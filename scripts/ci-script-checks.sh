@@ -266,6 +266,17 @@ echo "=== Relay-authority named-target floor contract (#5071) ==="
 "$PYTHON" scripts/check_relay_authority_contract.py --check-manifest
 "$PYTHON" -m unittest tests.test_check_relay_authority_contract
 
+# The axis-A promotion report is the only reader of the observation log, so its
+# false-green modes are promotion decisions. These pin the completeness floors:
+# an entry-only window and a re-entered fingerprint must fail, not pass; the
+# `line_integrity` denominator counts only the target segment's own records, so
+# the previous segment cohabiting the target's first file cannot dilute its
+# losses and the verdict does not move with how much cohabits there; and a JSON
+# line that is a bare scalar is counted as unusable instead of aborting the run
+# before any criterion is evaluated.
+echo "=== Relay-authority axis-A promotion report (#5464 T5 S2) ==="
+"$PYTHON" -m unittest tests.test_relay_authority_rollout_report
+
 echo "=== Fast compile check PR/main/nightly split contract (#4747) ==="
 "$PYTHON" -m unittest tests.test_fast_check_ci_wiring
 

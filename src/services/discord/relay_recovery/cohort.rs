@@ -68,12 +68,11 @@ pub(crate) fn cohort_bucket(channel_id: u64) -> u8 {
 /// operator value fails toward "everyone", which is visible in the health
 /// block, instead of wrapping into a silently narrow cohort.
 ///
-/// `dead_code` is allowed narrowly: S1 has **no** production caller by design —
-/// that absence is what makes the slice a deployment no-op — and the attribute
-/// keeps `cohort_bucket` and the three `RelayAuthorityMode` predicates
-/// reachable, so the dormant chain adds nothing to the repo's dead-code debt.
-/// S2 is the first caller; dropping this attribute belongs to that slice.
-#[allow(dead_code)]
+/// S1 shipped this with no production caller — `#[allow(dead_code)]` and all —
+/// because that absence was what made the slice a deployment no-op. S2 is the
+/// first caller (`authority_observation::observing_dial`), so the attribute is
+/// gone: the dormancy argument is now carried by the dial's shipped values
+/// rather than by the absence of a call site.
 pub(crate) fn admits(mode: RelayAuthorityMode, percent: u8, channel_id: u64) -> bool {
     mode.consults_cohort() && cohort_bucket(channel_id) < percent.min(100)
 }
@@ -83,10 +82,26 @@ pub(crate) fn admits(mode: RelayAuthorityMode, percent: u8, channel_id: u64) -> 
 /// `config_live_reload` keeps no generation counter (r3 §5.2, measured), so
 /// rollout stages cannot be numbered monotonically. This fingerprints the
 /// settings instead: two windows at the same dial position share a fingerprint
-/// even if the operator moved the dial away and back (declared limit L-7 — the
-/// promotion script separates such windows by file/timestamp order). Any knob
-/// added to the cohort decision MUST join the canonical string below, or two
-/// materially different rollout windows become indistinguishable in AC3.
+/// even if the operator moved the dial away and back (declared limit L-7). The
+/// promotion script separates such windows by the interleaved samples the dial's
+/// detour itself wrote — a sample carrying a different fingerprint sitting
+/// between two samples of one fingerprint. File order and a bare timestamp gap
+/// were both tried as the discriminator and both retired, because neither can
+/// tell a detour from an idle night; the gap survives only as a fallback for the
+/// two cases that leave no interleaved sample to find — the detour left the
+/// observing set and so wrote nothing at all, or samples did exist during it and
+/// were all lost while stranded. `segment_events` in
+/// `scripts/relay_authority_rollout_report.py` carries both branches and why the
+/// second is low-reachability (eviction bounds unpublished turns at one per
+/// channel — legA r3c P2-4).
+///
+/// The fingerprint is deliberately host-independent, which means it witnesses
+/// "the observed population disagreed about the dial", not "the dial moved":
+/// during a part-way config rollout two hosts' samples interleave and shred the
+/// window. That direction is fail-closed and is declared in `segment_events`
+/// (legA r3c P2-3). Any knob added to the cohort decision MUST join the
+/// canonical string below, or two materially different rollout windows become
+/// indistinguishable in AC3.
 pub(crate) fn cohort_fingerprint(mode: RelayAuthorityMode, percent: u8) -> String {
     let canonical = format!("mode={mode:?};percent={}", percent.min(100));
     let mut hash = FNV_OFFSET_BASIS;

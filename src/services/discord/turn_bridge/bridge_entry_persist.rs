@@ -238,6 +238,14 @@ pub(super) async fn establish_bridge_entry_authority(
         &mut runtime,
         ctx.resumed_placeholder_clear_applied,
     );
+    // #5464 T5 S2: record what this gate answers and what the AC2-R gate would
+    // answer, for the cohort only. Observation returns `()`, so the gate below
+    // reads the same `outcome` it always did.
+    crate::services::discord::relay_recovery::authority_observation::record_bridge_entry_gate(
+        ctx.shared,
+        &ctx.bridge.inflight_state,
+        outcome,
+    );
     if !bridge_entry_lifecycle_can_continue(outcome) {
         signal_bridge_entry_abort_completion(&mut ctx.bridge.completion_tx);
         return false;
@@ -297,6 +305,36 @@ mod tests {
         assert!(bridge_entry_lifecycle_can_continue(
             GuardedSaveOutcome::Saved
         ));
+    }
+
+    /// #5464 T5 S2: the recorded `old` verdict has to BE the gate that ships,
+    /// or the promotion window compares the AC2-R gate against a fiction. This
+    /// asserts the mirror against the production predicate over its whole input
+    /// domain, so a change to either side fails here instead of silently
+    /// re-basing the evidence.
+    #[test]
+    fn recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate() {
+        use crate::services::discord::relay_recovery::authority_observation::{
+            entry_gate_new, entry_gate_old,
+        };
+
+        for outcome in [
+            GuardedSaveOutcome::Saved,
+            GuardedSaveOutcome::Missing,
+            GuardedSaveOutcome::IdentityMismatch,
+            GuardedSaveOutcome::IoError,
+        ] {
+            assert_eq!(
+                entry_gate_old(outcome).ends_lifecycle(),
+                !bridge_entry_lifecycle_can_continue(outcome),
+                "{outcome:?}: recorded old entry verdict disagrees with the shipped gate"
+            );
+        }
+        assert!(
+            !bridge_entry_lifecycle_can_continue(GuardedSaveOutcome::Missing)
+                && !entry_gate_new(GuardedSaveOutcome::Missing).ends_lifecycle(),
+            "AC1: the shipped gate ends the turn on a missing row and the new one must not"
+        );
     }
 
     #[test]

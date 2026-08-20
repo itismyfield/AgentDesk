@@ -103,6 +103,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/runtime_handoff_loop/tests.rs",
         "src/services/discord/turn_bridge/status_panel_tests.rs",
         "src/services/discord/turn_bridge/stream_loop/expected_identity_tests.rs",
+        "src/services/discord/turn_bridge/stream_tick/guarded_persist_tests.rs",
         "src/services/discord/turn_bridge/stream_loop/tool_arms/authority_tests.rs",
         "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests.rs",
         "src/services/discord/turn_bridge/voice_completion_tests.rs",

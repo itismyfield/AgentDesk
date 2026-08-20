@@ -516,6 +516,10 @@ async fn health_response(state: &AppState, detailed: bool) -> Response {
             // out" when it may be enrolled. The dial is process config, not
             // Discord state, so it is well-defined with no registry mounted.
             json["relay_authority_rollout"] = relay_authority_rollout_health_json();
+            // #5464 T5 S2: same cross-branch reason as the dial above — a
+            // standalone node still runs the bridge, so its observation
+            // counters have to be readable from the same key.
+            json["relay_authority_observation"] = relay_authority_observation_health_json();
         }
         if let Some(opencode_block) = opencode_warm_pool_json(detailed) {
             json["opencode"] = opencode_block;
@@ -635,6 +639,15 @@ fn delivery_record_rollout_health_json() -> serde_json::Value {
 fn relay_authority_rollout_health_json() -> serde_json::Value {
     serde_json::to_value(crate::services::discord::relay_recovery::cohort::rollout_report())
         .unwrap_or_else(|_| serde_json::json!({}))
+}
+
+/// #5464 T5 S2: the standalone branch's copy of the axis-A observation block,
+/// built from the same producer the registry branch's snapshot uses.
+fn relay_authority_observation_health_json() -> serde_json::Value {
+    serde_json::to_value(
+        crate::services::discord::relay_recovery::authority_observation::observation_report(),
+    )
+    .unwrap_or_else(|_| serde_json::json!({}))
 }
 
 /// Bare (argument-less) provider degraded-reason classifications emitted by
@@ -1911,8 +1924,8 @@ pub async fn senddm_handler(
 mod tests {
     use super::{
         RegistryPurgeDecision, discord_control_endpoints_allowed, discord_send_caller_class,
-        public_health_json, registry_purge_decision, relay_authority_rollout_health_json,
-        stale_mailbox_repair_applied,
+        public_health_json, registry_purge_decision, relay_authority_observation_health_json,
+        relay_authority_rollout_health_json, stale_mailbox_repair_applied,
     };
     use axum::{
         body::{Body, to_bytes},
@@ -1986,6 +1999,38 @@ mod tests {
                 .get("cohort_fingerprint")
                 .and_then(|v| v.as_str())
                 .is_some_and(|fingerprint| fingerprint.len() == 16)
+        );
+    }
+
+    /// #5464 T5 S2: the standalone branch forwards the whole observation block,
+    /// not a subset, and does not fall back to its `{}` serialization arm.
+    #[test]
+    fn standalone_relay_authority_observation_publishes_the_whole_triage_block() {
+        let standalone = relay_authority_observation_health_json();
+        let mut keys: Vec<&str> = standalone
+            .as_object()
+            .expect("the observation block is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "channels",
+                "new_stricter_verdicts",
+                "resident_buffers",
+                "rowless_continuations",
+                "sink_dropped_records",
+                "stream_diff_ticks",
+                "turns_recorded",
+            ]
+        );
+        assert_eq!(
+            standalone
+                .get("new_stricter_verdicts")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
         );
     }
 

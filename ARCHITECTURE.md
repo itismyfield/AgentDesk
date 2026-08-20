@@ -738,6 +738,7 @@ src/
 │   │   │   ├── tests/
 │   │   │   │   └── circuit_breaker_apply.rs
 │   │   │   ├── apply.rs
+│   │   │   ├── authority_observation.rs
 │   │   │   ├── cohort.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── idle_tmux.rs
@@ -1017,7 +1018,8 @@ src/
 │   │   │   │   ├── tool_arms.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── stream_tick/
-│   │   │   │   └── guarded_persist.rs
+│   │   │   │   ├── guarded_persist.rs
+│   │   │   │   └── guarded_persist_tests.rs
 │   │   │   ├── terminal_controller_cutover/
 │   │   │   │   └── unix_journal.rs
 │   │   │   ├── terminal_outcome_delivery/
