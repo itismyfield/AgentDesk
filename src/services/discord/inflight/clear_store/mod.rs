@@ -12,6 +12,7 @@
 
 mod abandon;
 mod identity;
+mod reconcile_gate;
 
 pub(crate) use self::abandon::{
     request_inflight_abandon_if_matches, request_inflight_abandon_if_matches_zero_owned,
@@ -24,7 +25,12 @@ pub(super) use self::abandon::{
 pub(super) use self::identity::{
     clear_inflight_state_if_matches_identity_in_root,
     clear_inflight_state_if_matches_identity_returning_row_in_root,
-    clear_inflight_state_if_matches_identity_turn_nonce_in_root, turn_nonce_matches,
+    clear_inflight_state_if_matches_identity_turn_nonce_in_root,
+    clear_rebind_origin_inflight_state_if_matches_identity_in_root, turn_nonce_matches,
+};
+pub(in crate::services::discord) use self::reconcile_gate::{
+    ReconcileClearOutcome, clear_inflight_state_for_reconcile, clear_rebind_origin_for_reconcile,
+    row_is_current_generation,
 };
 
 use super::*;
@@ -541,55 +547,6 @@ pub(super) fn clear_inflight_state_if_matches_identity_generation_in_root(
                 expected_finalizer_turn_id,
                 error = %error,
                 "inflight generation-guarded clear remove_file failed; treating as IoError so sweeper retries"
-            );
-            GuardedClearOutcome::IoError
-        }
-    }
-}
-
-pub(super) fn clear_rebind_origin_inflight_state_if_matches_identity_in_root(
-    root: &std::path::Path,
-    provider: &ProviderKind,
-    channel_id: u64,
-    expected: &InflightTurnIdentity,
-    expected_turn_nonce: Option<&str>,
-) -> GuardedClearOutcome {
-    let path = inflight_state_path(root, provider, channel_id);
-    let Ok(_lock) = lock_inflight_state_path(&path) else {
-        return GuardedClearOutcome::IoError;
-    };
-    let Ok(data) = fs::read_to_string(&path) else {
-        return GuardedClearOutcome::Missing;
-    };
-    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
-        return GuardedClearOutcome::Missing;
-    };
-    if state.restart_mode.is_some() {
-        return GuardedClearOutcome::PlannedRestartSkipped;
-    }
-    if !state.rebind_origin {
-        return GuardedClearOutcome::UserMsgMismatch;
-    }
-    if !expected.matches_state(&state) || !turn_nonce_matches(expected_turn_nonce, &state) {
-        return GuardedClearOutcome::UserMsgMismatch;
-    }
-    log_inflight_remove(
-        provider,
-        channel_id,
-        state.user_msg_id,
-        "clear_rebind_origin_inflight_state_if_matches_identity",
-        &path,
-    );
-    match fs::remove_file(&path) {
-        Ok(()) => GuardedClearOutcome::Cleared,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
-        Err(error) => {
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel_id,
-                expected_user_msg_id = expected.user_msg_id,
-                error = %error,
-                "rebind-origin inflight guarded-clear remove_file failed; treating as IoError so sweeper retries"
             );
             GuardedClearOutcome::IoError
         }

@@ -37,6 +37,70 @@ pub(crate) fn log_inflight_remove(
     );
 }
 
+fn inflight_age_secs_for_path(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .ok()
+        .map(|age| age.as_secs())
+}
+
+fn log_loader_inflight_remove(
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+    reason: &'static str,
+    path: &Path,
+    state: Option<&InflightTurnState>,
+    current_generation: u64,
+) {
+    let born_generation = state.map(|row| row.born_generation);
+    let tmux_session_name_present = state.is_some_and(|row| row.tmux_session_name.is_some());
+    let age_secs = inflight_age_secs_for_path(path);
+    tracing::warn!(
+        target: "agentdesk::inflight_remove",
+        provider = %provider.as_str(),
+        channel_id,
+        user_msg_id,
+        reason,
+        path = %path.display(),
+        born_generation = ?born_generation,
+        current_generation,
+        tmux_session_name_present,
+        age_secs = ?age_secs,
+        "discord inflight state row removal"
+    );
+}
+
+fn loader_gate_refuses(state: &InflightTurnState, current_generation: u64) -> bool {
+    row_is_current_generation(state, current_generation) && state.tmux_session_name.is_some()
+}
+
+fn record_loader_generation_gate(state: &InflightTurnState, current_generation: u64, path: &Path) {
+    record_inflight_invariant_with_severity(
+        false,
+        state,
+        "reconcile_never_clears_current_generation_row",
+        "src/services/discord/inflight/removal.rs:load_inflight_states_from_root",
+        "destructive inflight loader must preserve a named row authored by the running process",
+        serde_json::json!({
+            "site": "load_inflight_states_from_root_stale",
+            "born_generation": state.born_generation,
+            "current_generation": current_generation,
+            "user_msg_id": state.user_msg_id,
+            "finalizer_turn_id": state.finalizer_turn_id,
+            "turn_nonce": state.turn_nonce,
+            "updated_at": state.updated_at,
+            "save_generation": state.save_generation,
+            "tmux_session_name": state.tmux_session_name,
+            "path": path.display().to_string(),
+        }),
+        ObsSeverity::Warn,
+    );
+}
+
 pub(crate) fn log_inflight_remove_for_path(
     provider: &ProviderKind,
     channel_id: u64,
@@ -307,10 +371,7 @@ fn stale_removal_reason_for_path(
     state: &InflightTurnState,
     current_generation: u64,
 ) -> Option<String> {
-    let meta = fs::metadata(path).ok()?;
-    let modified = meta.modified().ok()?;
-    let age = modified.elapsed().ok()?;
-    stale_removal_reason(state, age.as_secs(), current_generation)
+    stale_removal_reason(state, inflight_age_secs_for_path(path)?, current_generation)
 }
 
 pub(super) fn load_inflight_states_from_root(
@@ -352,11 +413,14 @@ pub(super) fn load_inflight_states_from_root(
                     match read_inflight_state_content(&path) {
                         Some(locked_state) => (locked_state, false),
                         None => {
-                            log_inflight_remove_for_path(
+                            log_loader_inflight_remove(
                                 provider,
                                 channel_id_from_path(&path),
+                                user_msg_id_for_inflight_remove_log(&path),
                                 "load_inflight_states_from_root_malformed",
                                 &path,
+                                None,
+                                current_generation,
                             );
                             let _ = fs::remove_file(&path);
                             continue;
@@ -374,22 +438,27 @@ pub(super) fn load_inflight_states_from_root(
                 continue;
             };
             let Some(locked_state) = read_inflight_state_content(&path) else {
-                log_inflight_remove_for_path(
+                log_loader_inflight_remove(
                     provider,
                     channel_id_from_path(&path),
+                    user_msg_id_for_inflight_remove_log(&path),
                     "load_inflight_states_from_root_provider_mismatch",
                     &path,
+                    None,
+                    current_generation,
                 );
                 let _ = fs::remove_file(&path);
                 continue;
             };
             if locked_state.provider_kind().as_ref() != Some(provider) {
-                log_inflight_remove(
+                log_loader_inflight_remove(
                     provider,
                     locked_state.channel_id,
                     locked_state.user_msg_id,
                     "load_inflight_states_from_root_provider_mismatch",
                     &path,
+                    Some(&locked_state),
+                    current_generation,
                 );
                 let _ = fs::remove_file(&path);
                 continue;
@@ -402,22 +471,27 @@ pub(super) fn load_inflight_states_from_root(
                 continue;
             };
             let Some(locked_state) = read_inflight_state_content(&path) else {
-                log_inflight_remove_for_path(
+                log_loader_inflight_remove(
                     provider,
                     channel_id_from_path(&path),
+                    user_msg_id_for_inflight_remove_log(&path),
                     "load_inflight_states_from_root_stale",
                     &path,
+                    None,
+                    current_generation,
                 );
                 let _ = fs::remove_file(&path);
                 continue;
             };
             if locked_state.provider_kind().as_ref() != Some(provider) {
-                log_inflight_remove(
+                log_loader_inflight_remove(
                     provider,
                     locked_state.channel_id,
                     locked_state.user_msg_id,
                     "load_inflight_states_from_root_stale_provider_mismatch",
                     &path,
+                    Some(&locked_state),
+                    current_generation,
                 );
                 let _ = fs::remove_file(&path);
                 continue;
@@ -425,17 +499,23 @@ pub(super) fn load_inflight_states_from_root(
             if let Some(reason) =
                 stale_removal_reason_for_path(&path, &locked_state, current_generation)
             {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!("  [{ts}] ⚠ {}: {}", reason, path.display());
-                log_inflight_remove(
-                    provider,
-                    locked_state.channel_id,
-                    locked_state.user_msg_id,
-                    "load_inflight_states_from_root_stale",
-                    &path,
-                );
-                let _ = fs::remove_file(&path);
-                continue;
+                if loader_gate_refuses(&locked_state, current_generation) {
+                    record_loader_generation_gate(&locked_state, current_generation, &path);
+                } else {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::info!("  [{ts}] ⚠ {}: {}", reason, path.display());
+                    log_loader_inflight_remove(
+                        provider,
+                        locked_state.channel_id,
+                        locked_state.user_msg_id,
+                        "load_inflight_states_from_root_stale",
+                        &path,
+                        Some(&locked_state),
+                        current_generation,
+                    );
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
             }
             finalizer_backfilled = false;
             state = locked_state;

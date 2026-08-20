@@ -162,6 +162,51 @@ mod dispatched_origin_ghost_order_pg_tests {
         pg_db.drop().await;
     }
 
+    /// [ERRATUM R3-E1] A readopted/live row rewritten by the current process
+    /// can still satisfy the durable ghost predicate. The S2 generation fence
+    /// must preserve it and force restore to continue rather than consuming the
+    /// marker or skipping watcher re-registration.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_generation_readopted_row_is_not_consumed() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = tempfile::tempdir().expect("runtime root");
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let current_generation = 54_620;
+        crate::services::discord::runtime_store::set_process_generation_for_tests(Some(
+            current_generation,
+        ));
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let session_key = "claude/test/readopted-live-5462";
+        let channel_id = 546_200_005_u64;
+        let turn_nonce = "readopted-live-nonce-5462";
+        write_turn_start_marker(&pool, session_key, channel_id, turn_nonce, true).await;
+
+        let mut state = inflight_row(channel_id, session_key, 546_200_501, turn_nonce);
+        state.born_generation = current_generation;
+        save_inflight_state(&state).expect("seed current-generation readopted row");
+
+        assert!(
+            !consume_dispatched_origin_ghost_if_current(Some(&pool), &state).await,
+            "a current-generation row is live ownership, not a consumable ghost"
+        );
+        let preserved = load_inflight_state(&ProviderKind::Claude, channel_id)
+            .expect("the current-generation row must survive the reconcile clear");
+        assert_eq!(preserved.born_generation, state.born_generation);
+        let (status, origin_nonce) = session_row(&pool, session_key).await;
+        assert_eq!(status, "turn_active");
+        assert_eq!(origin_nonce.as_deref(), Some(turn_nonce));
+
+        pool.close().await;
+        pg_db.drop().await;
+        crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+    }
+
     /// Return-value contract, `UserMsgMismatch` row: the marker is there, so the
     /// probe matches, but a newer turn now owns the inflight row. Neither the
     /// row nor the session may move — the release must not be layered on a

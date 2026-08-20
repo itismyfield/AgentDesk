@@ -93,14 +93,11 @@ pub(super) async fn consume_dispatched_origin_ghost_if_current(
 
     // Step 2 — the clear is pinned to the identity and nonce the caller just
     // read, so a newer turn that replaced the row keeps it.
-    match crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
-        &provider,
-        state.channel_id,
-        &crate::services::discord::inflight::InflightTurnIdentity::from_state(state),
-        Some(turn_nonce),
-    ) {
-        crate::services::discord::inflight::GuardedClearOutcome::Cleared
-        | crate::services::discord::inflight::GuardedClearOutcome::Missing => {}
+    match crate::services::discord::inflight::clear_inflight_state_for_reconcile(&provider, state) {
+        crate::services::discord::inflight::ReconcileClearOutcome::Delegated(
+            crate::services::discord::inflight::GuardedClearOutcome::Cleared
+            | crate::services::discord::inflight::GuardedClearOutcome::Missing,
+        ) => {}
         // Including `IoError`: the row may still be on disk, and the existing
         // sweepers reclaim it. Marking the session idle on top of a row this
         // call could not remove is the one thing that must not happen.

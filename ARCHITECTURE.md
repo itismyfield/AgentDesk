@@ -582,7 +582,8 @@ src/
 │   │   │   ├── clear_store/
 │   │   │   │   ├── abandon.rs
 │   │   │   │   ├── identity.rs
-│   │   │   │   └── mod.rs
+│   │   │   │   ├── mod.rs
+│   │   │   │   └── reconcile_gate.rs
 │   │   │   ├── model/
 │   │   │   │   ├── identity.rs
 │   │   │   │   ├── serde_adapters.rs

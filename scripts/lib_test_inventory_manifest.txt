@@ -2865,6 +2865,10 @@ services::discord::inflight::budget::tests::bump_persists_attempts_on_restart_ma
 services::discord::inflight::budget::tests::bump_persists_attempts_on_tui_direct_row
 services::discord::inflight::budget::tests::bump_refuses_row_owned_by_newer_turn
 services::discord::inflight::budget::tests::bump_refuses_tui_direct_row_without_offset_proof
+services::discord::inflight::clear_store::reconcile_gate::tests::current_generation_predicate_is_nonzero_and_exact
+services::discord::inflight::clear_store::reconcile_gate::tests::current_generation_rebind_origin_is_protected
+services::discord::inflight::clear_store::reconcile_gate::tests::legacy_zero_generation_remains_fail_open
+services::discord::inflight::clear_store::reconcile_gate::tests::normal_reconcile_clear_uses_fresh_locked_generation
 services::discord::inflight::destructive_commit::tests::generation_advance_aborts_before_cancel_store
 services::discord::inflight::destructive_commit::tests::typed_outcomes_cover_commit_and_every_pin_field
 services::discord::inflight::destructive_commit::tests::typed_outcomes_cover_missing_malformed_lock_and_io_failures
@@ -3041,6 +3045,8 @@ services::discord::inflight::stall_recovery_tests::clear_status_panel_if_current
 services::discord::inflight::stall_recovery_tests::clear_status_panel_if_current_preserves_newer_turns_panel_on_mismatch
 services::discord::inflight::stall_recovery_tests::clear_status_panel_if_current_respects_extra_guards
 services::discord::inflight::stall_recovery_tests::delivery_response_sent_offset_stays_on_utf8_boundary
+services::discord::inflight::stall_recovery_tests::destructive_loader_keeps_unnamed_current_generation_rows_in_reclaim_scope
+services::discord::inflight::stall_recovery_tests::destructive_loader_preserves_current_generation_named_row_even_when_stale
 services::discord::inflight::stall_recovery_tests::existing_rebind_adoption_does_not_clobber_rebind_origin
 services::discord::inflight::stall_recovery_tests::existing_rebind_adoption_merges_into_fresh_on_disk_row
 services::discord::inflight::stall_recovery_tests::existing_rebind_adoption_persists_paths_for_planned_restart
@@ -5377,6 +5383,7 @@ services::discord::tmux::watcher_lifecycle::claude_restore::claude_tui_transcrip
 services::discord::tmux::watcher_lifecycle::claude_restore::claude_tui_transcript_fallback_tests::returns_none_without_transcript
 services::discord::tmux::watcher_lifecycle::codex_restore::codex_direct_resume_args_tests::extracts_resume_session_id_from_direct_codex_pane_args
 services::discord::tmux::watcher_lifecycle::codex_restore::codex_direct_resume_args_tests::ignores_wrapper_and_exec_shapes
+services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::current_generation_readopted_row_is_not_consumed
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::failed_ownership_proof_withholds_the_session_release
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::live_turn_without_dispatch_keeps_its_inflight_row
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::real_dispatched_origin_ghost_is_consumed_after_the_probe

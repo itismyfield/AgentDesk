@@ -193,15 +193,15 @@ pub(crate) use self::clear_store::{
     request_inflight_abandon_if_matches_zero_owned,
 };
 pub(in crate::services::discord) use self::clear_store::{
-    archive_inflight_state_if_matches_identity_generation,
-    clear_inflight_state_if_matches_identity,
+    ReconcileClearOutcome, archive_inflight_state_if_matches_identity_generation,
+    clear_inflight_state_for_reconcile, clear_inflight_state_if_matches_identity,
     clear_inflight_state_if_matches_identity_after_delivery,
     clear_inflight_state_if_matches_identity_generation,
     clear_inflight_state_if_matches_identity_returning_row,
     clear_inflight_state_if_matches_identity_turn_nonce,
     clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence,
-    clear_rebind_origin_inflight_state_if_matches_identity,
-    refresh_inflight_last_offset_if_matches_identity,
+    clear_rebind_origin_for_reconcile, clear_rebind_origin_inflight_state_if_matches_identity,
+    refresh_inflight_last_offset_if_matches_identity, row_is_current_generation,
 };
 // `clear_*_in_root` seams reached by inflight-core in production (health recovery
 // engine): the clear child declares them `pub(in crate::services::discord)`.
@@ -4425,6 +4425,96 @@ mod stall_recovery_tests {
         assert!(
             reason.contains("removing stale inflight state file"),
             "unexpected removal reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn destructive_loader_preserves_current_generation_named_row_even_when_stale() {
+        let _guard = stale_override_test_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            temp.path(),
+        );
+        let current = 54_620;
+        crate::services::discord::runtime_store::set_process_generation_for_tests(Some(current));
+        super::set_test_tmux_alive_override(Some(&[]));
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            81,
+            Some("adk-cdx".to_string()),
+            7,
+            42,
+            43,
+            "hello".to_string(),
+            Some("session-81".to_string()),
+            Some("AgentDesk-codex-current-generation-81".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            Some("/tmp/in.fifo".to_string()),
+            0,
+        );
+        state.born_generation = current;
+        save_inflight_state_in_root(temp.path(), &state).expect("seed current-generation row");
+        let path = inflight_state_path(temp.path(), &ProviderKind::Codex, state.channel_id);
+        filetime::set_file_mtime(
+            &path,
+            filetime::FileTime::from_unix_time(
+                chrono::Utc::now().timestamp() - super::INFLIGHT_MAX_AGE_SECS as i64 - 2,
+                0,
+            ),
+        )
+        .expect("age row past loader threshold");
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        super::set_test_tmux_alive_override(None);
+        crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+        assert_eq!(loaded.len(), 1);
+        assert!(
+            path.exists(),
+            "the current process's named live row must survive"
+        );
+    }
+
+    #[test]
+    fn destructive_loader_keeps_unnamed_current_generation_rows_in_reclaim_scope() {
+        let temp = TempDir::new().unwrap();
+        let current = crate::services::discord::runtime_store::process_generation();
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            82,
+            Some("adk-cdx".to_string()),
+            7,
+            42,
+            43,
+            "hello".to_string(),
+            Some("session-82".to_string()),
+            None,
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.born_generation = current;
+        save_inflight_state_in_root(temp.path(), &state).expect("seed unnamed row");
+        let path = inflight_state_path(temp.path(), &ProviderKind::Codex, state.channel_id);
+        filetime::set_file_mtime(
+            &path,
+            filetime::FileTime::from_unix_time(
+                chrono::Utc::now().timestamp() - super::INFLIGHT_MAX_AGE_SECS as i64 - 2,
+                0,
+            ),
+        )
+        .expect("age row past loader threshold");
+
+        let loaded = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
+        assert!(loaded.is_empty());
+        assert!(
+            !path.exists(),
+            "the loader remains the bounded reclaimer for unnamed rows"
         );
     }
 }
