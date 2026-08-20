@@ -1192,6 +1192,59 @@ static POSTGRES_TEST_DATABASE_OWNERS: std::sync::OnceLock<
 thread_local! {
     static FIXTURE_BASE_OVERRIDE: std::cell::RefCell<Option<Option<String>>> =
         const { std::cell::RefCell::new(None) };
+
+    /// How many `PostgresTestLifecycleGuard`s this thread currently holds.
+    ///
+    /// The harness has exactly two process-global test mutexes that a `_pg`
+    /// test routinely wants at the same time: `config::shared_test_env_lock`
+    /// (E) and `POSTGRES_TEST_LIFECYCLE_LOCK` (P). **The canonical hierarchy is
+    /// `E -> P`** — the majority of `_pg` tests already take the env lock first
+    /// and only then build their database. A test that reverses it closes an
+    /// ABBA cycle with any concurrently in-flight `E -> P` test, and because
+    /// both are `std::sync::Mutex` the process parks in `__psynch_mutexwait`
+    /// forever with no timeout, no deadlock detection, and no frame naming
+    /// either offender. That is how a full `cargo test --lib` run stopped dead
+    /// at test 4176 with fourteen threads stranded.
+    ///
+    /// This counter is the P half of the tripwire that replaces that silence:
+    /// `config::shared_test_env_lock` reads it and panics — naming the test
+    /// thread — the moment a P holder reaches for E. See
+    /// `test_lifecycle_lock_held` /
+    /// `assert_test_lifecycle_lock_not_held_before_env_lock` below.
+    static PG_LIFECYCLE_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether this thread currently holds `POSTGRES_TEST_LIFECYCLE_LOCK` (P).
+#[cfg(test)]
+pub(crate) fn test_lifecycle_lock_held() -> bool {
+    PG_LIFECYCLE_HELD.with(|depth| depth.get() > 0)
+}
+
+/// Panic if this thread is about to take E while already holding P.
+///
+/// Called from `config::shared_test_env_lock`, so it covers both the canonical
+/// `test_env_lock::acquire_shared_test_env_lock` path and the direct
+/// `shared_test_env_lock().lock()` sites. It fires *before* the blocking
+/// `lock()`, which is what converts a silent, unattributable hang into a red
+/// test that names itself.
+#[cfg(test)]
+pub(crate) fn assert_test_lifecycle_lock_not_held_before_env_lock() {
+    if !test_lifecycle_lock_held() {
+        return;
+    }
+    // libtest names each test thread after the test it runs, so this is the
+    // offending test's own name in every normal `cargo test` invocation.
+    let offender = std::thread::current()
+        .name()
+        .unwrap_or("<unnamed test thread>")
+        .to_string();
+    let message = format!(
+        "test lock order inversion in `{offender}`: POSTGRES_TEST_LIFECYCLE_LOCK is already \
+         held while acquiring config::shared_test_env_lock. The canonical hierarchy is \
+         E -> P: take the shared test-env lock (or the fixture that owns it) *before* \
+         creating the PostgreSQL test database, not after."
+    );
+    panic!("{message}"); // agentdesk-audit: allow-unwrap — #[cfg(test)]-gated tripwire, never compiled into production; the panic converts a silent ABBA hang into a red test naming the offender
 }
 
 #[cfg(test)]
@@ -1292,11 +1345,21 @@ pub(crate) struct PostgresTestLifecycleGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
+/// Keeps `PG_LIFECYCLE_HELD` in step with real ownership so the E-after-P
+/// tripwire cannot go stale. The counter is decremented here and the inner
+/// `MutexGuard` releases P immediately afterwards, both on this thread.
+#[cfg(test)]
+impl Drop for PostgresTestLifecycleGuard {
+    fn drop(&mut self) {
+        PG_LIFECYCLE_HELD.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn lock_test_lifecycle() -> PostgresTestLifecycleGuard {
-    PostgresTestLifecycleGuard {
-        _guard: lock_test_lifecycle_raw(),
-    }
+    let guard = lock_test_lifecycle_raw();
+    PG_LIFECYCLE_HELD.with(|depth| depth.set(depth.get() + 1));
+    PostgresTestLifecycleGuard { _guard: guard }
 }
 
 #[cfg(test)]
@@ -3766,5 +3829,71 @@ mod tests {
             err.contains("timed out"),
             "expected timeout wording, got {err}"
         );
+    }
+
+    /// The `E -> P` hierarchy has to fail loudly from the wrong side.
+    ///
+    /// `RequirePgEnvGuard::set` above shows the canonical order: env lock, then
+    /// lifecycle lock. Reversed, the two mutexes form an ABBA cycle with any
+    /// concurrently in-flight `E -> P` test, and because both are
+    /// `std::sync::Mutex` the whole run parks with no timeout, no deadlock
+    /// detection, and no frame naming the offender. This asserts the
+    /// replacement behaviour: a P holder reaching for E panics immediately, and
+    /// the panic names the offending thread — which under libtest is the
+    /// offending test.
+    ///
+    /// Runs on a spawned thread with a bounded wait for the same reason the
+    /// sibling re-entry proof in `config.rs` does: if the tripwire ever stops
+    /// firing, this test must go red rather than hang the suite it protects.
+    /// Acquiring P itself is deliberately *not* on the short timer — a real
+    /// `_pg` test may legitimately hold it right now, and that wait is not what
+    /// is being measured.
+    #[test]
+    fn env_lock_after_lifecycle_lock_trips_the_order_tripwire() {
+        let (armed_tx, armed_rx) = std::sync::mpsc::channel();
+        let (verdict_tx, verdict_rx) = std::sync::mpsc::channel();
+        let offender = "pg_lifecycle_then_env_lock";
+        let handle = std::thread::Builder::new()
+            .name(offender.to_string())
+            .spawn(move || {
+                let _lifecycle = super::lock_test_lifecycle();
+                armed_tx.send(()).expect("signal that the P lock is held");
+                let outcome = std::panic::catch_unwind(|| {
+                    let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
+                });
+                let message = outcome.err().map(|payload| {
+                    payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| {
+                            payload
+                                .downcast_ref::<&str>()
+                                .map(|text| (*text).to_string())
+                        })
+                        .unwrap_or_default()
+                });
+                verdict_tx.send(message).expect("send inversion verdict");
+            })
+            .expect("spawn the lock-order probe thread");
+
+        armed_rx
+            .recv_timeout(Duration::from_secs(120))
+            .expect("probe thread should take the postgres lifecycle lock");
+        let message = verdict_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("E-after-P must panic before it can block on the env mutex")
+            .expect("acquiring the env lock while holding the lifecycle lock must panic");
+
+        assert!(
+            message.contains(offender),
+            "the tripwire must name the offending thread; got: {message}"
+        );
+        assert!(
+            message.contains("E -> P"),
+            "the tripwire must state the canonical hierarchy; got: {message}"
+        );
+        handle
+            .join()
+            .expect("lock-order probe thread should finish");
     }
 }

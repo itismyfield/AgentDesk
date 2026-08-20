@@ -205,13 +205,17 @@ mod tests {
 
     #[tokio::test]
     async fn enqueue_default_off_leaves_all_circuit_columns_null_pg() {
+        // Lock hierarchy `E -> P`: `setup()` takes the postgres lifecycle lock
+        // and holds it in `db` for the rest of the test, so the shared env lock
+        // has to be taken *first*. Taking it after `setup()` is the inversion
+        // that deadlocked the parallel `--lib` census against the `E -> P`
+        // majority in `router::intake_dispatch`. Only the lock moves up; the
+        // env mutation itself still happens in the narrow window below.
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let Some((db, pool)) = setup("circuit_producer_default_off").await else {
             return;
         };
         active_owner(&pool, "46151").await;
-        let _env_lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
         let previous = std::env::var_os(CIRCUIT_STAMP_ENV);
         unsafe { std::env::remove_var(CIRCUIT_STAMP_ENV) };
         let result = enqueue(Some(&pool), &request(46_151, "default-off"), 300).await;
