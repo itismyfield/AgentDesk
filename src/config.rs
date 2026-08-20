@@ -1772,6 +1772,80 @@ fn is_structural_relay_verdict_source(source: &RelayVerdictSource) -> bool {
     *source == RelayVerdictSource::Structural
 }
 
+/// Rollout stage for the #5464 (#5071 T5) relay-authority gate (design r3
+/// §1.1, AC2-R).
+///
+/// AC2-R demotes the structural relay signals — durable inflight row
+/// presence/absence, `RelayStallState`, offset comparison, tmux liveness, queue
+/// depth — from *approvers* of destruction and lifecycle termination to
+/// *candidate nominators*, and puts an exact-episode or ledger/lease veto on
+/// the approval gate. This switch is the rollout dial for that change.
+///
+/// Slice S1 lands the dial dormant, and dormancy is structural rather than
+/// conventional: no production caller consults
+/// `governs_destructive_authority` or `records_authority_observations` yet, the
+/// shipped default is `Legacy`, and the shipped cohort width is `0`. Under
+/// that pair `relay_recovery::cohort::admits` answers `false` for every
+/// channel, so even a mode moved on its own admits nobody — a later slice must
+/// wire a consumer AND an operator must widen the cohort before any call site
+/// can observe a behaviour change.
+///
+/// Cohort membership is per channel, not per turn or per obligation: the
+/// warrant this dial governs is a property of a channel's relay, and a channel
+/// that flips cohort mid-turn would compare an old-path decision against a
+/// new-path one within a single episode. See
+/// `services::discord::relay_recovery::cohort`.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayAuthorityMode {
+    /// Structural signals keep approving destruction and lifecycle termination
+    /// exactly as they do today. No warrant is computed, no old/new comparison
+    /// is recorded, and the cohort dial is inert.
+    #[default]
+    Legacy,
+    /// Compute the warrant beside the structural answer and record the old/new
+    /// diff, but let the structural answer keep deciding. This is the mode the
+    /// AC3 promotion evidence is collected under, so it must stay
+    /// behaviour-identical to `Legacy` for every consumer that is not the
+    /// recorder.
+    Observe,
+    /// The warrant decides: a structural candidate whose exact-episode or
+    /// ledger veto fails is refused instead of applied. Refusing is the only
+    /// thing this mode adds — it never approves something `Legacy` denied.
+    Enforce,
+}
+
+impl RelayAuthorityMode {
+    /// Both post-`Legacy` modes record the old/new comparison; recording is not
+    /// a decision, so `Enforce` shares the observation path rather than
+    /// replacing it. Same shape, and the same reason, as
+    /// `ExecutionIdentityMode::records_identity_observations`.
+    pub const fn records_authority_observations(self) -> bool {
+        matches!(self, Self::Observe | Self::Enforce)
+    }
+
+    /// Only `Enforce` may turn a failing warrant into a refusal. The warrant is
+    /// monotone-relaxing by construction (design r3 ERRATUM R3-E3 §E3.2): no
+    /// mode lets it promote an action the structural planner left ineligible.
+    pub const fn governs_destructive_authority(self) -> bool {
+        matches!(self, Self::Enforce)
+    }
+
+    /// Whether this mode has any use for the cohort dial at all.
+    ///
+    /// Derived from the two predicates above rather than matching `Legacy`, so
+    /// a future mode that starts consuming the comparison keeps its cohort
+    /// gating without editing this — the same reason
+    /// `ExecutionIdentityMode::consults_spawn_nonce` is derived.
+    pub const fn consults_cohort(self) -> bool {
+        self.records_authority_observations() || self.governs_destructive_authority()
+    }
+}
+
+fn is_legacy_relay_authority_mode(mode: &RelayAuthorityMode) -> bool {
+    *mode == RelayAuthorityMode::Legacy
+}
+
 /// A conservative bound that stays within chrono's duration and UTC datetime
 /// ranges while remaining far above any operational sweep TTL.
 pub(crate) const MAX_INTAKE_SWEEP_CUTOFF_SECS: u64 = i64::MAX as u64 / 1_000_000_000;
@@ -1796,6 +1870,15 @@ pub struct RuntimeSettingsConfig {
     pub execution_identity_mode: ExecutionIdentityMode,
     #[serde(default, skip_serializing_if = "is_structural_relay_verdict_source")]
     pub relay_verdict_source: RelayVerdictSource,
+    /// #5464 T5 S1: rollout stage for the AC2-R relay-authority warrant.
+    #[serde(default, skip_serializing_if = "is_legacy_relay_authority_mode")]
+    pub relay_authority_mode: RelayAuthorityMode,
+    /// #5464 T5 S1: percentage of channels admitted to the relay-authority
+    /// cohort. `0` (the shipped default) admits none and `100` admits all;
+    /// larger values clamp at the admission site rather than here, so a typo
+    /// widens the cohort to everyone instead of wrapping to a narrow one.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub relay_authority_cohort_percent: u8,
     /// Heartbeat-absence TTL for stale dispatched debt; unset defaults to 1800 seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intake_delivery_sweep_dispatched_cutoff_secs: Option<u64>,
@@ -1977,6 +2060,8 @@ impl RuntimeSettingsConfig {
             && self.intake_delivery_settlement == IntakeDeliverySettlementStage::Off
             && self.execution_identity_mode == ExecutionIdentityMode::Legacy
             && self.relay_verdict_source == RelayVerdictSource::Structural
+            && self.relay_authority_mode == RelayAuthorityMode::Legacy
+            && self.relay_authority_cohort_percent == 0
             && self.intake_delivery_sweep_dispatched_cutoff_secs.is_none()
             && self.intake_delivery_sweep_spawned_cutoff_secs.is_none()
             && self.intake_delivery_sweep_batch_limit.is_none()
@@ -2295,6 +2380,81 @@ mod runtime_hook_registry_config_tests {
                 parsed
             );
         }
+    }
+
+    // #5464 T5 S1: same shape as the two switch tests above, plus the pairing
+    // the cohort adds — an operator who sets ONLY the width, or ONLY the mode,
+    // must keep that key on a round-trip, or the half-configured rollout they
+    // are staging silently reverts to dormant on the next config write.
+    #[test]
+    fn relay_authority_dial_defaults_dormant_and_round_trips_each_knob_alone() {
+        let default = RuntimeSettingsConfig::default();
+        assert_eq!(default.relay_authority_mode, RelayAuthorityMode::Legacy);
+        assert_eq!(default.relay_authority_cohort_percent, 0);
+        let serialized = serde_yaml::to_string(&default).expect("serialize default runtime");
+        assert!(!serialized.contains("relay_authority_mode"));
+        assert!(!serialized.contains("relay_authority_cohort_percent"));
+
+        let absent: RuntimeSettingsConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(absent.relay_authority_mode, RelayAuthorityMode::Legacy);
+        assert_eq!(absent.relay_authority_cohort_percent, 0);
+        assert!(!absent.relay_authority_mode.records_authority_observations());
+        assert!(!absent.relay_authority_mode.governs_destructive_authority());
+        assert!(!absent.relay_authority_mode.consults_cohort());
+        assert!(absent.is_empty());
+
+        // `consults_cohort` is derived, so pin the derivation against the two
+        // predicates rather than against a `Legacy` match.
+        for mode in [
+            RelayAuthorityMode::Legacy,
+            RelayAuthorityMode::Observe,
+            RelayAuthorityMode::Enforce,
+        ] {
+            assert_eq!(
+                mode.consults_cohort(),
+                mode.records_authority_observations() || mode.governs_destructive_authority()
+            );
+            assert_eq!(
+                mode.governs_destructive_authority(),
+                mode == RelayAuthorityMode::Enforce
+            );
+
+            let yaml = format!(
+                "relay_authority_mode: {}\n",
+                serde_yaml::to_value(mode)
+                    .expect("serialize mode")
+                    .as_str()
+                    .expect("mode serializes as a string")
+            );
+            let parsed: RuntimeSettingsConfig =
+                serde_yaml::from_str(&yaml).expect("parse relay authority mode");
+            assert_eq!(parsed.relay_authority_mode, mode);
+            assert_eq!(
+                parsed.is_empty(),
+                mode == RelayAuthorityMode::Legacy,
+                "a non-Legacy mode must keep the runtime section serialized"
+            );
+            assert_eq!(
+                serde_yaml::from_str::<RuntimeSettingsConfig>(
+                    &serde_yaml::to_string(&parsed).expect("serialize runtime")
+                )
+                .expect("reparse runtime"),
+                parsed
+            );
+        }
+
+        let width_only: RuntimeSettingsConfig =
+            serde_yaml::from_str("relay_authority_cohort_percent: 25\n").unwrap();
+        assert_eq!(width_only.relay_authority_cohort_percent, 25);
+        assert_eq!(width_only.relay_authority_mode, RelayAuthorityMode::Legacy);
+        assert!(!width_only.is_empty());
+        assert_eq!(
+            serde_yaml::from_str::<RuntimeSettingsConfig>(
+                &serde_yaml::to_string(&width_only).expect("serialize runtime")
+            )
+            .expect("reparse runtime"),
+            width_only
+        );
     }
 
     #[test]
