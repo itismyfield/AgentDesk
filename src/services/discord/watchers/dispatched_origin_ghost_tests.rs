@@ -149,8 +149,9 @@ mod dispatched_origin_ghost_order_pg_tests {
             !consume_dispatched_origin_ghost_if_current(Some(&pool), &state).await,
             "a dispatch-less turn has no dispatched-origin marker to consume"
         );
-        let preserved = load_inflight_state(&ProviderKind::Claude, channel_id)
-            .expect("a live turn's inflight row must survive a verdict that says it is not a ghost");
+        let preserved = load_inflight_state(&ProviderKind::Claude, channel_id).expect(
+            "a live turn's inflight row must survive a verdict that says it is not a ghost",
+        );
         assert_eq!(preserved.user_msg_id, state.user_msg_id);
         assert_eq!(preserved.turn_nonce.as_deref(), Some(turn_nonce));
         let (status, origin_nonce) = session_row(&pool, session_key).await;
