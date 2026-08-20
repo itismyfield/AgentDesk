@@ -3974,6 +3974,10 @@ services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests::non
 services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests::reattach_reseeds_watcher_owned_ledger_entry
 services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests::repeated_reattach_is_idempotent_single_watcher_entry
 services::discord::recovery_engine::runtime::reregister_ledger_reseed_tests::zero_user_msg_id_reseeds_with_finalizer_turn_id
+services::discord::recovery_engine::runtime::terminal_committed_reconcile_clear_tests::a_newer_turns_legacy_row_survives_the_committed_clear
+services::discord::recovery_engine::runtime::terminal_committed_reconcile_clear_tests::a_prior_generations_matching_row_is_still_reclaimed
+services::discord::recovery_engine::runtime::terminal_committed_reconcile_clear_tests::a_row_the_running_process_authored_survives_the_committed_clear
+services::discord::recovery_engine::runtime::terminal_committed_reconcile_clear_tests::the_episode_guard_arm_still_clears_nothing
 services::discord::recovery_engine::state_extractors::tests::claude_tui_without_runtime_output_path_stays_not_ready
 services::discord::recovery_engine::state_extractors::tests::structured_ready_state_skips_pane_fallback_evaluation
 services::discord::recovery_engine::terminal_text_idempotency::tests::anchored_fallback_fresh_send_records_replacement_anchor
