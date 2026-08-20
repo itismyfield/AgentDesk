@@ -14,6 +14,9 @@ mod codex_restore;
 #[path = "dispatched_origin_ghost.rs"]
 mod dispatched_origin_ghost;
 use dispatched_origin_ghost::consume_dispatched_origin_ghost_if_current;
+#[cfg(test)]
+#[path = "dispatched_origin_ghost_tests.rs"]
+mod dispatched_origin_ghost_tests;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum LivenessProbeOutcome {

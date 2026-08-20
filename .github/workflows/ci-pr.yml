@@ -171,6 +171,11 @@ jobs:
               - 'src/services/discord/health/recovery.rs'
               - 'src/services/discord/health/recovery/**'
               - 'src/services/discord/watchers/lifecycle/restore_tests.rs'
+              # #5462 S1: the restore-time ghost verdict is proven against a
+              # real `sessions` row, so the owner and its test sidecar both
+              # have to run the PG lane.
+              - 'src/services/discord/watchers/dispatched_origin_ghost.rs'
+              - 'src/services/discord/watchers/dispatched_origin_ghost_tests.rs'
               - 'src/services/maintenance/jobs/worktree_orphan_sweep.rs'
               - 'src/services/pipeline_override.rs'
               # #5025: terminal-delivery evidence routing and every local
