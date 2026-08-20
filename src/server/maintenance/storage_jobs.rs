@@ -186,9 +186,10 @@ impl MaintenanceJob for StorageHangDumpCleanupJob {
 }
 
 /// #1093 / #3231 — weekly postgres retention sweep. Reuses
-/// `services::maintenance::jobs::db_retention::db_retention_job` verbatim
-/// (the same fn the dead `register_db_retention` wrapped). PG-only; the
-/// live scheduler always has a pool so no skip branch is needed here.
+/// `services::maintenance::jobs::db_retention::db_retention_job` verbatim.
+/// PG-only; the live scheduler always has a pool — the
+/// `ServerWorkerId::MaintenanceScheduler` arm in `worker_registry.rs` skips the
+/// whole worker when none is available — so no skip branch is needed here.
 pub(super) struct StorageDbRetentionJob;
 
 impl MaintenanceJob for StorageDbRetentionJob {

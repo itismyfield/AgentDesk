@@ -1488,6 +1488,17 @@ without a redeploy leaves the old values live in the plist.
   each host provisions worktrees under its own root, so the leader sweep does not
   see another node's directories. If worktree roots ever become shared storage, the
   live-owner check would need to fan out cross-node.)
+  **Coverage consequence of the LEADER-ONLY class:** a non-leader host's
+  `~/.adk/release/worktrees` is never orphan-swept at all — the periodic backstop
+  runs only where the leader epoch is held (`register_leader_tokio`), and no other
+  live path substitutes for it. The only reclaimer that still runs off-leader is
+  the inline per-card `kanban::terminal_cleanup` (`cleanup_managed_worktree` on a
+  terminal kanban transition), which removes the worktree paths a dispatch
+  recorded but is not a backstop for the leaks that path misses. This is a
+  documentation correction rather than a regression: the pre-#5463 "each node
+  sweeps its OWN worktree root" wording described the dynamic (non-leader)
+  scheduler, which had zero registered jobs and zero callers, so per-node
+  coverage never actually ran.
 - #3037 (backflow hotfile re-point): `tmux_watcher.rs` changed by a **pure import
   path correction** — the single `global_monitoring_store()` call in the
   suppressed-placeholder monitor-entry-key snapshot now resolves the function via

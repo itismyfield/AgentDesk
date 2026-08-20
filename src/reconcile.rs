@@ -1610,7 +1610,6 @@ async fn active_review_dispatch_exists_pg(pool: &PgPool, card_id: &str) -> Resul
     .map_err(anyhow::Error::from)
 }
 
-// ============================================================================
 #[cfg(test)]
 mod dispatch_delivery_reconcile_tests {
     use super::*;

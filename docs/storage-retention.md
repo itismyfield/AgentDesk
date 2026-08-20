@@ -10,7 +10,11 @@ Tracking issue: [#1094](https://github.com/itismyfield-org/agentdesk/issues/1094
 
 Prerequisite context:
 
-- [#1091 / 909-2] Dynamic maintenance scheduler (`register_maintenance_job`).
+- [#1091 / 909-2] Dynamic maintenance scheduler (`register_maintenance_job` /
+  `spawn_maintenance_scheduler`) — **dead as of #5463**: it has zero registered
+  jobs and zero callers, so the dynamic slice of `/api/cron-jobs`
+  (`services::maintenance::list_maintenance_jobs`) is permanently empty. Every
+  job below actually runs on the leader-only `src/server/maintenance` registry.
 - [#1092 / 909-3] Storage maintenance jobs wired: `target_sweep`,
   `worktree_orphan_sweep`, `hang_dump_cleanup`.
 - [#1093 / 909-4] DB retention job wired: `db_retention`.
