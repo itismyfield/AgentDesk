@@ -2511,7 +2511,7 @@ these contextual numbers to match ordinary LoC churn.
 - `src/services/discord/tmux_watcher_registry.rs` (below the giant threshold; crossed
   the 1000-line production threshold at 1092 prod LoC via #5071 relay-tail S4 and came
   back to 637 prod LoC in #5457, which moved the S4 conjunct layer verbatim into the
-  child module `tmux_watcher_registry/fences.rs` (488 prod LoC): `WatcherIdentityFence`
+  child module `tmux_watcher_registry/fences.rs` (489 prod LoC): `WatcherIdentityFence`
   with its `PinnedWatcherBinding` and `#[cfg(not(unix))]` shims, `TerminalDeliveryFence`,
   `commit_under_delivery_fence`, the live `execution_identity_mode` read, and the two
   test hooks. The registry root deliberately KEEPS the four maps, both
