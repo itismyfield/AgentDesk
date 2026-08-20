@@ -164,13 +164,6 @@ grandfathered_baseline_paths = [
 grandfathered = []
 
 [[entry]]
-file = "src/services/discord/tmux_watcher_registry.rs"
-decision = "shrink"
-owner = "discord-relay"
-deadline = "2026-10-31"
-decompose_issue = "#5457"
-
-[[entry]]
 file = "src/cli/client.rs"
 decision = "shrink"
 owner = "server-runtime"

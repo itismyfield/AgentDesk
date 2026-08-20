@@ -942,6 +942,8 @@ src/
 │   │   │   ├── two_message_panel_tests.rs
 │   │   │   ├── utf8_chunk_decoder.rs
 │   │   │   └── utf8_chunk_decoder_tests.rs
+│   │   ├── tmux_watcher_registry/
+│   │   │   └── fences.rs
 │   │   ├── tui_direct_abort_marker/
 │   │   │   ├── deferred_claim.rs
 │   │   │   ├── drain.rs
