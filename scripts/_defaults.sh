@@ -1055,11 +1055,14 @@ _restart_artifact_nonce_matches() {
     && grep -Fqx -- "nonce=${expected_nonce}" "$artifact" 2>/dev/null
 }
 
+# Generate a path-safe entropy suffix, preferring uuidgen and falling back to
+# four bytes from /dev/urandom when uuidgen is absent or fails.
 _restart_nonce_entropy() {
   local entropy=""
   if command -v uuidgen >/dev/null 2>&1; then
     entropy="$(uuidgen 2>/dev/null || true)"
-  elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then
+  fi
+  if [ -z "$entropy" ] && [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then
     entropy="$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
   fi
   _restart_nonce_is_path_safe "$entropy" || return 1
@@ -1121,7 +1124,11 @@ _restart_dispose_marker_by_own_nonce() {
     elif [ -e "$marker" ]; then
       # A newer actor filled the canonical name. Preserve the claimed inode as
       # recovery-visible residue; deleting it here loses the middle request.
-      echo "⚠ [gate] restart-dispose-restore-eexist root=${root} expected=${expected_nonce}" >&2
+      local found="unknown"
+      found="$(grep -m1 '^nonce=' "$disposal" 2>/dev/null || true)"
+      found="${found#nonce=}"
+      [ -n "$found" ] || found="unknown"
+      echo "⚠ [gate] restart-dispose-restore-eexist root=${root} expected=${expected_nonce} found=${found}" >&2
     else
       echo "✗ [gate] failed to restore foreign restart marker at ${marker}; preserving ${disposal}" >&2
       rc=1
@@ -1415,6 +1422,7 @@ request_restart_drain_mode_or_fail() {
   local roots=()
   local acquired=()
   local root
+  local acquired_root
   local consumed_root
   local job_state
   local nonce entropy marker_rc terminal_path
@@ -1451,30 +1459,16 @@ request_restart_drain_mode_or_fail() {
   done
 
   entropy="$(_restart_nonce_entropy)" || {
-    echo "✗ [gate] refused:marker-nonce-unsafe (failed to generate nonce entropy)" >&2
+    echo "✗ [gate] failed to generate restart nonce entropy" >&2
     return 1
   }
+  # Current generator measurements: nonce length 64 and longest terminal tmp
+  # basename 94, versus design measurements M6/M7 of 36 and 54/92.
   nonce="$(date -u '+%Y%m%dT%H%M%S')-$$-${RANDOM:-0}-${entropy}"
   if ! _restart_nonce_is_path_safe "$nonce"; then
     echo "✗ [gate] refused:marker-nonce-unsafe" >&2
     return 1
   fi
-
-  # A generated nonce owns its request-specific terminal names. Remove only
-  # artifacts under that exact name before attempting the lease. This closes a
-  # reused-nonce stale proof without deleting any other request's evidence.
-  for root in "${roots[@]}"; do
-    for terminal_path in \
-      "$(_restart_request_artifact_path "$root" restart_persisted "$nonce")" \
-      "$(_restart_request_artifact_path "$root" restart_cancelled "$nonce")"; do
-      if [ -e "$terminal_path" ]; then
-        rm -f "$terminal_path" 2>/dev/null || {
-          echo "✗ [gate] failed to clear stale terminal artifact: $terminal_path" >&2
-          return 1
-        }
-      fi
-    done
-  done
 
   # Two-stage ownership: first publish a complete immutable identity, then link
   # it into the canonical lease. Every root must acquire the same nonce or none
@@ -1507,13 +1501,31 @@ request_restart_drain_mode_or_fail() {
     esac
     if [ "$marker_rc" -ne 0 ]; then
       if [ "${#acquired[@]}" -gt 0 ]; then
-        local acquired_root
         for acquired_root in "${acquired[@]}"; do
           _restart_dispose_marker_by_own_nonce "$acquired_root" "$nonce" || true
         done
       fi
       return 1
     fi
+  done
+
+  # Lease reservation makes this actor the sole live incarnation of the nonce.
+  # Only now may stale same-nonce terminal identities be removed: cleaning them
+  # before acquisition can delete a concurrent actor's newly published proof.
+  for root in "${roots[@]}"; do
+    for terminal_path in \
+      "$(_restart_request_artifact_path "$root" restart_persisted "$nonce")" \
+      "$(_restart_request_artifact_path "$root" restart_cancelled "$nonce")"; do
+      if [ -e "$terminal_path" ]; then
+        rm -f "$terminal_path" 2>/dev/null || {
+          echo "✗ [gate] failed to clear stale terminal artifact: $terminal_path" >&2
+          for acquired_root in "${acquired[@]}"; do
+            _restart_dispose_marker_by_own_nonce "$acquired_root" "$nonce" || true
+          done
+          return 1
+        }
+      fi
+    done
   done
 
   while [ "$waited" -lt "$ack_wait" ]; do
@@ -1549,12 +1561,12 @@ request_restart_drain_mode_or_fail() {
     # #1447 review iter 4 P2: leaving the marker on disk causes the next
     # cold boot to enter drain mode, observe zero turns, delete the marker,
     # and call exit(0) — flapping under KeepAlive. The service is not
-    # running, so there is nothing to drain; clear the marker and report
-    # success.
+    # running, so there is nothing to drain; dispose only this request's marker
+    # through the nonce CAS so a newer actor's canonical lease survives.
     for root in "${roots[@]}"; do
-      rm -f "$root/restart_pending" "$root/restart_persisted" \
-        "$root/restart_cancelled" 2>/dev/null || true
+      _restart_dispose_marker_by_own_nonce "$root" "$nonce" || true
     done
+    AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
     AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1
     AGENTDESK_RESTART_DRAIN_VERDICT="not evaluated: launchd job is not running"
     echo "▸ [gate] ${scope} launchd job is not running; cleared restart drain marker (no in-flight turns to drain)"

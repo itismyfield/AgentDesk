@@ -1137,7 +1137,7 @@ _restart_artifact_nonce_matches() {
   fi
   [ -f "$1" ] && grep -Fqx -- "nonce=$2" "$1" 2>/dev/null
 }
-_restart_dispose_marker_by_own_nonce "$S3A_TMP/three" actor-N >/dev/null 2>&1 || true
+three_dispose_out=$(_restart_dispose_marker_by_own_nonce "$S3A_TMP/three" actor-N 2>&1 || true)
 eval "$real_nonce_match"
 set -- "$S3A_TMP/three"/.restart_pending.dispose.actor-N.*
 if [ -f "$1" ] \
@@ -1148,6 +1148,12 @@ if [ -f "$1" ] \
 else
   fail "three-actor EEXIST lower bound preserves residue and middle identity"
 fi
+case "$three_dispose_out" in
+  *"restart-dispose-restore-eexist"*"expected=actor-N"*"found=actor-N-prime"*)
+    pass "EEXIST residue log names expected and found nonces" ;;
+  *)
+    fail "EEXIST residue log names expected and found nonces (got: $three_dispose_out)" ;;
+esac
 
 # A canonical link syscall failure without a competing canonical marker is a
 # create failure (rc=2), never a held lease (rc=1).
@@ -1167,8 +1173,23 @@ unset -f ln
 [ -n "$real_ln" ] && eval "$real_ln"
 assert_eq "canonical link failure without owner returns rc=2" "2" "$link_fail_rc"
 
-# E8.4②: force nonce reuse and prove only that nonce's terminal identities are
-# removed before acquisition; foreign identities and fixed indexes survive.
+# Entropy generation must reach /dev/urandom when an installed uuidgen fails.
+mkdir -p "$S3A_TMP/entropy-bin"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$S3A_TMP/entropy-bin/uuidgen"
+chmod +x "$S3A_TMP/entropy-bin/uuidgen"
+set +e
+fallback_entropy=$(PATH="$S3A_TMP/entropy-bin:$PATH" _restart_nonce_entropy)
+entropy_rc=$?
+set -e
+assert_eq "uuidgen failure falls back to /dev/urandom" "0" "$entropy_rc"
+if [ "${#fallback_entropy}" = 8 ] && _restart_nonce_is_path_safe "$fallback_entropy"; then
+  pass "urandom fallback yields eight path-safe hex characters"
+else
+  fail "urandom fallback yields eight path-safe hex characters (got: $fallback_entropy)"
+fi
+
+# E8.4②: force nonce reuse and inject a same-nonce terminal publication during
+# acquisition. Cleanup is allowed only after the lease reservation succeeds.
 mkdir -p "$S3A_TMP/reuse"
 forced_nonce="forced-$$-0-entropy"
 printf 'nonce=%s\n' "$forced_nonce" >"$S3A_TMP/reuse/restart_persisted.$forced_nonce"
@@ -1177,6 +1198,7 @@ printf 'nonce=foreign\n' >"$S3A_TMP/reuse/restart_persisted.foreign"
 printf 'nonce=fixed\n' >"$S3A_TMP/reuse/restart_persisted"
 real_entropy=$(declare -f _restart_nonce_entropy)
 real_date=$(declare -f date 2>/dev/null || true)
+real_stage=$(declare -f _restart_stage_and_link_marker)
 _restart_nonce_entropy() { printf entropy; }
 date() {
   if [ "$1" = -u ] && [ "$2" = +%Y%m%dT%H%M%S ]; then
@@ -1185,6 +1207,11 @@ date() {
     command date "$@"
   fi
 }
+_restart_stage_and_link_marker() {
+  _restart_terminal_publish "$1" restart_persisted "$2" 'committed_at=concurrent'
+  eval "$real_stage"
+  _restart_stage_and_link_marker "$@"
+}
 unset RANDOM
 RANDOM=0
 _launchd_job_state() { echo "not running"; }
@@ -1192,12 +1219,77 @@ request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/reuse" src >/dev/
 unset -f _launchd_job_state date
 [ -n "$real_date" ] && eval "$real_date"
 eval "$real_entropy"
+eval "$real_stage"
 if [ ! -e "$S3A_TMP/reuse/restart_persisted.$forced_nonce" ] \
   && [ ! -e "$S3A_TMP/reuse/restart_cancelled.$forced_nonce" ] \
   && [ -e "$S3A_TMP/reuse/restart_persisted.foreign" ]; then
-  pass "nonce issuance clears only matching stale terminal identities"
+  pass "same-nonce terminal cleanup occurs after lease reservation"
 else
-  fail "nonce issuance clears only matching stale terminal identities"
+  fail "same-nonce terminal cleanup occurs after lease reservation"
+fi
+
+# The not-running check can race with a newer actor acquiring the canonical
+# lease. Inject actor B at that seam and require actor A's cleanup to preserve B.
+mkdir -p "$S3A_TMP/not-running-race"
+real_entropy=$(declare -f _restart_nonce_entropy)
+real_date=$(declare -f date 2>/dev/null || true)
+_restart_nonce_entropy() { printf actor-A-entropy; }
+date() {
+  if [ "$1" = -u ] && [ "$2" = +%Y%m%dT%H%M%S ]; then
+    printf actor-A
+  else
+    command date "$@"
+  fi
+}
+unset RANDOM
+RANDOM=0
+_launchd_job_state() {
+  rm -f "$S3A_TMP/not-running-race/restart_pending"
+  _restart_stage_and_link_marker "$S3A_TMP/not-running-race" actor-B src scope label
+  echo "not running"
+}
+request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/not-running-race" src >/dev/null 2>&1
+unset -f _launchd_job_state date
+[ -n "$real_date" ] && eval "$real_date"
+eval "$real_entropy"
+if _restart_artifact_nonce_matches "$S3A_TMP/not-running-race/restart_pending" actor-B \
+  && _restart_artifact_nonce_matches "$S3A_TMP/not-running-race/restart_pending.actor-B" actor-B; then
+  pass "not-running cleanup preserves a newer actor's canonical marker"
+else
+  fail "not-running cleanup preserves a newer actor's canonical marker"
+fi
+
+# Reproduce the restart skill's no-argument cleanup form under set -e. The
+# not-running success path must arm the nonce so bootstrap remains reachable.
+mkdir -p "$S3A_TMP/no-arg"
+set +e
+(
+  set -e
+  _restart_nonce_entropy() { printf no-arg-entropy; }
+  date() {
+    if [ "$1" = -u ] && [ "$2" = +%Y%m%dT%H%M%S ]; then
+      printf no-arg
+    else
+      command date "$@"
+    fi
+  }
+  unset RANDOM
+  RANDOM=0
+  _launchd_job_state() { echo "not running"; }
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
+    PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
+    request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/no-arg" src >/dev/null 2>&1
+  clear_restart_drain_mode "$S3A_TMP/no-arg" >/dev/null 2>&1
+  printf reached-bootstrap >"$S3A_TMP/no-arg/result"
+)
+no_arg_rc=$?
+set -e
+assert_eq "restart skill no-argument cleanup stays on success path" "0" "$no_arg_rc"
+no_arg_result="$(command cat "$S3A_TMP/no-arg/result" 2>/dev/null || true)"
+if [ "$no_arg_result" = reached-bootstrap ]; then
+  pass "restart skill reaches bootstrap after no-argument cleanup"
+else
+  fail "restart skill reaches bootstrap after no-argument cleanup"
 fi
 
 mkdir -p "$S3A_TMP/cancel"
@@ -1206,9 +1298,9 @@ clear_restart_drain_mode "$S3A_TMP/cancel" cancel-order
 if _restart_artifact_nonce_matches "$S3A_TMP/cancel/restart_cancelled.cancel-order" cancel-order \
   && [ ! -e "$S3A_TMP/cancel/restart_pending" ] \
   && [ ! -e "$S3A_TMP/cancel/restart_pending.cancel-order" ]; then
-  pass "cancellation publishes terminal identity before disposing both marker names"
+  pass "cancellation leaves terminal identity and removes both marker names"
 else
-  fail "cancellation publishes terminal identity before disposing both marker names"
+  fail "cancellation leaves terminal identity and removes both marker names"
 fi
 
 echo
