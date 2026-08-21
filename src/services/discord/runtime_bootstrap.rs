@@ -1,5 +1,6 @@
 use super::*;
 
+mod deferred_restart;
 mod framework_setup;
 mod gateway_lease;
 mod gateway_lease_recovery;
