@@ -29,10 +29,14 @@ fn queued_restart_foreign_authority_propagates_loss_while_self_delegation_contin
     let mut foreign = bridge.clone();
     foreign.set_watcher_owner_channel_id(foreign.channel_id + 1);
     foreign.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+    // #5464 T5 S4: driven with the cohort ADMITTING, because the propagation this
+    // pins must survive enforcement — `IdentityMismatch` is an exact-episode veto
+    // and keeps ending the lifecycle inside the cohort (ERRATUM R3-E4-3).
     let foreign_authority = visible_mutation_authority_after_guarded_save(
         crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch,
         &foreign,
         intended,
+        true,
     );
     assert_eq!(foreign_authority, VisibleMutationAuthority::AuthorityLost);
     assert_eq!(
@@ -45,11 +49,92 @@ fn queued_restart_foreign_authority_propagates_loss_while_self_delegation_contin
         crate::services::discord::inflight::GuardedSaveOutcome::Saved,
         &foreign,
         delegated,
+        true,
     );
     assert_eq!(self_delegated, VisibleMutationAuthority::Suppressed);
     assert_eq!(
         stream_tool_outcome_after_restart_authority(Some(self_delegated)),
         StreamToolArmOutcome::Continue,
+    );
+}
+
+/// #5464 T5 S4 at the tool-arm entry, driven through production: with no durable
+/// row the real restart fence reports `Missing`, and under the SHIPPED dial that
+/// must still end the arm exactly as it does today.
+///
+/// The two fence functions ask the cohort themselves — they hold none of
+/// `stream_tick`'s per-tick locals — so the source assertion below pins that they
+/// still ASK. A literal at either call site would keep this file's behavioural
+/// assertions green while silently pinning the whole tool-arm surface to one side
+/// of the rollout, and the promotion evidence S2 collects would then describe a
+/// gate the arms are not running.
+#[test]
+fn the_restart_fence_asks_the_cohort_and_a_vanished_row_still_ends_the_arm() {
+    let temp = tempfile::TempDir::new().expect("runtime root");
+    let _env_guard = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+
+    let channel = ChannelId::new(42_593_141);
+    let mut inflight_state = bridge_state(channel.get());
+    let expected =
+        crate::services::discord::inflight::InflightTurnIdentity::from_state(&inflight_state);
+    let mut baseline = inflight_state.clone();
+    let mut expected_current_message = (
+        inflight_state.current_msg_id,
+        inflight_state.current_msg_len,
+    );
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let gateway: std::sync::Arc<dyn TurnGateway> =
+        std::sync::Arc::new(crate::services::discord::gateway::HeadlessGateway);
+    let mut current_msg_id = MessageId::new(1);
+    let mut full_response = String::new();
+    let mut response_sent_offset = 0usize;
+    let mut confirmed_offset = 0usize;
+    let mut any_tool_used = false;
+    let mut has_post_tool_text = false;
+
+    // Nothing was ever saved for this channel, so the guarded save inside the
+    // fence can only answer `Missing` — asserted, because `IdentityMismatch`
+    // maps to the same `AuthorityLost` and would let this pass for the wrong
+    // reason.
+    assert!(
+        crate::services::discord::inflight::load_inflight_state(
+            &ProviderKind::Codex,
+            channel.get(),
+        )
+        .is_none(),
+        "the fixture needs a VANISHED row, not a reowned one",
+    );
+    let authority = fence_restart_visible_mutation(StreamToolAuthorityContext {
+        shared_owned: &shared,
+        gateway: &gateway,
+        persisted_inflight_baseline: &mut baseline,
+        inflight_state: &mut inflight_state,
+        stream_tick_expected_identity: &expected,
+        expected_current_message: &mut expected_current_message,
+        current_msg_id: &mut current_msg_id,
+        full_response: &mut full_response,
+        response_sent_offset: &mut response_sent_offset,
+        confirmed_offset: &mut confirmed_offset,
+        any_tool_used: &mut any_tool_used,
+        has_post_tool_text: &mut has_post_tool_text,
+    });
+    assert_eq!(
+        authority,
+        VisibleMutationAuthority::AuthorityLost,
+        "outside the enforcement cohort a vanished row must still end the arm",
+    );
+    assert_eq!(
+        stream_tool_outcome_after_restart_authority(Some(authority)),
+        StreamToolArmOutcome::AuthorityLost,
+    );
+
+    let source = include_str!("authority.rs");
+    assert_eq!(
+        source
+            .matches("stream_loop_suppression_cohort_admits(context.inflight_state.channel_id)")
+            .count(),
+        2,
+        "both tool-arm fences must read the cohort instead of passing a literal",
     );
 }
 
