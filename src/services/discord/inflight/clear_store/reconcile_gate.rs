@@ -25,6 +25,37 @@ pub(in crate::services::discord) fn row_is_current_generation(
     state.born_generation != 0 && state.born_generation == current_generation
 }
 
+/// Which population a row that the fence ALLOWED belongs to (#5462 S5 §7.2-2).
+///
+/// The allow counter has to be a distribution: the fence refuses exactly one
+/// bucket, so a bare "how many passed" says nothing about whether it blocks too
+/// much. The other three are the populations §9-1 / §9-8 / §9-9 deferred to
+/// free observation. `prior_generation` is where BOTH the readopt hole (§9-1)
+/// and the pre-allocation skew (§9-9) land, and its rate is what chooses between
+/// the α and β repairs; `legacy_zero` is fail-open by decision (§9-8) and only
+/// means something paired with [`generation_subsystem_available`]; `older` is
+/// ordinary reconcile work, kept separate so it cannot inflate the other two.
+fn generation_relation(born_generation: u64, current_generation: u64) -> &'static str {
+    if born_generation == 0 {
+        "legacy_zero"
+    } else if born_generation == current_generation {
+        "current_generation"
+    } else if born_generation.saturating_add(1) == current_generation {
+        "prior_generation"
+    } else {
+        "older"
+    }
+}
+
+/// §9-8's transfer condition: `legacy_zero` conflates "a binary predating the
+/// field wrote this row" with "this deployment could not open the generation
+/// file", and going fail-closed is only safe for the first. Reads the path and
+/// never allocates — allocating from an observation would move the very epoch
+/// that observation reports on.
+fn generation_subsystem_available() -> bool {
+    crate::services::discord::runtime_store::generation_path().is_some()
+}
+
 /// Clear a normal reconcile row after a locked fresh-read generation fence.
 pub(in crate::services::discord) fn clear_inflight_state_for_reconcile(
     provider: &ProviderKind,
@@ -100,7 +131,14 @@ fn observe_reconcile_outcome(
                 ObsSeverity::Warn,
             );
         }
-        ReconcileClearOutcome::Delegated(_) => {
+        ReconcileClearOutcome::Delegated(delegated) => {
+            // The delegated outcome rides along because "allowed" alone cannot
+            // separate a fence passing real work through from one whose callers
+            // all bounce off the identity guard behind it — a regression that
+            // looks healthy in a bare allow count.
+            let generation_relation =
+                generation_relation(snapshot.born_generation, current_generation);
+            let delegated_outcome = format!("{delegated:?}");
             crate::services::observability::emit_inflight_lifecycle_event(
                 provider.as_str(),
                 snapshot.channel_id,
@@ -112,6 +150,9 @@ fn observe_reconcile_outcome(
                     "site": site,
                     "born_generation": snapshot.born_generation,
                     "current_generation": current_generation,
+                    "generation_relation": generation_relation,
+                    "generation_subsystem_available": generation_subsystem_available(),
+                    "delegated_outcome": delegated_outcome,
                     "user_msg_id": snapshot.user_msg_id,
                     "path": path.display().to_string(),
                 }),
@@ -122,6 +163,9 @@ fn observe_reconcile_outcome(
                 user_msg_id = snapshot.user_msg_id,
                 born_generation = snapshot.born_generation,
                 current_generation,
+                generation_relation,
+                generation_subsystem_available = generation_subsystem_available(),
+                delegated_outcome = ?delegated,
                 site,
                 path = %path.display(),
                 "reconcile generation gate allowed delegated inflight clear"
@@ -200,6 +244,22 @@ mod tests {
         assert!(row_is_current_generation(&current_row, current));
         assert!(!row_is_current_generation(&legacy_row, 0));
         assert!(!row_is_current_generation(&prior_row, current));
+    }
+
+    // Collapsing `prior_generation` into `older` would hide the readopt hole's
+    // rate, which is the one number that chooses between the α and β repairs.
+    #[test]
+    fn allowed_generation_buckets_separate_the_deferred_populations() {
+        assert_eq!(generation_relation(0, 5462), "legacy_zero");
+        // Zero row in a deployment whose counter is also zero stays fail-open,
+        // not "current" — else an unavailable generation subsystem would read as
+        // a fence protecting every row.
+        assert_eq!(generation_relation(0, 0), "legacy_zero");
+        assert_eq!(generation_relation(5462, 5462), "current_generation");
+        assert_eq!(generation_relation(5461, 5462), "prior_generation");
+        assert_eq!(generation_relation(5460, 5462), "older");
+        // A future-generation row (downgrade / rollback) is not readopt either.
+        assert_eq!(generation_relation(5463, 5462), "older");
     }
 
     #[test]

@@ -33,6 +33,34 @@ also fails to typecheck.  This check exists because that is a property of one
 type's shape, which a refactor can relax without anyone noticing, while a
 pairing diff is visible in review.
 
+``inflight_row_clear_call`` (#5462 S5) pins, per file, the calls to an inflight
+ROW-DESTRUCTION helper made from OUTSIDE the owner module
+``src/services/discord/inflight/clear_store/``.  The owner exclusion is the same
+idiom ``registry_remove`` uses for ``REGISTRY_OWNER``: definitions and
+helper-to-helper composition live there, and pinning them would count the
+implementation instead of its consumers.  The callee's NAME carries the
+destructive meaning here, which is why it sees helper-mediated destruction that a
+counter keyed on path-resolution symbols cannot: in this repository the callee,
+not the caller, resolves the inflight path.  Its limits:
+
+* A SPELLING count, not a semantic one.  Definitions and re-export wrappers are
+  counted too.  Harmless for a no-growth ratchet, wrong if read as "number of
+  destruction sites".
+* Direct ``fs::remove_file`` unlinks are INVISIBLE.  ``inflight/removal.rs``,
+  ``inflight/rebind_reap.rs``, ``inflight.rs`` and ``src/reconcile.rs`` unlink
+  directly and count 0 for those unlinks.  Helper-mediated class only; the
+  direct-unlink surface is a separate issue.
+* The generation-fenced ``*_for_reconcile`` wrappers count AS destruction, not as
+  a separate fenced-entry-point category.  They delegate to the same unlink, and
+  excluding them would blind the category on the very reconcile sites it exists
+  to pin: those sites spelled the bare helper when the baseline was designed, so
+  converting one to its fenced form would otherwise read as a DECREASE the
+  no-growth ratchet waves through.  Whether the fence actually refuses is a
+  runtime property this file cannot see — ``reconcile_gate.rs`` counts that.
+* ``clear_inflight_state_for_channel`` is not in the pattern; its body spells
+  ``clear_inflight_state`` and is counted there, so the destruction is pinned one
+  hop earlier than its ``server/routes/health_api.rs`` caller.
+
 ``--check`` rejects growth in an existing file, every UNLISTED file, and any
 identity/delivery pairing mismatch.  A decrease is allowed for growth: this is a
 no-growth ratchet.  For an intentional change, run ``--write-baseline`` and
@@ -60,6 +88,7 @@ CATEGORIES = (
     "registry_remove",
     "identity_fence_bind",
     "delivery_fence_bind",
+    "inflight_row_clear_call",
 )
 WARNING = "These counts are a growth-blocking baseline, not proof of safety."
 REPIN = (
@@ -97,6 +126,18 @@ REGISTRY_OWNER = "src/services/discord/tmux_watcher_registry.rs"
 IDENTITY_FENCE_PATTERN = re.compile(r"\bunder_identity_fence\s*\(")
 DELIVERY_FENCE_PATTERN = re.compile(r"\bwith_terminal_delivery_fence\s*\(")
 FENCE_PAIR = ("identity_fence_bind", "delivery_fence_bind")
+# #5462 S5: inflight row-destruction helpers.  Scanned over all of `src/**`, not
+# just `src/services/discord/`, because `services/turn_lifecycle.rs` calls them
+# from outside the Discord tree.
+INFLIGHT_ROW_CLEAR_PATTERN = re.compile(
+    r"\b(?:clear_inflight_state(?:_if_matches\w*|_for_reconcile\w*)?"
+    r"|clear_rebind_origin_inflight_state_if_matches_identity\w*"
+    r"|clear_rebind_origin_for_reconcile\w*"
+    r"|delete_inflight_state_file"
+    r"|clear_inflight_by_tmux_name"
+    r"|request_inflight_abandon_if_matches\w*)\s*\("
+)
+INFLIGHT_ROW_CLEAR_OWNER_PREFIX = "src/services/discord/inflight/clear_store/"
 
 
 class RatchetError(RuntimeError):
@@ -153,9 +194,18 @@ def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
             if found:
                 counts[category][rel] = found
 
-        if not rel.startswith("src/services/discord/") or _is_whole_test_file(path, rel):
+        if _is_whole_test_file(path, rel):
             continue
         production = RUST_LEXER._production_text(path)
+        # Widest surface first: this category is the only one that looks outside
+        # `src/services/discord/`.
+        if not rel.startswith(INFLIGHT_ROW_CLEAR_OWNER_PREFIX):
+            clear_found = len(INFLIGHT_ROW_CLEAR_PATTERN.findall(production))
+            if clear_found:
+                counts["inflight_row_clear_call"][rel] = clear_found
+
+        if not rel.startswith("src/services/discord/"):
+            continue
         process_found = len(PROCESS_PATTERN.findall(production))
         if process_found:
             counts["process_kill"][rel] = process_found
@@ -298,6 +348,19 @@ def _snapshot(
                     "no-growth ratchet would otherwise wave through."
                 ),
                 "files": dict(sorted(counts["delivery_fence_bind"].items())),
+            },
+            "inflight_row_clear_call": {
+                "comment": (
+                    "#5462 S5: calls to an inflight ROW-DESTRUCTION helper from "
+                    "outside the owner module src/services/discord/inflight/"
+                    "clear_store/. A spelling count: definitions and re-export "
+                    "wrappers are counted, direct fs::remove_file unlinks are "
+                    "invisible, and the generation-fenced *_for_reconcile "
+                    "wrappers count AS destruction so converting a bare call to "
+                    "its fenced form is not scored as a decrease. See the module "
+                    "docstring for the full limits."
+                ),
+                "files": dict(sorted(counts["inflight_row_clear_call"].items())),
             },
         },
     }

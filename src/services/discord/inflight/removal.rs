@@ -101,6 +101,40 @@ fn record_loader_generation_gate(state: &InflightTurnState, current_generation: 
     );
 }
 
+/// #5462 S5 §7.2-2 for the loader fence. Its refusal above is an invariant WARN,
+/// so without this the analysis stream counts blocked removals but not permitted
+/// ones — and a reject count with no allow count cannot tell an over-blocking
+/// fence from a quiet boot.
+///
+/// The generation/name triple is raw rather than bucketed because §9-2's transfer
+/// condition is one combination this fence deliberately does NOT refuse (current
+/// generation, no tmux name), which becomes a filter over these fields. §7.2-6's
+/// removal log carries the same triple, so the two streams agree field for field.
+fn emit_loader_generation_gate_allowed(
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+    current_generation: u64,
+    path: &Path,
+) {
+    crate::services::observability::emit_inflight_lifecycle_event(
+        provider.as_str(),
+        state.channel_id,
+        state.dispatch_id.as_deref(),
+        state.session_key.as_deref(),
+        None,
+        "reconcile_generation_gate_allowed",
+        serde_json::json!({
+            "site": "load_inflight_states_from_root_stale",
+            "born_generation": state.born_generation,
+            "current_generation": current_generation,
+            "current_generation_row": row_is_current_generation(state, current_generation),
+            "tmux_session_name_present": state.tmux_session_name.is_some(),
+            "user_msg_id": state.user_msg_id,
+            "path": path.display().to_string(),
+        }),
+    );
+}
+
 pub(crate) fn log_inflight_remove_for_path(
     provider: &ProviderKind,
     channel_id: u64,
@@ -502,6 +536,12 @@ pub(super) fn load_inflight_states_from_root(
                 if loader_gate_refuses(&locked_state, current_generation) {
                     record_loader_generation_gate(&locked_state, current_generation, &path);
                 } else {
+                    emit_loader_generation_gate_allowed(
+                        provider,
+                        &locked_state,
+                        current_generation,
+                        &path,
+                    );
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!("  [{ts}] ⚠ {}: {}", reason, path.display());
                     log_loader_inflight_remove(
