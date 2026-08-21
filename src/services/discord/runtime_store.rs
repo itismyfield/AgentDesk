@@ -525,6 +525,25 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| classify_io_error("rename", e))
 }
 
+/// #5254 D10: fsync the directory entry `atomic_write` published, so the rename
+/// itself — not just the bytes `sync_all` already flushed — is handed to the
+/// filesystem. The contract stops at the calls: `sync_all` on the file, then an
+/// fsync of the parent directory. What either one survives is not a claim this
+/// helper makes.
+///
+/// Deliberately a second call rather than a flag on `atomic_write`: the inflight
+/// hot path must not pay a directory fsync, and callers that need durability
+/// want the two failures separable (a rename error aborts, a directory fsync
+/// error is post-commit and its only caller uses it to skip the derived index —
+/// #5254 §E8.2). The directory is opened read-only because opening one for
+/// writing fails with `EISDIR`.
+pub(crate) fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    fs::File::open(parent.unwrap_or_else(|| Path::new(".")))?.sync_all()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AtomicWriteContext<'a> {
     pub(crate) store: &'a str,
@@ -671,6 +690,37 @@ mod runtime_root_tests {
         assert_eq!(load_generation(), 8);
         assert_eq!(process_generation(), 7);
         set_process_generation_for_tests(None);
+    }
+}
+
+#[cfg(test)]
+mod parent_dir_fsync_tests {
+    use super::*;
+
+    /// #5254 D10 [measured P8/P10]: the directory fsync succeeds on a real
+    /// published file. The open mode is contract, not accident — opening a
+    /// directory for writing fails with `EISDIR`, so a "make it writable"
+    /// refactor of this helper turns a durability call into a permanent error.
+    #[test]
+    fn published_file_parent_dir_is_fsyncable() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let published = root.path().join("restart_persisted.nonce-a");
+        atomic_write(&published, "nonce=nonce-a\n").expect("publish");
+
+        fsync_parent_dir(&published).expect("directory entry fsync");
+    }
+
+    /// The caller gates the derived index on this result, which is only safe if
+    /// failure is reported rather than raised: this must be an `Err`, never a
+    /// panic.
+    #[test]
+    fn missing_parent_dir_is_reported_not_panicked() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let orphan = root.path().join("gone").join("restart_persisted.nonce-b");
+
+        let error = fsync_parent_dir(&orphan).expect_err("absent parent directory");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
 }
 
