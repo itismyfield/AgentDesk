@@ -114,18 +114,46 @@ pub(super) fn detect_live_tmux_output_path(
     detect_rebind_output_path_from_candidates(fallback_path, candidates)
 }
 
+fn observe_restore_inflight_snapshot(
+    provider: &ProviderKind,
+    states: &[inflight::InflightTurnState],
+    boot_elapsed: std::time::Duration,
+) {
+    let current_generation = super::runtime_store::process_generation();
+    tracing::info!(provider = %provider.as_str(), snapshot_rows = states.len(), boot_elapsed_ms = boot_elapsed.as_millis(), "restore_inflight snapshot loaded");
+    for state in states
+        .iter()
+        .filter(|state| state.born_generation != 0 && state.born_generation == current_generation)
+    {
+        tracing::warn!(provider = %provider.as_str(), channel_id = state.channel_id, user_msg_id = state.user_msg_id, born_generation = state.born_generation, current_generation, boot_elapsed_ms = boot_elapsed.as_millis(), "restore_inflight snapshot contains a row authored by the running process");
+    }
+}
+
 pub(in crate::services::discord) async fn restore_inflight_turns(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) {
     let states = load_inflight_states(provider);
+    observe_restore_inflight_snapshot(
+        provider,
+        &states,
+        shared.restart.recovery_started_at.elapsed(),
+    );
     if states.is_empty() {
         return;
     }
 
     let settings_snapshot = shared.settings.read().await.clone();
 
+    // Reconcile wrappers preserve planned-restart rows via `PlannedRestartSkipped`; the
+    // loader applies the mode-specific 1800s drain / 900s hot-swap retention checks.
+    // That preservation is separate from the generation fence below. If generation
+    // allocation cannot advance the positive durable epoch (flock failure, atomic-write
+    // failure, or u64::MAX saturation), a prior-process row can look current and remain
+    // for this process's lifetime. This intentional over-suppression prevents relay loss;
+    // its bound is the next boot that successfully advances the epoch. An allocation-
+    // provenance witness belongs to #5482.
     for mut state in states {
         // #897 round-4 High: rebind_origin inflights are synthetic
         // placeholders owned by `/api/inflight/rebind` and do NOT carry
@@ -144,7 +172,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 "  [{ts}] ⏭ recovery: skipping rebind-origin inflight for channel {} — operator must re-invoke /api/inflight/rebind post-restart",
                 state.channel_id
             );
-            clear_inflight_state(provider, state.channel_id);
+            super::inflight::clear_rebind_origin_for_reconcile(provider, &state);
             continue;
         }
 
@@ -184,7 +212,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 "recovery_runtime_kind_unknown_skip",
             )
             .await;
-            clear_inflight_state(provider, state.channel_id);
+            super::inflight::clear_inflight_state_for_reconcile(provider, &state);
             continue;
         }
         let is_dm = matches!(
@@ -577,7 +605,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                         "recovery_completed_during_downtime",
                     )
                     .await;
-                    clear_inflight_state(provider, state.channel_id);
+                    super::inflight::clear_inflight_state_for_reconcile(provider, &state);
                 } else if let Some(ref did) = recovered_dispatch_id {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
@@ -763,6 +791,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                             }
                         };
                         if watcher_claimed {
+                            shared
+                                .restart
+                                .recovering_channels
+                                .insert(channel_id, std::time::Instant::now());
                             let ts2 = chrono::Local::now().format("%H:%M:%S");
                             if truncated {
                                 tracing::info!(
@@ -1175,7 +1207,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     "recovery_captured_full_response",
                 )
                 .await;
-                clear_inflight_state(provider, state.channel_id);
+                super::inflight::clear_inflight_state_for_reconcile(provider, &state);
             }
             continue;
         }
@@ -1444,7 +1476,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     "recovery_output_completed",
                 )
                 .await;
-                clear_inflight_state(provider, state.channel_id);
+                super::inflight::clear_inflight_state_for_reconcile(provider, &state);
             }
             continue;
         }
@@ -1476,7 +1508,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     "recovery_ready_without_output_already_delivered",
                 )
                 .await;
-                clear_inflight_state(provider, state.channel_id);
+                super::inflight::clear_inflight_state_for_reconcile(provider, &state);
                 continue;
             }
             if recovery_ready_without_output_has_captured_response(&state) {
@@ -1661,7 +1693,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                         "recovery_runtime_kind_missing_skip",
                     )
                     .await;
-                    clear_inflight_state(provider, state.channel_id);
+                    super::inflight::clear_inflight_state_for_reconcile(provider, &state);
                     continue;
                 }
                 tracing::info!(
@@ -1732,7 +1764,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 "recovery_terminal_delivery_already_committed",
             )
             .await;
-            clear_inflight_state(provider, state.channel_id);
+            super::inflight::clear_inflight_state_for_reconcile(provider, &state);
             continue;
         }
 
@@ -1831,7 +1863,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                             )
                             .await;
                             super::restart_report::clear_restart_report(provider, state.channel_id);
-                            clear_inflight_state(provider, state.channel_id);
+                            super::inflight::clear_inflight_state_for_reconcile(provider, &state);
                         } else {
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::warn!(
@@ -1941,6 +1973,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     }
                 };
                 if watcher_claimed {
+                    shared
+                        .restart
+                        .recovering_channels
+                        .insert(channel_id, std::time::Instant::now());
                     let ts2 = chrono::Local::now().format("%H:%M:%S");
                     if truncated {
                         tracing::info!(
@@ -2067,7 +2103,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     )
                     .await;
                     super::restart_report::clear_restart_report(provider, state.channel_id);
-                    clear_inflight_state(provider, state.channel_id);
+                    super::inflight::clear_inflight_state_for_reconcile(provider, &state);
                 } else {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::warn!(
@@ -2329,6 +2365,189 @@ mod tests {
         self, GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState, RelayOwnerKind,
     };
     use crate::services::provider::ProviderKind;
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("capture log").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_logs(run: impl FnOnce()) -> String {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(CapturingWriter(buffer.clone()))
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        String::from_utf8(buffer.lock().expect("captured logs").clone())
+            .expect("captured logs are utf8")
+    }
+
+    fn recovery_state(provider: ProviderKind, channel_id: u64) -> InflightTurnState {
+        InflightTurnState::new(
+            provider,
+            channel_id,
+            None,
+            1,
+            2,
+            3,
+            "restore reconcile gate".to_string(),
+            Some(format!("session-{channel_id}")),
+            Some(format!("AgentDesk-claude-{channel_id}")),
+            Some(format!("/tmp/{channel_id}.jsonl")),
+            None,
+            0,
+        )
+    }
+
+    #[test]
+    fn restore_snapshot_warns_only_for_current_generation_rows() {
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let provider = ProviderKind::Claude;
+        let mut prior = recovery_state(provider.clone(), 5_462_301);
+        prior.born_generation = 41;
+        crate::services::discord::runtime_store::set_process_generation_for_tests(Some(42));
+        let without_current = capture_logs(|| {
+            super::observe_restore_inflight_snapshot(
+                &provider,
+                &[prior.clone()],
+                std::time::Duration::from_millis(17),
+            );
+        });
+        assert!(without_current.contains("restore_inflight snapshot loaded"));
+        assert!(!without_current.contains("authored by the running process"));
+
+        let mut legacy = recovery_state(provider.clone(), 5_462_300);
+        legacy.born_generation = 0;
+        crate::services::discord::runtime_store::set_process_generation_for_tests(Some(0));
+        let with_zero_generation = capture_logs(|| {
+            super::observe_restore_inflight_snapshot(
+                &provider,
+                &[legacy],
+                std::time::Duration::from_millis(19),
+            );
+        });
+        assert!(!with_zero_generation.contains("authored by the running process"));
+
+        crate::services::discord::runtime_store::set_process_generation_for_tests(Some(42));
+        let mut current = recovery_state(provider.clone(), 5_462_302);
+        current.born_generation = 42;
+        let with_current = capture_logs(|| {
+            super::observe_restore_inflight_snapshot(
+                &provider,
+                &[prior, current],
+                std::time::Duration::from_millis(23),
+            );
+        });
+        assert!(with_current.contains("snapshot_rows=2"));
+        assert!(with_current.contains("boot_elapsed_ms=23"));
+        assert!(with_current.contains("authored by the running process"));
+        crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+    }
+
+    #[test]
+    fn restore_reconcile_wrappers_preserve_current_rows_and_use_rebind_path() {
+        let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let generation = 54_623;
+        crate::services::discord::runtime_store::set_process_generation_for_tests(Some(generation));
+
+        let mut normal = recovery_state(provider.clone(), 5_462_311);
+        normal.born_generation = generation;
+        inflight::save_inflight_state(&normal).expect("seed current normal row");
+        assert!(matches!(
+            inflight::clear_inflight_state_for_reconcile(&provider, &normal),
+            inflight::ReconcileClearOutcome::LiveGenerationSkipped { .. }
+        ));
+        assert!(inflight::load_inflight_state(&provider, normal.channel_id).is_some());
+
+        let mut rebind = recovery_state(provider.clone(), 5_462_312);
+        rebind.born_generation = generation.saturating_sub(1);
+        rebind.rebind_origin = true;
+        inflight::save_inflight_state(&rebind).expect("seed rebind row");
+        assert!(matches!(
+            inflight::clear_rebind_origin_for_reconcile(&provider, &rebind),
+            inflight::ReconcileClearOutcome::Delegated(inflight::GuardedClearOutcome::Cleared)
+        ));
+        assert!(inflight::load_inflight_state(&provider, rebind.channel_id).is_none());
+        crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+    }
+
+    /// Lexical ratchet for the restore clear spellings and three recovery-marker sites.
+    /// It is not execution proof: aliases, re-exports, macro-constructed calls, indirection,
+    /// and semantically equivalent spellings can remain unseen, while comments can satisfy
+    /// occurrence counts. The sibling `inflight_row_clear_call` ratchet catches equivalent
+    /// bare-call spellings; behavioural coverage, including the ten-branch gate matrix, is
+    /// tracked in #5482 rather than proven by this source-token assertion.
+    #[test]
+    fn restore_clear_and_recovery_marker_sites_are_lexically_pinned() {
+        let source = include_str!("restore_inflight.rs");
+        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert_eq!(
+            production
+                .matches("clear_rebind_origin_for_reconcile(provider, &state)")
+                .count(),
+            1
+        );
+        assert_eq!(
+            production
+                .matches("clear_inflight_state_for_reconcile(provider, &state)")
+                .count(),
+            9
+        );
+        assert_eq!(
+            production
+                .matches("clear_inflight_state(provider, state.channel_id)")
+                .count(),
+            0
+        );
+        let restart_report_claim = production
+            .split("if watcher_claimed {")
+            .nth(1)
+            .expect("restart-report watcher claim success block");
+        assert!(restart_report_claim.starts_with(
+            "\n                            shared\n                                .restart\n                                .recovering_channels\n                                .insert("
+        ));
+        let pane_alive_claim = production
+            .split("if watcher_claimed {")
+            .nth(2)
+            .expect("pane-alive watcher claim success block");
+        assert!(pane_alive_claim.starts_with(
+            "\n                    shared\n                        .restart\n                        .recovering_channels\n                        .insert("
+        ));
+        assert!(production.contains(
+            "            continue;\n        }\n\n        shared\n            .restart\n            .recovering_channels\n            .insert("
+        ));
+        assert_eq!(production.matches(".recovering_channels\n").count(), 3);
+    }
 
     fn generic_recovery_runtime_ready(
         shared: &std::sync::Arc<super::SharedData>,

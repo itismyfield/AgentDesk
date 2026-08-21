@@ -435,7 +435,12 @@
 # helpers) into recovery_engine/restore_inflight.rs. The root facade is now below
 # the prod-giant threshold and the remaining restart child stays registered for
 # follow-up #3834 slices.
-"src/services/discord/recovery_engine/restore_inflight.rs" = 2335
+# #5462 S3: +21 (2335 -> 2356), reviewable admission — every restore-inflight
+# destruction now routes through the reconcile generation fence; snapshot
+# contamination is observable, and all three recovery-marker sites are pinned.
+# #5462 S3 r3 docs: +3 comment lines (2356 -> 2359).
+# The inline regression tests are excluded from production LoC.
+"src/services/discord/recovery_engine/restore_inflight.rs" = 2359
 # #3034 batch-8: lowered 3771 -> 3770 (dead-code removal).
 # #3038 S1: +1 (3770 -> 3771) for the mechanical `shared.queued_placeholders` ->
 # `shared.queued.queued_placeholders` re-wire (one extra method-chain line) forced

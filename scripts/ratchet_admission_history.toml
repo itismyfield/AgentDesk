@@ -101,3 +101,11 @@ old_cap = 2502
 new_cap = 2544
 decompose_issue = 5071
 count = 4
+
+[[admission]]
+ratchet = "giant_file_ratchet"
+file = "src/services/discord/recovery_engine/restore_inflight.rs"
+old_cap = 2335
+new_cap = 2359
+decompose_issue = 5462
+count = 1
