@@ -2870,12 +2870,12 @@ services::discord::inflight::budget::tests::bump_refuses_row_owned_by_newer_turn
 services::discord::inflight::budget::tests::bump_refuses_tui_direct_row_without_offset_proof
 services::discord::inflight::clear_store::reconcile_gate::tests::allow_side_facts_are_wired_from_the_row_then_the_epoch
 services::discord::inflight::clear_store::reconcile_gate::tests::allowed_generation_buckets_separate_the_deferred_populations
+services::discord::inflight::clear_store::reconcile_gate::tests::current_generation_nonzero_is_the_allocated_epoch_not_a_path_probe
 services::discord::inflight::clear_store::reconcile_gate::tests::current_generation_predicate_is_nonzero_and_exact
 services::discord::inflight::clear_store::reconcile_gate::tests::current_generation_rebind_origin_is_protected
 services::discord::inflight::clear_store::reconcile_gate::tests::legacy_zero_generation_remains_fail_open
 services::discord::inflight::clear_store::reconcile_gate::tests::normal_reconcile_clear_uses_fresh_locked_generation
 services::discord::inflight::clear_store::reconcile_gate::tests::refusal_warn_describes_the_fresh_row_not_the_stale_snapshot
-services::discord::inflight::clear_store::reconcile_gate::tests::subsystem_availability_is_the_allocated_epoch_not_a_path_probe
 services::discord::inflight::destructive_commit::tests::generation_advance_aborts_before_cancel_store
 services::discord::inflight::destructive_commit::tests::typed_outcomes_cover_commit_and_every_pin_field
 services::discord::inflight::destructive_commit::tests::typed_outcomes_cover_missing_malformed_lock_and_io_failures

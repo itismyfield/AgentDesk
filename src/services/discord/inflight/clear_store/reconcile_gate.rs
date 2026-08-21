@@ -38,7 +38,7 @@ pub(in crate::services::discord) fn row_is_current_generation(
 /// free observation. `prior_generation` is where BOTH the readopt hole (§9-1)
 /// and the pre-allocation skew (§9-9) land, and its rate is what chooses between
 /// the α and β repairs; `legacy_zero` is fail-open by decision (§9-8) and only
-/// means something paired with [`generation_subsystem_available`]; `older` is
+/// means something paired with [`current_generation_nonzero`]; `older` is
 /// ordinary reconcile work, kept separate so it cannot inflate the other two.
 ///
 /// `older` also absorbs FUTURE-generation rows (`born > current`, i.e. a counter
@@ -58,29 +58,47 @@ fn generation_relation(born_generation: u64, current_generation: u64) -> &'stati
     }
 }
 
-/// §9-8's transfer condition: `legacy_zero` conflates "a binary predating the
-/// field wrote this row" with "this deployment could not produce a generation",
-/// and going fail-closed is only safe for the first.
+/// §9-8's transfer condition needs `legacy_zero` split into "a binary predating
+/// the field wrote this row" and "this deployment could not produce a
+/// generation", because going fail-closed is only safe for the first.
 ///
-/// The flag is the allocated epoch itself, not a path probe: a healthy
-/// subsystem allocates `>= 1`, so a zero epoch is the subsystem failing.
-/// `allocate_durable_generation` reaches zero by THREE routes and a path probe
-/// only sees the first — `generation_path() == None`; a `lock_generation_path`
-/// failure falling back to `load_generation()` on a missing/corrupt counter; and
-/// an `atomic_write` failure returning the pre-increment `current`, which is
-/// zero on a first boot. The path is `Some` in the last two, so a probe would
-/// report the subsystem available while the epoch it reports on is zero.
+/// PROVES: exactly that split, and nothing else. A deployment whose epoch is
+/// positive stamps a positive `born_generation` on every row it writes, so a
+/// zero-born row it meets is a legacy binary's — this deployment cannot pollute
+/// the zero bucket, whichever of its own failures occurred.
 ///
-/// Residual (§9-9): the pre-allocation window is the fourth way to observe a
-/// zero epoch, and it is indistinguishable here from the failure routes. A row
-/// born in that window carries `born_generation = 0` and lands in `legacy_zero`
-/// rather than `prior_generation`, so §9-9's population mixes into §9-8's.
-/// Separating them needs a provenance field this slice does not add.
+/// DOES NOT PROVE — which is why this is no longer spelled
+/// `generation_subsystem_available` (#5462 S5 r3): allocation success, an epoch
+/// advanced past the previous process's, or a fence worth trusting.
+/// `allocate_durable_generation` fails POSITIVE on three routes and every one of
+/// them reads `true` here. A `lock_generation_path` failure falls back to
+/// `load_generation()` and returns the previous process's counter unchanged, so
+/// this process shares that process's generation. An `atomic_write` failure
+/// returns the pre-increment `current`, positive whenever the counter already
+/// was. And a counter at `u64::MAX` writes successfully while
+/// `saturating_add(1)` leaves the epoch exactly where it was. Telling those from
+/// a real allocation needs the allocation's own provenance carried into the
+/// observation, which means touching `runtime_store` — deferred, not solved.
+///
+/// The false half is the honest one, and is why this is the allocated epoch
+/// rather than a path probe: the same two failures reach ZERO instead when the
+/// counter is missing, corrupt, or absent on a first boot, and
+/// `generation_path() == None` is a third route to zero. The path is `Some` in
+/// the first two, so a probe would call the subsystem available while the epoch
+/// it reports on is zero.
+///
+/// Residual (§9-9) — FIRST BOOT ONLY: the pre-allocation window returns
+/// `load_generation()`, the value the PREVIOUS process wrote, so a row born in
+/// that window normally carries `born_generation = N-1` and lands in
+/// `prior_generation` — the bucket §9-9 itself nominated for observing it. Only
+/// where no counter file exists yet does that fallback read zero, and only there
+/// does §9-9's population mix into §9-8's `legacy_zero`. Separating even that
+/// needs a provenance field this slice does not add.
 ///
 /// Takes the epoch the caller already read instead of reading it again: this is
 /// an observation, and `allocate_process_generation` is a `OnceLock` initializer
 /// that would move the very epoch the observation reports on.
-fn generation_subsystem_available(current_generation: u64) -> bool {
+fn current_generation_nonzero(current_generation: u64) -> bool {
     current_generation > 0
 }
 
@@ -93,14 +111,14 @@ fn generation_subsystem_available(current_generation: u64) -> bool {
 /// "future-generation row" while the classifier's own tests all still pass.
 struct AllowedGenerationFacts {
     relation: &'static str,
-    subsystem_available: bool,
+    current_generation_nonzero: bool,
 }
 
 impl AllowedGenerationFacts {
     fn observe(snapshot: &InflightTurnState, current_generation: u64) -> Self {
         Self {
             relation: generation_relation(snapshot.born_generation, current_generation),
-            subsystem_available: generation_subsystem_available(current_generation),
+            current_generation_nonzero: current_generation_nonzero(current_generation),
         }
     }
 }
@@ -164,6 +182,20 @@ pub(in crate::services::discord) fn clear_rebind_origin_for_reconcile(
 /// (`provider` / `channel_id` / `dispatch_id` / `session_key` / `turn_id`) are
 /// still the snapshot's; the outcome carries only the generation, and channel is
 /// the join key both rows share.
+///
+/// That prefixing left one invariant name — the
+/// `reconcile_never_clears_current_generation_row` below — with TWO producers
+/// publishing DIFFERENT field sets (#5462 S5 r3). The sibling,
+/// `removal::record_loader_generation_gate`, reads its row off disk under its
+/// own lock and so names `user_msg_id` / `finalizer_turn_id` /
+/// `turn_nonce` / `updated_at` / `save_generation` / `tmux_session_name`
+/// unprefixed; here those same six are a stale caller snapshot and must say so.
+/// The schemas are deliberately NOT unified — each spelling is true where it
+/// stands — so `site` is the discriminator: it reads
+/// `load_inflight_states_from_root_stale` there and a
+/// `clear_*_for_reconcile` name here. A §9-2-style query filtering an
+/// unprefixed field (`details->>'tmux_session_name' IS NOT NULL`) therefore
+/// counts loader rows only and drops every row from this site silently.
 fn refusal_details(
     site: &'static str,
     snapshot: &InflightTurnState,
@@ -233,7 +265,7 @@ fn observe_reconcile_outcome(
                     "born_generation": snapshot.born_generation,
                     "current_generation": current_generation,
                     "generation_relation": facts.relation,
-                    "generation_subsystem_available": facts.subsystem_available,
+                    "current_generation_nonzero": facts.current_generation_nonzero,
                     "delegated_outcome": delegated_outcome,
                     "user_msg_id": snapshot.user_msg_id,
                     "path": path.display().to_string(),
@@ -246,7 +278,7 @@ fn observe_reconcile_outcome(
                 born_generation = snapshot.born_generation,
                 current_generation,
                 generation_relation = facts.relation,
-                generation_subsystem_available = facts.subsystem_available,
+                current_generation_nonzero = facts.current_generation_nonzero,
                 delegated_outcome = ?delegated,
                 site,
                 path = %path.display(),
@@ -344,28 +376,43 @@ mod tests {
         assert_eq!(generation_relation(5463, 5462), "older");
     }
 
-    // A zero epoch is the only signal §9-8 has that the subsystem failed, and a
-    // path probe cannot see the two failure routes that keep the path `Some`.
+    // A zero epoch is the only signal §9-8 has that this deployment could not
+    // produce a generation, and a path probe cannot see the two failure routes
+    // that keep the path `Some`. The true side classifies nothing beyond that —
+    // see the predicate's docstring for the three positive allocation failures
+    // it cannot separate.
     #[test]
-    fn subsystem_availability_is_the_allocated_epoch_not_a_path_probe() {
-        assert!(generation_subsystem_available(5462));
-        assert!(generation_subsystem_available(1));
-        assert!(!generation_subsystem_available(0));
+    fn current_generation_nonzero_is_the_allocated_epoch_not_a_path_probe() {
+        assert!(current_generation_nonzero(5462));
+        assert!(current_generation_nonzero(1));
+        assert!(!current_generation_nonzero(0));
     }
 
     // Both allow-side facts are wired from the caller's arguments, in that
     // order: `generation_relation(current, born)` would still satisfy every
     // assertion in the classifier test above while redefining the bucket that
     // chooses between the α and β repairs.
+    //
+    // The third case is the discriminating one, and the only shape where the
+    // row's generation and the epoch disagree about being zero: a legacy row in
+    // a healthy deployment. The first two are zero-together or positive-
+    // together, so both survive reading the flag off the wrong source
+    // (`current_generation_nonzero(snapshot.born_generation)`) and both survive
+    // collapsing it into `relation != "legacy_zero"` — a tautology that would
+    // delete §9-8's discriminator outright. The third kills each.
     #[test]
     fn allow_side_facts_are_wired_from_the_row_then_the_epoch() {
         let facts = AllowedGenerationFacts::observe(&row(1, 54_61), 54_62);
         assert_eq!(facts.relation, "prior_generation");
-        assert!(facts.subsystem_available);
+        assert!(facts.current_generation_nonzero);
 
         let unavailable = AllowedGenerationFacts::observe(&row(2, 0), 0);
         assert_eq!(unavailable.relation, "legacy_zero");
-        assert!(!unavailable.subsystem_available);
+        assert!(!unavailable.current_generation_nonzero);
+
+        let legacy_row_in_a_live_deployment = AllowedGenerationFacts::observe(&row(3, 0), 54_62);
+        assert_eq!(legacy_row_in_a_live_deployment.relation, "legacy_zero");
+        assert!(legacy_row_in_a_live_deployment.current_generation_nonzero);
     }
 
     #[test]

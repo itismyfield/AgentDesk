@@ -78,6 +78,21 @@ fn loader_gate_refuses(state: &InflightTurnState, current_generation: u64) -> bo
     row_is_current_generation(state, current_generation) && state.tmux_session_name.is_some()
 }
 
+/// §7.2-1's refusal payload for the loader fence, filed under an invariant name
+/// it SHARES with `clear_store::reconcile_gate::refusal_details`.
+///
+/// The two producers publish DIFFERENT field sets under that one name (#5462 S5
+/// r3). Here `user_msg_id` / `finalizer_turn_id` / `turn_nonce` / `updated_at` /
+/// `save_generation` / `tmux_session_name` are unprefixed because they come off
+/// the row this fence just read under the lock. The reconcile site builds those
+/// same six from a caller snapshot that is already stale by the time its fence
+/// judges, so #5462 S5 r2 gave them a `snapshot_` prefix rather than let them
+/// stand in for the row it protected. Unifying the schemas is not the fix —
+/// each spelling is true where it stands — so `site` is the discriminator: the
+/// `load_inflight_states_from_root_stale` written below, against the reconcile
+/// site's `clear_*_for_reconcile`. A §9-2-style query filtering an unprefixed
+/// field (`details->>'tmux_session_name' IS NOT NULL`) therefore counts this
+/// site only, and drops every reconcile-gate row without saying so.
 fn record_loader_generation_gate(state: &InflightTurnState, current_generation: u64, path: &Path) {
     record_inflight_invariant_with_severity(
         false,
@@ -106,7 +121,7 @@ fn record_loader_generation_gate(state: &InflightTurnState, current_generation: 
 /// Deliberately NOT `reconcile_generation_gate_allowed`: that kind belongs to
 /// `clear_store/reconcile_gate.rs`, where "allowed" means the fence delegated
 /// and the identity guard behind it may still refuse, and where the payload
-/// carries `generation_relation` / `generation_subsystem_available` /
+/// carries `generation_relation` / `current_generation_nonzero` /
 /// `delegated_outcome`. Here "allowed" means the row is unlinked immediately and
 /// none of those three fields exist. Sharing one kind put two incompatible
 /// schemas and two meanings of "allowed" behind a single name, so
@@ -126,10 +141,19 @@ const LOADER_GENERATION_GATE_ALLOWED: &str = "loader_generation_gate_allowed";
 /// generation, no tmux name), which becomes a filter over these fields. §7.2-6's
 /// removal log (`log_loader_inflight_remove`) carries the same triple by NAME,
 /// but not in the same representation: it renders `born_generation` as
-/// `Some(N)`/`None` rather than a number, spells the tmux name as
-/// `tmux_session_name` rather than a `_present` bool, and adds `age_secs` that
-/// the allow side has no equivalent for. Joining the two streams needs that
-/// normalization first.
+/// `Some(N)`/`None` rather than a number, and adds `age_secs` that the allow
+/// side has no equivalent for. The tmux item is NOT one of the differences —
+/// the removal log derives the same bool under the same
+/// `tmux_session_name_present` spelling (#5462 S5 r3 correction). The site that
+/// publishes the raw string `tmux_session_name` is the loader's REFUSAL WARN,
+/// `record_loader_generation_gate` above, which is the stream this event is
+/// actually the counterpart of.
+///
+/// A fourth difference runs the other way, so "the same triple by NAME" does not
+/// cover it: `current_generation_row`, the derived fence bool below, exists on
+/// the allow event alone — neither the removal log nor the refusal WARN carries
+/// it, and both would have to recompute it from their generation pair. Joining
+/// any two of these streams needs those normalizations first.
 fn emit_loader_generation_gate_allowed(
     provider: &ProviderKind,
     state: &InflightTurnState,
