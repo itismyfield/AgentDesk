@@ -166,6 +166,7 @@ SEGMENT_GAP_HOURS = 48
 SOURCE_FILE_KEY = "_source_file"
 # Per-file line tally keys. `unusable` is derived from the three failure counters.
 INTEGRITY_COUNTERS = ("lines", "unparseable", "schema_mismatch", "undatable")
+COMPLETION_LINES = "_completion_lines"
 # Design §4.3/§5.3 fields the S2 emitter cannot produce; re-assigned to S7a.
 UNMEASURED_UNTIL_S7A = ("frontier_already_covers", "unbound_anchor_left")
 
@@ -198,7 +199,10 @@ def event_time(event: dict) -> datetime | None:
 
 
 def empty_integrity() -> dict:
-    return {name: 0 for name in INTEGRITY_COUNTERS} | {"unusable": 0}
+    return {name: 0 for name in INTEGRITY_COUNTERS} | {
+        "unusable": 0,
+        COMPLETION_LINES: 0,
+    }
 
 
 def merge_integrity(tallies) -> dict:
@@ -206,9 +210,15 @@ def merge_integrity(tallies) -> dict:
 
     total = empty_integrity()
     for tally in tallies:
-        for name in INTEGRITY_COUNTERS:
+        for name in (*INTEGRITY_COUNTERS, COMPLETION_LINES):
             total[name] += tally[name]
     total["unusable"] = total["unparseable"] + total["schema_mismatch"] + total["undatable"]
+    return total
+
+
+def all_file_integrity(by_file: dict[str, dict]) -> dict:
+    total = merge_integrity(by_file.values())
+    total["lines"] -= total.pop(COMPLETION_LINES)
     return total
 
 
@@ -269,6 +279,8 @@ def load_events(directory: Path) -> tuple[list[dict], list[str], dict[str, dict]
                 integrity["undatable"] += 1
                 warnings.append(f"{path.name}:{lineno}: no usable observation time, skipped")
                 continue
+            if str(event.get("site") or "").startswith("completion_"):
+                integrity[COMPLETION_LINES] += 1
             event[SOURCE_FILE_KEY] = path.name
             events.append(event)
         integrity["unusable"] = (
@@ -550,7 +562,9 @@ def scoped_integrity(target: dict | None, by_file: dict[str, dict]) -> dict:
     records = len(target["events"]) if target else 0
     # Usable lines in those files belonging to some other segment. Excluded from
     # the denominator; reported so the exclusion is auditable rather than silent.
-    scoped["cohabiting_usable_lines"] = scoped["lines"] - scoped["unusable"] - records
+    scoped["cohabiting_usable_lines"] = (
+        scoped["lines"] - scoped["unusable"] - scoped[COMPLETION_LINES] - records
+    )
     # The symmetric display for the fail-open residual: unusable lines in files
     # this target has no usable record in, which leave BOTH sides of the ratio.
     # Displayed only — no criterion reads it, and none is added here.
@@ -558,6 +572,7 @@ def scoped_integrity(target: dict | None, by_file: dict[str, dict]) -> dict:
         merge_integrity(by_file.values())["unusable"] - scoped["unusable"]
     )
     scoped["lines"] = records + scoped["unusable"]
+    scoped.pop(COMPLETION_LINES)
     scoped["files"] = files
     return scoped
 
@@ -571,7 +586,11 @@ def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
     target_counts["completion_scopes"] = completion_scope_counts(
         event
         for event in events
-        if str(event.get("cohort_fingerprint")) == target_fingerprint
+        if target
+        and str(event.get("cohort_fingerprint")) == target_fingerprint
+        and datetime.fromisoformat(target["first_observed"])
+        <= event_time(event)
+        <= datetime.fromisoformat(target["last_observed"])
     )
     integrity = scoped_integrity(target, by_file)
     criteria = criteria_for(target_counts, stage, integrity)
@@ -603,7 +622,7 @@ def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
         "line_integrity": integrity,
         # Context only, for the same reason `all_segments_turn_samples` is: the
         # whole input spans dial positions this promotion case is not about.
-        "line_integrity_all_files": merge_integrity(by_file.values()),
+        "line_integrity_all_files": all_file_integrity(by_file),
         "criteria": criteria,
         "promotion_ready": all(item["met"] for item in criteria.values()),
     }

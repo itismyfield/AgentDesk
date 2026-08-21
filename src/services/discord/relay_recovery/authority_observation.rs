@@ -43,8 +43,8 @@
 //! * **Bias** — toward the measured population. `Missing` at entry and
 //!   `AuthorityLost` mid-stream are precisely the turns that leave without a loop
 //!   exit, so they are the ones that need a successor.
-//! * **What the counters see** — `sink_dropped_records` counts records the sink
-//!   *attempted* and could not write; a turn lost this way never reaches the sink,
+//! * **What the counters see** — `sink_dropped_records` counts axis-A lifecycle
+//!   records the sink *attempted* and could not write; a turn lost this way never reaches the sink,
 //!   so nothing counts it. `resident_buffers` is a gauge, so under traffic it cannot
 //!   separate "in flight" from "stranded". Both are process-local and gone after a
 //!   restart, and neither is in the JSONL canon the promotion gate reads.
@@ -321,6 +321,8 @@ static ACTIVE_TURNS: AtomicUsize = AtomicUsize::new(0);
 /// failed line write. Silence in the sink is survivable only if it is visible, and
 /// this is the only place it becomes visible (E4-4).
 static SINK_DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
+/// Completion ownership records dropped by their separate best-effort sink path.
+static COMPLETION_SINK_DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
 /// Dial-independent fail-closed completion decisions. Unlike
 /// `completion_scopes`, this advances under the shipped Legacy/0 dial.
 static COMPLETION_SUPPRESSIONS: AtomicU64 = AtomicU64::new(0);
@@ -368,7 +370,8 @@ pub(in crate::services::discord) fn record_bridge_entry_gate(
 /// Eviction always flushes, never discards: the displaced buffer is handed to
 /// [`publish`] before this turn takes the slot. That is a statement about *this*
 /// layer only — the sink [`publish`] hands it to is best-effort by contract and
-/// counts what it could not write in `sink_dropped_records` (legA r3c P2-5).
+/// counts axis-A lifecycle records it could not write in `sink_dropped_records`
+/// (legA r3c P2-5).
 fn open_turn(
     (mode, percent): (RelayAuthorityMode, u8),
     shared: &SharedData,
@@ -519,10 +522,10 @@ fn record_completion_scope_at(
         cohort_fingerprint: cohort::cohort_fingerprint(mode, percent),
     };
     let Some(line) = encode_scope(&stamp, site, turn_source, scope, scope_reason) else {
-        drop_records(1);
+        drop_records(&COMPLETION_SINK_DROPPED_RECORDS, 1);
         return;
     };
-    append_jsonl(&[line]);
+    append_jsonl(&[line], &COMPLETION_SINK_DROPPED_RECORDS);
     let mut triage = TRIAGE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -560,7 +563,7 @@ fn publish(turn: TurnObservation, publish_reason: &'static str) {
         .into_iter()
         .filter_map(|(site, axis_a)| encode(&turn.stamp, publish_reason, site, axis_a?))
         .collect();
-    append_jsonl(&lines);
+    append_jsonl(&lines, &SINK_DROPPED_RECORDS);
     record_triage(&turn);
 }
 
@@ -636,29 +639,29 @@ fn encode_scope(
 /// alone: a window of entry-only turns passes a floor that only counts turns. The
 /// per-site coverage floors in `scripts/relay_authority_rollout_report.py` and this
 /// counter are the two halves of that answer (legB P1-2).
-fn append_jsonl(lines: &[String]) {
+fn append_jsonl(lines: &[String], dropped_records: &AtomicU64) {
     if lines.is_empty() {
         return;
     }
     let Some(dir) = runtime_store::agentdesk_root().map(|root| root.join("relay_authority")) else {
-        drop_records(lines.len());
+        drop_records(dropped_records, lines.len());
         return;
     };
     let _ = fs::create_dir_all(&dir);
     let path = dir.join(format!("{}.jsonl", chrono::Local::now().format("%Y-%m-%d")));
     let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) else {
-        drop_records(lines.len());
+        drop_records(dropped_records, lines.len());
         return;
     };
     for line in lines {
         if writeln!(file, "{line}").is_err() {
-            drop_records(1);
+            drop_records(dropped_records, 1);
         }
     }
 }
 
-fn drop_records(count: usize) {
-    SINK_DROPPED_RECORDS.fetch_add(count as u64, Ordering::Relaxed);
+fn drop_records(counter: &AtomicU64, count: usize) {
+    counter.fetch_add(count as u64, Ordering::Relaxed);
 }
 
 /// One turn as `/api/health/detail` shows it.
@@ -688,13 +691,15 @@ pub(crate) struct RelayAuthorityObservationReport {
     /// does not fall back toward zero is the stranded population of the module
     /// docstring: buffers whose only publisher is a successor that never came.
     resident_buffers: u64,
-    /// Cumulative records the JSONL sink threw away. Nonzero means the canon log
-    /// is incomplete and the promotion window over it is not trustworthy.
+    /// Cumulative axis-A lifecycle records the JSONL sink threw away. Nonzero
+    /// means the promotion canon is incomplete and its window is not trustworthy.
     sink_dropped_records: u64,
+    /// Cumulative completion ownership records their sink path threw away.
+    completion_sink_dropped_records: u64,
     /// Fail-closed completion decisions, counted regardless of rollout dial/cohort.
     pub(crate) completion_suppressions: u64,
     /// Completion-time ownership samples keyed by `site:scope:scope_reason`.
-    completion_scopes: BTreeMap<String, u64>,
+    pub(crate) completion_scopes: BTreeMap<String, u64>,
     channels: BTreeMap<String, VecDeque<TurnTriageEntry>>,
     /// Channel keys in least-recently-recorded order, bounding `channels`. Not
     /// published: it is the eviction order, not triage data.
@@ -740,6 +745,8 @@ pub(crate) fn observation_report() -> RelayAuthorityObservationReport {
     // other is written from the sink, which never takes this lock.
     report.resident_buffers = ACTIVE_TURNS.load(Ordering::Relaxed) as u64;
     report.sink_dropped_records = SINK_DROPPED_RECORDS.load(Ordering::Relaxed);
+    report.completion_sink_dropped_records =
+        COMPLETION_SINK_DROPPED_RECORDS.load(Ordering::Relaxed);
     report.completion_suppressions = COMPLETION_SUPPRESSIONS.load(Ordering::Relaxed);
     report
 }
@@ -1239,16 +1246,35 @@ mod tests {
         let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
         let turn = state(4_259_218, 77_050);
         let before = observation_report().sink_dropped_records;
+        let completion_before = observation_report().completion_sink_dropped_records;
 
         open_turn(OBSERVING, &shared, &turn, GuardedSaveOutcome::Saved);
         record_stream_loop_gate(&turn, GuardedSaveOutcome::Saved, true, true);
         record_loop_exit(&turn, Some(4_096));
+        record_completion_scope_at(
+            OBSERVING,
+            CompletionScopeRecord {
+                shared: &shared,
+                provider: &ProviderKind::Claude,
+                turn_id: 77_051,
+                channel_id: 4_259_218,
+                site: "completion_r0",
+                turn_source: "managed",
+                scope: "foreign",
+                scope_reason: "foreign_episode",
+            },
+        );
 
         let report = observation_report();
         assert_eq!(
             report.sink_dropped_records - before,
             3,
-            "all three site records the sink could not write are counted",
+            "only the three axis-A lifecycle records increment the canon drop counter",
+        );
+        assert_eq!(
+            report.completion_sink_dropped_records - completion_before,
+            1,
+            "the completion record increments only its separate drop counter",
         );
         assert!(
             report.turns_recorded > 0,

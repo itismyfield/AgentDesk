@@ -72,10 +72,7 @@ impl RelayOwnerKind {
 }
 
 impl TurnSource {
-    /// Stable wire representation for audit logs / metrics labels.
-    // #3034: wire-contract surface pinned by the unit tests below; not yet read
-    // by a live audit/metrics callsite.
-    #[allow(dead_code)]
+    /// Stable wire representation for completion audit logs and metrics labels.
     pub(in crate::services::discord) fn as_str(self) -> &'static str {
         match self {
             Self::Managed => "managed",

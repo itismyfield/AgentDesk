@@ -525,6 +525,7 @@ where
         background_agent_pending,
         "turn_terminal_delivery",
         this_turn_user_msg_id,
+        permits_channel_effects,
     )
     .await
 }
@@ -731,6 +732,38 @@ mod tests {
             .render_completion_footer(channel_id, &provider, "⠸");
         assert_eq!(after.block, before.block);
         assert_eq!(after.has_unfinished_entries, before.has_unfinished_entries);
+
+        let permitted_shared = super::super::make_shared_data_for_tests();
+        let _ = complete_bridge_single_message_completion_footer(
+            permitted_shared.as_ref(),
+            channel_id,
+            MessageId::new(5_464_332),
+            super::footer_view_reconciler::CompletionFooterOwner::new(5_464_329, 1_700_000_000),
+            &provider,
+            1_700_000_000,
+            "owned final answer",
+            "⠸",
+            false,
+            false,
+            true,
+        )
+        .await;
+        let permitted = permitted_shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, &provider, "⠸");
+        assert!(permitted.block.is_none());
+        assert_ne!(
+            permitted_shared.ui.placeholder_live_events.render_status_panel(
+                channel_id,
+                &provider,
+                1_700_000_000,
+            ),
+            super::super::make_shared_data_for_tests()
+                .ui
+                .placeholder_live_events
+                .render_status_panel(channel_id, &provider, 1_700_000_000),
+        );
     }
 
     #[tokio::test]

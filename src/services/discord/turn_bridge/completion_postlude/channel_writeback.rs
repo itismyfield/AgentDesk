@@ -124,16 +124,8 @@ pub(in crate::services::discord::turn_bridge) fn apply_channel_turn_writeback(
     }
 }
 
-/// #4658 F1: gate the voluntary tool_feedback reminder stash on channel
-/// ownership. `store_voluntary_feedback_reminder` writes a (provider,
-/// channel_id) KV that the NEXT live intake takes and injects into the model
-/// prompt (`response_format.rs`), so a scheduled-snapshot turn stashing a
-/// reminder would leak its recall/feedback output into the live conversation's
-/// next turn (same F1-invariant class as the sessions-map writeback).
-///
-/// Returns the reminder to stash ONLY for a channel-owning turn; a suppressed turn
-/// (`channel_effects_suppressed`) yields `None` so nothing is written to the shared
-/// channel KV.
+/// Select the provider session key only when this completion owns channel effects
+/// and the turn-end memory plan requests a destructive provider-session clear.
 pub(in crate::services::discord::turn_bridge) fn provider_session_clear_key<'a>(
     channel_effects_suppressed: bool,
     clear_provider_session: bool,
@@ -144,6 +136,16 @@ pub(in crate::services::discord::turn_bridge) fn provider_session_clear_key<'a>(
         .flatten()
 }
 
+/// #4658 F1: gate the voluntary tool_feedback reminder stash on channel
+/// ownership. `store_voluntary_feedback_reminder` writes a (provider,
+/// channel_id) KV that the NEXT live intake takes and injects into the model
+/// prompt (`response_format.rs`), so a scheduled-snapshot turn stashing a
+/// reminder would leak its recall/feedback output into the live conversation's
+/// next turn (same F1-invariant class as the sessions-map writeback).
+///
+/// Returns the reminder to stash ONLY for a channel-owning turn; a suppressed turn
+/// (`channel_effects_suppressed`) yields `None` so nothing is written to the shared
+/// channel KV.
 pub(in crate::services::discord::turn_bridge) fn feedback_reminder_to_stash(
     channel_effects_suppressed: bool,
     reminder: Option<String>,

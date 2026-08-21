@@ -23,8 +23,9 @@ pub(super) async fn complete_status_panel_v2<G: TurnGateway + ?Sized>(
     background_agent_pending: bool,
     source: &'static str,
     expected_user_msg_id: u64,
+    permits_channel_effects: bool,
 ) -> bool {
-    if !shared.ui.status_panel_v2_enabled {
+    if !permits_channel_effects || !shared.ui.status_panel_v2_enabled {
         return true;
     }
     shared.ui.placeholder_live_events.push_status_event(

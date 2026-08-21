@@ -322,14 +322,13 @@ mod tests {
             )
             .await
         );
-        let before = authority_observation::observation_report().completion_suppressions;
+        let before = authority_observation::observation_report();
         let foreign = probe.read("completion_r1").await;
         assert_eq!(foreign.scope, ChannelEpisodeScope::Foreign);
         assert!(!foreign.permits_channel_effects());
-        assert_eq!(
-            authority_observation::observation_report().completion_suppressions,
-            before + 1
-        );
+        let report = authority_observation::observation_report();
+        assert_eq!(report.completion_suppressions, before.completion_suppressions + 1);
+        assert_eq!(report.completion_scopes, before.completion_scopes);
     }
 
     #[test]

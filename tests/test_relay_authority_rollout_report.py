@@ -84,9 +84,15 @@ def event(
 
 
 def completion_event(
-    *, site: str, turn: int, observed: datetime, scope: str, scope_reason: str
+    *,
+    site: str,
+    turn: int,
+    observed: datetime,
+    scope: str,
+    scope_reason: str,
+    fingerprint: str = FINGERPRINT,
 ) -> dict:
-    item = event(site=site, turn=turn, observed=observed)
+    item = event(site=site, turn=turn, observed=observed, fingerprint=fingerprint)
     item.pop("axis_a")
     item["publish_reason"] = "post_flush"
     item["scope"] = scope
@@ -221,6 +227,49 @@ class RolloutReportTest(unittest.TestCase):
         )
         self.assertTrue(summary["promotion_ready"], summary["criteria"])
 
+    def test_completion_scopes_exclude_an_earlier_same_fingerprint_segment(self):
+        first = turns(30, days=2, sites=("bridge_entry", "stream_loop", "loop_exit"))
+        other = turns(
+            10,
+            days=1,
+            sites=("bridge_entry", "stream_loop", "loop_exit"),
+            start=BASE + timedelta(days=4),
+            fingerprint="observe:50:c0ffee",
+            turn_base=5_000,
+        )
+        target = turns(
+            30,
+            days=2,
+            sites=("bridge_entry", "stream_loop", "loop_exit"),
+            start=BASE + timedelta(days=7),
+            turn_base=9_000,
+        )
+        events = first + other + target
+        events.extend(
+            [
+                completion_event(
+                    site="completion_r0",
+                    turn=90_001,
+                    observed=BASE + timedelta(days=1),
+                    scope="idle",
+                    scope_reason="mailbox_idle",
+                ),
+                completion_event(
+                    site="completion_r0",
+                    turn=90_002,
+                    observed=BASE + timedelta(days=7),
+                    scope="foreign",
+                    scope_reason="foreign_episode",
+                ),
+            ]
+        )
+
+        summary = self.run_report(events)
+        self.assertEqual(
+            summary["target_segment"]["completion_scopes"],
+            {"completion_r0:foreign:foreign_episode": 1},
+        )
+
     def test_completion_records_neither_dilute_corruption_nor_change_verdict(self):
         """210 axis-A turns + 8 damaged lines judge identically with completion telemetry."""
 
@@ -245,6 +294,14 @@ class RolloutReportTest(unittest.TestCase):
         self.assertFalse(with_completion["promotion_ready"])
         self.assertEqual(without["criteria"], with_completion["criteria"])
         self.assertEqual(with_completion["line_integrity"]["lines"], 638)
+        self.assertEqual(
+            without["line_integrity_all_files"],
+            with_completion["line_integrity_all_files"],
+        )
+        self.assertEqual(
+            without["line_integrity"]["cohabiting_usable_lines"],
+            with_completion["line_integrity"]["cohabiting_usable_lines"],
+        )
 
     def test_completion_only_turn_keys_do_not_raise_axis_a_turn_samples(self):
         lifecycle = turns(199, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))
