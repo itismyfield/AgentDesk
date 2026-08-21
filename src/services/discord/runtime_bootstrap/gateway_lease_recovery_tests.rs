@@ -4,8 +4,8 @@ use sqlx::Connection;
 
 use super::gateway_lease_recovery::{
     GATEWAY_LEASE_APPLICATION_PREFIX, GatewayLeaseHolder, PromotionHandoffOutcome,
-    STANDBY_PROMOTION_IN_PROGRESS, TerminalProof, follow_promotion_handoff_chain,
-    gateway_holder_is_reapable, gateway_lease_application_name_for,
+    STANDBY_PROMOTION_IN_PROGRESS, TerminalProof, attempt_clean_standby_promotion,
+    follow_promotion_handoff_chain, gateway_holder_is_reapable, gateway_lease_application_name_for,
     reap_orphaned_gateway_lease_for_instance_with_min_age, recover_cancelled_promotion,
     restart_artifact_proof, restart_file_nonce, restart_request_artifact_path, terminal_proof,
     try_create_restart_marker, wait_for_promotion_handoff,
@@ -36,6 +36,306 @@ fn age_artifact(path: &std::path::Path) {
 /// forbids for std guards. It also cannot be poisoned, so a panicking holder
 /// leaves no cascade behind it.
 static PROMOTION_FLAG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct PromotionFixture {
+    _root_env: crate::config::TestEnvVarGuard,
+    _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
+    root: tempfile::TempDir,
+    admin_url: String,
+    database_name: String,
+    pool: sqlx::PgPool,
+    registry: std::sync::Arc<crate::services::discord::health::HealthRegistry>,
+    runtimes: Vec<std::sync::Arc<crate::services::discord::SharedData>>,
+    _env_lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+}
+
+impl PromotionFixture {
+    async fn new(label: &str) -> Option<Self> {
+        let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().expect("promotion runtime root");
+        let root_env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let lifecycle = crate::db::postgres::lock_test_lifecycle();
+        let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
+            return None;
+        };
+        let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres".to_string());
+        let admin_url = format!("{base}/{admin_db}");
+        let database_name = format!(
+            "agentdesk_gateway_promotion_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        if let Err(error) =
+            crate::db::postgres::create_test_database(&admin_url, &database_name, label).await
+        {
+            eprintln!("skipping {label}: {error}");
+            return None;
+        }
+        let database_url = format!("{base}/{database_name}");
+        let pool = crate::db::postgres::connect_test_pool_and_migrate(&database_url, label)
+            .await
+            .expect("connect isolated promotion database");
+        let registry = std::sync::Arc::new(crate::services::discord::health::HealthRegistry::new());
+        let mut runtimes = Vec::new();
+        for provider in [ProviderKind::Claude, ProviderKind::Codex] {
+            let mut runtime = crate::services::discord::make_shared_data_for_tests();
+            let runtime_mut = std::sync::Arc::get_mut(&mut runtime)
+                .expect("fresh runtime is uniquely owned before registry install");
+            runtime_mut.provider = provider.clone();
+            runtime_mut.health_registry = std::sync::Arc::downgrade(&registry);
+            registry
+                .register(provider.as_str().to_string(), runtime.clone())
+                .await;
+            runtimes.push(runtime);
+        }
+        Some(Self {
+            _root_env: root_env,
+            _lifecycle: lifecycle,
+            root,
+            admin_url,
+            database_name,
+            pool,
+            registry,
+            runtimes,
+            _env_lock: env_lock,
+        })
+    }
+
+    fn shared(&self) -> std::sync::Arc<crate::services::discord::SharedData> {
+        self.runtimes[0].clone()
+    }
+
+    async fn lease(&self, label: &str) -> crate::db::postgres::AdvisoryLockLease {
+        crate::db::postgres::AdvisoryLockLease::try_acquire(&self.pool, 91_480_260, label)
+            .await
+            .expect("acquire promotion test lease")
+            .expect("promotion test lease available")
+    }
+
+    fn assert_fenced(&self) {
+        for runtime in &self.runtimes {
+            assert!(
+                runtime
+                    .restart
+                    .intake_worker_lifecycle
+                    .admission_is_fenced(),
+                "committed promotion keeps every runtime admission fence closed"
+            );
+            assert!(
+                runtime
+                    .restart
+                    .restart_pending
+                    .load(std::sync::atomic::Ordering::Acquire),
+                "committed promotion keeps every runtime restart-pending flag set"
+            );
+        }
+    }
+
+    fn assert_recovered(&self) {
+        for runtime in &self.runtimes {
+            assert!(
+                !runtime
+                    .restart
+                    .intake_worker_lifecycle
+                    .admission_is_fenced(),
+                "cancelled promotion reopens every runtime admission fence"
+            );
+            assert!(
+                !runtime
+                    .restart
+                    .restart_pending
+                    .load(std::sync::atomic::Ordering::Acquire),
+                "cancelled promotion clears every runtime restart-pending flag"
+            );
+        }
+    }
+
+    async fn close(self, label: &str) {
+        drop(self.registry);
+        crate::db::postgres::close_test_pool(self.pool, label)
+            .await
+            .expect("close promotion test pool");
+        crate::db::postgres::drop_test_database(&self.admin_url, &self.database_name, label)
+            .await
+            .expect("drop promotion test database");
+    }
+}
+
+#[tokio::test]
+async fn committed_existing_handoff_returns_true_and_preserves_every_runtime_fence_pg() {
+    let _flag = PROMOTION_FLAG_LOCK.lock().await;
+    STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+    let Some(fixture) = PromotionFixture::new("committed existing promotion handoff pg").await
+    else {
+        return;
+    };
+    let existing_nonce = "deploy-existing";
+    std::fs::write(
+        fixture.root.path().join("restart_pending"),
+        format!("nonce={existing_nonce}\nsource=deploy\n"),
+    )
+    .expect("existing restart owner marker");
+    std::fs::write(
+        fixture
+            .root
+            .path()
+            .join(format!("restart_persisted.{existing_nonce}")),
+        format!("nonce={existing_nonce}\nsource=deploy\n"),
+    )
+    .expect("identity-bound persisted acknowledgement");
+
+    let promoted = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        attempt_clean_standby_promotion(
+            &fixture.shared(),
+            &ProviderKind::Claude,
+            fixture
+                .lease("committed existing promotion handoff pg")
+                .await,
+        ),
+    )
+    .await
+    .expect("existing promotion handoff resolves");
+
+    assert!(promoted, "identity-bound Committed handoff returns true");
+    fixture.assert_fenced();
+    assert_eq!(
+        restart_file_nonce(fixture.root.path(), "restart_pending").as_deref(),
+        Some(existing_nonce)
+    );
+    assert!(
+        std::fs::read_dir(fixture.root.path())
+            .expect("list promotion runtime root")
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("restart_pending.")),
+        "refused promotion removes its own identity marker"
+    );
+    assert!(!STANDBY_PROMOTION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
+    fixture
+        .close("committed existing promotion handoff pg")
+        .await;
+}
+
+#[tokio::test]
+async fn committed_owned_handoff_returns_true_and_preserves_every_runtime_fence_pg() {
+    let _flag = PROMOTION_FLAG_LOCK.lock().await;
+    STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+    let Some(fixture) = PromotionFixture::new("committed owned promotion handoff pg").await else {
+        return;
+    };
+    let root = fixture.root.path().to_path_buf();
+    let acknowledge = tokio::spawn(async move {
+        let nonce = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(nonce) = restart_file_nonce(&root, "restart_pending") {
+                    let request = std::fs::read_to_string(root.join("restart_pending"))
+                        .expect("read owned promotion request");
+                    assert!(
+                        request
+                            .lines()
+                            .any(|line| line == "reason=gateway_standby_promotion")
+                    );
+                    assert!(request.lines().any(|line| line == "provider=claude"));
+                    break nonce;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("promotion publishes its restart marker");
+        std::fs::write(
+            root.join(format!("restart_persisted.{nonce}")),
+            format!("nonce={nonce}\nsource=test-deploy\n"),
+        )
+        .expect("identity-bound persisted acknowledgement");
+        nonce
+    });
+
+    let promoted = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        attempt_clean_standby_promotion(
+            &fixture.shared(),
+            &ProviderKind::Claude,
+            fixture.lease("committed owned promotion handoff pg").await,
+        ),
+    )
+    .await
+    .expect("owned promotion handoff resolves");
+    let nonce = acknowledge.await.expect("acknowledgement task joins");
+
+    assert!(
+        promoted,
+        "owned identity-bound Committed handoff returns true"
+    );
+    assert_eq!(
+        restart_file_nonce(fixture.root.path(), "restart_pending").as_deref(),
+        Some(nonce.as_str())
+    );
+    fixture.assert_fenced();
+    // The owned Committed arm intentionally keeps this pre-S1 process owner latched.
+    assert!(STANDBY_PROMOTION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
+    STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
+    fixture.close("committed owned promotion handoff pg").await;
+}
+
+#[tokio::test]
+async fn missing_existing_persisted_artifact_returns_false_and_reopens_every_runtime_fence_pg() {
+    let _flag = PROMOTION_FLAG_LOCK.lock().await;
+    STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+    let Some(fixture) = PromotionFixture::new("missing existing persisted artifact pg").await
+    else {
+        return;
+    };
+    let existing_nonce = "deploy-cancelled";
+    std::fs::write(
+        fixture.root.path().join("restart_pending"),
+        format!("nonce={existing_nonce}\nsource=deploy\n"),
+    )
+    .expect("existing restart owner marker");
+    std::fs::write(
+        fixture
+            .root
+            .path()
+            .join(format!("restart_cancelled.{existing_nonce}")),
+        format!("nonce={existing_nonce}\nsource=deploy\n"),
+    )
+    .expect("identity-bound cancellation acknowledgement");
+
+    let promoted = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        attempt_clean_standby_promotion(
+            &fixture.shared(),
+            &ProviderKind::Claude,
+            fixture
+                .lease("missing existing persisted artifact pg")
+                .await,
+        ),
+    )
+    .await
+    .expect("cancelled promotion handoff resolves");
+
+    assert!(
+        !promoted,
+        "missing persisted artifact keeps the cancelled handoff on the retry path"
+    );
+    assert_eq!(
+        terminal_proof(fixture.root.path(), existing_nonce),
+        TerminalProof::Absent
+    );
+    fixture.assert_recovered();
+    assert!(!STANDBY_PROMOTION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire));
+    fixture
+        .close("missing existing persisted artifact pg")
+        .await;
+}
 
 #[tokio::test]
 async fn promotion_owner_recovers_all_runtimes_when_cancel_precedes_first_poll_tick() {
