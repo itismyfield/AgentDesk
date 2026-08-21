@@ -751,7 +751,8 @@ fn nothing_between_the_point_of_no_return_and_the_exit_can_undo_it() {
         );
     }
 
-    let (_, commit_body) = POLLER
+    const COMMIT_PATH: &str = include_str!("deferred_restart.rs");
+    let (_, commit_body) = COMMIT_PATH
         .split_once("fn commit_deferred_restart_sentinel")
         .expect("the commit helper still exists");
     let (commit_body, _) = commit_body
