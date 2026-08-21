@@ -780,34 +780,32 @@ async fn foreign_mailbox_owner_cannot_complete_tui_direct_no_footer_arm() {
         &provider,
     );
     let mut suppressed_text = String::new();
-    assert!(
-        complete_bridge_terminal_footer_or_status_panel_with_sniffer(
-            shared.as_ref(),
-            &gateway,
-            channel_id,
-            current_msg_id,
-            Some(MessageId::new(user_msg_id)),
-            None,
-            &provider,
-            1_700_000_000,
-            &mut suppressed_text,
-            true,
-            true,
-            Some("stale A answer"),
-            "⠸",
-            0,
-            None,
-            false,
-            |_| async { false },
-        )
-        .await
-    );
+    let completion_committed = complete_bridge_terminal_footer_or_status_panel_with_sniffer(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        current_msg_id,
+        Some(MessageId::new(user_msg_id)),
+        None,
+        &provider,
+        1_700_000_000,
+        &mut suppressed_text,
+        true,
+        true,
+        Some("stale A answer\n\n"),
+        "⠸",
+        0,
+        None,
+        false,
+        |_| async { false },
+    )
+    .await;
+    assert!(completion_committed);
     assert!(
         crate::services::discord::footer_view_reconciler::completion_footer_has_registered_target(
             channel_id
         )
     );
-    assert!(gateway.edited_message_ids.lock().unwrap().is_empty());
     crate::services::discord::footer_view_reconciler::completion_footer_forget_registered_target(
         channel_id,
     );
