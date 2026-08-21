@@ -468,7 +468,7 @@ pub(super) fn recover_cancelled_promotion(runtimes: &[Arc<SharedData>]) {
     STANDBY_PROMOTION_IN_PROGRESS.store(false, std::sync::atomic::Ordering::Release);
 }
 
-async fn attempt_clean_standby_promotion(
+pub(super) async fn attempt_clean_standby_promotion(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     lease: crate::db::postgres::AdvisoryLockLease,
