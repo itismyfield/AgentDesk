@@ -6087,6 +6087,8 @@ services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::comp
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::footer_migration_edits_and_clears_existing_separate_panel
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::footer_migration_noop_without_existing_panel
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::footer_migration_skips_synthetic_headless_panel
+services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::foreign_mailbox_owner_cannot_complete_tui_direct_no_footer_arm
+services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::foreign_mailbox_owner_cannot_complete_two_message_status_panel
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::fresh_turn_discards_stale_status_panel_message_id
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::multiple_completion_paths_render_wip_warning_exactly_once
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::resume_turn_discards_synthetic_status_panel_message_id
