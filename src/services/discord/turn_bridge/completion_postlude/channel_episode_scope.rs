@@ -327,7 +327,10 @@ mod tests {
         assert_eq!(foreign.scope, ChannelEpisodeScope::Foreign);
         assert!(!foreign.permits_channel_effects());
         let report = authority_observation::observation_report();
-        assert_eq!(report.completion_suppressions, before.completion_suppressions + 1);
+        assert_eq!(
+            report.completion_suppressions,
+            before.completion_suppressions + 1
+        );
         assert_eq!(report.completion_scopes, before.completion_scopes);
     }
 

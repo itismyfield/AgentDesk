@@ -666,10 +666,11 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
         load_inflight_state(&provider, channel_id.get()).is_none(),
         "the takeover window has only B's mailbox claim, not B's inflight row"
     );
-    let before = shared
-        .ui
-        .placeholder_live_events
-        .render_completion_footer(channel_id, &provider, "⠸");
+    let before =
+        shared
+            .ui
+            .placeholder_live_events
+            .render_status_panel(channel_id, &provider, 1_700_000_000);
     let mut suppressed_text = String::new();
     assert!(
         complete_bridge_terminal_footer_or_status_panel_with_sniffer(
@@ -693,12 +694,12 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
         )
         .await
     );
-    let after = shared
-        .ui
-        .placeholder_live_events
-        .render_completion_footer(channel_id, &provider, "⠸");
-    assert_eq!(after.block, before.block);
-    assert_eq!(after.has_unfinished_entries, before.has_unfinished_entries);
+    let after =
+        shared
+            .ui
+            .placeholder_live_events
+            .render_status_panel(channel_id, &provider, 1_700_000_000);
+    assert_eq!(after, before);
     assert!(suppressed_text.is_empty());
     assert!(
         gateway
@@ -749,6 +750,66 @@ async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
             .len(),
         1,
         "the permits=true control must exercise the same two-message effect arm"
+    );
+}
+
+#[tokio::test]
+async fn foreign_mailbox_owner_cannot_complete_tui_direct_no_footer_arm() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_status_panel_v2_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(5_464_344);
+    let user_msg_id = 5_464_345;
+    let current_msg_id = MessageId::new(9_100_000_000_000_000_344);
+    assert!(
+        crate::services::discord::mailbox_try_start_turn_kinded(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            UserId::new(2),
+            MessageId::new(user_msg_id + 1),
+            ActiveTurnKind::UserOrAgent,
+        )
+        .await
+    );
+    assert!(load_inflight_state(&provider, channel_id.get()).is_none());
+    crate::services::discord::footer_view_reconciler::register_completion_footer_target_for_test(
+        channel_id,
+        current_msg_id,
+        &provider,
+    );
+    let mut suppressed_text = String::new();
+    assert!(
+        complete_bridge_terminal_footer_or_status_panel_with_sniffer(
+            shared.as_ref(),
+            &gateway,
+            channel_id,
+            current_msg_id,
+            Some(MessageId::new(user_msg_id)),
+            None,
+            &provider,
+            1_700_000_000,
+            &mut suppressed_text,
+            true,
+            true,
+            Some("stale A answer"),
+            "⠸",
+            0,
+            None,
+            false,
+            |_| async { false },
+        )
+        .await
+    );
+    assert!(
+        crate::services::discord::footer_view_reconciler::completion_footer_has_registered_target(
+            channel_id
+        )
+    );
+    assert!(gateway.edited_message_ids.lock().unwrap().is_empty());
+    crate::services::discord::footer_view_reconciler::completion_footer_forget_registered_target(
+        channel_id,
     );
 }
 

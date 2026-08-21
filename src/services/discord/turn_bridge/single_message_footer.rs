@@ -272,7 +272,11 @@ async fn complete_bridge_single_message_terminal_no_footer(
     terminal_msg_id: MessageId,
     provider: &ProviderKind,
     terminal_text: &str,
+    permits_channel_effects: bool,
 ) -> bool {
+    if !permits_channel_effects {
+        return true;
+    }
     super::footer_view_reconciler::note_footer_suppressed_for_tui_mirror(
         super::footer_view_reconciler::FooterViewWriter::bridge(shared),
         channel_id,
@@ -491,6 +495,7 @@ where
                         current_msg_id,
                         provider,
                         text,
+                        permits_channel_effects,
                     )
                     .await
                 } else {
@@ -754,11 +759,10 @@ mod tests {
             .render_completion_footer(channel_id, &provider, "⠸");
         assert!(permitted.block.is_none());
         assert_ne!(
-            permitted_shared.ui.placeholder_live_events.render_status_panel(
-                channel_id,
-                &provider,
-                1_700_000_000,
-            ),
+            permitted_shared
+                .ui
+                .placeholder_live_events
+                .render_status_panel(channel_id, &provider, 1_700_000_000,),
             super::super::make_shared_data_for_tests()
                 .ui
                 .placeholder_live_events
