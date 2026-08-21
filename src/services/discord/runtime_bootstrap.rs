@@ -71,6 +71,44 @@ pub(super) fn discord_gateway_intents() -> serenity::GatewayIntents {
         | serenity::GatewayIntents::MESSAGE_CONTENT
 }
 
+/// #5254 D4④ (P2-3 disposition Δ28): the in-process commit latch's storage.
+///
+/// Only the *location* is behind the cfg — both builds run the same `OnceLock`
+/// set/get, so the one-shot semantics the callers depend on are not a test-only
+/// shape. A test binary keeps its latch per thread because `OnceLock` cannot be
+/// reset in-process: one process-global cell would make every commit case in
+/// the binary order-dependent, and libtest's parallel threads would decide that
+/// order. `cargo test` gives each test a thread, so thread-local storage is
+/// exactly the isolation unit.
+///
+/// The honest cost: no unit test observes the production cell. `spawns_tests`
+/// covers the gap from both sides — a subprocess test drives the real commit
+/// path in a dedicated process, and a source assertion pins the shape below.
+#[cfg(not(test))]
+fn with_commit_latch<R>(scope: impl FnOnce(&std::sync::OnceLock<String>) -> R) -> R {
+    static COMMIT_LATCH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    scope(&COMMIT_LATCH)
+}
+
+#[cfg(test)]
+fn with_commit_latch<R>(scope: impl FnOnce(&std::sync::OnceLock<String>) -> R) -> R {
+    thread_local! {
+        static COMMIT_LATCH: std::sync::OnceLock<String> = const { std::sync::OnceLock::new() };
+    }
+    COMMIT_LATCH.with(|latch| scope(latch))
+}
+
+/// Record `nonce` as this process's committed restart. `true` for the first
+/// caller only; the point of no return happens once, so the latch is one-shot.
+pub(super) fn latch_commit(nonce: &str) -> bool {
+    with_commit_latch(|latch| latch.set(nonce.to_owned()).is_ok())
+}
+
+/// The nonce this process committed, if it has passed the point of no return.
+pub(super) fn committed_nonce() -> Option<String> {
+    with_commit_latch(|latch| latch.get().cloned())
+}
+
 /// Entry point: start the Discord bot
 pub(crate) async fn run_bot(token: &str, provider: ProviderKind, context: RunBotContext) {
     let RunBotContext {

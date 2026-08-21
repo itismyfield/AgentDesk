@@ -373,6 +373,42 @@ pub(super) fn try_create_restart_marker(
     }
 }
 
+/// #5254 D11-2 + ERRATUM §E5.2: publish the terminal artifact identity-first.
+///
+/// The identity name is the only green authority and the fixed-name index is a
+/// hard link *derived* from it, never published alone — that derivation is what
+/// lets `restart_artifact_proof` attribute an identity-less index to a pre-I2c
+/// publisher. So a nonce that cannot spell an identity name refuses the commit
+/// outright (E5.2 corollary) instead of publishing the index by itself. The
+/// `atomic_write` rename is the point of no return: the latch takes it before
+/// any other call can fail, and everything after it is log-only because the
+/// outcome is already decided and I2c owes the caller an exit.
+pub(super) fn publish_restart_terminal(
+    root: &std::path::Path,
+    nonce: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    let Some(identity) = restart_request_artifact_path(root, "restart_persisted", nonce) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "restart-nonce-unsafe: refusing to publish a terminal artifact",
+        ));
+    };
+    runtime_store::atomic_write(&identity, body).map_err(std::io::Error::other)?;
+    latch_commit(nonce);
+    if let Err(error) = runtime_store::fsync_parent_dir(&identity) {
+        tracing::warn!(%error, "restart persisted parent dir fsync failed; commit proceeds");
+    }
+    let staged = root.join(format!(".restart_persisted.idx.{}", uuid::Uuid::new_v4()));
+    if let Err(error) = std::fs::hard_link(&identity, &staged)
+        .and_then(|()| std::fs::rename(&staged, root.join("restart_persisted")))
+    {
+        let _ = std::fs::remove_file(&staged);
+        tracing::warn!(%error, "restart persisted index refresh failed; commit proceeds");
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PromotionHandoffOutcome {
     Committed,

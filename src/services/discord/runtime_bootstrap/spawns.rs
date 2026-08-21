@@ -1,5 +1,9 @@
 use super::*;
 
+use super::gateway_lease_recovery::{
+    publish_restart_terminal, restart_file_nonce, restart_request_artifact_path,
+};
+
 pub(super) struct DeferredRestartPermit;
 
 pub(super) fn restart_request_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool {
@@ -46,6 +50,12 @@ impl DeferredRestartCancellationGuard {
 
 impl Drop for DeferredRestartCancellationGuard {
     fn drop(&mut self) {
+        // #5254 D4④: read the latch before any file. Commit and abort are
+        // exclusive within one process, so once this nonce passed the point of
+        // no return, unfencing here would reopen a runtime that is leaving.
+        if committed_nonce().as_deref() == Some(self.nonce.as_str()) {
+            return;
+        }
         if self.armed
             && (self.cancelled()
                 || restart_request_matches(&self.root, "restart_pending", &self.nonce))
@@ -103,39 +113,63 @@ pub(super) fn finish_deferred_restart(shared: &SharedData, _permit: DeferredRest
     is_final
 }
 
-/// Write the durable sentinel, then make the final cancellation decision at
-/// the closest practical point before the atomic rename. A successful rename
-/// is the point of no return: cancellation observed afterwards is intentionally
-/// ignored so persistence and process exit remain a single durable outcome.
+/// Make the final cancellation decision at the closest practical point before
+/// publishing, then publish. The rename inside `publish_restart_terminal` is the
+/// point of no return and latches this nonce, so `Ok(true)` means committed:
+/// #5254 D4③ retired the post-rename re-check that used to withdraw the
+/// acknowledgement it had just published, because a third party removing our
+/// marker must not be able to retract a durable terminal artifact.
 pub(super) fn commit_deferred_restart_sentinel(
     root: &std::path::Path,
     provider: &ProviderKind,
     nonce: &str,
     guard: &DeferredRestartCancellationGuard,
 ) -> std::io::Result<bool> {
-    let ack = root.join("restart_persisted");
-    let ack_tmp = root.join(format!("restart_persisted.{}.tmp", std::process::id()));
-    let ack_body = format!(
+    if guard.cancelled() || !restart_request_matches(root, "restart_pending", nonce) {
+        return Ok(false);
+    }
+    let body = format!(
         "nonce={nonce}\nprovider={}\ncommitted_at={}\n",
         provider.as_str(),
         chrono::Utc::now().to_rfc3339()
     );
-    std::fs::write(&ack_tmp, ack_body)?;
-    if guard.cancelled() || !restart_request_matches(root, "restart_pending", nonce) {
-        let _ = std::fs::remove_file(&ack_tmp);
-        return Ok(false);
-    }
-    std::fs::rename(&ack_tmp, &ack)?;
-    // Compare-and-act again after the atomic acknowledgement publish. A newer
-    // request may have replaced the marker between the pre-rename check and the
-    // rename; never let a stale poller claim or remove that newer request.
-    if !restart_request_matches(root, "restart_pending", nonce) {
-        if restart_request_matches(root, "restart_persisted", nonce) {
-            let _ = std::fs::remove_file(&ack);
-        }
-        return Ok(false);
-    }
+    publish_restart_terminal(root, nonce, &body)?;
     Ok(true)
+}
+
+/// #5254 D4② / D11-4: dispose request `nonce`'s marker, never another's. The
+/// canonical lease carries no nonce so it needs a CAS; the identity name *is*
+/// the authority (I2d), so its unlink needs neither body check nor CAS — no
+/// other request can spell that name — and it repeats harmlessly.
+fn identity_safe_dispose_restart_marker(root: &std::path::Path, nonce: &str) {
+    let disposed = format!(".restart_pending.dispose.{}", uuid::Uuid::new_v4());
+    if std::fs::rename(root.join("restart_pending"), root.join(&disposed)).is_ok() {
+        restore_foreign_disposed_marker(root, &disposed, nonce);
+    }
+    if let Some(identity) = restart_request_artifact_path(root, "restart_pending", nonce) {
+        let _ = std::fs::remove_file(identity);
+    }
+}
+
+/// The CAS half of D11-4 step (1). Removing the disposed file has to be earned:
+/// the body is ours, or the canonical name was restored from it. Neither holds
+/// once a third request re-created the canonical name — `hard_link` fails with
+/// `EEXIST` — and the non-destructive lower bound keeps that inode reachable, so
+/// the request in the middle reads `restart-lease-lost` instead of vanishing.
+fn restore_foreign_disposed_marker(root: &std::path::Path, disposed: &str, nonce: &str) {
+    let path = root.join(disposed);
+    if restart_request_matches(root, disposed, nonce)
+        || std::fs::hard_link(&path, root.join("restart_pending")).is_ok()
+    {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    tracing::warn!(
+        disposed = %path.display(),
+        expected = nonce,
+        found = ?restart_file_nonce(root, disposed),
+        "restart-dispose-restore-eexist: keeping the disposed marker as recovery residue"
+    );
 }
 
 fn release_deferred_restart_ownership(shared: &SharedData) {
@@ -460,18 +494,12 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                             }
                             Ok(true) => {}
                         }
-                        if !restart_request_matches(&root, "restart_pending", &nonce) {
-                            // A newer nonce owns the marker. Preserve its shared
-                            // fence, release A's barrier slot, and keep this poller
-                            // alive so it can service B on the next iteration.
-                            if restart_request_is_superseded(&root, &nonce) {
-                                handoff_superseded_restart(&shared_for_deferred);
-                            }
-                            cancellation_guard.disarm();
-                            continue;
-                        }
+                        // #5254 D4③: past the rename there is exactly one path
+                        // out. Supersession is not re-checked — exit is what a
+                        // newer request wants, the next process reads its
+                        // marker, and disposal is identity-scoped.
                         cancellation_guard.disarm();
-                        let _ = std::fs::remove_file(&marker);
+                        identity_safe_dispose_restart_marker(&root, &nonce);
                         std::process::exit(0);
                     }
 
@@ -480,6 +508,13 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                     // arrives. Returning here would strand its consumed slot.
                     loop {
                         tokio::time::sleep(DEFERRED_RESTART_POLL_INTERVAL).await;
+                        // #5254 D4④: the latch first. Once the final provider
+                        // commits, a cancellation published afterwards is late
+                        // for the whole process (§11-4).
+                        if committed_nonce().as_deref() == Some(nonce.as_str()) {
+                            cancellation_guard.disarm();
+                            break;
+                        }
                         if cancellation_guard.cancelled() {
                             break;
                         }
