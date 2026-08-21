@@ -380,7 +380,8 @@ set -e
 assert_eq "marker deletion without acknowledgement is not durability proof" "1" "$rc"
 
 mkdir -p "$TMP_RUNTIME3/still-pending"
-touch "$TMP_RUNTIME3/still-pending/restart_pending"
+_restart_stage_and_link_marker \
+  "$TMP_RUNTIME3/still-pending" test-nonce test release test.label
 set +e
 wait_for_restart_persistence_or_fail \
   "release" "$TMP_RUNTIME3/still-pending" "test-nonce" 1 >/dev/null 2>&1
@@ -398,15 +399,15 @@ printf 'nonce=handoff-order\n' >"$TMPDIR_TEST/restart_pending"
 # shellcheck source=/dev/null
 . "$DEFAULTS_SH"
 marker_remove_saw_cancel=0
-rm() {
-  if [ "$1" = "-f" ] && [ "$2" = "$TMPDIR_TEST/restart_pending" ] \
-    && [ -f "$TMPDIR_TEST/restart_cancelled" ]; then
+mv() {
+  if [ "$1" = "$TMPDIR_TEST/restart_pending" ] \
+    && [ -f "$TMPDIR_TEST/restart_cancelled.handoff-order" ]; then
     marker_remove_saw_cancel=1
   fi
-  command rm "$@"
+  command mv "$@"
 }
-clear_restart_drain_mode "$TMPDIR_TEST" >/dev/null 2>&1 || true
-unset -f rm
+clear_restart_drain_mode "$TMPDIR_TEST" handoff-order >/dev/null 2>&1 || true
+unset -f mv
 if [ ! -e "$TMPDIR_TEST/restart_pending" ]; then
   pass "marker removed"
 else
@@ -604,43 +605,6 @@ assert_eq "8a: request armed restart_pending in the shell's own root" "1" "$arme
 assert_eq "8a: request armed restart_pending in the runtime's root (mirror)" "1" "$armed_mirror"
 assert_eq "8a: both roots carry the same nonce" "1" "$armed_same_nonce"
 
-# --- 8m: a new request pre-cleans EVERY root it will later consult ----------
-# Not cosmetic. gateway_lease_recovery.rs (~:428) treats the mere presence of a
-# restart_persisted written during the current process lifetime as proof that a
-# promotion handoff committed — that check is lifetime-scoped, not nonce-scoped.
-# Two deploys inside one runtime lifetime is the ordinary retry pattern, so an
-# acknowledgement from the previous request left lying in the runtime root is a
-# stale positive for the next one. The old code pre-cleaned only the directory
-# it wrote to; now that both are written, both must be cleaned.
-rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
-printf 'nonce=stale-request\n' >"$DUAL_PRIMARY/restart_persisted"
-printf 'nonce=stale-request\n' >"$DUAL_PRIMARY/restart_cancelled"
-printf 'nonce=stale-request\n' >"$DUAL_MIRROR/restart_persisted"
-printf 'nonce=stale-request\n' >"$DUAL_MIRROR/restart_cancelled"
-_launchd_job_state() { echo "running"; }
-set +e
-AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
-  PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
-  AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
-  request_restart_drain_mode_or_fail "test" "test.label" 0 "$DUAL_PRIMARY" "smoke-test" \
-  >/dev/null 2>&1
-set -e
-unset -f _launchd_job_state
-if [ -e "$DUAL_PRIMARY/restart_persisted" ]; then
-  fail "8m: stale ack removed from the shell root before the new request arms"
-else
-  pass "8m: stale ack removed from the shell root before the new request arms"
-fi
-if [ -e "$DUAL_MIRROR/restart_persisted" ]; then
-  fail "8m: stale ack removed from the runtime root before the new request arms"
-else
-  pass "8m: stale ack removed from the runtime root before the new request arms"
-fi
-if grep -q '^nonce=stale-request$' "$DUAL_MIRROR/restart_cancelled" 2>/dev/null; then
-  fail "8m: the previous request's cancellation does not survive into this one"
-else
-  pass "8m: the previous request's cancellation does not survive into this one"
-fi
 
 # --- 8b/8c (A/B): acknowledgement from EITHER root is accepted ---------------
 rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
@@ -711,35 +675,32 @@ rc=$?
 set -e
 assert_eq "8f: empty nonce is refused even when a bare 'nonce=' ack exists" "1" "$rc"
 
-# --- 8g (E): cancellation recovers the nonce from whichever root still has it
-# The runtime consumes the marker in the ONE directory it watches. The nonce
-# for the cancellation must then be read from the other root, or the surviving
-# poller receives a cancellation it cannot bind to its own request.
+# --- 8g (E): cancellation is bound to the caller's request nonce -----------
 rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
-printf 'nonce=consumed-by-runtime\n' >"$DUAL_PRIMARY/restart_pending"
+_restart_stage_and_link_marker "$DUAL_PRIMARY" consumed-by-runtime test test test.label
 set +e
 AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
-  clear_restart_drain_mode "$DUAL_PRIMARY" >/dev/null 2>&1
+  clear_restart_drain_mode "$DUAL_PRIMARY" consumed-by-runtime >/dev/null 2>&1
 rc=$?
 set -e
 assert_eq "8g (E): clear succeeds when only one root still holds the marker" "0" "$rc"
 if grep -q '^nonce=consumed-by-runtime$' "$DUAL_MIRROR/restart_cancelled" 2>/dev/null \
   && grep -q '^nonce=consumed-by-runtime$' "$DUAL_PRIMARY/restart_cancelled" 2>/dev/null; then
-  pass "8g: nonce-bound cancellation reaches the root whose marker was consumed"
+  pass "8g: caller nonce publishes cancellation to every root"
 else
-  fail "8g: nonce-bound cancellation reaches the root whose marker was consumed"
+  fail "8g: caller nonce publishes cancellation to every root"
 fi
 
 rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
-printf 'nonce=only-in-mirror\n' >"$DUAL_MIRROR/restart_pending"
+_restart_stage_and_link_marker "$DUAL_MIRROR" only-in-mirror test test test.label
 set +e
 AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
-  clear_restart_drain_mode "$DUAL_PRIMARY" >/dev/null 2>&1
+  clear_restart_drain_mode "$DUAL_PRIMARY" only-in-mirror >/dev/null 2>&1
 set -e
 if grep -q '^nonce=only-in-mirror$' "$DUAL_PRIMARY/restart_cancelled" 2>/dev/null; then
-  pass "8g: nonce is recovered from the mirror when the shell root has none"
+  pass "8g: explicit nonce clears a request held only in the mirror"
 else
-  fail "8g: nonce is recovered from the mirror when the shell root has none"
+  fail "8g: explicit nonce clears a request held only in the mirror"
 fi
 
 # --- 8h: the second root is the stated variable, never dirname --------------
@@ -1106,6 +1067,346 @@ case "$run_out" in
   *)
     pass "the run path does not print a skip line" ;;
 esac
+
+echo "== Test 10: #5254 S3a — shell restart lifecycle primitives =="
+S3A_TMP=$(mktemp -d)
+trap 'rm -rf "$TMP_FIXTURE_DIR" "$TMP_RUNTIME" "$TMPDIR_TEST" "$TMP_RUNTIME2" "$TMP_RUNTIME3" "$TMP_D" "$S1_TMP" "$S3A_TMP"' EXIT
+
+for safe_nonce in a A0 a.b_c-d "$(printf '%0128d' 0)"; do
+  if _restart_nonce_is_path_safe "$safe_nonce"; then
+    pass "charset gate accepts path-safe nonce length=${#safe_nonce}"
+  else
+    fail "charset gate accepts path-safe nonce length=${#safe_nonce}"
+  fi
+done
+for unsafe_nonce in '' . .. 'a/b' 'a b' 'x?y' "$(printf 'x\n../escape')" "$(printf '%0129d' 0)"; do
+  if _restart_nonce_is_path_safe "$unsafe_nonce"; then
+    fail "charset gate rejects unsafe nonce length=${#unsafe_nonce}"
+  else
+    pass "charset gate rejects unsafe nonce length=${#unsafe_nonce}"
+  fi
+done
+
+mkdir -p "$S3A_TMP/stage"
+set +e
+_restart_stage_and_link_marker "$S3A_TMP/stage" 'bad/nonce' src scope label
+unsafe_rc=$?
+set -e
+assert_eq "five-way stage rc=3 for unsafe nonce" "3" "$unsafe_rc"
+if _restart_stage_and_link_marker "$S3A_TMP/stage" nonce-A src scope label; then
+  pass "two-stage marker acquisition succeeds"
+else
+  fail "two-stage marker acquisition succeeds"
+fi
+if [ -f "$S3A_TMP/stage/restart_pending.nonce-A" ] \
+  && [ -f "$S3A_TMP/stage/restart_pending" ] \
+  && _restart_artifact_nonce_matches "$S3A_TMP/stage/restart_pending" nonce-A; then
+  pass "identity and canonical marker names expose the complete body"
+else
+  fail "identity and canonical marker names expose the complete body"
+fi
+set +e
+_restart_stage_and_link_marker "$S3A_TMP/stage" nonce-A src scope label
+reused_rc=$?
+_restart_stage_and_link_marker "$S3A_TMP/stage" nonce-B src scope label
+held_rc=$?
+set -e
+assert_eq "five-way stage rc=4 for reused nonce" "4" "$reused_rc"
+assert_eq "five-way stage rc=1 for held lease" "1" "$held_rc"
+
+mkdir -p "$S3A_TMP/terminal"
+_restart_terminal_publish "$S3A_TMP/terminal" restart_persisted terminal-A 'committed_at=now'
+_restart_terminal_publish "$S3A_TMP/terminal" restart_persisted terminal-B 'committed_at=later'
+if _restart_artifact_nonce_matches "$S3A_TMP/terminal/restart_persisted.terminal-A" terminal-A \
+  && _restart_artifact_nonce_matches "$S3A_TMP/terminal/restart_persisted.terminal-B" terminal-B \
+  && _restart_artifact_nonce_matches "$S3A_TMP/terminal/restart_persisted" terminal-B; then
+  pass "terminal publish preserves identities and advances the fixed-name index"
+else
+  fail "terminal publish preserves identities and advances the fixed-name index"
+fi
+
+# Three actors: stale A claims B's canonical marker, then C installs its marker
+# before A restores. Inject that interleaving inside the production helper.
+mkdir -p "$S3A_TMP/three"
+_restart_stage_and_link_marker "$S3A_TMP/three" actor-N-prime src scope label
+real_nonce_match=$(declare -f _restart_artifact_nonce_matches)
+_restart_artifact_nonce_matches() {
+  if [ "$2" = actor-N ]; then
+    _restart_stage_and_link_marker "$S3A_TMP/three" actor-N-double-prime src scope label
+    return 1
+  fi
+  [ -f "$1" ] && grep -Fqx -- "nonce=$2" "$1" 2>/dev/null
+}
+three_dispose_out=$(_restart_dispose_marker_by_own_nonce "$S3A_TMP/three" actor-N 2>&1 || true)
+eval "$real_nonce_match"
+set -- "$S3A_TMP/three"/.restart_pending.dispose.actor-N.*
+if [ -f "$1" ] \
+  && _restart_artifact_nonce_matches "$1" actor-N-prime \
+  && _restart_artifact_nonce_matches "$S3A_TMP/three/restart_pending.actor-N-prime" actor-N-prime \
+  && _restart_artifact_nonce_matches "$S3A_TMP/three/restart_pending" actor-N-double-prime; then
+  pass "three-actor EEXIST lower bound preserves residue and middle identity"
+else
+  fail "three-actor EEXIST lower bound preserves residue and middle identity"
+fi
+case "$three_dispose_out" in
+  *"restart-dispose-restore-eexist"*"expected=actor-N"*"found=actor-N-prime"*)
+    pass "EEXIST residue log names expected and found nonces" ;;
+  *)
+    fail "EEXIST residue log names expected and found nonces (got: $three_dispose_out)" ;;
+esac
+
+# A canonical link syscall failure without a competing canonical marker is a
+# create failure (rc=2), never a held lease (rc=1).
+mkdir -p "$S3A_TMP/link-fail"
+real_ln=$(declare -f ln 2>/dev/null || true)
+ln() {
+  if [ "$2" = "$S3A_TMP/link-fail/restart_pending" ]; then
+    return 1
+  fi
+  command ln "$@"
+}
+set +e
+_restart_stage_and_link_marker "$S3A_TMP/link-fail" link-fail src scope label
+link_fail_rc=$?
+set -e
+unset -f ln
+[ -n "$real_ln" ] && eval "$real_ln"
+assert_eq "canonical link failure without owner returns rc=2" "2" "$link_fail_rc"
+
+# Entropy generation must reach /dev/urandom when an installed uuidgen fails.
+mkdir -p "$S3A_TMP/entropy-bin"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$S3A_TMP/entropy-bin/uuidgen"
+chmod +x "$S3A_TMP/entropy-bin/uuidgen"
+set +e
+fallback_entropy=$(PATH="$S3A_TMP/entropy-bin:$PATH" _restart_nonce_entropy)
+entropy_rc=$?
+set -e
+assert_eq "uuidgen failure falls back to /dev/urandom" "0" "$entropy_rc"
+if [ "${#fallback_entropy}" = 8 ] && _restart_nonce_is_path_safe "$fallback_entropy"; then
+  pass "urandom fallback yields eight path-safe hex characters"
+else
+  fail "urandom fallback yields eight path-safe hex characters (got: $fallback_entropy)"
+fi
+
+# E8.9: force nonce reuse and publish a same-nonce terminal identity immediately
+# after identity reservation. Cleanup must occur after identity reservation and
+# before canonical publication; moving it to either side makes one fixture red.
+mkdir -p "$S3A_TMP/reuse"
+forced_nonce="forced-$$-0-entropy"
+printf 'nonce=%s\n' "$forced_nonce" >"$S3A_TMP/reuse/restart_persisted.$forced_nonce"
+printf 'nonce=%s\n' "$forced_nonce" >"$S3A_TMP/reuse/restart_cancelled.$forced_nonce"
+printf 'nonce=foreign\n' >"$S3A_TMP/reuse/restart_persisted.foreign"
+printf 'nonce=fixed\n' >"$S3A_TMP/reuse/restart_persisted"
+real_entropy=$(declare -f _restart_nonce_entropy)
+real_date=$(declare -f date 2>/dev/null || true)
+real_stage_identity=$(declare -f _restart_stage_marker_identity)
+real_link_canonical=$(declare -f _restart_link_canonical_marker)
+eval "$(printf '%s\n' "$real_stage_identity" | sed '1s/_restart_stage_marker_identity/_restart_stage_marker_identity_real/')"
+eval "$(printf '%s\n' "$real_link_canonical" | sed '1s/_restart_link_canonical_marker/_restart_link_canonical_marker_real/')"
+_restart_nonce_entropy() { printf entropy; }
+date() {
+  if [ "$1" = -u ] && [ "$2" = +%Y%m%dT%H%M%S ]; then
+    printf forced
+  else
+    command date "$@"
+  fi
+}
+_restart_stage_marker_identity() {
+  _restart_stage_marker_identity_real "$@" || return $?
+  _restart_terminal_publish "$1" restart_persisted "$2" 'committed_at=concurrent'
+}
+unset RANDOM
+RANDOM=0
+_launchd_job_state() { echo "not running"; }
+AGENTDESK_RESTART_DRAIN_ACK_WAIT=0 \
+  request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/reuse" src >/dev/null 2>&1
+if [ ! -e "$S3A_TMP/reuse/restart_persisted.$forced_nonce" ] \
+  && [ ! -e "$S3A_TMP/reuse/restart_cancelled.$forced_nonce" ] \
+  && [ -e "$S3A_TMP/reuse/restart_persisted.foreign" ]; then
+  pass "same-nonce terminal cleanup occurs after identity reservation and before canonical publication"
+else
+  fail "same-nonce terminal cleanup occurs after identity reservation and before canonical publication"
+fi
+
+# Crash exactly after canonical publication. The canonical and identity may
+# remain, but the stale same-nonce terminal must already be absent.
+mkdir -p "$S3A_TMP/post-lease-crash"
+printf 'nonce=%s\n' "$forced_nonce" >"$S3A_TMP/post-lease-crash/restart_persisted.$forced_nonce"
+unset RANDOM
+RANDOM=0
+set +e
+(
+  _restart_link_canonical_marker() {
+    _restart_link_canonical_marker_real "$@" || return $?
+    exit 97
+  }
+  request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/post-lease-crash" src >/dev/null 2>&1
+)
+post_lease_crash_rc=$?
+set -e
+assert_eq "post-canonical crash seam exits at injected point" "97" "$post_lease_crash_rc"
+if [ -e "$S3A_TMP/post-lease-crash/restart_pending" ] \
+  && [ -e "$S3A_TMP/post-lease-crash/restart_pending.$forced_nonce" ] \
+  && [ ! -e "$S3A_TMP/post-lease-crash/restart_persisted.$forced_nonce" ]; then
+  pass "post-canonical crash cannot retain a same-nonce stale terminal"
+else
+  fail "post-canonical crash cannot retain a same-nonce stale terminal"
+fi
+
+# Identity-only rollback is the failure shape before canonical publication.
+mkdir -p "$S3A_TMP/identity-only-rollback"
+_restart_stage_marker_identity_real "$S3A_TMP/identity-only-rollback" identity-only src scope label
+_restart_dispose_marker_by_own_nonce "$S3A_TMP/identity-only-rollback" identity-only
+if [ ! -e "$S3A_TMP/identity-only-rollback/restart_pending" ] \
+  && [ ! -e "$S3A_TMP/identity-only-rollback/restart_pending.identity-only" ]; then
+  pass "identity-only rollback removes its reservation without a canonical marker"
+else
+  fail "identity-only rollback removes its reservation without a canonical marker"
+fi
+
+# Actor B must not dispose actor A's same-nonce identity or canonical lease when
+# B loses the identity reservation with marker rc=4.
+mkdir -p "$S3A_TMP/same-nonce-race"
+printf 'nonce=%s\n' "$forced_nonce" >"$S3A_TMP/same-nonce-race/restart_pending.$forced_nonce"
+ln "$S3A_TMP/same-nonce-race/restart_pending.$forced_nonce" \
+  "$S3A_TMP/same-nonce-race/restart_pending"
+unset RANDOM
+RANDOM=0
+set +e
+AGENTDESK_RESTART_DRAIN_ACK_WAIT=0 \
+  request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/same-nonce-race" src \
+  >"$S3A_TMP/same-nonce-race.out" 2>&1
+same_nonce_race_rc=$?
+set -e
+assert_eq "same-nonce actor B fails after marker rc=4" "1" "$same_nonce_race_rc"
+if _restart_artifact_nonce_matches "$S3A_TMP/same-nonce-race/restart_pending" "$forced_nonce" \
+  && _restart_artifact_nonce_matches "$S3A_TMP/same-nonce-race/restart_pending.$forced_nonce" "$forced_nonce"; then
+  pass "marker rc=4 preserves actor A's identity and canonical lease"
+else
+  fail "marker rc=4 preserves actor A's identity and canonical lease"
+fi
+
+# Actor B must not move a foreign canonical lease out of its fixed name when
+# B loses canonical publication with marker rc=1. Observe the helper seam that
+# the old rollback entered; any transient absence would let the owner falsely
+# classify the request as consumed.
+mkdir -p "$S3A_TMP/foreign-canonical-race"
+_restart_stage_and_link_marker \
+  "$S3A_TMP/foreign-canonical-race" actor-A-foreign src scope label
+real_nonce_match=$(declare -f _restart_artifact_nonce_matches)
+foreign_canonical_absent=0
+_restart_artifact_nonce_matches() {
+  if [ ! -e "$S3A_TMP/foreign-canonical-race/restart_pending" ]; then
+    foreign_canonical_absent=1
+  fi
+  [ -f "$1" ] && grep -Fqx -- "nonce=$2" "$1" 2>/dev/null
+}
+_restart_nonce_entropy() { printf actor-B-entropy; }
+date() {
+  if [ "$1" = -u ] && [ "$2" = +%Y%m%dT%H%M%S ]; then
+    printf actor-B
+  else
+    command date "$@"
+  fi
+}
+unset RANDOM
+RANDOM=0
+set +e
+AGENTDESK_RESTART_DRAIN_ACK_WAIT=0 \
+  request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/foreign-canonical-race" src \
+  >"$S3A_TMP/foreign-canonical-race.out" 2>&1
+foreign_canonical_race_rc=$?
+set -e
+assert_eq "foreign canonical actor B fails after marker rc=1" "1" "$foreign_canonical_race_rc"
+assert_eq "marker rc=1 never removes actor A's canonical fixed name" \
+  "0" "$foreign_canonical_absent"
+if _restart_artifact_nonce_matches "$S3A_TMP/foreign-canonical-race/restart_pending" actor-A-foreign; then
+  pass "marker rc=1 preserves actor A's canonical lease"
+else
+  fail "marker rc=1 preserves actor A's canonical lease"
+fi
+
+eval "$real_nonce_match"
+unset -f _launchd_job_state date _restart_stage_marker_identity_real _restart_link_canonical_marker_real
+[ -n "$real_date" ] && eval "$real_date"
+eval "$real_entropy"
+eval "$real_stage_identity"
+eval "$real_link_canonical"
+
+# The not-running check can race with a newer actor acquiring the canonical
+# lease. Inject actor B at that seam and require actor A's cleanup to preserve B.
+mkdir -p "$S3A_TMP/not-running-race"
+real_entropy=$(declare -f _restart_nonce_entropy)
+real_date=$(declare -f date 2>/dev/null || true)
+_restart_nonce_entropy() { printf actor-A-entropy; }
+date() {
+  if [ "$1" = -u ] && [ "$2" = +%Y%m%dT%H%M%S ]; then
+    printf actor-A
+  else
+    command date "$@"
+  fi
+}
+unset RANDOM
+RANDOM=0
+_launchd_job_state() {
+  rm -f "$S3A_TMP/not-running-race/restart_pending"
+  _restart_stage_and_link_marker "$S3A_TMP/not-running-race" actor-B src scope label
+  echo "not running"
+}
+request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/not-running-race" src >/dev/null 2>&1
+unset -f _launchd_job_state date
+[ -n "$real_date" ] && eval "$real_date"
+eval "$real_entropy"
+if _restart_artifact_nonce_matches "$S3A_TMP/not-running-race/restart_pending" actor-B \
+  && _restart_artifact_nonce_matches "$S3A_TMP/not-running-race/restart_pending.actor-B" actor-B; then
+  pass "not-running cleanup preserves a newer actor's canonical marker"
+else
+  fail "not-running cleanup preserves a newer actor's canonical marker"
+fi
+
+# Reproduce the restart skill's no-argument cleanup form under set -e. The
+# not-running success path must arm the nonce so bootstrap remains reachable.
+mkdir -p "$S3A_TMP/no-arg"
+set +e
+(
+  set -e
+  _restart_nonce_entropy() { printf no-arg-entropy; }
+  date() {
+    if [ "$1" = -u ] && [ "$2" = +%Y%m%dT%H%M%S ]; then
+      printf no-arg
+    else
+      command date "$@"
+    fi
+  }
+  unset RANDOM
+  RANDOM=0
+  _launchd_job_state() { echo "not running"; }
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
+    PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
+    request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/no-arg" src >/dev/null 2>&1
+  clear_restart_drain_mode "$S3A_TMP/no-arg" >/dev/null 2>&1
+  printf reached-bootstrap >"$S3A_TMP/no-arg/result"
+)
+no_arg_rc=$?
+set -e
+assert_eq "restart skill no-argument cleanup stays on success path" "0" "$no_arg_rc"
+no_arg_result="$(command cat "$S3A_TMP/no-arg/result" 2>/dev/null || true)"
+if [ "$no_arg_result" = reached-bootstrap ]; then
+  pass "restart skill reaches bootstrap after no-argument cleanup"
+else
+  fail "restart skill reaches bootstrap after no-argument cleanup"
+fi
+
+mkdir -p "$S3A_TMP/cancel"
+_restart_stage_and_link_marker "$S3A_TMP/cancel" cancel-order src scope label
+clear_restart_drain_mode "$S3A_TMP/cancel" cancel-order
+if _restart_artifact_nonce_matches "$S3A_TMP/cancel/restart_cancelled.cancel-order" cancel-order \
+  && [ ! -e "$S3A_TMP/cancel/restart_pending" ] \
+  && [ ! -e "$S3A_TMP/cancel/restart_pending.cancel-order" ]; then
+  pass "cancellation leaves terminal identity and removes both marker names"
+else
+  fail "cancellation leaves terminal identity and removes both marker names"
+fi
 
 echo
 echo "==== Results ===="
