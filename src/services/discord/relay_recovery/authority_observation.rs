@@ -321,6 +321,9 @@ static ACTIVE_TURNS: AtomicUsize = AtomicUsize::new(0);
 /// failed line write. Silence in the sink is survivable only if it is visible, and
 /// this is the only place it becomes visible (E4-4).
 static SINK_DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
+/// Dial-independent fail-closed completion decisions. Unlike
+/// `completion_scopes`, this advances under the shipped Legacy/0 dial.
+static COMPLETION_SUPPRESSIONS: AtomicU64 = AtomicU64::new(0);
 static TRIAGE: LazyLock<Mutex<RelayAuthorityObservationReport>> = LazyLock::new(Mutex::default);
 
 fn turns() -> MutexGuard<'static, HashMap<u64, TurnObservation>> {
@@ -474,6 +477,7 @@ pub(in crate::services::discord) struct CompletionScopeRecord<'a> {
     pub(in crate::services::discord) turn_id: u64,
     pub(in crate::services::discord) channel_id: u64,
     pub(in crate::services::discord) site: &'static str,
+    pub(in crate::services::discord) turn_source: &'static str,
     pub(in crate::services::discord) scope: &'static str,
     pub(in crate::services::discord) scope_reason: &'static str,
 }
@@ -483,6 +487,10 @@ pub(in crate::services::discord) fn record_completion_scope(record: CompletionSc
         return;
     };
     record_completion_scope_at(dial, record);
+}
+
+pub(in crate::services::discord) fn record_completion_suppression() {
+    COMPLETION_SUPPRESSIONS.fetch_add(1, Ordering::Relaxed);
 }
 
 fn record_completion_scope_at(
@@ -495,6 +503,7 @@ fn record_completion_scope_at(
         turn_id,
         channel_id,
         site,
+        turn_source,
         scope,
         scope_reason,
     } = record;
@@ -509,7 +518,7 @@ fn record_completion_scope_at(
         observed_at: chrono::Local::now().to_rfc3339(),
         cohort_fingerprint: cohort::cohort_fingerprint(mode, percent),
     };
-    let Some(line) = encode_scope(&stamp, site, scope, scope_reason) else {
+    let Some(line) = encode_scope(&stamp, site, turn_source, scope, scope_reason) else {
         drop_records(1);
         return;
     };
@@ -590,6 +599,7 @@ fn encode(
 fn encode_scope(
     stamp: &TurnStamp,
     site: &'static str,
+    turn_source: &'static str,
     scope: &'static str,
     scope_reason: &'static str,
 ) -> Option<String> {
@@ -601,6 +611,7 @@ fn encode_scope(
         #[serde(flatten)]
         stamp: &'a TurnStamp,
         site: &'static str,
+        turn_source: &'static str,
         scope: &'static str,
         scope_reason: &'static str,
     }
@@ -611,6 +622,7 @@ fn encode_scope(
         publish_reason: "post_flush",
         stamp,
         site,
+        turn_source,
         scope,
         scope_reason,
     })
@@ -679,6 +691,8 @@ pub(crate) struct RelayAuthorityObservationReport {
     /// Cumulative records the JSONL sink threw away. Nonzero means the canon log
     /// is incomplete and the promotion window over it is not trustworthy.
     sink_dropped_records: u64,
+    /// Fail-closed completion decisions, counted regardless of rollout dial/cohort.
+    pub(crate) completion_suppressions: u64,
     /// Completion-time ownership samples keyed by `site:scope:scope_reason`.
     completion_scopes: BTreeMap<String, u64>,
     channels: BTreeMap<String, VecDeque<TurnTriageEntry>>,
@@ -726,6 +740,7 @@ pub(crate) fn observation_report() -> RelayAuthorityObservationReport {
     // other is written from the sink, which never takes this lock.
     report.resident_buffers = ACTIVE_TURNS.load(Ordering::Relaxed) as u64;
     report.sink_dropped_records = SINK_DROPPED_RECORDS.load(Ordering::Relaxed);
+    report.completion_suppressions = COMPLETION_SUPPRESSIONS.load(Ordering::Relaxed);
     report
 }
 
@@ -800,11 +815,6 @@ mod tests {
             .collect()
     }
 
-    /// AC2-R's monotone-relaxing contract, asserted as a property over the full
-    /// input domain of both gates rather than on the cells that happen to move:
-    /// no input exists for which the new predicate ends a lifecycle the shipped
-    /// one continued. This is the precondition S4 and S7a are allowed to
-    /// enforce under, so it has to fail here if either table is ever widened.
     #[test]
     fn completion_scope_is_a_post_flush_record_and_live_triage_counter() {
         let temp = tempfile::TempDir::new().expect("runtime root");
@@ -820,6 +830,7 @@ mod tests {
                 turn_id: 77_080,
                 channel_id: channel,
                 site: "completion_r1",
+                turn_source: "external_input",
                 scope: "unprovable",
                 scope_reason: "mailbox_absent",
             },
@@ -831,6 +842,7 @@ mod tests {
         assert_eq!(event["schema"].as_str(), Some(OBSERVATION_SCHEMA));
         assert_eq!(event["publish_reason"].as_str(), Some("post_flush"));
         assert_eq!(event["site"].as_str(), Some("completion_r1"));
+        assert_eq!(event["turn_source"].as_str(), Some("external_input"));
         assert_eq!(event["scope"].as_str(), Some("unprovable"));
         assert_eq!(event["scope_reason"].as_str(), Some("mailbox_absent"));
         assert!(event.get("axis_a").is_none());
@@ -839,10 +851,15 @@ mod tests {
                 .completion_scopes
                 .get("completion_r1:unprovable:mailbox_absent"),
             Some(&1),
-            "TUI-direct mailbox absence must remain visible in live triage"
+            "mailbox-handle absence must remain visible in rollout-scoped triage"
         );
     }
 
+    /// AC2-R's monotone-relaxing contract, asserted as a property over the full
+    /// input domain of both gates rather than on the cells that happen to move:
+    /// no input exists for which the new predicate ends a lifecycle the shipped
+    /// one continued. This is the precondition S4 and S7a are allowed to
+    /// enforce under, so it has to fail here if either table is ever widened.
     #[test]
     fn neither_new_gate_ends_a_lifecycle_the_shipped_gate_continued() {
         for outcome in OUTCOMES {

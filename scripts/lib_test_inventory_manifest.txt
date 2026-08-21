@@ -5948,6 +5948,8 @@ services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_re
 services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::bridge_entry_sites_pin_mailbox_token_registration_contract
 services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::empty_nonce_never_proves_ownership
 services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::five_row_decision_table_is_fail_closed
+services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::tui_direct_synthetic_release_is_idle_but_an_active_successor_is_foreign
+services::discord::turn_bridge::completion_postlude::channel_writeback::tests::foreign_completion_cannot_select_provider_session_clear
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::normal_turn_writes_back_into_channel_session
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_does_not_stash_feedback_reminder
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_leaves_channel_session_untouched
@@ -5957,8 +5959,8 @@ services::discord::turn_bridge::context_window::tests::done_uses_terminal_result
 services::discord::turn_bridge::context_window::tests::sentinel_overwrite_clamps_response_sent_offset_within_bounds
 services::discord::turn_bridge::current_message_anchor::tests::authority_or_message_epoch_advance_during_send_aborts_and_deletes_candidate
 services::discord::turn_bridge::current_message_anchor::tests::cleared_durable_current_message_stays_absent_until_real_anchor_exists
+services::discord::turn_bridge::finalize_epilogue::tests::disconnected_gateway_watcher_resume_requires_completion_ownership
 services::discord::turn_bridge::finalize_epilogue::tests::dispatch_failure_requeue_front_schedules_deferred_kickoff
-services::discord::turn_bridge::finalize_epilogue::tests::foreign_completion_does_not_resume_disconnected_gateway_watcher
 services::discord::turn_bridge::finalize_epilogue::tests::session_transition_fences_finalizer_dequeue_and_preserves_fifo_4794
 services::discord::turn_bridge::finalize_epilogue::tests::stale_queue_flag_skips_capped_retry_and_dispatches_unrelated_backlog_4893
 services::discord::turn_bridge::followup_requeue::tests::already_queued_refusal_preserves_existing_merged_marker
@@ -6056,6 +6058,7 @@ services::discord::turn_bridge::single_message_footer::tests::bridge_pathologica
 services::discord::turn_bridge::single_message_footer::tests::bridge_single_message_completion_footer_emits_background_agent_pending_payload
 services::discord::turn_bridge::single_message_footer::tests::bridge_single_message_completion_footer_producer_threads_sniffed_background_agent_pending
 services::discord::turn_bridge::single_message_footer::tests::bridge_terminal_footer_strips_panel_block
+services::discord::turn_bridge::single_message_footer::tests::stale_single_message_completion_cannot_mutate_new_owner_status
 services::discord::turn_bridge::single_message_footer::tests::status_panel_defers_only_while_first_answer_body_pending
 services::discord::turn_bridge::single_message_footer::tests::tui_direct_completion_footer_suppression_gate_3959
 services::discord::turn_bridge::single_message_footer::tests::tui_direct_mirror_clean_prose_needs_no_redundant_edit_3959

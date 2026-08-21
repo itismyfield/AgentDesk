@@ -89,6 +89,14 @@ pub(super) async fn run_completion_postlude(
     let mut inflight_guard = state.inflight_guard;
     let mut inflight_state = state.inflight_state;
 
+    let ownership = channel_episode_scope::ChannelEpisodeProbe::new(
+        &shared_owned,
+        channel_id,
+        &provider,
+        &inflight_state,
+        &cancel_token,
+    );
+    let completion_r0 = ownership.read("completion_r0").await;
     let mut status_panel_completion_committed = true;
     if status_panel_terminal_committed
         && bridge_should_emit_completion
@@ -103,9 +111,8 @@ pub(super) async fn run_completion_postlude(
         // the live accumulated snapshot, else re-parses the output JSONL the
         // same way persisted analytics does, and returns None when no exact
         // usage exists — so we never fabricate or reuse stale numbers.
-        // set_context_panel_usage is a no-op when the live path already set
-        // the same values, and is gated to context_window_tokens != 0.
-        if shared_owned.ui.status_panel_v2_enabled {
+        // It is a no-op for the same values and gated to context_window_tokens != 0.
+        if completion_r0.permits_channel_effects() && shared_owned.ui.status_panel_v2_enabled {
             let context_provider_session_id = new_raw_provider_session_id
                 .as_deref()
                 .or(new_session_id.as_deref())
@@ -155,6 +162,7 @@ pub(super) async fn run_completion_postlude(
                     indicator,
                     status_panel_generation, // #3805 P2: prove this turn's panel epoch
                     inflight_state.tmux_session_name.as_deref(),
+                    completion_r0.permits_channel_effects(),
                 ),
             )
             .await;
@@ -182,13 +190,6 @@ pub(super) async fn run_completion_postlude(
         );
     }
 
-    let ownership = channel_episode_scope::ChannelEpisodeProbe::new(
-        &shared_owned,
-        channel_id,
-        &provider,
-        &inflight_state,
-        &cancel_token,
-    );
     let completion_r1 = ownership.read("completion_r1").await;
     if completion_r1.permits_channel_effects()
         && status_panel_terminal_committed
@@ -357,14 +358,13 @@ pub(super) async fn run_completion_postlude(
 
     // Persist or clear provider session_id in DB so fresh-session transitions
     // survive dcserver restarts and idle cleanup.
-    if clear_provider_session {
-        if let Some(session_key) = adk_session_key.as_deref() {
-            super::super::adk_session::clear_provider_session_id(
-                session_key,
-                shared_owned.api_port,
-            )
+    if let Some(session_key) = channel_writeback::provider_session_clear_key(
+        channel_effects_suppressed,
+        clear_provider_session,
+        adk_session_key.as_deref(),
+    ) {
+        super::super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port)
             .await;
-        }
     } else if let (Some(session_key), Some(persisted_sid)) =
         (adk_session_key.as_deref(), session_id_to_persist.as_deref())
     {
@@ -671,6 +671,7 @@ pub(super) async fn run_completion_postlude(
 
     let completion_r3 = ownership.read("completion_r3").await;
     {
+        // Registry timing starts at channel admission; fallback timing starts at bridge entry.
         let duration = if completion_r3.permits_channel_effects() {
             shared_owned
                 .turn_start_times

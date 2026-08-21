@@ -1284,6 +1284,7 @@ mod tests {
             [
                 "channels",
                 "completion_scopes",
+                "completion_suppressions",
                 "new_stricter_verdicts",
                 "resident_buffers",
                 "rowless_continuations",

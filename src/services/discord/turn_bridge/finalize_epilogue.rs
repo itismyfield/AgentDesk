@@ -21,6 +21,7 @@ use super::*;
 /// Discord context is missing). The queued-turn mailbox side-effects preserve
 /// their original order. The disconnected-gateway watcher resume is a channel
 /// effect and therefore also requires the completion-time ownership conjunct.
+/// That R4 boolean crosses the awaits in this function and can be stale by use.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn finalize_and_drain_queued_turns(
     shared_owned: Arc<SharedData>,
@@ -219,6 +220,7 @@ mod tests {
     type TestGatewayFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
     struct FailingQueuedDispatchGateway;
+    struct DisconnectedGateway;
 
     struct RecordingFailingQueuedDispatchGateway {
         dispatched_message_ids: Arc<std::sync::Mutex<Vec<MessageId>>>,
@@ -290,6 +292,65 @@ mod tests {
 
         fn bot_owner_provider(&self) -> Option<ProviderKind> {
             Some(ProviderKind::Claude)
+        }
+    }
+
+    impl TurnGateway for DisconnectedGateway {
+        fn send_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _content: &'a str,
+        ) -> TestGatewayFuture<'a, Result<MessageId, String>> {
+            Box::pin(async { unreachable!() })
+        }
+        fn edit_message<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> TestGatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { unreachable!() })
+        }
+        fn replace_message_with_outcome<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _message_id: MessageId,
+            _content: &'a str,
+        ) -> TestGatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
+            Box::pin(async { unreachable!() })
+        }
+        fn schedule_retry_with_history<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _user_message_id: MessageId,
+            _user_text: &'a str,
+        ) -> TestGatewayFuture<'a, ()> {
+            Box::pin(async {})
+        }
+        fn dispatch_queued_turn<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+            _intervention: &'a Intervention,
+            _request_owner_name: &'a str,
+            _has_more_queued_turns: bool,
+            _dispatch_lease: Option<Arc<crate::services::turn_orchestrator::DispatchLease>>,
+        ) -> TestGatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { unreachable!() })
+        }
+        fn validate_live_routing<'a>(
+            &'a self,
+            _channel_id: ChannelId,
+        ) -> TestGatewayFuture<'a, Result<(), String>> {
+            Box::pin(async { unreachable!() })
+        }
+        fn requester_mention(&self) -> Option<String> {
+            None
+        }
+        fn can_chain_locally(&self) -> bool {
+            false
+        }
+        fn bot_owner_provider(&self) -> Option<ProviderKind> {
+            None
         }
     }
 
@@ -391,53 +452,58 @@ mod tests {
     }
 
     #[test]
-    fn foreign_completion_does_not_resume_disconnected_gateway_watcher() {
+    fn disconnected_gateway_watcher_resume_requires_completion_ownership() {
         let tmp = tempfile::tempdir().expect("runtime root");
         let _root_guard = crate::config::set_agentdesk_root_for_test(tmp.path());
-        let shared = crate::services::discord::make_shared_data_for_tests();
-
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
             .block_on(async {
-                let channel_id = ChannelId::new(5_464_300);
-                let resume_offset = Arc::new(std::sync::Mutex::new(None));
-                let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
-                shared.tmux_watchers.insert(
-                    channel_id,
-                    TmuxWatcherHandle {
-                        tmux_session_name: "foreign-owner".to_string(),
-                        output_path: "/tmp/foreign-owner.jsonl".to_string(),
-                        paused: paused.clone(),
-                        resume_offset: resume_offset.clone(),
-                        cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                        pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-                        turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                        last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
-                            super::super::tmux_watcher_now_ms(),
-                        )),
-                    },
-                );
-                shared.restart.finalizing_turns.store(1, Ordering::Relaxed);
-                shared.restart.global_finalizing.store(1, Ordering::Relaxed);
-
-                finalize_and_drain_queued_turns(
-                    shared,
-                    true,
-                    false,
-                    Arc::new(FailingQueuedDispatchGateway),
-                    channel_id,
-                    ProviderKind::Claude,
-                    "requester".to_string(),
-                    Some(7_777),
-                    channel_id,
-                    false,
-                )
-                .await;
-
-                assert_eq!(*resume_offset.lock().expect("resume offset"), None);
-                assert!(paused.load(Ordering::Relaxed));
+                for (owns_channel_effects, expected_offset, expected_paused, channel_raw) in [
+                    (false, None, true, 5_464_300),
+                    (true, Some(7_777), false, 5_464_301),
+                ] {
+                    let shared = crate::services::discord::make_shared_data_for_tests();
+                    let channel_id = ChannelId::new(channel_raw);
+                    let resume_offset = Arc::new(std::sync::Mutex::new(None));
+                    let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                    shared.tmux_watchers.insert(
+                        channel_id,
+                        TmuxWatcherHandle {
+                            tmux_session_name: "disconnected-owner".to_string(),
+                            output_path: "/tmp/disconnected-owner.jsonl".to_string(),
+                            paused: paused.clone(),
+                            resume_offset: resume_offset.clone(),
+                            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                            turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                                super::super::tmux_watcher_now_ms(),
+                            )),
+                        },
+                    );
+                    shared.restart.finalizing_turns.store(1, Ordering::Relaxed);
+                    shared.restart.global_finalizing.store(1, Ordering::Relaxed);
+                    finalize_and_drain_queued_turns(
+                        shared,
+                        true,
+                        false,
+                        Arc::new(DisconnectedGateway),
+                        channel_id,
+                        ProviderKind::Claude,
+                        "requester".to_string(),
+                        Some(7_777),
+                        channel_id,
+                        owns_channel_effects,
+                    )
+                    .await;
+                    assert_eq!(
+                        *resume_offset.lock().expect("resume offset"),
+                        expected_offset
+                    );
+                    assert_eq!(paused.load(Ordering::Relaxed), expected_paused);
+                }
             });
     }
 

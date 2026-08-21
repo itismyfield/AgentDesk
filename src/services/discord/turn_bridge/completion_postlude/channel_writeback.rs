@@ -38,11 +38,12 @@
 //! and mailbox recovery-marker clear use fresh ownership conjuncts at their own
 //! effect groups rather than this helper predicate.
 //!
-//! Turn-OWN, key-scoped, or observability-only effects are intentionally NOT
-//! gated: DB rows/metrics keyed by the snapshot's own `adk_session_key`, the
-//! session_transcripts / analytics / quality / metric emits (dashboards, never
-//! read back into a live prompt), and the identity-guarded inflight lifecycle +
-//! queued-turn drain (this turn's own row / required terminal cleanup).
+//! Turn-OWN or observability-only effects are intentionally NOT gated: transcript,
+//! analytics, quality and metric emits (dashboards, never read back into a live
+//! prompt), plus identity-guarded inflight lifecycle and queued-turn drain. Provider
+//! session clear is destructive state under `adk_session_key`; key separation does
+//! not prove ownership for `Foreign`/`Unprovable`, so it uses the combined suppression
+//! predicate. Provider session save already requires unsuppressed writeback output.
 //!
 //! # F-2 (documented limitation, non-blocking)
 //!
@@ -133,6 +134,16 @@ pub(in crate::services::discord::turn_bridge) fn apply_channel_turn_writeback(
 /// Returns the reminder to stash ONLY for a channel-owning turn; a suppressed turn
 /// (`channel_effects_suppressed`) yields `None` so nothing is written to the shared
 /// channel KV.
+pub(in crate::services::discord::turn_bridge) fn provider_session_clear_key<'a>(
+    channel_effects_suppressed: bool,
+    clear_provider_session: bool,
+    session_key: Option<&'a str>,
+) -> Option<&'a str> {
+    (!channel_effects_suppressed && clear_provider_session)
+        .then_some(session_key)
+        .flatten()
+}
+
 pub(in crate::services::discord::turn_bridge) fn feedback_reminder_to_stash(
     channel_effects_suppressed: bool,
     reminder: Option<String>,
@@ -231,6 +242,23 @@ mod tests {
         assert_eq!(
             outcome.session_id_to_persist, None,
             "suppressed turn must not persist a session_id read from the channel session"
+        );
+    }
+
+    #[test]
+    fn foreign_completion_cannot_select_provider_session_clear() {
+        assert_eq!(
+            provider_session_clear_key(true, true, Some("host:live-channel")),
+            None,
+            "Foreign/Unprovable completion must not call clear_provider_session_id"
+        );
+        assert_eq!(
+            provider_session_clear_key(false, true, Some("host:live-channel")),
+            Some("host:live-channel")
+        );
+        assert_eq!(
+            provider_session_clear_key(false, false, Some("host:live-channel")),
+            None
         );
     }
 

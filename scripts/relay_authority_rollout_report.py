@@ -12,12 +12,20 @@ not an automatic gate. The exit status therefore reports whether the axis-A
 criteria are *met*, so a runbook step can branch on it, but nothing in the
 running system consults it.
 
-Time base: every window, day count and segment boundary here is keyed on
-``observed_at`` (when the turn started), NOT on ``ts`` (when the record was
-published). The two differ by design — a turn stranded by a bridge exit is
-published when the *next* turn on its channel arrives, which for an idle channel
-is hours or days later, and windowing on ``ts`` dated exactly the populations
-this slice exists to measure to the wrong day (ERRATUM R3-E4/E4-5).
+Time base: every promotion window, day count and segment boundary here is keyed
+only on axis-A lifecycle records' ``observed_at`` (when the turn started), NOT on
+``ts`` (when the record was published). Completion ``observed_at`` values are
+telemetry-only and cannot move a promotion window. Publication and observation
+times differ by design — a turn stranded by a bridge exit is published when the
+*next* turn on its channel arrives, which for an idle channel is hours or days
+later, and windowing on ``ts`` dated exactly the populations this slice exists to
+measure to the wrong day (ERRATUM R3-E4/E4-5).
+
+Completion R0–R4 records are displayed separately and never enter segmentation,
+turn/day counts, publication provenance, coverage, or integrity denominators.
+Their fresh reads are independent, non-atomic samples: a prefix may survive a
+crash and different sites may describe different mailbox episodes, so the rows
+must not be interpreted as one completion snapshot.
 
 Promotion criteria (design §5.3, S2's share of the table). All of them are
 evaluated over ONE segment — the newest contiguous run of samples at a single
@@ -278,8 +286,10 @@ def apply_window(events: list[dict], days: int | None) -> list[dict]:
 
     if days is None or not events:
         return events
-    newest = max(event_time(event) for event in events)
-    floor = newest - timedelta(days=days)
+    lifecycle_times = [event_time(event) for event in events if is_axis_a_event(event)]
+    if not lifecycle_times:
+        return events
+    floor = max(lifecycle_times) - timedelta(days=days)
     return [event for event in events if event_time(event) > floor]
 
 
@@ -290,6 +300,22 @@ def turn_key(event: dict) -> tuple:
         event.get("runtime_ptr"),
         event.get("channel_id"),
         event.get("turn_id"),
+    )
+
+
+def is_axis_a_event(event: dict) -> bool:
+    return event.get("site") in {"bridge_entry", "stream_loop", "loop_exit"} and isinstance(
+        event.get("axis_a"), dict
+    )
+
+
+def completion_scope_counts(events: list[dict]) -> dict:
+    return dict(
+        Counter(
+            f"{event.get('site')}:{event.get('scope')}:{event.get('scope_reason')}"
+            for event in events
+            if str(event.get("site") or "").startswith("completion_")
+        )
     )
 
 
@@ -334,6 +360,7 @@ def segment_events(events: list[dict]) -> list[dict]:
         (
             (event_time(event), str(event.get("cohort_fingerprint")), event)
             for event in events
+            if is_axis_a_event(event)
         ),
         key=lambda item: (item[0], item[1]),
     )
@@ -362,8 +389,9 @@ def build_segment(fingerprint: str, run: list[tuple[datetime, dict]]) -> dict:
 
 
 def tally(events: list[dict]) -> dict:
-    """Everything counted per event, over whatever slice is handed in."""
+    """Promotion counts over an already axis-A-only segment."""
 
+    events = [event for event in events if is_axis_a_event(event)]
     days = {event_time(event).date().isoformat() for event in events}
     turns = {turn_key(event) for event in events}
     sites = Counter()
@@ -371,7 +399,6 @@ def tally(events: list[dict]) -> dict:
     rowless_turns: set[tuple] = set()
     range_shapes = Counter()
     stream = Counter()
-    completion_scopes = Counter()
     unmeasured = Counter()
     # Provenance is a property of the publication, so it is counted per turn: all
     # three of a turn's site records are written by one call and carry one value.
@@ -405,10 +432,6 @@ def tally(events: list[dict]) -> dict:
             for field in UNMEASURED_UNTIL_S7A:
                 if field not in axis_a:
                     unmeasured[field] += 1
-        elif site and site.startswith("completion_"):
-            completion_scopes[
-                f"{site}:{event.get('scope')}:{event.get('scope_reason')}"
-            ] += 1
 
     reasons = Counter(reason_of_turn.values())
     published = sum(reasons.values())
@@ -420,7 +443,6 @@ def tally(events: list[dict]) -> dict:
         "rowless_continuation_turns": len(rowless_turns),
         "stream_gate": dict(stream),
         "lease_range_shapes": dict(range_shapes),
-        "completion_scopes": dict(completion_scopes),
         "unmeasured_fields": dict(unmeasured),
         "publish_reasons": dict(reasons),
         # Displayed, never gated (see the module docstring). This is the share of
@@ -541,9 +563,16 @@ def scoped_integrity(target: dict | None, by_file: dict[str, dict]) -> dict:
 
 
 def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
-    segments = segment_events(events)
+    lifecycle_events = [event for event in events if is_axis_a_event(event)]
+    segments = segment_events(lifecycle_events)
     target = segments[-1] if segments else None
     target_counts = tally(target["events"]) if target else tally([])
+    target_fingerprint = target["cohort_fingerprint"] if target else None
+    target_counts["completion_scopes"] = completion_scope_counts(
+        event
+        for event in events
+        if str(event.get("cohort_fingerprint")) == target_fingerprint
+    )
     integrity = scoped_integrity(target, by_file)
     criteria = criteria_for(target_counts, stage, integrity)
 
@@ -569,7 +598,7 @@ def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
         ],
         # Context only. Promotion is judged on the target segment above, because
         # two segments can sit at different dial positions.
-        "all_segments_turn_samples": len({turn_key(event) for event in events}),
+        "all_segments_turn_samples": len({turn_key(event) for event in lifecycle_events}),
         "rowless_no_range_share": None,
         "line_integrity": integrity,
         # Context only, for the same reason `all_segments_turn_samples` is: the

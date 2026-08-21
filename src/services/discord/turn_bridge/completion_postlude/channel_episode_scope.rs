@@ -11,8 +11,12 @@
 //! `Idle` read still has a read-to-effect race and cannot distinguish “no successor”
 //! from “a successor already finished.” A nonce-fallback `Mine` proves an episode,
 //! not one rehydration attempt, so duplicate actors for the same nonce can both pass.
-//! TUI-direct bridge entry does not register its token in a mailbox; absent handles
-//! therefore remain observable as `Unprovable` rather than being defaulted to idle.
+//! TUI-direct first creates a synthetic mailbox claim but its bridge mints a separate
+//! token. After synthetic release it reads `Idle` when no successor exists and
+//! `Foreign` when a successor is active, not normally `Unprovable`. A foreign read
+//! can suppress the final status write and leave the namespaced TUI session stuck
+//! `TURN_ACTIVE`; this round makes that residue unconditionally visible rather than
+//! transporting the synthetic claim witness into the bridge.
 
 use std::sync::Arc;
 
@@ -119,6 +123,7 @@ pub(super) struct ChannelEpisodeProbe<'a> {
     channel_id: ChannelId,
     provider: &'a super::ProviderKind,
     turn_id: u64,
+    turn_source: &'static str,
     own_nonce: Option<String>,
     mine: Arc<CancelToken>,
 }
@@ -136,11 +141,15 @@ impl<'a> ChannelEpisodeProbe<'a> {
             channel_id,
             provider,
             turn_id: state.effective_finalizer_turn_id(),
+            turn_source: state.turn_source.as_str(),
             own_nonce: state.turn_nonce.clone(),
             mine: mine.clone(),
         }
     }
 
+    /// Each call is a fresh witness for one effect group. Callers must not reuse it
+    /// across await-separated groups; R4 is the explicit accepted exception passed
+    /// to the final epilogue and may be stale by the watcher-resume effect.
     pub(super) async fn read(&self, site: &'static str) -> ChannelEpisodeDecision {
         // Deliberately bypass `mailbox_snapshot`: that helper maps an absent handle
         // to `Default`, which is indistinguishable from idle and would fail open.
@@ -157,10 +166,23 @@ impl<'a> ChannelEpisodeProbe<'a> {
                 turn_id: self.turn_id,
                 channel_id: self.channel_id.get(),
                 site,
+                turn_source: self.turn_source,
                 scope: decision.scope_label(),
                 scope_reason: decision.reason_label(),
             },
         );
+        if !decision.permits_channel_effects() {
+            tracing::warn!(
+                target: "agentdesk::relay_authority_completion_suppressed",
+                site,
+                scope = decision.scope_label(),
+                scope_reason = decision.reason_label(),
+                turn_source = self.turn_source,
+                channel_id = self.channel_id.get(),
+                "completion channel effects suppressed"
+            );
+            authority_observation::record_completion_suppression();
+        }
         decision
     }
 }
@@ -237,6 +259,79 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn tui_direct_synthetic_release_is_idle_but_an_active_successor_is_foreign() {
+        use crate::services::turn_orchestrator::ActiveTurnKind;
+        use serenity::all::{MessageId, UserId};
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = crate::services::provider::ProviderKind::Claude;
+        let channel_id = ChannelId::new(5_464_321);
+        let synthetic = Arc::new(CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn_kinded(
+                &shared,
+                channel_id,
+                synthetic,
+                UserId::new(1),
+                MessageId::new(10),
+                ActiveTurnKind::Background,
+            )
+            .await
+        );
+        crate::services::discord::mailbox_finish_turn(&shared, &provider, channel_id).await;
+
+        let bridge = Arc::new(CancelToken::new());
+        let mut state = serde_json::from_value::<InflightTurnState>(serde_json::json!({
+            "version": 9,
+            "provider": "claude",
+            "channel_id": channel_id.get(),
+            "channel_name": "adk-claude-test",
+            "request_owner_user_id": 1,
+            "user_msg_id": 0,
+            "current_msg_id": 10,
+            "current_msg_len": 0,
+            "user_text": "tui-direct",
+            "source": "text",
+            "session_id": null,
+            "tmux_session_name": null,
+            "output_path": null,
+            "input_fifo_path": null,
+            "last_offset": 0,
+            "full_response": "",
+            "response_sent_offset": 0,
+            "started_at": "2026-08-20 00:00:00",
+            "updated_at": "2026-08-20 00:00:00"
+        }))
+        .expect("TUI-direct inflight state");
+        state.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+        let probe = ChannelEpisodeProbe::new(&shared, channel_id, &provider, &state, &bridge);
+        let idle = probe.read("completion_r0").await;
+        assert_eq!(idle.scope, ChannelEpisodeScope::Idle);
+        assert!(idle.permits_channel_effects());
+
+        let successor = Arc::new(CancelToken::new());
+        assert!(
+            crate::services::discord::mailbox_try_start_turn_kinded(
+                &shared,
+                channel_id,
+                successor,
+                UserId::new(2),
+                MessageId::new(11),
+                ActiveTurnKind::UserOrAgent,
+            )
+            .await
+        );
+        let before = authority_observation::observation_report().completion_suppressions;
+        let foreign = probe.read("completion_r1").await;
+        assert_eq!(foreign.scope, ChannelEpisodeScope::Foreign);
+        assert!(!foreign.permits_channel_effects());
+        assert_eq!(
+            authority_observation::observation_report().completion_suppressions,
+            before + 1
+        );
+    }
+
     #[test]
     fn empty_nonce_never_proves_ownership() {
         let mine = Arc::new(CancelToken::from_persisted_turn_nonce(None));
@@ -264,8 +359,9 @@ mod tests {
     }
 
     /// Source pin for design L-4. This fixes the complete production caller set and
-    /// its token-registration contract. The two TUI-direct calls intentionally mint
-    /// bridge-only tokens, so their missing mailbox is measured as `Unprovable`.
+    /// its token-registration contract. TUI-direct bridges intentionally mint a token
+    /// distinct from their preceding synthetic claim, yielding Idle after release or
+    /// Foreign when a successor has claimed the retained mailbox handle.
     #[test]
     fn bridge_entry_sites_pin_mailbox_token_registration_contract() {
         let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

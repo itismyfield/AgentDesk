@@ -296,7 +296,11 @@ pub(super) async fn complete_bridge_single_message_completion_footer(
     indicator: &str,
     background: bool,
     background_agent_pending: bool,
+    permits_channel_effects: bool,
 ) -> bool {
+    if !permits_channel_effects {
+        return true;
+    }
     super::footer_view_reconciler::note_turn_completed_footer(
         super::footer_view_reconciler::FooterViewWriter::bridge(shared),
         channel_id,
@@ -359,6 +363,7 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGatew
     indicator: &str,
     this_turn_status_panel_generation: u64,
     tmux_session_name: Option<&str>,
+    permits_channel_effects: bool,
 ) -> bool {
     complete_bridge_terminal_footer_or_status_panel_with_sniffer(
         shared,
@@ -376,6 +381,7 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel<G: TurnGatew
         indicator,
         this_turn_status_panel_generation,
         tmux_session_name.map(str::to_string),
+        permits_channel_effects,
         |tmux_session_name| async move {
             // #4353: `super::super::tmux` is cfg(unix). No tmux pane means nothing
             // can be pending in one.
@@ -417,6 +423,7 @@ pub(super) async fn complete_bridge_terminal_footer_or_status_panel_with_sniffer
     indicator: &str,
     this_turn_status_panel_generation: u64,
     tmux_session_name: Option<String>,
+    permits_channel_effects: bool,
     sniff_background_agent_pending: S,
 ) -> bool
 where
@@ -498,6 +505,7 @@ where
                         indicator,
                         false,
                         background_agent_pending,
+                        permits_channel_effects,
                     )
                     .await
                 }
@@ -670,6 +678,7 @@ mod tests {
             "⠸",
             false,
             true,
+            true,
         )
         .await;
 
@@ -682,6 +691,46 @@ mod tests {
         assert!(rendered.has_unfinished_entries);
         assert!(block.contains("Background agents"));
         assert!(block.contains("Waiting for background agents ⠸"));
+    }
+
+    #[tokio::test]
+    async fn stale_single_message_completion_cannot_mutate_new_owner_status() {
+        let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+        let shared = super::super::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(5_464_330);
+        let provider = ProviderKind::Claude;
+        shared
+            .ui
+            .placeholder_live_events
+            .push_status_event(channel_id, StatusEvent::Heartbeat);
+        let before = shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, &provider, "⠸");
+
+        assert!(
+            complete_bridge_single_message_completion_footer(
+                shared.as_ref(),
+                channel_id,
+                MessageId::new(5_464_331),
+                super::footer_view_reconciler::CompletionFooterOwner::new(5_464_329, 1_700_000_000),
+                &provider,
+                1_700_000_000,
+                "stale final answer",
+                "⠸",
+                false,
+                false,
+                false,
+            )
+            .await
+        );
+
+        let after = shared
+            .ui
+            .placeholder_live_events
+            .render_completion_footer(channel_id, &provider, "⠸");
+        assert_eq!(after.block, before.block);
+        assert_eq!(after.has_unfinished_entries, before.has_unfinished_entries);
     }
 
     #[tokio::test]
@@ -713,6 +762,7 @@ mod tests {
                 "⠸",
                 0,
                 Some("AgentDesk-claude-background-test".to_string()),
+                true,
                 move |tmux_session_name| async move {
                     sniffer_observed_tmux_session
                         .lock()

@@ -663,6 +663,7 @@ async fn bridge_status_panel_completion_producer_threads_sniffed_background_agen
             "⠸",
             0,
             Some("AgentDesk-claude-status-panel-background-test".to_string()),
+            true,
             move |tmux_session_name| async move {
                 sniffer_observed_tmux_session
                     .lock()

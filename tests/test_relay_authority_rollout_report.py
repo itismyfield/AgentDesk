@@ -189,7 +189,7 @@ class RolloutReportTest(unittest.TestCase):
         self.assertEqual(summary["criteria"]["loop_exit_coverage"]["share"], 1.0)
         self.assertEqual(len(summary["segments"]), 1)
 
-    def test_completion_scope_distribution_includes_tui_direct_unprovable(self):
+    def test_completion_scope_distribution_displays_tui_direct_idle_and_foreign(self):
         observed = BASE
         events = turns(210, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))
         events.extend(
@@ -198,15 +198,15 @@ class RolloutReportTest(unittest.TestCase):
                     site="completion_r1",
                     turn=90_001,
                     observed=observed,
-                    scope="unprovable",
-                    scope_reason="mailbox_absent",
+                    scope="idle",
+                    scope_reason="mailbox_idle",
                 ),
                 completion_event(
                     site="completion_r2",
                     turn=90_001,
                     observed=observed,
-                    scope="unprovable",
-                    scope_reason="mailbox_absent",
+                    scope="foreign",
+                    scope_reason="foreign_episode",
                 ),
             ]
         )
@@ -215,11 +215,55 @@ class RolloutReportTest(unittest.TestCase):
         self.assertEqual(
             summary["target_segment"]["completion_scopes"],
             {
-                "completion_r1:unprovable:mailbox_absent": 1,
-                "completion_r2:unprovable:mailbox_absent": 1,
+                "completion_r1:idle:mailbox_idle": 1,
+                "completion_r2:foreign:foreign_episode": 1,
             },
         )
         self.assertTrue(summary["promotion_ready"], summary["criteria"])
+
+    def test_completion_records_neither_dilute_corruption_nor_change_verdict(self):
+        """210 axis-A turns + 8 damaged lines judge identically with completion telemetry."""
+
+        lifecycle = turns(210, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))
+        completions = [
+            completion_event(
+                site=f"completion_r{site}",
+                turn=90_000 + index,
+                observed=BASE + timedelta(days=index % 7),
+                scope="idle",
+                scope_reason="mailbox_idle",
+            )
+            for index in range(210)
+            for site in range(1, 5)
+        ]
+        without = self.run_report(lifecycle, extra_lines=["{not json"] * 8)
+        with_completion = self.run_report(
+            lifecycle + completions, extra_lines=["{not json"] * 8
+        )
+
+        self.assertEqual(without["promotion_ready"], with_completion["promotion_ready"])
+        self.assertFalse(with_completion["promotion_ready"])
+        self.assertEqual(without["criteria"], with_completion["criteria"])
+        self.assertEqual(with_completion["line_integrity"]["lines"], 638)
+
+    def test_completion_only_turn_keys_do_not_raise_axis_a_turn_samples(self):
+        lifecycle = turns(199, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))
+        completions = [
+            completion_event(
+                site="completion_r1",
+                turn=99_000 + index,
+                observed=BASE + timedelta(days=20 + index),
+                scope="foreign",
+                scope_reason="foreign_episode",
+            )
+            for index in range(4)
+        ]
+
+        summary = self.run_report(lifecycle + completions)
+        self.assertEqual(summary["target_segment"]["turn_samples"], 199)
+        self.assertEqual(summary["all_segments_turn_samples"], 199)
+        self.assertEqual(summary["criteria"]["turn_samples"]["value"], 199)
+        self.assertFalse(summary["promotion_ready"])
 
     def test_entry_only_turns_do_not_pass_on_the_turn_count(self):
         """legB P1-2: 200 turns, 7 days, and no stream or loop-exit record.
@@ -693,6 +737,23 @@ class RolloutReportTest(unittest.TestCase):
         days = {item["observed_at"][:10] for item in kept}
         self.assertLessEqual(len(days), 3)
         self.assertIn((BASE + timedelta(days=6)).date().isoformat(), days)
+
+    def test_completion_observed_at_does_not_move_the_axis_a_day_window(self):
+        lifecycle = turns(210, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))
+        future_completion = completion_event(
+            site="completion_r4",
+            turn=99_999,
+            observed=BASE + timedelta(days=365),
+            scope="foreign",
+            scope_reason="foreign_episode",
+        )
+
+        kept = report.apply_window(lifecycle + [future_completion], 2)
+        lifecycle_days = {
+            item["observed_at"][:10] for item in kept if report.is_axis_a_event(item)
+        }
+        self.assertIn((BASE + timedelta(days=6)).date().isoformat(), lifecycle_days)
+        self.assertGreater(len(lifecycle_days), 0)
 
     def test_an_empty_log_is_not_promotion_ready(self):
         summary = self.run_report([], argv=[])
