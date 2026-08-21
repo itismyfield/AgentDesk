@@ -123,7 +123,7 @@ fn observe_restore_inflight_snapshot(
     tracing::info!(provider = %provider.as_str(), snapshot_rows = states.len(), boot_elapsed_ms = boot_elapsed.as_millis(), "restore_inflight snapshot loaded");
     for state in states
         .iter()
-        .filter(|state| state.born_generation == current_generation)
+        .filter(|state| state.born_generation != 0 && state.born_generation == current_generation)
     {
         tracing::warn!(provider = %provider.as_str(), channel_id = state.channel_id, user_msg_id = state.user_msg_id, born_generation = state.born_generation, current_generation, boot_elapsed_ms = boot_elapsed.as_millis(), "restore_inflight snapshot contains a row authored by the running process");
     }
@@ -146,7 +146,11 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
 
     let settings_snapshot = shared.settings.read().await.clone();
 
-    // Reconcile wrappers preserve planned restarts; loader expiry bounds the skip to 1800s.
+    // If generation allocation cannot advance the positive durable epoch (flock failure,
+    // atomic-write failure, or u64::MAX saturation), a prior-process row can look current
+    // and remain for this process's lifetime. This intentional over-suppression prevents
+    // relay loss; its bound is the next boot that successfully advances the epoch.
+    // An allocation-provenance witness belongs to the separate E1.2 follow-up.
     for mut state in states {
         // #897 round-4 High: rebind_origin inflights are synthetic
         // placeholders owned by `/api/inflight/rebind` and do NOT carry
@@ -784,6 +788,10 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                             }
                         };
                         if watcher_claimed {
+                            shared
+                                .restart
+                                .recovering_channels
+                                .insert(channel_id, std::time::Instant::now());
                             let ts2 = chrono::Local::now().format("%H:%M:%S");
                             if truncated {
                                 tracing::info!(
@@ -2019,6 +2027,11 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             continue;
         }
 
+        shared
+            .restart
+            .recovering_channels
+            .insert(channel_id, std::time::Instant::now());
+
         let persisted_session_path = load_last_session_path(
             shared.pg_pool.as_ref(),
             &shared.token_hash,
@@ -2424,6 +2437,19 @@ mod tests {
         assert!(without_current.contains("restore_inflight snapshot loaded"));
         assert!(!without_current.contains("authored by the running process"));
 
+        let mut legacy = recovery_state(provider.clone(), 5_462_300);
+        legacy.born_generation = 0;
+        crate::services::discord::runtime_store::set_process_generation_for_tests(Some(0));
+        let with_zero_generation = capture_logs(|| {
+            super::observe_restore_inflight_snapshot(
+                &provider,
+                &[legacy],
+                std::time::Duration::from_millis(19),
+            );
+        });
+        assert!(!with_zero_generation.contains("authored by the running process"));
+
+        crate::services::discord::runtime_store::set_process_generation_for_tests(Some(42));
         let mut current = recovery_state(provider.clone(), 5_462_302);
         current.born_generation = 42;
         let with_current = capture_logs(|| {
@@ -2472,8 +2498,11 @@ mod tests {
         crate::services::discord::runtime_store::set_process_generation_for_tests(None);
     }
 
+    /// Lexical ratchet for the restore clear spellings and three recovery-marker sites.
+    /// It is not execution proof: aliases, re-exports, macro-constructed calls, and
+    /// indirection can remain unseen, while comments can satisfy occurrence counts.
     #[test]
-    fn every_restore_clear_routes_through_reconcile_gate() {
+    fn restore_clear_and_recovery_marker_sites_are_lexically_pinned() {
         let source = include_str!("restore_inflight.rs");
         let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
         assert_eq!(
@@ -2494,14 +2523,24 @@ mod tests {
                 .count(),
             0
         );
-        let claim_success = production
+        let restart_report_claim = production
+            .split("if watcher_claimed {")
+            .nth(1)
+            .expect("restart-report watcher claim success block");
+        assert!(restart_report_claim.starts_with(
+            "\n                            shared\n                                .restart\n                                .recovering_channels\n                                .insert("
+        ));
+        let pane_alive_claim = production
             .split("if watcher_claimed {")
             .nth(2)
             .expect("pane-alive watcher claim success block");
-        assert!(claim_success.starts_with(
+        assert!(pane_alive_claim.starts_with(
             "\n                    shared\n                        .restart\n                        .recovering_channels\n                        .insert("
         ));
-        assert_eq!(production.matches(".recovering_channels\n").count(), 1);
+        assert!(production.contains(
+            "            continue;\n        }\n\n        shared\n            .restart\n            .recovering_channels\n            .insert("
+        ));
+        assert_eq!(production.matches(".recovering_channels\n").count(), 3);
     }
 
     fn generic_recovery_runtime_ready(

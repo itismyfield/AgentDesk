@@ -106,6 +106,6 @@ count = 4
 ratchet = "giant_file_ratchet"
 file = "src/services/discord/recovery_engine/restore_inflight.rs"
 old_cap = 2335
-new_cap = 2343
+new_cap = 2356
 decompose_issue = 5462
 count = 1

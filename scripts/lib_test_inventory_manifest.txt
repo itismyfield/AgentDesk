@@ -3970,9 +3970,9 @@ services::discord::recovery_engine::recovery_two_message_panel::tests::replaceme
 services::discord::recovery_engine::recovery_two_message_panel::tests::replacement_owner_survives_recovery_send_race
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_reanchors_stranded_panel_and_persists_new_epoch
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_recreates_missing_panel_without_duplicate_old_delete
-services::discord::recovery_engine::restore_inflight::tests::every_restore_clear_routes_through_reconcile_gate
 services::discord::recovery_engine::restore_inflight::tests::generic_recovery_consumes_restart_before_runtime_ready_and_persists_runtime_stamp
 services::discord::recovery_engine::restore_inflight::tests::restore_claude_tui_without_runtime_output_uses_tmux_fallback_path
+services::discord::recovery_engine::restore_inflight::tests::restore_clear_and_recovery_marker_sites_are_lexically_pinned
 services::discord::recovery_engine::restore_inflight::tests::restore_reconcile_wrappers_preserve_current_rows_and_use_rebind_path
 services::discord::recovery_engine::restore_inflight::tests::restore_rollout_output_path_patch_preserves_concurrent_relay_fields
 services::discord::recovery_engine::restore_inflight::tests::restore_snapshot_warns_only_for_current_generation_rows
