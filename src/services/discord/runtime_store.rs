@@ -526,7 +526,10 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
 }
 
 /// #5254 D10: fsync the directory entry `atomic_write` published, so the rename
-/// itself — not just the bytes `sync_all` already flushed — survives a crash.
+/// itself — not just the bytes `sync_all` already flushed — is handed to the
+/// filesystem. The contract stops at the calls: `sync_all` on the file, then an
+/// fsync of the parent directory. What either one survives is not a claim this
+/// helper makes.
 ///
 /// Deliberately a second call rather than a flag on `atomic_write`: the inflight
 /// hot path must not pay a directory fsync, and callers that need durability

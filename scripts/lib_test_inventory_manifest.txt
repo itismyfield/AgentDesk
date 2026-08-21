@@ -4509,8 +4509,9 @@ services::discord::runtime_bootstrap::session_gc::thread_session_gc_tests::threa
 services::discord::runtime_bootstrap::shutdown::lifecycle_tests::invariant_gateway_exit_releases_catalog_owner_before_diagnostics_and_takeover
 services::discord::runtime_bootstrap::spawns::tests::a_committed_restart_survives_late_cancellation_in_a_dedicated_process
 services::discord::runtime_bootstrap::spawns::tests::a_failed_restore_keeps_the_disposed_marker_as_residue
+services::discord::runtime_bootstrap::spawns::tests::an_absent_latch_defers_to_the_identity_artifact_before_rolling_back
 services::discord::runtime_bootstrap::spawns::tests::an_unsafe_nonce_publishes_nothing_and_refuses_the_commit
-services::discord::runtime_bootstrap::spawns::tests::cancellation_after_sentinel_write_before_rename_rolls_back
+services::discord::runtime_bootstrap::spawns::tests::cancellation_before_any_staging_publishes_nothing_and_rolls_back
 services::discord::runtime_bootstrap::spawns::tests::cancellation_before_durable_commit_rolls_back_but_after_commit_stays_committed
 services::discord::runtime_bootstrap::spawns::tests::cancellation_during_prepare_drain_drops_guard_and_restores_admission
 services::discord::runtime_bootstrap::spawns::tests::cancellation_guard_rolls_back_consumed_slot_when_cancel_arrives_after_finish

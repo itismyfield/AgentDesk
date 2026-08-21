@@ -1,7 +1,8 @@
 use super::*;
 
 use super::gateway_lease_recovery::{
-    publish_restart_terminal, restart_file_nonce, restart_request_artifact_path,
+    TerminalProof, publish_restart_terminal, restart_file_nonce, restart_request_artifact_path,
+    terminal_proof,
 };
 
 pub(super) struct DeferredRestartPermit;
@@ -48,18 +49,32 @@ impl DeferredRestartCancellationGuard {
     }
 }
 
+/// #5254 ERRATUM §E8.1: has this process passed the point of no return for
+/// `nonce`? The latch is a fast-path cache, not the authority — rename and
+/// `latch_commit` are two calls, so a task preempted between them reads `None`
+/// from a process that has already committed. The filesystem owns the point of
+/// no return, so a `None` latch re-reads the identity artifact under S1's
+/// authority: `Proven` only, the identity name present with its body nonce
+/// agreeing, exactly as `terminal_proof` decides it everywhere else.
+///
+/// This narrows; it does not close. The residue is the stat↔rename race, the
+/// class D4⑤ already accepts for its closest-practical pre-check, and closing
+/// it would need a mutex spanning the commit — the direction §12-5 rejected.
+fn restart_commit_is_proven(root: &std::path::Path, nonce: &str) -> bool {
+    committed_nonce().as_deref() == Some(nonce)
+        || terminal_proof(root, nonce) == TerminalProof::Proven
+}
+
 impl Drop for DeferredRestartCancellationGuard {
     fn drop(&mut self) {
-        // #5254 D4④: read the latch before any file. Commit and abort are
-        // exclusive within one process, so once this nonce passed the point of
-        // no return, unfencing here would reopen a runtime that is leaving.
-        if committed_nonce().as_deref() == Some(self.nonce.as_str()) {
+        // #5254 D4④ + §E8.1: commit and abort are exclusive from the point of
+        // no return onward, and the identity artifact — not the latch alone —
+        // is what says we are past it. Returning without a rollback is what
+        // disarming means for a guard that is already being dropped.
+        if !self.armed || restart_commit_is_proven(&self.root, &self.nonce) {
             return;
         }
-        if self.armed
-            && (self.cancelled()
-                || restart_request_matches(&self.root, "restart_pending", &self.nonce))
-        {
+        if self.cancelled() || restart_request_matches(&self.root, "restart_pending", &self.nonce) {
             rollback_deferred_restart(&self.shared);
         }
     }
@@ -154,8 +169,10 @@ fn identity_safe_dispose_restart_marker(root: &std::path::Path, nonce: &str) {
 /// The CAS half of D11-4 step (1). Removing the disposed file has to be earned:
 /// the body is ours, or the canonical name was restored from it. Neither holds
 /// once a third request re-created the canonical name — `hard_link` fails with
-/// `EEXIST` — and the non-destructive lower bound keeps that inode reachable, so
-/// the request in the middle reads `restart-lease-lost` instead of vanishing.
+/// `EEXIST` — so the lower bound keeps that inode for forensics only. It buys
+/// no reachability: `.dispose.*` has no reader and no automatic successor
+/// (§12-7). The identity name is what makes the request in the middle reachable
+/// and what names it `restart-lease-lost`.
 fn restore_foreign_disposed_marker(root: &std::path::Path, disposed: &str, nonce: &str) {
     let path = root.join(disposed);
     if restart_request_matches(root, disposed, nonce)
@@ -401,11 +418,16 @@ pub(super) fn run_bot_spawn_deferred_restart_poller(
                         continue;
                     }
                     if restart_request_matches(&root, "restart_cancelled", &nonce) {
-                        rollback_deferred_restart(&shared_for_deferred);
-                        tracing::info!(
-                            provider = provider_for_deferred.as_str(),
-                            "restart request cancelled; intake admission restored"
-                        );
+                        // #5254 §E8.1: this is the second site that decides a
+                        // rollback, so it owes the same authority check — an
+                        // absent latch is not evidence that nothing committed.
+                        if !restart_commit_is_proven(&root, &nonce) {
+                            rollback_deferred_restart(&shared_for_deferred);
+                            tracing::info!(
+                                provider = provider_for_deferred.as_str(),
+                                "restart request cancelled; intake admission restored"
+                            );
+                        }
                         continue;
                     }
                     let Some((shutdown_permit, mut cancellation_guard)) =

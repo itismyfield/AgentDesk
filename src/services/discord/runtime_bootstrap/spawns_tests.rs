@@ -161,8 +161,12 @@ async fn cancellation_during_prepare_drain_drops_guard_and_restores_admission() 
     assert!(!shared.restart.shutdown_counted.load(Ordering::Acquire));
 }
 
+/// #5254 D4③ (S2): the commit helper decides cancellation before it writes any
+/// tmp file, so there is no "sentinel staged, rename pending" window left to
+/// model — the contract this covers is that a cancellation present at the
+/// decision point publishes nothing at all and still rolls back.
 #[test]
-fn cancellation_after_sentinel_write_before_rename_rolls_back() {
+fn cancellation_before_any_staging_publishes_nothing_and_rolls_back() {
     let shared = crate::services::discord::make_shared_data_for_tests();
     shared.restart.shutdown_remaining.store(1, Ordering::SeqCst);
     let root = tempfile::tempdir().expect("runtime root");
@@ -179,17 +183,17 @@ fn cancellation_after_sentinel_write_before_rename_rolls_back() {
         root.path().to_path_buf(),
         nonce.to_owned(),
     );
-    // This models timeout publication after sentinel staging but before
-    // rename. The production helper must observe it after writing its tmp
-    // sentinel and leave no committed acknowledgement behind.
+    // Timeout publication reaching the runtime before the commit decision. The
+    // production helper reads it at the closest practical point ahead of any
+    // staging, so nothing — not even a tmp file — is written on this path.
     std::fs::write(
         root.path().join("restart_cancelled"),
         format!("nonce={nonce}\n"),
     )
-    .expect("cancel before rename");
+    .expect("cancel before the commit decision");
     assert!(
         !commit_deferred_restart_sentinel(root.path(), &ProviderKind::Codex, nonce, &guard,)
-            .expect("sentinel staging")
+            .expect("cancellation is decided, not raised")
     );
     assert!(!root.path().join("restart_persisted").exists());
     drop(guard);
@@ -319,8 +323,11 @@ fn stale_nonce_cannot_commit_persistence_or_remove_newer_marker() {
 /// #5254 D11-2: the identity name is what the commit publishes, and the index
 /// is a hard link derived from it. Same inode is the whole point — a reader that
 /// finds our nonce under the fixed name with no identity beside it is looking at
-/// a pre-I2c publisher, and that inference only holds while this publisher never
-/// writes the index by itself (ERRATUM §E5.2).
+/// a pre-I2c publisher. That is a proposition about the current request's
+/// terminal-proof judging window only (R3-E5 correction 1): a later sweep may
+/// unlink the identity and leave our own index standing. Even inside the window
+/// it holds only while this publisher never writes the index by itself (ERRATUM
+/// §E5.2, tightened by §E8.2 to a durable identity directory entry).
 #[test]
 fn commit_publishes_the_identity_and_derives_the_index_from_it() {
     let shared = crate::services::discord::make_shared_data_for_tests();
@@ -551,6 +558,68 @@ fn commit_latch_child() {
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 0);
 }
 
+/// #5254 ERRATUM §E8.1: every rollback site re-reads the identity artifact when
+/// the latch reads `None`, so the rename→`latch_commit` preemption window cannot
+/// unfence a runtime whose point of no return is already on disk. The latch is
+/// deliberately never set for this nonce — that absence *is* the window — and
+/// the first arm keeps the pre-E8.1 behaviour for the case where no identity
+/// exists, which is still a genuine abort.
+#[test]
+fn an_absent_latch_defers_to_the_identity_artifact_before_rolling_back() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    shared.restart.shutdown_remaining.store(1, Ordering::SeqCst);
+    let root = tempfile::tempdir().expect("runtime root");
+    let nonce = "preempted-before-the-latch";
+    std::fs::write(
+        root.path().join("restart_pending"),
+        format!("nonce={nonce}\n"),
+    )
+    .expect("restart request");
+    std::fs::write(
+        root.path().join("restart_cancelled"),
+        format!("nonce={nonce}\n"),
+    )
+    .expect("cancellation racing the commit");
+    assert_ne!(
+        committed_nonce().as_deref(),
+        Some(nonce),
+        "the window under test is exactly an unset latch"
+    );
+
+    // No identity artifact: the guard has nothing to defer to, so the
+    // cancellation still wins and admission is restored.
+    let permit = begin_deferred_restart(&shared).expect("restart permit");
+    assert!(finish_deferred_restart(&shared, permit));
+    drop(DeferredRestartCancellationGuard::new(
+        shared.clone(),
+        root.path().to_path_buf(),
+        nonce.to_owned(),
+    ));
+    assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
+    assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
+
+    // The identity artifact exists now — published by the task that has not yet
+    // reached `latch_commit`. It is the point of no return, latch or no latch.
+    std::fs::write(
+        root.path().join(format!("restart_persisted.{nonce}")),
+        format!("nonce={nonce}\n"),
+    )
+    .expect("identity artifact from the preempted task");
+    let permit = begin_deferred_restart(&shared).expect("restart permit after rollback");
+    assert!(finish_deferred_restart(&shared, permit));
+    drop(DeferredRestartCancellationGuard::new(
+        shared.clone(),
+        root.path().to_path_buf(),
+        nonce.to_owned(),
+    ));
+    assert!(
+        shared.restart.intake_worker_lifecycle.admission_is_fenced(),
+        "a committed identity must not be unfenced by a late cancellation"
+    );
+    assert!(shared.restart.shutting_down.load(Ordering::Acquire));
+    assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 0);
+}
+
 /// #5254 §9-0 auxiliary assertion: line adjacency, which the design grades as a
 /// regression hint rather than a proof — it is format-fragile and says nothing
 /// about control flow. It does pin the two orderings the commit contract needs:
@@ -622,6 +691,23 @@ fn nothing_between_the_point_of_no_return_and_the_exit_can_undo_it() {
     assert!(
         !commit_body.contains("remove_file"),
         "#5254 D4③: a published acknowledgement is never withdrawn by its publisher"
+    );
+
+    // The point of no return itself now lives in `publish_restart_terminal`, so
+    // the two slices above would miss a retraction reintroduced beside the
+    // rename. This publisher may unlink exactly one thing — the staged index
+    // link it created — and never the identity it just committed.
+    const PUBLISHER: &str = include_str!("gateway_lease_recovery.rs");
+    let (_, publisher_body) = PUBLISHER
+        .split_once("fn publish_restart_terminal")
+        .expect("the terminal publisher still exists");
+    let (publisher_body, _) = publisher_body
+        .split_once("\n}\n")
+        .expect("the terminal publisher still ends");
+    assert_eq!(
+        publisher_body.matches("remove_file").count(),
+        publisher_body.matches("remove_file(&staged)").count(),
+        "#5254 D4③: the publisher unlinks only its own staged index link"
     );
 }
 

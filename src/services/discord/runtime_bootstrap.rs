@@ -73,17 +73,25 @@ pub(super) fn discord_gateway_intents() -> serenity::GatewayIntents {
 
 /// #5254 D4④ (P2-3 disposition Δ28): the in-process commit latch's storage.
 ///
-/// Only the *location* is behind the cfg — both builds run the same `OnceLock`
-/// set/get, so the one-shot semantics the callers depend on are not a test-only
-/// shape. A test binary keeps its latch per thread because `OnceLock` cannot be
-/// reset in-process: one process-global cell would make every commit case in
-/// the binary order-dependent, and libtest's parallel threads would decide that
-/// order. `cargo test` gives each test a thread, so thread-local storage is
-/// exactly the isolation unit.
+/// Both builds run the same `OnceLock` set/get, but what the cfg splits is the
+/// *scope*, not merely the location: production keeps one process-global cell,
+/// a test binary keeps one per thread. `OnceLock` cannot be reset in-process,
+/// so a single global cell would make every commit case in the binary
+/// order-dependent and libtest's parallel threads would decide that order;
+/// `cargo test` gives each test a thread, so thread-local storage is exactly
+/// the isolation unit.
 ///
-/// The honest cost: no unit test observes the production cell. `spawns_tests`
-/// covers the gap from both sides — a subprocess test drives the real commit
-/// path in a dedicated process, and a source assertion pins the shape below.
+/// The honest cost is larger than "no unit test observes the production cell".
+/// Two of D4④'s three read sites — the guard `Drop` and the non-final provider
+/// loop — exist precisely to read the latch from a task *other* than the one
+/// that committed (§11-4), and under the test twin such a cross-task read is
+/// unreproducible in principle: each thread opens its own cell, so the
+/// process-global one-shot those callers depend on is not what any test
+/// observes. `spawns_tests` covers what can be covered from both sides — a
+/// subprocess test drives the real commit path in a dedicated process, and a
+/// source assertion pins the shape below. ERRATUM §E8.1 is what keeps that gap
+/// from being load-bearing: no rollback site treats a `None` latch as a
+/// conclusion any more.
 #[cfg(not(test))]
 fn with_commit_latch<R>(scope: impl FnOnce(&std::sync::OnceLock<String>) -> R) -> R {
     static COMMIT_LATCH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
