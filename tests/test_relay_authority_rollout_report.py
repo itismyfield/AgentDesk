@@ -83,6 +83,17 @@ def event(
     }
 
 
+def completion_event(
+    *, site: str, turn: int, observed: datetime, scope: str, scope_reason: str
+) -> dict:
+    item = event(site=site, turn=turn, observed=observed)
+    item.pop("axis_a")
+    item["publish_reason"] = "post_flush"
+    item["scope"] = scope
+    item["scope_reason"] = scope_reason
+    return item
+
+
 def default_axis_a(site: str) -> dict:
     if site == "bridge_entry":
         return {
@@ -177,6 +188,38 @@ class RolloutReportTest(unittest.TestCase):
         self.assertEqual(summary["criteria"]["turn_samples"]["value"], 210)
         self.assertEqual(summary["criteria"]["loop_exit_coverage"]["share"], 1.0)
         self.assertEqual(len(summary["segments"]), 1)
+
+    def test_completion_scope_distribution_includes_tui_direct_unprovable(self):
+        observed = BASE
+        events = turns(210, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))
+        events.extend(
+            [
+                completion_event(
+                    site="completion_r1",
+                    turn=90_001,
+                    observed=observed,
+                    scope="unprovable",
+                    scope_reason="mailbox_absent",
+                ),
+                completion_event(
+                    site="completion_r2",
+                    turn=90_001,
+                    observed=observed,
+                    scope="unprovable",
+                    scope_reason="mailbox_absent",
+                ),
+            ]
+        )
+
+        summary = self.run_report(events)
+        self.assertEqual(
+            summary["target_segment"]["completion_scopes"],
+            {
+                "completion_r1:unprovable:mailbox_absent": 1,
+                "completion_r2:unprovable:mailbox_absent": 1,
+            },
+        )
+        self.assertTrue(summary["promotion_ready"], summary["criteria"])
 
     def test_entry_only_turns_do_not_pass_on_the_turn_count(self):
         """legB P1-2: 200 turns, 7 days, and no stream or loop-exit record.

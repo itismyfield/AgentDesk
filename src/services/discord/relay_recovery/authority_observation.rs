@@ -12,10 +12,11 @@
 //!
 //! **The no-op claim is about values, not timing.** No caller can consume a
 //! verdict from here, so every judgement and delivery value is what it was. With
-//! recording ON, though, each stream tick takes [`TURNS`], and two sites do a
-//! synchronous encode + file append: loop exit, and a successor's entry gate
-//! *before* its own lifecycle gate and anchor work, so a slow filesystem delays
-//! the new turn. Under the shipped `Legacy`/`0` dial the per-tick path is one
+//! recording ON, though, each stream tick takes [`TURNS`], and publication paths
+//! synchronously encode + append: loop exit; a successor's entry gate *before* its
+//! own lifecycle gate and anchor work; and each completion ownership read after
+//! terminal outcome delivery. A slow filesystem can therefore delay either a new
+//! turn or completion. Under the shipped `Legacy`/`0` dial the per-tick path is one
 //! relaxed load of [`ACTIVE_TURNS`] and none of the rest runs at all.
 //!
 //! Two sinks, one of them authority. The JSONL log
@@ -76,8 +77,9 @@ use crate::config::RelayAuthorityMode;
 /// changed meaning must bump this instead of silently re-interpreting windows
 /// already archived under the old spelling. `v2` adds `observed_at` (E4-5).
 /// `publish_reason` is additive, so it does not bump: the script counts a record
-/// without it as `unattributed` rather than assuming the reassuring value.
-const OBSERVATION_SCHEMA: &str = "relay_authority.axis_a.v2";
+/// without it as `unattributed` rather than assuming the reassuring value. `v3`
+/// adds post-flush completion ownership records with `scope` and `scope_reason`.
+const OBSERVATION_SCHEMA: &str = "relay_authority.axis_a.v3";
 /// Per-channel triage ring depth on `/api/health/detail` (design §5.3).
 const TRIAGE_RING_DEPTH: usize = 16;
 /// How many channels the triage block keeps rings for, least-recently-recorded
@@ -463,6 +465,64 @@ pub(in crate::services::discord) fn record_loop_exit(
     publish(turn, "loop_exit");
 }
 
+/// Record completion ownership after [`record_loop_exit`] has removed and flushed
+/// the coalesced turn buffer. This path intentionally rebuilds the stamp instead of
+/// reviving that buffer or changing S2's loop-exit publication semantics.
+pub(in crate::services::discord) struct CompletionScopeRecord<'a> {
+    pub(in crate::services::discord) shared: &'a SharedData,
+    pub(in crate::services::discord) provider: &'a crate::services::provider::ProviderKind,
+    pub(in crate::services::discord) turn_id: u64,
+    pub(in crate::services::discord) channel_id: u64,
+    pub(in crate::services::discord) site: &'static str,
+    pub(in crate::services::discord) scope: &'static str,
+    pub(in crate::services::discord) scope_reason: &'static str,
+}
+
+pub(in crate::services::discord) fn record_completion_scope(record: CompletionScopeRecord<'_>) {
+    let Some(dial) = observing_dial(record.channel_id) else {
+        return;
+    };
+    record_completion_scope_at(dial, record);
+}
+
+fn record_completion_scope_at(
+    (mode, percent): (RelayAuthorityMode, u8),
+    record: CompletionScopeRecord<'_>,
+) {
+    let CompletionScopeRecord {
+        shared,
+        provider,
+        turn_id,
+        channel_id,
+        site,
+        scope,
+        scope_reason,
+    } = record;
+    let stamp = TurnStamp {
+        host: std::env::var("HOSTNAME").unwrap_or_else(|_| "local".to_string()),
+        api_port: shared.api_port,
+        process_generation: runtime_store::process_generation(),
+        runtime_ptr: format!("{:p}", std::ptr::from_ref(shared)),
+        provider: provider.as_str().to_string(),
+        channel_id,
+        turn_id,
+        observed_at: chrono::Local::now().to_rfc3339(),
+        cohort_fingerprint: cohort::cohort_fingerprint(mode, percent),
+    };
+    let Some(line) = encode_scope(&stamp, site, scope, scope_reason) else {
+        drop_records(1);
+        return;
+    };
+    append_jsonl(&[line]);
+    let mut triage = TRIAGE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *triage
+        .completion_scopes
+        .entry(format!("{site}:{scope}:{scope_reason}"))
+        .or_default() += 1;
+}
+
 const fn guarded_save_label(outcome: GuardedSaveOutcome) -> &'static str {
     match outcome {
         GuardedSaveOutcome::Saved => "saved",
@@ -523,6 +583,36 @@ fn encode(
         stamp,
         site,
         axis_a,
+    })
+    .ok()
+}
+
+fn encode_scope(
+    stamp: &TurnStamp,
+    site: &'static str,
+    scope: &'static str,
+    scope_reason: &'static str,
+) -> Option<String> {
+    #[derive(Serialize)]
+    struct CompletionScopeRecord<'a> {
+        schema: &'static str,
+        ts: String,
+        publish_reason: &'static str,
+        #[serde(flatten)]
+        stamp: &'a TurnStamp,
+        site: &'static str,
+        scope: &'static str,
+        scope_reason: &'static str,
+    }
+
+    serde_json::to_string(&CompletionScopeRecord {
+        schema: OBSERVATION_SCHEMA,
+        ts: chrono::Local::now().to_rfc3339(),
+        publish_reason: "post_flush",
+        stamp,
+        site,
+        scope,
+        scope_reason,
     })
     .ok()
 }
@@ -589,6 +679,8 @@ pub(crate) struct RelayAuthorityObservationReport {
     /// Cumulative records the JSONL sink threw away. Nonzero means the canon log
     /// is incomplete and the promotion window over it is not trustworthy.
     sink_dropped_records: u64,
+    /// Completion-time ownership samples keyed by `site:scope:scope_reason`.
+    completion_scopes: BTreeMap<String, u64>,
     channels: BTreeMap<String, VecDeque<TurnTriageEntry>>,
     /// Channel keys in least-recently-recorded order, bounding `channels`. Not
     /// published: it is the eviction order, not triage data.
@@ -713,6 +805,44 @@ mod tests {
     /// no input exists for which the new predicate ends a lifecycle the shipped
     /// one continued. This is the precondition S4 and S7a are allowed to
     /// enforce under, so it has to fail here if either table is ever widened.
+    #[test]
+    fn completion_scope_is_a_post_flush_record_and_live_triage_counter() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let channel = 4_259_218;
+
+        record_completion_scope_at(
+            OBSERVING,
+            CompletionScopeRecord {
+                shared: &shared,
+                provider: &ProviderKind::Claude,
+                turn_id: 77_080,
+                channel_id: channel,
+                site: "completion_r1",
+                scope: "unprovable",
+                scope_reason: "mailbox_absent",
+            },
+        );
+
+        let events = events_for(temp.path(), channel);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event["schema"].as_str(), Some(OBSERVATION_SCHEMA));
+        assert_eq!(event["publish_reason"].as_str(), Some("post_flush"));
+        assert_eq!(event["site"].as_str(), Some("completion_r1"));
+        assert_eq!(event["scope"].as_str(), Some("unprovable"));
+        assert_eq!(event["scope_reason"].as_str(), Some("mailbox_absent"));
+        assert!(event.get("axis_a").is_none());
+        assert_eq!(
+            observation_report()
+                .completion_scopes
+                .get("completion_r1:unprovable:mailbox_absent"),
+            Some(&1),
+            "TUI-direct mailbox absence must remain visible in live triage"
+        );
+    }
+
     #[test]
     fn neither_new_gate_ends_a_lifecycle_the_shipped_gate_continued() {
         for outcome in OUTCOMES {

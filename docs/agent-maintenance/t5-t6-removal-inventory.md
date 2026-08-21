@@ -171,8 +171,9 @@ r1의 기록기는 판정·배달을 바꾸지 않았지만 **기록된 데이�
   측정 가능 시점은 S7a 집행 착지 이후 — **그 시점의 재도입은 S7a의 DoD**다.
 - **관측 시각 필드 추가**(legA P1-2, E4-5). `ts` 는 발행 시각이므로 축출-발행되는 목표 모집단이
   후임 턴 도착 시각으로 오귀속됐다. 방출 스탬프에 `observed_at`(턴의 `started_at`)을 추가하고
-  스키마를 `relay_authority.axis_a.v2` 로 bump, 스크립트의 window·지문 구간 산정·`--days`
-  필터를 전부 관측 시각 기준으로 전환했다. 미배포 상태이므로 마이그레이션 부담 0.
+  당시 스키마를 `relay_authority.axis_a.v2` 로 bump했고, 스크립트의 window·지문 구간 산정·`--days`
+  필터를 전부 관측 시각 기준으로 전환했다. S3의 completion scope 레코드 추가로 현재 스키마는
+  `relay_authority.axis_a.v3`이며, 미배포 상태이므로 두 변경 모두 마이그레이션 부담이 없다.
 - **턴 신원 4축**(legB P1-1). 버퍼 매처가 `(user_msg_id, started_at)` 2필드였다 — 같은 초에
   시작한 `user_msg_id == 0` TUI-direct 연속 턴을 구분하지 못해 전임의 지연 tick/loop-exit이
   후임 버퍼를 오염·소멸시켰다. 버퍼는 이제 정본 `InflightTurnIdentity` 를 들고, 턴 도중 불변인

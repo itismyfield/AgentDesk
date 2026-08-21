@@ -4087,6 +4087,7 @@ services::discord::relay_recovery::authority_observation::tests::a_turn_that_nev
 services::discord::relay_recovery::authority_observation::tests::a_turn_whose_entry_was_not_observed_tallies_nothing
 services::discord::relay_recovery::authority_observation::tests::a_turn_whose_tmux_session_is_rebased_mid_turn_is_not_stranded
 services::discord::relay_recovery::authority_observation::tests::an_observed_turn_emits_one_event_per_site_with_the_full_key_set
+services::discord::relay_recovery::authority_observation::tests::completion_scope_is_a_post_flush_record_and_live_triage_counter
 services::discord::relay_recovery::authority_observation::tests::lease_range_shape_matches_the_no_range_definition
 services::discord::relay_recovery::authority_observation::tests::neither_new_gate_ends_a_lifecycle_the_shipped_gate_continued
 services::discord::relay_recovery::authority_observation::tests::only_the_missing_row_cell_differs_between_old_and_new
@@ -5944,6 +5945,9 @@ services::discord::turn_bridge::completion_guard::completion_postgres::runtime_c
 services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_covers_work_dispatch_types_including_plan
 services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_excludes_side_paths_and_review_family
 services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_requires_live_status
+services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::bridge_entry_sites_pin_mailbox_token_registration_contract
+services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::empty_nonce_never_proves_ownership
+services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::five_row_decision_table_is_fail_closed
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::normal_turn_writes_back_into_channel_session
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_does_not_stash_feedback_reminder
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_leaves_channel_session_untouched
@@ -5954,6 +5958,7 @@ services::discord::turn_bridge::context_window::tests::sentinel_overwrite_clamps
 services::discord::turn_bridge::current_message_anchor::tests::authority_or_message_epoch_advance_during_send_aborts_and_deletes_candidate
 services::discord::turn_bridge::current_message_anchor::tests::cleared_durable_current_message_stays_absent_until_real_anchor_exists
 services::discord::turn_bridge::finalize_epilogue::tests::dispatch_failure_requeue_front_schedules_deferred_kickoff
+services::discord::turn_bridge::finalize_epilogue::tests::foreign_completion_does_not_resume_disconnected_gateway_watcher
 services::discord::turn_bridge::finalize_epilogue::tests::session_transition_fences_finalizer_dequeue_and_preserves_fifo_4794
 services::discord::turn_bridge::finalize_epilogue::tests::stale_queue_flag_skips_capped_retry_and_dispatches_unrelated_backlog_4893
 services::discord::turn_bridge::followup_requeue::tests::already_queued_refusal_preserves_existing_merged_marker

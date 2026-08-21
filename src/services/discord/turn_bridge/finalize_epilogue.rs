@@ -19,7 +19,8 @@ use super::*;
 /// (`preserve_inflight_for_cleanup_retry` → restart_pending → live-routing
 /// validation → dispatch, with the deferred-idle-kickoff fallback when the live
 /// Discord context is missing). The queued-turn mailbox side-effects preserve
-/// their original order.
+/// their original order. The disconnected-gateway watcher resume is a channel
+/// effect and therefore also requires the completion-time ownership conjunct.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn finalize_and_drain_queued_turns(
     shared_owned: Arc<SharedData>,
@@ -31,6 +32,7 @@ pub(super) async fn finalize_and_drain_queued_turns(
     request_owner_name: String,
     tmux_last_offset: Option<u64>,
     watcher_owner_channel_id: ChannelId,
+    owns_channel_effects: bool,
 ) {
     // Finalization complete — decrement counters
     shared_owned
@@ -186,7 +188,8 @@ pub(super) async fn finalize_and_drain_queued_turns(
             tracing::info!(
                 "  [{ts}] 📦 preserving queued command(s): missing live Discord context — scheduling deferred drain"
             );
-            if let Some(offset) = tmux_last_offset
+            if owns_channel_effects
+                && let Some(offset) = tmux_last_offset
                 && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
             {
                 if let Ok(mut guard) = watcher.resume_offset.lock() {
@@ -388,6 +391,57 @@ mod tests {
     }
 
     #[test]
+    fn foreign_completion_does_not_resume_disconnected_gateway_watcher() {
+        let tmp = tempfile::tempdir().expect("runtime root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(tmp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let channel_id = ChannelId::new(5_464_300);
+                let resume_offset = Arc::new(std::sync::Mutex::new(None));
+                let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                shared.tmux_watchers.insert(
+                    channel_id,
+                    TmuxWatcherHandle {
+                        tmux_session_name: "foreign-owner".to_string(),
+                        output_path: "/tmp/foreign-owner.jsonl".to_string(),
+                        paused: paused.clone(),
+                        resume_offset: resume_offset.clone(),
+                        cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+                        turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                            super::super::tmux_watcher_now_ms(),
+                        )),
+                    },
+                );
+                shared.restart.finalizing_turns.store(1, Ordering::Relaxed);
+                shared.restart.global_finalizing.store(1, Ordering::Relaxed);
+
+                finalize_and_drain_queued_turns(
+                    shared,
+                    true,
+                    false,
+                    Arc::new(FailingQueuedDispatchGateway),
+                    channel_id,
+                    ProviderKind::Claude,
+                    "requester".to_string(),
+                    Some(7_777),
+                    channel_id,
+                    false,
+                )
+                .await;
+
+                assert_eq!(*resume_offset.lock().expect("resume offset"), None);
+                assert!(paused.load(Ordering::Relaxed));
+            });
+    }
+
+    #[test]
     fn session_transition_fences_finalizer_dequeue_and_preserves_fifo_4794() {
         let tmp = tempfile::tempdir().expect("runtime root");
         let _root_guard = crate::config::set_agentdesk_root_for_test(tmp.path());
@@ -429,6 +483,7 @@ mod tests {
                     "requester".to_string(),
                     None,
                     channel_id,
+                    true,
                 )
                 .await;
                 let blocked_snapshot = super::super::mailbox_snapshot(&shared, channel_id).await;
@@ -461,6 +516,7 @@ mod tests {
                     "requester".to_string(),
                     None,
                     channel_id,
+                    true,
                 )
                 .await;
                 assert_eq!(
@@ -534,6 +590,7 @@ mod tests {
                     "requester".to_string(),
                     None,
                     channel_id,
+                    true,
                 )
                 .await;
 
@@ -584,6 +641,7 @@ mod tests {
                     "requester".to_string(),
                     None,
                     channel_id,
+                    true,
                 )
                 .await;
 

@@ -125,7 +125,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
-SCHEMA = "relay_authority.axis_a.v2"
+SCHEMA = "relay_authority.axis_a.v3"
 STAGE_TURN_FLOOR = {1: 200, 2: 500}
 WINDOW_DAY_FLOOR = 7
 # Per-site record counts, as a share of bridge-entry records. Both floors are
@@ -371,6 +371,7 @@ def tally(events: list[dict]) -> dict:
     rowless_turns: set[tuple] = set()
     range_shapes = Counter()
     stream = Counter()
+    completion_scopes = Counter()
     unmeasured = Counter()
     # Provenance is a property of the publication, so it is counted per turn: all
     # three of a turn's site records are written by one call and carry one value.
@@ -404,6 +405,10 @@ def tally(events: list[dict]) -> dict:
             for field in UNMEASURED_UNTIL_S7A:
                 if field not in axis_a:
                     unmeasured[field] += 1
+        elif site and site.startswith("completion_"):
+            completion_scopes[
+                f"{site}:{event.get('scope')}:{event.get('scope_reason')}"
+            ] += 1
 
     reasons = Counter(reason_of_turn.values())
     published = sum(reasons.values())
@@ -415,6 +420,7 @@ def tally(events: list[dict]) -> dict:
         "rowless_continuation_turns": len(rowless_turns),
         "stream_gate": dict(stream),
         "lease_range_shapes": dict(range_shapes),
+        "completion_scopes": dict(completion_scopes),
         "unmeasured_fields": dict(unmeasured),
         "publish_reasons": dict(reasons),
         # Displayed, never gated (see the module docstring). This is the share of
@@ -601,6 +607,7 @@ def render(summary: dict, warnings: list[str]) -> str:
             f"  rowless turns      : {target['rowless_continuation_turns']}",
             f"  stream gate totals : {target['stream_gate']}",
             f"  lease range shapes : {target['lease_range_shapes']}",
+            f"  completion scopes  : {target['completion_scopes']}",
             f"  published by       : {target['publish_reasons']}",
             f"  evicted share      : {target['evicted_publication_share']} "
             "(displayed, NOT gated — the share that needed a successor to be"

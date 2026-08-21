@@ -2018,6 +2018,7 @@ mod tests {
             keys,
             [
                 "channels",
+                "completion_scopes",
                 "new_stricter_verdicts",
                 "resident_buffers",
                 "rowless_continuations",
