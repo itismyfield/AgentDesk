@@ -106,6 +106,9 @@ impl StartupDoctorEffects for ProcessStartupDoctorEffects {
     }
 }
 
+/// Barrier arrival that is NOT a provider finishing its own reconcile: a launch
+/// skip, a standby lease, or a gateway backend that ended. §7.2-4's tag reads
+/// `unknown` for these rather than implying a reconcile that never ran.
 pub(super) async fn run_startup_diagnostic_after_reconcile_barrier(
     remaining: Arc<std::sync::atomic::AtomicUsize>,
     started: Arc<std::sync::atomic::AtomicBool>,
@@ -115,6 +118,35 @@ pub(super) async fn run_startup_diagnostic_after_reconcile_barrier(
     // The rearm handle is deliberately dropped: the watcher is detached (see
     // `spawn_startup_doctor_rearm`). Only tests await it.
     let _rearm = run_startup_diagnostic_after_reconcile_barrier_with(
+        None,
+        remaining,
+        started,
+        health_registry,
+        Arc::new(ProcessStartupDoctorEffects { api_port }),
+    )
+    .await;
+}
+
+/// Barrier arrival for the provider whose reconcile just completed (#5462 S5
+/// §7.2-4). `waiting for N provider reconcile(s)` counted the outstanding ones
+/// and named no arrival at all, so the waiting lines said nothing about who had
+/// gotten there.
+///
+/// What the tag answers is narrower than "which provider is missing": the
+/// arrivals that are NOT a provider reconcile join as `unknown` (see
+/// `run_startup_diagnostic_after_reconcile_barrier`), so a boot stuck at N=1
+/// still cannot separate "X never arrived" from "X arrived as a skip". Naming
+/// those would mean tagging a reconcile that never ran, which is the confusion
+/// this tag exists to avoid; the residual is deliberate.
+pub(super) async fn run_startup_diagnostic_after_reconcile_barrier_for_provider(
+    provider: &ProviderKind,
+    remaining: Arc<std::sync::atomic::AtomicUsize>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    health_registry: Arc<health::HealthRegistry>,
+    api_port: u16,
+) {
+    let _rearm = run_startup_diagnostic_after_reconcile_barrier_with(
+        Some(provider.as_str().to_string()),
         remaining,
         started,
         health_registry,
@@ -125,7 +157,11 @@ pub(super) async fn run_startup_diagnostic_after_reconcile_barrier(
 
 /// Returns the rearm watcher's handle when the skip branch armed one, so a test
 /// can await the watcher instead of racing it.
+///
+/// `arriving_provider` is owned rather than borrowed because this future is
+/// spawned, so a borrowed tag would not be `'static`.
 async fn run_startup_diagnostic_after_reconcile_barrier_with(
+    arriving_provider: Option<String>,
     remaining: Arc<std::sync::atomic::AtomicUsize>,
     started: Arc<std::sync::atomic::AtomicBool>,
     health_registry: Arc<health::HealthRegistry>,
@@ -135,6 +171,7 @@ async fn run_startup_diagnostic_after_reconcile_barrier_with(
         StartupDoctorBarrier::Waiting(waiting) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
+                provider = arriving_provider.as_deref().unwrap_or("unknown"),
                 "  [{ts}] ⏳ startup_doctor waiting for {waiting} provider reconcile(s)"
             );
             return None;
@@ -457,6 +494,7 @@ mod startup_doctor_rearm_tests {
         let upgraded = Arc::new(AtomicUsize::new(0));
 
         let barrier = tokio::spawn(super::run_startup_diagnostic_after_reconcile_barrier_with(
+            Some("claude".to_string()),
             Arc::new(AtomicUsize::new(1)),
             Arc::new(AtomicBool::new(false)),
             registry.clone(),

@@ -131,6 +131,10 @@ class RatchetDiscriminationTests(unittest.TestCase):
             "src/services/discord/t3a4_probe.rs",
             "view.with_terminal_delivery_fence(delivery);\n",
         ),
+        "inflight_row_clear_call": (
+            "src/services/discord/t3a4_probe.rs",
+            "inflight::clear_inflight_state(&provider, channel_id);\n",
+        ),
     }
 
     def test_fake_callsite_mutations_are_unlisted(self) -> None:
@@ -182,6 +186,56 @@ class RatchetDiscriminationTests(unittest.TestCase):
         self.assertIn("fence_pairing", errors[0])
         self.assertIn(rel, errors[0])
         self.assertIn("must carry both S4 conjuncts", errors[0])
+
+    INFLIGHT_ROW_CLEAR_ENTRY_POINTS = {
+        "clear_inflight_state_for_channel": (
+            "crate::services::discord::clear_inflight_state_for_channel(&provider, channel);\n"
+        ),
+        "archive_inflight_state_if_matches_identity_generation": (
+            "inflight::archive_inflight_state_if_matches_identity_generation(\n"
+            "    &provider, channel, &identity, generation,\n"
+            ");\n"
+        ),
+        "clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence": (
+            "inflight::clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence(\n"
+            "    &provider, channel, &identity,\n"
+            ");\n"
+        ),
+    }
+
+    def test_inflight_row_clear_catches_the_three_named_entry_points(self) -> None:
+        """#5462 S5 r2 (E1.4): the entry points §4.5's enumeration left out.
+
+        Each already has a production consumer, so while they were outside the
+        pattern a brand-new file could call them and the ratchet stayed green —
+        the opposite of the adoption contract, which is that a new file reaching
+        a destruction helper is rejected as UNLISTED.
+        """
+        rel = "src/services/discord/t3a4_inflight_clear_probe.rs"
+        for name, body in self.INFLIGHT_ROW_CLEAR_ENTRY_POINTS.items():
+            with self.subTest(entry_point=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                write(root, rel, body)
+                actual, _subcounts = ratchet.scan(root)
+                self.assertEqual(actual["inflight_row_clear_call"], {rel: 1})
+                errors = ratchet.growth_errors(actual, empty_counts())
+                self.assertEqual(len(errors), 1)
+                self.assertIn("inflight_row_clear_call: UNLISTED call site", errors[0])
+                self.assertIn(rel, errors[0])
+
+    def test_inflight_row_clear_excludes_the_owner_module(self) -> None:
+        # The category counts CONSUMERS. Definitions and helper-to-helper
+        # composition live under the owner prefix; counting them would pin the
+        # implementation instead of the call sites it exists to bound.
+        owner = ratchet.INFLIGHT_ROW_CLEAR_OWNER_PREFIX + "probe.rs"
+        outside = "src/services/discord/t3a4_inflight_clear_probe.rs"
+        body = "inflight::clear_inflight_state(&provider, channel);\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, owner, body)
+            write(root, outside, body)
+            actual, _subcounts = ratchet.scan(root)
+        self.assertEqual(actual["inflight_row_clear_call"], {outside: 1})
 
     def test_pairing_is_two_sided(self) -> None:
         actual = empty_counts()

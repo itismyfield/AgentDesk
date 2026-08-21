@@ -365,7 +365,14 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
             // #122: Reconcile phase complete — open intake
             mark_reconcile_complete(&shared_for_restart_reports);
             let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!("  [{ts}] ✓ Reconcile complete — intake open");
+            // #5462 S5 §7.2-4: every provider bot prints this line, so untagged
+            // it cannot say WHICH intake opened — and the reconcile-window
+            // incidents are diagnosed by lining this moment up against one
+            // provider's own destructive log entries.
+            tracing::info!(
+                provider = %provider_for_restore.as_str(),
+                "  [{ts}] ✓ Reconcile complete — intake open"
+            );
         } // end of !is_utility_bot recovery block
 
         // Kick off again to drain messages queued during reconcile window
@@ -393,7 +400,9 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
             );
         }
 
-        run_startup_diagnostic_after_reconcile_barrier(
+        // §7.2-4: the one arrival that IS a provider reconcile completing.
+        run_startup_diagnostic_after_reconcile_barrier_for_provider(
+            &provider_for_restore,
             startup_reconcile_remaining_for_restore,
             startup_doctor_started_for_restore,
             health_registry_for_startup_doctor,

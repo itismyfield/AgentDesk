@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "964f7b64e602b33547a2cd1f4032ca4152491f3f",
+  "measured_at_sha": "fb4b0186ce8ab5e5614fc6b0e2288eaa74cd8b4e",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -91,6 +91,38 @@
       "files": {
         "src/services/discord/relay_recovery/apply.rs": 1,
         "src/services/discord/tui_direct_pending_start.rs": 1
+      }
+    },
+    "inflight_row_clear_call": {
+      "comment": "#5462 S5: calls to an inflight ROW-DESTRUCTION helper from outside the owner module src/services/discord/inflight/clear_store/. A spelling count: definitions and re-export wrappers are counted, direct fs::remove_file unlinks are invisible, and the generation-fenced *_for_reconcile wrappers count AS destruction so converting a bare call to its fenced form is not scored as a decrease. S5 r2 added the three named entry points the design's enumeration missed: clear_inflight_state_for_channel, archive_inflight_state_if_matches_identity_generation* and clear_lifecycle_inflight_state_if_matches*. See the module docstring for the full limits.",
+      "files": {
+        "src/server/routes/health_api.rs": 1,
+        "src/services/discord/health/recovery.rs": 8,
+        "src/services/discord/inflight.rs": 2,
+        "src/services/discord/inflight_heartbeat_sweeper.rs": 1,
+        "src/services/discord/mod.rs": 4,
+        "src/services/discord/placeholder_sweeper/abandon_guard.rs": 1,
+        "src/services/discord/recovery_engine/manual_rebind/mod.rs": 2,
+        "src/services/discord/recovery_engine/restore_inflight.rs": 10,
+        "src/services/discord/recovery_engine/runtime.rs": 1,
+        "src/services/discord/recovery_paths/restart.rs": 2,
+        "src/services/discord/relay_recovery/apply.rs": 1,
+        "src/services/discord/relay_recovery/idle_tmux.rs": 1,
+        "src/services/discord/router/intake_gate/stale_turn.rs": 2,
+        "src/services/discord/standby_relay.rs": 1,
+        "src/services/discord/tmux_restart_handoff.rs": 1,
+        "src/services/discord/tmux_watcher/no_result_exits.rs": 2,
+        "src/services/discord/tmux_watcher/stall_exit.rs": 1,
+        "src/services/discord/tmux_watcher/terminal_commit_epilogue.rs": 1,
+        "src/services/discord/tmux_watcher/turn_identity.rs": 2,
+        "src/services/discord/tui_direct_pending_start.rs": 2,
+        "src/services/discord/tui_prompt_relay/synthetic_start.rs": 1,
+        "src/services/discord/turn_bridge/completion_postlude.rs": 2,
+        "src/services/discord/turn_bridge/guards.rs": 2,
+        "src/services/discord/turn_finalizer/cleanup.rs": 1,
+        "src/services/discord/turn_finalizer/finalize.rs": 2,
+        "src/services/discord/watchers/dispatched_origin_ghost.rs": 1,
+        "src/services/turn_lifecycle.rs": 4
       }
     }
   }
