@@ -195,7 +195,17 @@ fn cancellation_before_any_staging_publishes_nothing_and_rolls_back() {
         !commit_deferred_restart_sentinel(root.path(), &ProviderKind::Codex, nonce, &guard,)
             .expect("cancellation is decided, not raised")
     );
-    assert!(!root.path().join("restart_persisted").exists());
+    assert_eq!(
+        std::fs::read_dir(root.path())
+            .expect("runtime root listing")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.file_name() != "restart_pending" && entry.file_name() != "restart_cancelled"
+            })
+            .count(),
+        0,
+        "no identity, no index, not even a tmp file is written on this path"
+    );
     drop(guard);
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
     assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
@@ -327,7 +337,7 @@ fn stale_nonce_cannot_commit_persistence_or_remove_newer_marker() {
 /// terminal-proof judging window only (R3-E5 correction 1): a later sweep may
 /// unlink the identity and leave our own index standing. Even inside the window
 /// it holds only while this publisher never writes the index by itself (ERRATUM
-/// §E5.2, tightened by §E8.2 to a durable identity directory entry).
+/// §E5.2, tightened by §E8.2 to a parent-directory fsync that returned `Ok`).
 #[test]
 fn commit_publishes_the_identity_and_derives_the_index_from_it() {
     let shared = crate::services::discord::make_shared_data_for_tests();
@@ -452,7 +462,8 @@ fn disposal_restores_a_foreign_lease_and_leaves_its_identity_alone() {
 /// rename and the restore, a newer request re-created the canonical name, so
 /// `hard_link` fails with `EEXIST`. Deleting the disposed inode here is what
 /// loses the middle request outright; keeping it leaves that request reachable
-/// through its identity name and nameable as `restart-lease-lost`.
+/// through its identity name, which will name it `restart-lease-lost` once
+/// S3a/S4 land.
 #[test]
 fn a_failed_restore_keeps_the_disposed_marker_as_residue() {
     let root = tempfile::tempdir().expect("runtime root");
@@ -544,8 +555,8 @@ fn commit_latch_child() {
     assert_eq!(committed_nonce().as_deref(), Some(nonce));
 
     // Cancellation published after the point of no return. The guard is still
-    // armed, and only the latch stands between it and an unfenced runtime that
-    // has already published a durable terminal artifact.
+    // armed; the latch is the fast path and the identity artifact is the
+    // authority behind it (§E8.1).
     std::fs::write(
         root.path().join("restart_cancelled"),
         format!("nonce={nonce}\n"),
@@ -586,8 +597,15 @@ fn an_absent_latch_defers_to_the_identity_artifact_before_rolling_back() {
         "the window under test is exactly an unset latch"
     );
 
-    // No identity artifact: the guard has nothing to defer to, so the
+    // No identity artifact — only a fixed-name index carrying our nonce, which
+    // `terminal_proof` grades `LegacyIndexOnly`: a pre-I2c publisher's artifact,
+    // never this process's commit. The guard has nothing to defer to, so the
     // cancellation still wins and admission is restored.
+    std::fs::write(
+        root.path().join("restart_persisted"),
+        format!("nonce={nonce}\n"),
+    )
+    .expect("legacy fixed-name index with no identity beside it");
     let permit = begin_deferred_restart(&shared).expect("restart permit");
     assert!(finish_deferred_restart(&shared, permit));
     drop(DeferredRestartCancellationGuard::new(
@@ -595,7 +613,10 @@ fn an_absent_latch_defers_to_the_identity_artifact_before_rolling_back() {
         root.path().to_path_buf(),
         nonce.to_owned(),
     ));
-    assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
+    assert!(
+        !shared.restart.intake_worker_lifecycle.admission_is_fenced(),
+        "a legacy index is not our commit"
+    );
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
 
     // The identity artifact exists now — published by the task that has not yet
@@ -615,6 +636,54 @@ fn an_absent_latch_defers_to_the_identity_artifact_before_rolling_back() {
     assert!(
         shared.restart.intake_worker_lifecycle.admission_is_fenced(),
         "a committed identity must not be unfenced by a late cancellation"
+    );
+    assert!(shared.restart.shutting_down.load(Ordering::Acquire));
+    assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 0);
+}
+
+/// #5254 ERRATUM §E8.5: D4④'s exclusion is process-wide, not nonce-scoped. Once
+/// this process has latched *any* commit it is bound for `exit(0)`, so no other
+/// request's late cancellation may unfence the runtime on the way out. Here the
+/// latch carries a foreign nonce and this request published no identity at all —
+/// exactly the shape the nonce-scoped guard of §E8.1 still rolled back.
+#[test]
+fn a_commit_under_another_nonce_forbids_this_ones_rollback() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    shared.restart.shutdown_remaining.store(1, Ordering::SeqCst);
+    let root = tempfile::tempdir().expect("runtime root");
+    let nonce = "not-the-latched-nonce";
+    std::fs::write(
+        root.path().join("restart_pending"),
+        format!("nonce={nonce}\n"),
+    )
+    .expect("restart request");
+    std::fs::write(
+        root.path().join("restart_cancelled"),
+        format!("nonce={nonce}\n"),
+    )
+    .expect("cancellation for this request");
+    assert!(
+        latch_commit("a-different-request"),
+        "the twin latch takes this thread's only commit"
+    );
+    assert_ne!(committed_nonce().as_deref(), Some(nonce));
+    assert_eq!(
+        terminal_proof(root.path(), nonce),
+        TerminalProof::Absent,
+        "this request published no identity artifact of its own"
+    );
+
+    let permit = begin_deferred_restart(&shared).expect("restart permit");
+    assert!(finish_deferred_restart(&shared, permit));
+    drop(DeferredRestartCancellationGuard::new(
+        shared.clone(),
+        root.path().to_path_buf(),
+        nonce.to_owned(),
+    ));
+
+    assert!(
+        shared.restart.intake_worker_lifecycle.admission_is_fenced(),
+        "a process that committed under any nonce must not be unfenced"
     );
     assert!(shared.restart.shutting_down.load(Ordering::Acquire));
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 0);
@@ -695,8 +764,9 @@ fn nothing_between_the_point_of_no_return_and_the_exit_can_undo_it() {
 
     // The point of no return itself now lives in `publish_restart_terminal`, so
     // the two slices above would miss a retraction reintroduced beside the
-    // rename. This publisher may unlink exactly one thing — the staged index
-    // link it created — and never the identity it just committed.
+    // rename. What this pins is spelling, not reachability — §9-0 grades source
+    // assertions as regression hints, and a rebinding of `staged` or a `rename`
+    // would walk straight past it.
     const PUBLISHER: &str = include_str!("gateway_lease_recovery.rs");
     let (_, publisher_body) = PUBLISHER
         .split_once("fn publish_restart_terminal")
@@ -707,7 +777,21 @@ fn nothing_between_the_point_of_no_return_and_the_exit_can_undo_it() {
     assert_eq!(
         publisher_body.matches("remove_file").count(),
         publisher_body.matches("remove_file(&staged)").count(),
-        "#5254 D4③: the publisher unlinks only its own staged index link"
+        "#5254 D4③: every remove_file in this function is spelled (&staged)"
+    );
+
+    // ERRATUM §E8.2: the derived index is gated on the first parent-dir fsync,
+    // so the fsync-failure return has to stand ahead of the `hard_link` that
+    // makes the second name. Deleting it brings the index-only producer back.
+    let fsync_gate = publisher_body
+        .find("return Ok(())")
+        .expect("the fsync failure path still returns before the index");
+    let derived_index = publisher_body
+        .find("hard_link")
+        .expect("the index is still a hard link of the identity");
+    assert!(
+        fsync_gate < derived_index,
+        "#5254 §E8.2: the index must never be derived from an unfsynced identity"
     );
 }
 

@@ -534,8 +534,9 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
 /// Deliberately a second call rather than a flag on `atomic_write`: the inflight
 /// hot path must not pay a directory fsync, and callers that need durability
 /// want the two failures separable (a rename error aborts, a directory fsync
-/// error is post-commit and log-only). The directory is opened read-only
-/// because opening one for writing fails with `EISDIR`.
+/// error is post-commit and its only caller uses it to skip the derived index —
+/// #5254 §E8.2). The directory is opened read-only because opening one for
+/// writing fails with `EISDIR`.
 pub(crate) fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
     let parent = path
         .parent()
@@ -709,8 +710,9 @@ mod parent_dir_fsync_tests {
         fsync_parent_dir(&published).expect("directory entry fsync");
     }
 
-    /// The caller treats failure as log-only, which is only safe if failure is
-    /// reported rather than raised: this must be an `Err`, never a panic.
+    /// The caller gates the derived index on this result, which is only safe if
+    /// failure is reported rather than raised: this must be an `Err`, never a
+    /// panic.
     #[test]
     fn missing_parent_dir_is_reported_not_panicked() {
         let root = tempfile::tempdir().expect("runtime root");

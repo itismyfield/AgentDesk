@@ -4507,6 +4507,7 @@ services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::deferred_restart_poller_consumes_marker_token_and_decrements_exactly_once
 services::discord::runtime_bootstrap::session_gc::thread_session_gc_tests::thread_gc_reap_candidate_requires_thread_owner_marker_and_existing_tmux
 services::discord::runtime_bootstrap::shutdown::lifecycle_tests::invariant_gateway_exit_releases_catalog_owner_before_diagnostics_and_takeover
+services::discord::runtime_bootstrap::spawns::tests::a_commit_under_another_nonce_forbids_this_ones_rollback
 services::discord::runtime_bootstrap::spawns::tests::a_committed_restart_survives_late_cancellation_in_a_dedicated_process
 services::discord::runtime_bootstrap::spawns::tests::a_failed_restore_keeps_the_disposed_marker_as_residue
 services::discord::runtime_bootstrap::spawns::tests::an_absent_latch_defers_to_the_identity_artifact_before_rolling_back
