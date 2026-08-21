@@ -146,11 +146,14 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
 
     let settings_snapshot = shared.settings.read().await.clone();
 
-    // If generation allocation cannot advance the positive durable epoch (flock failure,
-    // atomic-write failure, or u64::MAX saturation), a prior-process row can look current
-    // and remain for this process's lifetime. This intentional over-suppression prevents
-    // relay loss; its bound is the next boot that successfully advances the epoch.
-    // An allocation-provenance witness belongs to the separate E1.2 follow-up.
+    // Reconcile wrappers preserve planned-restart rows via `PlannedRestartSkipped`; the
+    // loader applies the mode-specific 1800s drain / 900s hot-swap retention checks.
+    // That preservation is separate from the generation fence below. If generation
+    // allocation cannot advance the positive durable epoch (flock failure, atomic-write
+    // failure, or u64::MAX saturation), a prior-process row can look current and remain
+    // for this process's lifetime. This intentional over-suppression prevents relay loss;
+    // its bound is the next boot that successfully advances the epoch. An allocation-
+    // provenance witness belongs to #5482.
     for mut state in states {
         // #897 round-4 High: rebind_origin inflights are synthetic
         // placeholders owned by `/api/inflight/rebind` and do NOT carry
@@ -2499,8 +2502,11 @@ mod tests {
     }
 
     /// Lexical ratchet for the restore clear spellings and three recovery-marker sites.
-    /// It is not execution proof: aliases, re-exports, macro-constructed calls, and
-    /// indirection can remain unseen, while comments can satisfy occurrence counts.
+    /// It is not execution proof: aliases, re-exports, macro-constructed calls, indirection,
+    /// and semantically equivalent spellings can remain unseen, while comments can satisfy
+    /// occurrence counts. The sibling `inflight_row_clear_call` ratchet catches equivalent
+    /// bare-call spellings; behavioural coverage, including the ten-branch gate matrix, is
+    /// tracked in #5482 rather than proven by this source-token assertion.
     #[test]
     fn restore_clear_and_recovery_marker_sites_are_lexically_pinned() {
         let source = include_str!("restore_inflight.rs");
