@@ -29,8 +29,9 @@ pub(in crate::services::discord::turn_bridge) struct StreamTickCandidateSaveCont
 /// A successful identity guard is not sufficient by itself: the same turn may
 /// have handed live delivery to a watcher/standby relay.  Only the historical
 /// `None` owner is bridge authority.  Store failures fail closed for this tick
-/// but remain retryable; a missing/reowned row or a durable non-bridge relay
-/// owner permanently ends bridge authority.
+/// but remain retryable; a reowned row or a durable non-bridge relay owner
+/// permanently ends bridge authority.  A row that VANISHED ends it only outside
+/// the enforcement cohort — see [`visible_mutation_authority_after_guarded_save`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord::turn_bridge) enum VisibleMutationAuthority {
     Authorized,
@@ -52,10 +53,39 @@ impl VisibleMutationAuthority {
     }
 }
 
+/// Whether this channel may take the AC2-R stream-loop suppression.
+///
+/// Shaped after `authority_observation::observing_dial`: both operands veto and
+/// both shipped values are the denying one, so a node nobody enrolled keeps the
+/// mapping that ships today. The mode predicate is `governs_destructive_authority`
+/// and not `records_authority_observations`, because `Observe` is the mode the
+/// promotion evidence is collected under and has to stay behaviour-identical to
+/// `Legacy` for every consumer that is not the recorder.
+///
+/// Callers read this ONCE at gate entry and pass the answer down, so one pass
+/// through a fence cannot answer the question two different ways and the gate
+/// below stays pure — which is what lets `stream_gate_old`/`stream_gate_new`
+/// mirror it operand for operand.
+pub(in crate::services::discord::turn_bridge) fn stream_loop_suppression_cohort_admits(
+    channel_id: u64,
+) -> bool {
+    let (mode, percent) = crate::config_live_reload::current()
+        .map(|config| {
+            (
+                config.runtime.relay_authority_mode,
+                config.runtime.relay_authority_cohort_percent,
+            )
+        })
+        .unwrap_or_default();
+    mode.governs_destructive_authority()
+        && crate::services::discord::relay_recovery::cohort::admits(mode, percent, channel_id)
+}
+
 pub(in crate::services::discord::turn_bridge) fn visible_mutation_authority_after_guarded_save(
     outcome: GuardedSaveOutcome,
     inflight_state: &InflightTurnState,
     intended_authority: crate::services::discord::inflight::StreamRelayAuthority,
+    cohort_admits: bool,
 ) -> VisibleMutationAuthority {
     use crate::services::discord::inflight::StreamRelayAuthority;
 
@@ -68,6 +98,14 @@ pub(in crate::services::discord::turn_bridge) fn visible_mutation_authority_afte
             VisibleMutationAuthority::Authorized
         }
         GuardedSaveOutcome::Saved if authority_unchanged => VisibleMutationAuthority::Suppressed,
+        // #5464 T5 S4: the one cell AC2-R moves. A vanished durable row is a
+        // structural signal, and AC1 forbids one from ending delivery authority
+        // on its own, so inside the cohort it withholds this tick's Discord
+        // mutation and leaves the turn alive — `post_loop_finalize` stays
+        // reachable instead of orphaning the finished answer inside a deleted
+        // row. `IdentityMismatch` deliberately does NOT move with it: it is an
+        // exact-episode veto rather than a structural signal.
+        GuardedSaveOutcome::Missing if cohort_admits => VisibleMutationAuthority::Suppressed,
         GuardedSaveOutcome::Saved
         | GuardedSaveOutcome::Missing
         | GuardedSaveOutcome::IdentityMismatch => VisibleMutationAuthority::AuthorityLost,

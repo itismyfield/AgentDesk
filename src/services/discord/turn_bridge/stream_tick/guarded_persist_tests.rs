@@ -51,6 +51,14 @@ fn with_runtime_root<T>(test: impl FnOnce() -> T) -> T {
 /// The same call also proves the observation added to this function is a
 /// no-op for its caller: the assertion below IS the production return
 /// value, taken with recording compiled in.
+///
+/// #5464 T5 S4 turns one mirror into two, over the same sixteen cells: outside
+/// the enforcement cohort the shipped mapping must still be `stream_gate_old`
+/// exactly, and inside it must be `stream_gate_new` exactly. That is the whole
+/// enforcement claim stated as a table rather than as a cell — and it also means
+/// the observation S2 records is the same table production now decides on, so
+/// `new_stricter_verdicts` reading `0` across the promotion window is a
+/// measurement OF this gate and not of a parallel copy of it.
 #[test]
 fn recorded_stream_gate_old_mirrors_the_shipped_authority_mapping() {
     use crate::services::discord::relay_recovery::authority_observation::{
@@ -87,18 +95,20 @@ fn recorded_stream_gate_old_mirrors_the_shipped_authority_mapping() {
             // `(authority_unchanged = false, bridge_owns_relay = true)`.
             (&delegated, bridge_authority, false, true),
         ] {
-            let shipped = visible_mutation_authority_after_guarded_save(outcome, state, intended);
-            let recorded = stream_gate_old(outcome, authority_unchanged, bridge_owns_relay);
-            let expected = match shipped {
+            let verdict_of = |authority: VisibleMutationAuthority| match authority {
                 VisibleMutationAuthority::Authorized => LifecycleVerdict::Continue,
                 VisibleMutationAuthority::Suppressed => LifecycleVerdict::Suppress,
                 VisibleMutationAuthority::Retry => LifecycleVerdict::Retry,
                 VisibleMutationAuthority::AuthorityLost => LifecycleVerdict::End,
             };
+            let shipped =
+                visible_mutation_authority_after_guarded_save(outcome, state, intended, false);
+            let recorded = stream_gate_old(outcome, authority_unchanged, bridge_owns_relay);
             assert_eq!(
-                recorded, expected,
+                recorded,
+                verdict_of(shipped),
                 "{outcome:?}/{authority_unchanged}/{bridge_owns_relay}: recorded old stream \
-                 verdict disagrees with the shipped mapping"
+                 verdict disagrees with the shipped mapping outside the cohort"
             );
             assert_eq!(
                 shipped.mutation_permission().is_none(),
@@ -110,8 +120,130 @@ fn recorded_stream_gate_old_mirrors_the_shipped_authority_mapping() {
                 !(!recorded.ends_lifecycle() && new.ends_lifecycle()),
                 "the new stream gate may only end FEWER lifecycles"
             );
+            let enforced =
+                visible_mutation_authority_after_guarded_save(outcome, state, intended, true);
+            assert_eq!(
+                new,
+                verdict_of(enforced),
+                "{outcome:?}/{authority_unchanged}/{bridge_owns_relay}: the enforced mapping \
+                 disagrees with the recorded new stream verdict"
+            );
         }
     }
+}
+
+/// #5464 T5 S4's deployment no-op, stated as the property that makes it one:
+/// under the SHIPPED dial no channel is admitted, so the operand every call site
+/// passes is `false` and the mapping above is the pre-S4 one. `Observe` is
+/// deliberately not enough either — it is the mode the promotion evidence is
+/// collected under, and admitting it here would change the behaviour the
+/// evidence describes.
+#[test]
+fn the_shipped_dial_admits_no_channel_to_the_stream_loop_enforcement_cohort() {
+    use crate::config::RelayAuthorityMode;
+
+    let defaults = crate::config::RuntimeSettingsConfig::default();
+    assert_eq!(defaults.relay_authority_mode, RelayAuthorityMode::Legacy);
+    assert_eq!(defaults.relay_authority_cohort_percent, 0);
+    assert!(
+        !RelayAuthorityMode::Observe.governs_destructive_authority(),
+        "the observing mode must not be able to enforce",
+    );
+
+    for channel_id in (0..2_000u64).map(|index| 1_534_511_598_012_600_371 + index * 7) {
+        assert!(
+            !stream_loop_suppression_cohort_admits(channel_id),
+            "channel {channel_id} was admitted to the enforcement cohort by the shipped dial"
+        );
+    }
+}
+
+/// The tick's half of the wiring, pinned the way this repo pins wiring claims.
+/// `stream_tick.rs`'s two gate call sites take the operand from ONE read taken at
+/// tick entry, so the sixteen `authorize_visible_mutation!` sites and the dirty
+/// flush cannot disagree with each other inside a single tick. A literal at
+/// either site would leave every behavioural assertion in this file green while
+/// pinning that site to one side of the rollout.
+#[test]
+fn the_tick_reads_the_enforcement_cohort_once_and_both_gate_sites_use_that_read() {
+    let source = include_str!("../stream_tick.rs");
+    assert_eq!(
+        source
+            .lines()
+            .filter(|line| {
+                line.trim()
+                    == "let cohort_admits = stream_loop_suppression_cohort_admits(channel_id.get());"
+            })
+            .count(),
+        1,
+        "the tick must read the cohort exactly once",
+    );
+    assert_eq!(
+        source
+            .lines()
+            .filter(|line| line.trim() == "cohort_admits,")
+            .count(),
+        2,
+        "both gate call sites must pass the tick-entry read",
+    );
+}
+
+/// The one cell S4 moves, at the seam that decides it, in both cohort states —
+/// and the two cells that must NOT move with it. `IdentityMismatch` is an
+/// exact-episode veto rather than a structural signal (design r3 ERRATUM
+/// R3-E4-3), so it keeps its termination right inside the cohort; `IoError` stays
+/// retryable. The promotion gate for the transition asserted here is S2's
+/// `new_stricter_verdicts` counter reading `0` across the observation window.
+#[test]
+fn a_vanished_row_suppresses_inside_the_cohort_and_still_ends_lifecycle_outside_it() {
+    let bridge = owner_state(4_259_124, 77_010);
+    let intended = crate::services::discord::inflight::StreamRelayAuthority::from_state(&bridge);
+    assert!(intended.bridge_owns_relay());
+
+    assert_eq!(
+        visible_mutation_authority_after_guarded_save(
+            GuardedSaveOutcome::Missing,
+            &bridge,
+            intended,
+            false,
+        ),
+        VisibleMutationAuthority::AuthorityLost,
+        "outside the cohort a vanished row must still end bridge lifecycle authority",
+    );
+    let suppressed = visible_mutation_authority_after_guarded_save(
+        GuardedSaveOutcome::Missing,
+        &bridge,
+        intended,
+        true,
+    );
+    assert_eq!(suppressed, VisibleMutationAuthority::Suppressed);
+    assert_eq!(
+        suppressed.mutation_permission(),
+        Some(false),
+        "`None` here is `return_authority_lost!()`, which skips post_loop_finalize \
+         and orphans the finished answer inside the deleted row",
+    );
+
+    for unmoved in [
+        GuardedSaveOutcome::IdentityMismatch,
+        GuardedSaveOutcome::IoError,
+    ] {
+        assert_eq!(
+            visible_mutation_authority_after_guarded_save(unmoved, &bridge, intended, true),
+            visible_mutation_authority_after_guarded_save(unmoved, &bridge, intended, false),
+            "{unmoved:?} is not a structural signal and the cohort must not reach it",
+        );
+    }
+    assert_eq!(
+        visible_mutation_authority_after_guarded_save(
+            GuardedSaveOutcome::IdentityMismatch,
+            &bridge,
+            intended,
+            true,
+        ),
+        VisibleMutationAuthority::AuthorityLost,
+        "an exact-episode veto keeps its termination right inside the cohort",
+    );
 }
 
 #[test]
@@ -124,6 +256,7 @@ fn visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection
             GuardedSaveOutcome::Saved,
             &bridge,
             bridge_authority,
+            false,
         ),
         VisibleMutationAuthority::Authorized,
     );
@@ -149,6 +282,7 @@ fn visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection
                 GuardedSaveOutcome::Saved,
                 &delegated,
                 intended,
+                false,
             ),
             VisibleMutationAuthority::Suppressed,
         );
@@ -165,6 +299,7 @@ fn visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection
                 GuardedSaveOutcome::Saved,
                 &foreign,
                 intended,
+                false,
             ),
             VisibleMutationAuthority::AuthorityLost,
         );
@@ -268,8 +403,12 @@ fn same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority() {
             "the adopted row must carry the answer forward into the delivery path",
         );
 
-        let authority =
-            visible_mutation_authority_after_guarded_save(outcome, &state, intended_authority);
+        let authority = visible_mutation_authority_after_guarded_save(
+            outcome,
+            &state,
+            intended_authority,
+            false,
+        );
         assert_eq!(authority, VisibleMutationAuthority::Authorized);
         assert_eq!(
             authority.mutation_permission(),
@@ -337,10 +476,15 @@ fn changed_durable_relay_authority_still_ends_bridge_authority() {
             "the bridge must not write its local delta after a real handoff",
         );
         assert_eq!(
-            visible_mutation_authority_after_guarded_save(outcome, &state, intended_authority)
-                .mutation_permission(),
+            visible_mutation_authority_after_guarded_save(
+                outcome,
+                &state,
+                intended_authority,
+                true
+            )
+            .mutation_permission(),
             None,
-            "a real relay handoff must still terminate bridge lifecycle authority",
+            "a real relay handoff must still terminate bridge lifecycle authority, cohort or not",
         );
     });
 }
@@ -794,7 +938,7 @@ async fn strict_fence_loses_authority_before_visible_mutation() {
     )
     .await;
     let authority =
-        visible_mutation_authority_after_guarded_save(outcome, &stale, intended_authority);
+        visible_mutation_authority_after_guarded_save(outcome, &stale, intended_authority, false);
     if authority == VisibleMutationAuthority::Authorized {
         TurnGateway::edit_message(
             &gateway,
@@ -997,7 +1141,7 @@ async fn second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3() {
     .await;
     assert_eq!(outcome, GuardedSaveOutcome::IoError);
     assert_eq!(
-        visible_mutation_authority_after_guarded_save(outcome, &state, intended_authority,),
+        visible_mutation_authority_after_guarded_save(outcome, &state, intended_authority, true),
         VisibleMutationAuthority::Retry
     );
     assert_eq!(pending_candidate, Some(MessageId::new(3)));

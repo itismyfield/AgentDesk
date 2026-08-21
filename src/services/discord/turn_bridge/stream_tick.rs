@@ -11,7 +11,8 @@ use guarded_persist::{
     GuardedSaveOutcome, StreamTickCandidateSaveContext, VisibleMutationAuthority,
     dirty_after_guarded_save, fence_stream_tick_visible_mutation_with_candidate_cleanup,
     persist_stream_tick_heartbeat, persist_stream_tick_state_with_candidate_cleanup,
-    sync_stream_tick_tool_fields, visible_mutation_authority_after_guarded_save,
+    stream_loop_suppression_cohort_admits, sync_stream_tick_tool_fields,
+    visible_mutation_authority_after_guarded_save,
 };
 
 pub(super) type LongRunningPlaceholderActive = Option<(
@@ -252,6 +253,10 @@ pub(super) async fn run_bridge_stream_tick(
     let mut long_running_placeholder_active = state.long_running_placeholder_active.take();
     let mut last_adk_heartbeat = *state.last_adk_heartbeat;
     let mut last_inflight_long_run_heartbeat = *state.last_inflight_long_run_heartbeat;
+    // #5464 T5 S4: asked once at tick entry, so every fence this tick runs —
+    // the sixteen `authorize_visible_mutation!` sites and the dirty flush —
+    // answers the cohort question the same way.
+    let cohort_admits = stream_loop_suppression_cohort_admits(channel_id.get());
 
     macro_rules! reconcile_tick_runtime_from_inflight {
         ($current_msg_id_before_save:expr) => {{
@@ -388,6 +393,7 @@ pub(super) async fn run_bridge_stream_tick(
                 guarded_outcome,
                 inflight_state,
                 intended_authority,
+                cohort_admits,
             )
             .mutation_permission()
             {
@@ -970,6 +976,7 @@ pub(super) async fn run_bridge_stream_tick(
             flush_outcome,
             inflight_state,
             intended_authority,
+            cohort_admits,
         ) == VisibleMutationAuthority::AuthorityLost
         {
             return_authority_lost!();
