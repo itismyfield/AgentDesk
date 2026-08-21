@@ -62,10 +62,22 @@ fn generation_relation(born_generation: u64, current_generation: u64) -> &'stati
 /// the field wrote this row" and "this deployment could not produce a
 /// generation", because going fail-closed is only safe for the first.
 ///
-/// PROVES: exactly that split, and nothing else. A deployment whose epoch is
-/// positive stamps a positive `born_generation` on every row it writes, so a
-/// zero-born row it meets is a legacy binary's — this deployment cannot pollute
-/// the zero bucket, whichever of its own failures occurred.
+/// PROVES: exactly that split, and nothing else, and only on the far side of
+/// this process's own allocation. Once the epoch is allocated and positive,
+/// every row this process writes carries that positive `born_generation` — none
+/// of the three positive-failure routes below stamps a zero — so a zero-born row
+/// it meets after that point is a legacy binary's.
+///
+/// The one exception is not a failure MODE but a TIMING window: before the
+/// allocation lands, `process_generation()` falls back to `load_generation()`,
+/// which reads zero on a boot whose counter is absent or unreadable, so a row
+/// born in that window carries `born_generation = 0` from THIS binary and does
+/// land in the zero bucket. The `Residual (§9-9)` paragraph below is that
+/// window, not a fourth failure route. A normal boot closes it before it can
+/// produce such a row: `run_bot_build_shared_data` calls
+/// `allocate_process_generation` while it builds `SharedData`, so the epoch is
+/// fixed before intake opens, and what keeps the fallback reachable at all is
+/// constructor-only tooling and tests.
 ///
 /// DOES NOT PROVE — which is why this is no longer spelled
 /// `generation_subsystem_available` (#5462 S5 r3): allocation success, an epoch
@@ -87,13 +99,15 @@ fn generation_relation(born_generation: u64, current_generation: u64) -> &'stati
 /// the first two, so a probe would call the subsystem available while the epoch
 /// it reports on is zero.
 ///
-/// Residual (§9-9) — FIRST BOOT ONLY: the pre-allocation window returns
-/// `load_generation()`, the value the PREVIOUS process wrote, so a row born in
-/// that window normally carries `born_generation = N-1` and lands in
-/// `prior_generation` — the bucket §9-9 itself nominated for observing it. Only
-/// where no counter file exists yet does that fallback read zero, and only there
-/// does §9-9's population mix into §9-8's `legacy_zero`. Separating even that
-/// needs a provenance field this slice does not add.
+/// Residual (§9-9) — ONLY WHERE THE COUNTER CANNOT BE READ: the pre-allocation
+/// window returns `load_generation()`, the value the PREVIOUS process wrote, so
+/// a row born in that window normally carries `born_generation = N-1` and lands
+/// in `prior_generation` — the bucket §9-9 itself nominated for observing it.
+/// That fallback reads zero wherever the counter cannot be read — absent on a
+/// first boot, or present but unparseable, which `load_generation()` collapses
+/// into the same `unwrap_or(0)` — and only there does §9-9's population mix into
+/// §9-8's `legacy_zero`. Separating even that needs a provenance field this
+/// slice does not add.
 ///
 /// Takes the epoch the caller already read instead of reading it again: this is
 /// an observation, and `allocate_process_generation` is a `OnceLock` initializer
@@ -366,8 +380,8 @@ mod tests {
     fn allowed_generation_buckets_separate_the_deferred_populations() {
         assert_eq!(generation_relation(0, 5462), "legacy_zero");
         // Zero row in a deployment whose counter is also zero stays fail-open,
-        // not "current" — else an unavailable generation subsystem would read as
-        // a fence protecting every row.
+        // not "current" — else a zero epoch would read as a fence protecting
+        // every row.
         assert_eq!(generation_relation(0, 0), "legacy_zero");
         assert_eq!(generation_relation(5462, 5462), "current_generation");
         assert_eq!(generation_relation(5461, 5462), "prior_generation");
@@ -393,22 +407,23 @@ mod tests {
     // assertion in the classifier test above while redefining the bucket that
     // chooses between the α and β repairs.
     //
-    // The third case is the discriminating one, and the only shape where the
-    // row's generation and the epoch disagree about being zero: a legacy row in
-    // a healthy deployment. The first two are zero-together or positive-
-    // together, so both survive reading the flag off the wrong source
-    // (`current_generation_nonzero(snapshot.born_generation)`) and both survive
-    // collapsing it into `relation != "legacy_zero"` — a tautology that would
-    // delete §9-8's discriminator outright. The third kills each.
+    // The third case is the discriminating one, and among the three below the
+    // only shape where the row's generation and the epoch disagree about being
+    // zero: a legacy row in a healthy deployment. The first two are
+    // zero-together or positive-together, so both survive reading the flag off
+    // the wrong source (`current_generation_nonzero(snapshot.born_generation)`)
+    // and both survive collapsing it into `relation != "legacy_zero"` — a
+    // tautology that would delete §9-8's discriminator outright. The third
+    // kills each.
     #[test]
     fn allow_side_facts_are_wired_from_the_row_then_the_epoch() {
         let facts = AllowedGenerationFacts::observe(&row(1, 54_61), 54_62);
         assert_eq!(facts.relation, "prior_generation");
         assert!(facts.current_generation_nonzero);
 
-        let unavailable = AllowedGenerationFacts::observe(&row(2, 0), 0);
-        assert_eq!(unavailable.relation, "legacy_zero");
-        assert!(!unavailable.current_generation_nonzero);
+        let zero_epoch = AllowedGenerationFacts::observe(&row(2, 0), 0);
+        assert_eq!(zero_epoch.relation, "legacy_zero");
+        assert!(!zero_epoch.current_generation_nonzero);
 
         let legacy_row_in_a_live_deployment = AllowedGenerationFacts::observe(&row(3, 0), 54_62);
         assert_eq!(legacy_row_in_a_live_deployment.relation, "legacy_zero");

@@ -154,6 +154,17 @@ const LOADER_GENERATION_GATE_ALLOWED: &str = "loader_generation_gate_allowed";
 /// the allow event alone — neither the removal log nor the refusal WARN carries
 /// it, and both would have to recompute it from their generation pair. Joining
 /// any two of these streams needs those normalizations first.
+///
+/// One more asymmetry, this time in the reconcile allow event rather than here
+/// (#5462 S5 r4): its `born_generation` and `generation_relation` are spelled
+/// WITHOUT the `snapshot_` prefix that its own refusal payload gives stale
+/// caller fields, yet both are derived from that caller snapshot and not from a
+/// locked re-read — only its `current_generation_nonzero` comes from the epoch.
+/// Every generation field on THIS event instead comes off the row this fence
+/// just read under its own lock. That site also counts rows this one never
+/// could: its `Delegated(GuardedClearOutcome::Missing)` arm stamps a bucket even
+/// when the state file could not be read or could not be parsed, so the row it
+/// classifies may no longer be on disk at all.
 fn emit_loader_generation_gate_allowed(
     provider: &ProviderKind,
     state: &InflightTurnState,
