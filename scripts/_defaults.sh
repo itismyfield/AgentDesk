@@ -1069,7 +1069,7 @@ _restart_nonce_entropy() {
   printf '%s' "$entropy"
 }
 
-_restart_stage_and_link_marker() {
+_restart_stage_marker_identity() {
   local root="$1"
   local nonce="$2"
   local source="$3"
@@ -1097,7 +1097,15 @@ _restart_stage_and_link_marker() {
     return 2
   fi
   rm -f "$stage" 2>/dev/null || true
+  return 0
+}
 
+_restart_link_canonical_marker() {
+  local root="$1"
+  local nonce="$2"
+  local identity
+
+  identity="$(_restart_request_artifact_path "$root" restart_pending "$nonce")" || return 3
   if ln "$identity" "$root/restart_pending" 2>/dev/null; then
     return 0
   fi
@@ -1106,11 +1114,16 @@ _restart_stage_and_link_marker() {
   return 2
 }
 
+_restart_stage_and_link_marker() {
+  _restart_stage_marker_identity "$@" || return $?
+  _restart_link_canonical_marker "$1" "$2"
+}
+
 _restart_dispose_marker_by_own_nonce() {
   local root="$1"
   local expected_nonce="$2"
   local marker="$root/restart_pending"
-  local identity disposal
+  local identity disposal found
   local rc=0
 
   identity="$(_restart_request_artifact_path "$root" restart_pending "$expected_nonce")" || return 1
@@ -1124,7 +1137,6 @@ _restart_dispose_marker_by_own_nonce() {
     elif [ -e "$marker" ]; then
       # A newer actor filled the canonical name. Preserve the claimed inode as
       # recovery-visible residue; deleting it here loses the middle request.
-      local found="unknown"
       found="$(grep -m1 '^nonce=' "$disposal" 2>/dev/null || true)"
       found="${found#nonce=}"
       [ -n "$found" ] || found="unknown"
@@ -1462,22 +1474,48 @@ request_restart_drain_mode_or_fail() {
     echo "✗ [gate] failed to generate restart nonce entropy" >&2
     return 1
   }
-  # Current generator measurements: nonce length 64 and longest terminal tmp
-  # basename 94, versus design measurements M6/M7 of 36 and 54/92.
+  # nonce = 54+len(pid)+len(RANDOM) with uuidgen (at most 64), or
+  # 26+len(pid)+len(RANDOM) with the urandom fallback (at most 36 = design M6).
+  # The longest basename is at most 101 (.restart_pending.dispose.*), terminal
+  # tmp basenames are at most 99, and both remain below NAME_MAX 255.
   nonce="$(date -u '+%Y%m%dT%H%M%S')-$$-${RANDOM:-0}-${entropy}"
   if ! _restart_nonce_is_path_safe "$nonce"; then
     echo "✗ [gate] refused:marker-nonce-unsafe" >&2
     return 1
   fi
 
-  # Two-stage ownership: first publish a complete immutable identity, then link
-  # it into the canonical lease. Every root must acquire the same nonce or none
-  # is retained; partial rollback uses identity-safe disposal.
+  # Per root, reserve the immutable identity before clearing stale same-nonce
+  # terminal identities, then publish the canonical lease. The runtime cannot
+  # consume this request before canonical publication, and a same-nonce actor
+  # cannot reach cleanup after the identity reservation succeeds.
   for root in "${roots[@]}"; do
-    if _restart_stage_and_link_marker "$root" "$nonce" "$source" "$scope" "$label"; then
+    if _restart_stage_marker_identity "$root" "$nonce" "$source" "$scope" "$label"; then
       marker_rc=0
     else
       marker_rc=$?
+    fi
+    if [ "$marker_rc" -eq 0 ]; then
+      for terminal_path in \
+        "$(_restart_request_artifact_path "$root" restart_persisted "$nonce")" \
+        "$(_restart_request_artifact_path "$root" restart_cancelled "$nonce")"; do
+        if [ -e "$terminal_path" ]; then
+          rm -f "$terminal_path" 2>/dev/null || {
+            echo "✗ [gate] failed to clear stale terminal artifact: $terminal_path" >&2
+            _restart_dispose_marker_by_own_nonce "$root" "$nonce" || true
+            if [ "${#acquired[@]}" -gt 0 ]; then
+              for acquired_root in "${acquired[@]}"; do
+                _restart_dispose_marker_by_own_nonce "$acquired_root" "$nonce" || true
+              done
+            fi
+            return 1
+          }
+        fi
+      done
+      if _restart_link_canonical_marker "$root" "$nonce"; then
+        marker_rc=0
+      else
+        marker_rc=$?
+      fi
     fi
     case "$marker_rc" in
       0)
@@ -1500,6 +1538,7 @@ request_restart_drain_mode_or_fail() {
         ;;
     esac
     if [ "$marker_rc" -ne 0 ]; then
+      _restart_dispose_marker_by_own_nonce "$root" "$nonce" || true
       if [ "${#acquired[@]}" -gt 0 ]; then
         for acquired_root in "${acquired[@]}"; do
           _restart_dispose_marker_by_own_nonce "$acquired_root" "$nonce" || true
@@ -1507,25 +1546,6 @@ request_restart_drain_mode_or_fail() {
       fi
       return 1
     fi
-  done
-
-  # Lease reservation makes this actor the sole live incarnation of the nonce.
-  # Only now may stale same-nonce terminal identities be removed: cleaning them
-  # before acquisition can delete a concurrent actor's newly published proof.
-  for root in "${roots[@]}"; do
-    for terminal_path in \
-      "$(_restart_request_artifact_path "$root" restart_persisted "$nonce")" \
-      "$(_restart_request_artifact_path "$root" restart_cancelled "$nonce")"; do
-      if [ -e "$terminal_path" ]; then
-        rm -f "$terminal_path" 2>/dev/null || {
-          echo "✗ [gate] failed to clear stale terminal artifact: $terminal_path" >&2
-          for acquired_root in "${acquired[@]}"; do
-            _restart_dispose_marker_by_own_nonce "$acquired_root" "$nonce" || true
-          done
-          return 1
-        }
-      fi
-    done
   done
 
   while [ "$waited" -lt "$ack_wait" ]; do

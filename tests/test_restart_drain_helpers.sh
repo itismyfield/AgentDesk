@@ -1188,8 +1188,9 @@ else
   fail "urandom fallback yields eight path-safe hex characters (got: $fallback_entropy)"
 fi
 
-# E8.4②: force nonce reuse and inject a same-nonce terminal publication during
-# acquisition. Cleanup is allowed only after the lease reservation succeeds.
+# E8.9: force nonce reuse and publish a same-nonce terminal identity immediately
+# after identity reservation. Cleanup must occur after identity reservation and
+# before canonical publication; moving it to either side makes one fixture red.
 mkdir -p "$S3A_TMP/reuse"
 forced_nonce="forced-$$-0-entropy"
 printf 'nonce=%s\n' "$forced_nonce" >"$S3A_TMP/reuse/restart_persisted.$forced_nonce"
@@ -1198,7 +1199,10 @@ printf 'nonce=foreign\n' >"$S3A_TMP/reuse/restart_persisted.foreign"
 printf 'nonce=fixed\n' >"$S3A_TMP/reuse/restart_persisted"
 real_entropy=$(declare -f _restart_nonce_entropy)
 real_date=$(declare -f date 2>/dev/null || true)
-real_stage=$(declare -f _restart_stage_and_link_marker)
+real_stage_identity=$(declare -f _restart_stage_marker_identity)
+real_link_canonical=$(declare -f _restart_link_canonical_marker)
+eval "$(printf '%s\n' "$real_stage_identity" | sed '1s/_restart_stage_marker_identity/_restart_stage_marker_identity_real/')"
+eval "$(printf '%s\n' "$real_link_canonical" | sed '1s/_restart_link_canonical_marker/_restart_link_canonical_marker_real/')"
 _restart_nonce_entropy() { printf entropy; }
 date() {
   if [ "$1" = -u ] && [ "$2" = +%Y%m%dT%H%M%S ]; then
@@ -1207,26 +1211,64 @@ date() {
     command date "$@"
   fi
 }
-_restart_stage_and_link_marker() {
+_restart_stage_marker_identity() {
+  _restart_stage_marker_identity_real "$@" || return $?
   _restart_terminal_publish "$1" restart_persisted "$2" 'committed_at=concurrent'
-  eval "$real_stage"
-  _restart_stage_and_link_marker "$@"
 }
 unset RANDOM
 RANDOM=0
 _launchd_job_state() { echo "not running"; }
-request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/reuse" src >/dev/null 2>&1
-unset -f _launchd_job_state date
-[ -n "$real_date" ] && eval "$real_date"
-eval "$real_entropy"
-eval "$real_stage"
+AGENTDESK_RESTART_DRAIN_ACK_WAIT=0 \
+  request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/reuse" src >/dev/null 2>&1
 if [ ! -e "$S3A_TMP/reuse/restart_persisted.$forced_nonce" ] \
   && [ ! -e "$S3A_TMP/reuse/restart_cancelled.$forced_nonce" ] \
   && [ -e "$S3A_TMP/reuse/restart_persisted.foreign" ]; then
-  pass "same-nonce terminal cleanup occurs after lease reservation"
+  pass "same-nonce terminal cleanup occurs after identity reservation and before canonical publication"
 else
-  fail "same-nonce terminal cleanup occurs after lease reservation"
+  fail "same-nonce terminal cleanup occurs after identity reservation and before canonical publication"
 fi
+
+# Crash exactly after canonical publication. The canonical and identity may
+# remain, but the stale same-nonce terminal must already be absent.
+mkdir -p "$S3A_TMP/post-lease-crash"
+printf 'nonce=%s\n' "$forced_nonce" >"$S3A_TMP/post-lease-crash/restart_persisted.$forced_nonce"
+unset RANDOM
+RANDOM=0
+set +e
+(
+  _restart_link_canonical_marker() {
+    _restart_link_canonical_marker_real "$@" || return $?
+    exit 97
+  }
+  request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/post-lease-crash" src >/dev/null 2>&1
+)
+post_lease_crash_rc=$?
+set -e
+assert_eq "post-canonical crash seam exits at injected point" "97" "$post_lease_crash_rc"
+if [ -e "$S3A_TMP/post-lease-crash/restart_pending" ] \
+  && [ -e "$S3A_TMP/post-lease-crash/restart_pending.$forced_nonce" ] \
+  && [ ! -e "$S3A_TMP/post-lease-crash/restart_persisted.$forced_nonce" ]; then
+  pass "post-canonical crash cannot retain a same-nonce stale terminal"
+else
+  fail "post-canonical crash cannot retain a same-nonce stale terminal"
+fi
+
+# Identity-only rollback is the failure shape before canonical publication.
+mkdir -p "$S3A_TMP/identity-only-rollback"
+_restart_stage_marker_identity_real "$S3A_TMP/identity-only-rollback" identity-only src scope label
+_restart_dispose_marker_by_own_nonce "$S3A_TMP/identity-only-rollback" identity-only
+if [ ! -e "$S3A_TMP/identity-only-rollback/restart_pending" ] \
+  && [ ! -e "$S3A_TMP/identity-only-rollback/restart_pending.identity-only" ]; then
+  pass "identity-only rollback removes its reservation without a canonical marker"
+else
+  fail "identity-only rollback removes its reservation without a canonical marker"
+fi
+
+unset -f _launchd_job_state date _restart_stage_marker_identity_real _restart_link_canonical_marker_real
+[ -n "$real_date" ] && eval "$real_date"
+eval "$real_entropy"
+eval "$real_stage_identity"
+eval "$real_link_canonical"
 
 # The not-running check can race with a newer actor acquiring the canonical
 # lease. Inject actor B at that seam and require actor A's cleanup to preserve B.
