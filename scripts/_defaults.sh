@@ -1538,7 +1538,6 @@ request_restart_drain_mode_or_fail() {
         ;;
     esac
     if [ "$marker_rc" -ne 0 ]; then
-      _restart_dispose_marker_by_own_nonce "$root" "$nonce" || true
       if [ "${#acquired[@]}" -gt 0 ]; then
         for acquired_root in "${acquired[@]}"; do
           _restart_dispose_marker_by_own_nonce "$acquired_root" "$nonce" || true

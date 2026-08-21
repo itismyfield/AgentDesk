@@ -1264,6 +1264,69 @@ else
   fail "identity-only rollback removes its reservation without a canonical marker"
 fi
 
+# Actor B must not dispose actor A's same-nonce identity or canonical lease when
+# B loses the identity reservation with marker rc=4.
+mkdir -p "$S3A_TMP/same-nonce-race"
+printf 'nonce=%s\n' "$forced_nonce" >"$S3A_TMP/same-nonce-race/restart_pending.$forced_nonce"
+ln "$S3A_TMP/same-nonce-race/restart_pending.$forced_nonce" \
+  "$S3A_TMP/same-nonce-race/restart_pending"
+unset RANDOM
+RANDOM=0
+set +e
+AGENTDESK_RESTART_DRAIN_ACK_WAIT=0 \
+  request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/same-nonce-race" src \
+  >"$S3A_TMP/same-nonce-race.out" 2>&1
+same_nonce_race_rc=$?
+set -e
+assert_eq "same-nonce actor B fails after marker rc=4" "1" "$same_nonce_race_rc"
+if _restart_artifact_nonce_matches "$S3A_TMP/same-nonce-race/restart_pending" "$forced_nonce" \
+  && _restart_artifact_nonce_matches "$S3A_TMP/same-nonce-race/restart_pending.$forced_nonce" "$forced_nonce"; then
+  pass "marker rc=4 preserves actor A's identity and canonical lease"
+else
+  fail "marker rc=4 preserves actor A's identity and canonical lease"
+fi
+
+# Actor B must not move a foreign canonical lease out of its fixed name when
+# B loses canonical publication with marker rc=1. Observe the helper seam that
+# the old rollback entered; any transient absence would let the owner falsely
+# classify the request as consumed.
+mkdir -p "$S3A_TMP/foreign-canonical-race"
+_restart_stage_and_link_marker \
+  "$S3A_TMP/foreign-canonical-race" actor-A-foreign src scope label
+real_nonce_match=$(declare -f _restart_artifact_nonce_matches)
+foreign_canonical_absent=0
+_restart_artifact_nonce_matches() {
+  if [ ! -e "$S3A_TMP/foreign-canonical-race/restart_pending" ]; then
+    foreign_canonical_absent=1
+  fi
+  [ -f "$1" ] && grep -Fqx -- "nonce=$2" "$1" 2>/dev/null
+}
+_restart_nonce_entropy() { printf actor-B-entropy; }
+date() {
+  if [ "$1" = -u ] && [ "$2" = +%Y%m%dT%H%M%S ]; then
+    printf actor-B
+  else
+    command date "$@"
+  fi
+}
+unset RANDOM
+RANDOM=0
+set +e
+AGENTDESK_RESTART_DRAIN_ACK_WAIT=0 \
+  request_restart_drain_mode_or_fail test test.label 0 "$S3A_TMP/foreign-canonical-race" src \
+  >"$S3A_TMP/foreign-canonical-race.out" 2>&1
+foreign_canonical_race_rc=$?
+set -e
+assert_eq "foreign canonical actor B fails after marker rc=1" "1" "$foreign_canonical_race_rc"
+assert_eq "marker rc=1 never removes actor A's canonical fixed name" \
+  "0" "$foreign_canonical_absent"
+if _restart_artifact_nonce_matches "$S3A_TMP/foreign-canonical-race/restart_pending" actor-A-foreign; then
+  pass "marker rc=1 preserves actor A's canonical lease"
+else
+  fail "marker rc=1 preserves actor A's canonical lease"
+fi
+
+eval "$real_nonce_match"
 unset -f _launchd_job_state date _restart_stage_marker_identity_real _restart_link_canonical_marker_real
 [ -n "$real_date" ] && eval "$real_date"
 eval "$real_entropy"
