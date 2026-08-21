@@ -656,7 +656,7 @@ fn nudge_watcher_handle_for_backlog(
         .as_ref()
         .is_some_and(|pending| *pending <= token.committed_offset || *pending == requested_frontier)
     {
-        tracing::error!(
+        tracing::warn!(
             target: "agentdesk::discord::relay_recovery",
             event = "redrive_frontier_no_progress",
             channel_id = channel_id.get(),
@@ -1176,15 +1176,22 @@ mod tests {
             *resume_offset.lock().unwrap(),
             Some(snapshot.last_relay_offset)
         );
-        assert!(
-            !nudge_watcher_handle_for_backlog(
+        let (duplicate_enqueued, error_logs) = capture_errors(|| {
+            nudge_watcher_handle_for_backlog(
                 &shared,
                 &snapshot,
                 shared.tmux_watchers.get(&channel_id).unwrap().value(),
                 channel_id,
                 shared.relay_frontier_token(channel_id),
-            ),
+            )
+        });
+        assert!(
+            !duplicate_enqueued,
             "a still-pending identical frontier must not be enqueued again"
+        );
+        assert!(
+            !error_logs.contains("redrive_frontier_no_progress"),
+            "a duplicate frontier is diagnostic WARN, never ERROR"
         );
         assert_eq!(
             *resume_offset.lock().unwrap(),

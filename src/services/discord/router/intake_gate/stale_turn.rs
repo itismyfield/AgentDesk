@@ -36,6 +36,32 @@ enum StaleActiveTurnProofClassification {
     ExplicitBackgroundStatus,
 }
 
+#[cfg(unix)]
+async fn observe_stale_turn_axis_b(
+    shared: &std::sync::Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: serenity::ChannelId,
+) {
+    let Some(registry) = shared.health_registry.upgrade() else {
+        return;
+    };
+    let Some(snapshot) = registry
+        .snapshot_watcher_state_for_provider(provider, channel_id.get())
+        .await
+    else {
+        return;
+    };
+    crate::services::discord::relay_recovery::observe_axis_b_candidate(
+        shared,
+        provider,
+        &snapshot,
+        crate::services::discord::relay_recovery::AxisBSite::StaleTurnIntake,
+        crate::services::discord::relay_recovery::RelayRecoveryActionKind::ClearStaleThreadProof,
+        true,
+        chrono::Utc::now().timestamp_millis(),
+    );
+}
+
 fn classify_stale_active_turn_proof(
     inflight: &crate::services::discord::inflight::InflightTurnState,
     snapshot: &crate::services::discord::health::WatcherStateSnapshot,
@@ -157,6 +183,8 @@ pub(super) async fn thread_guard_force_clean_stale_thread(
     _parent_channel_id: serenity::ChannelId,
     thread_id: serenity::ChannelId,
 ) {
+    #[cfg(unix)]
+    observe_stale_turn_axis_b(shared, provider, thread_id).await;
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] 🔓 THREAD-GUARD: stale inflight detected for thread {}, cleaning up and proceeding",
@@ -213,6 +241,8 @@ async fn release_queue_blocked_stale_active_turn(
         return false;
     }
 
+    #[cfg(unix)]
+    observe_stale_turn_axis_b(shared, provider, channel_id).await;
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
         "  [{ts}] 🔓 QUEUE-GUARD: stale active-turn proof for channel {} has no live owner; releasing mailbox and proceeding",

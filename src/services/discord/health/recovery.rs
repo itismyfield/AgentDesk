@@ -35,13 +35,7 @@ use leak_recovery_ledger::{
     leak_recovery_record_confirmed_chunk, leak_recovery_unrelayed_range,
     render_leak_recovery_delivery,
 };
-pub(crate) use watchdog_decisions::{
-    STALL_WATCHDOG_INITIAL_DELAY_SECS, STALL_WATCHDOG_INTERVAL_SECS,
-    STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS, STALL_WATCHDOG_THRESHOLD_SECS,
-    completed_stale_no_answer_orphan_should_clean, inflight_completed_stale_leak_detected,
-    stale_idle_foreground_queue_detected, stall_watchdog_should_force_clean,
-    stall_watchdog_should_force_clean_orphan_explicit_background_work,
-};
+pub(crate) use watchdog_decisions::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeTurnStopResult {
@@ -1782,6 +1776,13 @@ pub(crate) async fn run_stall_watchdog_pass(
             )
             .unwrap_or(false)
         {
+            #[cfg(unix)]
+            observe_watchdog_axis_b(
+                &shared,
+                provider,
+                &snapshot,
+                discord::relay_recovery::AxisBSite::WatchdogStaleIdle,
+            );
             let Some(result) = clear_idle_tmux_stale_turn(
                 registry,
                 provider.as_str(),
@@ -1819,6 +1820,13 @@ pub(crate) async fn run_stall_watchdog_pass(
             now_unix_secs,
             STALL_WATCHDOG_THRESHOLD_SECS,
         ) {
+            #[cfg(unix)]
+            observe_watchdog_axis_b(
+                &shared,
+                provider,
+                &snapshot,
+                discord::relay_recovery::AxisBSite::WatchdogExplicitBackground,
+            );
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for orphan explicit background work in channel {}",

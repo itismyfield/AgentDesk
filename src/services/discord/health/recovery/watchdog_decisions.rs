@@ -1,5 +1,8 @@
+use crate::services::discord::health::snapshot::WatcherStateSnapshot;
 use crate::services::discord::relay_health::{RelayActiveTurn, RelayStallState};
-use crate::services::discord::{self as discord};
+use crate::services::discord::relay_recovery::{self, AxisBSite, RelayRecoveryActionKind};
+use crate::services::discord::{self as discord, SharedData};
+use crate::services::provider::ProviderKind;
 
 /// #1446 stall-deadlock recovery - pure decision helper for the
 /// `stall_watchdog` periodic loop. Returns `true` when the watchdog should
@@ -283,6 +286,31 @@ pub(crate) fn stall_watchdog_should_force_clean_orphan_explicit_background_work(
 /// Watchdog tick interval. Picked to converge inside ~1 cycle once the
 /// `2x` staleness window has elapsed, while staying well below the
 /// gateway-lease keepalive cadence so we never starve the gateway loop.
+/// Observe the two watchdog consumers after every shipped structural guard has
+/// passed. Returning `()` makes the ledger incapable of changing that guard.
+#[cfg(unix)]
+pub(crate) fn observe_watchdog_axis_b(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    snapshot: &WatcherStateSnapshot,
+    site: AxisBSite,
+) {
+    let action = match site {
+        AxisBSite::WatchdogStaleIdle => RelayRecoveryActionKind::ClearStaleThreadProof,
+        AxisBSite::WatchdogExplicitBackground => RelayRecoveryActionKind::ClearOrphanPendingToken,
+        _ => return,
+    };
+    relay_recovery::observe_axis_b_candidate(
+        shared,
+        provider,
+        snapshot,
+        site,
+        action,
+        true,
+        chrono::Utc::now().timestamp_millis(),
+    );
+}
+
 pub(crate) const STALL_WATCHDOG_INTERVAL_SECS: u64 = 30;
 
 /// Initial delay before the first watchdog pass - mirrors

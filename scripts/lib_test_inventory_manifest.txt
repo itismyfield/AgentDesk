@@ -2677,6 +2677,7 @@ services::discord::health::snapshot::tests::provider_scoped_snapshot_timeout_doe
 services::discord::health::snapshot::tests::rebind_origin_idle_only_without_cancel_token
 services::discord::health::snapshot::tests::relay_authority_observation_is_published_on_the_detail_build_only
 services::discord::health::snapshot::tests::relay_authority_rollout_is_published_on_the_detail_build_only
+services::discord::health::snapshot::tests::relay_verdict_probe_operands_preserve_process_start_and_pane_semantics
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_records_row_vs_registry_identity_divergence
 services::discord::health::snapshot::tests::stale_ownerless_external_input_inflight_is_not_foreground_even_with_cancel_token
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_rejects_same_second_synthetic_successor_4181
@@ -4115,6 +4116,8 @@ services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_rest
 services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_same_watcher_emission_in_flight_is_not_confirmation_failure
 services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_same_watcher_without_emission_fails_at_deadline
 services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_spawn_confirm_requires_stable_heartbeat_advance
+services::discord::relay_recovery::axis_b_tests::axis_b_emit_covers_all_six_sites_without_turn_scope
+services::discord::relay_recovery::axis_b_tests::destructive_consumers_cannot_read_reachability_for_routing
 services::discord::relay_recovery::circuit_breaker::tests::alert_enqueue_failure_stays_pending_and_retry_marks_only_alert_flag
 services::discord::relay_recovery::circuit_breaker::tests::alert_marker_is_exact_episode_scoped
 services::discord::relay_recovery::circuit_breaker::tests::crash_after_local_alert_commit_resumes_same_held_row_without_reenqueue
