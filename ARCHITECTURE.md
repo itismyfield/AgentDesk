@@ -986,6 +986,7 @@ src/
 │   │   │   │   ├── completion_context.rs
 │   │   │   │   └── completion_postgres.rs
 │   │   │   ├── completion_postlude/
+│   │   │   │   ├── channel_episode_scope.rs
 │   │   │   │   ├── channel_writeback.rs
 │   │   │   │   └── contracts.rs
 │   │   │   ├── headless_delivery/

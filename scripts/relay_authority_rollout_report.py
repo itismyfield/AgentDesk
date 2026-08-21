@@ -12,12 +12,20 @@ not an automatic gate. The exit status therefore reports whether the axis-A
 criteria are *met*, so a runbook step can branch on it, but nothing in the
 running system consults it.
 
-Time base: every window, day count and segment boundary here is keyed on
-``observed_at`` (when the turn started), NOT on ``ts`` (when the record was
-published). The two differ by design — a turn stranded by a bridge exit is
-published when the *next* turn on its channel arrives, which for an idle channel
-is hours or days later, and windowing on ``ts`` dated exactly the populations
-this slice exists to measure to the wrong day (ERRATUM R3-E4/E4-5).
+Time base: every promotion window, day count and segment boundary here is keyed
+only on axis-A lifecycle records' ``observed_at`` (when the turn started), NOT on
+``ts`` (when the record was published). Completion ``observed_at`` values are
+telemetry-only and cannot move a promotion window. Publication and observation
+times differ by design — a turn stranded by a bridge exit is published when the
+*next* turn on its channel arrives, which for an idle channel is hours or days
+later, and windowing on ``ts`` dated exactly the populations this slice exists to
+measure to the wrong day (ERRATUM R3-E4/E4-5).
+
+Completion R0–R4 records are displayed separately and never enter segmentation,
+turn/day counts, publication provenance, coverage, or integrity denominators.
+Their fresh reads are independent, non-atomic samples: a prefix may survive a
+crash and different sites may describe different mailbox episodes, so the rows
+must not be interpreted as one completion snapshot.
 
 Promotion criteria (design §5.3, S2's share of the table). All of them are
 evaluated over ONE segment — the newest contiguous run of samples at a single
@@ -125,7 +133,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
-SCHEMA = "relay_authority.axis_a.v2"
+SCHEMA = "relay_authority.axis_a.v3"
 STAGE_TURN_FLOOR = {1: 200, 2: 500}
 WINDOW_DAY_FLOOR = 7
 # Per-site record counts, as a share of bridge-entry records. Both floors are
@@ -158,6 +166,7 @@ SEGMENT_GAP_HOURS = 48
 SOURCE_FILE_KEY = "_source_file"
 # Per-file line tally keys. `unusable` is derived from the three failure counters.
 INTEGRITY_COUNTERS = ("lines", "unparseable", "schema_mismatch", "undatable")
+COMPLETION_LINES = "_completion_lines"
 # Design §4.3/§5.3 fields the S2 emitter cannot produce; re-assigned to S7a.
 UNMEASURED_UNTIL_S7A = ("frontier_already_covers", "unbound_anchor_left")
 
@@ -190,7 +199,10 @@ def event_time(event: dict) -> datetime | None:
 
 
 def empty_integrity() -> dict:
-    return {name: 0 for name in INTEGRITY_COUNTERS} | {"unusable": 0}
+    return {name: 0 for name in INTEGRITY_COUNTERS} | {
+        "unusable": 0,
+        COMPLETION_LINES: 0,
+    }
 
 
 def merge_integrity(tallies) -> dict:
@@ -198,9 +210,15 @@ def merge_integrity(tallies) -> dict:
 
     total = empty_integrity()
     for tally in tallies:
-        for name in INTEGRITY_COUNTERS:
+        for name in (*INTEGRITY_COUNTERS, COMPLETION_LINES):
             total[name] += tally[name]
     total["unusable"] = total["unparseable"] + total["schema_mismatch"] + total["undatable"]
+    return total
+
+
+def all_file_integrity(by_file: dict[str, dict]) -> dict:
+    total = merge_integrity(by_file.values())
+    total["lines"] -= total.pop(COMPLETION_LINES)
     return total
 
 
@@ -261,6 +279,8 @@ def load_events(directory: Path) -> tuple[list[dict], list[str], dict[str, dict]
                 integrity["undatable"] += 1
                 warnings.append(f"{path.name}:{lineno}: no usable observation time, skipped")
                 continue
+            if str(event.get("site") or "").startswith("completion_"):
+                integrity[COMPLETION_LINES] += 1
             event[SOURCE_FILE_KEY] = path.name
             events.append(event)
         integrity["unusable"] = (
@@ -278,8 +298,10 @@ def apply_window(events: list[dict], days: int | None) -> list[dict]:
 
     if days is None or not events:
         return events
-    newest = max(event_time(event) for event in events)
-    floor = newest - timedelta(days=days)
+    lifecycle_times = [event_time(event) for event in events if is_axis_a_event(event)]
+    if not lifecycle_times:
+        return events
+    floor = max(lifecycle_times) - timedelta(days=days)
     return [event for event in events if event_time(event) > floor]
 
 
@@ -290,6 +312,22 @@ def turn_key(event: dict) -> tuple:
         event.get("runtime_ptr"),
         event.get("channel_id"),
         event.get("turn_id"),
+    )
+
+
+def is_axis_a_event(event: dict) -> bool:
+    return event.get("site") in {"bridge_entry", "stream_loop", "loop_exit"} and isinstance(
+        event.get("axis_a"), dict
+    )
+
+
+def completion_scope_counts(events: list[dict]) -> dict:
+    return dict(
+        Counter(
+            f"{event.get('site')}:{event.get('scope')}:{event.get('scope_reason')}"
+            for event in events
+            if str(event.get("site") or "").startswith("completion_")
+        )
     )
 
 
@@ -334,6 +372,7 @@ def segment_events(events: list[dict]) -> list[dict]:
         (
             (event_time(event), str(event.get("cohort_fingerprint")), event)
             for event in events
+            if is_axis_a_event(event)
         ),
         key=lambda item: (item[0], item[1]),
     )
@@ -362,8 +401,9 @@ def build_segment(fingerprint: str, run: list[tuple[datetime, dict]]) -> dict:
 
 
 def tally(events: list[dict]) -> dict:
-    """Everything counted per event, over whatever slice is handed in."""
+    """Promotion counts over an already axis-A-only segment."""
 
+    events = [event for event in events if is_axis_a_event(event)]
     days = {event_time(event).date().isoformat() for event in events}
     turns = {turn_key(event) for event in events}
     sites = Counter()
@@ -522,7 +562,9 @@ def scoped_integrity(target: dict | None, by_file: dict[str, dict]) -> dict:
     records = len(target["events"]) if target else 0
     # Usable lines in those files belonging to some other segment. Excluded from
     # the denominator; reported so the exclusion is auditable rather than silent.
-    scoped["cohabiting_usable_lines"] = scoped["lines"] - scoped["unusable"] - records
+    scoped["cohabiting_usable_lines"] = (
+        scoped["lines"] - scoped["unusable"] - scoped[COMPLETION_LINES] - records
+    )
     # The symmetric display for the fail-open residual: unusable lines in files
     # this target has no usable record in, which leave BOTH sides of the ratio.
     # Displayed only — no criterion reads it, and none is added here.
@@ -530,14 +572,26 @@ def scoped_integrity(target: dict | None, by_file: dict[str, dict]) -> dict:
         merge_integrity(by_file.values())["unusable"] - scoped["unusable"]
     )
     scoped["lines"] = records + scoped["unusable"]
+    scoped.pop(COMPLETION_LINES)
     scoped["files"] = files
     return scoped
 
 
 def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
-    segments = segment_events(events)
+    lifecycle_events = [event for event in events if is_axis_a_event(event)]
+    segments = segment_events(lifecycle_events)
     target = segments[-1] if segments else None
     target_counts = tally(target["events"]) if target else tally([])
+    target_fingerprint = target["cohort_fingerprint"] if target else None
+    target_counts["completion_scopes"] = completion_scope_counts(
+        event
+        for event in events
+        if target
+        and str(event.get("cohort_fingerprint")) == target_fingerprint
+        and datetime.fromisoformat(target["first_observed"])
+        <= event_time(event)
+        <= datetime.fromisoformat(target["last_observed"])
+    )
     integrity = scoped_integrity(target, by_file)
     criteria = criteria_for(target_counts, stage, integrity)
 
@@ -563,12 +617,12 @@ def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
         ],
         # Context only. Promotion is judged on the target segment above, because
         # two segments can sit at different dial positions.
-        "all_segments_turn_samples": len({turn_key(event) for event in events}),
+        "all_segments_turn_samples": len({turn_key(event) for event in lifecycle_events}),
         "rowless_no_range_share": None,
         "line_integrity": integrity,
         # Context only, for the same reason `all_segments_turn_samples` is: the
         # whole input spans dial positions this promotion case is not about.
-        "line_integrity_all_files": merge_integrity(by_file.values()),
+        "line_integrity_all_files": all_file_integrity(by_file),
         "criteria": criteria,
         "promotion_ready": all(item["met"] for item in criteria.values()),
     }
@@ -601,6 +655,7 @@ def render(summary: dict, warnings: list[str]) -> str:
             f"  rowless turns      : {target['rowless_continuation_turns']}",
             f"  stream gate totals : {target['stream_gate']}",
             f"  lease range shapes : {target['lease_range_shapes']}",
+            f"  completion scopes  : {target['completion_scopes']}",
             f"  published by       : {target['publish_reasons']}",
             f"  evicted share      : {target['evicted_publication_share']} "
             "(displayed, NOT gated — the share that needed a successor to be"

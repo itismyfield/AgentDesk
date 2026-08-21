@@ -171,8 +171,10 @@ r1의 기록기는 판정·배달을 바꾸지 않았지만 **기록된 데이�
   측정 가능 시점은 S7a 집행 착지 이후 — **그 시점의 재도입은 S7a의 DoD**다.
 - **관측 시각 필드 추가**(legA P1-2, E4-5). `ts` 는 발행 시각이므로 축출-발행되는 목표 모집단이
   후임 턴 도착 시각으로 오귀속됐다. 방출 스탬프에 `observed_at`(턴의 `started_at`)을 추가하고
-  스키마를 `relay_authority.axis_a.v2` 로 bump, 스크립트의 window·지문 구간 산정·`--days`
-  필터를 전부 관측 시각 기준으로 전환했다. 미배포 상태이므로 마이그레이션 부담 0.
+  당시 스키마를 `relay_authority.axis_a.v2` 로 bump했고, 스크립트의 window·지문 구간 산정·`--days`
+  필터를 전부 관측 시각 기준으로 전환했다. S3의 completion scope 레코드 추가로 현재 스키마는
+  `relay_authority.axis_a.v3`이다. 출하 다이얼이 `Legacy`/`0`이라 v2 기록은 생성되지 않았으므로
+  기존 레코드를 재분류하는 마이그레이션 부담이 없다.
 - **턴 신원 4축**(legB P1-1). 버퍼 매처가 `(user_msg_id, started_at)` 2필드였다 — 같은 초에
   시작한 `user_msg_id == 0` TUI-direct 연속 턴을 구분하지 못해 전임의 지연 tick/loop-exit이
   후임 버퍼를 오염·소멸시켰다. 버퍼는 이제 정본 `InflightTurnIdentity` 를 들고, 턴 도중 불변인
@@ -406,7 +408,19 @@ segmentation 은 48h 미만 다이얼 이탈에서 두 window 를 병합했고(r
 
 ---
 
-## S3 이후
+## S3 — completion ownership 관측·억제
+
+**S3: 대체한 레거시 경로 없음(순수 추가 + 기존 completion 효과 게이트).**
+
+- L-21 옵션 A인 TUI-direct synthetic mailbox token/nonce의 bridge 운반은 이번 슬라이스에서
+  구현하지 않았다. synthetic 턴 수명을 바꾸는 라이브 경로 리스크보다 안전성을 우선했다.
+- 대신 옵션 B로 non-permitting completion을 다이얼·코호트와 무관한 경고 및 health 누적
+  `completion_suppressions`로 관측하며, `turn_source`를 completion 기록에 추가한다.
+- 실측 triage에서 TUI-direct `Foreign` 억제와 namespaced session의 `TURN_ACTIVE` 잔류 빈도·영향을
+  확인한 뒤 옵션 A 또는 동등한 episode-bound witness 운반을 재평가한다. 이 재평가는 T6 철거가
+  아니라 후속 설계 항목이며, 채택 전까지 현재 잔여를 해결됐다고 간주하지 않는다.
+
+## S4 이후
 
 미작성. 각 슬라이스 구현 시 이 파일에 절을 추가한다 (§12-2 = 슬라이스 DoD).
 

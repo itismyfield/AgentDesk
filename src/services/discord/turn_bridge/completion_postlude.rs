@@ -12,6 +12,7 @@ use super::guards::{CompletionGuard, InflightCleanupGuard};
 use super::memory_lifecycle::note_memento_context_from_turn;
 use super::*;
 
+mod channel_episode_scope;
 mod channel_writeback;
 mod contracts;
 
@@ -88,6 +89,14 @@ pub(super) async fn run_completion_postlude(
     let mut inflight_guard = state.inflight_guard;
     let mut inflight_state = state.inflight_state;
 
+    let ownership = channel_episode_scope::ChannelEpisodeProbe::new(
+        &shared_owned,
+        channel_id,
+        &provider,
+        &inflight_state,
+        &cancel_token,
+    );
+    let completion_r0 = ownership.read("completion_r0").await;
     let mut status_panel_completion_committed = true;
     if status_panel_terminal_committed
         && bridge_should_emit_completion
@@ -102,9 +111,8 @@ pub(super) async fn run_completion_postlude(
         // the live accumulated snapshot, else re-parses the output JSONL the
         // same way persisted analytics does, and returns None when no exact
         // usage exists — so we never fabricate or reuse stale numbers.
-        // set_context_panel_usage is a no-op when the live path already set
-        // the same values, and is gated to context_window_tokens != 0.
-        if shared_owned.ui.status_panel_v2_enabled {
+        // It is a no-op for the same values and gated to context_window_tokens != 0.
+        if completion_r0.permits_channel_effects() && shared_owned.ui.status_panel_v2_enabled {
             let context_provider_session_id = new_raw_provider_session_id
                 .as_deref()
                 .or(new_session_id.as_deref())
@@ -154,6 +162,7 @@ pub(super) async fn run_completion_postlude(
                     indicator,
                     status_panel_generation, // #3805 P2: prove this turn's panel epoch
                     inflight_state.tmux_session_name.as_deref(),
+                    completion_r0.permits_channel_effects(),
                 ),
             )
             .await;
@@ -181,7 +190,9 @@ pub(super) async fn run_completion_postlude(
         );
     }
 
-    if status_panel_terminal_committed
+    let completion_r1 = ownership.read("completion_r1").await;
+    if completion_r1.permits_channel_effects()
+        && status_panel_terminal_committed
         && status_panel_completion_committed
         && !preserve_inflight_for_cleanup_retry
     {
@@ -218,7 +229,8 @@ pub(super) async fn run_completion_postlude(
         );
     }
 
-    if !bridge_relay_delegated_to_watcher
+    if completion_r1.permits_channel_effects()
+        && !bridge_relay_delegated_to_watcher
         && should_resume_watcher_after_turn(
             defer_watcher_resume,
             has_queued_turns,
@@ -263,10 +275,10 @@ pub(super) async fn run_completion_postlude(
     // and headless turns already use verbatim — and compare. When the turn's key
     // is present and differs, the turn does NOT own the channel's live session and
     // must produce ZERO channel-scoped side-effects a later LIVE turn can observe.
-    // The full isolation invariant (the enumerated gated effects #1..#5 and the
-    // F-2 mid-turn-rebind recompute limitation) lives in the `channel_writeback`
-    // module doc — the single source of truth for what `!isolated_from_channel`
-    // gates below. (#4634 bug class, completion side.)
+    // The full isolation invariant (the enumerated gated effects and the F-2
+    // mid-turn-rebind recompute limitation) lives in the `channel_writeback`
+    // module doc — the single source of truth for the combined suppression gate
+    // below. (#4634 bug class, completion side.)
     let channel_canonical_session_key = super::super::adk_session::build_adk_session_key(
         &shared_owned,
         channel_id,
@@ -278,6 +290,9 @@ pub(super) async fn run_completion_postlude(
         Some(turn_key) => channel_canonical_session_key.as_deref() != Some(turn_key),
         None => false,
     };
+    let completion_r2 = ownership.read("completion_r2").await;
+    let channel_effects_suppressed =
+        isolated_from_channel || !completion_r2.permits_channel_effects();
     // #5168: path-B reflect gate. Scanned once here and reused by the
     // tool_feedback analysis below, so the transcript is walked a single time.
     let memento_tool_call_observed =
@@ -298,7 +313,7 @@ pub(super) async fn run_completion_postlude(
                 // completely unchanged for a scheduled-snapshot turn.
                 let writeback = channel_writeback::apply_channel_turn_writeback(
                     session,
-                    isolated_from_channel,
+                    channel_effects_suppressed,
                     &memory_plan,
                     &user_text_owned,
                     &full_response,
@@ -307,7 +322,7 @@ pub(super) async fn run_completion_postlude(
                 should_persist_transcript = writeback.persist_transcript;
                 // A snapshot turn must not reflect/capture the channel session
                 // either — both mutate or summarize `data.sessions[channel_id]`.
-                if !isolated_from_channel {
+                if !channel_effects_suppressed {
                     // #5168: the model owns memento recall now (path B), so the
                     // session's reflect gate is armed by the model's OWN memento
                     // tool calls in this turn's transcript. Runs after the
@@ -316,7 +331,7 @@ pub(super) async fn run_completion_postlude(
                     // session that ends on the same turn still reflects.
                     note_memento_context_from_turn(
                         session,
-                        isolated_from_channel,
+                        channel_effects_suppressed,
                         memento_tool_call_observed,
                     );
                     if let Some(reason) = memory_plan.session_end_reason {
@@ -343,14 +358,13 @@ pub(super) async fn run_completion_postlude(
 
     // Persist or clear provider session_id in DB so fresh-session transitions
     // survive dcserver restarts and idle cleanup.
-    if clear_provider_session {
-        if let Some(session_key) = adk_session_key.as_deref() {
-            super::super::adk_session::clear_provider_session_id(
-                session_key,
-                shared_owned.api_port,
-            )
+    if let Some(session_key) = channel_writeback::provider_session_clear_key(
+        channel_effects_suppressed,
+        clear_provider_session,
+        adk_session_key.as_deref(),
+    ) {
+        super::super::adk_session::clear_provider_session_id(session_key, shared_owned.api_port)
             .await;
-        }
     } else if let (Some(session_key), Some(persisted_sid)) =
         (adk_session_key.as_deref(), session_id_to_persist.as_deref())
     {
@@ -374,7 +388,7 @@ pub(super) async fn run_completion_postlude(
         };
     if let Some(analysis) = recall_feedback_analysis.as_ref()
         && let Some(reminder) = channel_writeback::feedback_reminder_to_stash(
-            isolated_from_channel,
+            channel_effects_suppressed,
             build_voluntary_feedback_reminder(analysis),
         )
     {
@@ -412,7 +426,7 @@ pub(super) async fn run_completion_postlude(
     // worktree yields `None` here, so nothing is stashed and turn N+1 is
     // byte-for-byte unchanged. A stash failure only loses the next-turn nudge
     // (the channel-post backstop still fires), so warn+skip.
-    if !isolated_from_channel
+    if !channel_effects_suppressed
         && let Some(wip_warning) =
             super::super::turn_end_wip_warning::turn_end_wip_warning_text(Some(&inflight_state))
         && let Err(error) = super::recovery_text::store_turn_end_wip_warning(
@@ -559,7 +573,9 @@ pub(super) async fn run_completion_postlude(
     // #4658 F1: `record_api_friction_reports` calls `backend.remember(..)`,
     // landing in the agent's memento memory a live turn's recall can surface, so
     // a scheduled-snapshot turn must skip it (isolation invariant, effect #5).
-    if !isolated_from_channel && shared_owned.pg_pool.is_some() && !api_friction_reports.is_empty()
+    if !channel_effects_suppressed
+        && shared_owned.pg_pool.is_some()
+        && !api_friction_reports.is_empty()
     {
         match crate::services::api_friction::record_api_friction_reports(
             shared_owned.pg_pool.as_ref(),
@@ -653,12 +669,18 @@ pub(super) async fn run_completion_postlude(
         .await;
     }
 
+    let completion_r3 = ownership.read("completion_r3").await;
     {
-        let duration = shared_owned
-            .turn_start_times
-            .remove(&channel_id)
-            .map(|(_, start)| start.elapsed().as_secs_f64())
-            .unwrap_or(0.0);
+        // Registry timing starts at channel admission; fallback timing starts at bridge entry.
+        let duration = if completion_r3.permits_channel_effects() {
+            shared_owned
+                .turn_start_times
+                .remove(&channel_id)
+                .map(|(_, start)| start.elapsed().as_secs_f64())
+                .unwrap_or(0.0)
+        } else {
+            turn_start.elapsed().as_secs_f64()
+        };
         let memory_usage = TokenUsage {
             input_tokens: accumulated_memory_input_tokens,
             output_tokens: accumulated_memory_output_tokens,
@@ -698,7 +720,7 @@ pub(super) async fn run_completion_postlude(
     // Clear restart report BEFORE clearing inflight state (which removes
     // the cancel token) to prevent the flush loop from processing the
     // report in the gap between cancel token removal and report deletion.
-    if restart_followup_pending {
+    if completion_r3.permits_channel_effects() && restart_followup_pending {
         clear_restart_report(&provider, channel_id.get());
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
@@ -946,7 +968,10 @@ pub(super) async fn run_completion_postlude(
             }),
         );
     }
-    super::super::mailbox_clear_recovery_marker(&shared_owned, channel_id).await;
+    let completion_r4 = ownership.read("completion_r4").await;
+    if completion_r4.permits_channel_effects() {
+        super::super::mailbox_clear_recovery_marker(&shared_owned, channel_id).await;
+    }
 
     // Dispatch thread sessions now stay alive after finalization so the next
     // implementation/review/rework turn can warm-resume from the same tmux.
@@ -966,6 +991,7 @@ pub(super) async fn run_completion_postlude(
         request_owner_name,
         tmux_last_offset,
         watcher_owner_channel_id,
+        completion_r4.permits_channel_effects(),
     )
     .await;
 

@@ -12,10 +12,11 @@
 //!
 //! **The no-op claim is about values, not timing.** No caller can consume a
 //! verdict from here, so every judgement and delivery value is what it was. With
-//! recording ON, though, each stream tick takes [`TURNS`], and two sites do a
-//! synchronous encode + file append: loop exit, and a successor's entry gate
-//! *before* its own lifecycle gate and anchor work, so a slow filesystem delays
-//! the new turn. Under the shipped `Legacy`/`0` dial the per-tick path is one
+//! recording ON, though, each stream tick takes [`TURNS`], and publication paths
+//! synchronously encode + append: loop exit; a successor's entry gate *before* its
+//! own lifecycle gate and anchor work; and each completion ownership read after
+//! terminal outcome delivery. A slow filesystem can therefore delay either a new
+//! turn or completion. Under the shipped `Legacy`/`0` dial the per-tick path is one
 //! relaxed load of [`ACTIVE_TURNS`] and none of the rest runs at all.
 //!
 //! Two sinks, one of them authority. The JSONL log
@@ -42,8 +43,8 @@
 //! * **Bias** — toward the measured population. `Missing` at entry and
 //!   `AuthorityLost` mid-stream are precisely the turns that leave without a loop
 //!   exit, so they are the ones that need a successor.
-//! * **What the counters see** — `sink_dropped_records` counts records the sink
-//!   *attempted* and could not write; a turn lost this way never reaches the sink,
+//! * **What the counters see** — `sink_dropped_records` counts axis-A lifecycle
+//!   records the sink *attempted* and could not write; a turn lost this way never reaches the sink,
 //!   so nothing counts it. `resident_buffers` is a gauge, so under traffic it cannot
 //!   separate "in flight" from "stranded". Both are process-local and gone after a
 //!   restart, and neither is in the JSONL canon the promotion gate reads.
@@ -76,8 +77,9 @@ use crate::config::RelayAuthorityMode;
 /// changed meaning must bump this instead of silently re-interpreting windows
 /// already archived under the old spelling. `v2` adds `observed_at` (E4-5).
 /// `publish_reason` is additive, so it does not bump: the script counts a record
-/// without it as `unattributed` rather than assuming the reassuring value.
-const OBSERVATION_SCHEMA: &str = "relay_authority.axis_a.v2";
+/// without it as `unattributed` rather than assuming the reassuring value. `v3`
+/// adds post-flush completion ownership records with `scope` and `scope_reason`.
+const OBSERVATION_SCHEMA: &str = "relay_authority.axis_a.v3";
 /// Per-channel triage ring depth on `/api/health/detail` (design §5.3).
 const TRIAGE_RING_DEPTH: usize = 16;
 /// How many channels the triage block keeps rings for, least-recently-recorded
@@ -319,6 +321,11 @@ static ACTIVE_TURNS: AtomicUsize = AtomicUsize::new(0);
 /// failed line write. Silence in the sink is survivable only if it is visible, and
 /// this is the only place it becomes visible (E4-4).
 static SINK_DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
+/// Completion ownership records dropped by their separate best-effort sink path.
+static COMPLETION_SINK_DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
+/// Dial-independent fail-closed completion decisions. Unlike
+/// `completion_scopes`, this advances under the shipped Legacy/0 dial.
+static COMPLETION_SUPPRESSIONS: AtomicU64 = AtomicU64::new(0);
 static TRIAGE: LazyLock<Mutex<RelayAuthorityObservationReport>> = LazyLock::new(Mutex::default);
 
 fn turns() -> MutexGuard<'static, HashMap<u64, TurnObservation>> {
@@ -363,7 +370,8 @@ pub(in crate::services::discord) fn record_bridge_entry_gate(
 /// Eviction always flushes, never discards: the displaced buffer is handed to
 /// [`publish`] before this turn takes the slot. That is a statement about *this*
 /// layer only — the sink [`publish`] hands it to is best-effort by contract and
-/// counts what it could not write in `sink_dropped_records` (legA r3c P2-5).
+/// counts axis-A lifecycle records it could not write in `sink_dropped_records`
+/// (legA r3c P2-5).
 fn open_turn(
     (mode, percent): (RelayAuthorityMode, u8),
     shared: &SharedData,
@@ -463,6 +471,70 @@ pub(in crate::services::discord) fn record_loop_exit(
     publish(turn, "loop_exit");
 }
 
+/// Record completion ownership after [`record_loop_exit`] has removed and flushed
+/// the coalesced turn buffer. This path intentionally rebuilds the stamp instead of
+/// reviving that buffer or changing S2's loop-exit publication semantics.
+pub(in crate::services::discord) struct CompletionScopeRecord<'a> {
+    pub(in crate::services::discord) shared: &'a SharedData,
+    pub(in crate::services::discord) provider: &'a crate::services::provider::ProviderKind,
+    pub(in crate::services::discord) turn_id: u64,
+    pub(in crate::services::discord) channel_id: u64,
+    pub(in crate::services::discord) site: &'static str,
+    pub(in crate::services::discord) turn_source: &'static str,
+    pub(in crate::services::discord) scope: &'static str,
+    pub(in crate::services::discord) scope_reason: &'static str,
+}
+
+pub(in crate::services::discord) fn record_completion_scope(record: CompletionScopeRecord<'_>) {
+    let Some(dial) = observing_dial(record.channel_id) else {
+        return;
+    };
+    record_completion_scope_at(dial, record);
+}
+
+pub(in crate::services::discord) fn record_completion_suppression() {
+    COMPLETION_SUPPRESSIONS.fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_completion_scope_at(
+    (mode, percent): (RelayAuthorityMode, u8),
+    record: CompletionScopeRecord<'_>,
+) {
+    let CompletionScopeRecord {
+        shared,
+        provider,
+        turn_id,
+        channel_id,
+        site,
+        turn_source,
+        scope,
+        scope_reason,
+    } = record;
+    let stamp = TurnStamp {
+        host: std::env::var("HOSTNAME").unwrap_or_else(|_| "local".to_string()),
+        api_port: shared.api_port,
+        process_generation: runtime_store::process_generation(),
+        runtime_ptr: format!("{:p}", std::ptr::from_ref(shared)),
+        provider: provider.as_str().to_string(),
+        channel_id,
+        turn_id,
+        observed_at: chrono::Local::now().to_rfc3339(),
+        cohort_fingerprint: cohort::cohort_fingerprint(mode, percent),
+    };
+    let Some(line) = encode_scope(&stamp, site, turn_source, scope, scope_reason) else {
+        drop_records(&COMPLETION_SINK_DROPPED_RECORDS, 1);
+        return;
+    };
+    append_jsonl(&[line], &COMPLETION_SINK_DROPPED_RECORDS);
+    let mut triage = TRIAGE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *triage
+        .completion_scopes
+        .entry(format!("{site}:{scope}:{scope_reason}"))
+        .or_default() += 1;
+}
+
 const fn guarded_save_label(outcome: GuardedSaveOutcome) -> &'static str {
     match outcome {
         GuardedSaveOutcome::Saved => "saved",
@@ -491,7 +563,7 @@ fn publish(turn: TurnObservation, publish_reason: &'static str) {
         .into_iter()
         .filter_map(|(site, axis_a)| encode(&turn.stamp, publish_reason, site, axis_a?))
         .collect();
-    append_jsonl(&lines);
+    append_jsonl(&lines, &SINK_DROPPED_RECORDS);
     record_triage(&turn);
 }
 
@@ -527,6 +599,39 @@ fn encode(
     .ok()
 }
 
+fn encode_scope(
+    stamp: &TurnStamp,
+    site: &'static str,
+    turn_source: &'static str,
+    scope: &'static str,
+    scope_reason: &'static str,
+) -> Option<String> {
+    #[derive(Serialize)]
+    struct CompletionScopeRecord<'a> {
+        schema: &'static str,
+        ts: String,
+        publish_reason: &'static str,
+        #[serde(flatten)]
+        stamp: &'a TurnStamp,
+        site: &'static str,
+        turn_source: &'static str,
+        scope: &'static str,
+        scope_reason: &'static str,
+    }
+
+    serde_json::to_string(&CompletionScopeRecord {
+        schema: OBSERVATION_SCHEMA,
+        ts: chrono::Local::now().to_rfc3339(),
+        publish_reason: "post_flush",
+        stamp,
+        site,
+        turn_source,
+        scope,
+        scope_reason,
+    })
+    .ok()
+}
+
 /// Best-effort append into today's event file, in the shape `metrics::today_file`
 /// uses. An unwritable runtime root drops the observation rather than propagate
 /// anything back into the turn that produced it — but the drop is counted, because
@@ -534,29 +639,29 @@ fn encode(
 /// alone: a window of entry-only turns passes a floor that only counts turns. The
 /// per-site coverage floors in `scripts/relay_authority_rollout_report.py` and this
 /// counter are the two halves of that answer (legB P1-2).
-fn append_jsonl(lines: &[String]) {
+fn append_jsonl(lines: &[String], dropped_records: &AtomicU64) {
     if lines.is_empty() {
         return;
     }
     let Some(dir) = runtime_store::agentdesk_root().map(|root| root.join("relay_authority")) else {
-        drop_records(lines.len());
+        drop_records(dropped_records, lines.len());
         return;
     };
     let _ = fs::create_dir_all(&dir);
     let path = dir.join(format!("{}.jsonl", chrono::Local::now().format("%Y-%m-%d")));
     let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) else {
-        drop_records(lines.len());
+        drop_records(dropped_records, lines.len());
         return;
     };
     for line in lines {
         if writeln!(file, "{line}").is_err() {
-            drop_records(1);
+            drop_records(dropped_records, 1);
         }
     }
 }
 
-fn drop_records(count: usize) {
-    SINK_DROPPED_RECORDS.fetch_add(count as u64, Ordering::Relaxed);
+fn drop_records(counter: &AtomicU64, count: usize) {
+    counter.fetch_add(count as u64, Ordering::Relaxed);
 }
 
 /// One turn as `/api/health/detail` shows it.
@@ -586,9 +691,15 @@ pub(crate) struct RelayAuthorityObservationReport {
     /// does not fall back toward zero is the stranded population of the module
     /// docstring: buffers whose only publisher is a successor that never came.
     resident_buffers: u64,
-    /// Cumulative records the JSONL sink threw away. Nonzero means the canon log
-    /// is incomplete and the promotion window over it is not trustworthy.
+    /// Cumulative axis-A lifecycle records the JSONL sink threw away. Nonzero
+    /// means the promotion canon is incomplete and its window is not trustworthy.
     sink_dropped_records: u64,
+    /// Cumulative completion ownership records their sink path threw away.
+    completion_sink_dropped_records: u64,
+    /// Fail-closed completion decisions, counted regardless of rollout dial/cohort.
+    pub(crate) completion_suppressions: u64,
+    /// Completion-time ownership samples keyed by `site:scope:scope_reason`.
+    pub(crate) completion_scopes: BTreeMap<String, u64>,
     channels: BTreeMap<String, VecDeque<TurnTriageEntry>>,
     /// Channel keys in least-recently-recorded order, bounding `channels`. Not
     /// published: it is the eviction order, not triage data.
@@ -634,6 +745,9 @@ pub(crate) fn observation_report() -> RelayAuthorityObservationReport {
     // other is written from the sink, which never takes this lock.
     report.resident_buffers = ACTIVE_TURNS.load(Ordering::Relaxed) as u64;
     report.sink_dropped_records = SINK_DROPPED_RECORDS.load(Ordering::Relaxed);
+    report.completion_sink_dropped_records =
+        COMPLETION_SINK_DROPPED_RECORDS.load(Ordering::Relaxed);
+    report.completion_suppressions = COMPLETION_SUPPRESSIONS.load(Ordering::Relaxed);
     report
 }
 
@@ -706,6 +820,46 @@ mod tests {
             .into_iter()
             .filter(|event| event["channel_id"].as_u64() == Some(channel_id))
             .collect()
+    }
+
+    #[test]
+    fn completion_scope_is_a_post_flush_record_and_live_triage_counter() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let channel = 4_259_218;
+
+        record_completion_scope_at(
+            OBSERVING,
+            CompletionScopeRecord {
+                shared: &shared,
+                provider: &ProviderKind::Claude,
+                turn_id: 77_080,
+                channel_id: channel,
+                site: "completion_r1",
+                turn_source: "external_input",
+                scope: "unprovable",
+                scope_reason: "mailbox_absent",
+            },
+        );
+
+        let events = events_for(temp.path(), channel);
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event["schema"].as_str(), Some(OBSERVATION_SCHEMA));
+        assert_eq!(event["publish_reason"].as_str(), Some("post_flush"));
+        assert_eq!(event["site"].as_str(), Some("completion_r1"));
+        assert_eq!(event["turn_source"].as_str(), Some("external_input"));
+        assert_eq!(event["scope"].as_str(), Some("unprovable"));
+        assert_eq!(event["scope_reason"].as_str(), Some("mailbox_absent"));
+        assert!(event.get("axis_a").is_none());
+        assert_eq!(
+            observation_report()
+                .completion_scopes
+                .get("completion_r1:unprovable:mailbox_absent"),
+            Some(&1),
+            "mailbox-handle absence must remain visible in rollout-scoped triage"
+        );
     }
 
     /// AC2-R's monotone-relaxing contract, asserted as a property over the full
@@ -1092,16 +1246,35 @@ mod tests {
         let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
         let turn = state(4_259_218, 77_050);
         let before = observation_report().sink_dropped_records;
+        let completion_before = observation_report().completion_sink_dropped_records;
 
         open_turn(OBSERVING, &shared, &turn, GuardedSaveOutcome::Saved);
         record_stream_loop_gate(&turn, GuardedSaveOutcome::Saved, true, true);
         record_loop_exit(&turn, Some(4_096));
+        record_completion_scope_at(
+            OBSERVING,
+            CompletionScopeRecord {
+                shared: &shared,
+                provider: &ProviderKind::Claude,
+                turn_id: 77_051,
+                channel_id: 4_259_218,
+                site: "completion_r0",
+                turn_source: "managed",
+                scope: "foreign",
+                scope_reason: "foreign_episode",
+            },
+        );
 
         let report = observation_report();
         assert_eq!(
             report.sink_dropped_records - before,
             3,
-            "all three site records the sink could not write are counted",
+            "only the three axis-A lifecycle records increment the canon drop counter",
+        );
+        assert_eq!(
+            report.completion_sink_dropped_records - completion_before,
+            1,
+            "the completion record increments only its separate drop counter",
         );
         assert!(
             report.turns_recorded > 0,

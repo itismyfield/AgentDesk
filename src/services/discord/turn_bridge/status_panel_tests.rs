@@ -15,6 +15,9 @@ use crate::services::discord::inflight::{
     load_inflight_state, save_inflight_state,
 };
 use crate::services::git::GitCommand;
+use crate::services::provider::CancelToken;
+use crate::services::turn_orchestrator::ActiveTurnKind;
+use serenity::all::UserId;
 use std::fs;
 use std::future::Future;
 use std::path::Path;
@@ -559,6 +562,7 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
             false,
             "test_completion_before_body",
             1510319194921504929,
+            true,
         )
         .await;
     }
@@ -585,6 +589,7 @@ async fn status_panel_fallback_completion_is_blocked_until_body_visible() {
             false,
             "test_completion_after_body",
             1510319194921504929,
+            true,
         )
         .await;
         assert!(committed);
@@ -620,6 +625,7 @@ async fn bridge_status_panel_completion_emits_background_agent_pending_payload()
         true,
         "test_bridge_background_agent_pending_payload",
         4_047_402,
+        true,
     )
     .await;
 
@@ -633,6 +639,176 @@ async fn bridge_status_panel_completion_emits_background_agent_pending_payload()
     assert!(rendered.has_unfinished_entries);
     assert!(block.contains("Background agents"));
     assert!(block.contains("Waiting for background agents ⠸"));
+}
+
+#[tokio::test]
+async fn foreign_mailbox_owner_cannot_complete_two_message_status_panel() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_status_panel_v2_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(5_464_341);
+    let user_msg_id = 5_464_342;
+    let panel_msg_id = MessageId::new(9_100_000_000_000_000_341);
+    let successor = Arc::new(CancelToken::new());
+    assert!(
+        crate::services::discord::mailbox_try_start_turn_kinded(
+            &shared,
+            channel_id,
+            successor,
+            UserId::new(2),
+            MessageId::new(user_msg_id + 1),
+            ActiveTurnKind::UserOrAgent,
+        )
+        .await
+    );
+    assert!(
+        load_inflight_state(&provider, channel_id.get()).is_none(),
+        "the takeover window has only B's mailbox claim, not B's inflight row"
+    );
+    let before =
+        shared
+            .ui
+            .placeholder_live_events
+            .render_status_panel(channel_id, &provider, 1_700_000_000);
+    let mut suppressed_text = String::new();
+    assert!(
+        complete_bridge_terminal_footer_or_status_panel_with_sniffer(
+            shared.as_ref(),
+            &gateway,
+            channel_id,
+            MessageId::new(user_msg_id),
+            Some(MessageId::new(user_msg_id)),
+            Some(panel_msg_id),
+            &provider,
+            1_700_000_000,
+            &mut suppressed_text,
+            false,
+            false,
+            Some("stale A answer"),
+            "⠸",
+            0,
+            None,
+            false,
+            |_| async { false },
+        )
+        .await
+    );
+    let after =
+        shared
+            .ui
+            .placeholder_live_events
+            .render_status_panel(channel_id, &provider, 1_700_000_000);
+    assert_eq!(after, before);
+    assert!(suppressed_text.is_empty());
+    assert!(
+        gateway
+            .sent_messages
+            .lock()
+            .expect("sent messages lock")
+            .is_empty()
+    );
+    assert!(
+        gateway
+            .edited_message_ids
+            .lock()
+            .expect("edited ids lock")
+            .is_empty()
+    );
+
+    let permitted_gateway = StatusPanelFallbackGateway::default();
+    let permitted_channel = ChannelId::new(5_464_343);
+    let mut permitted_text = String::new();
+    assert!(
+        complete_bridge_terminal_footer_or_status_panel_with_sniffer(
+            shared.as_ref(),
+            &permitted_gateway,
+            permitted_channel,
+            MessageId::new(user_msg_id),
+            Some(MessageId::new(user_msg_id)),
+            None,
+            &provider,
+            1_700_000_000,
+            &mut permitted_text,
+            false,
+            false,
+            Some("owned answer"),
+            "⠸",
+            0,
+            None,
+            true,
+            |_| async { false },
+        )
+        .await
+    );
+    assert!(!permitted_text.is_empty());
+    assert_eq!(
+        permitted_gateway
+            .sent_messages
+            .lock()
+            .expect("sent messages lock")
+            .len(),
+        1,
+        "the permits=true control must exercise the same two-message effect arm"
+    );
+}
+
+#[tokio::test]
+async fn foreign_mailbox_owner_cannot_complete_tui_direct_no_footer_arm() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_status_panel_v2_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(5_464_344);
+    let user_msg_id = 5_464_345;
+    let current_msg_id = MessageId::new(9_100_000_000_000_000_344);
+    assert!(
+        crate::services::discord::mailbox_try_start_turn_kinded(
+            &shared,
+            channel_id,
+            Arc::new(CancelToken::new()),
+            UserId::new(2),
+            MessageId::new(user_msg_id + 1),
+            ActiveTurnKind::UserOrAgent,
+        )
+        .await
+    );
+    assert!(load_inflight_state(&provider, channel_id.get()).is_none());
+    crate::services::discord::footer_view_reconciler::register_completion_footer_target_for_test(
+        channel_id,
+        current_msg_id,
+        &provider,
+    );
+    let mut suppressed_text = String::new();
+    let completion_committed = complete_bridge_terminal_footer_or_status_panel_with_sniffer(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        current_msg_id,
+        Some(MessageId::new(user_msg_id)),
+        None,
+        &provider,
+        1_700_000_000,
+        &mut suppressed_text,
+        true,
+        true,
+        Some("stale A answer\n\n"),
+        "⠸",
+        0,
+        None,
+        false,
+        |_| async { false },
+    )
+    .await;
+    assert!(completion_committed);
+    assert!(
+        crate::services::discord::footer_view_reconciler::completion_footer_has_registered_target(
+            channel_id
+        )
+    );
+    crate::services::discord::footer_view_reconciler::completion_footer_forget_registered_target(
+        channel_id,
+    );
 }
 
 #[tokio::test]
@@ -663,6 +839,7 @@ async fn bridge_status_panel_completion_producer_threads_sniffed_background_agen
             "⠸",
             0,
             Some("AgentDesk-claude-status-panel-background-test".to_string()),
+            true,
             move |tmux_session_name| async move {
                 sniffer_observed_tmux_session
                     .lock()
@@ -719,6 +896,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
         false,
         "test_synthetic_status_panel_id",
         1510319194921504929,
+        true,
     )
     .await;
 
@@ -752,6 +930,7 @@ async fn status_panel_completion_fallback_posts_when_message_id_is_synthetic() {
         false,
         "test_synthetic_status_panel_id_retry",
         1510319194921504929,
+        true,
     )
     .await;
 
@@ -802,6 +981,7 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
         false,
         "test_wip_warning_order",
         user_msg_id,
+        true,
     )
     .await;
 
@@ -833,6 +1013,7 @@ async fn status_panel_completion_merges_korean_wip_warning_into_completion_surfa
         false,
         "test_wip_warning_order_retry",
         user_msg_id,
+        true,
     )
     .await;
 
@@ -907,6 +1088,7 @@ async fn multiple_completion_paths_render_wip_warning_exactly_once() {
             false,
             "test_status_panel_completion_path",
             user_msg_id,
+            true,
         )
         .await
     );
@@ -993,6 +1175,7 @@ async fn status_panel_completion_fallback_posts_after_unknown_message_edit() {
         false,
         "test_unknown_status_panel_id",
         1510319194921504929,
+        true,
     )
     .await;
 
@@ -1060,6 +1243,7 @@ async fn status_panel_completion_purges_pending_bind_for_final_panel() {
         false,
         "test_pending_bind_completion_purge",
         user_msg_id,
+        true,
     )
     .await;
 
@@ -1134,6 +1318,7 @@ async fn singleton_panel_state_transitions_edit_the_same_message() {
         true,
         "test_singleton_transition_pending",
         4_860_102,
+        true,
     )
     .await;
     assert!(committed);
@@ -1159,6 +1344,7 @@ async fn singleton_panel_state_transitions_edit_the_same_message() {
         false,
         "test_singleton_transition_final",
         4_860_102,
+        true,
     )
     .await;
     assert!(committed);
@@ -1224,6 +1410,7 @@ async fn single_message_mode_completion_leaves_singleton_store_untouched() {
         false,
         "test_flag_off_no_singleton",
         4_860_202,
+        true,
     )
     .await;
 
