@@ -47,9 +47,9 @@ not the caller, resolves the inflight path.  Its limits:
   counted too.  Harmless for a no-growth ratchet, wrong if read as "number of
   destruction sites".
 * Direct ``fs::remove_file`` unlinks are INVISIBLE.  ``inflight/removal.rs``,
-  ``inflight/rebind_reap.rs``, ``inflight.rs`` and ``src/reconcile.rs`` unlink
-  directly and count 0 for those unlinks.  Helper-mediated class only; the
-  direct-unlink surface is a separate issue.
+  ``inflight/rebind_reap.rs`` and ``inflight.rs`` unlink directly and count 0 for
+  those unlinks.  Helper-mediated class only; the direct-unlink surface is a
+  separate issue.
 * The generation-fenced ``*_for_reconcile`` wrappers count AS destruction, not as
   a separate fenced-entry-point category.  They delegate to the same unlink, and
   excluding them would blind the category on the very reconcile sites it exists
@@ -57,9 +57,16 @@ not the caller, resolves the inflight path.  Its limits:
   converting one to its fenced form would otherwise read as a DECREASE the
   no-growth ratchet waves through.  Whether the fence actually refuses is a
   runtime property this file cannot see — ``reconcile_gate.rs`` counts that.
-* ``clear_inflight_state_for_channel`` is not in the pattern; its body spells
-  ``clear_inflight_state`` and is counted there, so the destruction is pinned one
-  hop earlier than its ``server/routes/health_api.rs`` caller.
+* Aliases, re-export call names, macro-assembled names, general indirection and
+  semantically equivalent spellings stay unseen, same as every other category.
+  A named row-destruction entry point that this repository already exposes is
+  NOT in that residual — it belongs in the pattern.
+  ``clear_inflight_state_for_channel``,
+  ``archive_inflight_state_if_matches_identity_generation*`` (renames the row
+  into the archive path, so the inflight row is gone) and
+  ``clear_lifecycle_inflight_state_if_matches*`` were left out by the #5462 §4.5
+  enumeration and are in the pattern as of S5 r2; each has production consumers
+  that the earlier pattern let grow without limit.
 
 ``--check`` rejects growth in an existing file, every UNLISTED file, and any
 identity/delivery pairing mismatch.  A decrease is allowed for growth: this is a
@@ -130,9 +137,11 @@ FENCE_PAIR = ("identity_fence_bind", "delivery_fence_bind")
 # just `src/services/discord/`, because `services/turn_lifecycle.rs` calls them
 # from outside the Discord tree.
 INFLIGHT_ROW_CLEAR_PATTERN = re.compile(
-    r"\b(?:clear_inflight_state(?:_if_matches\w*|_for_reconcile\w*)?"
+    r"\b(?:clear_inflight_state(?:_if_matches\w*|_for_reconcile\w*|_for_channel)?"
     r"|clear_rebind_origin_inflight_state_if_matches_identity\w*"
     r"|clear_rebind_origin_for_reconcile\w*"
+    r"|archive_inflight_state_if_matches_identity_generation\w*"
+    r"|clear_lifecycle_inflight_state_if_matches\w*"
     r"|delete_inflight_state_file"
     r"|clear_inflight_by_tmux_name"
     r"|request_inflight_abandon_if_matches\w*)\s*\("
@@ -357,7 +366,11 @@ def _snapshot(
                     "wrappers are counted, direct fs::remove_file unlinks are "
                     "invisible, and the generation-fenced *_for_reconcile "
                     "wrappers count AS destruction so converting a bare call to "
-                    "its fenced form is not scored as a decrease. See the module "
+                    "its fenced form is not scored as a decrease. S5 r2 added "
+                    "the three named entry points the design's enumeration "
+                    "missed: clear_inflight_state_for_channel, "
+                    "archive_inflight_state_if_matches_identity_generation* and "
+                    "clear_lifecycle_inflight_state_if_matches*. See the module "
                     "docstring for the full limits."
                 ),
                 "files": dict(sorted(counts["inflight_row_clear_call"].items())),

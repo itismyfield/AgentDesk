@@ -101,37 +101,71 @@ fn record_loader_generation_gate(state: &InflightTurnState, current_generation: 
     );
 }
 
+/// Lifecycle kind for the loader fence's allow counter (#5462 S5 r2).
+///
+/// Deliberately NOT `reconcile_generation_gate_allowed`: that kind belongs to
+/// `clear_store/reconcile_gate.rs`, where "allowed" means the fence delegated
+/// and the identity guard behind it may still refuse, and where the payload
+/// carries `generation_relation` / `generation_subsystem_available` /
+/// `delegated_outcome`. Here "allowed" means the row is unlinked immediately and
+/// none of those three fields exist. Sharing one kind put two incompatible
+/// schemas and two meanings of "allowed" behind a single name, so
+/// `delegated_outcome = "Cleared"` — the natural filter for "the gate let a real
+/// destruction through" — silently dropped every loader row.
+const LOADER_GENERATION_GATE_ALLOWED: &str = "loader_generation_gate_allowed";
+
 /// #5462 S5 §7.2-2 for the loader fence. Its refusal above is an invariant WARN,
 /// so without this the analysis stream counts blocked removals but not permitted
 /// ones — and a reject count with no allow count cannot tell an over-blocking
-/// fence from a quiet boot.
+/// fence from a quiet boot. §7.1: `emit_inflight_lifecycle_event` never reaches
+/// stdout, so §7.2-2's `tracing::info!` half is what makes the allow side
+/// visible in a release log at all.
 ///
 /// The generation/name triple is raw rather than bucketed because §9-2's transfer
 /// condition is one combination this fence deliberately does NOT refuse (current
 /// generation, no tmux name), which becomes a filter over these fields. §7.2-6's
-/// removal log carries the same triple, so the two streams agree field for field.
+/// removal log (`log_loader_inflight_remove`) carries the same triple by NAME,
+/// but not in the same representation: it renders `born_generation` as
+/// `Some(N)`/`None` rather than a number, spells the tmux name as
+/// `tmux_session_name` rather than a `_present` bool, and adds `age_secs` that
+/// the allow side has no equivalent for. Joining the two streams needs that
+/// normalization first.
 fn emit_loader_generation_gate_allowed(
     provider: &ProviderKind,
     state: &InflightTurnState,
     current_generation: u64,
     path: &Path,
 ) {
+    let current_generation_row = row_is_current_generation(state, current_generation);
+    let tmux_session_name_present = state.tmux_session_name.is_some();
     crate::services::observability::emit_inflight_lifecycle_event(
         provider.as_str(),
         state.channel_id,
         state.dispatch_id.as_deref(),
         state.session_key.as_deref(),
         None,
-        "reconcile_generation_gate_allowed",
+        LOADER_GENERATION_GATE_ALLOWED,
         serde_json::json!({
             "site": "load_inflight_states_from_root_stale",
             "born_generation": state.born_generation,
             "current_generation": current_generation,
-            "current_generation_row": row_is_current_generation(state, current_generation),
-            "tmux_session_name_present": state.tmux_session_name.is_some(),
+            "current_generation_row": current_generation_row,
+            "tmux_session_name_present": tmux_session_name_present,
             "user_msg_id": state.user_msg_id,
             "path": path.display().to_string(),
         }),
+    );
+    tracing::info!(
+        provider = %provider.as_str(),
+        channel_id = state.channel_id,
+        user_msg_id = state.user_msg_id,
+        born_generation = state.born_generation,
+        current_generation,
+        current_generation_row,
+        tmux_session_name_present,
+        site = "load_inflight_states_from_root_stale",
+        path = %path.display(),
+        "loader generation gate allowed destructive inflight row removal"
     );
 }
 
@@ -591,4 +625,92 @@ pub(super) fn load_inflight_states_from_root(
         states.push(state);
     }
     states
+}
+
+#[cfg(test)]
+mod loader_gate_observation_tests {
+    use super::*;
+
+    fn row(channel_id: u64, born_generation: u64, tmux: Option<&str>) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            channel_id,
+            Some("adk-claude".to_string()),
+            7,
+            8,
+            9,
+            "loader gate row".to_string(),
+            Some("session-5462".to_string()),
+            tmux.map(str::to_string),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.born_generation = born_generation;
+        state
+    }
+
+    fn emitted_allow_payload(channel_id: u64) -> serde_json::Value {
+        crate::services::observability::events::recent(usize::MAX)
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.event_type == "inflight_lifecycle"
+                    && event.channel_id == Some(channel_id)
+                    && event.payload["kind"] == LOADER_GENERATION_GATE_ALLOWED
+            })
+            .map(|event| event.payload["extra"].clone())
+            .expect("loader gate allow event")
+    }
+
+    // The allow counter is §9-2's denominator, so its fields are the filter that
+    // isolates the transfer condition (current generation, no tmux name) — the
+    // one combination this fence deliberately does not refuse.
+    #[test]
+    fn loader_allow_event_carries_the_generation_and_name_filter() {
+        let state = row(54_630, 54_61, None);
+        emit_loader_generation_gate_allowed(
+            &ProviderKind::Claude,
+            &state,
+            54_62,
+            Path::new("/tmp/54630.json"),
+        );
+
+        let extra = emitted_allow_payload(54_630);
+        assert_eq!(extra["site"], "load_inflight_states_from_root_stale");
+        assert_eq!(extra["born_generation"], 54_61);
+        assert_eq!(extra["current_generation"], 54_62);
+        assert_eq!(extra["current_generation_row"], false);
+        assert_eq!(extra["tmux_session_name_present"], false);
+        assert_eq!(extra["path"], "/tmp/54630.json");
+    }
+
+    // §9-2's transfer condition itself: a current-generation row with no tmux
+    // name is ALLOWED through, and both halves of that pair must be readable
+    // from the event or the condition cannot be counted.
+    #[test]
+    fn loader_allow_event_marks_the_unnamed_current_generation_row() {
+        let state = row(54_631, 54_62, None);
+        emit_loader_generation_gate_allowed(
+            &ProviderKind::Claude,
+            &state,
+            54_62,
+            Path::new("/tmp/54631.json"),
+        );
+
+        let extra = emitted_allow_payload(54_631);
+        assert_eq!(extra["current_generation_row"], true);
+        assert_eq!(extra["tmux_session_name_present"], false);
+    }
+
+    // The two allow-side producers publish different schemas, so they must not
+    // share a kind: filtering the reconcile fence's `delegated_outcome` would
+    // otherwise drop every loader row without saying so.
+    #[test]
+    fn loader_allow_kind_is_distinct_from_the_reconcile_fence_kind() {
+        assert_ne!(
+            LOADER_GENERATION_GATE_ALLOWED,
+            "reconcile_generation_gate_allowed"
+        );
+    }
 }

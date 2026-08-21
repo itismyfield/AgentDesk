@@ -129,8 +129,15 @@ pub(super) async fn run_startup_diagnostic_after_reconcile_barrier(
 
 /// Barrier arrival for the provider whose reconcile just completed (#5462 S5
 /// §7.2-4). `waiting for N provider reconcile(s)` counted the outstanding ones
-/// but never named the arrival, so a boot stuck at N=1 could not say which
-/// provider was missing — the question the reconcile-window incidents opened on.
+/// and named no arrival at all, so the waiting lines said nothing about who had
+/// gotten there.
+///
+/// What the tag answers is narrower than "which provider is missing": the
+/// arrivals that are NOT a provider reconcile join as `unknown` (see
+/// `run_startup_diagnostic_after_reconcile_barrier`), so a boot stuck at N=1
+/// still cannot separate "X never arrived" from "X arrived as a skip". Naming
+/// those would mean tagging a reconcile that never ran, which is the confusion
+/// this tag exists to avoid; the residual is deliberate.
 pub(super) async fn run_startup_diagnostic_after_reconcile_barrier_for_provider(
     provider: &ProviderKind,
     remaining: Arc<std::sync::atomic::AtomicUsize>,

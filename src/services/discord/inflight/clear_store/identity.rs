@@ -124,7 +124,11 @@ fn clear_inflight_state_if_matches_identity_turn_nonce_impl_in_root(
     if reconcile_current_generation
         .is_some_and(|current| super::reconcile_gate::row_is_current_generation(&state, current))
     {
-        return ReconcileClearOutcome::LiveGenerationSkipped;
+        // The refusal reports the generation of THIS row — the one just read
+        // under the lock — not the caller's snapshot (#5462 S5 r2).
+        return ReconcileClearOutcome::LiveGenerationSkipped {
+            fresh_born_generation: state.born_generation,
+        };
     }
     let outcome = guarded_identity_clear_outcome(&state, expected, expected_turn_nonce);
     if outcome != GuardedClearOutcome::Cleared {
@@ -159,7 +163,7 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_tur
         None,
     ) {
         super::reconcile_gate::ReconcileClearOutcome::Delegated(outcome) => outcome,
-        super::reconcile_gate::ReconcileClearOutcome::LiveGenerationSkipped => {
+        super::reconcile_gate::ReconcileClearOutcome::LiveGenerationSkipped { .. } => {
             unreachable!("the ordinary identity clear never enables the reconcile gate")
         }
     }
@@ -206,7 +210,10 @@ fn clear_rebind_origin_inflight_state_if_matches_identity_impl_in_root(
     if reconcile_current_generation
         .is_some_and(|current| super::reconcile_gate::row_is_current_generation(&state, current))
     {
-        return ReconcileClearOutcome::LiveGenerationSkipped;
+        // Same fresh-row reporting contract as the turn-nonce fence above.
+        return ReconcileClearOutcome::LiveGenerationSkipped {
+            fresh_born_generation: state.born_generation,
+        };
     }
     let outcome = if state.restart_mode.is_some() {
         GuardedClearOutcome::PlannedRestartSkipped
@@ -250,7 +257,7 @@ pub(in crate::services::discord) fn clear_rebind_origin_inflight_state_if_matche
         None,
     ) {
         super::reconcile_gate::ReconcileClearOutcome::Delegated(outcome) => outcome,
-        super::reconcile_gate::ReconcileClearOutcome::LiveGenerationSkipped => {
+        super::reconcile_gate::ReconcileClearOutcome::LiveGenerationSkipped { .. } => {
             unreachable!("the ordinary rebind clear never enables the reconcile gate")
         }
     }
