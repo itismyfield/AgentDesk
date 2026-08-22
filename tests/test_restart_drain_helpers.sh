@@ -1425,9 +1425,18 @@ fi
 # observable.
 echo "== Test 11: #5254 S3b — crash-safe restart artifact sweep =="
 
+# date dialect probe: GNU date reads an epoch as -d @N, BSD date as -r N
+# (GNU -r means "file mtime" and fails on a bare epoch, feeding touch -t an
+# empty stamp). Local time on both sides so touch -t interprets consistently.
+if date -d @0 '+%Y' >/dev/null 2>&1; then
+  _epoch_to_touch_stamp() { date -d "@$1" '+%Y%m%d%H%M.%S'; }
+else
+  _epoch_to_touch_stamp() { date -r "$1" '+%Y%m%d%H%M.%S'; }
+fi
+
 set_file_age() {
   local file="$1" age="$2"
-  touch -t "$(date -r "$(( $(date +%s) - age ))" '+%Y%m%d%H%M.%S')" "$file"
+  touch -t "$(_epoch_to_touch_stamp "$(( $(date +%s) - age ))")" "$file"
 }
 
 new_sweep_root() {
@@ -1548,7 +1557,7 @@ pass "A11 basename nonce extraction table"
 # A14 future mtime is preserved with all diagnostic fields.
 root=$(new_sweep_root future)
 printf 'nonce=future\n' >"$root/restart_pending.future"
-touch -t "$(date -r 4102444800 '+%Y%m%d%H%M.%S')" "$root/restart_pending.future"
+touch -t "$(_epoch_to_touch_stamp 4102444800)" "$root/restart_pending.future"
 future_out=$(_restart_sweep_artifacts "$root" 2>&1)
 case "$future_out" in
   *restart-artifact-future-mtime*"root=$root"*"age=-"*"grace=600"*"decision=preserve"*"class=marker-identity"*)

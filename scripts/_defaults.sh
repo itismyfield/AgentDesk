@@ -1082,6 +1082,20 @@ _purge_restart_artifacts_by_own_nonce() {
   return "$rc"
 }
 
+# stat dialect probe: BSD stat (darwin) takes -f FORMAT; GNU stat (linux CI)
+# takes -c FORMAT and treats -f as "filesystem status", which SUCCEEDS with
+# mount-level values — an || fallback chain would silently compare mount
+# constants and collapse every identity check, so the dialect is probed once.
+if stat -c '%d:%i' / >/dev/null 2>&1; then
+  _restart_stat_identity() { stat -c '%d:%i:%Y' "$1" 2>/dev/null; }
+  _restart_stat_inode() { stat -c '%d:%i' "$1" 2>/dev/null; }
+  _restart_stat_size() { stat -c %s "$1" 2>/dev/null; }
+else
+  _restart_stat_identity() { stat -f '%d:%i:%m' "$1" 2>/dev/null; }
+  _restart_stat_inode() { stat -f '%d:%i' "$1" 2>/dev/null; }
+  _restart_stat_size() { stat -f %z "$1" 2>/dev/null; }
+fi
+
 _restart_artifact_age_allows_reclaim() {
   local root="$1"
   local artifact="$2"
@@ -1093,8 +1107,8 @@ _restart_artifact_age_allows_reclaim() {
     ''|*[!0-9]*) return 1 ;;
   esac
   now="$(date +%s 2>/dev/null)" || return 1
-  identity="$(stat -f '%d:%i:%m' "$artifact" 2>/dev/null)" || return 1
-  size="$(stat -f %z "$artifact" 2>/dev/null)" || return 1
+  identity="$(_restart_stat_identity "$artifact")" || return 1
+  size="$(_restart_stat_size "$artifact")" || return 1
   case "$now:$identity:$size" in
     *[!0-9:]*) return 1 ;;
   esac
@@ -1129,7 +1143,7 @@ _restart_reclaim_legacy_marker_if_stale() {
     "$root" "$marker" "$grace" legacy-marker)" || return 0
   # S4 remains: the adjacent inode/content recheck narrows but cannot make
   # pathname replacement and unlink atomic.
-  if [ "$(stat -f '%d:%i:%m' "$marker" 2>/dev/null)" = "$witness" ] \
+  if [ "$(_restart_stat_identity "$marker")" = "$witness" ] \
     && ! grep -q '^nonce=' "$marker" 2>/dev/null \
     && ! rm -f "$marker" 2>/dev/null; then
     return 1
@@ -1156,14 +1170,14 @@ _restart_sweep_marker_identities() {
     esac
     witness="$(_restart_artifact_age_allows_reclaim \
       "$root" "$artifact" "$grace" marker-identity)" || continue
-    observed="$(stat -f '%d:%i:%m' "$artifact" 2>/dev/null)" || continue
+    observed="$(_restart_stat_identity "$artifact")" || continue
     [ "$observed" = "$witness" ] || continue
     [ ! -e "$canonical" ] || continue
     _restart_sweep_deadline_ok "$started" "$grace" || return 0
     # M-d: recheck again adjacent to unlink; this narrows but does not close S1.
     _restart_sweep_deadline_ok "$started" "$grace" && rm -f "$artifact" 2>/dev/null \
       || return 0
-    if [ "$(stat -f '%d:%i' "$canonical" 2>/dev/null)" = "${witness%:*}" ]; then
+    if [ "$(_restart_stat_inode "$canonical")" = "${witness%:*}" ]; then
       ln "$canonical" "$artifact" 2>/dev/null || true
     fi
   done
@@ -1195,15 +1209,15 @@ _restart_sweep_terminal_identities() {
       "$root" "$artifact" "$grace" terminal-identity)" || continue
     _restart_stage_marker_identity "$root" "$nonce" restart-sweep sweep lock-hold \
       || continue
-    lockid="$(stat -f '%d:%i:%m' "$lock" 2>/dev/null)" || lockid=""
-    observed="$(stat -f '%d:%i:%m' "$artifact" 2>/dev/null)"
+    lockid="$(_restart_stat_identity "$lock")" || lockid=""
+    observed="$(_restart_stat_identity "$artifact")"
     if [ "$observed" = "$witness" ] \
       && ! _restart_artifact_nonce_matches "$canonical" "$nonce" \
       && _restart_sweep_deadline_ok "$started" "$marker_grace"; then
       # T-f: S2 remains; bind each unlink to its adjacent inode observation.
       _restart_sweep_deadline_ok "$started" "$marker_grace" \
-        && [ "$(stat -f '%d:%i' "$artifact" 2>/dev/null)" \
-          = "$(stat -f '%d:%i' "$fixed" 2>/dev/null)" ] \
+        && [ "$(_restart_stat_inode "$artifact")" \
+          = "$(_restart_stat_inode "$fixed")" ] \
         && rm -f "$fixed" 2>/dev/null || true
       _restart_sweep_deadline_ok "$started" "$marker_grace" \
         && rm -f "$artifact" 2>/dev/null || true
@@ -1211,7 +1225,7 @@ _restart_sweep_terminal_identities() {
     # T-g: the adjacent check narrows but does not close the S3 replacement seam.
     if [ -n "$lockid" ] \
       && _restart_sweep_deadline_ok "$started" "$marker_grace" \
-      && [ "$(stat -f '%d:%i:%m' "$lock" 2>/dev/null)" = "$lockid" ]; then
+      && [ "$(_restart_stat_identity "$lock")" = "$lockid" ]; then
       _restart_sweep_deadline_ok "$started" "$marker_grace" \
         && rm -f "$lock" 2>/dev/null || true
     fi
