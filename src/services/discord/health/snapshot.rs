@@ -555,6 +555,17 @@ struct RelayVerdictProbeOperands {
 /// Do not collapse this to `unwrap_or(0) == 0`: the unmeasured-tail mutation is
 /// pinned by `call_site_withholds_the_pane_idle_witness_for_an_unmeasured_tail`.
 #[cfg(unix)]
+fn reachability_ledger_operand_exists(provider: &ProviderKind, channel_id: u64) -> bool {
+    let Some(root) = super::super::runtime_store::runtime_root() else {
+        return false;
+    };
+    root.join("discord_reachability_ledger")
+        .join(provider.as_str())
+        .join(format!("{channel_id}.json"))
+        .is_file()
+}
+
+#[cfg(unix)]
 fn relay_verdict_probe_operands(
     pane_alive: bool,
     relay_health: &RelayHealthSnapshot,
@@ -715,7 +726,10 @@ async fn watcher_state_snapshot_for_shared(
         session.watcher_output_path.as_deref(),
     );
     #[cfg(unix)]
-    let reachability_observation = {
+    let reachability_observation = provider_kind.as_ref().and_then(|provider| {
+        if !reachability_ledger_operand_exists(provider, channel.get()) {
+            return None;
+        }
         let operands = relay_verdict_probe_operands(
             tmux_session_alive == Some(true),
             &relay_health,
@@ -724,7 +738,7 @@ async fn watcher_state_snapshot_for_shared(
         );
         Some((
             observe_relay_verdict(RelayVerdictProbe {
-                provider: provider_kind.as_ref(),
+                provider: Some(provider),
                 channel_id: channel.get(),
                 row_output_path: session
                     .inflight
@@ -741,7 +755,7 @@ async fn watcher_state_snapshot_for_shared(
             .clone(),
             operands.now_epoch_ms.min(i64::MAX as u64) as i64,
         ))
-    };
+    });
     Some(WatcherStateSnapshot {
         provider: provider_name.to_string(),
         attached: session.attached,
@@ -2160,6 +2174,44 @@ mod tests {
                     crate::services::discord::tmux_watcher_now_ms(),
                 )),
             }
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn watcher_state_snapshot_abstains_when_reachability_ledger_is_absent() {
+            let tmp = tempfile::tempdir().expect("temp runtime root");
+            let _env =
+                crate::config::TestEnvVarGuard::set_path(super::AGENTDESK_ROOT_DIR_ENV, tmp.path());
+
+            let provider = ProviderKind::Codex;
+            let channel =
+                ChannelId::new(super::NEXT_ABSENT_MAILBOX_CHANNEL.fetch_add(1, Ordering::Relaxed));
+            let tmux_session_name = "AgentDesk-codex-adk-t5-s6a-missing-ledger";
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            let output = tmp.path().join("t5-s6a-missing-ledger.jsonl");
+            std::fs::write(&output, "{\"type\":\"assistant\"}\n")
+                .expect("write transcript fixture");
+            shared.tmux_watchers.insert(
+                channel,
+                watcher_handle(tmux_session_name, output.to_str().expect("utf8 path")),
+            );
+
+            assert!(
+                !super::super::reachability_ledger_operand_exists(&provider, channel.get()),
+                "fixture must start without a ledger"
+            );
+
+            let snapshot = super::super::watcher_state_snapshot_for_shared(
+                provider.as_str(),
+                shared,
+                channel,
+                0,
+            )
+            .await
+            .expect("live watcher must produce a snapshot");
+            assert!(
+                snapshot.reachability_observation().is_none(),
+                "missing ledger must remain an absent warrant operand"
+            );
         }
 
         #[tokio::test(flavor = "current_thread")]

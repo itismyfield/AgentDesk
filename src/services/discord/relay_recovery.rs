@@ -207,8 +207,25 @@ fn axis_b_site_for_apply(
             RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog,
             RelayRecoveryActionKind::ClearOrphanPendingToken,
         ) => Some(AxisBSite::ProbeAutoHeal),
+        (
+            RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog,
+            RelayRecoveryActionKind::ClearStaleThreadProof,
+        ) => Some(AxisBSite::ProbeAutoHeal),
+        (
+            RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog,
+            RelayRecoveryActionKind::DrainPendingQueue,
+        ) => Some(AxisBSite::ProbeAutoHeal),
         _ => None,
     }
+}
+
+#[cfg(unix)]
+fn pinned_adoption_for_apply(
+    source: RelayRecoveryApplySource,
+    action: RelayRecoveryActionKind,
+) -> bool {
+    action == RelayRecoveryActionKind::ReattachWatcher
+        && source == RelayRecoveryApplySource::ProbeAutoHeal
 }
 
 #[cfg(unix)]
@@ -744,28 +761,33 @@ async fn auto_apply_relay_recovery_for_shared_at(
     decision.affected.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
     trace_relay_recovery_decision(&decision, true);
     #[cfg(unix)]
-    if let Some(site) = axis_b_site_for_apply(source, allowed_action) {
-        observe_axis_b_candidate(
-            &shared,
-            provider,
-            &snapshot,
-            site,
-            decision.action,
-            decision.auto_heal.eligible,
-            chrono::Utc::now().timestamp_millis(),
-        );
-        let structural_candidate_apply =
-            destructive_warrant::structural_candidate_apply(decision.auto_heal.eligible);
-        let destructive_warrant_bind = destructive_warrant::destructive_warrant_bind(
-            structural_candidate_apply,
-            decision.action,
-            provider,
-            Some(&snapshot),
-            circuit_breaker::should_use_durable_circuit(decision.action, source),
-        );
-        decision.auto_heal.eligible = destructive_warrant_bind.eligible;
-        if let Some(reason) = destructive_warrant_bind.skipped_reason {
-            decision.auto_heal.skipped_reason = Some(reason);
+    if decision.action.is_destructive() {
+        if let Some(site) = axis_b_site_for_apply(source, decision.action) {
+            observe_axis_b_candidate(
+                &shared,
+                provider,
+                &snapshot,
+                site,
+                decision.action,
+                decision.auto_heal.eligible,
+                chrono::Utc::now().timestamp_millis(),
+            );
+            let structural_candidate_apply =
+                destructive_warrant::structural_candidate_apply(decision.auto_heal.eligible);
+            let destructive_warrant_bind = destructive_warrant::destructive_warrant_bind(
+                structural_candidate_apply,
+                decision.action,
+                provider,
+                Some(&snapshot),
+                pinned_adoption_for_apply(source, decision.action),
+            );
+            decision.auto_heal.eligible = destructive_warrant_bind.eligible;
+            if let Some(reason) = destructive_warrant_bind.skipped_reason {
+                decision.auto_heal.skipped_reason = Some(reason);
+            }
+        } else if source != RelayRecoveryApplySource::Manual {
+            decision.auto_heal.eligible = false;
+            decision.auto_heal.skipped_reason = Some("axis_b_warrant_site_unmapped");
         }
     }
 
@@ -892,7 +914,9 @@ fn trace_relay_recovery_skipped(
 mod axis_b_tests {
     use super::*;
 
-    fn quiet_snapshot(channel_id: u64) -> health::WatcherStateSnapshot {
+    pub(super) fn quiet_snapshot_for_warrant_tests(
+        channel_id: u64,
+    ) -> health::WatcherStateSnapshot {
         health::WatcherStateSnapshot {
             provider: "codex".to_string(),
             attached: false,
@@ -1166,6 +1190,24 @@ mod axis_b_tests {
             Some(AxisBSite::ProbeAutoHealReattach),
             "redrive reattach is a plan_relay_recovery consumer in design §3.4"
         );
+        for action in [
+            RelayRecoveryActionKind::ClearStaleThreadProof,
+            RelayRecoveryActionKind::DrainPendingQueue,
+        ] {
+            assert_eq!(
+                axis_b_site_for_apply(RelayRecoveryApplySource::ProbeAutoHeal, action),
+                Some(AxisBSite::ProbeAutoHeal),
+                "every composed-planner destructive action must map to a warrant site"
+            );
+        }
+        assert!(pinned_adoption_for_apply(
+            RelayRecoveryApplySource::ProbeAutoHeal,
+            RelayRecoveryActionKind::ReattachWatcher,
+        ));
+        assert!(!pinned_adoption_for_apply(
+            RelayRecoveryApplySource::StallWatchdog,
+            RelayRecoveryActionKind::ReattachWatcher,
+        ));
     }
 
     fn every_verdict() -> Vec<health::reachability::verdict::ReachabilityVerdict> {
@@ -1250,7 +1292,7 @@ mod axis_b_tests {
             (
                 AxisBSite::RelayDeadReattach,
                 RelayRecoveryActionKind::ReattachWatcher,
-                true,
+                false,
             ),
             (
                 AxisBSite::ProbeAutoHeal,
@@ -1275,9 +1317,9 @@ mod axis_b_tests {
                     health::reachability::verdict::ReachabilityVerdict::TransportUnknown {
                         ..
                     } => action == RelayRecoveryActionKind::ReattachWatcher && pinned_adoption,
-                    _ => false,
+                    _ => true,
                 };
-                let mut snapshot = quiet_snapshot(54_641);
+                let mut snapshot = quiet_snapshot_for_warrant_tests(54_641);
                 snapshot.reachability_observation = Some((verdict, 900));
                 observe_axis_b_candidate_with_dial(
                     &shared,
@@ -1401,7 +1443,7 @@ mod axis_b_tests {
         let temp = tempfile::tempdir().expect("axis-B temp root");
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
         let shared = super::super::make_shared_data_for_tests();
-        let snapshot = quiet_snapshot(54_640);
+        let snapshot = quiet_snapshot_for_warrant_tests(54_640);
         for site in AxisBSite::ALL {
             record_axis_b(
                 AxisBRecord {

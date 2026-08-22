@@ -10,6 +10,13 @@ enum WarrantRule {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EpisodeEvidence {
+    Matched,
+    Mismatched,
+    OperandAbsent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DestructiveWarrant {
     pub(crate) eligible: bool,
     pub(crate) skipped_reason: Option<&'static str>,
@@ -50,25 +57,37 @@ fn rule(
     }
 }
 
-fn exact_episode_matches(
-    action: RelayRecoveryActionKind,
+fn compare_episode_nonces(
+    mailbox_nonce: Option<&str>,
+    inflight_nonce: Option<&str>,
+) -> EpisodeEvidence {
+    let Some(mailbox_nonce) = mailbox_nonce.filter(|nonce| !nonce.is_empty()) else {
+        return EpisodeEvidence::OperandAbsent;
+    };
+    let Some(inflight_nonce) = inflight_nonce.filter(|nonce| !nonce.is_empty()) else {
+        return EpisodeEvidence::OperandAbsent;
+    };
+    if inflight_nonce == mailbox_nonce {
+        EpisodeEvidence::Matched
+    } else {
+        EpisodeEvidence::Mismatched
+    }
+}
+
+fn exact_episode_evidence(
     provider: &ProviderKind,
     snapshot: &health::WatcherStateSnapshot,
-) -> bool {
-    let Some(mailbox_nonce) = snapshot
-        .mailbox_active_turn_nonce
-        .as_deref()
-        .filter(|nonce| !nonce.is_empty())
-    else {
-        return false;
-    };
-    if action == RelayRecoveryActionKind::ClearOrphanPendingToken {
-        return true;
-    }
-    super::inflight::load_inflight_state_read_only(provider, snapshot.relay_health.channel_id)
-        .and_then(|state| state.turn_nonce)
-        .as_deref()
-        .is_some_and(|inflight_nonce| !inflight_nonce.is_empty() && inflight_nonce == mailbox_nonce)
+) -> EpisodeEvidence {
+    let inflight = super::super::inflight::load_inflight_state_read_only(
+        provider,
+        snapshot.relay_health.channel_id,
+    );
+    compare_episode_nonces(
+        snapshot.mailbox_active_turn_nonce.as_deref(),
+        inflight
+            .as_ref()
+            .and_then(|state| state.turn_nonce.as_deref()),
+    )
 }
 
 pub(in crate::services::discord) const fn structural_candidate_apply(eligible: bool) -> bool {
@@ -105,15 +124,15 @@ pub(in crate::services::discord) fn destructive_warrant_bind(
             eligible: true,
             skipped_reason: None,
         },
-        WarrantRule::RequireEpisode if exact_episode_matches(action, provider, snapshot) => {
-            DestructiveWarrant {
+        WarrantRule::RequireEpisode => match exact_episode_evidence(provider, snapshot) {
+            EpisodeEvidence::Matched | EpisodeEvidence::OperandAbsent => DestructiveWarrant {
                 eligible: true,
                 skipped_reason: None,
-            }
-        }
-        WarrantRule::RequireEpisode => DestructiveWarrant {
-            eligible: false,
-            skipped_reason: Some("axis_b_exact_episode_required"),
+            },
+            EpisodeEvidence::Mismatched => DestructiveWarrant {
+                eligible: false,
+                skipped_reason: Some("axis_b_exact_episode_required"),
+            },
         },
         WarrantRule::Deny => DestructiveWarrant {
             eligible: false,
@@ -192,11 +211,120 @@ mod tests {
     }
 
     #[test]
+    fn clear_orphan_pending_token_requires_the_same_episode_when_both_operands_exist() {
+        let provider = ProviderKind::Codex;
+        let mut snapshot = super::super::axis_b_tests::quiet_snapshot_for_warrant_tests(54_642);
+        snapshot.reachability_observation = Some((
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 1),
+            1,
+        ));
+        snapshot.mailbox_active_turn_nonce = Some("mailbox-episode".to_string());
+        let root = tempfile::tempdir().expect("inflight root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        let mut state = super::super::inflight::InflightTurnState::new(
+            provider.clone(),
+            snapshot.relay_health.channel_id,
+            None,
+            1,
+            2,
+            3,
+            "episode witness".to_string(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        state.turn_nonce = Some("different-episode".to_string());
+        super::super::inflight::save_inflight_state(&state).expect("save mismatch row");
+        let mismatched = destructive_warrant_bind(
+            true,
+            RelayRecoveryActionKind::ClearOrphanPendingToken,
+            &provider,
+            Some(&snapshot),
+            false,
+        );
+        assert!(!mismatched.eligible);
+        assert_eq!(
+            mismatched.skipped_reason,
+            Some("axis_b_exact_episode_required")
+        );
+
+        state.turn_nonce = Some("mailbox-episode".to_string());
+        super::super::inflight::clear_inflight_state(&provider, snapshot.relay_health.channel_id);
+        super::super::inflight::save_inflight_state(&state).expect("save matching row");
+        assert!(
+            destructive_warrant_bind(
+                true,
+                RelayRecoveryActionKind::ClearOrphanPendingToken,
+                &provider,
+                Some(&snapshot),
+                false,
+            )
+            .eligible
+        );
+    }
+
+    #[test]
+    fn exact_episode_distinguishes_match_mismatch_and_missing_operands() {
+        assert_eq!(
+            compare_episode_nonces(Some("episode-a"), Some("episode-a")),
+            EpisodeEvidence::Matched
+        );
+        assert_eq!(
+            compare_episode_nonces(Some("episode-a"), Some("episode-b")),
+            EpisodeEvidence::Mismatched
+        );
+        for (mailbox, inflight) in [
+            (None, Some("episode-a")),
+            (Some("episode-a"), None),
+            (Some(""), Some("episode-a")),
+            (Some("episode-a"), Some("")),
+        ] {
+            assert_eq!(
+                compare_episode_nonces(mailbox, inflight),
+                EpisodeEvidence::OperandAbsent
+            );
+        }
+    }
+
+    #[test]
     fn warrant_is_monotone_and_abstains_when_its_operand_is_absent() {
         let provider = ProviderKind::Codex;
         for action in ACTIONS {
             assert!(!destructive_warrant_bind(false, action, &provider, None, false).eligible);
             assert!(destructive_warrant_bind(true, action, &provider, None, false).eligible);
         }
+
+        let mut snapshot = super::super::axis_b_tests::quiet_snapshot_for_warrant_tests(54_643);
+        assert!(snapshot.reachability_observation().is_none());
+        assert!(
+            destructive_warrant_bind(
+                true,
+                RelayRecoveryActionKind::ClearOrphanPendingToken,
+                &provider,
+                Some(&snapshot),
+                false,
+            )
+            .eligible,
+            "missing reachability operand must preserve structural eligibility"
+        );
+
+        snapshot.reachability_observation = Some((
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 1),
+            1,
+        ));
+        assert!(snapshot.mailbox_active_turn_nonce.is_none());
+        assert!(
+            destructive_warrant_bind(
+                true,
+                RelayRecoveryActionKind::ClearOrphanPendingToken,
+                &provider,
+                Some(&snapshot),
+                false,
+            )
+            .eligible,
+            "legacy missing episode nonce must abstain rather than veto"
+        );
     }
 }

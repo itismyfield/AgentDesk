@@ -2551,6 +2551,16 @@ async fn probe_redrive_reattach_records_the_actual_relay_recovery_observation() 
         .last_heartbeat_ts_ms
         .store(0, std::sync::atomic::Ordering::Relaxed);
     shared.tmux_watchers.insert(channel, watcher);
+    let ledger_path = root_dir
+        .path()
+        .join("runtime")
+        .join("discord_reachability_ledger")
+        .join(provider.as_str())
+        .join(format!("{}.json", channel.get()));
+    std::fs::create_dir_all(ledger_path.parent().expect("ledger parent"))
+        .expect("create reachability ledger directory");
+    std::fs::write(&ledger_path, "{}")
+        .expect("seed present but unreadable reachability ledger operand");
 
     let before = axis_b_observation_report().counters;
     let response = auto_apply_relay_recovery_for_shared_at(

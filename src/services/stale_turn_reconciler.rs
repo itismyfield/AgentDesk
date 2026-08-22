@@ -292,6 +292,25 @@ where
     reconcile_stale_turns_matching_with_warrant_pg(pool, session_key, probe, None).await
 }
 
+fn structural_candidate_apply(eligible: bool) -> bool {
+    eligible
+}
+
+async fn destructive_warrant_bind(
+    registry: Option<&HealthRegistry>,
+    session_key: &str,
+    provider: &str,
+    site: AxisBSite,
+) -> bool {
+    crate::services::discord::relay_recovery::automatic_stale_sweep_warrants(
+        registry,
+        session_key,
+        provider,
+        site,
+    )
+    .await
+}
+
 async fn reconcile_stale_turns_matching_with_warrant_pg<F>(
     pool: &PgPool,
     session_key: Option<&str>,
@@ -324,10 +343,10 @@ where
             continue;
         }
 
-        let structural_candidate_apply = true;
+        let structural_candidate_apply = structural_candidate_apply(true);
         let destructive_warrant_bind = match automatic_warrant {
             Some((registry, site)) => {
-                crate::services::discord::relay_recovery::automatic_stale_sweep_warrants(
+                destructive_warrant_bind(
                     registry,
                     &candidate.session_key,
                     &candidate.provider,

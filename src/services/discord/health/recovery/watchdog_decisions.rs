@@ -294,10 +294,14 @@ pub(crate) fn watchdog_axis_b_warrants(
     snapshot: &WatcherStateSnapshot,
     site: AxisBSite,
 ) -> bool {
-    let action = match site {
-        AxisBSite::WatchdogStaleIdle => RelayRecoveryActionKind::ClearStaleThreadProof,
-        AxisBSite::WatchdogExplicitBackground => RelayRecoveryActionKind::ClearOrphanPendingToken,
-        _ => return false,
+    let Some(action) = (match site {
+        AxisBSite::WatchdogStaleIdle => Some(RelayRecoveryActionKind::ClearStaleThreadProof),
+        AxisBSite::WatchdogExplicitBackground => {
+            Some(RelayRecoveryActionKind::ClearOrphanPendingToken)
+        }
+        _ => None,
+    }) else {
+        return true;
     };
     let structural_candidate_apply = relay_recovery::structural_candidate_apply(true);
     relay_recovery::observe_axis_b_candidate(

@@ -283,6 +283,32 @@ class RatchetDiscriminationTests(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertIn("structural_candidate_apply 0x", errors[0])
 
+    def test_stale_sweep_consumers_are_inside_the_warrant_pairing_gate(self) -> None:
+        rel = "src/services/stale_turn_reconciler.rs"
+        actual, _subcounts = ratchet.scan(ROOT)
+        self.assertEqual(actual["structural_candidate_apply"].get(rel), 1)
+        self.assertEqual(actual["destructive_warrant_bind"].get(rel), 1)
+        production = ratchet.RUST_LEXER._production_text(ROOT / rel)
+        dropped = production.replace(
+            "                destructive_warrant_bind(\n",
+            "                unpaired_warrant(\n",
+            1,
+        )
+        self.assertEqual(
+            len(ratchet.STRUCTURAL_CANDIDATE_PATTERN.findall(dropped)),
+            1,
+        )
+        self.assertEqual(
+            len(ratchet.DESTRUCTIVE_WARRANT_PATTERN.findall(dropped)),
+            0,
+        )
+        mutated = empty_counts()
+        mutated["structural_candidate_apply"] = {rel: 1}
+        errors = ratchet.pairing_errors(mutated)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("warrant_pairing", errors[0])
+        self.assertIn(rel, errors[0])
+
     def test_existing_file_growth_is_red_but_deletion_is_allowed(self) -> None:
         baseline = empty_counts()
         baseline["tmux_kill"] = {"src/a.rs": 2, "src/deleted.rs": 3}
