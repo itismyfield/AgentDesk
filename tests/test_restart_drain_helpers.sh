@@ -1818,6 +1818,9 @@ _restart_sweep_deadline_ok() {
   if [ "$lock_deadline_calls" -eq 2 ]; then
     command rm -f "$root/restart_pending.lock-recheck"
     _restart_stage_marker_identity "$root" lock-recheck publisher request live
+    # ext4 recycles the freed inode and both locks are born in the same
+    # second, so force a distinct mtime to keep d:i:m distinguishable.
+    set_file_age "$root/restart_pending.lock-recheck" 5
   fi
   return 0
 }
@@ -1951,7 +1954,7 @@ ln "$root/restart_persisted.old" "$root/restart_persisted"
 real_stat=$(declare -f stat 2>/dev/null || true)
 s2_fixed_stat_calls=0
 stat() {
-  if [ "$1" = -f ] && [ "$2" = '%d:%i' ] \
+  if { [ "$1" = -f ] || [ "$1" = -c ]; } && [ "$2" = '%d:%i' ] \
     && [ "$3" = "$root/restart_persisted" ]; then
     s2_fixed_stat_calls=$((s2_fixed_stat_calls + 1))
     if [ "$s2_fixed_stat_calls" -eq 1 ]; then
