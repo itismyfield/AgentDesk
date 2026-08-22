@@ -233,11 +233,20 @@ SANCTIONED_TREE_CONSUMERS: set[str] = set()
 #   * `health/stall_verdict.rs` — its detail-serialization test builds that field.
 #   * `relay_recovery/decision.rs` — the 4987 §4.4
 #     `(RelayStallState, ReachabilityVerdict)` planner and its I15 mutation lock.
+#   * `health/recovery.rs` — #5464 T5 S5's watchdog witness imports the ledger,
+#     discovery identity, and verdict needed to build both axis-B fixtures.
+#   * `relay_recovery.rs` — #5464 T5 S5's alias-invariant witness enumerates the
+#     verdict variants consumed by the axis-B observation boundary.
+#   * `router/intake_gate/stale_turn.rs` — #5464 T5 S5's stale-turn witness
+#     preserves a concrete verdict in the snapshot passed to axis-B observation.
 JUDGMENT_TREE_CONSUMERS = {
     "src/services/discord/health/snapshot.rs",
     "src/services/discord/health/mailbox.rs",
+    "src/services/discord/health/recovery.rs",
     "src/services/discord/health/stall_verdict.rs",
+    "src/services/discord/relay_recovery.rs",
     "src/services/discord/relay_recovery/decision.rs",
+    "src/services/discord/router/intake_gate/stale_turn.rs",
 }
 # A module reference, not a word: an identifier that merely contains the
 # substring (`run_bot_spawn_reachability_observation`, say) is not a reader, and
