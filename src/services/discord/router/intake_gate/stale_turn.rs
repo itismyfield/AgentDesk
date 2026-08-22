@@ -36,6 +36,33 @@ enum StaleActiveTurnProofClassification {
     ExplicitBackgroundStatus,
 }
 
+struct StaleActiveTurnProof {
+    classification: StaleActiveTurnProofClassification,
+    snapshot: crate::services::discord::health::WatcherStateSnapshot,
+}
+
+#[cfg(unix)]
+fn observe_stale_turn_axis_b(
+    shared: &std::sync::Arc<SharedData>,
+    provider: &ProviderKind,
+    proof: &StaleActiveTurnProof,
+) {
+    let eligible = matches!(
+        proof.classification,
+        StaleActiveTurnProofClassification::RelayStalled
+            | StaleActiveTurnProofClassification::QueueBlockedOrphan
+    );
+    crate::services::discord::relay_recovery::observe_axis_b_candidate(
+        shared,
+        provider,
+        &proof.snapshot,
+        crate::services::discord::relay_recovery::AxisBSite::StaleTurnIntake,
+        crate::services::discord::relay_recovery::RelayRecoveryActionKind::ClearStaleThreadProof,
+        eligible,
+        chrono::Utc::now().timestamp_millis(),
+    );
+}
+
 fn classify_stale_active_turn_proof(
     inflight: &crate::services::discord::inflight::InflightTurnState,
     snapshot: &crate::services::discord::health::WatcherStateSnapshot,
@@ -74,27 +101,34 @@ fn classify_stale_active_turn_proof(
     StaleActiveTurnProofClassification::LiveOrUnclear
 }
 
+fn bind_stale_active_turn_proof(
+    inflight: &crate::services::discord::inflight::InflightTurnState,
+    snapshot: crate::services::discord::health::WatcherStateSnapshot,
+    now_unix_secs: i64,
+) -> StaleActiveTurnProof {
+    StaleActiveTurnProof {
+        classification: classify_stale_active_turn_proof(inflight, &snapshot, now_unix_secs),
+        snapshot,
+    }
+}
+
 async fn classify_channel_stale_active_turn_proof(
     shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     now_unix_secs: i64,
-) -> StaleActiveTurnProofClassification {
-    let Some(inflight) =
-        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())
-    else {
-        return StaleActiveTurnProofClassification::LiveOrUnclear;
-    };
-    let Some(registry) = shared.health_registry.upgrade() else {
-        return StaleActiveTurnProofClassification::LiveOrUnclear;
-    };
-    let Some(snapshot) = registry
+) -> Option<StaleActiveTurnProof> {
+    let inflight =
+        crate::services::discord::inflight::load_inflight_state(provider, channel_id.get())?;
+    let registry = shared.health_registry.upgrade()?;
+    let snapshot = registry
         .snapshot_watcher_state_for_provider(provider, channel_id.get())
-        .await
-    else {
-        return StaleActiveTurnProofClassification::LiveOrUnclear;
-    };
-    classify_stale_active_turn_proof(&inflight, &snapshot, now_unix_secs)
+        .await?;
+    Some(bind_stale_active_turn_proof(
+        &inflight,
+        snapshot,
+        now_unix_secs,
+    ))
 }
 
 /// #1446 / #1456 — full force-clean predicate. Requires stale persisted
@@ -119,11 +153,21 @@ pub(super) async fn thread_guard_should_force_clean_stale_thread(
     thread_id: serenity::ChannelId,
     now_unix_secs: i64,
 ) -> bool {
-    matches!(
-        classify_channel_stale_active_turn_proof(shared, provider, thread_id, now_unix_secs).await,
+    let Some(proof) =
+        classify_channel_stale_active_turn_proof(shared, provider, thread_id, now_unix_secs).await
+    else {
+        return false;
+    };
+    let eligible = matches!(
+        proof.classification,
         StaleActiveTurnProofClassification::RelayStalled
             | StaleActiveTurnProofClassification::QueueBlockedOrphan
-    )
+    );
+    if eligible {
+        #[cfg(unix)]
+        observe_stale_turn_axis_b(shared, provider, &proof);
+    }
+    eligible
 }
 
 /// #1446 Layer 2 — perform the THREAD-GUARD's stale-thread cleanup:
@@ -207,12 +251,17 @@ async fn release_queue_blocked_stale_active_turn(
     channel_id: serenity::ChannelId,
     now_unix_secs: i64,
 ) -> bool {
-    let classification =
-        classify_channel_stale_active_turn_proof(shared, provider, channel_id, now_unix_secs).await;
-    if classification != StaleActiveTurnProofClassification::QueueBlockedOrphan {
+    let Some(proof) =
+        classify_channel_stale_active_turn_proof(shared, provider, channel_id, now_unix_secs).await
+    else {
+        return false;
+    };
+    if proof.classification != StaleActiveTurnProofClassification::QueueBlockedOrphan {
         return false;
     }
 
+    #[cfg(unix)]
+    observe_stale_turn_axis_b(shared, provider, &proof);
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
         "  [{ts}] 🔓 QUEUE-GUARD: stale active-turn proof for channel {} has no live owner; releasing mailbox and proceeding",
@@ -426,6 +475,8 @@ mod thread_guard_stale_pure_tests {
             inflight_identity: None,
             inflight_finalizer_turn_id: None,
             inflight_output_path: Some("/tmp/stale-proof-tmux.jsonl".to_string()),
+            #[cfg(unix)]
+            reachability_observation: None,
             relay_stall_state,
             relay_health,
         }
@@ -536,7 +587,7 @@ mod thread_guard_stale_pure_tests {
             -(crate::services::discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS as i64) - 5,
         );
         let inflight = inflight_with_updated_at(&provider, channel_id, &stale_at);
-        let snapshot = watcher_snapshot(
+        let mut snapshot = watcher_snapshot(
             &provider,
             channel_id,
             inflight.user_msg_id,
@@ -544,10 +595,26 @@ mod thread_guard_stale_pure_tests {
             Some(false),
             false,
         );
+        #[cfg(unix)]
+        let observation = (
+            crate::services::discord::health::reachability::verdict::ReachabilityVerdict::Reachable,
+            54_641,
+        );
+        #[cfg(unix)]
+        {
+            snapshot.reachability_observation = Some(observation.clone());
+        }
+        let proof = super::bind_stale_active_turn_proof(&inflight, snapshot, now_unix);
 
         assert_eq!(
-            super::classify_stale_active_turn_proof(&inflight, &snapshot, now_unix),
+            proof.classification,
             super::StaleActiveTurnProofClassification::QueueBlockedOrphan
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            proof.snapshot.reachability_observation,
+            Some(observation),
+            "the proof must retain the exact snapshot that authorized cleanup"
         );
     }
 

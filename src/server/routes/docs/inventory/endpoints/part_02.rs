@@ -64,7 +64,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/channels/{id}/relay-recovery",
             "health",
-            "Local/protected relay recovery dry-run endpoint with bounded apply for safe local auto-heal actions, including stale proof cleanup and detached watcher reattach.",
+            "Local/protected relay recovery dry-run endpoint with bounded apply for safe local auto-heal actions. Reachability is shadow-planned and recorded as axis-B telemetry only; it cannot change the returned or applied structural decision.",
         )
         .with_params([
             ("id", path_param("Discord channel snowflake")),

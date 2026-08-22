@@ -6,7 +6,9 @@ use super::*;
 // the same way. No production path calls that planner in either configuration;
 // windows simply keeps only the structural `plan_relay_recovery`.
 #[cfg(unix)]
-use crate::services::discord::health::reachability::verdict::ReachabilityVerdict;
+use crate::services::discord::health::reachability::verdict::{
+    NotAliveObligationState, ReachabilityUnknownReason, ReachabilityVerdict,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -132,6 +134,76 @@ pub(in crate::services::discord) struct RelayRecoveryAutoHeal {
     pub remaining_attempts: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped_reason: Option<&'static str>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(in crate::services::discord) enum AxisBDiff {
+    Agree,
+    LedgerMilder,
+    LedgerStricter,
+}
+
+#[cfg(unix)]
+impl AxisBDiff {
+    /// The ledger planner is monotone-relaxing: it may retain or remove a
+    /// structural action, never introduce a new destructive one.
+    pub(in crate::services::discord) fn from_decisions(
+        structural: &RelayRecoveryDecision,
+        ledger: &RelayRecoveryDecision,
+    ) -> Self {
+        Self::from_outcomes(
+            structural.action,
+            structural.auto_heal.eligible,
+            ledger.action,
+            ledger.auto_heal.eligible,
+        )
+    }
+
+    pub(in crate::services::discord) fn from_outcomes(
+        structural_action: RelayRecoveryActionKind,
+        structural_eligible: bool,
+        ledger_action: RelayRecoveryActionKind,
+        ledger_eligible: bool,
+    ) -> Self {
+        if structural_action == ledger_action && structural_eligible == ledger_eligible {
+            Self::Agree
+        } else if (ledger_action.is_destructive() && ledger_action != structural_action)
+            || (ledger_eligible && !structural_eligible)
+        {
+            Self::LedgerStricter
+        } else {
+            Self::LedgerMilder
+        }
+    }
+
+    pub(in crate::services::discord) fn preserves_monotone_relaxation(self) -> bool {
+        self != Self::LedgerStricter
+    }
+}
+
+#[cfg(unix)]
+pub(in crate::services::discord) fn reachability_unknown_reason_label(
+    verdict: &ReachabilityVerdict,
+) -> Option<&'static str> {
+    Some(match verdict.unknown_reason()? {
+        ReachabilityUnknownReason::TranscriptUnresolved => "transcript_unresolved",
+        ReachabilityUnknownReason::NeverObserved => "never_observed",
+        ReachabilityUnknownReason::ProviderUnresolved => "provider_unresolved",
+        ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+            NotAliveObligationState::NoneOutstanding,
+        ) => "incarnation_not_alive_no_obligations",
+        ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+            NotAliveObligationState::WithinGrace,
+        ) => "incarnation_not_alive_within_grace",
+        ReachabilityUnknownReason::TranscriptCoordinateDivergence => {
+            "transcript_coordinate_divergence"
+        }
+        ReachabilityUnknownReason::RowlessActiveTurn => "rowless_active_turn",
+        ReachabilityUnknownReason::ReadTruncated => "read_truncated",
+        ReachabilityUnknownReason::ReceiptStoreUnreadable => "receipt_store_unreadable",
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -542,6 +614,20 @@ mod reachability_authority_tests {
                 uncovered_ranges: 4,
             },
             ReachabilityVerdict::unknown(ReachabilityUnknownReason::TranscriptUnresolved, 30),
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 30),
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::ProviderUnresolved, 30),
+            ReachabilityVerdict::unknown(
+                ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+                    NotAliveObligationState::NoneOutstanding,
+                ),
+                30,
+            ),
+            ReachabilityVerdict::unknown(
+                ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+                    NotAliveObligationState::WithinGrace,
+                ),
+                30,
+            ),
             ReachabilityVerdict::unknown(
                 ReachabilityUnknownReason::TranscriptCoordinateDivergence,
                 30,
@@ -612,6 +698,55 @@ mod reachability_authority_tests {
     /// planner refused — fails here, for every (stall state, verdict) pair.
     #[test]
     fn reachability_never_selects_or_enables_a_destructive_action() {
+        let stricter = AxisBDiff::from_outcomes(
+            RelayRecoveryActionKind::ObserveOnly,
+            false,
+            RelayRecoveryActionKind::ReattachWatcher,
+            true,
+        );
+        let eligibility_only_stricter = AxisBDiff::from_outcomes(
+            RelayRecoveryActionKind::ObserveOnly,
+            false,
+            RelayRecoveryActionKind::ObserveOnly,
+            true,
+        );
+        let milder = AxisBDiff::from_outcomes(
+            RelayRecoveryActionKind::ReattachWatcher,
+            true,
+            RelayRecoveryActionKind::ObserveOnly,
+            false,
+        );
+        let agree = AxisBDiff::from_outcomes(
+            RelayRecoveryActionKind::ReattachWatcher,
+            true,
+            RelayRecoveryActionKind::ReattachWatcher,
+            true,
+        );
+        assert_eq!(stricter, AxisBDiff::LedgerStricter);
+        assert_eq!(eligibility_only_stricter, AxisBDiff::LedgerStricter);
+        assert_eq!(milder, AxisBDiff::LedgerMilder);
+        assert_eq!(agree, AxisBDiff::Agree);
+        assert!(!stricter.preserves_monotone_relaxation());
+        assert!(milder.preserves_monotone_relaxation());
+        assert!(agree.preserves_monotone_relaxation());
+        let unknown_labels: Vec<_> = every_verdict()
+            .iter()
+            .filter_map(reachability_unknown_reason_label)
+            .collect();
+        assert_eq!(
+            unknown_labels,
+            [
+                "transcript_unresolved",
+                "never_observed",
+                "provider_unresolved",
+                "incarnation_not_alive_no_obligations",
+                "incarnation_not_alive_within_grace",
+                "transcript_coordinate_divergence",
+                "rowless_active_turn",
+                "read_truncated",
+                "receipt_store_unreadable",
+            ]
+        );
         for snapshot in [quiet_snapshot(), live_snapshot()] {
             for stall_state in every_stall_state() {
                 let structural = plan_relay_recovery(&snapshot, stall_state, 1_000);
@@ -621,6 +756,11 @@ mod reachability_authority_tests {
                         stall_state,
                         &verdict,
                         1_000,
+                    );
+                    let diff = AxisBDiff::from_decisions(&structural, &composed);
+                    assert!(
+                        diff.preserves_monotone_relaxation(),
+                        "ledger became stricter for {stall_state:?}/{verdict:?}"
                     );
                     if composed.action.is_destructive() {
                         assert_eq!(

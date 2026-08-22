@@ -15,6 +15,8 @@ use super::reachability::composite::{
     RelayVerdict, RelayVerdictProbe, RelayVerdictReport, observe_relay_verdict,
     relay_verdict_source,
 };
+#[cfg(unix)]
+use super::reachability::verdict::ReachabilityVerdict;
 use super::redaction;
 use super::session_enrichment::{self, SessionEnrichment};
 use super::stall_verdict;
@@ -50,7 +52,7 @@ pub enum HealthStatus {
 /// `has_pending_queue`, and `mailbox_active_user_msg_id`. All new fields
 /// are scalar (no message text, no user IDs, no transcripts) so the
 /// response remains safe for non-privileged operator dashboards.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct WatcherStateSnapshot {
     pub provider: String,
     pub attached: bool,
@@ -149,6 +151,12 @@ pub struct WatcherStateSnapshot {
     pub(in crate::services::discord) inflight_finalizer_turn_id: Option<u64>,
     #[serde(skip)]
     pub(in crate::services::discord) inflight_output_path: Option<String>,
+    /// #5464 T5 S5: fresh, read-only ledger verdict computed with this snapshot.
+    /// The field stays live in unit-test builds so consumers and the axis-B
+    /// observer share one snapshot shape; producer wiring has separate coverage.
+    #[cfg(unix)]
+    #[serde(skip)]
+    pub(in crate::services::discord) reachability_observation: Option<(ReachabilityVerdict, i64)>,
     /// #1455: Pure relay-stall classifier output derived from the nested
     /// relay-health snapshot. Read-only diagnostic; no recovery behavior is
     /// triggered from this value.
@@ -156,6 +164,17 @@ pub struct WatcherStateSnapshot {
     /// #1455: Focused relay-health model shared with the detailed health
     /// endpoint and future recovery/UI code.
     pub(in crate::services::discord) relay_health: RelayHealthSnapshot,
+}
+
+impl WatcherStateSnapshot {
+    #[cfg(unix)]
+    pub(in crate::services::discord) fn reachability_observation(
+        &self,
+    ) -> Option<(&ReachabilityVerdict, i64)> {
+        self.reachability_observation
+            .as_ref()
+            .map(|(verdict, observed_at_ms)| (verdict, *observed_at_ms))
+    }
 }
 
 impl HealthStatus {
@@ -211,6 +230,11 @@ pub struct DiscordHealthSnapshot {
     /// which reads the JSONL event log instead (design §5.3).
     #[serde(skip_serializing_if = "Option::is_none")]
     relay_authority_observation: Option<RelayAuthorityObservationReport>,
+    /// #5464 T5 S5: detail-only axis-B triage. The public health response is an
+    /// allowlist, so absence is serialized as no key rather than JSON `null`.
+    #[cfg(unix)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    axis_b_observation: Option<crate::services::discord::relay_recovery::AxisBObservationReport>,
 }
 
 impl DiscordHealthSnapshot {
@@ -439,7 +463,13 @@ impl HealthRegistry {
         .await
         {
             Ok(Some(shared)) => {
-                return watcher_state_snapshot_for_shared(provider.as_str(), shared, channel).await;
+                return watcher_state_snapshot_for_shared(
+                    provider.as_str(),
+                    shared,
+                    channel,
+                    self.started_at_unix(),
+                )
+                .await;
             }
             Ok(None) => {}
             Err(_) => {
@@ -469,8 +499,13 @@ impl HealthRegistry {
         shared: std::sync::Arc<SharedData>,
         channel_id: u64,
     ) -> Option<WatcherStateSnapshot> {
-        watcher_state_snapshot_for_shared(provider.as_str(), shared, ChannelId::new(channel_id))
-            .await
+        watcher_state_snapshot_for_shared(
+            provider.as_str(),
+            shared,
+            ChannelId::new(channel_id),
+            self.started_at_unix(),
+        )
+        .await
     }
 
     async fn snapshot_watcher_state_filtered(
@@ -494,6 +529,7 @@ impl HealthRegistry {
                     .unwrap_or(entry.name.as_str()),
                 entry.shared.clone(),
                 channel,
+                self.started_at_unix(),
             )
             .await
             {
@@ -504,10 +540,43 @@ impl HealthRegistry {
     }
 }
 
+#[cfg(unix)]
+struct RelayVerdictProbeOperands {
+    pane_idle_confirmed: bool,
+    rowless_active_turn: bool,
+    placeholder_present: bool,
+    now_epoch_ms: u64,
+    process_started_at_epoch_ms: u64,
+}
+
+/// Preserve the reachability probe's three-valued tail evidence. A missing
+/// `unread_bytes` is not a proven drained tail for a row-backed turn; only the
+/// separately witnessed rowless case may use pane-idle as positive evidence.
+/// Do not collapse this to `unwrap_or(0) == 0`: the unmeasured-tail mutation is
+/// pinned by `call_site_withholds_the_pane_idle_witness_for_an_unmeasured_tail`.
+#[cfg(unix)]
+fn relay_verdict_probe_operands(
+    pane_alive: bool,
+    relay_health: &RelayHealthSnapshot,
+    rowless_active_turn: bool,
+    process_started_at_unix: i64,
+) -> RelayVerdictProbeOperands {
+    RelayVerdictProbeOperands {
+        pane_idle_confirmed: pane_alive
+            && matches!(relay_health.active_turn, RelayActiveTurn::None)
+            && relay_health.idle_witness_tail_is_not_waiting(),
+        rowless_active_turn,
+        placeholder_present: relay_health.pending_discord_callback_msg_id.is_some(),
+        now_epoch_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+        process_started_at_epoch_ms: process_started_at_unix.max(0).saturating_mul(1_000) as u64,
+    }
+}
+
 async fn watcher_state_snapshot_for_shared(
     provider_name: &str,
     shared: std::sync::Arc<SharedData>,
     channel: ChannelId,
+    process_started_at_unix: i64,
 ) -> Option<WatcherStateSnapshot> {
     let provider_kind = ProviderKind::from_str(provider_name);
     let session = SessionEnrichment::load(&shared, provider_kind.as_ref(), channel).await;
@@ -645,6 +714,34 @@ async fn watcher_state_snapshot_for_shared(
             .and_then(|state| state.output_path.as_deref()),
         session.watcher_output_path.as_deref(),
     );
+    #[cfg(unix)]
+    let reachability_observation = {
+        let operands = relay_verdict_probe_operands(
+            tmux_session_alive == Some(true),
+            &relay_health,
+            unpaired_active_token_reconfirmed,
+            process_started_at_unix,
+        );
+        Some((
+            observe_relay_verdict(RelayVerdictProbe {
+                provider: provider_kind.as_ref(),
+                channel_id: channel.get(),
+                row_output_path: session
+                    .inflight
+                    .as_ref()
+                    .and_then(|state| state.output_path.as_deref()),
+                registry_output_path: session.watcher_output_path.as_deref(),
+                pane_idle_confirmed: operands.pane_idle_confirmed,
+                rowless_active_turn: operands.rowless_active_turn,
+                placeholder_present: operands.placeholder_present,
+                now_epoch_ms: operands.now_epoch_ms,
+                process_started_at_epoch_ms: operands.process_started_at_epoch_ms,
+            })
+            .in_band()
+            .clone(),
+            operands.now_epoch_ms.min(i64::MAX as u64) as i64,
+        ))
+    };
     Some(WatcherStateSnapshot {
         provider: provider_name.to_string(),
         attached: session.attached,
@@ -682,6 +779,8 @@ async fn watcher_state_snapshot_for_shared(
             .inflight
             .as_ref()
             .and_then(|state| state.output_path.clone()),
+        #[cfg(unix)]
+        reachability_observation,
         relay_stall_state,
         relay_health,
     })
@@ -858,74 +957,32 @@ async fn build_health_snapshot_with_options(
                 // to the divergence comparison only, matching the descriptive
                 // call above it; nothing here resolves or tails through it.
                 #[cfg(unix)]
-                let relay_verdict = observe_relay_verdict(RelayVerdictProbe {
-                    provider: provider_kind.as_ref(),
-                    channel_id: channel.get(),
-                    row_output_path: session
-                        .inflight
-                        .as_ref()
-                        .and_then(|state| state.output_path.as_deref()),
-                    registry_output_path: session.watcher_output_path.as_deref(),
-                    // 4987 §-1.4's second alive witness: the pane is up, the
-                    // mailbox holds no turn, and the tail has nothing waiting,
-                    // so a transcript that is not growing is idle rather than
-                    // gone.
-                    //
-                    // The third term is three-valued, and #5071 relay-tail S2
-                    // splits its `None` where T4-B6 folded it. `unread_bytes` is
-                    // derived in `SessionEnrichment::load` from the capture
-                    // coordinate of the IN-FLIGHT ROW's `output_path`, so a
-                    // channel with no in-flight row has no coordinate and the
-                    // field is `None` with nothing that could be waiting. That
-                    // half of the old `unwrap_or(0)` fold is the population this
-                    // witness exists for and it is kept: requiring `Some(0)`
-                    // there would deny the witness to every rowless idle
-                    // channel, and one with no held obligation and a transcript
-                    // that is not growing would then classify
-                    // `Unknown{TranscriptUnresolved}`
-                    // (`composite_tests::nothing_observed_is_not_green` pins
-                    // that verdict) — a degraded reason for each such channel
-                    // once `RelayVerdictSource` is `Composite`.
-                    //
-                    // The other half was a `None` beside a row present, where the
-                    // tail is UNKNOWN — the row's `output_path` is absent, its
-                    // stat failed, or the frontier is not attributable to the
-                    // row. That one did let an unknown tail help assert liveness,
-                    // running opposite to
-                    // `RelayHealthSnapshot::relay_frontier_never_advanced_with_unread_tail`,
-                    // whose tail term reads the same field (`is_some_and(|b| b > 0)`
-                    // in one disjunct, an unmeasured-`None` gate in the other) and
-                    // never lets an unmeasured tail carry a FAILURE on its own.
-                    // (#5071 relay-tail S3 gave that predicate a second disjunct
-                    // that fires while `unread_bytes` is `None`, but on an
-                    // independent watcher witness — the `None` permits it and
-                    // testifies to nothing, the same as here.)
-                    // `idle_witness_tail_is_not_waiting` now requires `Some(0)`
-                    // for that case, which is not the rowless population above —
-                    // a row present with `active_turn == None` is its own live
-                    // shape (#3631 rebind-origin, ownerless TUI-direct rows).
-                    // `call_site_withholds_the_pane_idle_witness_for_an_unmeasured_tail`
-                    // builds that shape, runs it through `build_health_snapshot`,
-                    // and reads the verdict this term decides off the published
-                    // `reachability` of the mailbox entry — so folding EITHER this
-                    // line or the predicate back to `unwrap_or(0) == 0` fails it.
-                    pane_idle_confirmed: tmux_present
-                        && matches!(relay_health.active_turn, RelayActiveTurn::None)
-                        && relay_health.idle_witness_tail_is_not_waiting(),
-                    // The RECONFIRMED unpaired token, not the raw one: a second
-                    // mailbox snapshot and inflight read still saw the same
-                    // active episode without a durable row, so an ordinary
-                    // start-of-turn race between the token and the row write
-                    // does not spend a tick as `Unknown{RowlessActiveTurn}`.
-                    rowless_active_turn: unpaired_active_token_reconfirmed,
-                    placeholder_present: relay_health.pending_discord_callback_msg_id.is_some(),
-                    now_epoch_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
-                    process_started_at_epoch_ms: registry
-                        .started_at_unix()
-                        .max(0)
-                        .saturating_mul(1_000)
-                        as u64,
-                });
+                let relay_verdict = {
+                    // The detail poll's `tmux_present` witness is intentionally
+                    // weaker than the recovery snapshot's has-session probe. The
+                    // explicit helper operand keeps that semantic difference
+                    // visible instead of silently forking the remaining inputs.
+                    let operands = relay_verdict_probe_operands(
+                        tmux_present,
+                        &relay_health,
+                        unpaired_active_token_reconfirmed,
+                        registry.started_at_unix(),
+                    );
+                    observe_relay_verdict(RelayVerdictProbe {
+                        provider: provider_kind.as_ref(),
+                        channel_id: channel.get(),
+                        row_output_path: session
+                            .inflight
+                            .as_ref()
+                            .and_then(|state| state.output_path.as_deref()),
+                        registry_output_path: session.watcher_output_path.as_deref(),
+                        pane_idle_confirmed: operands.pane_idle_confirmed,
+                        rowless_active_turn: operands.rowless_active_turn,
+                        placeholder_present: operands.placeholder_present,
+                        now_epoch_ms: operands.now_epoch_ms,
+                        process_started_at_epoch_ms: operands.process_started_at_epoch_ms,
+                    })
+                };
                 #[cfg(unix)]
                 apply_relay_verdict_polarity(
                     composite_governs_polarity,
@@ -1025,6 +1082,9 @@ async fn build_health_snapshot_with_options(
         relay_authority_rollout: include_mailbox_details.then(cohort::rollout_report),
         relay_authority_observation: include_mailbox_details
             .then(authority_observation::observation_report),
+        #[cfg(unix)]
+        axis_b_observation: include_mailbox_details
+            .then(crate::services::discord::relay_recovery::axis_b_observation_report),
     }
 }
 
@@ -1182,7 +1242,9 @@ mod tests {
     // tree, so they are gated with the seam they exercise. `HealthStatus` rides
     // the same gate because those tests are its only readers here.
     #[cfg(unix)]
-    use super::{HealthStatus, RelayVerdict, apply_relay_verdict_polarity};
+    use super::{
+        HealthStatus, RelayVerdict, apply_relay_verdict_polarity, relay_verdict_probe_operands,
+    };
     use crate::services::agent_protocol::RuntimeHandoffKind;
     #[cfg(unix)]
     use crate::services::discord::health::reachability::composite::compose_relay_verdict;
@@ -1193,7 +1255,7 @@ mod tests {
         ReachabilityUnknownReason, ReachabilityVerdict,
     };
     use crate::services::discord::inflight::InflightTurnState;
-    use crate::services::discord::relay_health::RelayActiveTurn;
+    use crate::services::discord::relay_health::{RelayActiveTurn, RelayHealthSnapshot};
     use crate::services::provider::{CancelToken, ProviderKind};
     use crate::services::tui_prompt_dedupe::TuiRuntimeBinding;
     use chrono::TimeZone;
@@ -1202,6 +1264,48 @@ mod tests {
     static NEXT_ABSENT_MAILBOX_CHANNEL: AtomicU64 = AtomicU64::new(9_406_800_000_000);
 
     struct EnvGuard;
+
+    #[cfg(unix)]
+    #[test]
+    fn relay_verdict_probe_operands_preserve_process_start_and_pane_semantics() {
+        let relay_health = RelayHealthSnapshot {
+            provider: "codex".to_string(),
+            channel_id: 54_640,
+            active_turn: RelayActiveTurn::None,
+            tmux_session: None,
+            tmux_alive: None,
+            watcher_attached: false,
+            watcher_attached_stale: false,
+            watcher_owner_channel_id: None,
+            watcher_owns_live_relay: false,
+            bridge_inflight_present: false,
+            bridge_current_msg_id: None,
+            mailbox_has_cancel_token: false,
+            mailbox_active_user_msg_id: None,
+            mailbox_turn_started_at_ms: None,
+            mailbox_turn_age_secs: None,
+            queue_depth: 0,
+            pending_discord_callback_msg_id: Some(7),
+            pending_thread_proof: false,
+            parent_channel_id: None,
+            thread_channel_id: None,
+            last_relay_ts_ms: None,
+            last_relay_age_secs: None,
+            last_outbound_activity_ms: None,
+            last_capture_offset: None,
+            last_relay_offset: 0,
+            unread_bytes: None,
+            desynced: false,
+            stale_thread_proof: false,
+            unpaired_active_token_reconfirmed: false,
+        };
+        let operands = relay_verdict_probe_operands(true, &relay_health, true, 1_725_000_123);
+        assert_eq!(operands.process_started_at_epoch_ms, 1_725_000_123_000);
+        assert!(operands.pane_idle_confirmed);
+        assert!(operands.rowless_active_turn);
+        assert!(operands.placeholder_present);
+        assert!(!relay_verdict_probe_operands(false, &relay_health, false, 1).pane_idle_confirmed);
+    }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
@@ -1266,6 +1370,11 @@ mod tests {
             public.get("relay_authority_observation").is_none(),
             "observation triage must not reach the public health allowlist"
         );
+        #[cfg(unix)]
+        assert!(
+            public.get("axis_b_observation").is_none(),
+            "axis-B triage must not reach the public health allowlist"
+        );
 
         let detail = serde_json::to_value(build_health_snapshot(&registry).await)
             .expect("serialize detail snapshot");
@@ -1301,6 +1410,15 @@ mod tests {
             Some(0),
             "AC2-R's monotone-relaxing alarm counter must be zero in this process"
         );
+        #[cfg(unix)]
+        {
+            let axis_b = detail
+                .get("axis_b_observation")
+                .and_then(serde_json::Value::as_object)
+                .expect("detail health publishes the independent axis-B producer block");
+            assert!(axis_b.contains_key("dropped_records"));
+            assert!(axis_b.contains_key("write_failures"));
+        }
     }
 
     #[cfg(unix)]
@@ -1396,6 +1514,37 @@ mod tests {
                 "a health-permitting verdict degraded nothing to report, got {reasons:?}"
             );
             assert_eq!(status, HealthStatus::Healthy);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_unreachable_verdict_reaches_the_polarity_boundary() {
+        let unreachable = compose_relay_verdict(
+            ReachabilityVerdict::Unreachable {
+                oldest_unsatisfied_age_secs: 900,
+                uncovered_ranges: 4,
+            },
+            ExternalRelayVerdict::NoLoss,
+        );
+        assert!(!unreachable.permits_health());
+
+        for (composite_governs_polarity, expected_status) in [
+            (false, HealthStatus::Healthy),
+            (true, HealthStatus::Degraded),
+        ] {
+            let mut reasons = Vec::new();
+            let mut status = HealthStatus::Healthy;
+            apply_relay_verdict_polarity(
+                composite_governs_polarity,
+                &unreachable,
+                POLARITY_PROVIDER,
+                POLARITY_CHANNEL,
+                &mut reasons,
+                &mut status,
+            );
+            assert_eq!(status, expected_status);
+            assert_eq!(reasons.is_empty(), !composite_governs_polarity);
         }
     }
 
@@ -2055,6 +2204,7 @@ mod tests {
                 provider.as_str(),
                 shared,
                 channel,
+                0,
             ))
             .await;
 

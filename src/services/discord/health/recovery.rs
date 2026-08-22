@@ -7,6 +7,8 @@ use serde::Serialize;
 use serenity::{ChannelId, MessageId};
 
 use crate::services::discord::inflight::opt_message_id;
+#[cfg(unix)]
+use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_via_shared as tv_clear;
 use crate::services::discord::{self as discord, SharedData};
@@ -35,6 +37,8 @@ use leak_recovery_ledger::{
     leak_recovery_record_confirmed_chunk, leak_recovery_unrelayed_range,
     render_leak_recovery_delivery,
 };
+#[cfg(unix)]
+pub(crate) use watchdog_decisions::observe_watchdog_axis_b;
 pub(crate) use watchdog_decisions::{
     STALL_WATCHDOG_INITIAL_DELAY_SECS, STALL_WATCHDOG_INTERVAL_SECS,
     STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS, STALL_WATCHDOG_THRESHOLD_SECS,
@@ -1782,6 +1786,8 @@ pub(crate) async fn run_stall_watchdog_pass(
             )
             .unwrap_or(false)
         {
+            #[cfg(unix)]
+            observe_watchdog_axis_b(&shared, provider, &snapshot, AxisBSite::WatchdogStaleIdle);
             let Some(result) = clear_idle_tmux_stale_turn(
                 registry,
                 provider.as_str(),
@@ -1819,6 +1825,13 @@ pub(crate) async fn run_stall_watchdog_pass(
             now_unix_secs,
             STALL_WATCHDOG_THRESHOLD_SECS,
         ) {
+            #[cfg(unix)]
+            observe_watchdog_axis_b(
+                &shared,
+                provider,
+                &snapshot,
+                AxisBSite::WatchdogExplicitBackground,
+            );
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for orphan explicit background work in channel {}",
@@ -4447,6 +4460,235 @@ mod stall_watchdog_auto_heal_tests {
             shared.turn_view_reconciler.ops().len(),
             turn_view_ops_before,
             "branch 4 must not mutate the turn view"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reachability_verdict_does_not_change_the_shipped_watchdog_branch() {
+        use crate::services::discord::health::reachability::discovery::TranscriptFileId;
+        use crate::services::discord::health::reachability::ledger::{
+            LedgerIncarnation, LedgerObligation, ReachabilityLedger, bootstrap_ledger_at,
+            ledger_path, write_ledger_at,
+        };
+        use crate::services::discord::health::reachability::verdict::{
+            ReachabilityVerdict, TransportUnknownEvidence,
+        };
+        use std::os::unix::fs::MetadataExt;
+
+        let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let tempdir = tempfile::tempdir().expect("runtime root tempdir");
+        let _env = TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            tempdir.path(),
+        );
+        if !crate::services::platform::tmux::is_available() {
+            eprintln!("skipping reachability watchdog witness: tmux unavailable");
+            return;
+        }
+
+        let mut shipped_outcomes = Vec::new();
+        for (index, has_unsatisfied_obligation) in [false, true].into_iter().enumerate() {
+            let provider = ProviderKind::Claude;
+            let mut registry = HealthRegistry::new();
+            let now = chrono::Utc::now().timestamp();
+            registry.started_at_unix = now - 1_000;
+            let shared = super::super::super::make_shared_data_for_tests();
+            registry
+                .register(provider.as_str().to_string(), shared.clone())
+                .await;
+            let channel = ChannelId::new(5_464_300 + index as u64);
+            let user_msg = MessageId::new(5_464_400 + index as u64);
+            let tmux_session = format!(
+                "AgentDesk-claude-5464-axis-b-{}-{index}",
+                std::process::id()
+            );
+            let _ = crate::services::platform::tmux::kill_session(
+                &tmux_session,
+                "#5464 axis-B watchdog fixture reset",
+            );
+            assert!(
+                crate::services::platform::tmux::create_session(&tmux_session, None, "sleep 60")
+                    .expect("start tmux fixture")
+                    .status
+                    .success()
+            );
+            let output = tempdir
+                .path()
+                .join(format!("axis-b-watchdog-{index}.jsonl"));
+            std::fs::write(
+                &output,
+                "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n",
+            )
+            .expect("seed at-rest transcript");
+            let output_len = std::fs::metadata(&output)
+                .expect("transcript metadata")
+                .len();
+            let token = seed_active_mailbox_and_session(&shared, channel, user_msg).await;
+            let mut state = seed_idle_inflight(
+                &provider,
+                channel,
+                user_msg.get(),
+                &tmux_session,
+                &output,
+                output_len,
+                "axis-b-watchdog-session",
+            );
+            let stale_at = (chrono::Local::now() - chrono::Duration::minutes(30))
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string();
+            state.started_at = stale_at.clone();
+            state.updated_at = stale_at.clone();
+            crate::services::discord::inflight::save_inflight_state(&state)
+                .expect("save stale watchdog fixture");
+            let row_path = crate::services::discord::inflight::inflight_state_path(
+                &crate::services::discord::inflight::inflight_runtime_root()
+                    .expect("inflight runtime root"),
+                &provider,
+                channel.get(),
+            );
+            let mut row: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&row_path).expect("read watchdog fixture"),
+            )
+            .expect("parse watchdog fixture");
+            row["updated_at"] = serde_json::Value::String(stale_at);
+            std::fs::write(
+                &row_path,
+                serde_json::to_string_pretty(&row).expect("serialize watchdog fixture"),
+            )
+            .expect("age watchdog fixture");
+            let watcher_cancel = Arc::new(AtomicBool::new(false));
+            shared.tmux_watchers.insert(
+                channel,
+                watcher_handle(&tmux_session, &output, watcher_cancel),
+            );
+
+            let metadata = std::fs::metadata(&output).expect("transcript identity metadata");
+            let incarnation = LedgerIncarnation::new(
+                tmux_session.clone(),
+                0,
+                None,
+                TranscriptFileId {
+                    dev: metadata.dev(),
+                    ino: metadata.ino(),
+                },
+            );
+            let path = ledger_path(&provider, channel.get()).expect("ledger path");
+            bootstrap_ledger_at(&path, incarnation.clone(), 0).expect("bootstrap ledger");
+            let obligations = has_unsatisfied_obligation
+                .then(|| {
+                    vec![LedgerObligation {
+                        start: 0,
+                        end: 1,
+                        first_observed_at_epoch_ms: ((now - 700) * 1_000) as u64,
+                    }]
+                })
+                .unwrap_or_default();
+            write_ledger_at(
+                &path,
+                &ReachabilityLedger {
+                    schema_version: 1,
+                    incarnation,
+                    cursor_offset: output_len,
+                    bootstrap_offset: 0,
+                    last_observed_len: if has_unsatisfied_obligation {
+                        output_len
+                    } else {
+                        0
+                    },
+                    obligations,
+                    counters: Default::default(),
+                },
+            )
+            .expect("write verdict fixture");
+
+            let pre = registry
+                .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel.get())
+                .await
+                .expect("pre-watchdog snapshot");
+            let produced_verdict = pre
+                .reachability_observation()
+                .map(|(verdict, _)| verdict)
+                .expect("production snapshot must publish a reachability verdict");
+            if has_unsatisfied_obligation {
+                assert!(
+                    matches!(
+                        produced_verdict,
+                        ReachabilityVerdict::TransportUnknown {
+                            evidence: TransportUnknownEvidence::PlaceholderPresent,
+                            ..
+                        }
+                    ),
+                    "an active mailbox turns the unsatisfied obligation into placeholder evidence: {produced_verdict:?}"
+                );
+            } else {
+                assert_eq!(
+                    produced_verdict,
+                    &ReachabilityVerdict::Reachable,
+                    "the control fixture must produce the healthy endpoint: {produced_verdict:?}"
+                );
+            }
+            assert!(
+                super::watchdog_decisions::stale_idle_foreground_queue_detected(
+                    pre.relay_health.active_turn,
+                    pre.relay_health.mailbox_has_cancel_token,
+                    pre.relay_health.queue_depth,
+                    pre.inflight_state_present,
+                    pre.inflight_updated_at.as_deref(),
+                    pre.tmux_session_alive,
+                    pre.relay_health.last_outbound_activity_ms,
+                    now,
+                    super::watchdog_decisions::STALL_WATCHDOG_THRESHOLD_SECS,
+                ),
+                "the destructive watchdog branch must be armed before observation"
+            );
+            assert!(
+                crate::services::discord::relay_recovery::idle_tmux_repair_ready_for_input(
+                    &provider,
+                    channel.get(),
+                    &tmux_session,
+                ),
+                "the shipped watchdog readiness gate must be open"
+            );
+
+            let entered = Arc::new(AtomicBool::new(false));
+            let entered_by_hook = Arc::clone(&entered);
+            let hook_provider = provider.clone();
+            let hook_output = output.clone();
+            let hook_tmux = tmux_session.clone();
+            let _hook = set_idle_tmux_candidate_hook(Arc::new(move |_candidate| {
+                entered_by_hook.store(true, Ordering::Release);
+                seed_idle_inflight(
+                    &hook_provider,
+                    channel,
+                    user_msg.get() + 1_000,
+                    &hook_tmux,
+                    &hook_output,
+                    output_len,
+                    "newer-axis-b-watchdog-session",
+                );
+            }));
+            let cleaned = super::run_stall_watchdog_pass(&registry, &provider).await;
+            let mailbox = super::super::super::mailbox_snapshot(&shared, channel).await;
+            shipped_outcomes.push((
+                entered.load(Ordering::Acquire),
+                cleaned,
+                mailbox.active_user_message_id.is_some(),
+                token.cancelled.load(Ordering::Relaxed),
+            ));
+
+            let _ = crate::services::platform::tmux::kill_session(
+                &tmux_session,
+                "#5464 axis-B watchdog fixture cleanup",
+            );
+            crate::services::discord::inflight::clear_inflight_state(&provider, channel.get());
+        }
+
+        assert_eq!(shipped_outcomes[0], shipped_outcomes[1]);
+        assert_eq!(
+            shipped_outcomes[0],
+            (true, 0, true, false),
+            "Reachable and TransportUnknown{{PlaceholderPresent}} must enter the same shipped branch and preserve the same authorities"
         );
     }
 

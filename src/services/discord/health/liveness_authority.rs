@@ -624,6 +624,8 @@ mod tests {
             inflight_identity: None,
             inflight_finalizer_turn_id: None,
             inflight_output_path: None,
+            #[cfg(unix)]
+            reachability_observation: None,
             relay_stall_state: RelayStallState::TmuxAliveRelayDead,
             relay_health: RelayHealthSnapshot {
                 provider: key.provider.clone(),

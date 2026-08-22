@@ -829,6 +829,8 @@ mod tests {
             ),
             inflight_finalizer_turn_id: None,
             inflight_output_path: Some(format!("/tmp/{tmux_session}.jsonl")),
+            #[cfg(unix)]
+            reachability_observation: None,
             relay_stall_state: RelayStallState::TmuxAliveRelayDead,
             relay_health: RelayHealthSnapshot {
                 provider: ProviderKind::Codex.as_str().to_string(),
