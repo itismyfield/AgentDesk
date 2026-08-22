@@ -38,7 +38,7 @@ use leak_recovery_ledger::{
     render_leak_recovery_delivery,
 };
 #[cfg(unix)]
-pub(crate) use watchdog_decisions::observe_watchdog_axis_b;
+pub(crate) use watchdog_decisions::watchdog_axis_b_warrants;
 pub(crate) use watchdog_decisions::{
     STALL_WATCHDOG_INITIAL_DELAY_SECS, STALL_WATCHDOG_INTERVAL_SECS,
     STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS, STALL_WATCHDOG_THRESHOLD_SECS,
@@ -1785,9 +1785,8 @@ pub(crate) async fn run_stall_watchdog_pass(
                 channel_id.get(),
             )
             .unwrap_or(false)
+            && watchdog_axis_b_warrants(&shared, provider, &snapshot, AxisBSite::WatchdogStaleIdle)
         {
-            #[cfg(unix)]
-            observe_watchdog_axis_b(&shared, provider, &snapshot, AxisBSite::WatchdogStaleIdle);
             let Some(result) = clear_idle_tmux_stale_turn(
                 registry,
                 provider.as_str(),
@@ -1824,14 +1823,12 @@ pub(crate) async fn run_stall_watchdog_pass(
             snapshot.relay_health.last_outbound_activity_ms,
             now_unix_secs,
             STALL_WATCHDOG_THRESHOLD_SECS,
+        ) && watchdog_axis_b_warrants(
+            &shared,
+            provider,
+            &snapshot,
+            AxisBSite::WatchdogExplicitBackground,
         ) {
-            #[cfg(unix)]
-            observe_watchdog_axis_b(
-                &shared,
-                provider,
-                &snapshot,
-                AxisBSite::WatchdogExplicitBackground,
-            );
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for orphan explicit background work in channel {}",
@@ -4465,7 +4462,7 @@ mod stall_watchdog_auto_heal_tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reachability_verdict_does_not_change_the_shipped_watchdog_branch() {
+    async fn reachability_warrant_vetoes_transport_unknown_watchdog_branch() {
         use crate::services::discord::health::reachability::discovery::TranscriptFileId;
         use crate::services::discord::health::reachability::ledger::{
             LedgerIncarnation, LedgerObligation, ReachabilityLedger, bootstrap_ledger_at,
@@ -4684,11 +4681,11 @@ mod stall_watchdog_auto_heal_tests {
             crate::services::discord::inflight::clear_inflight_state(&provider, channel.get());
         }
 
-        assert_eq!(shipped_outcomes[0], shipped_outcomes[1]);
+        assert_eq!(shipped_outcomes[0], (true, 0, true, false));
         assert_eq!(
-            shipped_outcomes[0],
-            (true, 0, true, false),
-            "Reachable and TransportUnknown{{PlaceholderPresent}} must enter the same shipped branch and preserve the same authorities"
+            shipped_outcomes[1],
+            (false, 1, false, true),
+            "TransportUnknown{{PlaceholderPresent}} must veto the destructive stale-idle branch"
         );
     }
 
@@ -5597,7 +5594,7 @@ mod stall_watchdog_auto_heal_tests {
         );
         state.started_at = stale_at.clone();
         state.updated_at = stale_at.clone();
-        state.turn_nonce = Some("nonce-5396-tick".to_string());
+        state.turn_nonce = token.turn_nonce().map(str::to_string);
         state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
         state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
         crate::services::discord::inflight::save_inflight_state(&state)

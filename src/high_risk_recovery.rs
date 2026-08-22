@@ -402,9 +402,10 @@ async fn boot_reconcile_pg_resets_stale_runtime_rows() {
     .await
     .expect("seed valid auto queue entry");
 
-    let stats = crate::reconcile::reconcile_boot_runtime(&engine, Some(&pool), "test-instance")
-        .await
-        .expect("pg boot reconcile succeeds");
+    let stats =
+        crate::reconcile::reconcile_boot_runtime(&engine, Some(&pool), "test-instance", None)
+            .await
+            .expect("pg boot reconcile succeeds");
 
     assert_eq!(stats.stale_processing_outbox_reset, 1);
     assert_eq!(stats.stale_dispatch_reservations_cleared, 1);
@@ -492,7 +493,7 @@ async fn boot_reconcile_terminalizes_cancelled_run_entry_after_partial_legacy_ca
     .await
     .expect("seed stranded cancelled entry");
 
-    let stats = crate::reconcile::reconcile_boot_db_pg(&pool, "cancel-reconcile-test")
+    let stats = crate::reconcile::reconcile_boot_db_pg(&pool, "cancel-reconcile-test", None)
         .await
         .expect("boot reconcile cancelled run entry");
     assert_eq!(stats.broken_auto_queue_entries_reset, 1);
@@ -604,9 +605,10 @@ async fn restart_recovery_does_not_repost_prior_typed_dispatch_delivery_pg() {
     .await
     .expect("seed prior typed sent delivery");
 
-    let stats = crate::reconcile::reconcile_boot_runtime(&engine, Some(&pool), "old-dcserver")
-        .await
-        .expect("pg boot reconcile succeeds");
+    let stats =
+        crate::reconcile::reconcile_boot_runtime(&engine, Some(&pool), "old-dcserver", None)
+            .await
+            .expect("pg boot reconcile succeeds");
     assert_eq!(stats.stale_processing_outbox_reset, 1);
     let (recovered_status, recovered_claim_owner): (String, Option<String>) = sqlx::query_as(
         "SELECT status, claim_owner
@@ -1022,9 +1024,10 @@ async fn boot_reconcile_pg_refires_missing_review_dispatch() {
     .await
     .expect("seed completed implementation dispatch");
 
-    let stats = crate::reconcile::reconcile_boot_runtime(&engine, Some(&pool), "test-instance")
-        .await
-        .expect("pg boot reconcile succeeds");
+    let stats =
+        crate::reconcile::reconcile_boot_runtime(&engine, Some(&pool), "test-instance", None)
+            .await
+            .expect("pg boot reconcile succeeds");
 
     assert_eq!(
         stats.missing_review_dispatches_refired, 1,

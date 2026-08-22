@@ -357,6 +357,7 @@ pub(crate) async fn run(
         boot_reconcile_engine.as_ref().unwrap_or(&engine),
         startup_pool,
         &cluster_instance_id,
+        health_registry.as_deref(),
     )
     .await?;
     drop(boot_reconcile_engine);
@@ -590,7 +591,13 @@ async fn policy_tick_loop(
         if count % 2 == 0 {
             fire_tick_hook_by_name_with_pg(&engine, pg_pool.as_deref(), "OnTick1min", "1min").await;
             if let Some(pool) = pg_pool.as_deref().or_else(|| engine.pg_pool()) {
-                match crate::services::stale_turn_reconciler::reconcile_stale_turns_pg(pool).await {
+                match crate::services::stale_turn_reconciler::reconcile_stale_turns_pg(
+                    pool,
+                    health_registry.as_deref(),
+                    crate::services::discord::relay_recovery::AxisBSite::PolicyTickStaleSweep,
+                )
+                .await
+                {
                     Ok(reconciled) if reconciled > 0 => {
                         tracing::warn!(
                             reconciled,

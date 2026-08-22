@@ -14,7 +14,9 @@ can remain unseen.
 
 The ``identity_fence_bind`` and ``delivery_fence_bind`` categories are the
 inverse of the others: they count the FENCED entry points, not unfenced
-destruction.  Pinning them does NOT make an unfenced destructive removal
+destruction. The #5464 T5 S6a warrant categories similarly count a lexical
+per-file pair, not control-flow dominance or argument identity.
+Pinning fence binders does NOT make an unfenced destructive removal
 impossible — those spell the unfenced helper names and land in
 ``registry_remove`` instead.  What it does is force any change to the set of
 fence-bearing call sites (adding one, moving one, deleting one) to appear as a
@@ -96,6 +98,8 @@ CATEGORIES = (
     "identity_fence_bind",
     "delivery_fence_bind",
     "inflight_row_clear_call",
+    "structural_candidate_apply",
+    "destructive_warrant_bind",
 )
 WARNING = "These counts are a growth-blocking baseline, not proof of safety."
 REPIN = (
@@ -133,6 +137,9 @@ REGISTRY_OWNER = "src/services/discord/tmux_watcher_registry.rs"
 IDENTITY_FENCE_PATTERN = re.compile(r"\bunder_identity_fence\s*\(")
 DELIVERY_FENCE_PATTERN = re.compile(r"\bwith_terminal_delivery_fence\s*\(")
 FENCE_PAIR = ("identity_fence_bind", "delivery_fence_bind")
+STRUCTURAL_CANDIDATE_PATTERN = re.compile(r"(?<!fn )\bstructural_candidate_apply\s*\(")
+DESTRUCTIVE_WARRANT_PATTERN = re.compile(r"(?<!fn )\bdestructive_warrant_bind\s*\(")
+WARRANT_PAIR = ("structural_candidate_apply", "destructive_warrant_bind")
 # #5462 S5: inflight row-destruction helpers.  Scanned over all of `src/**`, not
 # just `src/services/discord/`, because `services/turn_lifecycle.rs` calls them
 # from outside the Discord tree.
@@ -206,6 +213,12 @@ def scan(repo_root: Path) -> tuple[dict[str, dict[str, int]], dict[str, int]]:
         if _is_whole_test_file(path, rel):
             continue
         production = RUST_LEXER._production_text(path)
+        structural_found = len(STRUCTURAL_CANDIDATE_PATTERN.findall(production))
+        if structural_found:
+            counts["structural_candidate_apply"][rel] = structural_found
+        warrant_found = len(DESTRUCTIVE_WARRANT_PATTERN.findall(production))
+        if warrant_found:
+            counts["destructive_warrant_bind"][rel] = warrant_found
         # Widest surface first: this category is the only one that looks outside
         # `src/services/discord/`.
         if not rel.startswith(INFLIGHT_ROW_CLEAR_OWNER_PREFIX):
@@ -284,16 +297,9 @@ def growth_errors(
 
 
 def pairing_errors(actual: Mapping[str, Mapping[str, int]]) -> list[str]:
-    """Every fenced site must bind BOTH S4 conjuncts.
-
-    Measured against the tree, not the baseline: this is an invariant of the
-    source, not a quantity that is allowed to ratchet down.  An unequal pair in
-    either direction is an error — a missing delivery fence is a destructive
-    removal that lost the lease conjunct, and a missing identity fence is a
-    delivery fence chained onto something that is not the fenced view.
-    """
-    identity, delivery = (dict(actual.get(category, {})) for category in FENCE_PAIR)
+    """Require both lexical members of each pair; equality is two-sided."""
     errors: list[str] = []
+    identity, delivery = (dict(actual.get(category, {})) for category in FENCE_PAIR)
     for path in sorted(set(identity) | set(delivery)):
         identity_found = identity.get(path, 0)
         delivery_found = delivery.get(path, 0)
@@ -303,6 +309,18 @@ def pairing_errors(actual: Mapping[str, Mapping[str, int]]) -> list[str]:
             f"fence_pairing: {path} binds under_identity_fence {identity_found}x but "
             f"with_terminal_delivery_fence {delivery_found}x; every fenced destructive "
             "removal must carry both S4 conjuncts"
+        )
+
+    structural, warrant = (dict(actual.get(category, {})) for category in WARRANT_PAIR)
+    for path in sorted(set(structural) | set(warrant)):
+        structural_found = structural.get(path, 0)
+        warrant_found = warrant.get(path, 0)
+        if structural_found == warrant_found:
+            continue
+        errors.append(
+            f"warrant_pairing: {path} binds structural_candidate_apply {structural_found}x "
+            f"but destructive_warrant_bind {warrant_found}x; every automatic destructive "
+            "candidate binding must carry its T5 S6a warrant binding"
         )
     return errors
 
@@ -375,6 +393,14 @@ def _snapshot(
                 ),
                 "files": dict(sorted(counts["inflight_row_clear_call"].items())),
             },
+            "structural_candidate_apply": {
+                "comment": "#5464 T5 S6a: per-file structural/warrant counts must match.",
+                "files": dict(sorted(counts["structural_candidate_apply"].items())),
+            },
+            "destructive_warrant_bind": {
+                "comment": "#5464 T5 S6a: lexical mismatch fails closed; dominance is unproved.",
+                "files": dict(sorted(counts["destructive_warrant_bind"].items())),
+            },
         },
     }
 
@@ -422,7 +448,7 @@ def main(argv: Sequence[str] | None = None, repo_root: Path = REPO_ROOT) -> int:
         print(f"FAIL: destructive call-site ratchet: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     if errors:
-        print("FAIL: destructive call-site growth or fence-pairing violation", file=sys.stderr)
+        print("FAIL: destructive call-site growth or pairing violation", file=sys.stderr)
         print("\n".join(f"  - {error}" for error in errors), file=sys.stderr)
         print(REPIN, file=sys.stderr)
         return 1

@@ -125,6 +125,22 @@
         "src/services/discord/watchers/dispatched_origin_ghost.rs": 1,
         "src/services/turn_lifecycle.rs": 4
       }
+    },
+    "structural_candidate_apply": {
+      "comment": "#5464 T5 S6a: lexical structural-candidate binders at automatic destructive consumers. Must equal destructive_warrant_bind per production Rust file. Equality detects one-sided deletion but does not prove control-flow dominance or argument identity.",
+      "files": {
+        "src/services/discord/health/recovery/watchdog_decisions.rs": 1,
+        "src/services/discord/relay_recovery.rs": 2,
+        "src/services/discord/router/intake_gate/stale_turn.rs": 1
+      }
+    },
+    "destructive_warrant_bind": {
+      "comment": "#5464 T5 S6a: lexical axis-B warrant binders paired with structural_candidate_apply. The checker fails closed on either direction of per-file mismatch; semantic consumer tests establish the shipped outcomes beyond this lexical invariant.",
+      "files": {
+        "src/services/discord/health/recovery/watchdog_decisions.rs": 1,
+        "src/services/discord/relay_recovery.rs": 2,
+        "src/services/discord/router/intake_gate/stale_turn.rs": 1
+      }
     }
   }
 }
