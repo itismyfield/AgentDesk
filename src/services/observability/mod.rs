@@ -140,7 +140,14 @@ pub(super) const RELAY_SIGNAL_DEFINITIONS: &[RelaySignal] = &[
     RelaySignal {
         key: "offset_invariant_violation",
         event_type: "invariant_violation",
-        statuses: &["last_offset_monotonic", "response_sent_offset_monotonic"],
+        statuses: &[
+            "last_offset_monotonic",
+            "response_sent_offset_monotonic",
+            // #5490: the cross-turn edge. The two above are same-identity
+            // guards; `turn_start_offset` is part of that identity key, so its
+            // own backward move is invisible to them.
+            "turn_start_offset_monotonic",
+        ],
         default_threshold: 1,
         label: "오프셋 단조성 불변식 위반",
     },

@@ -689,6 +689,7 @@ mod stall_recovery_tests {
     // `_in_root` helpers, …) via `use super::*`.
     mod flake_isolation_4361;
     mod flake_isolation_4422;
+    mod turn_start_offset_monotonic_5490;
 
     /// `inflight_state_is_stale` must flip to true once `updated_at` is
     /// older than the configured threshold and stay false for fresh state.

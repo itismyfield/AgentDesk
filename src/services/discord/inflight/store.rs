@@ -257,6 +257,47 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
         "inflight last_offset must not move backwards for the same turn identity"
     );
 
+    // #5490: `turn_start_offset` is itself part of the `same_turn_identity` key
+    // above, so a BACKWARD move of it declares itself a "fresh turn" and thereby
+    // exempts itself from every same-identity monotonic guard — including the one
+    // that would have caught it. The identity key is self-certifying.
+    //
+    // The contract is that `turn_start_offset` is monotonic ACROSS turns — the
+    // next turn always begins at or after the previous turn's start
+    // (`cluster/stream_relay.rs`, `discord/session_relay_sink.rs`,
+    // `discord/tmux_watcher/supervisor_relay.rs` all state it). Until now that
+    // contract lived only in those doc comments with no enforcement site, so a
+    // regression was structurally unobservable (2026-08-22: 269088 -> 0 surfaced
+    // only as an incidental field on an unrelated fail-closed WARN).
+    //
+    // OBSERVE-ONLY and WARN: this records the cross-identity edge that nothing
+    // else watches. It deliberately does not skip the write and carries no
+    // `debug_assert!` — the backward-write enforcement question is separate, and
+    // the distribution has to be measured before anything is blocked on it.
+    let turn_start_offset_monotonic = match (existing.turn_start_offset, state.turn_start_offset) {
+        (Some(previous), Some(next)) => next >= previous,
+        // `None` on either side is UNMEASURED, not a violation — mirrors the
+        // #5071 relay-tail S2 rule that `unread_bytes=None` reads as unknown
+        // rather than as a drained tail.
+        _ => true,
+    };
+    record_inflight_invariant_with_severity(
+        turn_start_offset_monotonic,
+        state,
+        "turn_start_offset_monotonic",
+        code_location,
+        "inflight turn_start_offset must not move backwards across turns",
+        serde_json::json!({
+            "previous": existing.turn_start_offset,
+            "next": state.turn_start_offset,
+            "previous_user_msg_id": existing.user_msg_id,
+            "next_user_msg_id": state.user_msg_id,
+            "same_turn_identity": same_turn_identity,
+            "path": path.display().to_string(),
+        }),
+        ObsSeverity::Warn,
+    );
+
     let same_tmux_owner = existing.tmux_session_name.is_none()
         || state.tmux_session_name.is_none()
         || existing.tmux_session_name == state.tmux_session_name;

@@ -406,6 +406,9 @@ mod tests {
             "relay_uncommitted_inflight_cleared",
             "response_sent_offset_monotonic",
             "task_response_chunk_delivery_ambiguous",
+            // #5490: pins the cross-turn guard into the monitored set so the
+            // wiring cannot be silently dropped again.
+            "turn_start_offset_monotonic",
         ] {
             assert!(
                 statuses.contains(&expected),
