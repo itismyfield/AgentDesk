@@ -1421,20 +1421,23 @@ fi
 # observable.
 echo "== Test 11: #5254 S3b — crash-safe restart artifact sweep =="
 
-set_file_epoch() {
-  local file="$1" epoch="$2"
-  touch -t "$(date -r "$epoch" '+%Y%m%d%H%M.%S')" "$file"
-}
-
 set_file_age() {
   local file="$1" age="$2"
-  set_file_epoch "$file" "$(( $(date +%s) - age ))"
+  touch -t "$(date -r "$(( $(date +%s) - age ))" '+%Y%m%d%H%M.%S')" "$file"
 }
 
 new_sweep_root() {
   local name="$1"
   local root="$S3A_TMP/s3b-$name"
   mkdir -p "$root"
+  printf '%s' "$root"
+}
+
+new_aged_artifact() {
+  local root
+  root=$(new_sweep_root "$1")
+  printf '%s\n' "$3" >"$root/$2"
+  set_file_age "$root/$2" "$4"
   printf '%s' "$root"
 }
 
@@ -1541,7 +1544,7 @@ pass "A11 basename nonce extraction table"
 # A14 future mtime is preserved with all diagnostic fields.
 root=$(new_sweep_root future)
 printf 'nonce=future\n' >"$root/restart_pending.future"
-set_file_epoch "$root/restart_pending.future" 4102444800
+touch -t "$(date -r 4102444800 '+%Y%m%d%H%M.%S')" "$root/restart_pending.future"
 future_out=$(_restart_sweep_artifacts "$root" 2>&1)
 case "$future_out" in
   *restart-artifact-future-mtime*"root=$root"*"age=-"*"grace=600"*"decision=preserve"*"class=marker-identity"*)
@@ -1555,9 +1558,7 @@ esac
 
 # A1, A2, A15, A17, A21, A25, A26: a fresh sweep reservation uses the same
 # namespace as publishers. EEXIST chooses one winner and preserves the proof.
-root=$(new_sweep_root lock)
-printf 'nonce=terminal-lock\n' >"$root/restart_persisted.terminal-lock"
-set_file_age "$root/restart_persisted.terminal-lock" 3601
+root=$(new_aged_artifact lock restart_persisted.terminal-lock nonce=terminal-lock 3601)
 _restart_stage_marker_identity "$root" terminal-lock restart-sweep sweep lock-hold
 set +e
 _restart_stage_marker_identity "$root" terminal-lock publisher request live
@@ -1576,9 +1577,7 @@ rm -f "$root/restart_pending" "$root/restart_pending.terminal-lock"
 
 # A15: the real class-T path must honor a pre-existing nonce reservation. The
 # terminal proof is old enough to reclaim, so EEXIST is its sole protection.
-root=$(new_sweep_root preheld-lock)
-printf 'nonce=preheld\n' >"$root/restart_persisted.preheld"
-set_file_age "$root/restart_persisted.preheld" 3601
+root=$(new_aged_artifact preheld-lock restart_persisted.preheld nonce=preheld 3601)
 _restart_stage_marker_identity "$root" preheld publisher request live
 _restart_sweep_terminal_identities "$root" >/dev/null 2>&1
 if [ -e "$root/restart_persisted.preheld" ] \
@@ -1590,9 +1589,8 @@ fi
 
 # A21: the class-T reservation is born fresh. At T-e, a concurrent class-M
 # pass cannot reap it, and a publisher attempting the same nonce receives rc=4.
-root=$(new_sweep_root fresh-reservation)
-printf 'nonce=fresh-reservation\n' >"$root/restart_persisted.fresh-reservation"
-set_file_age "$root/restart_persisted.fresh-reservation" 3601
+root=$(new_aged_artifact fresh-reservation restart_persisted.fresh-reservation \
+  nonce=fresh-reservation 3601)
 real_nonce_match=$(declare -f _restart_artifact_nonce_matches)
 fresh_reservation_calls=0
 fresh_reservation_rc=-1
@@ -1619,9 +1617,8 @@ fi
 
 # A6 inode binding: replace the marker immediately after its age witness is
 # captured. M-b must observe the different inode and preserve it.
-root=$(new_sweep_root marker-inode-recheck)
-printf 'nonce=marker-recheck\nold=yes\n' >"$root/restart_pending.marker-recheck"
-set_file_age "$root/restart_pending.marker-recheck" 601
+root=$(new_aged_artifact marker-inode-recheck restart_pending.marker-recheck \
+  $'nonce=marker-recheck\nold=yes' 601)
 real_age_helper=$(declare -f _restart_artifact_age_allows_reclaim)
 shadow_function_as _restart_artifact_age_allows_reclaim _restart_artifact_age_allows_reclaim_real
 _restart_artifact_age_allows_reclaim() {
@@ -1644,9 +1641,8 @@ fi
 
 # A5/M-c: canonical authority can appear after the class-level fast path. The
 # final canonical check must preserve an unrelated marker identity.
-root=$(new_sweep_root marker-canonical-recheck)
-printf 'nonce=marker-canonical\n' >"$root/restart_pending.marker-canonical"
-set_file_age "$root/restart_pending.marker-canonical" 601
+root=$(new_aged_artifact marker-canonical-recheck restart_pending.marker-canonical \
+  nonce=marker-canonical 601)
 real_age_helper=$(declare -f _restart_artifact_age_allows_reclaim)
 shadow_function_as _restart_artifact_age_allows_reclaim _restart_artifact_age_allows_reclaim_real
 _restart_artifact_age_allows_reclaim() {
@@ -1669,9 +1665,7 @@ fi
 # A6/A18/A23: inode and canonical rechecks prevent stale observations from
 # authorizing a replacement. Inject the canonical in the rm seam so the
 # post-delete restoration sees the same inode.
-root=$(new_sweep_root marker-seam)
-printf 'nonce=stale\n' >"$root/restart_pending.stale"
-set_file_age "$root/restart_pending.stale" 601
+root=$(new_aged_artifact marker-seam restart_pending.stale nonce=stale 601)
 real_rm=$(declare -f rm 2>/dev/null || true)
 rm() {
   if [ "$2" = "$root/restart_pending.stale" ]; then
@@ -1691,9 +1685,8 @@ command rm -f "$root/restart_pending.stale-backup" "$root/restart_pending"
 
 # A18: two class-M sweepers observe the same aged inode. The first replaces it
 # before the second's M-b check; only one deletion is then authorized.
-root=$(new_sweep_root marker-two-sweeper)
-printf 'nonce=m-two\nold=yes\n' >"$root/restart_pending.m-two"
-set_file_age "$root/restart_pending.m-two" 601
+root=$(new_aged_artifact marker-two-sweeper restart_pending.m-two \
+  $'nonce=m-two\nold=yes' 601)
 real_age_helper=$(declare -f _restart_artifact_age_allows_reclaim)
 shadow_function_as _restart_artifact_age_allows_reclaim _restart_artifact_age_allows_reclaim_real
 m_age_calls=0
@@ -1719,9 +1712,7 @@ else
 fi
 
 # A23: the adjacent content recheck preserves a post-stat fresh canonical.
-root=$(new_sweep_root legacy-seam)
-printf 'legacy\n' >"$root/restart_pending"
-set_file_age "$root/restart_pending" 61
+root=$(new_aged_artifact legacy-seam restart_pending legacy 61)
 real_grep=$(declare -f grep 2>/dev/null || true)
 legacy_grep_calls=0
 grep() {
@@ -1744,9 +1735,7 @@ else
 fi
 
 # A16: normal terminal sweep releases its lock and stage.
-root=$(new_sweep_root release)
-printf 'nonce=release\n' >"$root/restart_persisted.release"
-set_file_age "$root/restart_persisted.release" 3601
+root=$(new_aged_artifact release restart_persisted.release nonce=release 3601)
 _restart_sweep_artifacts "$root" >/dev/null 2>&1
 set -- "$root"/.restart_pending.stage.*
 if [ ! -e "$root/restart_pending.release" ] && [ ! -e "$1" ]; then
@@ -1757,9 +1746,7 @@ fi
 
 # A19/A20: the terminal authority remains at its published pathname while a
 # fresh lock is acquired; cancellation publication likewise precedes cleanup.
-root=$(new_sweep_root crash-authority)
-printf 'nonce=authority\n' >"$root/restart_persisted.authority"
-set_file_age "$root/restart_persisted.authority" 3601
+root=$(new_aged_artifact crash-authority restart_persisted.authority nonce=authority 3601)
 _restart_stage_marker_identity "$root" authority restart-sweep sweep lock-hold
 if [ -e "$root/restart_persisted.authority" ]; then
   pass "A19 lock acquisition preserves terminal authority pathname"
@@ -1810,9 +1797,7 @@ fi
 
 # A27: replacing the class-T reservation before its final lock recheck is
 # observed. The publisher identity survives and can publish canonically.
-root=$(new_sweep_root lock-recheck)
-printf 'nonce=lock-recheck\n' >"$root/restart_persisted.lock-recheck"
-set_file_age "$root/restart_persisted.lock-recheck" 3601
+root=$(new_aged_artifact lock-recheck restart_persisted.lock-recheck nonce=lock-recheck 3601)
 real_deadline=$(declare -f _restart_sweep_deadline_ok)
 lock_deadline_calls=0
 _restart_sweep_deadline_ok() {
@@ -1838,9 +1823,7 @@ fi
 
 # A31: after the sweep lock is removed, a publisher can make canonical binding
 # visible at T-e; that unconditional second check blocks terminal deletion.
-root=$(new_sweep_root canonical-recheck)
-printf 'nonce=canonical-recheck\n' >"$root/restart_persisted.canonical-recheck"
-set_file_age "$root/restart_persisted.canonical-recheck" 3601
+root=$(new_aged_artifact canonical-recheck restart_persisted.canonical-recheck nonce=canonical-recheck 3601)
 real_nonce_match=$(declare -f _restart_artifact_nonce_matches)
 canonical_match_calls=0
 _restart_artifact_nonce_matches() {
@@ -1864,9 +1847,8 @@ fi
 
 # A28: replace the terminal immediately after its age witness is captured.
 # T-d must observe the new inode and suppress T-f.
-root=$(new_sweep_root terminal-seams)
-printf 'nonce=before-recheck\nold=yes\n' >"$root/restart_persisted.before-recheck"
-set_file_age "$root/restart_persisted.before-recheck" 3601
+root=$(new_aged_artifact terminal-seams restart_persisted.before-recheck \
+  $'nonce=before-recheck\nold=yes' 3601)
 real_age_helper=$(declare -f _restart_artifact_age_allows_reclaim)
 shadow_function_as _restart_artifact_age_allows_reclaim _restart_artifact_age_allows_reclaim_real
 _restart_artifact_age_allows_reclaim() {
@@ -1903,9 +1885,7 @@ fi
 
 # A32: S1 is intentionally observable. Deletion after the final check can hit
 # a replacement, but publication fails visibly once and a new nonce retries.
-root=$(new_sweep_root residual-s1)
-printf 'nonce=s1\n' >"$root/restart_pending.s1"
-set_file_age "$root/restart_pending.s1" 601
+root=$(new_aged_artifact residual-s1 restart_pending.s1 nonce=s1 601)
 real_deadline=$(declare -f _restart_sweep_deadline_ok)
 _restart_sweep_deadline_ok() {
   command rm -f "$root/restart_pending.s1"
@@ -1925,11 +1905,9 @@ else
   fail "A32 residual S1 is visible and a fresh nonce retries"
 fi
 
-# A33: S2 can publish a fresh terminal after T-e. T-f removes its request
-# identity and the same-inode fixed index, so the persistence gate fails.
-root=$(new_sweep_root residual-s2)
-printf 'nonce=s2\n' >"$root/restart_persisted.s2"
-set_file_age "$root/restart_persisted.s2" 3601
+# A33: S2 removes a fresh terminal identity and its same-inode fixed proof, so
+# the persistence gate fails instead of returning a false green.
+root=$(new_aged_artifact residual-s2 restart_persisted.s2 nonce=s2 3601)
 real_deadline=$(declare -f _restart_sweep_deadline_ok)
 s2_deadline_counter="$root/deadline-calls"
 printf 0 >"$s2_deadline_counter"
@@ -1937,30 +1915,55 @@ _restart_sweep_deadline_ok() {
   local calls
   calls=$(($(command cat "$s2_deadline_counter") + 1))
   printf '%s' "$calls" >"$s2_deadline_counter"
-  if [ "$calls" -eq 1 ]; then
-    _restart_terminal_publish "$root" restart_persisted s2 fresh=yes
-  fi
+  [ "$calls" -ne 1 ] || _restart_terminal_publish "$root" restart_persisted s2 fresh=yes
   return 0
 }
 _restart_sweep_terminal_identities "$root" >/dev/null 2>&1
 eval "$real_deadline"
-s2_absent=0
-[ ! -e "$root/restart_persisted.s2" ] && [ ! -e "$root/restart_persisted" ] \
-  && s2_absent=1
 set +e
 wait_for_restart_persistence_or_fail probe "$root" s2 1 >/dev/null 2>&1
 s2_gate_rc=$?
 set -e
-if [ "$s2_absent" -eq 1 ] && [ "$s2_gate_rc" -ne 0 ]; then
+if [ ! -e "$root/restart_persisted.s2" ] \
+  && [ ! -e "$root/restart_persisted" ] && [ "$s2_gate_rc" -ne 0 ]; then
   pass "A33 residual S2 removes its fixed index and remains gate-visible"
 else
   fail "A33 residual S2 removes its fixed index and remains gate-visible"
 fi
 
-root=$(new_sweep_root residual-s2-unrelated)
-printf 'nonce=s2-unrelated\n' >"$root/restart_persisted.s2-unrelated"
+# The fixed-index recheck is unlink-adjacent: replacement with a live request's
+# new inode at that seam must preserve the replacement and its successful gate.
+root=$(new_aged_artifact residual-s2-fixed-replacement restart_persisted.old nonce=old 3601)
+ln "$root/restart_persisted.old" "$root/restart_persisted"
+real_stat=$(declare -f stat 2>/dev/null || true)
+s2_fixed_stat_calls=0
+stat() {
+  if [ "$1" = -f ] && [ "$2" = '%d:%i' ] \
+    && [ "$3" = "$root/restart_persisted" ]; then
+    s2_fixed_stat_calls=$((s2_fixed_stat_calls + 1))
+    if [ "$s2_fixed_stat_calls" -eq 1 ]; then
+      command rm -f "$root/restart_persisted"
+      _restart_terminal_publish "$root" restart_persisted live fresh=yes
+    fi
+  fi
+  command stat "$@"
+}
+_restart_sweep_terminal_identities "$root" >/dev/null 2>&1
+unset -f stat
+[ -n "$real_stat" ] && eval "$real_stat"
+set +e
+wait_for_restart_persistence_or_fail probe "$root" live 1 >/dev/null 2>&1
+live_gate_rc=$?
+set -e
+if grep -Fqx 'nonce=live' "$root/restart_persisted" 2>/dev/null \
+  && [ -e "$root/restart_persisted.live" ] && [ "$live_gate_rc" -eq 0 ]; then
+  pass "A33 adjacent fixed recheck preserves a replacement and live gate"
+else
+  fail "A33 adjacent fixed recheck preserves a replacement and live gate"
+fi
+
+root=$(new_aged_artifact residual-s2-unrelated restart_persisted.s2-unrelated nonce=s2-unrelated 3601)
 printf 'nonce=someone-else\n' >"$root/restart_persisted"
-set_file_age "$root/restart_persisted.s2-unrelated" 3601
 _restart_sweep_terminal_identities "$root" >/dev/null 2>&1
 [ ! -e "$root/restart_persisted.s2-unrelated" ] \
   && grep -Fqx 'nonce=someone-else' "$root/restart_persisted" 2>/dev/null \
@@ -1968,9 +1971,7 @@ _restart_sweep_terminal_identities "$root" >/dev/null 2>&1
   || fail "A33 residual S2 preserves an unrelated fixed index"
 
 # A34: S3 after lock recheck has the same visible failure and retry shape.
-root=$(new_sweep_root residual-s3)
-printf 'nonce=s3\n' >"$root/restart_persisted.s3"
-set_file_age "$root/restart_persisted.s3" 3601
+root=$(new_aged_artifact residual-s3 restart_persisted.s3 nonce=s3 3601)
 real_rm=$(declare -f rm 2>/dev/null || true)
 rm() {
   if [ "$2" = "$root/restart_pending.s3" ]; then
@@ -1997,18 +1998,14 @@ fi
 
 # A35: each destruction site gets a successful guard immediately followed by a
 # failing adjacent guard, modeling stop/resume with virtual time advanced.
-root=$(new_sweep_root deadline)
-printf 'nonce=deadline\n' >"$root/restart_pending.deadline"
-set_file_age "$root/restart_pending.deadline" 601
-root_t=$(new_sweep_root deadline-terminal)
-printf 'nonce=deadline-terminal\n' >"$root_t/restart_persisted.deadline-terminal"
-set_file_age "$root_t/restart_persisted.deadline-terminal" 3601
+root=$(new_aged_artifact deadline restart_pending.deadline nonce=deadline 601)
+root_t=$(new_aged_artifact deadline-terminal restart_persisted.deadline-terminal nonce=deadline-terminal 3601)
 real_deadline=$(declare -f _restart_sweep_deadline_ok)
 deadline_calls=0
 _restart_sweep_deadline_ok() {
   deadline_calls=$((deadline_calls + 1))
   case "$deadline_calls" in
-    1|3) return 0 ;;
+    1|4) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -2021,9 +2018,9 @@ eval "$real_deadline"
 if [ "$marker_preserved" -eq 1 ] \
   && [ -e "$root_t/restart_persisted.deadline-terminal" ] \
   && [ -e "$root_t/restart_pending.deadline-terminal" ]; then
-  pass "A35 adjacent deadline rechecks stop resumed destruction"
+  pass "A35 adjacent deadline guards stop resumed destruction"
 else
-  fail "A35 adjacent deadline rechecks stop resumed destruction"
+  fail "A35 adjacent deadline guards stop resumed destruction"
 fi
 
 echo

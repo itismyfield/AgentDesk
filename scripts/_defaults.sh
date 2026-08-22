@@ -1127,7 +1127,8 @@ _restart_reclaim_legacy_marker_if_stale() {
   grep -q '^nonce=' "$marker" 2>/dev/null && return 0
   witness="$(_restart_artifact_age_allows_reclaim \
     "$root" "$marker" "$grace" legacy-marker)" || return 0
-  # Recheck both identity and legacy content in the same compound as unlink.
+  # S4 remains: the adjacent inode/content recheck narrows but cannot make
+  # pathname replacement and unlink atomic.
   if [ "$(stat -f '%d:%i:%m' "$marker" 2>/dev/null)" = "$witness" ] \
     && ! grep -q '^nonce=' "$marker" 2>/dev/null \
     && ! rm -f "$marker" 2>/dev/null; then
@@ -1174,7 +1175,7 @@ _restart_sweep_terminal_identities() {
   local marker_grace="${AGENTDESK_RESTART_MARKER_IDENTITY_GRACE_SECS:-600}"
   local canonical="$root/restart_pending"
   local artifact base nonce witness observed lock lockid fixed
-  local cleanup=() started
+  local started
 
   started="$(date +%s 2>/dev/null)" || return 0
   for artifact in "$root"/restart_persisted.* "$root"/restart_cancelled.*; do
@@ -1199,12 +1200,13 @@ _restart_sweep_terminal_identities() {
     if [ "$observed" = "$witness" ] \
       && ! _restart_artifact_nonce_matches "$canonical" "$nonce" \
       && _restart_sweep_deadline_ok "$started" "$marker_grace"; then
-      # T-f: S2 remains; remove a same-inode fixed proof with its identity.
-      cleanup=("$artifact")
-      [ "$(stat -f '%d:%i' "$fixed" 2>/dev/null)" \
-        != "$(stat -f '%d:%i' "$artifact" 2>/dev/null)" ] || cleanup=("$fixed" "$artifact")
+      # T-f: S2 remains; bind each unlink to its adjacent inode observation.
       _restart_sweep_deadline_ok "$started" "$marker_grace" \
-        && rm -f "${cleanup[@]}" 2>/dev/null || true
+        && [ "$(stat -f '%d:%i' "$artifact" 2>/dev/null)" \
+          = "$(stat -f '%d:%i' "$fixed" 2>/dev/null)" ] \
+        && rm -f "$fixed" 2>/dev/null || true
+      _restart_sweep_deadline_ok "$started" "$marker_grace" \
+        && rm -f "$artifact" 2>/dev/null || true
     fi
     # T-g: the adjacent check narrows but does not close the S3 replacement seam.
     if [ -n "$lockid" ] \
