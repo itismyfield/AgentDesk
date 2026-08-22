@@ -1055,6 +1055,192 @@ _restart_artifact_nonce_matches() {
     && grep -Fqx -- "nonce=${expected_nonce}" "$artifact" 2>/dev/null
 }
 
+_purge_restart_artifacts_by_own_nonce() {
+  local root="$1"
+  local expected_nonce="$2"
+  shift 2
+  local artifact artifact_name expected_path
+  local rc=0
+
+  _restart_nonce_is_path_safe "$expected_nonce" || return 1
+  for artifact in "$@"; do
+    artifact_name="${artifact##*/}"
+    expected_path="$(_restart_request_artifact_path "$root" "${artifact_name%%.*}" "$expected_nonce")" \
+      || return 1
+    [ "$artifact" = "$expected_path" ] || continue
+    if [ ! -e "$artifact" ]; then
+      # Another sweep already reached the same idempotent terminal state.
+      continue
+    fi
+    # An existing but unreadable or mismatched body is unexplained. Preserve it.
+    _restart_artifact_nonce_matches "$artifact" "$expected_nonce" || {
+      rc=1
+      continue
+    }
+    rm -f "$artifact" 2>/dev/null || rc=1
+  done
+  return "$rc"
+}
+
+# stat dialect probe: BSD stat (darwin) takes -f FORMAT; GNU stat (linux CI)
+# takes -c FORMAT and treats -f as "filesystem status", which SUCCEEDS with
+# mount-level values — an || fallback chain would silently compare mount
+# constants and collapse every identity check, so the dialect is probed once.
+if stat -c '%d:%i' / >/dev/null 2>&1; then
+  _restart_stat_identity() { stat -c '%d:%i:%Y' "$1" 2>/dev/null; }
+  _restart_stat_inode() { stat -c '%d:%i' "$1" 2>/dev/null; }
+  _restart_stat_size() { stat -c %s "$1" 2>/dev/null; }
+else
+  _restart_stat_identity() { stat -f '%d:%i:%m' "$1" 2>/dev/null; }
+  _restart_stat_inode() { stat -f '%d:%i' "$1" 2>/dev/null; }
+  _restart_stat_size() { stat -f %z "$1" 2>/dev/null; }
+fi
+
+_restart_artifact_age_allows_reclaim() {
+  local root="$1"
+  local artifact="$2"
+  local grace="$3"
+  local label="$4"
+  local now identity size age
+
+  case "$grace" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  now="$(date +%s 2>/dev/null)" || return 1
+  identity="$(_restart_stat_identity "$artifact")" || return 1
+  size="$(_restart_stat_size "$artifact")" || return 1
+  case "$now:$identity:$size" in
+    *[!0-9:]*) return 1 ;;
+  esac
+  age=$((now - ${identity##*:}))
+  if [ "$age" -lt 0 ]; then
+    echo "⚠ [gate] restart-artifact-future-mtime root=${root} size=${size} mtime=${identity##*:} age=${age} grace=${grace} decision=preserve artifact=${artifact} class=${label}" >&2
+    return 1
+  fi
+  [ "$age" -ge "$grace" ] || return 1
+  echo "▸ [gate] restart-artifact-reclaim root=${root} size=${size} mtime=${identity##*:} age=${age} grace=${grace} decision=delete artifact=${artifact} class=${label}" >&2
+  printf '%s' "$identity"
+}
+
+_restart_sweep_deadline_ok() {
+  local started="$1"
+  local grace="$2"
+  local now
+
+  now="$(date +%s 2>/dev/null)" || return 1
+  [ $((now - started)) -lt $((grace / 2)) ]
+}
+
+_restart_reclaim_legacy_marker_if_stale() {
+  local root="$1"
+  local marker="$root/restart_pending"
+  local grace="${AGENTDESK_RESTART_LEGACY_MARKER_GRACE_SECS:-60}"
+  local witness
+
+  [ -f "$marker" ] || return 0
+  grep -q '^nonce=' "$marker" 2>/dev/null && return 0
+  witness="$(_restart_artifact_age_allows_reclaim \
+    "$root" "$marker" "$grace" legacy-marker)" || return 0
+  # S4 remains: the adjacent inode/content recheck narrows but cannot make
+  # pathname replacement and unlink atomic.
+  if [ "$(_restart_stat_identity "$marker")" = "$witness" ] \
+    && ! grep -q '^nonce=' "$marker" 2>/dev/null \
+    && ! rm -f "$marker" 2>/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
+_restart_sweep_marker_identities() {
+  local root="$1"
+  local grace="${AGENTDESK_RESTART_MARKER_IDENTITY_GRACE_SECS:-600}"
+  local canonical="$root/restart_pending"
+  local artifact base witness observed
+  local started
+
+  started="$(date +%s 2>/dev/null)" || return 0
+  [ -e "$canonical" ] && return 0
+  for artifact in "$root"/restart_pending.*; do
+    [ -e "$artifact" ] || continue
+    base="${artifact##*/}"
+    case "$base" in
+      *.tmp) continue ;;
+      restart_pending.*) : ;;
+      *) continue ;;
+    esac
+    witness="$(_restart_artifact_age_allows_reclaim \
+      "$root" "$artifact" "$grace" marker-identity)" || continue
+    observed="$(_restart_stat_identity "$artifact")" || continue
+    [ "$observed" = "$witness" ] || continue
+    [ ! -e "$canonical" ] || continue
+    _restart_sweep_deadline_ok "$started" "$grace" || return 0
+    # M-d: recheck again adjacent to unlink; this narrows but does not close S1.
+    _restart_sweep_deadline_ok "$started" "$grace" && rm -f "$artifact" 2>/dev/null \
+      || return 0
+    if [ "$(_restart_stat_inode "$canonical")" = "${witness%:*}" ]; then
+      ln "$canonical" "$artifact" 2>/dev/null || true
+    fi
+  done
+}
+
+_restart_sweep_terminal_identities() {
+  local root="$1"
+  local grace="${AGENTDESK_RESTART_TERMINAL_RETENTION_SECS:-3600}"
+  local marker_grace="${AGENTDESK_RESTART_MARKER_IDENTITY_GRACE_SECS:-600}"
+  local canonical="$root/restart_pending"
+  local artifact base nonce witness observed lock lockid fixed
+  local started
+
+  started="$(date +%s 2>/dev/null)" || return 0
+  for artifact in "$root"/restart_persisted.* "$root"/restart_cancelled.*; do
+    [ -e "$artifact" ] || continue
+    base="${artifact##*/}"
+    case "$base" in
+      *.tmp) continue ;;
+      restart_persisted.*) nonce="${base#restart_persisted.}" ;;
+      restart_cancelled.*) nonce="${base#restart_cancelled.}" ;;
+      *) continue ;;
+    esac
+    fixed="$root/${base%%.*}"
+    lock="$(_restart_request_artifact_path "$root" restart_pending "$nonce" 2>/dev/null)" \
+      || continue
+    _restart_artifact_nonce_matches "$canonical" "$nonce" && continue
+    witness="$(_restart_artifact_age_allows_reclaim \
+      "$root" "$artifact" "$grace" terminal-identity)" || continue
+    _restart_stage_marker_identity "$root" "$nonce" restart-sweep sweep lock-hold \
+      || continue
+    lockid="$(_restart_stat_identity "$lock")" || lockid=""
+    observed="$(_restart_stat_identity "$artifact")"
+    if [ "$observed" = "$witness" ] \
+      && ! _restart_artifact_nonce_matches "$canonical" "$nonce" \
+      && _restart_sweep_deadline_ok "$started" "$marker_grace"; then
+      # T-f: S2 remains; bind each unlink to its adjacent inode observation.
+      _restart_sweep_deadline_ok "$started" "$marker_grace" \
+        && [ "$(_restart_stat_inode "$artifact")" \
+          = "$(_restart_stat_inode "$fixed")" ] \
+        && rm -f "$fixed" 2>/dev/null || true
+      _restart_sweep_deadline_ok "$started" "$marker_grace" \
+        && rm -f "$artifact" 2>/dev/null || true
+    fi
+    # T-g: the adjacent check narrows but does not close the S3 replacement seam.
+    if [ -n "$lockid" ] \
+      && _restart_sweep_deadline_ok "$started" "$marker_grace" \
+      && [ "$(_restart_stat_identity "$lock")" = "$lockid" ]; then
+      _restart_sweep_deadline_ok "$started" "$marker_grace" \
+        && rm -f "$lock" 2>/dev/null || true
+    fi
+    # Deadline exhaustion does not stop iteration; later terminals may acquire
+    # fresh reservations that remain for class M to reclaim after marker grace.
+  done
+}
+
+_restart_sweep_artifacts() {
+  local root="$1"
+
+  _restart_sweep_marker_identities "$root"
+  _restart_sweep_terminal_identities "$root"
+}
+
 # Generate a path-safe entropy suffix, preferring uuidgen and falling back to
 # four bytes from /dev/urandom when uuidgen is absent or fails.
 _restart_nonce_entropy() {
@@ -1069,6 +1255,9 @@ _restart_nonce_entropy() {
   printf '%s' "$entropy"
 }
 
+# Reserve nonce N for a drain requester or a sweep. Sweep reservations use
+# source=restart-sweep/scope=sweep/label=lock-hold; EEXIST (rc=4) is the sole
+# same-nonce exclusion mechanism.
 _restart_stage_marker_identity() {
   local root="$1"
   local nonce="$2"
@@ -1468,6 +1657,13 @@ request_restart_drain_mode_or_fail() {
       echo "✗ [gate] failed to create ${scope} runtime root: $root" >&2
       return 1
     }
+    _restart_reclaim_legacy_marker_if_stale "$root" || {
+      echo "✗ [gate] failed to reclaim legacy restart marker at ${root}" >&2
+      return 1
+    }
+    if [ "${AGENTDESK_RESTART_SWEEP_ON_DRAIN:-1}" != "0" ]; then
+      _restart_sweep_artifacts "$root"
+    fi
   done
 
   entropy="$(_restart_nonce_entropy)" || {
@@ -1499,9 +1695,9 @@ request_restart_drain_mode_or_fail() {
         "$(_restart_request_artifact_path "$root" restart_persisted "$nonce")" \
         "$(_restart_request_artifact_path "$root" restart_cancelled "$nonce")"; do
         if [ -e "$terminal_path" ]; then
-          rm -f "$terminal_path" 2>/dev/null || {
+          _purge_restart_artifacts_by_own_nonce "$root" "$nonce" "$terminal_path" || {
             echo "✗ [gate] failed to clear stale terminal artifact: $terminal_path" >&2
-            _restart_dispose_marker_by_own_nonce "$root" "$nonce" || true
+            rm -f "$(_restart_request_artifact_path "$root" restart_pending "$nonce")" 2>/dev/null || true
             if [ "${#acquired[@]}" -gt 0 ]; then
               for acquired_root in "${acquired[@]}"; do
                 _restart_dispose_marker_by_own_nonce "$acquired_root" "$nonce" || true
