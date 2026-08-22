@@ -1121,15 +1121,19 @@ _restart_reclaim_legacy_marker_if_stale() {
   local root="$1"
   local marker="$root/restart_pending"
   local grace="${AGENTDESK_RESTART_LEGACY_MARKER_GRACE_SECS:-60}"
-  local witness observed
+  local witness
 
   [ -f "$marker" ] || return 0
   grep -q '^nonce=' "$marker" 2>/dev/null && return 0
   witness="$(_restart_artifact_age_allows_reclaim \
     "$root" "$marker" "$grace" legacy-marker)" || return 0
-  observed="$(stat -f '%d:%i:%m' "$marker" 2>/dev/null)" || return 0
-  [ "$observed" = "$witness" ] || return 0
-  rm -f "$marker" 2>/dev/null || return 1
+  # Recheck both identity and legacy content in the same compound as unlink.
+  if [ "$(stat -f '%d:%i:%m' "$marker" 2>/dev/null)" = "$witness" ] \
+    && ! grep -q '^nonce=' "$marker" 2>/dev/null \
+    && ! rm -f "$marker" 2>/dev/null; then
+    return 1
+  fi
+  return 0
 }
 
 _restart_sweep_marker_identities() {
@@ -1155,7 +1159,9 @@ _restart_sweep_marker_identities() {
     [ "$observed" = "$witness" ] || continue
     [ ! -e "$canonical" ] || continue
     _restart_sweep_deadline_ok "$started" "$grace" || return 0
-    rm -f "$artifact" 2>/dev/null || true
+    # M-d: recheck again adjacent to unlink; this narrows but does not close S1.
+    _restart_sweep_deadline_ok "$started" "$grace" && rm -f "$artifact" 2>/dev/null \
+      || return 0
     if [ "$(stat -f '%d:%i' "$canonical" 2>/dev/null)" = "${witness%:*}" ]; then
       ln "$canonical" "$artifact" 2>/dev/null || true
     fi
@@ -1167,8 +1173,8 @@ _restart_sweep_terminal_identities() {
   local grace="${AGENTDESK_RESTART_TERMINAL_RETENTION_SECS:-3600}"
   local marker_grace="${AGENTDESK_RESTART_MARKER_IDENTITY_GRACE_SECS:-600}"
   local canonical="$root/restart_pending"
-  local artifact base nonce witness observed lock lockid
-  local started
+  local artifact base nonce witness observed lock lockid fixed
+  local cleanup=() started
 
   started="$(date +%s 2>/dev/null)" || return 0
   for artifact in "$root"/restart_persisted.* "$root"/restart_cancelled.*; do
@@ -1180,6 +1186,7 @@ _restart_sweep_terminal_identities() {
       restart_cancelled.*) nonce="${base#restart_cancelled.}" ;;
       *) continue ;;
     esac
+    fixed="$root/${base%%.*}"
     lock="$(_restart_request_artifact_path "$root" restart_pending "$nonce" 2>/dev/null)" \
       || continue
     _restart_artifact_nonce_matches "$canonical" "$nonce" && continue
@@ -1192,13 +1199,22 @@ _restart_sweep_terminal_identities() {
     if [ "$observed" = "$witness" ] \
       && ! _restart_artifact_nonce_matches "$canonical" "$nonce" \
       && _restart_sweep_deadline_ok "$started" "$marker_grace"; then
-      rm -f "$artifact" 2>/dev/null || true
+      # T-f: S2 remains; remove a same-inode fixed proof with its identity.
+      cleanup=("$artifact")
+      [ "$(stat -f '%d:%i' "$fixed" 2>/dev/null)" \
+        != "$(stat -f '%d:%i' "$artifact" 2>/dev/null)" ] || cleanup=("$fixed" "$artifact")
+      _restart_sweep_deadline_ok "$started" "$marker_grace" \
+        && rm -f "${cleanup[@]}" 2>/dev/null || true
     fi
+    # T-g: the adjacent check narrows but does not close the S3 replacement seam.
     if [ -n "$lockid" ] \
       && _restart_sweep_deadline_ok "$started" "$marker_grace" \
       && [ "$(stat -f '%d:%i:%m' "$lock" 2>/dev/null)" = "$lockid" ]; then
-      rm -f "$lock" 2>/dev/null || true
+      _restart_sweep_deadline_ok "$started" "$marker_grace" \
+        && rm -f "$lock" 2>/dev/null || true
     fi
+    # Deadline exhaustion does not stop iteration; later terminals may acquire
+    # fresh reservations that remain for class M to reclaim after marker grace.
   done
 }
 
