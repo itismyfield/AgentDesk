@@ -1196,6 +1196,19 @@ mod tests {
             1,
             "a duplicate frontier emits exactly one diagnostic WARN"
         );
+        let (_, error_logs) = capture_errors(|| {
+            nudge_watcher_handle_for_backlog(
+                &shared,
+                &snapshot,
+                shared.tmux_watchers.get(&channel_id).unwrap().value(),
+                channel_id,
+                shared.relay_frontier_token(channel_id),
+            )
+        });
+        assert!(
+            !error_logs.contains("redrive_frontier_no_progress"),
+            "the duplicate-frontier diagnostic must stay below ERROR"
+        );
         assert_eq!(
             *resume_offset.lock().unwrap(),
             Some(snapshot.last_relay_offset)

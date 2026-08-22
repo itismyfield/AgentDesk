@@ -704,6 +704,12 @@ mod reachability_authority_tests {
             RelayRecoveryActionKind::ReattachWatcher,
             true,
         );
+        let eligibility_only_stricter = AxisBDiff::from_outcomes(
+            RelayRecoveryActionKind::ObserveOnly,
+            false,
+            RelayRecoveryActionKind::ObserveOnly,
+            true,
+        );
         let milder = AxisBDiff::from_outcomes(
             RelayRecoveryActionKind::ReattachWatcher,
             true,
@@ -717,6 +723,7 @@ mod reachability_authority_tests {
             true,
         );
         assert_eq!(stricter, AxisBDiff::LedgerStricter);
+        assert_eq!(eligibility_only_stricter, AxisBDiff::LedgerStricter);
         assert_eq!(milder, AxisBDiff::LedgerMilder);
         assert_eq!(agree, AxisBDiff::Agree);
         assert!(!stricter.preserves_monotone_relaxation());

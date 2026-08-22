@@ -52,7 +52,7 @@ pub enum HealthStatus {
 /// `has_pending_queue`, and `mailbox_active_user_msg_id`. All new fields
 /// are scalar (no message text, no user IDs, no transcripts) so the
 /// response remains safe for non-privileged operator dashboards.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct WatcherStateSnapshot {
     pub provider: String,
     pub attached: bool,
@@ -152,8 +152,8 @@ pub struct WatcherStateSnapshot {
     #[serde(skip)]
     pub(in crate::services::discord) inflight_output_path: Option<String>,
     /// #5464 T5 S5: fresh, read-only ledger verdict computed with this snapshot.
-    /// The field stays live in unit-test builds so the observation-only contract
-    /// is exercised through the same snapshot-to-observer path as production.
+    /// The field stays live in unit-test builds so consumers and the axis-B
+    /// observer share one snapshot shape; producer wiring has separate coverage.
     #[cfg(unix)]
     #[serde(skip)]
     pub(in crate::services::discord) reachability_observation: Option<(ReachabilityVerdict, i64)>,
@@ -1411,12 +1411,14 @@ mod tests {
             "AC2-R's monotone-relaxing alarm counter must be zero in this process"
         );
         #[cfg(unix)]
-        assert!(
-            detail
+        {
+            let axis_b = detail
                 .get("axis_b_observation")
-                .is_some_and(serde_json::Value::is_object),
-            "detail health publishes the independent axis-B producer block"
-        );
+                .and_then(serde_json::Value::as_object)
+                .expect("detail health publishes the independent axis-B producer block");
+            assert!(axis_b.contains_key("dropped_records"));
+            assert!(axis_b.contains_key("write_failures"));
+        }
     }
 
     #[cfg(unix)]
@@ -1512,6 +1514,37 @@ mod tests {
                 "a health-permitting verdict degraded nothing to report, got {reasons:?}"
             );
             assert_eq!(status, HealthStatus::Healthy);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_unreachable_verdict_reaches_the_polarity_boundary() {
+        let unreachable = compose_relay_verdict(
+            ReachabilityVerdict::Unreachable {
+                oldest_unsatisfied_age_secs: 900,
+                uncovered_ranges: 4,
+            },
+            ExternalRelayVerdict::NoLoss,
+        );
+        assert!(!unreachable.permits_health());
+
+        for (composite_governs_polarity, expected_status) in [
+            (false, HealthStatus::Healthy),
+            (true, HealthStatus::Degraded),
+        ] {
+            let mut reasons = Vec::new();
+            let mut status = HealthStatus::Healthy;
+            apply_relay_verdict_polarity(
+                composite_governs_polarity,
+                &unreachable,
+                POLARITY_PROVIDER,
+                POLARITY_CHANNEL,
+                &mut reasons,
+                &mut status,
+            );
+            assert_eq!(status, expected_status);
+            assert_eq!(reasons.is_empty(), !composite_governs_polarity);
         }
     }
 

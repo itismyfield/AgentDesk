@@ -172,9 +172,11 @@ fn axis_b_site_for_apply(
     action: RelayRecoveryActionKind,
 ) -> Option<AxisBSite> {
     match (source, action) {
-        (RelayRecoveryApplySource::Manual, _) => Some(AxisBSite::RelayRecovery),
         (RelayRecoveryApplySource::StallWatchdog, RelayRecoveryActionKind::ReattachWatcher) => {
             Some(AxisBSite::RelayDeadReattach)
+        }
+        (RelayRecoveryApplySource::ProbeAutoHeal, RelayRecoveryActionKind::ReattachWatcher) => {
+            Some(AxisBSite::RelayRecovery)
         }
         (
             RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog,
@@ -348,6 +350,8 @@ fn enqueue_axis_b_jsonl(bytes: Vec<u8>) {
     let Some(path) = axis_b_jsonl_path() else {
         return;
     };
+    // Tests append synchronously for deterministic assertions; production uses
+    // the bounded, non-blocking queue so recovery never waits on filesystem I/O.
     #[cfg(test)]
     {
         if append_axis_b_jsonl(&path, &bytes).is_err() {
@@ -865,8 +869,77 @@ mod axis_b_tests {
 
     #[test]
     fn destructive_consumers_cannot_read_reachability_for_routing() {
+        let snapshot = include_str!("health/snapshot.rs");
+        let production_snapshot = snapshot
+            .split("#[cfg(test)]")
+            .next()
+            .expect("watcher snapshot production section");
+        assert_eq!(
+            production_snapshot
+                .matches("reachability_observation:")
+                .count(),
+            1,
+            "the snapshot has exactly one reachability observation field"
+        );
+        assert_eq!(
+            production_snapshot
+                .matches("reachability_observation,")
+                .count(),
+            1,
+            "the snapshot constructor wires exactly one reachability observation"
+        );
+        assert_eq!(
+            production_snapshot
+                .matches("fn reachability_observation(")
+                .count(),
+            1,
+            "the sole reachability-derived helper is the observation accessor"
+        );
+        assert_eq!(
+            production_snapshot
+                .matches("self.reachability_observation")
+                .count(),
+            1,
+            "no authority-bearing alias helper may derive from the observation"
+        );
+        let watcher_snapshot_decl = production_snapshot
+            .split("pub struct WatcherStateSnapshot")
+            .next()
+            .and_then(|prefix| prefix.rsplit("#[derive(").next())
+            .expect("WatcherStateSnapshot derive");
+        assert!(
+            !watcher_snapshot_decl.contains("Debug"),
+            "the reachability-bearing snapshot must not expose verdicts through Debug formatting"
+        );
+        let relay_recovery_source = include_str!("relay_recovery.rs");
+        let production_relay_recovery = relay_recovery_source
+            .split("#[cfg(all(test, unix))]")
+            .next()
+            .expect("axis-B production section");
+        let static_names = production_relay_recovery
+            .lines()
+            .filter_map(|line| {
+                let mut tokens = line.split_whitespace();
+                tokens.find(|token| *token == "static")?;
+                tokens.next().map(|name| name.trim_end_matches(':'))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            static_names,
+            [
+                "AXIS_B_TRIAGE",
+                "AXIS_B_SINK",
+                "AXIS_B_WRITER",
+                "AXIS_B_DROPPED_RECORDS",
+                "AXIS_B_WRITE_FAILURES",
+                "DESTRUCTIVE_CANCEL_POST_GATE_HOOK",
+                "IDLE_TMUX_REATTACH_INFLIGHT_CANDIDATE_HOOK",
+            ],
+            "relay recovery may not acquire a new global side channel"
+        );
+
         for (source, allowed_observer_calls, fixture_observations, fixture_verdicts) in [
-            (include_str!("health/recovery.rs"), 2, 0, 0),
+            (include_str!("health/recovery.rs"), 2, 1, 3),
             (
                 include_str!("health/recovery/watchdog_decisions.rs"),
                 2,
@@ -935,6 +1008,13 @@ mod axis_b_tests {
                 .count(),
             1
         );
+        assert_eq!(
+            production_observer
+                .matches(".reachability_observation")
+                .count(),
+            1,
+            "the observer must use only the pinned accessor, never the raw field"
+        );
         for site in AxisBSite::ALL {
             assert!(observer.contains(site.as_str()));
         }
@@ -942,13 +1022,6 @@ mod axis_b_tests {
 
     #[test]
     fn axis_b_apply_site_mapping_matches_the_six_site_taxonomy() {
-        assert_eq!(
-            axis_b_site_for_apply(
-                RelayRecoveryApplySource::Manual,
-                RelayRecoveryActionKind::ObserveOnly,
-            ),
-            Some(AxisBSite::RelayRecovery)
-        );
         assert_eq!(
             axis_b_site_for_apply(
                 RelayRecoveryApplySource::StallWatchdog,
@@ -970,8 +1043,8 @@ mod axis_b_tests {
                 RelayRecoveryApplySource::ProbeAutoHeal,
                 RelayRecoveryActionKind::ReattachWatcher,
             ),
-            None,
-            "redrive reattach is outside design §3.4 and must not pollute probe_auto_heal"
+            Some(AxisBSite::RelayRecovery),
+            "redrive reattach is a plan_relay_recovery consumer in design §3.4"
         );
     }
 
@@ -1106,6 +1179,21 @@ mod axis_b_tests {
                 site.as_str()
             );
         }
+    }
+
+    #[test]
+    fn axis_b_append_path_uses_the_framing_lock() {
+        let source = include_str!("relay_recovery.rs");
+        let production = source
+            .split("#[cfg(all(test, unix))]")
+            .next()
+            .expect("axis-B production section");
+        let append = production
+            .split("fn append_axis_b_jsonl")
+            .nth(1)
+            .and_then(|body| body.split("fn axis_b_observation_report").next())
+            .expect("axis-B append implementation");
+        assert_eq!(append.matches("with_axis_b_writer(||").count(), 1);
     }
 
     #[test]

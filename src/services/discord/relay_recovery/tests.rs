@@ -2474,6 +2474,125 @@ async fn auto_apply_preserves_fresh_admission_token() {
     assert!(!token.cancelled.load(Ordering::Relaxed));
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_redrive_reattach_records_the_actual_relay_recovery_observation() {
+    struct LiveConfigGuard(crate::config::Config);
+
+    impl Drop for LiveConfigGuard {
+        fn drop(&mut self) {
+            crate::config_live_reload::install(self.0.clone());
+        }
+    }
+
+    let _guard = auto_heal_test_lock().lock().await;
+    clear_auto_heal_attempts_for_tests();
+    let (_root_guard, root_dir) = isolated_agentdesk_root();
+    if !crate::services::platform::tmux::is_available() {
+        eprintln!("skipping axis-B redrive witness: tmux unavailable");
+        return;
+    }
+
+    let mut observation_config = crate::config_live_reload::current()
+        .map(|config| (*config).clone())
+        .unwrap_or_default();
+    let _config_guard = LiveConfigGuard(observation_config.clone());
+    observation_config.runtime.relay_authority_mode = RelayAuthorityMode::Observe;
+    observation_config.runtime.relay_authority_cohort_percent = 100;
+    crate::config_live_reload::install(observation_config);
+
+    let provider = ProviderKind::Codex;
+    let (registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(5_464_501);
+    let user_msg = MessageId::new(5_464_502);
+    let tmux = format!("AgentDesk-codex-5464-redrive-{}", std::process::id());
+    let _ =
+        crate::services::platform::tmux::kill_session(&tmux, "#5464 axis-B redrive fixture reset");
+    assert!(
+        crate::services::platform::tmux::create_session(&tmux, None, "sleep 60")
+            .expect("start redrive tmux fixture")
+            .status
+            .success()
+    );
+    let output = root_dir.path().join("axis-b-redrive.jsonl");
+    std::fs::write(
+        &output,
+        "{\"type\":\"thread.started\",\"thread_id\":\"axis-b-redrive\"}\n",
+    )
+    .expect("write redrive transcript fixture");
+    let output_len = std::fs::metadata(&output)
+        .expect("redrive transcript metadata")
+        .len();
+    let token = start_test_turn(&shared, channel, user_msg).await;
+    let mut state = super::super::inflight::InflightTurnState::new(
+        provider.clone(),
+        channel.get(),
+        None,
+        1,
+        user_msg.get(),
+        user_msg.get() + 1,
+        "axis-B redrive".to_string(),
+        Some("axis-b-redrive-session".to_string()),
+        Some(tmux.clone()),
+        Some(output.to_string_lossy().to_string()),
+        None,
+        output_len,
+    );
+    state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
+    let stale_at = (chrono::Local::now() - chrono::Duration::minutes(30))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    state.started_at = stale_at.clone();
+    state.updated_at = stale_at;
+    super::super::inflight::save_inflight_state(&state).expect("seed redrive inflight row");
+    let (watcher, _) = test_watcher_handle(&tmux, &output);
+    watcher
+        .last_heartbeat_ts_ms
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    shared.tmux_watchers.insert(channel, watcher);
+
+    let before = axis_b_observation_report().counters;
+    let response = auto_apply_relay_recovery_for_shared_at(
+        &registry,
+        shared.clone(),
+        &provider,
+        channel.get(),
+        RelayRecoveryActionKind::ReattachWatcher,
+        RelayRecoveryApplySource::ProbeAutoHeal,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+    .expect("probe redrive should evaluate");
+    let after = axis_b_observation_report().counters;
+    let count = |counters: &std::collections::BTreeMap<String, u64>| {
+        counters
+            .iter()
+            .filter(|(key, _)| key.starts_with("relay_recovery:"))
+            .map(|(_, count)| count)
+            .sum::<u64>()
+    };
+
+    assert_eq!(
+        response.decision.action,
+        RelayRecoveryActionKind::ReattachWatcher
+    );
+    assert!(
+        response.decision.auto_heal.eligible,
+        "the actual redrive fixture must reach reattach eligibility"
+    );
+    assert!(
+        count(&after) >= count(&before) + 1,
+        "ProbeAutoHeal ReattachWatcher must record axis-B at RelayRecovery"
+    );
+    assert!(!token.cancelled.load(Ordering::Relaxed));
+
+    let _ = crate::services::platform::tmux::kill_session(
+        &tmux,
+        "#5464 axis-B redrive fixture cleanup",
+    );
+    super::super::inflight::clear_inflight_state(&provider, channel.get());
+}
+
 #[tokio::test]
 async fn probe_auto_apply_is_rate_limited_per_channel_action() {
     let _guard = auto_heal_test_lock().lock().await;
