@@ -1,6 +1,8 @@
 use crate::services::discord::health::snapshot::WatcherStateSnapshot;
 use crate::services::discord::relay_health::{RelayActiveTurn, RelayStallState};
-use crate::services::discord::relay_recovery::{self, AxisBSite, RelayRecoveryActionKind};
+#[cfg(unix)]
+use crate::services::discord::relay_recovery::AxisBSite;
+use crate::services::discord::relay_recovery::{self, RelayRecoveryActionKind};
 use crate::services::discord::{self as discord, SharedData};
 use crate::services::provider::ProviderKind;
 

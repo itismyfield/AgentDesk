@@ -37,12 +37,13 @@ use leak_recovery_ledger::{
     leak_recovery_record_confirmed_chunk, leak_recovery_unrelayed_range,
     render_leak_recovery_delivery,
 };
+#[cfg(unix)]
+pub(crate) use watchdog_decisions::observe_watchdog_axis_b;
 pub(crate) use watchdog_decisions::{
     STALL_WATCHDOG_INITIAL_DELAY_SECS, STALL_WATCHDOG_INTERVAL_SECS,
     STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS, STALL_WATCHDOG_THRESHOLD_SECS,
     completed_stale_no_answer_orphan_should_clean, inflight_completed_stale_leak_detected,
-    observe_watchdog_axis_b, stale_idle_foreground_queue_detected,
-    stall_watchdog_should_force_clean,
+    stale_idle_foreground_queue_detected, stall_watchdog_should_force_clean,
     stall_watchdog_should_force_clean_orphan_explicit_background_work,
 };
 

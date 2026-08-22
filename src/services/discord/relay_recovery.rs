@@ -26,14 +26,14 @@
 //! #4030 watcher-cancel fix; they need separate design/review.
 
 use std::path::Path;
-use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
 #[cfg(unix)]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
 #[cfg(unix)]
-use std::sync::{LazyLock, Mutex as StdMutex, OnceLock, mpsc};
+use std::sync::{LazyLock, Mutex as StdMutex, mpsc};
 use std::time::{Duration, SystemTime};
 #[cfg(unix)]
 use std::{collections::BTreeMap, fs, io::Write, path::PathBuf};

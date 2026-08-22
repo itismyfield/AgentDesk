@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "fb4b0186ce8ab5e5614fc6b0e2288eaa74cd8b4e",
+  "measured_at_sha": "fe6804361dc81dec7c092452150c2543f15adea0",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -13,11 +13,12 @@
         "src/services/codex.rs": 4,
         "src/services/codex_tui/warm_followup.rs": 1,
         "src/services/discord/commands/control.rs": 2,
-        "src/services/discord/health/recovery.rs": 2,
+        "src/services/discord/health/recovery.rs": 4,
         "src/services/discord/health/relay_auto_heal.rs": 2,
         "src/services/discord/health/snapshot.rs": 2,
         "src/services/discord/recovery_engine/manual_rebind/mod.rs": 1,
         "src/services/discord/recovery_engine/manual_rebind/post_adoption_guard_tests.rs": 2,
+        "src/services/discord/relay_recovery/tests.rs": 2,
         "src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs": 2,
         "src/services/discord/router/message_handler/provider_isolation.rs": 1,
         "src/services/discord/runtime_bootstrap/session_gc.rs": 1,
