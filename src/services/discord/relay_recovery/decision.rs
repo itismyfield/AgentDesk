@@ -169,8 +169,8 @@ impl AxisBDiff {
     ) -> Self {
         if structural_action == ledger_action && structural_eligible == ledger_eligible {
             Self::Agree
-        } else if ledger_action.is_destructive()
-            && (ledger_action != structural_action || (ledger_eligible && !structural_eligible))
+        } else if (ledger_action.is_destructive() && ledger_action != structural_action)
+            || (ledger_eligible && !structural_eligible)
         {
             Self::LedgerStricter
         } else {
@@ -698,15 +698,6 @@ mod reachability_authority_tests {
     /// planner refused — fails here, for every (stall state, verdict) pair.
     #[test]
     fn reachability_never_selects_or_enables_a_destructive_action() {
-        let expected_sites = [
-            "RelayRecovery",
-            "WatchdogStaleIdle",
-            "WatchdogExplicitBackground",
-            "StaleTurnIntake",
-            "RelayDeadReattach",
-            "ProbeAutoHeal",
-        ];
-        assert_eq!(expected_sites.len(), 6);
         let stricter = AxisBDiff::from_outcomes(
             RelayRecoveryActionKind::ObserveOnly,
             false,
@@ -752,7 +743,6 @@ mod reachability_authority_tests {
         for snapshot in [quiet_snapshot(), live_snapshot()] {
             for stall_state in every_stall_state() {
                 let structural = plan_relay_recovery(&snapshot, stall_state, 1_000);
-                let shipped_outcome = (structural.action, structural.auto_heal.eligible);
                 for verdict in every_verdict() {
                     let composed = plan_relay_recovery_under_reachability(
                         &snapshot,
@@ -765,13 +755,6 @@ mod reachability_authority_tests {
                         diff.preserves_monotone_relaxation(),
                         "ledger became stricter for {stall_state:?}/{verdict:?}"
                     );
-                    for site in expected_sites {
-                        assert_eq!(
-                            (structural.action, structural.auto_heal.eligible),
-                            shipped_outcome,
-                            "observation changed {site} behavior for {stall_state:?}/{verdict:?}"
-                        );
-                    }
                     if composed.action.is_destructive() {
                         assert_eq!(
                             composed.action, structural.action,

@@ -27,14 +27,16 @@
 
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
+#[cfg(unix)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 #[cfg(unix)]
-use std::sync::{LazyLock, Mutex as StdMutex};
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex as StdMutex, OnceLock, mpsc};
 use std::time::{Duration, SystemTime};
 #[cfg(unix)]
-use std::{collections::BTreeMap, fs, io::Write};
+use std::{collections::BTreeMap, fs, io::Write, path::PathBuf};
 
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
@@ -107,6 +109,28 @@ const ORPHAN_PENDING_TOKEN_ADMISSION_GRACE: Duration = Duration::from_secs(30);
 const AXIS_B_SCHEMA: &str = "relay_authority.axis_b.v1";
 #[cfg(unix)]
 static AXIS_B_TRIAGE: LazyLock<StdMutex<BTreeMap<String, u64>>> = LazyLock::new(StdMutex::default);
+#[cfg(unix)]
+static AXIS_B_SINK: OnceLock<mpsc::SyncSender<AxisBWrite>> = OnceLock::new();
+#[cfg(unix)]
+static AXIS_B_WRITER: LazyLock<StdMutex<()>> = LazyLock::new(StdMutex::default);
+#[cfg(unix)]
+static AXIS_B_DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
+#[cfg(unix)]
+static AXIS_B_WRITE_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+struct AxisBWrite {
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Default, Serialize)]
+pub(in crate::services::discord) struct AxisBObservationReport {
+    counters: BTreeMap<String, u64>,
+    dropped_records: u64,
+    write_failures: u64,
+}
 
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -139,6 +163,24 @@ impl AxisBSite {
             Self::RelayDeadReattach => "relay_dead_reattach",
             Self::ProbeAutoHeal => "probe_auto_heal",
         }
+    }
+}
+
+#[cfg(unix)]
+fn axis_b_site_for_apply(
+    source: RelayRecoveryApplySource,
+    action: RelayRecoveryActionKind,
+) -> Option<AxisBSite> {
+    match (source, action) {
+        (RelayRecoveryApplySource::Manual, _) => Some(AxisBSite::RelayRecovery),
+        (RelayRecoveryApplySource::StallWatchdog, RelayRecoveryActionKind::ReattachWatcher) => {
+            Some(AxisBSite::RelayDeadReattach)
+        }
+        (
+            RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog,
+            RelayRecoveryActionKind::ClearOrphanPendingToken,
+        ) => Some(AxisBSite::ProbeAutoHeal),
+        _ => None,
     }
 }
 
@@ -208,10 +250,32 @@ pub(in crate::services::discord) fn observe_axis_b_candidate(
     structural_eligible: bool,
     applied_at_ms: i64,
 ) {
+    observe_axis_b_candidate_with_dial(
+        shared,
+        provider,
+        snapshot,
+        site,
+        structural_action,
+        structural_eligible,
+        applied_at_ms,
+        axis_b_dial(),
+    );
+}
+
+#[cfg(unix)]
+fn observe_axis_b_candidate_with_dial(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    snapshot: &health::WatcherStateSnapshot,
+    site: AxisBSite,
+    structural_action: RelayRecoveryActionKind,
+    structural_eligible: bool,
+    applied_at_ms: i64,
+    (mode, percent): (RelayAuthorityMode, u8),
+) {
     let Some((verdict, observed_at_ms)) = snapshot.reachability_observation() else {
         return;
     };
-    let (mode, percent) = axis_b_dial();
     if !mode.records_authority_observations()
         || !cohort::admits(mode, percent, snapshot.relay_health.channel_id)
     {
@@ -250,8 +314,9 @@ pub(in crate::services::discord) fn observe_axis_b_candidate(
 #[cfg(unix)]
 fn record_axis_b(record: AxisBRecord<'_>, site: AxisBSite) {
     let diff = record.diff;
-    if let Ok(line) = serde_json::to_string(&record) {
-        append_axis_b_jsonl(&line);
+    if let Ok(mut bytes) = serde_json::to_vec(&record) {
+        bytes.push(b'\n');
+        enqueue_axis_b_jsonl(bytes);
     }
     *AXIS_B_TRIAGE
         .lock()
@@ -261,24 +326,83 @@ fn record_axis_b(record: AxisBRecord<'_>, site: AxisBSite) {
 }
 
 #[cfg(unix)]
-fn append_axis_b_jsonl(line: &str) {
-    let Some(dir) = super::runtime_store::agentdesk_root().map(|root| root.join("relay_authority"))
-    else {
+fn axis_b_sink() -> &'static mpsc::SyncSender<AxisBWrite> {
+    AXIS_B_SINK.get_or_init(|| {
+        let (sender, receiver) = mpsc::sync_channel::<AxisBWrite>(256);
+        std::thread::Builder::new()
+            .name("axis-b-jsonl".to_string())
+            .spawn(move || {
+                while let Ok(write) = receiver.recv() {
+                    if append_axis_b_jsonl(&write.path, &write.bytes).is_err() {
+                        AXIS_B_WRITE_FAILURES.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })
+            .expect("spawn axis-B JSONL writer");
+        sender
+    })
+}
+
+#[cfg(unix)]
+fn enqueue_axis_b_jsonl(bytes: Vec<u8>) {
+    let Some(path) = axis_b_jsonl_path() else {
         return;
     };
-    let _ = fs::create_dir_all(&dir);
-    let path = dir.join(format!("{}.jsonl", chrono::Local::now().format("%Y-%m-%d")));
-    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{line}");
+    #[cfg(test)]
+    {
+        if append_axis_b_jsonl(&path, &bytes).is_err() {
+            AXIS_B_WRITE_FAILURES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    #[cfg(not(test))]
+    {
+        let write = AxisBWrite { path, bytes };
+        if axis_b_sink().try_send(write).is_err() {
+            AXIS_B_DROPPED_RECORDS.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
 #[cfg(unix)]
-pub(crate) fn axis_b_observation_report() -> BTreeMap<String, u64> {
-    AXIS_B_TRIAGE
+fn axis_b_jsonl_path() -> Option<PathBuf> {
+    super::runtime_store::agentdesk_root().map(|root| {
+        root.join("relay_authority")
+            .join(format!("{}.jsonl", chrono::Local::now().format("%Y-%m-%d")))
+    })
+}
+
+#[cfg(unix)]
+fn with_axis_b_writer<T>(write: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+    let _writer = AXIS_B_WRITER
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    write()
+}
+
+#[cfg(unix)]
+fn append_axis_b_jsonl(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    with_axis_b_writer(|| {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        file.write_all(bytes)
+    })
+}
+
+#[cfg(unix)]
+pub(in crate::services::discord) fn axis_b_observation_report() -> AxisBObservationReport {
+    AxisBObservationReport {
+        counters: AXIS_B_TRIAGE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone(),
+        dropped_records: AXIS_B_DROPPED_RECORDS.load(Ordering::Relaxed),
+        write_failures: AXIS_B_WRITE_FAILURES.load(Ordering::Relaxed),
+    }
 }
 
 #[cfg(test)]
@@ -536,23 +660,17 @@ async fn auto_apply_relay_recovery_for_shared_at(
     decision.affected.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
     trace_relay_recovery_decision(&decision, true);
     #[cfg(unix)]
-    observe_axis_b_candidate(
-        &shared,
-        provider,
-        &snapshot,
-        match source {
-            RelayRecoveryApplySource::Manual => AxisBSite::RelayRecovery,
-            RelayRecoveryApplySource::ProbeAutoHeal => AxisBSite::ProbeAutoHeal,
-            RelayRecoveryApplySource::StallWatchdog => match allowed_action {
-                RelayRecoveryActionKind::ReattachWatcher => AxisBSite::RelayDeadReattach,
-                RelayRecoveryActionKind::ClearOrphanPendingToken => AxisBSite::RelayRecovery,
-                _ => AxisBSite::RelayRecovery,
-            },
-        },
-        decision.action,
-        decision.auto_heal.eligible,
-        chrono::Utc::now().timestamp_millis(),
-    );
+    if let Some(site) = axis_b_site_for_apply(source, allowed_action) {
+        observe_axis_b_candidate(
+            &shared,
+            provider,
+            &snapshot,
+            site,
+            decision.action,
+            decision.auto_heal.eligible,
+            chrono::Utc::now().timestamp_millis(),
+        );
+    }
 
     if decision.action != allowed_action {
         decision.auto_heal.skipped_reason = Some("auto_heal_action_not_allowed");
@@ -708,6 +826,8 @@ mod axis_b_tests {
             inflight_identity: None,
             inflight_finalizer_turn_id: None,
             inflight_output_path: None,
+            #[cfg(unix)]
+            reachability_observation: None,
             relay_stall_state: RelayStallState::Healthy,
             relay_health: RelayHealthSnapshot {
                 provider: "codex".to_string(),
@@ -745,17 +865,64 @@ mod axis_b_tests {
 
     #[test]
     fn destructive_consumers_cannot_read_reachability_for_routing() {
-        for source in [
-            include_str!("health/recovery.rs"),
-            include_str!("health/recovery/watchdog_decisions.rs"),
-            include_str!("router/intake_gate/stale_turn.rs"),
-            include_str!("health/relay_auto_heal.rs"),
-            include_str!("health/relay_dead_reattach.rs"),
+        for (source, allowed_observer_calls, fixture_observations, fixture_verdicts) in [
+            (include_str!("health/recovery.rs"), 2, 0, 0),
+            (
+                include_str!("health/recovery/watchdog_decisions.rs"),
+                2,
+                0,
+                0,
+            ),
+            (include_str!("router/intake_gate/stale_turn.rs"), 4, 3, 1),
+            (include_str!("health/relay_auto_heal.rs"), 0, 1, 0),
+            (include_str!("health/relay_dead_reattach.rs"), 0, 1, 0),
+            (include_str!("relay_recovery/apply.rs"), 0, 0, 0),
         ] {
-            assert!(
-                !source.contains("reachability_observation("),
-                "a destructive consumer must not branch on the shadow verdict"
+            assert_eq!(
+                source.matches("reachability_observation").count(),
+                fixture_observations,
+                "only pinned test fixtures may name the raw reachability observation"
             );
+            assert_eq!(
+                source.matches("ReachabilityVerdict").count(),
+                fixture_verdicts,
+                "only the snapshot-binding fixture may construct a reachability verdict"
+            );
+            for forbidden in [
+                "reachability_unknown_reason_label",
+                "plan_relay_recovery_under_reachability",
+                "axis_b_observation_report",
+                "AxisBObservationReport",
+                "AXIS_B_TRIAGE",
+                "Debug::fmt",
+                "format!(\"{snapshot:?}\")",
+                "format!(\"{:?}\", snapshot)",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "a destructive consumer must not depend on axis-B observation via {forbidden}"
+                );
+            }
+            let observer_calls = source.matches("observe_watchdog_axis_b(").count()
+                + source.matches("observe_stale_turn_axis_b(").count()
+                + source.matches("observe_axis_b_candidate(").count();
+            assert_eq!(
+                observer_calls, allowed_observer_calls,
+                "observer call sites must remain standalone statements with no routing dependency"
+            );
+            for routed in [
+                "if observe_watchdog_axis_b",
+                "if observe_stale_turn_axis_b",
+                "if observe_axis_b_candidate",
+                "= observe_watchdog_axis_b",
+                "= observe_stale_turn_axis_b",
+                "= observe_axis_b_candidate",
+            ] {
+                assert!(
+                    !source.contains(routed),
+                    "observer result routed via {routed}"
+                );
+            }
         }
         let observer = include_str!("relay_recovery.rs");
         let production_observer = observer
@@ -770,6 +937,230 @@ mod axis_b_tests {
         );
         for site in AxisBSite::ALL {
             assert!(observer.contains(site.as_str()));
+        }
+    }
+
+    #[test]
+    fn axis_b_apply_site_mapping_matches_the_six_site_taxonomy() {
+        assert_eq!(
+            axis_b_site_for_apply(
+                RelayRecoveryApplySource::Manual,
+                RelayRecoveryActionKind::ObserveOnly,
+            ),
+            Some(AxisBSite::RelayRecovery)
+        );
+        assert_eq!(
+            axis_b_site_for_apply(
+                RelayRecoveryApplySource::StallWatchdog,
+                RelayRecoveryActionKind::ReattachWatcher,
+            ),
+            Some(AxisBSite::RelayDeadReattach)
+        );
+        for source in [
+            RelayRecoveryApplySource::ProbeAutoHeal,
+            RelayRecoveryApplySource::StallWatchdog,
+        ] {
+            assert_eq!(
+                axis_b_site_for_apply(source, RelayRecoveryActionKind::ClearOrphanPendingToken,),
+                Some(AxisBSite::ProbeAutoHeal)
+            );
+        }
+        assert_eq!(
+            axis_b_site_for_apply(
+                RelayRecoveryApplySource::ProbeAutoHeal,
+                RelayRecoveryActionKind::ReattachWatcher,
+            ),
+            None,
+            "redrive reattach is outside design §3.4 and must not pollute probe_auto_heal"
+        );
+    }
+
+    fn every_verdict() -> Vec<health::reachability::verdict::ReachabilityVerdict> {
+        use health::reachability::verdict::{
+            NotAliveObligationState, ReachabilityUnknownReason, ReachabilityVerdict,
+            TransportUnknownEvidence,
+        };
+        vec![
+            ReachabilityVerdict::Reachable,
+            ReachabilityVerdict::Degraded {
+                oldest_unsatisfied_age_secs: 300,
+                uncovered_ranges: 2,
+            },
+            ReachabilityVerdict::TransportUnknown {
+                since_secs: 700,
+                evidence: TransportUnknownEvidence::RestartBoundaryCrossed,
+            },
+            ReachabilityVerdict::TransportUnknown {
+                since_secs: 700,
+                evidence: TransportUnknownEvidence::PlaceholderPresent,
+            },
+            ReachabilityVerdict::TransportUnknown {
+                since_secs: 700,
+                evidence: TransportUnknownEvidence::UnreleasedDeliveryLease,
+            },
+            ReachabilityVerdict::Unreachable {
+                oldest_unsatisfied_age_secs: 900,
+                uncovered_ranges: 4,
+            },
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::TranscriptUnresolved, 30),
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 30),
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::ProviderUnresolved, 30),
+            ReachabilityVerdict::unknown(
+                ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+                    NotAliveObligationState::NoneOutstanding,
+                ),
+                30,
+            ),
+            ReachabilityVerdict::unknown(
+                ReachabilityUnknownReason::IncarnationNotAliveWitnessed(
+                    NotAliveObligationState::WithinGrace,
+                ),
+                30,
+            ),
+            ReachabilityVerdict::unknown(
+                ReachabilityUnknownReason::TranscriptCoordinateDivergence,
+                30,
+            ),
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::RowlessActiveTurn, 30),
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReadTruncated, 30),
+            ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReceiptStoreUnreadable, 30),
+        ]
+    }
+
+    #[test]
+    fn axis_b_observer_runs_every_verdict_without_returning_authority() {
+        let temp = tempfile::tempdir().expect("axis-B temp root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let shared = super::super::make_shared_data_for_tests();
+        let before = axis_b_observation_report().counters;
+        let shipped_outcomes = [
+            (
+                AxisBSite::RelayRecovery,
+                RelayRecoveryActionKind::ObserveOnly,
+                false,
+            ),
+            (
+                AxisBSite::WatchdogStaleIdle,
+                RelayRecoveryActionKind::ClearStaleThreadProof,
+                true,
+            ),
+            (
+                AxisBSite::WatchdogExplicitBackground,
+                RelayRecoveryActionKind::ClearOrphanPendingToken,
+                true,
+            ),
+            (
+                AxisBSite::StaleTurnIntake,
+                RelayRecoveryActionKind::ClearStaleThreadProof,
+                true,
+            ),
+            (
+                AxisBSite::RelayDeadReattach,
+                RelayRecoveryActionKind::ReattachWatcher,
+                true,
+            ),
+            (
+                AxisBSite::ProbeAutoHeal,
+                RelayRecoveryActionKind::ClearOrphanPendingToken,
+                true,
+            ),
+        ];
+        for (site, structural_action, structural_eligible) in shipped_outcomes {
+            for verdict in every_verdict() {
+                let mut snapshot = quiet_snapshot(54_641);
+                snapshot.reachability_observation = Some((verdict, 900));
+                let observer_result = observe_axis_b_candidate_with_dial(
+                    &shared,
+                    &ProviderKind::Codex,
+                    &snapshot,
+                    site,
+                    structural_action,
+                    structural_eligible,
+                    1_000,
+                    (RelayAuthorityMode::Observe, 100),
+                );
+                assert_eq!(
+                    observer_result,
+                    (),
+                    "axis-B observer must not return authority for {}",
+                    site.as_str()
+                );
+            }
+        }
+        let after = axis_b_observation_report().counters;
+        for site in AxisBSite::ALL {
+            let observed: u64 = after
+                .iter()
+                .filter(|(key, _)| key.starts_with(&format!("{}:", site.as_str())))
+                .map(|(_, count)| count)
+                .sum();
+            let prior: u64 = before
+                .iter()
+                .filter(|(key, _)| key.starts_with(&format!("{}:", site.as_str())))
+                .map(|(_, count)| count)
+                .sum();
+            assert_eq!(
+                observed - prior,
+                every_verdict().len() as u64,
+                "test-build verdicts must traverse the production observer for {}",
+                site.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn axis_b_writer_frames_concurrent_records() {
+        use std::sync::{Arc, Barrier};
+
+        struct YieldingBytes {
+            bytes: Arc<StdMutex<Vec<u8>>>,
+        }
+
+        impl std::io::Write for YieldingBytes {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.bytes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(bytes[0]);
+                std::thread::yield_now();
+                Ok(1)
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for round in 0..20 {
+            let output = Arc::new(StdMutex::new(Vec::new()));
+            let start = Arc::new(Barrier::new(9));
+            let mut writers = Vec::new();
+            for index in 0..8 {
+                let output = Arc::clone(&output);
+                let start = Arc::clone(&start);
+                writers.push(std::thread::spawn(move || {
+                    let record = format!("{{\"round\":{round},\"site\":{index}}}\n");
+                    start.wait();
+                    with_axis_b_writer(|| {
+                        YieldingBytes { bytes: output }.write_all(record.as_bytes())
+                    })
+                    .expect("write framed axis-B record");
+                }));
+            }
+            start.wait();
+            for writer in writers {
+                writer.join().expect("join axis-B writer");
+            }
+            let output = output
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let lines: Vec<serde_json::Value> = std::str::from_utf8(&output)
+                .expect("axis-B test output is UTF-8")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("one complete JSON object per line"))
+                .collect();
+            assert_eq!(lines.len(), 8);
+            assert!(lines.iter().all(|line| line["round"] == round));
         }
     }
 

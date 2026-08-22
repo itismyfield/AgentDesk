@@ -152,14 +152,11 @@ pub struct WatcherStateSnapshot {
     #[serde(skip)]
     pub(in crate::services::discord) inflight_output_path: Option<String>,
     /// #5464 T5 S5: fresh, read-only ledger verdict computed with this snapshot.
-    /// Unit-test fixtures outside this slice predate the field, so tests exercise
-    /// the same pure shadow planner rather than synthesizing persisted verdicts.
-    #[cfg(all(unix, not(test)))]
+    /// The field stays live in unit-test builds so the observation-only contract
+    /// is exercised through the same snapshot-to-observer path as production.
+    #[cfg(unix)]
     #[serde(skip)]
-    pub(in crate::services::discord) reachability_verdict: Option<ReachabilityVerdict>,
-    #[cfg(all(unix, not(test)))]
-    #[serde(skip)]
-    reachability_observed_at_ms: i64,
+    pub(in crate::services::discord) reachability_observation: Option<(ReachabilityVerdict, i64)>,
     /// #1455: Pure relay-stall classifier output derived from the nested
     /// relay-health snapshot. Read-only diagnostic; no recovery behavior is
     /// triggered from this value.
@@ -170,20 +167,13 @@ pub struct WatcherStateSnapshot {
 }
 
 impl WatcherStateSnapshot {
-    #[cfg(all(unix, not(test)))]
+    #[cfg(unix)]
     pub(in crate::services::discord) fn reachability_observation(
         &self,
     ) -> Option<(&ReachabilityVerdict, i64)> {
-        self.reachability_verdict
+        self.reachability_observation
             .as_ref()
-            .map(|verdict| (verdict, self.reachability_observed_at_ms))
-    }
-
-    #[cfg(all(unix, test))]
-    pub(in crate::services::discord) fn reachability_observation(
-        &self,
-    ) -> Option<(&ReachabilityVerdict, i64)> {
-        None
+            .map(|(verdict, observed_at_ms)| (verdict, *observed_at_ms))
     }
 }
 
@@ -240,8 +230,11 @@ pub struct DiscordHealthSnapshot {
     /// which reads the JSONL event log instead (design §5.3).
     #[serde(skip_serializing_if = "Option::is_none")]
     relay_authority_observation: Option<RelayAuthorityObservationReport>,
+    /// #5464 T5 S5: detail-only axis-B triage. The public health response is an
+    /// allowlist, so absence is serialized as no key rather than JSON `null`.
     #[cfg(unix)]
-    axis_b_observation: Option<std::collections::BTreeMap<String, u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    axis_b_observation: Option<crate::services::discord::relay_recovery::AxisBObservationReport>,
 }
 
 impl DiscordHealthSnapshot {
@@ -556,6 +549,11 @@ struct RelayVerdictProbeOperands {
     process_started_at_epoch_ms: u64,
 }
 
+/// Preserve the reachability probe's three-valued tail evidence. A missing
+/// `unread_bytes` is not a proven drained tail for a row-backed turn; only the
+/// separately witnessed rowless case may use pane-idle as positive evidence.
+/// Do not collapse this to `unwrap_or(0) == 0`: the unmeasured-tail mutation is
+/// pinned by `call_site_withholds_the_pane_idle_witness_for_an_unmeasured_tail`.
 #[cfg(unix)]
 fn relay_verdict_probe_operands(
     pane_alive: bool,
@@ -716,35 +714,33 @@ async fn watcher_state_snapshot_for_shared(
             .and_then(|state| state.output_path.as_deref()),
         session.watcher_output_path.as_deref(),
     );
-    #[cfg(all(unix, not(test)))]
-    let (reachability_verdict, reachability_observed_at_ms) = {
+    #[cfg(unix)]
+    let reachability_observation = {
         let operands = relay_verdict_probe_operands(
             tmux_session_alive == Some(true),
             &relay_health,
             unpaired_active_token_reconfirmed,
             process_started_at_unix,
         );
-        (
-            Some(
-                observe_relay_verdict(RelayVerdictProbe {
-                    provider: provider_kind.as_ref(),
-                    channel_id: channel.get(),
-                    row_output_path: session
-                        .inflight
-                        .as_ref()
-                        .and_then(|state| state.output_path.as_deref()),
-                    registry_output_path: session.watcher_output_path.as_deref(),
-                    pane_idle_confirmed: operands.pane_idle_confirmed,
-                    rowless_active_turn: operands.rowless_active_turn,
-                    placeholder_present: operands.placeholder_present,
-                    now_epoch_ms: operands.now_epoch_ms,
-                    process_started_at_epoch_ms: operands.process_started_at_epoch_ms,
-                })
-                .in_band()
-                .clone(),
-            ),
+        Some((
+            observe_relay_verdict(RelayVerdictProbe {
+                provider: provider_kind.as_ref(),
+                channel_id: channel.get(),
+                row_output_path: session
+                    .inflight
+                    .as_ref()
+                    .and_then(|state| state.output_path.as_deref()),
+                registry_output_path: session.watcher_output_path.as_deref(),
+                pane_idle_confirmed: operands.pane_idle_confirmed,
+                rowless_active_turn: operands.rowless_active_turn,
+                placeholder_present: operands.placeholder_present,
+                now_epoch_ms: operands.now_epoch_ms,
+                process_started_at_epoch_ms: operands.process_started_at_epoch_ms,
+            })
+            .in_band()
+            .clone(),
             operands.now_epoch_ms.min(i64::MAX as u64) as i64,
-        )
+        ))
     };
     Some(WatcherStateSnapshot {
         provider: provider_name.to_string(),
@@ -783,10 +779,8 @@ async fn watcher_state_snapshot_for_shared(
             .inflight
             .as_ref()
             .and_then(|state| state.output_path.clone()),
-        #[cfg(all(unix, not(test)))]
-        reachability_verdict,
-        #[cfg(all(unix, not(test)))]
-        reachability_observed_at_ms,
+        #[cfg(unix)]
+        reachability_observation,
         relay_stall_state,
         relay_health,
     })
@@ -1375,6 +1369,11 @@ mod tests {
         assert!(
             public.get("relay_authority_observation").is_none(),
             "observation triage must not reach the public health allowlist"
+        );
+        #[cfg(unix)]
+        assert!(
+            public.get("axis_b_observation").is_none(),
+            "axis-B triage must not reach the public health allowlist"
         );
 
         let detail = serde_json::to_value(build_health_snapshot(&registry).await)

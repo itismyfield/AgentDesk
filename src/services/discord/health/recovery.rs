@@ -7,6 +7,8 @@ use serde::Serialize;
 use serenity::{ChannelId, MessageId};
 
 use crate::services::discord::inflight::opt_message_id;
+#[cfg(unix)]
+use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_via_shared as tv_clear;
 use crate::services::discord::{self as discord, SharedData};
@@ -35,7 +37,14 @@ use leak_recovery_ledger::{
     leak_recovery_record_confirmed_chunk, leak_recovery_unrelayed_range,
     render_leak_recovery_delivery,
 };
-pub(crate) use watchdog_decisions::*;
+pub(crate) use watchdog_decisions::{
+    STALL_WATCHDOG_INITIAL_DELAY_SECS, STALL_WATCHDOG_INTERVAL_SECS,
+    STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS, STALL_WATCHDOG_THRESHOLD_SECS,
+    completed_stale_no_answer_orphan_should_clean, inflight_completed_stale_leak_detected,
+    observe_watchdog_axis_b, stale_idle_foreground_queue_detected,
+    stall_watchdog_should_force_clean,
+    stall_watchdog_should_force_clean_orphan_explicit_background_work,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeTurnStopResult {
@@ -1777,12 +1786,7 @@ pub(crate) async fn run_stall_watchdog_pass(
             .unwrap_or(false)
         {
             #[cfg(unix)]
-            observe_watchdog_axis_b(
-                &shared,
-                provider,
-                &snapshot,
-                discord::relay_recovery::AxisBSite::WatchdogStaleIdle,
-            );
+            observe_watchdog_axis_b(&shared, provider, &snapshot, AxisBSite::WatchdogStaleIdle);
             let Some(result) = clear_idle_tmux_stale_turn(
                 registry,
                 provider.as_str(),
@@ -1825,7 +1829,7 @@ pub(crate) async fn run_stall_watchdog_pass(
                 &shared,
                 provider,
                 &snapshot,
-                discord::relay_recovery::AxisBSite::WatchdogExplicitBackground,
+                AxisBSite::WatchdogExplicitBackground,
             );
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(

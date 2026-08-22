@@ -283,9 +283,6 @@ pub(crate) fn stall_watchdog_should_force_clean_orphan_explicit_background_work(
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
 }
 
-/// Watchdog tick interval. Picked to converge inside ~1 cycle once the
-/// `2x` staleness window has elapsed, while staying well below the
-/// gateway-lease keepalive cadence so we never starve the gateway loop.
 /// Observe the two watchdog consumers after every shipped structural guard has
 /// passed. Returning `()` makes the ledger incapable of changing that guard.
 #[cfg(unix)]
@@ -311,6 +308,9 @@ pub(crate) fn observe_watchdog_axis_b(
     );
 }
 
+/// Watchdog tick interval. Picked to converge inside ~1 cycle once the
+/// `2x` staleness window has elapsed, while staying well below the
+/// gateway-lease keepalive cadence so we never starve the gateway loop.
 pub(crate) const STALL_WATCHDOG_INTERVAL_SECS: u64 = 30;
 
 /// Initial delay before the first watchdog pass - mirrors

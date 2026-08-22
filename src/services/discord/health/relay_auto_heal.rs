@@ -825,6 +825,8 @@ mod tests {
             }),
             inflight_finalizer_turn_id: None,
             inflight_output_path: Some(output_path.to_string()),
+            #[cfg(unix)]
+            reachability_observation: None,
             relay_stall_state: RelayStallState::TmuxAliveRelayDead,
             relay_health: RelayHealthSnapshot {
                 provider: ProviderKind::Codex.as_str().to_string(),
@@ -1176,7 +1178,7 @@ mod tests {
             *resume_offset.lock().unwrap(),
             Some(snapshot.last_relay_offset)
         );
-        let (duplicate_enqueued, error_logs) = capture_errors(|| {
+        let (duplicate_enqueued, warn_logs) = capture_logs(tracing::Level::WARN, || {
             nudge_watcher_handle_for_backlog(
                 &shared,
                 &snapshot,
@@ -1189,9 +1191,10 @@ mod tests {
             !duplicate_enqueued,
             "a still-pending identical frontier must not be enqueued again"
         );
-        assert!(
-            !error_logs.contains("redrive_frontier_no_progress"),
-            "a duplicate frontier is diagnostic WARN, never ERROR"
+        assert_eq!(
+            warn_logs.matches("redrive_frontier_no_progress").count(),
+            1,
+            "a duplicate frontier emits exactly one diagnostic WARN"
         );
         assert_eq!(
             *resume_offset.lock().unwrap(),
@@ -1227,10 +1230,10 @@ mod tests {
         }
     }
 
-    fn capture_errors<R>(run: impl FnOnce() -> R) -> (R, String) {
+    fn capture_logs<R>(level: tracing::Level, run: impl FnOnce() -> R) -> (R, String) {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::ERROR)
+            .with_max_level(level)
             .with_ansi(false)
             .without_time()
             .with_writer(CapturingWriter(buffer.clone()))
@@ -1238,6 +1241,10 @@ mod tests {
         let result = tracing::subscriber::with_default(subscriber, run);
         let output = String::from_utf8_lossy(&buffer.lock().unwrap()).into_owned();
         (result, output)
+    }
+
+    fn capture_errors<R>(run: impl FnOnce() -> R) -> (R, String) {
+        capture_logs(tracing::Level::ERROR, run)
     }
 
     fn seed_liveness_verdict(
