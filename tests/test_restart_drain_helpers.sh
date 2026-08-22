@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2218
+# SC2218 is a structural false positive here: seam tests define an `rm()` shim
+# (declare -f save -> define -> exercise -> `unset -f rm` -> restore), so `rm`
+# calls outside those bounded regions target the real binary, not the shim.
 # Smoke test for #1447 — agentdesk-restart silent-fail regression.
 #
 # Verifies:
