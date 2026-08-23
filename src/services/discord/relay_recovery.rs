@@ -204,28 +204,35 @@ fn axis_b_site_for_apply(
             Some(AxisBSite::ProbeAutoHealReattach)
         }
         (
-            RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+            RelayRecoveryActionKind::ClearOrphanPendingToken
+            | RelayRecoveryActionKind::ClearStaleThreadProof
+            | RelayRecoveryActionKind::DrainPendingQueue,
+        ) => Some(AxisBSite::ProbeAutoHeal),
+        (
+            RelayRecoveryApplySource::StallWatchdog,
             RelayRecoveryActionKind::ClearOrphanPendingToken,
-        ) => Some(AxisBSite::ProbeAutoHeal),
+        ) => Some(AxisBSite::WatchdogExplicitBackground),
         (
-            RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog,
+            RelayRecoveryApplySource::StallWatchdog,
             RelayRecoveryActionKind::ClearStaleThreadProof,
-        ) => Some(AxisBSite::ProbeAutoHeal),
-        (
-            RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog,
-            RelayRecoveryActionKind::DrainPendingQueue,
-        ) => Some(AxisBSite::ProbeAutoHeal),
+        ) => Some(AxisBSite::WatchdogStaleIdle),
         _ => None,
     }
 }
 
+/// Whether this automatic apply can reach the pinned rebind branch.
+///
+/// Both automatic reattach sources reserve the current episode before apply.
+/// Reservation failure returns before apply, while a successful reservation
+/// supplies the episode that excludes the unpinned legacy retirement arms in
+/// `relay_recovery::apply`. Source labels do not select the apply branch.
 #[cfg(unix)]
 fn pinned_adoption_for_apply(
     source: RelayRecoveryApplySource,
     action: RelayRecoveryActionKind,
 ) -> bool {
-    action == RelayRecoveryActionKind::ReattachWatcher
-        && source == RelayRecoveryApplySource::ProbeAutoHeal
+    circuit_breaker::should_use_durable_circuit(action, source)
 }
 
 #[cfg(unix)]
@@ -786,6 +793,11 @@ async fn auto_apply_relay_recovery_for_shared_at(
                 decision.auto_heal.skipped_reason = Some(reason);
             }
         } else if source != RelayRecoveryApplySource::Manual {
+            // This is a closed-taxonomy programming error, not a missing warrant
+            // operand. Every shipped automatic source/action pair maps above;
+            // an unmapped future pair must stop before mutation until it chooses
+            // an explicit site. Missing snapshot or ledger evidence still
+            // abstains inside `destructive_warrant_bind`.
             decision.auto_heal.eligible = false;
             decision.auto_heal.skipped_reason = Some("axis_b_warrant_site_unmapped");
         }
@@ -1173,15 +1185,35 @@ mod axis_b_tests {
             ),
             Some(AxisBSite::RelayDeadReattach)
         );
-        for source in [
-            RelayRecoveryApplySource::ProbeAutoHeal,
-            RelayRecoveryApplySource::StallWatchdog,
-        ] {
-            assert_eq!(
-                axis_b_site_for_apply(source, RelayRecoveryActionKind::ClearOrphanPendingToken,),
-                Some(AxisBSite::ProbeAutoHeal)
-            );
-        }
+        assert_eq!(
+            axis_b_site_for_apply(
+                RelayRecoveryApplySource::ProbeAutoHeal,
+                RelayRecoveryActionKind::ClearOrphanPendingToken,
+            ),
+            Some(AxisBSite::ProbeAutoHeal)
+        );
+        assert_eq!(
+            axis_b_site_for_apply(
+                RelayRecoveryApplySource::StallWatchdog,
+                RelayRecoveryActionKind::ClearOrphanPendingToken,
+            ),
+            Some(AxisBSite::WatchdogExplicitBackground)
+        );
+        assert_eq!(
+            axis_b_site_for_apply(
+                RelayRecoveryApplySource::StallWatchdog,
+                RelayRecoveryActionKind::ClearStaleThreadProof,
+            ),
+            Some(AxisBSite::WatchdogStaleIdle)
+        );
+        assert_eq!(
+            axis_b_site_for_apply(
+                RelayRecoveryApplySource::StallWatchdog,
+                RelayRecoveryActionKind::DrainPendingQueue,
+            ),
+            None,
+            "the stall-watchdog apply surface has no pending-queue drain lane"
+        );
         assert_eq!(
             axis_b_site_for_apply(
                 RelayRecoveryApplySource::ProbeAutoHeal,
@@ -1200,12 +1232,21 @@ mod axis_b_tests {
                 "every composed-planner destructive action must map to a warrant site"
             );
         }
-        assert!(pinned_adoption_for_apply(
+        for source in [
             RelayRecoveryApplySource::ProbeAutoHeal,
-            RelayRecoveryActionKind::ReattachWatcher,
-        ));
-        assert!(!pinned_adoption_for_apply(
             RelayRecoveryApplySource::StallWatchdog,
+        ] {
+            assert!(pinned_adoption_for_apply(
+                source,
+                RelayRecoveryActionKind::ReattachWatcher,
+            ));
+            assert!(!pinned_adoption_for_apply(
+                source,
+                RelayRecoveryActionKind::ClearOrphanPendingToken,
+            ));
+        }
+        assert!(!pinned_adoption_for_apply(
+            RelayRecoveryApplySource::Manual,
             RelayRecoveryActionKind::ReattachWatcher,
         ));
     }
@@ -1263,6 +1304,46 @@ mod axis_b_tests {
     }
 
     #[test]
+    fn automatic_reattach_sources_keep_transport_unknown_recovery_eligible() {
+        use health::reachability::verdict::{ReachabilityVerdict, TransportUnknownEvidence};
+
+        let temp = tempfile::tempdir().expect("axis-B temp root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let provider = ProviderKind::Codex;
+        let mut snapshot = quiet_snapshot_for_warrant_tests(54_643);
+        snapshot.reachability_observation = Some((
+            ReachabilityVerdict::TransportUnknown {
+                since_secs: 700,
+                evidence: TransportUnknownEvidence::UnreleasedDeliveryLease,
+            },
+            900,
+        ));
+
+        for source in [
+            RelayRecoveryApplySource::ProbeAutoHeal,
+            RelayRecoveryApplySource::StallWatchdog,
+        ] {
+            let pinned_adoption =
+                pinned_adoption_for_apply(source, RelayRecoveryActionKind::ReattachWatcher);
+            assert!(
+                pinned_adoption,
+                "automatic reattach source {source:?} must derive pinned adoption from its durable episode reservation"
+            );
+            assert!(
+                destructive_warrant::destructive_warrant_bind(
+                    true,
+                    RelayRecoveryActionKind::ReattachWatcher,
+                    &provider,
+                    Some(&snapshot),
+                    pinned_adoption,
+                )
+                .eligible,
+                "TransportUnknown must not stop {source:?} pinned reattach recovery"
+            );
+        }
+    }
+
+    #[test]
     fn axis_b_observer_runs_every_verdict_without_returning_authority() {
         let temp = tempfile::tempdir().expect("axis-B temp root");
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
@@ -1292,7 +1373,7 @@ mod axis_b_tests {
             (
                 AxisBSite::RelayDeadReattach,
                 RelayRecoveryActionKind::ReattachWatcher,
-                false,
+                true,
             ),
             (
                 AxisBSite::ProbeAutoHeal,

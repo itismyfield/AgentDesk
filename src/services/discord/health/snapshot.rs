@@ -16,6 +16,8 @@ use super::reachability::composite::{
     relay_verdict_source,
 };
 #[cfg(unix)]
+use super::reachability::ledger::{ledger_file_exists, ledger_path};
+#[cfg(unix)]
 use super::reachability::verdict::ReachabilityVerdict;
 use super::redaction;
 use super::session_enrichment::{self, SessionEnrichment};
@@ -556,13 +558,9 @@ struct RelayVerdictProbeOperands {
 /// pinned by `call_site_withholds_the_pane_idle_witness_for_an_unmeasured_tail`.
 #[cfg(unix)]
 fn reachability_ledger_operand_exists(provider: &ProviderKind, channel_id: u64) -> bool {
-    let Some(root) = super::super::runtime_store::runtime_root() else {
-        return false;
-    };
-    root.join("discord_reachability_ledger")
-        .join(provider.as_str())
-        .join(format!("{channel_id}.json"))
-        .is_file()
+    ledger_path(provider, channel_id)
+        .as_deref()
+        .is_some_and(ledger_file_exists)
 }
 
 #[cfg(unix)]
@@ -2174,6 +2172,26 @@ mod tests {
                     crate::services::discord::tmux_watcher_now_ms(),
                 )),
             }
+        }
+
+        #[test]
+        fn reachability_operand_uses_the_canonical_ledger_path() {
+            let tmp = tempfile::tempdir().expect("temp runtime root");
+            let _env =
+                crate::config::TestEnvVarGuard::set_path(super::AGENTDESK_ROOT_DIR_ENV, tmp.path());
+            let provider = ProviderKind::Codex;
+            let channel =
+                ChannelId::new(super::NEXT_ABSENT_MAILBOX_CHANNEL.fetch_add(1, Ordering::Relaxed));
+            let path =
+                super::super::ledger_path(&provider, channel.get()).expect("canonical ledger path");
+            std::fs::create_dir_all(path.parent().expect("ledger parent"))
+                .expect("create canonical ledger directory");
+            std::fs::write(&path, b"not-json").expect("write present ledger operand");
+
+            assert!(
+                super::super::reachability_ledger_operand_exists(&provider, channel.get()),
+                "the snapshot presence probe must resolve the same path as ledger readers and writers"
+            );
         }
 
         #[tokio::test(flavor = "current_thread")]

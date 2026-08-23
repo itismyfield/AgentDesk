@@ -2680,6 +2680,7 @@ services::discord::health::snapshot::tests::rebind_origin_idle_only_without_canc
 services::discord::health::snapshot::tests::relay_authority_observation_is_published_on_the_detail_build_only
 services::discord::health::snapshot::tests::relay_authority_rollout_is_published_on_the_detail_build_only
 services::discord::health::snapshot::tests::relay_verdict_probe_operands_preserve_process_start_and_pane_semantics
+services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::reachability_operand_uses_the_canonical_ledger_path
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_abstains_when_reachability_ledger_is_absent
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_records_row_vs_registry_identity_divergence
 services::discord::health::snapshot::tests::stale_ownerless_external_input_inflight_is_not_foreground_even_with_cancel_token
@@ -4119,6 +4120,7 @@ services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_rest
 services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_same_watcher_emission_in_flight_is_not_confirmation_failure
 services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_same_watcher_without_emission_fails_at_deadline
 services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_spawn_confirm_requires_stable_heartbeat_advance
+services::discord::relay_recovery::axis_b_tests::automatic_reattach_sources_keep_transport_unknown_recovery_eligible
 services::discord::relay_recovery::axis_b_tests::automatic_warrant_wiring_is_pinned_at_the_four_direct_consumers
 services::discord::relay_recovery::axis_b_tests::axis_b_append_path_uses_the_framing_lock
 services::discord::relay_recovery::axis_b_tests::axis_b_apply_site_mapping_separates_operator_and_automatic_taxonomy
