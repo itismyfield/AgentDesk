@@ -138,6 +138,25 @@ pub async fn kill_tmux_session(
     .await
 }
 
+pub(crate) fn precondition_changed_response(
+    session_key: &str,
+    diagnostic: crate::services::stale_turn_reconciler::PreconditionDiagnostic,
+) -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::CONFLICT,
+        serde_json::json!({
+            "ok": false,
+            "session_key": session_key,
+            "reconciled": false,
+            "reason": "precondition_changed",
+            "retry": true,
+            "message": "session state changed during reconciliation; retry to evaluate a fresh snapshot",
+            "diagnostic_at": "after_failed_update",
+            "diagnostic": diagnostic,
+        }),
+    )
+}
+
 /// POST /api/sessions/{session_key}/reconcile-stale-turn
 pub async fn reconcile_stale_turn(
     State(state): State<AppState>,
@@ -202,6 +221,12 @@ pub async fn reconcile_stale_turn(
                            or its tmux evidence was not terminal",
             })),
         )),
+        crate::services::stale_turn_reconciler::SessionReconcileOutcome::PreconditionChanged(
+            diagnostic,
+        ) => {
+            let (status, body) = precondition_changed_response(&session_key, diagnostic);
+            Ok((status, Json(body)))
+        }
         crate::services::stale_turn_reconciler::SessionReconcileOutcome::NotFound => {
             Err(AppError::not_found("session not found"))
         }
@@ -223,3 +248,10 @@ pub async fn resume_previous_session(
     )
     .await
 }
+
+// Unix-gated: the witness installs a fake `tmux` on PATH, which needs
+// `PermissionsExt::set_mode`. Same gate as `platform::tmux::timeout_tests`,
+// which stubs the probe the same way.
+#[cfg(all(test, unix))]
+#[path = "dispatched_sessions_tests.rs"]
+mod tests;

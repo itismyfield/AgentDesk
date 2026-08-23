@@ -152,6 +152,7 @@ jobs:
               - 'src/server/routes/auto_queue_lifecycle_pg_tests.rs'
               - 'src/server/routes/tests/auto_queue_preflight_harness_tests.rs'
               - 'src/server/routes/dispatched_sessions.rs'
+              - 'src/server/routes/dispatched_sessions_tests.rs'
               - 'src/server/routes/dispatches/**'
               - 'src/server/routes/message_outbox.rs'
               - 'src/server/routes/scheduled_messages.rs'
