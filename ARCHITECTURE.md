@@ -991,7 +991,9 @@ src/
 │   │   │   │   ├── channel_writeback.rs
 │   │   │   │   └── contracts.rs
 │   │   │   ├── headless_delivery/
-│   │   │   │   └── intake_outbox_argument.rs
+│   │   │   │   ├── intake_outbox_argument.rs
+│   │   │   │   ├── outcome.rs
+│   │   │   │   └── production_seam_tests.rs
 │   │   │   ├── intake_settlement/
 │   │   │   │   └── tests.rs
 │   │   │   ├── runtime_handoff_loop/

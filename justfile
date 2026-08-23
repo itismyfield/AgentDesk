@@ -96,6 +96,9 @@ test-non-pg:
     cargo test --lib server::claude_oauth_usage_tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres
     cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres
+    # #5191: typed outcomes and production PG-error/pool-absence seams must keep
+    # ambiguous delivery out of the ACK path without bypassing cancel/fallback.
+    cargo test --lib services::discord::turn_bridge::headless_delivery
     # Keep the non-PostgreSQL unit tests covered after outbox_claiming's PG split.
     cargo test --lib services::dispatches::outbox_claiming::tests -- --skip _pg --skip pg_ --skip postgres
     # Keep the non-PostgreSQL unit tests covered after delivery guard's PG split.

@@ -217,9 +217,8 @@ fn caller_supplied_delivery_bot(delivery_bot: Option<&str>) -> Option<&str> {
 
 /// #5159: which bot identity a headless terminal delivery posts under.
 ///
-/// `enqueue_headless_delivery` has exactly one production caller — the
-/// `can_chain_locally == false` arm of `terminal_outcome_delivery` — and the
-/// payload it carries there is the turn's own (non-empty) answer body. A false
+/// `enqueue_headless_delivery` receives the turn's answer body from the
+/// `can_chain_locally == false` arm of `terminal_outcome_delivery`. A false
 /// `can_chain_locally` only says "this turn has no live Discord context to edit
 /// its placeholder through"; it says nothing about the content being an
 /// operational notice. Delivery-path selection and identity selection are
@@ -266,9 +265,16 @@ pub(super) use intake_outbox_argument::{
     HeadlessDeliveryArguments, HeadlessDeliveryInputs, assemble_headless_delivery_arguments,
 };
 
+mod outcome;
+pub(crate) use outcome::{
+    HeadlessDeliveryDisposition, HeadlessDeliveryOutcome, headless_delivery_disposition,
+    preserve_ambiguous_headless_delivery_for_retry,
+};
+use outcome::{classify_visible_outbox_result, run_headless_direct_fallback};
+
 pub(super) async fn enqueue_headless_delivery(
     arguments: HeadlessDeliveryArguments<'_>,
-) -> Result<(), String> {
+) -> HeadlessDeliveryOutcome {
     let HeadlessDeliveryRuntimeArguments {
         shared,
         channel_id,
@@ -295,7 +301,7 @@ pub(super) async fn enqueue_headless_delivery(
         let delivery_cancel_token = cancel_token.filter(|token| !token.is_completion_cleanup());
         // Terminal headless responses are per-turn facts. Identical content in
         // back-to-back E2E or operator turns must still be delivered.
-        match crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
+        match crate::services::message_outbox::enqueue_outbox_pg_returning_outcome_with_ttl_and_cancel(
             pool,
             outbox_message,
             0,
@@ -303,7 +309,9 @@ pub(super) async fn enqueue_headless_delivery(
         )
         .await
         {
-            Ok(Some(outbox_id)) => {
+            Ok(crate::services::message_outbox::OutboxEnqueueOutcome::Enqueued {
+                id: outbox_id,
+            }) => {
                 if let Some(session_key) =
                     session_key.map(str::trim).filter(|value| !value.is_empty())
                 {
@@ -363,12 +371,14 @@ pub(super) async fn enqueue_headless_delivery(
                                     tracing::warn!(
                                         "[outbox] terminal delivery marker write failed for session {session_key} row {outbox_id} (already enqueued; waiting for visible delivery): {error}"
                                     );
-                                    return wait_for_headless_delivery_outbox_visible(
-                                        pool,
-                                        outbox_id,
-                                        HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT,
-                                    )
-                                    .await;
+                                    return classify_visible_outbox_result(
+                                        wait_for_headless_delivery_outbox_visible(
+                                            pool,
+                                            outbox_id,
+                                            HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT,
+                                        )
+                                        .await,
+                                    );
                                 }
                                 if let Err(error) = tx.commit().await {
                                     tracing::warn!(
@@ -384,20 +394,32 @@ pub(super) async fn enqueue_headless_delivery(
                         }
                     }
                 }
-                return wait_for_headless_delivery_outbox_visible(
-                    pool,
-                    outbox_id,
-                    HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT,
-                )
-                .await;
+                return classify_visible_outbox_result(
+                    wait_for_headless_delivery_outbox_visible(
+                        pool,
+                        outbox_id,
+                        HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT,
+                    )
+                    .await,
+                );
             }
-            Ok(None) => {
+            Ok(crate::services::message_outbox::OutboxEnqueueOutcome::Cancelled) => {
                 tracing::info!(
                     channel_id = channel_id.get(),
                     session_key,
-                    "skipped headless direct fallback after outbox enqueue returned no row"
+                    "skipped headless delivery after outbox enqueue observed cancellation"
                 );
-                return Ok(());
+                return HeadlessDeliveryOutcome::Cancelled;
+            }
+            Ok(crate::services::message_outbox::OutboxEnqueueOutcome::NoRow) => {
+                tracing::warn!(
+                    channel_id = channel_id.get(),
+                    session_key,
+                    "headless outbox enqueue returned no row; preserving inflight for retry"
+                );
+                return HeadlessDeliveryOutcome::Ambiguous {
+                    surfaced_error: None,
+                };
             }
             Err(error) => {
                 tracing::warn!(
@@ -409,55 +431,58 @@ pub(super) async fn enqueue_headless_delivery(
         }
     }
 
-    if should_suppress_headless_delivery_for_cancel(cancel_token) {
+    let suppress_for_cancel = should_suppress_headless_delivery_for_cancel(cancel_token);
+    if suppress_for_cancel {
         tracing::info!(
             channel_id = channel_id.get(),
             session_key,
             "skipped headless direct fallback after turn cancellation"
         );
-        return Ok(());
     }
 
-    let notify_http = match shared
-        .health_registry()
-        .filter(|_| headless_direct_fallback_prefers_notify_http(delivery_bot))
-    {
-        Some(registry) => match super::health::resolve_utility_bot_http(
-            registry.as_ref(),
-            super::bot_role::UtilityBotRole::Notify,
-        )
-        .await
+    let direct_fallback = async {
+        let notify_http = match shared
+            .health_registry()
+            .filter(|_| headless_direct_fallback_prefers_notify_http(delivery_bot))
         {
-            Ok(http) => Some(http),
-            Err((status, body)) => {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::warn!(
-                    "  [{ts}] ⚠ headless notify bot unavailable in channel {}: {} {} — falling back to provider bot",
-                    channel_id,
-                    status,
-                    body
-                );
-                None
-            }
-        },
-        None => None,
-    };
-
-    // Phase 5.2 of intake-node-routing (issue #2009): use gateway-or-token
-    // fallback so the standby worker path can still deliver headless
-    // messages even when `cached_serenity_ctx` is None.
-    let http = notify_http
-        .or_else(|| shared.serenity_http_or_token_fallback())
-        .ok_or_else(|| {
-            format!(
-                "headless delivery unavailable for channel {}: no outbox storage or discord http",
-                channel_id.get()
+            Some(registry) => match super::health::resolve_utility_bot_http(
+                registry.as_ref(),
+                super::bot_role::UtilityBotRole::Notify,
             )
-        })?;
-    send_long_message_raw(&http, channel_id, content, shared)
-        .await
-        .map_err(|error| format!("headless direct delivery failed: {error}"))?;
-    Ok(())
+            .await
+            {
+                Ok(http) => Some(http),
+                Err((status, body)) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::warn!(
+                        "  [{ts}] ⚠ headless notify bot unavailable in channel {}: {} {} — falling back to provider bot",
+                        channel_id,
+                        status,
+                        body
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+
+        // Phase 5.2 of intake-node-routing (issue #2009): use gateway-or-token
+        // fallback so the standby worker path can still deliver headless
+        // messages even when `cached_serenity_ctx` is None.
+        let http = notify_http
+            .or_else(|| shared.serenity_http_or_token_fallback())
+            .ok_or_else(|| {
+                format!(
+                    "headless delivery unavailable for channel {}: no outbox storage or discord http",
+                    channel_id.get()
+                )
+            })?;
+        send_long_message_raw(&http, channel_id, content, shared)
+            .await
+            .map_err(|error| format!("headless direct delivery failed: {error}"))?;
+        Ok(())
+    };
+    run_headless_direct_fallback(suppress_for_cancel, || direct_fallback).await
 }
 
 const HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT: std::time::Duration =
@@ -511,6 +536,10 @@ async fn wait_for_headless_delivery_outbox_visible(
 }
 
 #[cfg(test)]
+#[path = "headless_delivery/production_seam_tests.rs"]
+mod production_seam_tests;
+
+#[cfg(test)]
 mod headless_delivery_tests {
     use super::*;
 
@@ -518,7 +547,7 @@ mod headless_delivery_tests {
     /// the headless outbox arm with `delivery_bot == None`, because only routine
     /// metadata ever writes `InflightTurnState::delivery_bot`. Before this fix
     /// the decision was `delivery_bot.unwrap_or(Notify.alias())`, so the turn's
-    /// own answer body was posted by the 🔔 notify utility bot. It must post as
+    /// own answer body was posted by the notify utility bot. It must post as
     /// the agent bot instead — the identity the placeholder-edit arm uses.
     #[test]
     fn user_turn_answer_posts_as_the_agent_bot_not_notify() {
@@ -591,18 +620,6 @@ mod headless_delivery_tests {
             headless_delivery_bot_alias(None, &provider),
             super::super::super::bot_role::UtilityBotRole::Notify.alias()
         );
-    }
-
-    /// The direct (non-outbox) fallback keeps its notify-http preference only
-    /// for a caller-supplied identity, so routine fallback behaviour is
-    /// unchanged while a user turn answer falls through to this runtime's own
-    /// provider http.
-    #[test]
-    fn direct_fallback_notify_http_preference_is_caller_supplied_only() {
-        assert!(headless_direct_fallback_prefers_notify_http(Some("notify")));
-        assert!(headless_direct_fallback_prefers_notify_http(Some("dm")));
-        assert!(!headless_direct_fallback_prefers_notify_http(None));
-        assert!(!headless_direct_fallback_prefers_notify_http(Some("   ")));
     }
 
     #[test]
