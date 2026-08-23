@@ -741,6 +741,7 @@ src/
 │   │   │   ├── authority_observation.rs
 │   │   │   ├── cohort.rs
 │   │   │   ├── decision.rs
+│   │   │   ├── destructive_warrant.rs
 │   │   │   ├── idle_tmux.rs
 │   │   │   └── tests.rs
 │   │   ├── router/

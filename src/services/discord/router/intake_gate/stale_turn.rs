@@ -42,25 +42,37 @@ struct StaleActiveTurnProof {
 }
 
 #[cfg(unix)]
-fn observe_stale_turn_axis_b(
+fn stale_turn_axis_b_warrants(
     shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     proof: &StaleActiveTurnProof,
-) {
-    let eligible = matches!(
-        proof.classification,
-        StaleActiveTurnProofClassification::RelayStalled
-            | StaleActiveTurnProofClassification::QueueBlockedOrphan
-    );
+) -> bool {
+    let structural_candidate_apply =
+        crate::services::discord::relay_recovery::structural_candidate_apply(matches!(
+            proof.classification,
+            StaleActiveTurnProofClassification::RelayStalled
+                | StaleActiveTurnProofClassification::QueueBlockedOrphan
+        ));
+    let action =
+        crate::services::discord::relay_recovery::RelayRecoveryActionKind::ClearStaleThreadProof;
     crate::services::discord::relay_recovery::observe_axis_b_candidate(
         shared,
         provider,
         &proof.snapshot,
         crate::services::discord::relay_recovery::AxisBSite::StaleTurnIntake,
-        crate::services::discord::relay_recovery::RelayRecoveryActionKind::ClearStaleThreadProof,
-        eligible,
+        action,
+        structural_candidate_apply,
         chrono::Utc::now().timestamp_millis(),
     );
+    let destructive_warrant_bind =
+        crate::services::discord::relay_recovery::destructive_warrant_bind(
+            structural_candidate_apply,
+            action,
+            provider,
+            Some(&proof.snapshot),
+            false,
+        );
+    destructive_warrant_bind.eligible
 }
 
 fn classify_stale_active_turn_proof(
@@ -158,16 +170,7 @@ pub(super) async fn thread_guard_should_force_clean_stale_thread(
     else {
         return false;
     };
-    let eligible = matches!(
-        proof.classification,
-        StaleActiveTurnProofClassification::RelayStalled
-            | StaleActiveTurnProofClassification::QueueBlockedOrphan
-    );
-    if eligible {
-        #[cfg(unix)]
-        observe_stale_turn_axis_b(shared, provider, &proof);
-    }
-    eligible
+    stale_turn_axis_b_warrants(shared, provider, &proof)
 }
 
 /// #1446 Layer 2 — perform the THREAD-GUARD's stale-thread cleanup:
@@ -260,8 +263,9 @@ async fn release_queue_blocked_stale_active_turn(
         return false;
     }
 
-    #[cfg(unix)]
-    observe_stale_turn_axis_b(shared, provider, &proof);
+    if !stale_turn_axis_b_warrants(shared, provider, &proof) {
+        return false;
+    }
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::warn!(
         "  [{ts}] 🔓 QUEUE-GUARD: stale active-turn proof for channel {} has no live owner; releasing mailbox and proceeding",
@@ -351,6 +355,15 @@ mod thread_guard_stale_pure_tests {
     }
 
     fn seed_inflight_with_updated_at(provider: &ProviderKind, channel_id: u64, updated_at: &str) {
+        seed_inflight_with_nonce(provider, channel_id, updated_at, None);
+    }
+
+    fn seed_inflight_with_nonce(
+        provider: &ProviderKind,
+        channel_id: u64,
+        updated_at: &str,
+        turn_nonce: Option<String>,
+    ) {
         let mut state = crate::services::discord::inflight::InflightTurnState::new(
             provider.clone(),
             channel_id,
@@ -367,6 +380,7 @@ mod thread_guard_stale_pure_tests {
         );
         state.updated_at = updated_at.to_string();
         state.started_at = updated_at.to_string();
+        state.turn_nonce = turn_nonce;
         let root = crate::services::discord::inflight::inflight_runtime_root()
             .expect("inflight runtime root must be available under test override");
         let provider_dir = root.join(provider.as_str());
@@ -631,7 +645,13 @@ mod thread_guard_stale_pure_tests {
             now_unix,
             -(crate::services::discord::inflight::INFLIGHT_STALENESS_THRESHOLD_SECS as i64) - 5,
         );
-        seed_inflight_with_updated_at(&provider, channel_id.get(), &stale_at);
+        let cancel_token = Arc::new(CancelToken::new());
+        seed_inflight_with_nonce(
+            &provider,
+            channel_id.get(),
+            &stale_at,
+            cancel_token.turn_nonce().map(str::to_string),
+        );
 
         let registry = Arc::new(crate::services::discord::health::HealthRegistry::new());
         let mut shared = crate::services::discord::make_shared_data_for_tests();
@@ -645,7 +665,7 @@ mod thread_guard_stale_pure_tests {
             crate::services::discord::mailbox_try_start_turn(
                 &shared,
                 channel_id,
-                Arc::new(CancelToken::new()),
+                cancel_token,
                 UserId::new(7),
                 user_msg_id,
             )

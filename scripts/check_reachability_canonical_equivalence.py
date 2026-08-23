@@ -237,6 +237,8 @@ SANCTIONED_TREE_CONSUMERS: set[str] = set()
 #     discovery identity, and verdict needed to build both axis-B fixtures.
 #   * `relay_recovery.rs` — #5464 T5 S5's alias-invariant witness enumerates the
 #     verdict variants consumed by the axis-B observation boundary.
+#   * `relay_recovery/destructive_warrant.rs` — #5464 T5 S6a's sole runtime
+#     consumer of the verdict operand; it applies the explicit 20-cell veto.
 #   * `router/intake_gate/stale_turn.rs` — #5464 T5 S5's stale-turn witness
 #     preserves a concrete verdict in the snapshot passed to axis-B observation.
 JUDGMENT_TREE_CONSUMERS = {
@@ -246,6 +248,7 @@ JUDGMENT_TREE_CONSUMERS = {
     "src/services/discord/health/stall_verdict.rs",
     "src/services/discord/relay_recovery.rs",
     "src/services/discord/relay_recovery/decision.rs",
+    "src/services/discord/relay_recovery/destructive_warrant.rs",
     "src/services/discord/router/intake_gate/stale_turn.rs",
 }
 # A module reference, not a word: an identifier that merely contains the

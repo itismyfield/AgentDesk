@@ -294,6 +294,7 @@ impl BootReconcileStats {
 pub(crate) async fn reconcile_boot_db_pg(
     pool: &PgPool,
     current_instance_id: &str,
+    health_registry: Option<&crate::services::discord::health::HealthRegistry>,
 ) -> Result<BootReconcileStats> {
     // Touch next_attempt_at so oldest_pending_age reflects "re-queued at boot",
     // not the original created_at. Without this, rows that were stuck in
@@ -342,7 +343,12 @@ pub(crate) async fn reconcile_boot_db_pg(
     let missing_notify_outbox_backfilled = backfill_missing_notify_outbox_pg(pool).await?;
     let broken_auto_queue_entries_reset = reset_broken_auto_queue_entries_pg(pool).await?;
     let stale_busy_sessions_reconciled =
-        crate::services::stale_turn_reconciler::reconcile_stale_turns_pg(pool).await?;
+        crate::services::stale_turn_reconciler::reconcile_stale_turns_pg(
+            pool,
+            health_registry,
+            crate::services::discord::relay_recovery::AxisBSite::BootReconcileSweep,
+        )
+        .await?;
 
     Ok(BootReconcileStats {
         stale_processing_outbox_reset,
@@ -361,9 +367,10 @@ pub(crate) async fn reconcile_boot_runtime(
     engine: &PolicyEngine,
     pg_pool: Option<&PgPool>,
     current_instance_id: &str,
+    health_registry: Option<&crate::services::discord::health::HealthRegistry>,
 ) -> Result<BootReconcileStats> {
     let mut stats = if let Some(pool) = pg_pool {
-        reconcile_boot_db_pg(pool, current_instance_id).await?
+        reconcile_boot_db_pg(pool, current_instance_id, health_registry).await?
     } else {
         {
             return Err(anyhow!("Postgres pool required for boot reconcile"));
@@ -1800,7 +1807,7 @@ mod dispatch_delivery_reconcile_tests {
         .await
         .expect("seed peer-owned processing outbox row");
 
-        let stats = reconcile_boot_db_pg(&pool, "current-instance")
+        let stats = reconcile_boot_db_pg(&pool, "current-instance", None)
             .await
             .expect("boot reconcile succeeds");
         assert_eq!(stats.stale_processing_outbox_reset, 0);

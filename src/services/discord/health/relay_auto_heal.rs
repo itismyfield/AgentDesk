@@ -1641,7 +1641,7 @@ mod tests {
         );
         inflight.started_at = started_at.clone();
         inflight.updated_at = started_at;
-        inflight.turn_nonce = Some("nonce-5396-reuse".to_string());
+        inflight.turn_nonce = cancel_token.turn_nonce().map(str::to_string);
         inflight.runtime_kind =
             Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
         inflight.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "fe6804361dc81dec7c092452150c2543f15adea0",
+  "measured_at_sha": "5d59338d07c224dc5e8d389027539dd5baa0961e",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -124,6 +124,24 @@
         "src/services/discord/turn_finalizer/finalize.rs": 2,
         "src/services/discord/watchers/dispatched_origin_ghost.rs": 1,
         "src/services/turn_lifecycle.rs": 4
+      }
+    },
+    "structural_candidate_apply": {
+      "comment": "#5464 T5 S6a: per-file structural/warrant counts must match. Equality detects one-sided deletion but does not prove control-flow dominance or argument identity.",
+      "files": {
+        "src/services/discord/health/recovery/watchdog_decisions.rs": 1,
+        "src/services/discord/relay_recovery.rs": 2,
+        "src/services/discord/router/intake_gate/stale_turn.rs": 1,
+        "src/services/stale_turn_reconciler.rs": 1
+      }
+    },
+    "destructive_warrant_bind": {
+      "comment": "#5464 T5 S6a: the checker fails closed on either direction of per-file mismatch. This lexical invariant proves neither control-flow dominance nor argument identity; semantic consumer tests establish the shipped outcomes.",
+      "files": {
+        "src/services/discord/health/recovery/watchdog_decisions.rs": 1,
+        "src/services/discord/relay_recovery.rs": 2,
+        "src/services/discord/router/intake_gate/stale_turn.rs": 1,
+        "src/services/stale_turn_reconciler.rs": 1
       }
     }
   }

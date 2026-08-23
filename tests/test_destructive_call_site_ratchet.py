@@ -135,6 +135,14 @@ class RatchetDiscriminationTests(unittest.TestCase):
             "src/services/discord/t3a4_probe.rs",
             "inflight::clear_inflight_state(&provider, channel_id);\n",
         ),
+        "structural_candidate_apply": (
+            "src/services/discord/t3a4_probe.rs",
+            "structural_candidate_apply(candidate);\n",
+        ),
+        "destructive_warrant_bind": (
+            "src/services/discord/t3a4_probe.rs",
+            "destructive_warrant_bind(candidate);\n",
+        ),
     }
 
     def test_fake_callsite_mutations_are_unlisted(self) -> None:
@@ -248,6 +256,59 @@ class RatchetDiscriminationTests(unittest.TestCase):
         actual["identity_fence_bind"]["src/services/discord/a.rs"] = 1
         self.assertEqual(ratchet.pairing_errors(actual), [])
 
+    def test_warrant_pairing_is_two_sided_and_file_local(self) -> None:
+        rel = "src/services/discord/s6a_pairing_probe.rs"
+        paired_body = (
+            "structural_candidate_apply(candidate);\n"
+            "destructive_warrant_bind(candidate);\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, rel, paired_body)
+            paired, _subcounts = ratchet.scan(root)
+            self.assertEqual(ratchet.pairing_errors(paired), [])
+
+            write(root, rel, "structural_candidate_apply(candidate);\n")
+            missing_warrant, _subcounts = ratchet.scan(root)
+            self.assertEqual(ratchet.growth_errors(missing_warrant, paired), [])
+            errors = ratchet.pairing_errors(missing_warrant)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("warrant_pairing", errors[0])
+            self.assertIn("destructive_warrant_bind 0x", errors[0])
+
+            write(root, rel, "destructive_warrant_bind(candidate);\n")
+            missing_structural, _subcounts = ratchet.scan(root)
+            self.assertEqual(ratchet.growth_errors(missing_structural, paired), [])
+            errors = ratchet.pairing_errors(missing_structural)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("structural_candidate_apply 0x", errors[0])
+
+    def test_stale_sweep_consumers_are_inside_the_warrant_pairing_gate(self) -> None:
+        rel = "src/services/stale_turn_reconciler.rs"
+        actual, _subcounts = ratchet.scan(ROOT)
+        self.assertEqual(actual["structural_candidate_apply"].get(rel), 1)
+        self.assertEqual(actual["destructive_warrant_bind"].get(rel), 1)
+        production = ratchet.RUST_LEXER._production_text(ROOT / rel)
+        dropped = production.replace(
+            "                destructive_warrant_bind(\n",
+            "                unpaired_warrant(\n",
+            1,
+        )
+        self.assertEqual(
+            len(ratchet.STRUCTURAL_CANDIDATE_PATTERN.findall(dropped)),
+            1,
+        )
+        self.assertEqual(
+            len(ratchet.DESTRUCTIVE_WARRANT_PATTERN.findall(dropped)),
+            0,
+        )
+        mutated = empty_counts()
+        mutated["structural_candidate_apply"] = {rel: 1}
+        errors = ratchet.pairing_errors(mutated)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("warrant_pairing", errors[0])
+        self.assertIn(rel, errors[0])
+
     def test_existing_file_growth_is_red_but_deletion_is_allowed(self) -> None:
         baseline = empty_counts()
         baseline["tmux_kill"] = {"src/a.rs": 2, "src/deleted.rs": 3}
@@ -303,6 +364,8 @@ fn probe() {
             self.assertEqual(actual["registry_remove"], {})
             self.assertEqual(actual["identity_fence_bind"], {})
             self.assertEqual(actual["delivery_fence_bind"], {})
+            self.assertEqual(actual["structural_candidate_apply"], {})
+            self.assertEqual(actual["destructive_warrant_bind"], {})
 
     def test_baseline_round_trip_preserves_per_file_counts_and_warning(self) -> None:
         counts = empty_counts()

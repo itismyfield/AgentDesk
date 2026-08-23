@@ -2539,6 +2539,7 @@ async fn probe_redrive_reattach_records_the_actual_relay_recovery_observation() 
         output_len,
     );
     state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
+    state.turn_nonce = token.turn_nonce().map(str::to_string);
     let stale_at = (chrono::Local::now() - chrono::Duration::minutes(30))
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
@@ -2550,6 +2551,16 @@ async fn probe_redrive_reattach_records_the_actual_relay_recovery_observation() 
         .last_heartbeat_ts_ms
         .store(0, std::sync::atomic::Ordering::Relaxed);
     shared.tmux_watchers.insert(channel, watcher);
+    let ledger_path = root_dir
+        .path()
+        .join("runtime")
+        .join("discord_reachability_ledger")
+        .join(provider.as_str())
+        .join(format!("{}.json", channel.get()));
+    std::fs::create_dir_all(ledger_path.parent().expect("ledger parent"))
+        .expect("create reachability ledger directory");
+    std::fs::write(&ledger_path, "{}")
+        .expect("seed present but unreadable reachability ledger operand");
 
     let before = axis_b_observation_report().counters;
     let response = auto_apply_relay_recovery_for_shared_at(
@@ -2567,7 +2578,7 @@ async fn probe_redrive_reattach_records_the_actual_relay_recovery_observation() 
     let count = |counters: &std::collections::BTreeMap<String, u64>| {
         counters
             .iter()
-            .filter(|(key, _)| key.starts_with("relay_recovery:"))
+            .filter(|(key, _)| key.starts_with("probe_auto_heal_reattach:"))
             .map(|(_, count)| count)
             .sum::<u64>()
     };
@@ -2582,7 +2593,7 @@ async fn probe_redrive_reattach_records_the_actual_relay_recovery_observation() 
     );
     assert!(
         count(&after) >= count(&before) + 1,
-        "ProbeAutoHeal ReattachWatcher must record axis-B at RelayRecovery"
+        "ProbeAutoHeal ReattachWatcher must record its automatic axis-B site"
     );
     assert!(!token.cancelled.load(Ordering::Relaxed));
 

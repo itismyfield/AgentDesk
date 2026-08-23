@@ -2591,7 +2591,7 @@ services::discord::health::recovery::stall_watchdog_auto_heal_tests::idle_tmux_s
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::idle_tmux_stale_turn_tail_recheck_preserves_mailbox_after_precheck_passed
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_capture_advance_has_defense_in_depth_suppression_pg
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::pre_backstop_flat_capture_pages_genuine_stall_pg
-services::discord::health::recovery::stall_watchdog_auto_heal_tests::reachability_verdict_does_not_change_the_shipped_watchdog_branch
+services::discord::health::recovery::stall_watchdog_auto_heal_tests::reachability_warrant_vetoes_transport_unknown_watchdog_branch
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::reuse_no_op_reattach_tick_still_skips_the_destructive_branches_5396
 services::discord::health::recovery::stall_watchdog_auto_heal_tests::stall_watchdog_cleanup_releases_residual_orphan_pending_token
 services::discord::health::recovery::stall_watchdog_pure_tests::chunk_ledger_growing_response_never_lowers_confirmed_prefix
@@ -2680,6 +2680,8 @@ services::discord::health::snapshot::tests::rebind_origin_idle_only_without_canc
 services::discord::health::snapshot::tests::relay_authority_observation_is_published_on_the_detail_build_only
 services::discord::health::snapshot::tests::relay_authority_rollout_is_published_on_the_detail_build_only
 services::discord::health::snapshot::tests::relay_verdict_probe_operands_preserve_process_start_and_pane_semantics
+services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::reachability_operand_uses_the_canonical_ledger_path
+services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_abstains_when_reachability_ledger_is_absent
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_records_row_vs_registry_identity_divergence
 services::discord::health::snapshot::tests::stale_ownerless_external_input_inflight_is_not_foreground_even_with_cancel_token
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_rejects_same_second_synthetic_successor_4181
@@ -4118,9 +4120,11 @@ services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_rest
 services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_same_watcher_emission_in_flight_is_not_confirmation_failure
 services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_same_watcher_without_emission_fails_at_deadline
 services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_spawn_confirm_requires_stable_heartbeat_advance
+services::discord::relay_recovery::axis_b_tests::automatic_reattach_sources_keep_transport_unknown_recovery_eligible
+services::discord::relay_recovery::axis_b_tests::automatic_warrant_wiring_is_pinned_at_the_four_direct_consumers
 services::discord::relay_recovery::axis_b_tests::axis_b_append_path_uses_the_framing_lock
-services::discord::relay_recovery::axis_b_tests::axis_b_apply_site_mapping_matches_the_six_site_taxonomy
-services::discord::relay_recovery::axis_b_tests::axis_b_emit_covers_all_six_sites_without_turn_scope
+services::discord::relay_recovery::axis_b_tests::axis_b_apply_site_mapping_separates_operator_and_automatic_taxonomy
+services::discord::relay_recovery::axis_b_tests::axis_b_emit_covers_all_sites_without_turn_scope
 services::discord::relay_recovery::axis_b_tests::axis_b_observer_runs_every_verdict_without_returning_authority
 services::discord::relay_recovery::axis_b_tests::axis_b_writer_frames_concurrent_records
 services::discord::relay_recovery::axis_b_tests::destructive_consumers_cannot_read_reachability_for_routing
@@ -4153,6 +4157,11 @@ services::discord::relay_recovery::cohort::tests::rollout_report_without_a_live_
 services::discord::relay_recovery::cohort::tests::shipped_defaults_admit_no_channel_to_the_relay_authority_cohort
 services::discord::relay_recovery::decision::reachability_authority_tests::foreground_stream_with_unreachable_relay_reports_without_acting
 services::discord::relay_recovery::decision::reachability_authority_tests::reachability_never_selects_or_enables_a_destructive_action
+services::discord::relay_recovery::destructive_warrant::tests::clear_orphan_pending_token_requires_the_same_episode_when_both_operands_exist
+services::discord::relay_recovery::destructive_warrant::tests::exact_episode_distinguishes_match_mismatch_and_missing_operands
+services::discord::relay_recovery::destructive_warrant::tests::pinned_adoption_only_relaxes_transport_unknown_reattach
+services::discord::relay_recovery::destructive_warrant::tests::truth_table_is_explicit_for_every_destructive_action_and_verdict
+services::discord::relay_recovery::destructive_warrant::tests::warrant_is_monotone_and_abstains_when_its_operand_is_absent
 services::discord::relay_recovery::leaked_row_sweep::tests::discord_row_is_sweep_candidate_without_pending_start
 services::discord::relay_recovery::leaked_row_sweep::tests::sweep_rejects_rows_without_channel_or_tmux_identity
 services::discord::relay_recovery::relay_recovery_circuit_alert_producer::tests::activate_unknown_status_fails_safe_without_reopen_pg
@@ -7550,6 +7559,7 @@ services::settings::tests::settings_write_response_serializes_ok_contract
 services::settings::tests::startup_pg_runtime_config_writer_keeps_blob_authority_without_mirror_reinsertion
 services::slo::avg_latency_tests::avg_latency_query_excludes_dispatch_noise_sources
 services::slo::avg_latency_tests::noisy_metrics_have_alerts_disabled
+services::stale_turn_reconciler::tests::automatic_sweep_abstains_without_registry_but_operator_stays_outside_warrant_pg
 services::stale_turn_reconciler::tests::keyed_reconcile_pg_never_idles_a_live_busy_session
 services::stale_turn_reconciler::tests::keyed_reconcile_pg_releases_busy_session_without_inflight
 services::stale_turn_reconciler::tests::keyed_unchanged_outcome_keeps_live_row_turn_active_pg

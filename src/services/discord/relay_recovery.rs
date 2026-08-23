@@ -70,6 +70,11 @@ pub(crate) mod cohort;
 mod completion_footer;
 #[path = "relay_recovery/decision.rs"]
 mod decision;
+#[path = "relay_recovery/destructive_warrant.rs"]
+mod destructive_warrant;
+pub(in crate::services::discord) use destructive_warrant::{
+    destructive_warrant_bind, structural_candidate_apply,
+};
 #[path = "relay_recovery/idle_tmux.rs"]
 mod idle_tmux;
 #[path = "relay_recovery_leaked_row_sweep.rs"]
@@ -134,34 +139,54 @@ pub(in crate::services::discord) struct AxisBObservationReport {
 
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::services::discord) enum AxisBSite {
-    RelayRecovery,
+pub(crate) enum AxisBSite {
+    OperatorRelayRecovery,
+    ProbeAutoHealReattach,
     WatchdogStaleIdle,
     WatchdogExplicitBackground,
     StaleTurnIntake,
     RelayDeadReattach,
     ProbeAutoHeal,
+    PolicyTickStaleSweep,
+    BootReconcileSweep,
 }
 
 #[cfg(unix)]
 impl AxisBSite {
-    const ALL: [Self; 6] = [
-        Self::RelayRecovery,
+    const AUTOMATIC: [Self; 8] = [
+        Self::ProbeAutoHealReattach,
         Self::WatchdogStaleIdle,
         Self::WatchdogExplicitBackground,
         Self::StaleTurnIntake,
         Self::RelayDeadReattach,
         Self::ProbeAutoHeal,
+        Self::PolicyTickStaleSweep,
+        Self::BootReconcileSweep,
     ];
 
-    fn as_str(self) -> &'static str {
+    const ALL: [Self; 9] = [
+        Self::OperatorRelayRecovery,
+        Self::ProbeAutoHealReattach,
+        Self::WatchdogStaleIdle,
+        Self::WatchdogExplicitBackground,
+        Self::StaleTurnIntake,
+        Self::RelayDeadReattach,
+        Self::ProbeAutoHeal,
+        Self::PolicyTickStaleSweep,
+        Self::BootReconcileSweep,
+    ];
+
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::RelayRecovery => "relay_recovery",
+            Self::OperatorRelayRecovery => "operator_relay_recovery",
+            Self::ProbeAutoHealReattach => "probe_auto_heal_reattach",
             Self::WatchdogStaleIdle => "watchdog_stale_idle",
             Self::WatchdogExplicitBackground => "watchdog_explicit_background",
             Self::StaleTurnIntake => "stale_turn_intake",
             Self::RelayDeadReattach => "relay_dead_reattach",
             Self::ProbeAutoHeal => "probe_auto_heal",
+            Self::PolicyTickStaleSweep => "policy_tick_stale_sweep",
+            Self::BootReconcileSweep => "boot_reconcile_sweep",
         }
     }
 }
@@ -176,14 +201,38 @@ fn axis_b_site_for_apply(
             Some(AxisBSite::RelayDeadReattach)
         }
         (RelayRecoveryApplySource::ProbeAutoHeal, RelayRecoveryActionKind::ReattachWatcher) => {
-            Some(AxisBSite::RelayRecovery)
+            Some(AxisBSite::ProbeAutoHealReattach)
         }
         (
-            RelayRecoveryApplySource::ProbeAutoHeal | RelayRecoveryApplySource::StallWatchdog,
-            RelayRecoveryActionKind::ClearOrphanPendingToken,
+            RelayRecoveryApplySource::ProbeAutoHeal,
+            RelayRecoveryActionKind::ClearOrphanPendingToken
+            | RelayRecoveryActionKind::ClearStaleThreadProof
+            | RelayRecoveryActionKind::DrainPendingQueue,
         ) => Some(AxisBSite::ProbeAutoHeal),
+        (
+            RelayRecoveryApplySource::StallWatchdog,
+            RelayRecoveryActionKind::ClearOrphanPendingToken,
+        ) => Some(AxisBSite::WatchdogExplicitBackground),
+        (
+            RelayRecoveryApplySource::StallWatchdog,
+            RelayRecoveryActionKind::ClearStaleThreadProof,
+        ) => Some(AxisBSite::WatchdogStaleIdle),
         _ => None,
     }
+}
+
+/// Whether this automatic apply can reach the pinned rebind branch.
+///
+/// Both automatic reattach sources reserve the current episode before apply.
+/// Reservation failure returns before apply, while a successful reservation
+/// supplies the episode that excludes the unpinned legacy retirement arms in
+/// `relay_recovery::apply`. Source labels do not select the apply branch.
+#[cfg(unix)]
+fn pinned_adoption_for_apply(
+    source: RelayRecoveryApplySource,
+    action: RelayRecoveryActionKind,
+) -> bool {
+    circuit_breaker::should_use_durable_circuit(action, source)
 }
 
 #[cfg(unix)]
@@ -550,7 +599,7 @@ pub(in crate::services::discord) async fn run_relay_recovery(
         &shared,
         &provider,
         &snapshot,
-        AxisBSite::RelayRecovery,
+        AxisBSite::OperatorRelayRecovery,
         decision.action,
         decision.auto_heal.eligible,
         chrono::Utc::now().timestamp_millis(),
@@ -564,6 +613,61 @@ pub(in crate::services::discord) async fn run_relay_recovery(
         RelayRecoveryApplySource::Manual,
     )
     .await)
+}
+
+pub(crate) async fn automatic_stale_sweep_warrants(
+    registry: Option<&HealthRegistry>,
+    session_key: &str,
+    provider_name: &str,
+    site: AxisBSite,
+) -> bool {
+    let structural_candidate_apply = destructive_warrant::structural_candidate_apply(true);
+    let Some(registry) = registry else {
+        return structural_candidate_apply;
+    };
+    let Some(identity) = super::session_identity::SessionIdentity::parse(session_key) else {
+        return structural_candidate_apply;
+    };
+    let Some(provider) = ProviderKind::from_str(provider_name) else {
+        return structural_candidate_apply;
+    };
+    let Some((identity_provider, channel)) = identity.provider_and_channel() else {
+        return structural_candidate_apply;
+    };
+    let Ok(channel_id) = channel.parse::<u64>() else {
+        return structural_candidate_apply;
+    };
+    if identity_provider != provider {
+        return structural_candidate_apply;
+    }
+    let Some(snapshot) = registry
+        .snapshot_watcher_state_for_provider(&provider, channel_id)
+        .await
+    else {
+        return structural_candidate_apply;
+    };
+    if let Some(shared) = registry
+        .shared_for_provider_on_channel(&provider, ChannelId::new(channel_id))
+        .await
+    {
+        observe_axis_b_candidate(
+            &shared,
+            &provider,
+            &snapshot,
+            site,
+            RelayRecoveryActionKind::ClearStaleThreadProof,
+            structural_candidate_apply,
+            chrono::Utc::now().timestamp_millis(),
+        );
+    }
+    let destructive_warrant_bind = destructive_warrant::destructive_warrant_bind(
+        structural_candidate_apply,
+        RelayRecoveryActionKind::ClearStaleThreadProof,
+        &provider,
+        Some(&snapshot),
+        false,
+    );
+    destructive_warrant_bind.eligible
 }
 
 async fn resolve_recovery_shared(
@@ -664,16 +768,39 @@ async fn auto_apply_relay_recovery_for_shared_at(
     decision.affected.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
     trace_relay_recovery_decision(&decision, true);
     #[cfg(unix)]
-    if let Some(site) = axis_b_site_for_apply(source, allowed_action) {
-        observe_axis_b_candidate(
-            &shared,
-            provider,
-            &snapshot,
-            site,
-            decision.action,
-            decision.auto_heal.eligible,
-            chrono::Utc::now().timestamp_millis(),
-        );
+    if decision.action.is_destructive() {
+        if let Some(site) = axis_b_site_for_apply(source, decision.action) {
+            observe_axis_b_candidate(
+                &shared,
+                provider,
+                &snapshot,
+                site,
+                decision.action,
+                decision.auto_heal.eligible,
+                chrono::Utc::now().timestamp_millis(),
+            );
+            let structural_candidate_apply =
+                destructive_warrant::structural_candidate_apply(decision.auto_heal.eligible);
+            let destructive_warrant_bind = destructive_warrant::destructive_warrant_bind(
+                structural_candidate_apply,
+                decision.action,
+                provider,
+                Some(&snapshot),
+                pinned_adoption_for_apply(source, decision.action),
+            );
+            decision.auto_heal.eligible = destructive_warrant_bind.eligible;
+            if let Some(reason) = destructive_warrant_bind.skipped_reason {
+                decision.auto_heal.skipped_reason = Some(reason);
+            }
+        } else if source != RelayRecoveryApplySource::Manual {
+            // This is a closed-taxonomy programming error, not a missing warrant
+            // operand. Every shipped automatic source/action pair maps above;
+            // an unmapped future pair must stop before mutation until it chooses
+            // an explicit site. Missing snapshot or ledger evidence still
+            // abstains inside `destructive_warrant_bind`.
+            decision.auto_heal.eligible = false;
+            decision.auto_heal.skipped_reason = Some("axis_b_warrant_site_unmapped");
+        }
     }
 
     if decision.action != allowed_action {
@@ -799,7 +926,9 @@ fn trace_relay_recovery_skipped(
 mod axis_b_tests {
     use super::*;
 
-    fn quiet_snapshot(channel_id: u64) -> health::WatcherStateSnapshot {
+    pub(super) fn quiet_snapshot_for_warrant_tests(
+        channel_id: u64,
+    ) -> health::WatcherStateSnapshot {
         health::WatcherStateSnapshot {
             provider: "codex".to_string(),
             attached: false,
@@ -938,15 +1067,15 @@ mod axis_b_tests {
             "relay recovery may not acquire a new global side channel"
         );
 
-        for (source, allowed_observer_calls, fixture_observations, fixture_verdicts) in [
-            (include_str!("health/recovery.rs"), 2, 1, 3),
+        for (source, allowed_warrant_binds, fixture_observations, fixture_verdicts) in [
+            (include_str!("health/recovery.rs"), 0, 1, 3),
             (
                 include_str!("health/recovery/watchdog_decisions.rs"),
-                2,
+                1,
                 0,
                 0,
             ),
-            (include_str!("router/intake_gate/stale_turn.rs"), 4, 3, 1),
+            (include_str!("router/intake_gate/stale_turn.rs"), 1, 3, 1),
             (include_str!("health/relay_auto_heal.rs"), 0, 1, 0),
             (include_str!("health/relay_dead_reattach.rs"), 0, 1, 0),
             (include_str!("relay_recovery/apply.rs"), 0, 0, 0),
@@ -976,21 +1105,17 @@ mod axis_b_tests {
                     "a destructive consumer must not depend on axis-B observation via {forbidden}"
                 );
             }
-            let observer_calls = source.matches("observe_watchdog_axis_b(").count()
-                + source.matches("observe_stale_turn_axis_b(").count()
-                + source.matches("observe_axis_b_candidate(").count();
             assert_eq!(
-                observer_calls, allowed_observer_calls,
-                "observer call sites must remain standalone statements with no routing dependency"
+                source.matches("structural_candidate_apply(").count(),
+                allowed_warrant_binds,
+                "each automatic destructive binding must mark its structural candidate"
             );
-            for routed in [
-                "if observe_watchdog_axis_b",
-                "if observe_stale_turn_axis_b",
-                "if observe_axis_b_candidate",
-                "= observe_watchdog_axis_b",
-                "= observe_stale_turn_axis_b",
-                "= observe_axis_b_candidate",
-            ] {
+            assert_eq!(
+                source.matches("destructive_warrant_bind(").count(),
+                allowed_warrant_binds,
+                "each marked structural candidate must bind the S6a warrant"
+            );
+            for routed in ["if observe_axis_b_candidate", "= observe_axis_b_candidate"] {
                 assert!(
                     !source.contains(routed),
                     "observer result routed via {routed}"
@@ -1021,7 +1146,38 @@ mod axis_b_tests {
     }
 
     #[test]
-    fn axis_b_apply_site_mapping_matches_the_six_site_taxonomy() {
+    fn automatic_warrant_wiring_is_pinned_at_the_four_direct_consumers() {
+        for (source, needle) in [
+            (
+                include_str!("health/recovery.rs"),
+                "AxisBSite::WatchdogStaleIdle",
+            ),
+            (
+                include_str!("health/recovery.rs"),
+                "AxisBSite::WatchdogExplicitBackground",
+            ),
+            (
+                include_str!("router/intake_gate/stale_turn.rs"),
+                "if !stale_turn_axis_b_warrants(shared, provider, &proof)",
+            ),
+            (
+                include_str!("../../server/mod.rs"),
+                "AxisBSite::PolicyTickStaleSweep",
+            ),
+            (
+                include_str!("../../reconcile.rs"),
+                "AxisBSite::BootReconcileSweep",
+            ),
+        ] {
+            assert!(
+                source.contains(needle),
+                "automatic warrant wiring missing: {needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn axis_b_apply_site_mapping_separates_operator_and_automatic_taxonomy() {
         assert_eq!(
             axis_b_site_for_apply(
                 RelayRecoveryApplySource::StallWatchdog,
@@ -1029,23 +1185,70 @@ mod axis_b_tests {
             ),
             Some(AxisBSite::RelayDeadReattach)
         );
-        for source in [
-            RelayRecoveryApplySource::ProbeAutoHeal,
-            RelayRecoveryApplySource::StallWatchdog,
-        ] {
-            assert_eq!(
-                axis_b_site_for_apply(source, RelayRecoveryActionKind::ClearOrphanPendingToken,),
-                Some(AxisBSite::ProbeAutoHeal)
-            );
-        }
+        assert_eq!(
+            axis_b_site_for_apply(
+                RelayRecoveryApplySource::ProbeAutoHeal,
+                RelayRecoveryActionKind::ClearOrphanPendingToken,
+            ),
+            Some(AxisBSite::ProbeAutoHeal)
+        );
+        assert_eq!(
+            axis_b_site_for_apply(
+                RelayRecoveryApplySource::StallWatchdog,
+                RelayRecoveryActionKind::ClearOrphanPendingToken,
+            ),
+            Some(AxisBSite::WatchdogExplicitBackground)
+        );
+        assert_eq!(
+            axis_b_site_for_apply(
+                RelayRecoveryApplySource::StallWatchdog,
+                RelayRecoveryActionKind::ClearStaleThreadProof,
+            ),
+            Some(AxisBSite::WatchdogStaleIdle)
+        );
+        assert_eq!(
+            axis_b_site_for_apply(
+                RelayRecoveryApplySource::StallWatchdog,
+                RelayRecoveryActionKind::DrainPendingQueue,
+            ),
+            None,
+            "the stall-watchdog apply surface has no pending-queue drain lane"
+        );
         assert_eq!(
             axis_b_site_for_apply(
                 RelayRecoveryApplySource::ProbeAutoHeal,
                 RelayRecoveryActionKind::ReattachWatcher,
             ),
-            Some(AxisBSite::RelayRecovery),
+            Some(AxisBSite::ProbeAutoHealReattach),
             "redrive reattach is a plan_relay_recovery consumer in design §3.4"
         );
+        for action in [
+            RelayRecoveryActionKind::ClearStaleThreadProof,
+            RelayRecoveryActionKind::DrainPendingQueue,
+        ] {
+            assert_eq!(
+                axis_b_site_for_apply(RelayRecoveryApplySource::ProbeAutoHeal, action),
+                Some(AxisBSite::ProbeAutoHeal),
+                "every composed-planner destructive action must map to a warrant site"
+            );
+        }
+        for source in [
+            RelayRecoveryApplySource::ProbeAutoHeal,
+            RelayRecoveryApplySource::StallWatchdog,
+        ] {
+            assert!(pinned_adoption_for_apply(
+                source,
+                RelayRecoveryActionKind::ReattachWatcher,
+            ));
+            assert!(!pinned_adoption_for_apply(
+                source,
+                RelayRecoveryActionKind::ClearOrphanPendingToken,
+            ));
+        }
+        assert!(!pinned_adoption_for_apply(
+            RelayRecoveryApplySource::Manual,
+            RelayRecoveryActionKind::ReattachWatcher,
+        ));
     }
 
     fn every_verdict() -> Vec<health::reachability::verdict::ReachabilityVerdict> {
@@ -1101,6 +1304,46 @@ mod axis_b_tests {
     }
 
     #[test]
+    fn automatic_reattach_sources_keep_transport_unknown_recovery_eligible() {
+        use health::reachability::verdict::{ReachabilityVerdict, TransportUnknownEvidence};
+
+        let temp = tempfile::tempdir().expect("axis-B temp root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let provider = ProviderKind::Codex;
+        let mut snapshot = quiet_snapshot_for_warrant_tests(54_643);
+        snapshot.reachability_observation = Some((
+            ReachabilityVerdict::TransportUnknown {
+                since_secs: 700,
+                evidence: TransportUnknownEvidence::UnreleasedDeliveryLease,
+            },
+            900,
+        ));
+
+        for source in [
+            RelayRecoveryApplySource::ProbeAutoHeal,
+            RelayRecoveryApplySource::StallWatchdog,
+        ] {
+            let pinned_adoption =
+                pinned_adoption_for_apply(source, RelayRecoveryActionKind::ReattachWatcher);
+            assert!(
+                pinned_adoption,
+                "automatic reattach source {source:?} must derive pinned adoption from its durable episode reservation"
+            );
+            assert!(
+                destructive_warrant::destructive_warrant_bind(
+                    true,
+                    RelayRecoveryActionKind::ReattachWatcher,
+                    &provider,
+                    Some(&snapshot),
+                    pinned_adoption,
+                )
+                .eligible,
+                "TransportUnknown must not stop {source:?} pinned reattach recovery"
+            );
+        }
+    }
+
+    #[test]
     fn axis_b_observer_runs_every_verdict_without_returning_authority() {
         let temp = tempfile::tempdir().expect("axis-B temp root");
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
@@ -1108,24 +1351,24 @@ mod axis_b_tests {
         let before = axis_b_observation_report().counters;
         let shipped_outcomes = [
             (
-                AxisBSite::RelayRecovery,
-                RelayRecoveryActionKind::ObserveOnly,
-                false,
+                AxisBSite::ProbeAutoHealReattach,
+                RelayRecoveryActionKind::ReattachWatcher,
+                true,
             ),
             (
                 AxisBSite::WatchdogStaleIdle,
                 RelayRecoveryActionKind::ClearStaleThreadProof,
-                true,
+                false,
             ),
             (
                 AxisBSite::WatchdogExplicitBackground,
                 RelayRecoveryActionKind::ClearOrphanPendingToken,
-                true,
+                false,
             ),
             (
                 AxisBSite::StaleTurnIntake,
                 RelayRecoveryActionKind::ClearStaleThreadProof,
-                true,
+                false,
             ),
             (
                 AxisBSite::RelayDeadReattach,
@@ -1135,33 +1378,57 @@ mod axis_b_tests {
             (
                 AxisBSite::ProbeAutoHeal,
                 RelayRecoveryActionKind::ClearOrphanPendingToken,
-                true,
+                false,
+            ),
+            (
+                AxisBSite::PolicyTickStaleSweep,
+                RelayRecoveryActionKind::ClearStaleThreadProof,
+                false,
+            ),
+            (
+                AxisBSite::BootReconcileSweep,
+                RelayRecoveryActionKind::ClearStaleThreadProof,
+                false,
             ),
         ];
-        for (site, structural_action, structural_eligible) in shipped_outcomes {
+        for (site, action, pinned_adoption) in shipped_outcomes {
             for verdict in every_verdict() {
-                let mut snapshot = quiet_snapshot(54_641);
+                let expected = match verdict {
+                    health::reachability::verdict::ReachabilityVerdict::Reachable => true,
+                    health::reachability::verdict::ReachabilityVerdict::TransportUnknown {
+                        ..
+                    } => action == RelayRecoveryActionKind::ReattachWatcher && pinned_adoption,
+                    _ => true,
+                };
+                let mut snapshot = quiet_snapshot_for_warrant_tests(54_641);
                 snapshot.reachability_observation = Some((verdict, 900));
-                let observer_result = observe_axis_b_candidate_with_dial(
+                observe_axis_b_candidate_with_dial(
                     &shared,
                     &ProviderKind::Codex,
                     &snapshot,
                     site,
-                    structural_action,
-                    structural_eligible,
+                    action,
+                    true,
                     1_000,
                     (RelayAuthorityMode::Observe, 100),
                 );
                 assert_eq!(
-                    observer_result,
-                    (),
-                    "axis-B observer must not return authority for {}",
+                    destructive_warrant::destructive_warrant_bind(
+                        true,
+                        action,
+                        &ProviderKind::Codex,
+                        Some(&snapshot),
+                        pinned_adoption,
+                    )
+                    .eligible,
+                    expected,
+                    "shipped warrant outcome mismatch for {}",
                     site.as_str()
                 );
             }
         }
         let after = axis_b_observation_report().counters;
-        for site in AxisBSite::ALL {
+        for site in AxisBSite::AUTOMATIC {
             let observed: u64 = after
                 .iter()
                 .filter(|(key, _)| key.starts_with(&format!("{}:", site.as_str())))
@@ -1253,11 +1520,11 @@ mod axis_b_tests {
     }
 
     #[test]
-    fn axis_b_emit_covers_all_six_sites_without_turn_scope() {
+    fn axis_b_emit_covers_all_sites_without_turn_scope() {
         let temp = tempfile::tempdir().expect("axis-B temp root");
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
         let shared = super::super::make_shared_data_for_tests();
-        let snapshot = quiet_snapshot(54_640);
+        let snapshot = quiet_snapshot_for_warrant_tests(54_640);
         for site in AxisBSite::ALL {
             record_axis_b(
                 AxisBRecord {

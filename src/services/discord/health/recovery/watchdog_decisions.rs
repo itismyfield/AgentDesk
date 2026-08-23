@@ -285,29 +285,42 @@ pub(crate) fn stall_watchdog_should_force_clean_orphan_explicit_background_work(
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
 }
 
-/// Observe the two watchdog consumers after every shipped structural guard has
-/// passed. Returning `()` makes the ledger incapable of changing that guard.
+/// Bind the two watchdog structural candidates to the axis-B warrant. The
+/// helper only preserves or lowers `structural_candidate_apply`.
 #[cfg(unix)]
-pub(crate) fn observe_watchdog_axis_b(
+pub(crate) fn watchdog_axis_b_warrants(
     shared: &SharedData,
     provider: &ProviderKind,
     snapshot: &WatcherStateSnapshot,
     site: AxisBSite,
-) {
-    let action = match site {
-        AxisBSite::WatchdogStaleIdle => RelayRecoveryActionKind::ClearStaleThreadProof,
-        AxisBSite::WatchdogExplicitBackground => RelayRecoveryActionKind::ClearOrphanPendingToken,
-        _ => return,
+) -> bool {
+    let Some(action) = (match site {
+        AxisBSite::WatchdogStaleIdle => Some(RelayRecoveryActionKind::ClearStaleThreadProof),
+        AxisBSite::WatchdogExplicitBackground => {
+            Some(RelayRecoveryActionKind::ClearOrphanPendingToken)
+        }
+        _ => None,
+    }) else {
+        return true;
     };
+    let structural_candidate_apply = relay_recovery::structural_candidate_apply(true);
     relay_recovery::observe_axis_b_candidate(
         shared,
         provider,
         snapshot,
         site,
         action,
-        true,
+        structural_candidate_apply,
         chrono::Utc::now().timestamp_millis(),
     );
+    let destructive_warrant_bind = relay_recovery::destructive_warrant_bind(
+        structural_candidate_apply,
+        action,
+        provider,
+        Some(snapshot),
+        false,
+    );
+    destructive_warrant_bind.eligible
 }
 
 /// Watchdog tick interval. Picked to converge inside ~1 cycle once the
