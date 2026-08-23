@@ -1,6 +1,5 @@
 use crate::services::discord::health::snapshot::WatcherStateSnapshot;
 use crate::services::discord::relay_health::{RelayActiveTurn, RelayStallState};
-#[cfg(unix)]
 use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::discord::relay_recovery::{self, RelayRecoveryActionKind};
 use crate::services::discord::{self as discord, SharedData};
@@ -283,6 +282,20 @@ pub(crate) fn stall_watchdog_should_force_clean_orphan_explicit_background_work(
     };
     let age_secs = now_unix_secs.saturating_sub(updated_at_unix);
     age_secs >= 0 && (age_secs as u64) >= threshold_secs
+}
+
+/// Non-unix builds have no tmux reachability evidence source: every warrant
+/// operand is absent, so the warrant abstains and the structural watchdog
+/// predicate alone decides (absence of evidence never manufactures a veto).
+#[cfg(not(unix))]
+pub(crate) fn watchdog_axis_b_warrants(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    snapshot: &WatcherStateSnapshot,
+    site: AxisBSite,
+) -> bool {
+    let _ = (shared, provider, snapshot, site);
+    true
 }
 
 /// Bind the two watchdog structural candidates to the axis-B warrant. The
