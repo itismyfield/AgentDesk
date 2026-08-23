@@ -70,8 +70,10 @@ pub(crate) mod cohort;
 mod completion_footer;
 #[path = "relay_recovery/decision.rs"]
 mod decision;
+#[cfg(unix)]
 #[path = "relay_recovery/destructive_warrant.rs"]
 mod destructive_warrant;
+#[cfg(unix)]
 pub(in crate::services::discord) use destructive_warrant::{
     destructive_warrant_bind, structural_candidate_apply,
 };
@@ -137,7 +139,10 @@ pub(in crate::services::discord) struct AxisBObservationReport {
     write_failures: u64,
 }
 
-#[cfg(unix)]
+// The site label itself is platform-neutral data: non-unix consumers (the
+// stale-turn reconciler entry points) name a site even though the evidence
+// machinery behind it is unix-only.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AxisBSite {
     OperatorRelayRecovery,
@@ -615,6 +620,21 @@ pub(in crate::services::discord) async fn run_relay_recovery(
     .await)
 }
 
+#[cfg(not(unix))]
+pub(crate) async fn automatic_stale_sweep_warrants(
+    registry: Option<&HealthRegistry>,
+    session_key: &str,
+    provider_name: &str,
+    site: AxisBSite,
+) -> bool {
+    // Non-unix builds have no tmux reachability evidence source, so every
+    // warrant operand is absent: the warrant abstains and the structural
+    // candidate is preserved (absence of evidence never manufactures a veto).
+    let _ = (registry, session_key, provider_name, site);
+    true
+}
+
+#[cfg(unix)]
 pub(crate) async fn automatic_stale_sweep_warrants(
     registry: Option<&HealthRegistry>,
     session_key: &str,

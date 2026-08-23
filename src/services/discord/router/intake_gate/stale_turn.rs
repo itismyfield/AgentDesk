@@ -41,6 +41,24 @@ struct StaleActiveTurnProof {
     snapshot: crate::services::discord::health::WatcherStateSnapshot,
 }
 
+/// Non-unix builds have no tmux reachability evidence source: every warrant
+/// operand is absent, so the warrant abstains and the structural
+/// classification alone decides (the pre-warrant behavior of both stale-turn
+/// release paths).
+#[cfg(not(unix))]
+fn stale_turn_axis_b_warrants(
+    shared: &std::sync::Arc<SharedData>,
+    provider: &ProviderKind,
+    proof: &StaleActiveTurnProof,
+) -> bool {
+    let _ = (shared, provider);
+    matches!(
+        proof.classification,
+        StaleActiveTurnProofClassification::RelayStalled
+            | StaleActiveTurnProofClassification::QueueBlockedOrphan
+    )
+}
+
 #[cfg(unix)]
 fn stale_turn_axis_b_warrants(
     shared: &std::sync::Arc<SharedData>,
