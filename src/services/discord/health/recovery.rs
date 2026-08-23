@@ -7,7 +7,6 @@ use serde::Serialize;
 use serenity::{ChannelId, MessageId};
 
 use crate::services::discord::inflight::opt_message_id;
-#[cfg(unix)]
 use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::discord::session_identity::tmux_name_from_session_key;
 use crate::services::discord::turn_view_reconciler::note_intake_turn_cleared_via_shared as tv_clear;
@@ -37,7 +36,6 @@ use leak_recovery_ledger::{
     leak_recovery_record_confirmed_chunk, leak_recovery_unrelayed_range,
     render_leak_recovery_delivery,
 };
-#[cfg(unix)]
 pub(crate) use watchdog_decisions::watchdog_axis_b_warrants;
 pub(crate) use watchdog_decisions::{
     STALL_WATCHDOG_INITIAL_DELAY_SECS, STALL_WATCHDOG_INTERVAL_SECS,
