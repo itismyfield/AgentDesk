@@ -69,6 +69,7 @@ EXPECTED_TEST_NON_PG_COMMANDS = (
     "cargo test --lib server::claude_oauth_usage_tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib tui_task_card::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib server::routes::message_outbox::tests -- --skip _pg --skip pg_ --skip postgres",
+    "cargo test --lib services::discord::turn_bridge::headless_delivery",
     "cargo test --lib services::dispatches::outbox_claiming::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib services::dispatches::discord_delivery::guard::tests -- --skip _pg --skip pg_ --skip postgres",
     "cargo test --lib discord_thread_create -- --test-threads=1",

@@ -51,6 +51,7 @@ mod queue_retry_silence;
 mod recovery_retry;
 
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
+
 pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
     state: TerminalOutcomeDeliveryState,
@@ -721,8 +722,9 @@ pub(super) async fn run_terminal_outcome_delivery(
                             cancel_token: Some(cancel_token.as_ref()),
                         },
                     );
-                match enqueue_headless_delivery(delivery_arguments).await {
-                    Ok(()) => {
+                let delivery_outcome = enqueue_headless_delivery(delivery_arguments).await;
+                match super::headless_delivery::headless_delivery_disposition(&delivery_outcome) {
+                    super::headless_delivery::HeadlessDeliveryDisposition::Commit => {
                         cleanup_headless_streaming_placeholder_after_delivery(
                             shared_owned.as_ref(),
                             channel_id,
@@ -738,15 +740,20 @@ pub(super) async fn run_terminal_outcome_delivery(
                             completion_footer_terminal_text = Some(delivery_response.clone());
                         }
                     }
-                    Err(error) => {
+                    super::headless_delivery::HeadlessDeliveryDisposition::PreserveForRetry {
+                        surfaced_error,
+                    } => {
+                        super::headless_delivery::preserve_ambiguous_headless_delivery_for_retry(
+                            &mut preserve_inflight_for_cleanup_retry,
+                        );
+                        let surfaced_error = surfaced_error.unwrap_or("no outbox row returned");
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         tracing::warn!(
-                            "  [{ts}] ⚠ headless delivery enqueue failed for channel {}: {} — preserving inflight for retry (full_response not yet delivered)",
+                            "  [{ts}] ⚠ headless delivery remained ambiguous for channel {}: {} — preserving inflight for retry (full_response not yet delivered)",
                             channel_id,
-                            error
+                            surfaced_error
                         );
-                        // Symmetric with the can_chain_locally failure arm: the answer was NOT delivered (enqueue failed) → do NOT let finalization clear inflight (it is the only persisted full_response). Preserving routes disposition through save_inflight_state so recovery can re-deliver.
-                        preserve_inflight_for_cleanup_retry = true;
+                        // Symmetric with the can_chain_locally failure arm: the answer was NOT confirmed delivered → do NOT let finalization clear inflight (it is the only persisted full_response). Preserving routes disposition through save_inflight_state so recovery can re-deliver.
                     }
                 }
             }

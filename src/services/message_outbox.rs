@@ -88,6 +88,20 @@ impl From<sqlx::Error> for OutboxEnqueueError {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutboxEnqueueOutcome {
+    Enqueued { id: i64 },
+    Cancelled,
+    NoRow,
+}
+
+pub(crate) fn fold_outbox_outcome_to_legacy_id(outcome: OutboxEnqueueOutcome) -> Option<i64> {
+    match outcome {
+        OutboxEnqueueOutcome::Enqueued { id } => Some(id),
+        OutboxEnqueueOutcome::Cancelled | OutboxEnqueueOutcome::NoRow => None,
+    }
+}
+
 pub(crate) fn validate_outbox_source(source: &str) -> Result<(), OutboxEnqueueError> {
     crate::services::discord::outbound::source_registry::validate_send_source_for(
         source,
@@ -613,12 +627,12 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx(
     .map_err(Into::into)
 }
 
-pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
+pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_ttl_and_cancel(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_ttl_secs: i64,
     cancel_token: Option<&CancelToken>,
-) -> Result<Option<i64>, OutboxEnqueueError> {
+) -> Result<OutboxEnqueueOutcome, OutboxEnqueueError> {
     validate_outbox_source(message.source)?;
     let reason_code = normalized_reason_code(message.reason_code);
     let session_key = normalized_session_key(message.target, message.session_key);
@@ -646,7 +660,7 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
             dedupe_ttl_secs,
             "suppressed duplicate outbox message"
         );
-        return Ok(None);
+        return Ok(OutboxEnqueueOutcome::NoRow);
     }
 
     if cancel_requested(cancel_token) {
@@ -658,24 +672,42 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
             session_key = session_key.as_deref(),
             "skipped outbox enqueue after turn cancellation"
         );
-        return Ok(None);
+        return Ok(OutboxEnqueueOutcome::Cancelled);
     }
 
     let mut tx = pool.begin().await?;
     let outbox_id = enqueue_outbox_pg_on_tx_with_ttl(&mut tx, message, dedupe_ttl_secs).await?;
     tx.commit().await?;
 
-    if outbox_id.is_none() {
-        tracing::info!(
-            target = message.target,
-            reason_code,
-            session_key = session_key.as_deref(),
-            dedupe_ttl_secs,
-            "suppressed duplicate outbox message by database dedupe key"
-        );
+    match outbox_id {
+        Some(id) => Ok(OutboxEnqueueOutcome::Enqueued { id }),
+        None => {
+            tracing::info!(
+                target = message.target,
+                reason_code,
+                session_key = session_key.as_deref(),
+                dedupe_ttl_secs,
+                "suppressed duplicate outbox message by database dedupe key"
+            );
+            Ok(OutboxEnqueueOutcome::NoRow)
+        }
     }
+}
 
-    Ok(outbox_id)
+pub(crate) async fn enqueue_outbox_pg_returning_id_with_ttl_and_cancel(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+    dedupe_ttl_secs: i64,
+    cancel_token: Option<&CancelToken>,
+) -> Result<Option<i64>, OutboxEnqueueError> {
+    enqueue_outbox_pg_returning_outcome_with_ttl_and_cancel(
+        pool,
+        message,
+        dedupe_ttl_secs,
+        cancel_token,
+    )
+    .await
+    .map(fold_outbox_outcome_to_legacy_id)
 }
 
 /// Validated deduplicating insert for callers that must atomically commit an
@@ -1022,6 +1054,53 @@ pub(crate) async fn enqueue_lifecycle_notification_pg(
 #[cfg(test)]
 mod postgres_source_contract_tests {
     use super::*;
+
+    fn headless_message() -> OutboxMessage<'static> {
+        OutboxMessage {
+            target: "channel:5191",
+            content: "terminal answer",
+            bot: "claude",
+            source: "headless_turn",
+            reason_code: Some("headless.delivery"),
+            session_key: Some("issue-5191"),
+        }
+    }
+
+    #[test]
+    fn typed_outbox_outcomes_fold_to_the_legacy_option_contract() {
+        assert_eq!(
+            fold_outbox_outcome_to_legacy_id(OutboxEnqueueOutcome::Enqueued { id: 5191 }),
+            Some(5191)
+        );
+        assert_eq!(
+            fold_outbox_outcome_to_legacy_id(OutboxEnqueueOutcome::Cancelled),
+            None
+        );
+        assert_eq!(
+            fold_outbox_outcome_to_legacy_id(OutboxEnqueueOutcome::NoRow),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_outbox_core_preserves_cancel_at_the_observation_site() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://127.0.0.1:1/agentdesk_cancel_must_not_connect")
+            .expect("lazy postgres pool");
+        let cancel_token = CancelToken::new();
+        cancel_token.publish_cancel("issue-5191-test");
+
+        let outcome = enqueue_outbox_pg_returning_outcome_with_ttl_and_cancel(
+            &pool,
+            headless_message(),
+            0,
+            Some(&cancel_token),
+        )
+        .await
+        .expect("a pre-cancelled TTL-zero enqueue must not touch postgres");
+
+        assert_eq!(outcome, OutboxEnqueueOutcome::Cancelled);
+    }
 
     async fn row_count(pool: &PgPool) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
