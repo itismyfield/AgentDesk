@@ -66,6 +66,7 @@ pub(super) fn reconcile_saved_exit_candidate(
         watcher_owner_channel_id: &mut *state.watcher_owner_channel_id,
         watcher_owns_assistant_relay: &mut *state.watcher_owns_assistant_relay,
         watcher_relay_available_for_turn: &mut *state.watcher_relay_available_for_turn,
+        watcher_delivery_pin: &mut *state.watcher_delivery_pin,
         standby_relay_owns_output: &mut *state.standby_relay_owns_output,
         status_panel_msg_id: &mut *state.status_panel_msg_id,
         status_panel_generation: &mut *state.status_panel_generation,

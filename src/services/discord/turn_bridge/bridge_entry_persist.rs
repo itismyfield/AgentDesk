@@ -19,9 +19,27 @@ pub(super) struct BridgeEntryRuntimeState<'a> {
     pub(super) watcher_owner_channel_id: &'a mut ChannelId,
     pub(super) watcher_owns_assistant_relay: &'a mut bool,
     pub(super) watcher_relay_available_for_turn: &'a mut bool,
+    pub(super) watcher_delivery_pin: &'a mut Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) standby_relay_owns_output: &'a mut bool,
     pub(super) status_panel_msg_id: &'a mut Option<MessageId>,
     pub(super) status_panel_generation: &'a mut u64,
+}
+
+struct LiveWatcherRelayObservation {
+    turn_delivered: Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn live_watcher_relay_observation(
+    shared: &SharedData,
+    owner_channel_id: ChannelId,
+) -> Option<LiveWatcherRelayObservation> {
+    let watcher = shared.tmux_watchers.get(&owner_channel_id)?;
+    if watcher.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    Some(LiveWatcherRelayObservation {
+        turn_delivered: Arc::clone(&watcher.turn_delivered),
+    })
 }
 
 fn relay_owner_flags(
@@ -120,16 +138,22 @@ pub(super) fn reconcile_runtime_locals_from_inflight_state(
         state.inflight_state.watcher_owner_channel_id,
         state.inflight_state.channel_id,
     );
-    let watcher_registered =
-        live_watcher_registered_for_relay(shared, *state.watcher_owner_channel_id);
+    let watcher = live_watcher_relay_observation(shared, *state.watcher_owner_channel_id);
     (
         *state.watcher_owns_assistant_relay,
         *state.watcher_relay_available_for_turn,
         *state.standby_relay_owns_output,
     ) = relay_owner_flags(
         state.inflight_state.effective_relay_owner_kind(),
-        watcher_registered,
+        watcher.is_some(),
     );
+    if *state.watcher_owns_assistant_relay
+        && let Some(watcher) = watcher
+    {
+        state
+            .watcher_delivery_pin
+            .get_or_insert(watcher.turn_delivered);
+    }
     *state.status_panel_msg_id = state
         .inflight_state
         .status_message_id
@@ -641,6 +665,104 @@ mod tests {
                 && defuse < early_return
                 && early_return < finalize
         );
+    }
+
+    #[test]
+    fn watcher_reconcile_pins_live_incumbent_once_across_registry_replacement() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let owner = ChannelId::new(4_259_612);
+        let mut durable = InflightTurnState::new(
+            ProviderKind::Codex,
+            owner.get(),
+            Some("pin-reconcile".to_string()),
+            343_742_347_365_974_026,
+            77_612,
+            18,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some("AgentDesk-pin-reconcile".to_string()),
+            Some("/tmp/pin-reconcile.jsonl".to_string()),
+            Some("/tmp/pin-reconcile.input".to_string()),
+            512,
+        );
+        durable.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        let make_handle = |marker: Arc<std::sync::atomic::AtomicBool>| TmuxWatcherHandle {
+            tmux_session_name: "AgentDesk-pin-reconcile".to_string(),
+            output_path: "/tmp/pin-reconcile.jsonl".to_string(),
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: marker,
+            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        };
+        let incumbent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        shared
+            .tmux_watchers
+            .insert(owner, make_handle(Arc::clone(&incumbent)));
+
+        let mut full_response = String::new();
+        let mut response_sent_offset = 0;
+        let mut confirmed_offset = 0;
+        let mut current_msg_id = MessageId::new(1);
+        let mut current_tool_line = None;
+        let mut prev_tool_status = None;
+        let mut last_tool_name = None;
+        let mut last_tool_summary = None;
+        let mut any_tool_used = false;
+        let mut has_post_tool_text = false;
+        let mut rollover_ids = Vec::new();
+        let mut tmux_last_offset = None;
+        let mut watcher_owner_channel_id = owner;
+        let mut watcher_owns = false;
+        let mut watcher_available = false;
+        let mut watcher_delivery_pin = None;
+        let mut standby_owns = false;
+        let mut status_panel_msg_id = None;
+        let mut status_panel_generation = 0;
+        let mut state = BridgeEntryRuntimeState {
+            inflight_state: &mut durable,
+            full_response: &mut full_response,
+            response_sent_offset: &mut response_sent_offset,
+            bridge_confirmed_response_sent_offset: &mut confirmed_offset,
+            current_msg_id: &mut current_msg_id,
+            current_tool_line: &mut current_tool_line,
+            prev_tool_status: &mut prev_tool_status,
+            last_tool_name: &mut last_tool_name,
+            last_tool_summary: &mut last_tool_summary,
+            any_tool_used: &mut any_tool_used,
+            has_post_tool_text: &mut has_post_tool_text,
+            streaming_rollover_frozen_msg_ids: &mut rollover_ids,
+            tmux_last_offset: &mut tmux_last_offset,
+            watcher_owner_channel_id: &mut watcher_owner_channel_id,
+            watcher_owns_assistant_relay: &mut watcher_owns,
+            watcher_relay_available_for_turn: &mut watcher_available,
+            watcher_delivery_pin: &mut watcher_delivery_pin,
+            standby_relay_owns_output: &mut standby_owns,
+            status_panel_msg_id: &mut status_panel_msg_id,
+            status_panel_generation: &mut status_panel_generation,
+        };
+        reconcile_runtime_locals_from_inflight_state(&shared, &mut state);
+        assert!(*state.watcher_owns_assistant_relay && *state.watcher_relay_available_for_turn);
+        assert!(Arc::ptr_eq(
+            state.watcher_delivery_pin.as_ref().unwrap(),
+            &incumbent,
+        ));
+
+        let replacement = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        shared
+            .tmux_watchers
+            .insert(owner, make_handle(Arc::clone(&replacement)));
+        reconcile_runtime_locals_from_inflight_state(&shared, &mut state);
+        assert!(*state.watcher_owns_assistant_relay && *state.watcher_relay_available_for_turn);
+        assert!(Arc::ptr_eq(
+            state.watcher_delivery_pin.as_ref().unwrap(),
+            &incumbent,
+        ));
+        assert!(Arc::ptr_ne(
+            state.watcher_delivery_pin.as_ref().unwrap(),
+            &replacement,
+        ));
     }
 
     #[test]

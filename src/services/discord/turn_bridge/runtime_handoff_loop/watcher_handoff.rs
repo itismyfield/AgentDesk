@@ -21,6 +21,7 @@ pub(super) struct WatcherRuntimeHandoffState<'a> {
     pub(super) watcher_owner_channel_id: &'a mut ChannelId,
     pub(super) standby_relay_owns_output: &'a mut bool,
     pub(super) watcher_relay_available_for_turn: &'a mut bool,
+    pub(super) watcher_delivery_pin: &'a mut Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) watcher_handoff_claim_outcome: &'a mut WatcherHandoffClaimOutcome,
     pub(super) tmux_handed_off: &'a mut bool,
     pub(super) watcher_owns_assistant_relay: &'a mut bool,
@@ -61,6 +62,7 @@ pub(super) fn handle_watcher_runtime_handoff(
     let watcher_owner_channel_id = state.watcher_owner_channel_id;
     let standby_relay_owns_output = state.standby_relay_owns_output;
     let watcher_relay_available_for_turn = state.watcher_relay_available_for_turn;
+    let watcher_delivery_pin = state.watcher_delivery_pin;
     let watcher_handoff_claim_outcome = state.watcher_handoff_claim_outcome;
     let tmux_handed_off = state.tmux_handed_off;
     let watcher_owns_assistant_relay = state.watcher_owns_assistant_relay;
@@ -397,6 +399,7 @@ pub(super) fn handle_watcher_runtime_handoff(
     if watcher_ready_for_relay {
         if let Some(watcher) = shared_owned.tmux_watchers.get(watcher_owner_channel_id) {
             *watcher_relay_available_for_turn = true;
+            super::pin_watcher_delivery_incarnation(watcher_delivery_pin, &watcher);
             if let Ok(mut guard) = watcher.resume_offset.lock() {
                 *guard = Some(last_offset);
             }

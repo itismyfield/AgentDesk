@@ -356,15 +356,12 @@ pub(super) fn spawn_turn_bridge(
                 provider.as_str(),
             );
         }
-        let resolved_watcher_owner_channel_id =
+        let mut watcher_owner_channel_id =
             resolve_guard_owner_channel(shared_owned.as_ref(), &bridge);
         let mut watcher_owns_assistant_relay =
             matches!(initial_relay_owner_kind, super::inflight::RelayOwnerKind::Watcher);
-        let mut watcher_relay_available_for_turn = watcher_owns_assistant_relay
-            && live_watcher_registered_for_relay(
-                shared_owned.as_ref(),
-                resolved_watcher_owner_channel_id,
-            );
+        let mut watcher_relay_available_for_turn = false;
+        let mut watcher_delivery_pin = None;
         let mut watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
         // Durable recovery must honor typed non-bridge owners too. `Unknown`
         // is treated like a live external owner so future relay variants do
@@ -446,13 +443,12 @@ pub(super) fn spawn_turn_bridge(
         let mut tmux_last_offset = bridge.tmux_last_offset;
         // #3041: seed the authoritative watcher owner channel so recovered
         // bridges and reused watchers lease the same cell.
-        let mut watcher_owner_channel_id = resolved_watcher_owner_channel_id;
         let mut new_session_id = bridge.new_session_id.clone();
         let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
         let is_external_input_tui_direct = bridge.is_external_input_tui_direct;
         let mut inflight_state = bridge.inflight_state.clone();
-        inflight_state.set_watcher_owner_channel_id(resolved_watcher_owner_channel_id.get());
+        inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
         let mut last_status_edit = tokio::time::Instant::now();
         // #3813: first non-empty answer may bypass the status interval once.
         let mut first_answer_relayed = false;
@@ -473,8 +469,7 @@ pub(super) fn spawn_turn_bridge(
         inflight_state.long_running_placeholder_active = false;
         let mut resumed_placeholder_clear_applied = false;
 
-        let anchor_text =
-            super::formatting::build_processing_status_block(SPINNER[0]).to_string();
+        let anchor_text = super::formatting::build_processing_status_block(SPINNER[0]).to_string();
         if !bridge_entry_persist::establish_bridge_entry_authority(
             bridge_entry_persist::BridgeEntryAuthorityContext {
                 bridge: &mut bridge,
@@ -501,6 +496,7 @@ pub(super) fn spawn_turn_bridge(
                 watcher_owner_channel_id: &mut watcher_owner_channel_id,
                 watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
                 watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+                watcher_delivery_pin: &mut watcher_delivery_pin,
                 standby_relay_owns_output: &mut standby_relay_owns_output,
                 status_panel_msg_id: &mut status_panel_msg_id,
                 status_panel_generation: &mut status_panel_generation,
@@ -658,6 +654,7 @@ pub(super) fn spawn_turn_bridge(
                 tmux_handed_off: &mut tmux_handed_off,
                 watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
                 watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+                watcher_delivery_pin: &mut watcher_delivery_pin,
                 watcher_handoff_claim_outcome: &mut watcher_handoff_claim_outcome,
                 standby_relay_owns_output: &mut standby_relay_owns_output,
                 last_assistant_text_line: &mut last_assistant_text_line,

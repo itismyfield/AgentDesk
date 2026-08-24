@@ -457,6 +457,8 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
     let mut last_status_panel_text = String::new();
     let mut watcher_owns_assistant_relay = false;
     let mut watcher_relay_available_for_turn = false;
+    let tick_delivery_pin = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut watcher_delivery_pin = Some(std::sync::Arc::clone(&tick_delivery_pin));
     let mut standby_relay_owns_output = false;
     let mut watcher_owner_channel_id = ChannelId::new(1);
     let mut streaming_rollover_frozen_msg_ids: Vec<MessageId> = Vec::new();
@@ -515,6 +517,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
             last_status_panel_text: &mut last_status_panel_text,
             watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
             watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+            watcher_delivery_pin: &mut watcher_delivery_pin,
             standby_relay_owns_output: &mut standby_relay_owns_output,
             watcher_owner_channel_id: &mut watcher_owner_channel_id,
             full_response: &mut full_response,
@@ -569,4 +572,48 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
         (true, true),
         "and the mechanism that prevents the rewind is the fence's re-seed",
     );
+    assert!(std::sync::Arc::ptr_eq(
+        watcher_delivery_pin
+            .as_ref()
+            .expect("the real tick writes its detached pin back to caller-owned state"),
+        &tick_delivery_pin,
+    ));
+}
+
+#[test]
+fn watcher_pin_projects_through_tick_writeback_and_saved_exit_reconcile() {
+    let tick = include_str!("../../stream_tick.rs");
+    let production_tick = tick
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production stream tick prefix");
+    let reconcile = production_tick
+        .find("watcher_delivery_pin: &mut watcher_delivery_pin,")
+        .expect("guarded tick reconciliation projects the watcher incarnation pin");
+    let writeback_macro = production_tick
+        .find("macro_rules! writeback_tick_state")
+        .expect("tick writeback macro remains present");
+    let pin_writeback = production_tick[writeback_macro..]
+        .find("*state.watcher_delivery_pin = watcher_delivery_pin.clone();")
+        .map(|offset| writeback_macro + offset)
+        .expect("tick writeback returns the pin to caller-owned state");
+    let early_return = production_tick[pin_writeback..]
+        .find("return StreamTickOutcome::AuthorityLost;")
+        .map(|offset| pin_writeback + offset)
+        .expect("authority loss follows the shared pin writeback");
+    let final_writeback = production_tick
+        .rfind("writeback_tick_state!();")
+        .expect("continuing ticks use the same writeback macro");
+    assert!(reconcile < writeback_macro && pin_writeback < early_return);
+    assert!(early_return < final_writeback);
+
+    let exit = include_str!("../exit_reconcile.rs");
+    let exit_pin = exit
+        .find("watcher_delivery_pin: &mut *state.watcher_delivery_pin,")
+        .expect("saved exit reconciliation projects the same caller-owned pin");
+    let exit_reconcile = exit[exit_pin..]
+        .find("reconcile_runtime_locals_from_inflight_state(")
+        .map(|offset| exit_pin + offset)
+        .expect("exit pin reaches production durable reconciliation");
+    assert!(exit_pin < exit_reconcile);
 }
