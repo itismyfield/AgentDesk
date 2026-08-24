@@ -235,6 +235,7 @@ fn request(channel_id: ChannelId, message_id: u64, text: &str) -> IntakeRequest 
         intake_outbox_id: None,
         channel_id,
         user_msg_id: MessageId::new(message_id),
+        source_message_ids: Vec::new(),
         busy_followup_retry_user_msg_id: MessageId::new(message_id),
         request_owner: UserId::new(4350),
         request_owner_name: "owner-affinity-test".to_string(),

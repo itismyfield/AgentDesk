@@ -2896,6 +2896,7 @@ services::discord::inflight::model::turn_source_tests::relay_owner_kind_unknown_
 services::discord::inflight::model::turn_source_tests::relay_owner_kind_uses_legacy_bool_when_typed_field_absent
 services::discord::inflight::model::turn_source_tests::serde_round_trip_uses_snake_case
 services::discord::inflight::model::turn_source_tests::set_watcher_owner_channel_id_with_zero_channel_id_skips_record_without_panicking
+services::discord::inflight::model::turn_source_tests::source_message_ids_round_trip_and_default_for_legacy_rows
 services::discord::inflight::model::turn_source_tests::status_panel_generation_defaults_to_zero_for_legacy_rows
 services::discord::inflight::model::turn_source_tests::status_panel_generation_round_trips_when_present
 services::discord::inflight::model::turn_source_tests::watcher_owner_channel_id_defaults_absent_legacy_rows_to_none
@@ -4242,6 +4243,7 @@ services::discord::router::intake_dispatch::attachment::tests::local_attachment_
 services::discord::router::intake_dispatch::attachment::tests::nonlocal_attachment_admission_never_runs_local_materialization
 services::discord::router::intake_dispatch::notice::tests::intake_dispatch_invariant_blocked_notice_is_throttled_atomically
 services::discord::router::intake_dispatch::queued::tests::actual_merge_persistence_restores_canonical_retry_lineage_4888
+services::discord::router::intake_dispatch::queued::tests::queued_admission_carries_every_absorbed_source_message_id
 services::discord::router::intake_dispatch::tests::dispatched_open_route_never_uses_stale_local_recovery_pg
 services::discord::router::intake_dispatch::tests::distinct_open_route_requeues_queued_successor_pg
 services::discord::router::intake_dispatch::tests::intake_dispatch_invariant_direct_execution_body_has_no_external_producer_callsites
@@ -4341,6 +4343,7 @@ services::discord::router::message_handler::intake_turn::feedback_reminder_take_
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::bridge_handoff_stamp_call_site_is_adjacent_to_the_only_spawn_turn_bridge
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_adopts_worker_intake_outbox_identity
 services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_cannot_replace_an_already_adopted_intake_outbox_identity
+services::discord::router::message_handler::intake_turn::intake_outbox_state_builder_tests::builder_persists_every_absorbed_source_message_id
 services::discord::router::message_handler::intake_turn::placeholder_handoff::tests::only_confirmed_missing_replaces_bound_busy_notice_4888
 services::discord::router::message_handler::intake_turn::queue_pending_reaction_clear_tests::cleared_set_covers_every_intake_gate_queue_reaction
 services::discord::router::message_handler::intake_turn::queue_pending_reaction_clear_tests::clears_every_queue_marker_reaction

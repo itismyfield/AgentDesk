@@ -28,6 +28,7 @@ pub(crate) struct IntakeRequest {
     pub intake_outbox_id: Option<i64>,
     pub channel_id: ChannelId,
     pub user_msg_id: MessageId,
+    pub source_message_ids: Vec<MessageId>,
     pub busy_followup_retry_user_msg_id: MessageId,
     pub request_owner: UserId,
     pub request_owner_name: String,
