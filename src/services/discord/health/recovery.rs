@@ -4273,7 +4273,6 @@ mod stale_sweep_witness_support {
         LedgerIncarnation, LedgerObligation, ReachabilityLedger, bootstrap_ledger_at, ledger_path,
         read_ledger_at, write_ledger_at,
     };
-    use super::super::reachability::verdict::ReachabilityVerdict;
     use crate::services::provider::ProviderKind;
 
     /// Test-only production-path fixture for a stale-sweep warrant verdict.
@@ -4372,10 +4371,10 @@ mod stale_sweep_witness_support {
                 .snapshot_watcher_state_for_provider(&ProviderKind::Claude, channel_id)
                 .await
                 .ok_or_else(|| "fixture did not publish a watcher-state snapshot".to_string())?;
-            match snapshot.reachability_observation() {
-                Some((ReachabilityVerdict::TransportUnknown { .. }, _)) => Ok(fixture),
-                other => Err(format!("fixture verdict drifted: {other:?}")),
-            }
+            super::stall_watchdog_auto_heal_tests::verify_reachability_fixture(
+                &snapshot, true, false,
+            )?;
+            Ok(fixture)
         }
 
         pub(crate) fn flip_to_reachable(&self) -> Result<(), String> {
@@ -4402,6 +4401,9 @@ pub(crate) use stale_sweep_witness_support::StaleSweepWarrantFixture;
 mod stall_watchdog_auto_heal_tests {
     use super::super::HealthRegistry;
     use crate::config::TestEnvVarGuard;
+    use crate::services::discord::health::reachability::verdict::{
+        ReachabilityVerdict, TransportUnknownEvidence,
+    };
     use crate::services::provider::{CancelToken, ProviderKind};
     use poise::serenity_prelude::{ChannelId, MessageId, UserId};
     use std::sync::Arc;
@@ -4456,6 +4458,43 @@ mod stall_watchdog_auto_heal_tests {
 
     fn result_line(text: &str) -> String {
         format!("{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"{text}\"}}\n")
+    }
+
+    #[cfg(unix)]
+    pub(super) fn verify_reachability_fixture(
+        snapshot: &super::WatcherStateSnapshot,
+        expect_transport_unknown: bool,
+        require_placeholder_evidence: bool,
+    ) -> Result<(), String> {
+        let produced_verdict = snapshot
+            .reachability_observation()
+            .map(|(verdict, _)| verdict)
+            .ok_or_else(|| {
+                "production snapshot did not publish a reachability verdict".to_string()
+            })?;
+        if expect_transport_unknown {
+            if let ReachabilityVerdict::TransportUnknown { evidence, .. } = produced_verdict {
+                if !require_placeholder_evidence
+                    || evidence == &TransportUnknownEvidence::PlaceholderPresent
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "an active mailbox must turn the unsatisfied obligation into placeholder evidence: {produced_verdict:?}"
+                    ))
+                }
+            } else {
+                Err(format!(
+                    "the fixture must produce transport-unknown evidence: {produced_verdict:?}"
+                ))
+            }
+        } else if produced_verdict == &ReachabilityVerdict::Reachable {
+            Ok(())
+        } else {
+            Err(format!(
+                "the control fixture must produce the healthy endpoint: {produced_verdict:?}"
+            ))
+        }
     }
 
     fn watcher_handle(
@@ -4606,9 +4645,6 @@ mod stall_watchdog_auto_heal_tests {
             LedgerIncarnation, LedgerObligation, ReachabilityLedger, bootstrap_ledger_at,
             ledger_path, write_ledger_at,
         };
-        use crate::services::discord::health::reachability::verdict::{
-            ReachabilityVerdict, TransportUnknownEvidence,
-        };
         use std::os::unix::fs::MetadataExt;
 
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -4741,28 +4777,12 @@ mod stall_watchdog_auto_heal_tests {
                 .snapshot_watcher_state_for_shared(&provider, shared.clone(), channel.get())
                 .await
                 .expect("pre-watchdog snapshot");
-            let produced_verdict = pre
-                .reachability_observation()
-                .map(|(verdict, _)| verdict)
-                .expect("production snapshot must publish a reachability verdict");
-            if has_unsatisfied_obligation {
-                assert!(
-                    matches!(
-                        produced_verdict,
-                        ReachabilityVerdict::TransportUnknown {
-                            evidence: TransportUnknownEvidence::PlaceholderPresent,
-                            ..
-                        }
-                    ),
-                    "an active mailbox turns the unsatisfied obligation into placeholder evidence: {produced_verdict:?}"
-                );
-            } else {
-                assert_eq!(
-                    produced_verdict,
-                    &ReachabilityVerdict::Reachable,
-                    "the control fixture must produce the healthy endpoint: {produced_verdict:?}"
-                );
-            }
+            verify_reachability_fixture(
+                &pre,
+                has_unsatisfied_obligation,
+                has_unsatisfied_obligation,
+            )
+            .expect("production snapshot reachability fixture");
             assert!(
                 super::watchdog_decisions::stale_idle_foreground_queue_detected(
                     pre.relay_health.active_turn,
