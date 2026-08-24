@@ -250,13 +250,20 @@ fn channel_inflight_state_present(session_key: &str, provider: &str) -> Inflight
     if tmux_provider != db_provider {
         return InflightPresence::Unknown;
     }
-    if crate::services::discord::zombie_foreground_release::inflight_state_present_for_tmux_name(
+    use crate::services::discord::zombie_foreground_release::InflightEpisodeLookup;
+    match crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name(
         &db_provider,
         &identity.tmux_name,
     ) {
-        InflightPresence::Present
-    } else {
-        InflightPresence::Absent
+        InflightEpisodeLookup::Claimed(_) => InflightPresence::Present,
+        InflightEpisodeLookup::Unclaimed => InflightPresence::Absent,
+        // A store that could not be read, and a tmux session two rows both
+        // claim, are both "we do not know". Reporting either as `Absent` would
+        // let a read failure authorize destruction, and would let whichever row
+        // a directory scan happened to yield first decide the verdict.
+        InflightEpisodeLookup::Unprobeable | InflightEpisodeLookup::Ambiguous => {
+            InflightPresence::Unknown
+        }
     }
 }
 
