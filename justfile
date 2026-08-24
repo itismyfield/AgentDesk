@@ -221,6 +221,9 @@ test-postgres:
     # #5356 S3: the ownership suite is a PostgreSQL-only out-of-line module;
     # keep its full module selected explicitly for the coverage ratchet.
     cargo test --lib db::dispatched_sessions::tests -- --nocapture --test-threads=1
+    # #5464 T5 S6b: the operator conflict contract is PG-only and lives in a
+    # plain `tests` module, so select the complete module for the same ratchet.
+    cargo test --lib server::routes::dispatched_sessions::tests -- --nocapture --test-threads=1
     # #5071 T2-W S-W2: settlement regressions use the hardening-audit `tests`
     # module name, so select both no-marker modules explicitly in the PG lane.
     cargo test --lib db::intake_outbox_delivery_proof::tests -- --nocapture --test-threads=1

@@ -7,6 +7,14 @@ use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::discord::session_identity::SessionIdentity;
 use crate::services::provider::ProviderKind;
 
+mod test_barriers;
+#[cfg(test)]
+use test_barriers::await_stale_sweep_apply_barrier;
+#[cfg(test)]
+pub(crate) use test_barriers::{
+    StaleSweepApplyBarrier, StaleSweepApplyBarrierPoint, install_stale_sweep_apply_barrier,
+};
+
 /// A live turn refreshes its heartbeat roughly once per minute. Five minutes
 /// leaves enough margin for transient database or scheduler delays while still
 /// bounding how long a stale busy state can block mailbox injection.
@@ -34,17 +42,29 @@ impl StaleTurnQualification {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionReconcileOutcome {
     Reconciled(StaleTurnQualification),
     Unchanged,
     NotFound,
+    PreconditionChanged(PreconditionDiagnostic),
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, sqlx::FromRow)]
+pub(crate) struct PreconditionDiagnostic {
+    pub(crate) row_exists: bool,
+    pub(crate) status: Option<String>,
+    pub(crate) active_dispatch_id: Option<String>,
+    pub(crate) last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
 struct StaleTurnCandidate {
     session_key: String,
     provider: String,
+    status: String,
+    active_dispatch_id: Option<String>,
+    last_heartbeat: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,13 +87,14 @@ pub(crate) async fn reconcile_stale_turns_pg(
     registry: Option<&HealthRegistry>,
     site: AxisBSite,
 ) -> Result<usize> {
-    reconcile_stale_turns_matching_with_warrant_pg(
+    Ok(reconcile_stale_turns_matching_with_warrant_pg(
         pool,
         None,
         independent_tmux_liveness,
         Some((registry, site)),
     )
-    .await
+    .await?
+    .reconciled)
 }
 
 /// Reconcile one session for the operator API without weakening the liveness
@@ -103,44 +124,104 @@ where
     L: Fn(&str, &str) -> IndependentLiveness + Copy + Send + 'static,
     I: Fn(&str, &str) -> InflightPresence + Copy + Send + 'static,
 {
-    let reconciled =
-        reconcile_stale_turns_matching_pg(pool, Some(session_key), liveness_probe).await?;
-    if reconciled > 0 {
-        return Ok(SessionReconcileOutcome::Reconciled(
-            StaleTurnQualification::StaleHeartbeat,
-        ));
-    }
-
-    // #5176 — the heartbeat-only guard reported the incident channel as "live"
-    // even though its turn record was gone and its pane sat at the prompt, so
-    // the endpoint that exists precisely for this case could not touch it.
-    //
-    // The widened qualification is deliberately scoped to THIS keyed operator
-    // call and never to the unattended sweeps above: an operator naming one
-    // session is a bounded, intentional act, while widening the sweep would put
-    // every `turn_active` row one probe away from being idled. The gates that
-    // protect a live turn are unchanged and all three still have to pass — no
-    // active dispatch (SQL), no inflight-turn record, terminal tmux evidence.
-    if reconcile_idle_without_inflight_pg(pool, session_key, liveness_probe, inflight_probe).await?
-    {
-        return Ok(SessionReconcileOutcome::Reconciled(
-            StaleTurnQualification::IdleWithoutInflight,
-        ));
-    }
-
-    let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM sessions WHERE session_key = $1)",
+    match reconcile_stale_turns_matching_with_warrant_pg(
+        pool,
+        Some(session_key),
+        liveness_probe,
+        None,
     )
-    .bind(session_key)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| anyhow!("check stale-turn reconcile session existence: {error}"))?;
+    .await?
+    {
+        ApplySummary {
+            reconciled: 1..,
+            precondition_changed: false,
+        } => {
+            return Ok(SessionReconcileOutcome::Reconciled(
+                StaleTurnQualification::StaleHeartbeat,
+            ));
+        }
+        ApplySummary {
+            precondition_changed: true,
+            ..
+        } => {
+            // Do not fall through to the operator-only IdleWithoutInflight
+            // qualification after a stale-candidate CAS miss. Besides avoiding a
+            // second destructive attempt from a later snapshot in the same
+            // request, this keeps the single candidate/apply test seam from being
+            // reached twice. The retryable 409 makes the caller obtain a fresh
+            // snapshot instead.
+            return precondition_changed_outcome_pg(pool, session_key).await;
+        }
+        _ => {}
+    }
 
-    Ok(if exists {
+    // #5176 — the widened qualification is scoped to this keyed operator call:
+    // no active dispatch, no inflight episode, and terminal tmux evidence.
+    match reconcile_idle_without_inflight_pg(pool, session_key, liveness_probe, inflight_probe)
+        .await?
+    {
+        CandidateApplyOutcome::Reconciled => {
+            return Ok(SessionReconcileOutcome::Reconciled(
+                StaleTurnQualification::IdleWithoutInflight,
+            ));
+        }
+        CandidateApplyOutcome::PreconditionChanged => {
+            return precondition_changed_outcome_pg(pool, session_key).await;
+        }
+        CandidateApplyOutcome::Unchanged => {}
+    }
+
+    let diagnostic = load_precondition_diagnostic_pg(pool, session_key).await?;
+    Ok(if diagnostic.row_exists {
         SessionReconcileOutcome::Unchanged
     } else {
         SessionReconcileOutcome::NotFound
     })
+}
+
+async fn precondition_changed_outcome_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> Result<SessionReconcileOutcome> {
+    // This is diagnostic only and is intentionally not fed back into the apply
+    // decision. It observes a later instant than the failed UPDATE.
+    let diagnostic = load_precondition_diagnostic_pg(pool, session_key).await?;
+    tracing::info!(
+        target: "reconcile",
+        session_key,
+        reason = "precondition_changed",
+        diagnostic_at = "after_failed_update",
+        row_exists = diagnostic.row_exists,
+        status = ?diagnostic.status,
+        active_dispatch_id = ?diagnostic.active_dispatch_id,
+        last_heartbeat = ?diagnostic.last_heartbeat,
+        "stale-turn operator apply precondition changed; retry with a fresh snapshot"
+    );
+    Ok(SessionReconcileOutcome::PreconditionChanged(diagnostic))
+}
+
+async fn load_precondition_diagnostic_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> Result<PreconditionDiagnostic> {
+    let row = sqlx::query_as::<_, PreconditionDiagnostic>(
+        "SELECT TRUE AS row_exists,
+                status,
+                active_dispatch_id,
+                last_heartbeat
+           FROM sessions
+          WHERE session_key = $1",
+    )
+    .bind(session_key)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| anyhow!("load stale-turn post-update diagnostic: {error}"))?;
+    Ok(row.unwrap_or(PreconditionDiagnostic {
+        row_exists: false,
+        status: None,
+        active_dispatch_id: None,
+        last_heartbeat: None,
+    }))
 }
 
 /// Whether a persistent inflight-turn record exists for a session's channel.
@@ -161,8 +242,6 @@ fn channel_inflight_state_present(session_key: &str, provider: &str) -> Inflight
         return InflightPresence::Unknown;
     };
     if identity.host != crate::services::platform::hostname_short() {
-        // A remote session's inflight files do not live on this host, so their
-        // absence here proves nothing.
         return InflightPresence::Unknown;
     }
     let Some((tmux_provider, _)) = identity.provider_and_channel() else {
@@ -181,18 +260,31 @@ fn channel_inflight_state_present(session_key: &str, provider: &str) -> Inflight
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateApplyOutcome {
+    Reconciled,
+    Unchanged,
+    PreconditionChanged,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ApplySummary {
+    reconciled: usize,
+    precondition_changed: bool,
+}
+
 async fn reconcile_idle_without_inflight_pg<L, I>(
     pool: &PgPool,
     session_key: &str,
     liveness_probe: L,
     inflight_probe: I,
-) -> Result<bool>
+) -> Result<CandidateApplyOutcome>
 where
     L: Fn(&str, &str) -> IndependentLiveness + Copy + Send + 'static,
     I: Fn(&str, &str) -> InflightPresence + Copy + Send + 'static,
 {
     let Some(candidate) = load_busy_session_pg(pool, session_key).await? else {
-        return Ok(false);
+        return Ok(CandidateApplyOutcome::Unchanged);
     };
 
     let key = candidate.session_key.clone();
@@ -207,7 +299,7 @@ where
             ?inflight,
             "preserved busy session because an inflight turn record was present or unprobeable"
         );
-        return Ok(false);
+        return Ok(CandidateApplyOutcome::Unchanged);
     }
 
     let key = candidate.session_key.clone();
@@ -225,11 +317,13 @@ where
             ?liveness,
             "preserved busy session without inflight because independent liveness was not terminal"
         );
-        return Ok(false);
+        return Ok(CandidateApplyOutcome::Unchanged);
     }
 
-    let reconciled =
-        reconcile_idle_without_inflight_candidate_pg(pool, &candidate.session_key).await?;
+    #[cfg(test)]
+    await_stale_sweep_apply_barrier().await;
+
+    let reconciled = reconcile_idle_without_inflight_candidate_pg(pool, &candidate).await?;
     if reconciled > 0 {
         tracing::warn!(
             target: "reconcile",
@@ -237,8 +331,11 @@ where
             qualification = StaleTurnQualification::IdleWithoutInflight.as_str(),
             "reconciled a busy session with no inflight turn record and terminal tmux evidence"
         );
+        Ok(CandidateApplyOutcome::Reconciled)
+    } else {
+        log_precondition_changed(&candidate);
+        Ok(CandidateApplyOutcome::PreconditionChanged)
     }
-    Ok(reconciled > 0)
 }
 
 /// The same busy-session shape as `load_stale_turn_candidates_pg`, minus the
@@ -249,7 +346,11 @@ async fn load_busy_session_pg(
     session_key: &str,
 ) -> Result<Option<StaleTurnCandidate>> {
     sqlx::query_as::<_, StaleTurnCandidate>(
-        "SELECT session_key, COALESCE(provider, 'claude') AS provider
+        "SELECT session_key,
+                COALESCE(provider, 'claude') AS provider,
+                status,
+                active_dispatch_id,
+                last_heartbeat
            FROM sessions
           WHERE status IN ('turn_active', 'working')
             AND COALESCE(BTRIM(active_dispatch_id), '') = ''
@@ -263,7 +364,7 @@ async fn load_busy_session_pg(
 
 async fn reconcile_idle_without_inflight_candidate_pg(
     pool: &PgPool,
-    session_key: &str,
+    candidate: &StaleTurnCandidate,
 ) -> Result<usize> {
     sqlx::query(
         "UPDATE sessions
@@ -271,16 +372,29 @@ async fn reconcile_idle_without_inflight_candidate_pg(
                                ' (no dispatch, no inflight turn, terminal tmux)',
                 status = 'idle'
           WHERE session_key = $1
-            AND status IN ('turn_active', 'working')
-            AND COALESCE(BTRIM(active_dispatch_id), '') = ''",
+            AND COALESCE(provider, 'claude') = $2
+            AND status = $3
+            AND COALESCE(BTRIM(active_dispatch_id), '') =
+                COALESCE(BTRIM($4::TEXT), '')
+            AND last_heartbeat IS NOT DISTINCT FROM $5",
     )
-    .bind(session_key)
+    .bind(&candidate.session_key)
+    .bind(&candidate.provider)
+    .bind(&candidate.status)
+    .bind(&candidate.active_dispatch_id)
+    .bind(candidate.last_heartbeat)
     .execute(pool)
     .await
     .map(|result| result.rows_affected() as usize)
-    .map_err(|error| anyhow!("reconcile busy session without inflight {session_key}: {error}"))
+    .map_err(|error| {
+        anyhow!(
+            "reconcile busy session without inflight {}: {error}",
+            candidate.session_key
+        )
+    })
 }
 
+#[cfg(test)]
 async fn reconcile_stale_turns_matching_pg<F>(
     pool: &PgPool,
     session_key: Option<&str>,
@@ -289,7 +403,11 @@ async fn reconcile_stale_turns_matching_pg<F>(
 where
     F: Fn(&str, &str) -> IndependentLiveness + Copy + Send + 'static,
 {
-    reconcile_stale_turns_matching_with_warrant_pg(pool, session_key, probe, None).await
+    Ok(
+        reconcile_stale_turns_matching_with_warrant_pg(pool, session_key, probe, None)
+            .await?
+            .reconciled,
+    )
 }
 
 fn structural_candidate_apply(eligible: bool) -> bool {
@@ -316,12 +434,12 @@ async fn reconcile_stale_turns_matching_with_warrant_pg<F>(
     session_key: Option<&str>,
     probe: F,
     automatic_warrant: Option<(Option<&HealthRegistry>, AxisBSite)>,
-) -> Result<usize>
+) -> Result<ApplySummary>
 where
     F: Fn(&str, &str) -> IndependentLiveness + Copy + Send + 'static,
 {
     let candidates = load_stale_turn_candidates_pg(pool, session_key).await?;
-    let mut reconciled = 0;
+    let mut summary = ApplySummary::default();
 
     for candidate in candidates {
         let key = candidate.session_key.clone();
@@ -329,7 +447,6 @@ where
         let liveness = tokio::task::spawn_blocking(move || probe(&key, &provider))
             .await
             .unwrap_or(IndependentLiveness::LiveOrAmbiguous);
-
         if !matches!(
             liveness,
             IndependentLiveness::NoPane | IndependentLiveness::ReadyForInput
@@ -359,19 +476,38 @@ where
         if !destructive_warrant_bind {
             continue;
         }
-        reconciled += reconcile_candidate_pg(pool, &candidate.session_key).await?;
+
+        #[cfg(test)]
+        await_stale_sweep_apply_barrier().await;
+
+        let updated = reconcile_candidate_pg(pool, &candidate).await?;
+        if updated == 0 {
+            summary.precondition_changed = true;
+            log_precondition_changed(&candidate);
+            continue;
+        }
+        summary.reconciled += updated;
     }
 
-    if reconciled > 0 {
+    if summary.reconciled > 0 {
         tracing::warn!(
             target: "reconcile",
-            reconciled,
+            reconciled = summary.reconciled,
             session_key = session_key.unwrap_or("*"),
             grace_seconds = STALE_TURN_GRACE.as_secs(),
             "reconciled stale busy sessions with terminal tmux evidence"
         );
     }
-    Ok(reconciled)
+    Ok(summary)
+}
+
+fn log_precondition_changed(candidate: &StaleTurnCandidate) {
+    tracing::info!(
+        target: "reconcile",
+        session_key = %candidate.session_key,
+        reason = "precondition_changed",
+        "stale-turn apply skipped because its captured precondition changed"
+    );
 }
 
 async fn load_stale_turn_candidates_pg(
@@ -379,7 +515,11 @@ async fn load_stale_turn_candidates_pg(
     session_key: Option<&str>,
 ) -> Result<Vec<StaleTurnCandidate>> {
     sqlx::query_as::<_, StaleTurnCandidate>(
-        "SELECT session_key, COALESCE(provider, 'claude') AS provider
+        "SELECT session_key,
+                COALESCE(provider, 'claude') AS provider,
+                status,
+                active_dispatch_id,
+                last_heartbeat
            FROM sessions
           WHERE status IN ('turn_active', 'working')
             AND COALESCE(BTRIM(active_dispatch_id), '') = ''
@@ -438,23 +578,35 @@ fn independent_tmux_liveness(session_key: &str, provider: &str) -> IndependentLi
     }
 }
 
-async fn reconcile_candidate_pg(pool: &PgPool, session_key: &str) -> Result<usize> {
+async fn reconcile_candidate_pg(pool: &PgPool, candidate: &StaleTurnCandidate) -> Result<usize> {
     sqlx::query(
         "UPDATE sessions
             SET session_info = 'reconciled stale ' || status ||
                                ' (no dispatch, stale heartbeat, terminal tmux)',
                 status = 'idle'
           WHERE session_key = $2
-            AND status IN ('turn_active', 'working')
-            AND COALESCE(BTRIM(active_dispatch_id), '') = ''
+            AND COALESCE(provider, 'claude') = $3
+            AND status = $4
+            AND COALESCE(BTRIM(active_dispatch_id), '') =
+                COALESCE(BTRIM($5::TEXT), '')
+            AND last_heartbeat IS NOT DISTINCT FROM $6
             AND last_heartbeat < NOW() - ($1::BIGINT * INTERVAL '1 second')",
     )
     .bind(STALE_TURN_GRACE.as_secs() as i64)
-    .bind(session_key)
+    .bind(&candidate.session_key)
+    .bind(&candidate.provider)
+    .bind(&candidate.status)
+    .bind(&candidate.active_dispatch_id)
+    .bind(candidate.last_heartbeat)
     .execute(pool)
     .await
     .map(|result| result.rows_affected() as usize)
-    .map_err(|error| anyhow!("reconcile stale busy session {session_key}: {error}"))
+    .map_err(|error| {
+        anyhow!(
+            "reconcile stale busy session {}: {error}",
+            candidate.session_key
+        )
+    })
 }
 
 #[cfg(test)]
@@ -476,15 +628,35 @@ mod tests {
         active_dispatch_id: Option<&str>,
         heartbeat_age_seconds: i64,
     ) {
+        seed_session_for_provider(
+            pool,
+            session_key,
+            "claude",
+            status,
+            active_dispatch_id,
+            heartbeat_age_seconds,
+        )
+        .await;
+    }
+
+    async fn seed_session_for_provider(
+        pool: &PgPool,
+        session_key: &str,
+        provider: &str,
+        status: &str,
+        active_dispatch_id: Option<&str>,
+        heartbeat_age_seconds: i64,
+    ) {
         sqlx::query(
             "INSERT INTO sessions (
                 session_key, provider, status, active_dispatch_id, last_heartbeat, session_info
              ) VALUES (
-                $1, 'claude', $2, $3,
-                NOW() - ($4::BIGINT * INTERVAL '1 second'), 'original'
+                $1, $2, $3, $4,
+                NOW() - ($5::BIGINT * INTERVAL '1 second'), 'original'
              )",
         )
         .bind(session_key)
+        .bind(provider)
         .bind(status)
         .bind(active_dispatch_id)
         .bind(heartbeat_age_seconds)
@@ -578,7 +750,8 @@ mod tests {
                 Some((None, AxisBSite::BootReconcileSweep)),
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .reconciled,
             1,
             "missing boot registry operand must preserve structural eligibility"
         );
@@ -884,6 +1057,260 @@ mod tests {
             SessionReconcileOutcome::NotFound
         );
 
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    fn apply_barrier() -> (
+        StaleSweepApplyBarrier,
+        std::sync::Arc<StaleSweepApplyBarrierPoint>,
+        std::sync::Arc<StaleSweepApplyBarrierPoint>,
+    ) {
+        let reached = std::sync::Arc::new(StaleSweepApplyBarrierPoint::new(2));
+        let resume = std::sync::Arc::new(StaleSweepApplyBarrierPoint::new(2));
+        (
+            StaleSweepApplyBarrier {
+                reached: reached.clone(),
+                resume: resume.clone(),
+            },
+            reached,
+            resume,
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_candidate_cas_rejects_heartbeat_move_and_is_non_latching_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let key = "remote-host:cas-heartbeat";
+        seed_session(
+            &pool,
+            key,
+            "turn_active",
+            None,
+            STALE_TURN_GRACE.as_secs() as i64 + 60,
+        )
+        .await;
+
+        let (barrier, reached, resume) = apply_barrier();
+        let guard = install_stale_sweep_apply_barrier(barrier);
+        let task_pool = pool.clone();
+        let task = tokio::spawn(async move {
+            reconcile_stale_turn_by_key_with_probes_pg(
+                &task_pool,
+                key,
+                |_, _| IndependentLiveness::NoPane,
+                |_, _| InflightPresence::Unknown,
+            )
+            .await
+            .unwrap()
+        });
+        reached.wait().await;
+        sqlx::query("UPDATE sessions SET last_heartbeat = NOW() - INTERVAL '10 minutes' WHERE session_key = $1")
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        resume.wait().await;
+        assert!(matches!(
+            task.await.unwrap(),
+            SessionReconcileOutcome::PreconditionChanged(_)
+        ));
+        assert_eq!(load_state(&pool, key).await.0, "turn_active");
+        drop(guard);
+
+        assert_eq!(
+            reconcile_stale_turn_by_key_with_probes_pg(
+                &pool,
+                key,
+                |_, _| IndependentLiveness::NoPane,
+                |_, _| InflightPresence::Unknown,
+            )
+            .await
+            .unwrap(),
+            SessionReconcileOutcome::Reconciled(StaleTurnQualification::StaleHeartbeat)
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_without_inflight_cas_rejects_heartbeat_move_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let key = "remote-host:idle-cas-heartbeat";
+        seed_session(&pool, key, "turn_active", None, 30).await;
+
+        let (barrier, reached, resume) = apply_barrier();
+        let _guard = install_stale_sweep_apply_barrier(barrier);
+        let task_pool = pool.clone();
+        let task = tokio::spawn(async move {
+            reconcile_stale_turn_by_key_with_probes_pg(
+                &task_pool,
+                key,
+                |_, _| IndependentLiveness::ReadyForInput,
+                |_, _| InflightPresence::Absent,
+            )
+            .await
+            .unwrap()
+        });
+        reached.wait().await;
+        sqlx::query("UPDATE sessions SET last_heartbeat = NOW() WHERE session_key = $1")
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        resume.wait().await;
+
+        assert!(matches!(
+            task.await.unwrap(),
+            SessionReconcileOutcome::PreconditionChanged(_)
+        ));
+        assert_eq!(load_state(&pool, key).await.0, "turn_active");
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn automatic_cas_log_names_only_precondition_changed_pg() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Writer {
+            type Writer = Writer;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let key = "remote-host:automatic-log-cas";
+        seed_session(
+            &pool,
+            key,
+            "turn_active",
+            None,
+            STALE_TURN_GRACE.as_secs() as i64 + 60,
+        )
+        .await;
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(Writer(logs.clone()))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let (barrier, reached, resume) = apply_barrier();
+        let _guard = install_stale_sweep_apply_barrier(barrier);
+        let task_pool = pool.clone();
+        let task = tokio::spawn(async move {
+            reconcile_stale_turns_matching_with_warrant_pg(
+                &task_pool,
+                Some(key),
+                |_, _| IndependentLiveness::NoPane,
+                None,
+            )
+            .await
+            .unwrap()
+        });
+        reached.wait().await;
+        sqlx::query("UPDATE sessions SET provider = 'codex' WHERE session_key = $1")
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        resume.wait().await;
+        assert!(task.await.unwrap().precondition_changed);
+        let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("reason=\"precondition_changed\""),
+            "{output}"
+        );
+        for unsupported in [
+            "provider_changed",
+            "heartbeat_changed",
+            "status_changed",
+            "dispatch_changed",
+        ] {
+            assert!(
+                !output.contains(unsupported),
+                "unsupported cause label in {output}"
+            );
+        }
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_only_interleaving_fails_the_candidate_cas_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let key = "remote-host:provider-cas";
+        seed_session(
+            &pool,
+            key,
+            "turn_active",
+            None,
+            STALE_TURN_GRACE.as_secs() as i64 + 60,
+        )
+        .await;
+        let heartbeat_before: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT last_heartbeat FROM sessions WHERE session_key = $1")
+                .bind(key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let (barrier, reached, resume) = apply_barrier();
+        let _guard = install_stale_sweep_apply_barrier(barrier);
+        let task_pool = pool.clone();
+        let task = tokio::spawn(async move {
+            reconcile_stale_turn_by_key_with_probes_pg(
+                &task_pool,
+                key,
+                |_, _| IndependentLiveness::NoPane,
+                |_, _| InflightPresence::Unknown,
+            )
+            .await
+            .unwrap()
+        });
+        reached.wait().await;
+        sqlx::query("UPDATE sessions SET provider = 'codex' WHERE session_key = $1")
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let heartbeat_after: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT last_heartbeat FROM sessions WHERE session_key = $1")
+                .bind(key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            heartbeat_before, heartbeat_after,
+            "interleaving must change only provider"
+        );
+        resume.wait().await;
+
+        assert!(matches!(
+            task.await.unwrap(),
+            SessionReconcileOutcome::PreconditionChanged(_)
+        ));
+        assert_eq!(load_state(&pool, key).await.0, "turn_active");
         pool.close().await;
         pg_db.drop().await;
     }

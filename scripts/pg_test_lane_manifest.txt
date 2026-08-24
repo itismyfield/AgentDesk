@@ -37,6 +37,7 @@ src/server/mod.rs
 src/server/multinode_regression.rs
 src/server/resource_locks.rs
 src/server/routes/auto_queue_lifecycle_pg_tests.rs
+src/server/routes/dispatched_sessions_tests.rs
 src/server/routes/dispatches/crud.rs
 src/server/routes/escalation.rs
 src/server/routes/memory_api.rs
@@ -146,6 +147,7 @@ server::multinode_regression::multinode_regression_pg_tests
 server::resource_locks::resource_locks_pg_tests
 server::routes::auto_queue_lifecycle_pg_tests::tests
 server::routes::auto_queue_preflight_harness_tests
+server::routes::dispatched_sessions::tests
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests
 server::routes::escalation::manual_decision_gate_tests
 server::routes::memory_api::request_body_tests
@@ -541,6 +543,7 @@ server::routes::auto_queue_lifecycle_pg_tests::tests::patch_retired_deploy_phase
 server::routes::auto_queue_lifecycle_pg_tests::tests::postgres_auto_queue_lifecycle_http_routes_use_canonical_writers_pg
 server::routes::auto_queue_lifecycle_pg_tests::tests::stale_manual_rebind_cannot_reclaim_slot_after_canonical_completion_pg
 server::routes::auto_queue_preflight_harness_tests::auto_queue_preflight_fixture_sandbox_roundtrip_pg
+server::routes::dispatched_sessions::tests::precondition_changed_handler_contract_is_conflict_and_retryable_pg
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_reconcile_stats_route_returns_current_stats_and_metric_rows
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
@@ -932,14 +935,18 @@ services::settings::tests::metadata_less_put_pg_runtime_config_preserves_explici
 services::settings::tests::put_pg_runtime_config_object_and_non_object_keep_only_blob_authority
 services::settings::tests::runtime_config_pg_delete_failure_rolls_back_blob_and_every_mirror
 services::settings::tests::startup_pg_runtime_config_writer_keeps_blob_authority_without_mirror_reinsertion
+services::stale_turn_reconciler::tests::automatic_cas_log_names_only_precondition_changed_pg
 services::stale_turn_reconciler::tests::automatic_sweep_abstains_without_registry_but_operator_stays_outside_warrant_pg
+services::stale_turn_reconciler::tests::idle_without_inflight_cas_rejects_heartbeat_move_pg
 services::stale_turn_reconciler::tests::keyed_reconcile_pg_never_idles_a_live_busy_session
 services::stale_turn_reconciler::tests::keyed_reconcile_pg_releases_busy_session_without_inflight
 services::stale_turn_reconciler::tests::keyed_unchanged_outcome_keeps_live_row_turn_active_pg
 services::stale_turn_reconciler::tests::periodic_sweep_pg_still_requires_an_expired_heartbeat
 services::stale_turn_reconciler::tests::preserved_live_tmux_evidence_keeps_stale_row_busy_pg
 services::stale_turn_reconciler::tests::probe_failure_spinner_and_provider_mismatch_preserve_rows_pg
+services::stale_turn_reconciler::tests::provider_only_interleaving_fails_the_candidate_cas_pg
 services::stale_turn_reconciler::tests::stale_busy_candidates_reconcile_only_after_terminal_liveness_pg
+services::stale_turn_reconciler::tests::stale_candidate_cas_rejects_heartbeat_move_and_is_non_latching_pg
 voice::announce_meta::tests::durable_handoff_concurrent_consumers_yield_exactly_one_claim
 voice::announce_meta::tests::durable_handoff_persist_does_not_resurrect_consumed_row
 voice::announce_meta::tests::durable_handoff_round_trips_and_consumes_exactly_once

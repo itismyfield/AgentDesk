@@ -910,6 +910,7 @@ server::routes::discord::tests::snowflake_or_none_accepts_digits_only
 server::routes::discord::tests::snowflake_or_none_rejects_injection_attempts
 server::routes::discord::tests::thread_parent_id_extracts_discord_thread_parent
 server::routes::discord::tests::thread_parent_id_ignores_regular_channels
+server::routes::dispatched_sessions::tests::precondition_changed_handler_contract_is_conflict_and_retryable_pg
 server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_status_conflict_message_allows_active_statuses
 server::routes::dispatches::crud::status_conflict_tests::dispatch_completion_status_conflict_message_rejects_terminal_statuses
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_delivery_events_route_returns_typed_rows_newest_first
@@ -7067,6 +7068,7 @@ services::platform::tmux::target_safety_tests::blank_session_name_is_not_a_valid
 services::platform::tmux::target_safety_tests::tmux_command_enables_utf8_mode
 services::platform::tmux::timeout_tests::kill_session_timeout_reports_hung_tmux
 services::platform::tmux::timeout_tests::pane_liveness_does_not_classify_probe_failure_as_dead
+services::platform::tmux::timeout_tests::probe_failure_widens_to_live_or_ambiguous_readiness
 services::platform::tmux::timeout_tests::send_keys_timeout_preserves_tmux_stderr_on_fast_failure
 services::platform::tmux::timeout_tests::send_keys_timeout_reports_hung_tmux
 services::platform::tmux::timeout_tests::session_presence_distinguishes_missing_from_probe_failure
@@ -7572,14 +7574,18 @@ services::settings::tests::settings_write_response_serializes_ok_contract
 services::settings::tests::startup_pg_runtime_config_writer_keeps_blob_authority_without_mirror_reinsertion
 services::slo::avg_latency_tests::avg_latency_query_excludes_dispatch_noise_sources
 services::slo::avg_latency_tests::noisy_metrics_have_alerts_disabled
+services::stale_turn_reconciler::tests::automatic_cas_log_names_only_precondition_changed_pg
 services::stale_turn_reconciler::tests::automatic_sweep_abstains_without_registry_but_operator_stays_outside_warrant_pg
+services::stale_turn_reconciler::tests::idle_without_inflight_cas_rejects_heartbeat_move_pg
 services::stale_turn_reconciler::tests::keyed_reconcile_pg_never_idles_a_live_busy_session
 services::stale_turn_reconciler::tests::keyed_reconcile_pg_releases_busy_session_without_inflight
 services::stale_turn_reconciler::tests::keyed_unchanged_outcome_keeps_live_row_turn_active_pg
 services::stale_turn_reconciler::tests::periodic_sweep_pg_still_requires_an_expired_heartbeat
 services::stale_turn_reconciler::tests::preserved_live_tmux_evidence_keeps_stale_row_busy_pg
 services::stale_turn_reconciler::tests::probe_failure_spinner_and_provider_mismatch_preserve_rows_pg
+services::stale_turn_reconciler::tests::provider_only_interleaving_fails_the_candidate_cas_pg
 services::stale_turn_reconciler::tests::stale_busy_candidates_reconcile_only_after_terminal_liveness_pg
+services::stale_turn_reconciler::tests::stale_candidate_cas_rejects_heartbeat_move_and_is_non_latching_pg
 services::stale_turn_reconciler::tests::tmux_identity_rejects_provider_mismatch_and_spinner_is_busy
 services::task_completion_v1::tests::canonical_round_trip_and_field_permutation
 services::task_completion_v1::tests::duplicate_and_escaped_duplicate_keys_are_rejected
