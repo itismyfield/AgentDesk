@@ -128,6 +128,12 @@ pub(in crate::services::discord) struct InflightTurnState {
     pub thread_title: Option<String>,
     pub request_owner_user_id: u64,
     pub user_msg_id: u64,
+    /// Message ids absorbed into this active queued turn. This is durable
+    /// positive evidence only: an empty list does not prove that no absorption
+    /// happened, because persistence is not atomic with queue removal and
+    /// `intake_request_from_row` cannot restore these ids after cluster forwarding.
+    #[serde(default)]
+    pub source_message_ids: Vec<u64>,
     /// Primary key of the `intake_outbox` row that produced this turn. Worker
     /// turns carry `Some`; leader-local and legacy turns carry `None`. Production
     /// construction sets it through `adopt_intake_outbox`; serde deserialization
@@ -898,6 +904,45 @@ mod turn_source_tests {
             serde_json::from_value(encoded).expect("new reader accepts legacy state");
         assert_eq!(legacy.intake_outbox_id(), None);
     }
+
+    #[test]
+    fn source_message_ids_round_trip_and_default_for_legacy_rows() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            42,
+            Some("adk-cdx".to_string()),
+            7,
+            8,
+            9,
+            "hello".to_string(),
+            None,
+            Some("AgentDesk-claude-adk-cdx".to_string()),
+            Some("/tmp/out.jsonl".to_string()),
+            None,
+            0,
+        );
+        state.source_message_ids = vec![5_071_401, 5_071_402];
+        let mut encoded = serde_json::to_value(&state).expect("serialize source ids");
+        assert_eq!(
+            encoded["source_message_ids"],
+            serde_json::json!([5_071_401, 5_071_402])
+        );
+
+        let round_trip: InflightTurnState =
+            serde_json::from_value(encoded.clone()).expect("round-trip source ids");
+        assert_eq!(round_trip.source_message_ids, state.source_message_ids);
+
+        encoded
+            .as_object_mut()
+            .expect("state serializes as object")
+            .remove("source_message_ids");
+        let legacy = serde_json::from_value::<InflightTurnState>(encoded);
+        assert!(
+            legacy.is_ok(),
+            "legacy inflight row without source_message_ids must deserialize"
+        );
+        assert!(legacy.unwrap().source_message_ids.is_empty());
+    }
 }
 
 impl InflightTurnState {
@@ -948,6 +993,7 @@ impl InflightTurnState {
             thread_title: None,
             request_owner_user_id,
             user_msg_id,
+            source_message_ids: Vec::new(),
             intake_outbox_id: None,
             intake_delivery_capabilities: Default::default(),
             busy_followup_retry_user_msg_id: user_msg_id,

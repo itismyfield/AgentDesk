@@ -45,6 +45,7 @@ pub(crate) async fn admit_queued_intake(
             intake_outbox_id: None,
             channel_id,
             user_msg_id: intervention.message_id,
+            source_message_ids: intervention.source_message_ids.clone(),
             busy_followup_retry_user_msg_id: serenity::MessageId::new(retry_identity.user_msg_id),
             request_owner,
             request_owner_name,
@@ -152,6 +153,68 @@ pub(crate) async fn finish_admitted_queued_intake(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queued_admission_carries_every_absorbed_source_message_id() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _mode = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "ADK_INTAKE_ROUTING_MODE",
+            std::ffi::OsStr::new("disabled"),
+        );
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = std::sync::Arc::new(serenity::Http::new("Bot queued-source-id-test"));
+        let deps = super::super::super::message_handler::IntakeDeps {
+            http: &http,
+            cache: None,
+            ctx_for_chained_dispatch: None,
+            shared: &shared,
+            token: "queued-source-id-test",
+        };
+        let source_a = serenity::MessageId::new(5_071_201);
+        let source_b = serenity::MessageId::new(5_071_202);
+        let intervention = Intervention {
+            author_id: serenity::UserId::new(5_071_203),
+            author_is_bot: false,
+            message_id: source_b,
+            queued_generation: 1,
+            source_message_ids: vec![source_a, source_b],
+            source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
+            text: "absorbed source ids".to_string(),
+            mode: crate::services::turn_orchestrator::InterventionMode::Soft,
+            created_at: std::time::Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: true,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        };
+
+        let admitted = admit_queued_intake(
+            &deps,
+            ProviderKind::Claude,
+            serenity::ChannelId::new(5_071_204),
+            &intervention,
+            intervention.author_id,
+            "source-owner".to_string(),
+            false,
+            false,
+            "queued_source_id_test",
+            None,
+        )
+        .await;
+        let QueuedAdmissionDisposition::Admitted(admitted) = admitted else {
+            panic!("disabled routing must admit queued intake locally");
+        };
+
+        assert_eq!(
+            admitted.submission.request.source_message_ids,
+            vec![source_a, source_b],
+            "queued admission must carry every absorbed source message id"
+        );
+    }
 
     #[test]
     fn actual_merge_persistence_restores_canonical_retry_lineage_4888() {

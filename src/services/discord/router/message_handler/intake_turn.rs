@@ -47,10 +47,15 @@ pub(in crate::services::discord) struct IntakeDeps<'a> {
 
 fn build_intake_inflight_state(
     intake_outbox_id: Option<i64>,
+    source_message_ids: Vec<serenity::MessageId>,
     construct: impl FnOnce() -> InflightTurnState,
 ) -> InflightTurnState {
     let mut state = construct();
     state.adopt_intake_outbox(intake_outbox_id);
+    state.source_message_ids = source_message_ids
+        .into_iter()
+        .map(serenity::MessageId::get)
+        .collect();
     state
 }
 
@@ -66,7 +71,7 @@ mod intake_outbox_state_builder_tests {
         // `IntakeRequest` constructors — two intake-gate, queued, skill — all
         // pass `None`, and none asserts that value; those `None` edges rest on
         // type/inventory pinning rather than a dedicated value check.
-        let state = build_intake_inflight_state(Some(5071), || {
+        let state = build_intake_inflight_state(Some(5071), Vec::new(), || {
             InflightTurnState::new(
                 ProviderKind::Claude,
                 42,
@@ -88,7 +93,7 @@ mod intake_outbox_state_builder_tests {
 
     #[test]
     fn builder_cannot_replace_an_already_adopted_intake_outbox_identity() {
-        let state = build_intake_inflight_state(Some(0), || {
+        let state = build_intake_inflight_state(Some(0), Vec::new(), || {
             let mut state = InflightTurnState::new(
                 ProviderKind::Claude,
                 42,
@@ -108,6 +113,49 @@ mod intake_outbox_state_builder_tests {
         });
 
         assert_eq!(state.intake_outbox_id(), Some(5071));
+    }
+
+    #[test]
+    fn builder_persists_every_absorbed_source_message_id() {
+        let _lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().expect("temporary AgentDesk root");
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let channel_id = 5_071_301;
+        let source_a = serenity::MessageId::new(5_071_302);
+        let source_b = serenity::MessageId::new(5_071_303);
+        let state = build_intake_inflight_state(None, vec![source_a, source_b], || {
+            InflightTurnState::new(
+                provider.clone(),
+                channel_id,
+                Some("adk-source-owner".to_string()),
+                7,
+                source_b.get(),
+                9,
+                "hello".to_string(),
+                None,
+                Some("AgentDesk-claude-adk-source-owner".to_string()),
+                Some("/tmp/out.jsonl".to_string()),
+                None,
+                0,
+            )
+        });
+
+        crate::services::discord::inflight::save_inflight_state_create_new(&state)
+            .expect("persist inflight state with source ids");
+        let persisted =
+            crate::services::discord::inflight::load_inflight_state(&provider, channel_id)
+                .expect("reload inflight state with source ids");
+        assert_eq!(
+            persisted.source_message_ids,
+            vec![source_a.get(), source_b.get()],
+            "durable inflight row must retain every absorbed source message id"
+        );
     }
 
     /// 호출 인접성·개수 검사이지 등록 성공 증명이 아님.
@@ -165,6 +213,7 @@ pub(super) async fn handle_text_message(
         intake_outbox_id,
         channel_id,
         user_msg_id,
+        source_message_ids,
         busy_followup_retry_user_msg_id,
         request_owner,
         request_owner_name: request_owner_name_owned,
@@ -2214,22 +2263,23 @@ pub(super) async fn handle_text_message(
             (channel_id.get(), None, None)
         };
 
-    let mut inflight_state = build_intake_inflight_state(intake_outbox_id, || {
-        InflightTurnState::new(
-            provider.clone(),
-            channel_id.get(),
-            channel_name.clone(),
-            request_owner.get(),
-            user_msg_id.get(),
-            placeholder_msg_id.get(),
-            user_text.to_string(),
-            session_id.clone(),
-            inflight_tmux_name,
-            inflight_output_path,
-            inflight_input_fifo.clone(),
-            inflight_offset,
-        )
-    });
+    let mut inflight_state =
+        build_intake_inflight_state(intake_outbox_id, source_message_ids, || {
+            InflightTurnState::new(
+                provider.clone(),
+                channel_id.get(),
+                channel_name.clone(),
+                request_owner.get(),
+                user_msg_id.get(),
+                placeholder_msg_id.get(),
+                user_text.to_string(),
+                session_id.clone(),
+                inflight_tmux_name,
+                inflight_output_path,
+                inflight_input_fifo.clone(),
+                inflight_offset,
+            )
+        });
     inflight_state.busy_followup_retry_user_msg_id = busy_followup_retry_user_msg_id.get();
     inflight_state.turn_nonce = cancel_token.turn_nonce().map(str::to_owned);
     apply_prelaunch_runtime_kind(&mut inflight_state, prelaunch_runtime_kind);

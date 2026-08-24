@@ -25,6 +25,7 @@ pub(crate) async fn dispatch_skill_intake(
             intake_outbox_id: None,
             channel_id,
             user_msg_id,
+            source_message_ids: Vec::new(),
             busy_followup_retry_user_msg_id: user_msg_id,
             request_owner,
             request_owner_name,
