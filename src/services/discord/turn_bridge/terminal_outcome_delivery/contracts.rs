@@ -186,6 +186,167 @@ pub(super) fn ordered_terminal_range_end(
     }
 }
 
+/// #5191 R2: the bridge's pre-publish CAS claim on a watcher's `turn_delivered`
+/// marker, with rollback on every abnormal exit.
+///
+/// ## What it fixes
+///
+/// The marker used to be set only in the epilogue, AFTER the answer was already
+/// on Discord. A watcher resuming inside that window reads `false` and relays
+/// the same answer again — symptom (a), duplicate publication. The claim moves
+/// the `false -> true` edge to BEFORE the publishing fork, so there is no
+/// instant at which a delivered answer is visible with the marker unset.
+///
+/// ## Why it cannot leak (the absolute line)
+///
+/// `turn_delivered = true` suppresses the watcher. A claim that survives a turn
+/// which did NOT deliver suppresses that turn's relay forever — a permanently
+/// undelivered answer, which is strictly worse than a duplicate. Three exits
+/// therefore all restore the marker:
+///
+/// - the normal one, [`Self::settle`], when the epilogue's own gate says this
+///   turn does not mark the watcher delivered;
+/// - a panic anywhere between the claim and the settle, through `Drop`;
+/// - a future drop (cancelled bridge task) in the same span, also through
+///   `Drop`.
+///
+/// `Drop` is the load-bearing half: it is what makes the claim safe to take
+/// before the outcome is known. [`Self::defuse`] is the `InflightCleanupGuard`
+/// idiom — taking the `Arc` out is what disarms the rollback.
+///
+/// ## What the CAS buys, and what it does not
+///
+/// `compare_exchange(false -> true)` means the claim is only owned when THIS
+/// actor won the transition. A marker that was already `true` belongs to
+/// somebody else, so this bridge never rolls it back (see the `W-OWN` witness).
+/// It does NOT make two concurrent bridges mutually exclusive for publishing —
+/// only one of them owns the marker; both still publish. That residue is
+/// declared as `L5` and is not closed here.
+///
+/// The claimed `Arc` is cloned out of the registry and OWNED. The claim never
+/// re-resolves the channel key, so a registry replacement between claim and
+/// settle cannot make it write to a different watcher's marker (`D1`, the
+/// `W-XCLAIM` witness). The opposite direction — a replacement watcher reading
+/// its own fresh `false` marker and relaying anyway — is `D2` and stays open;
+/// see `L2`.
+pub(super) struct WatcherDeliveryClaim {
+    /// `Some` == armed: this actor won the CAS and owes the marker a rollback.
+    claimed: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl WatcherDeliveryClaim {
+    /// An unarmed claim.
+    ///
+    /// The binding is created SEPARATELY from [`Self::try_claim`] on purpose,
+    /// and always in a scope that outlives the publishing fork. Two things
+    /// depend on that split:
+    ///
+    /// - the binding must still be live where `settle` is called, which is
+    ///   after the fork block closes;
+    /// - moving the `try_claim` CALL later (past a publishing arm) has to stay
+    ///   a compiling mutation, so the ordering witnesses fail on an assertion
+    ///   rather than being excused by a compile error.
+    ///
+    /// Design r3's §5 insertion-point table does not compile if it is followed
+    /// literally: it puts this binding inside the publishing fork, and that
+    /// block closes before the settle, so the binding would be out of scope
+    /// there. §4.3 ("the binding is always outer") governs; the §5 row means
+    /// the `try_claim` CALL site. Do not "restore" the binding into the fork.
+    pub(super) fn unarmed() -> Self {
+        Self { claimed: None }
+    }
+
+    /// Take the marker for this turn, if it is free and this bridge owns the
+    /// relay.
+    ///
+    /// `delegated` (the watcher, not the bridge, owns this turn's relay) is a
+    /// no-op: there is nothing to suppress and claiming would strand the
+    /// watcher that is supposed to deliver.
+    ///
+    /// The registry `Ref` is dropped before returning — it borrows a `dashmap`
+    /// shard guard, and holding one across the publishing `await`s would let an
+    /// unrelated registry write deadlock behind this turn's Discord I/O. Only
+    /// the cloned `Arc` outlives this call.
+    ///
+    /// The call site is a SINGLE statement placed before the publishing fork,
+    /// so it covers all six publishing arms at once. Before this claim existed,
+    /// the marker was set only in the epilogue, so every arm had a window in
+    /// which a delivered answer was visible with `turn_delivered` still
+    /// `false` and a resuming watcher relayed it a second time. Rolling the
+    /// marker back for the arms that do NOT deliver is this type's job, not the
+    /// caller's.
+    pub(super) fn try_claim(
+        &mut self,
+        shared: &Arc<SharedData>,
+        watcher_owner_channel_id: ChannelId,
+        delegated: bool,
+    ) {
+        if delegated {
+            return;
+        }
+        let marker = {
+            let Some(watcher) = shared.tmux_watchers.get(&watcher_owner_channel_id) else {
+                return;
+            };
+            Arc::clone(&watcher.turn_delivered)
+        };
+        if marker
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.claimed = Some(marker);
+        }
+    }
+
+    /// Resolve the claim against the epilogue's own gate.
+    ///
+    /// `marks_delivered` is
+    /// [`bridge_epilogue_marks_watcher_delivered`](super::super::terminal_delivery::bridge_epilogue_marks_watcher_delivered)
+    /// evaluated on the SAME inputs the epilogue will use. Both of its inputs
+    /// are fixed before the epilogue runs and the epilogue does not change
+    /// them (`DeliveryEpilogueState` carries no `preserve` field), so calling
+    /// settle first is not a guess about what the epilogue will decide — it is
+    /// the same decision, taken earlier.
+    ///
+    /// Settling BEFORE `handle_delivery_epilogue` is what keeps a successful
+    /// publication marked: the epilogue awaits (its stale-prefix drain, its
+    /// completion routing), and a drop at any of those points with the guard
+    /// still armed would roll a delivered answer back to `false` and reopen the
+    /// duplicate window this type exists to close.
+    ///
+    /// Settling does not make the epilogue's own `store(true)` redundant. On a
+    /// claimed turn that store is an idempotent confirm, but the paths that
+    /// never reach the claim — the empty-response recovery edit and the
+    /// `silent_turn` commit, both of which resolve BEFORE the fork — have no
+    /// other writer, and their pre-store window (`L1`) is not what this claim
+    /// closes.
+    pub(super) fn settle(&mut self, marks_delivered: bool) {
+        if let Some(marker) = self.defuse()
+            && !marks_delivered
+        {
+            marker.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Disarm and hand back the owned marker, if any.
+    fn defuse(&mut self) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+        self.claimed.take()
+    }
+}
+
+impl Drop for WatcherDeliveryClaim {
+    fn drop(&mut self) {
+        if let Some(marker) = self.defuse() {
+            marker.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -473,6 +473,7 @@ struct TerminalDeliveryDriver {
     marker: Arc<AtomicBool>,
     observations: Arc<Mutex<Vec<DriverObservation>>>,
     completed_publications: Arc<AtomicUsize>,
+    cancel_token: Arc<crate::services::provider::CancelToken>,
     inflight: InflightTurnState,
     body: String,
     _temp: tempfile::TempDir,
@@ -548,6 +549,7 @@ impl TerminalDeliveryDriver {
             marker,
             observations,
             completed_publications,
+            cancel_token: Arc::new(crate::services::provider::CancelToken::new()),
             inflight,
             body: DRIVER_BODY.to_string(),
             _temp: temp,
@@ -561,6 +563,13 @@ impl TerminalDeliveryDriver {
     /// replace.
     fn with_body(mut self, body: String) -> Self {
         self.body = body;
+        self
+    }
+
+    /// Hand the marker to a different owner before the turn starts, so the
+    /// production CAS is the thing that decides this bridge does not own it.
+    fn with_marker_already_owned(self) -> Self {
+        self.marker.store(true, Ordering::Release);
         self
     }
 
@@ -633,7 +642,7 @@ impl TerminalDeliveryDriver {
                 shared_owned: Arc::clone(&self.shared),
                 gateway: Arc::clone(&self.gateway),
                 provider: ProviderKind::Claude,
-                cancel_token: Arc::new(crate::services::provider::CancelToken::new()),
+                cancel_token: Arc::clone(&self.cancel_token),
                 turn_id: "terminal-delivery-driver-5191".to_string(),
                 user_text_owned: "driver prompt".to_string(),
                 adk_session_key: None,
@@ -677,17 +686,61 @@ fn poll_at_most<F: Future>(future: &mut Pin<Box<F>>, polls: usize) -> bool {
     false
 }
 
-/// #5191 S1-prep baseline. The bridge enters its terminal publish with
-/// `watcher.turn_delivered` STILL FALSE, and only the epilogue's post-commit
-/// store turns it true afterwards.
+// ===========================================================================
+// #5191 R2 S1-fix — witnesses for the pre-publish claim.
+//
+// The S1-prep commit on this branch pinned the OLD ordering: the bridge entered
+// every publishing arm with `turn_delivered` still `false`, and only the
+// epilogue's post-commit store set it. Those assertions are inverted here on
+// purpose — that inversion IS the repair, and it is meant to be visible as an
+// edit rather than as silence.
+//
+// LIMITS THIS SLICE DOES NOT CLOSE (design r3 §9). Do not read any green below
+// as covering them:
+//   L1  the empty-response recovery edit and the `silent_turn` commit resolve
+//       BEFORE the claim, so their pre-store window is unchanged. `W-CONFIRM`
+//       pins the current behaviour there, nothing more.
+//   L2  handle ABA in the OTHER direction: after the claim, a registry
+//       replacement gives the new watcher a fresh `false` marker, which this
+//       bridge never claimed and never sets, so that watcher is not suppressed
+//       and can still duplicate. `W-XCLAIM` is a `D1`-only witness; see its own
+//       negative note.
+//   L3  a fallback POST that actually published the body still reports "not
+//       committed", so settle rolls the marker back. `W-FALLBACK` fixes that as
+//       a known residue.
+//   L4  a drop between the publish landing and the settle. Unchanged from
+//       before this slice, so not a regression, but not closed either.
+//   L5  the CAS only decides OWNERSHIP of the marker. Two concurrent bridges
+//       are not mutually exclusive for publishing; the loser simply does not
+//       own the rollback.
+//   L6  A6 does not participate in the `DeliveryLeaseCell`, so sink/A6 mutual
+//       exclusion is still absent. A6-versus-watcher duplication IS closed by
+//       the claim — that half is not a residue.
+//   L7  only the inline replace (A5) and the legacy long-chunk arm (A3) have
+//       ordering witnesses. The other four arms are covered by the position of
+//       the single `try_claim` statement, not by a driven test.
+//   L8  FIXTURE COVERAGE GAP (not a design residue): the epilogue's `tv_done`
+//       suspension is reachable in production but not from this driver, whose
+//       synthetic message ids fall below the `is_real_discord_message_id`
+//       floor. `W-POSTSTORE` lands on the stale-prefix `delete_message` drain
+//       instead — the same span, a different point. See that witness for the
+//       symbol-level derivation.
+//
+// ABSOLUTE LINE: a claim that survives a turn which did not deliver suppresses
+// that watcher forever. Every witness below that asserts the marker is unset
+// after an abnormal exit is guarding that, not tidiness.
+// ===========================================================================
+
+/// W4 — the inline terminal replace (A5) enters its publish with the marker
+/// ALREADY claimed, and a committed turn keeps it.
 ///
-/// This is the exact ordering the duplicate-relay symptom rides on: between the
-/// publish landing on Discord and the epilogue store, a resuming watcher reads
-/// `false` and relays the same answer again. S1-fix moves a CAS claim ahead of
-/// the fork, at which point `marker_at_entry` below becomes `true` — an
-/// intentional edit to this assertion, not a silent behaviour change.
+/// This is the repair, stated positively: there is no longer an instant at
+/// which the answer is on Discord while `turn_delivered` reads `false`.
+///
+/// Kills a `try_claim` that CASes without storing, and a `settle` that rolls
+/// back unconditionally.
 #[tokio::test]
-async fn driver_terminal_publish_currently_starts_with_the_watcher_marker_unset_5191() {
+async fn claim_marks_the_watcher_before_the_inline_terminal_publish_5191() {
     let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
     assert!(
         !driver.marker(),
@@ -707,33 +760,64 @@ async fn driver_terminal_publish_currently_starts_with_the_watcher_marker_unset_
         driver.observations()
     );
     assert!(
-        !publishes[0].marker_at_entry,
-        "BASELINE: today the bridge publishes with turn_delivered still false"
+        publishes[0].marker_at_entry,
+        "the bridge must hold the watcher claim BEFORE it publishes"
     );
     assert!(
         driver.marker(),
-        "the epilogue's post-commit store is what leaves the marker true today"
+        "a committed delivery keeps the watcher suppressed"
     );
-    assert!(
-        output.terminal_delivery_committed,
-        "an EditedOriginal replace commits the terminal delivery"
-    );
-    assert!(
-        !output.preserve_inflight_for_cleanup_retry,
-        "a committed delivery does not preserve inflight for retry"
-    );
+    assert!(output.terminal_delivery_committed);
+    assert!(!output.preserve_inflight_for_cleanup_retry);
 }
 
-/// #5191 S1-prep baseline. A replace that is NOT committed preserves the turn
-/// for retry, and `bridge_epilogue_marks_watcher_delivered` therefore refuses to
-/// mark the watcher — the marker stays false end to end.
+/// W3 — the epilogue's own store is an idempotent confirm on a claimed turn.
 ///
-/// S1-fix must keep this false: a claim taken before the fork has to be ROLLED
-/// BACK here. If it ever reports true, the watcher is permanently suppressed for
-/// a turn that was never delivered, which is the slice's absolute-line failure.
+/// The claim sets the marker, settle defuses without touching it, and the
+/// epilogue store writes the same value again. The point is that nothing in
+/// that sequence dips the marker back to `false`, so a watcher polling at any
+/// moment after the claim sees a suppressed turn.
+///
+/// Kills a `settle` that rolls back unconditionally.
 #[tokio::test]
-async fn driver_uncommitted_terminal_replace_leaves_the_watcher_unmarked_5191() {
-    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Failed, 1);
+async fn epilogue_store_is_an_idempotent_confirm_after_a_claim_5191() {
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let (ctx, state) = driver.parts();
+    let mut future = Box::pin(run_terminal_outcome_delivery(ctx, state));
+
+    // Step the future one poll at a time and sample the marker between polls.
+    // Once the claim has been taken, no intermediate state may show `false`.
+    let mut claimed_yet = false;
+    for _ in 0..DRIVER_POLL_BUDGET {
+        let done = poll_at_most(&mut future, 1);
+        if driver.marker() {
+            claimed_yet = true;
+        } else {
+            assert!(
+                !claimed_yet,
+                "the marker dipped back to false between the claim and the epilogue store"
+            );
+        }
+        if done {
+            break;
+        }
+    }
+    assert!(claimed_yet, "the turn must have claimed the marker at all");
+    assert!(driver.marker(), "the confirmed turn stays suppressed");
+}
+
+/// W-OWN — a marker that is already `true` belongs to someone else, and this
+/// bridge must neither take it nor clear it.
+///
+/// The turn below FAILS to deliver, so its settle would roll a claim back. It
+/// must not, because it never won the CAS: clearing another owner's marker
+/// un-suppresses a turn that owner already delivered, which is a duplicate.
+///
+/// Kills a `try_claim` that stores unconditionally instead of comparing.
+#[tokio::test]
+async fn claim_refuses_a_marker_another_owner_already_holds_5191() {
+    let driver =
+        TerminalDeliveryDriver::new(ReplaceBehaviour::Failed, 1).with_marker_already_owned();
 
     let (ctx, state) = driver.parts();
     let output = tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
@@ -743,29 +827,148 @@ async fn driver_uncommitted_terminal_replace_leaves_the_watcher_unmarked_5191() 
     assert_eq!(driver.publish_entries().len(), 1);
     assert!(
         output.preserve_inflight_for_cleanup_retry,
-        "a failed replace preserves the turn for retry"
+        "the failed replace still preserves the turn for retry"
     );
     assert!(
-        !output.terminal_delivery_committed,
-        "a failed replace does not commit the terminal delivery"
-    );
-    assert!(
-        !driver.marker(),
-        "an undelivered turn must never suppress the watcher"
+        driver.marker(),
+        "a bridge that lost the CAS must not clear the winner's marker"
     );
 }
 
-/// #5191 S1-prep: the driver can drive an UNWIND out of the production publish
-/// and observe the marker afterwards. That capability is the whole reason this
-/// harness exists ahead of S1-fix — the P0 witness (a claim leaking through a
-/// panic and permanently suppressing the watcher) is unreachable without it.
+/// W2 — a headless (A6) turn whose delivery stays ambiguous must NOT leave the
+/// watcher suppressed.
 ///
-/// The baseline value is `false` because nothing claims the marker yet. After
-/// S1-fix the claim sets it true before the publish and the guard's `Drop` must
-/// restore it to false along this same unwind; the assertion text stays, the
-/// mechanism under it changes.
+/// The claim is taken before the fork, so it is armed on this path too; the
+/// settle has to give it back when the epilogue gate says the turn is preserved
+/// for retry. If it did not, the answer would be undelivered AND the watcher
+/// permanently silenced for it — the absolute-line failure.
+///
+/// Kills a `settle` that always defuses, and a
+/// `bridge_epilogue_marks_watcher_delivered` that drops its `preserve` term.
 #[tokio::test]
-async fn driver_publish_panic_unwinds_and_leaves_the_watcher_unmarked_5191() {
+async fn ambiguous_headless_delivery_releases_the_claim_5191() {
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let (mut ctx, state) = driver.parts();
+    // A6: no local chaining, so delivery goes through the headless outbox. With
+    // no PostgreSQL pool and no Discord http this resolves Ambiguous, which is
+    // the production disposition for "we cannot confirm this was delivered".
+    ctx.can_chain_locally = false;
+
+    let output = tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+        .await
+        .expect("terminal outcome delivery must not hang");
+
+    assert!(
+        driver.publish_entries().is_empty(),
+        "the headless arm must not take the inline replace"
+    );
+    assert!(
+        output.preserve_inflight_for_cleanup_retry,
+        "an ambiguous headless delivery preserves the turn for retry"
+    );
+    assert!(
+        !output.terminal_delivery_committed,
+        "an ambiguous headless delivery is not a commit"
+    );
+    assert!(
+        !driver.marker(),
+        "an undelivered turn must never leave the watcher suppressed"
+    );
+}
+
+/// W-CANCEL — a cancelled headless turn is a COMMIT, and the claim stays.
+///
+/// `turn_delivered = true` means "the bridge finished this turn", not "the
+/// bridge posted something". A cancellation ends the turn, so the watcher must
+/// not relay it afterwards. Pinning this stops a future reading of the marker
+/// as "was published" from turning cancellations back into retries.
+///
+/// Kills a `headless_delivery_disposition` that maps `Cancelled` to
+/// `PreserveForRetry`.
+#[tokio::test]
+async fn cancelled_headless_turn_keeps_the_claim_and_does_not_retry_5191() {
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    driver
+        .cancel_token
+        .publish_cancel("terminal-delivery-driver");
+    let (mut ctx, state) = driver.parts();
+    ctx.can_chain_locally = false;
+
+    let output = tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+        .await
+        .expect("terminal outcome delivery must not hang");
+
+    assert!(
+        output.terminal_delivery_committed,
+        "a cancelled headless turn is committed, not retried"
+    );
+    assert!(
+        !output.preserve_inflight_for_cleanup_retry,
+        "a cancelled turn must not be preserved for retry"
+    );
+    assert!(
+        driver.marker(),
+        "a turn the bridge finished by cancelling must still suppress the watcher"
+    );
+}
+
+/// W-CONFIRM — the epilogue store is the ONLY writer on a path that never
+/// reaches the claim.
+///
+/// A fully consumed response commits before the publishing fork: there is
+/// nothing left to send, so `try_claim` is never executed and the marker can
+/// only come from the epilogue. Deleting that store would silently un-suppress
+/// this whole family of turns.
+///
+/// This also delimits `L1`: it pins the CURRENT behaviour of that path, and
+/// makes no claim that its own pre-store window is closed.
+///
+/// Kills a deleted `store(true)` under the epilogue's gate.
+#[tokio::test]
+async fn epilogue_store_is_the_only_writer_when_the_claim_is_never_reached_5191() {
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let (ctx, mut state) = driver.parts();
+    // Everything in `full_response` has already been sent, so the sink commits
+    // the turn without entering the publishing fork.
+    state.response_sent_offset = DRIVER_BODY.len();
+
+    let output = tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+        .await
+        .expect("terminal outcome delivery must not hang");
+
+    let observed = driver.observations();
+    // The epilogue's stale-prefix drain still runs; what must NOT happen is a
+    // publish, because that is the fork the claim lives in front of.
+    assert!(
+        observed.iter().all(|call| call.call == DriverCall::Delete),
+        "the fully-consumed sink publishes nothing; observed={observed:?}"
+    );
+    assert_eq!(
+        driver.completed_publications(),
+        0,
+        "nothing was published on this path"
+    );
+    assert!(
+        output.terminal_delivery_committed,
+        "a fully consumed response is a commit"
+    );
+    assert!(
+        driver.marker(),
+        "with no claim on this path, the epilogue store is the only thing that can \
+         suppress the watcher"
+    );
+}
+
+/// W-P0 — a panic inside the publish rolls the claim back.
+///
+/// This is the reason the claim is a `Drop` type rather than a pair of
+/// statements. The turn holds the marker when it enters the publish; the panic
+/// unwinds past every explicit settle; and the watcher must still be free
+/// afterwards, because nothing was delivered.
+///
+/// Kills a `Drop` body that does nothing.
+#[tokio::test]
+async fn publish_panic_rolls_the_claim_back_5191() {
     let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::PanicMidPublish, 1);
     let (ctx, state) = driver.parts();
     let mut future = Box::pin(run_terminal_outcome_delivery(ctx, state));
@@ -785,15 +988,16 @@ async fn driver_publish_panic_unwinds_and_leaves_the_watcher_unmarked_5191() {
         message.contains(DRIVER_PUBLISH_PANIC),
         "the unwind must come from inside the publish, not from the harness; payload={message}"
     );
-    assert_eq!(
-        driver.publish_entries().len(),
-        1,
-        "the unwind must happen at the publish seam"
+    let publishes = driver.publish_entries();
+    assert_eq!(publishes.len(), 1, "the unwind happens at the publish seam");
+    assert!(
+        publishes[0].marker_at_entry,
+        "the claim was held when the publish was entered"
     );
     assert_eq!(
         driver.completed_publications(),
         0,
-        "the panicking publish never resolved, so nothing landed"
+        "the panicking publish never landed"
     );
     assert!(
         !driver.marker(),
@@ -802,57 +1006,120 @@ async fn driver_publish_panic_unwinds_and_leaves_the_watcher_unmarked_5191() {
     drop(future);
 }
 
-/// #5191 S1-prep: the manual-poll DROP SWEEP, and the marker table it measures.
+/// W-P0b — dropping the bridge future mid-publish rolls the claim back.
 ///
-/// Every gateway call the driver serves suspends once, so dropping the driven
-/// future after `n` polls lands at real interior points of the production call
-/// graph. Today the table is uniform: no reachable drop point leaves the marker
-/// set, because only the epilogue's post-commit store sets it and nothing
-/// suspends after that store.
+/// A cancelled bridge task does not panic; its future is simply dropped. That
+/// exit has to restore the marker for the same reason a panic does, and it is
+/// reached through the same `Drop`.
 ///
-/// S1-fix inverts the interesting half — once a publish has RESOLVED
-/// successfully, a drop must leave the marker `true` — and that inversion is
-/// what kills a mutant that moves `settle` behind the epilogue.
-///
-/// ENTRY IS NOT SUCCESS. The fake gateway records an entry observation when the
-/// production code reaches the method, then suspends, and only resolves the
-/// outcome on a later poll. So a drop at the poll that entered the publish is
-/// NOT a post-success drop: nothing was delivered there, and rolling the marker
-/// back at that point is correct rather than a defect. The invariant and the
-/// counting below are therefore built on `completed_publications`, never on the
-/// entry observations. Measured for this fixture (one suspension per gateway
-/// call): the publish resolves on poll 2, and the single post-success
-/// non-completing drop point is poll 2 — the epilogue's stale-prefix drain.
-///
-/// MEASURED CONSTRAINT (#5191 U7). A spin-polled task cannot resolve the
-/// epilogue's voice-completion lookup: `voice_channel_for_background` awaits
-/// `cached_config`, which awaits a `tokio::task::spawn_blocking` config load
-/// that never resolves while the polling task itself monopolises the
-/// current-thread runtime. The sweep therefore drives the production shape that
-/// skips it — a turn with no anchored user message, which the epilogue already
-/// documents as a real recovery shape ("A recovery turn with no anchored user
-/// message (user_msg_id == 0) is never a voice turn"). This is an ordinary
-/// production input, not a test-only bypass: the publish, the stale-prefix
-/// drain and the post-commit marker store all still run. The `.await`-driven
-/// tests above cover the anchored-user-message shape.
+/// Kills a `Drop` body that does nothing.
 #[tokio::test]
-async fn driver_drop_sweep_measures_the_current_marker_at_every_suspension_5191() {
-    // (polls, completed, publications_landed, marker)
+async fn dropping_the_bridge_future_mid_publish_rolls_the_claim_back_5191() {
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let (ctx, state) = driver.parts();
+    let mut future = Box::pin(run_terminal_outcome_delivery(ctx, state));
+
+    // One poll enters the publish and suspends inside it.
+    assert!(
+        !poll_at_most(&mut future, 1),
+        "the publish must still be in flight after one poll"
+    );
+    let publishes = driver.publish_entries();
+    assert_eq!(publishes.len(), 1, "the publish was entered");
+    assert!(
+        publishes[0].marker_at_entry,
+        "the claim was held when the publish was entered"
+    );
+    assert_eq!(
+        driver.completed_publications(),
+        0,
+        "the publish has not landed yet"
+    );
+    assert!(driver.marker(), "the claim is live while the publish runs");
+
+    drop(future);
+
+    assert!(
+        !driver.marker(),
+        "a dropped turn whose publish never landed must free the watcher"
+    );
+}
+
+/// W-POSTSTORE — once the gateway has actually published, NO drop point may
+/// take the marker back.
+///
+/// This is the witness that pins `settle` to the near side of the epilogue.
+/// Settling afterwards leaves the rollback guard armed across the epilogue's
+/// own awaits, so a drop there would clear the marker for an answer that is
+/// already on Discord and reopen the duplicate window.
+///
+/// ENTRY IS NOT SUCCESS. The fake gateway records reaching the gateway method,
+/// then suspends, and only resolves the outcome on a later poll. A drop at the
+/// entering poll is therefore NOT a post-success drop — nothing was delivered
+/// there and rolling back is correct. Every assertion below is built on
+/// `completed_publications`, never on the entry observations.
+///
+/// Design r3 §1.3 names `tv_done` as the window this sweep lands in. This
+/// fixture DOES NOT COVER THAT WINDOW — and that is a coverage gap in the
+/// fixture, not an error in the design. In production `tv_done` really does
+/// suspend after the publish:
+///
+/// * `delivery_epilogue.rs` calls `tv_done` under
+///   `can_chain_locally && !preserve_inflight_for_cleanup_retry &&
+///   !delivery_response.trim().is_empty() && user_msg_id.is_some()`, all of
+///   which a normal locally-chained terminal answer satisfies;
+/// * `tv_done` is `note_intake_turn_completed_via_shared` ->
+///   `TurnViewReconciler::note_turn_completed` -> `note_state` ->
+///   `note_state_delivery_with_clear_attempt_guard`, which returns early ONLY
+///   when `!is_real_discord_message_id(target.message_id)`;
+/// * that predicate is the half-open range
+///   `100_000_000_000_000..9_000_000_000_000_000_000`, and real Discord
+///   snowflakes (~1.4e18) fall inside it, so production does NOT short-circuit
+///   and reaches `target_lock.lock().await` and the reaction work past it.
+///
+/// The driver cannot get there: its synthetic ids are far below the floor, so
+/// with `user_msg_id = Some(..)` the call short-circuits before its first
+/// await, and a real-shaped id would instead route the epilogue into the
+/// voice-completion block, whose `spawn_blocking` config load a spin-polled
+/// task cannot resolve (see the MEASURED CONSTRAINT below). So this sweep
+/// lands on the other reachable post-publish suspension inside the same
+/// epilogue: the stale-prefix `delete_message` drain. Same standing — it sits
+/// inside the span a late settle would keep armed — so the invariant and the
+/// mutant it kills are unchanged, but the `tv_done` suspension itself has no
+/// witness here and is recorded as NOT CLOSED.
+///
+/// MEASURED CONSTRAINT: a spin-polled task cannot resolve the epilogue's
+/// voice-completion config load (`cached_config` awaits a `spawn_blocking`), so
+/// the sweep drives the production shape that skips it — a turn with no
+/// anchored user message, which the epilogue documents as a real recovery
+/// shape. The publish, the drain and the marker store all still run.
+///
+/// Kills a `settle` moved behind `handle_delivery_epilogue`, and a `Drop` body
+/// that does nothing.
+#[tokio::test]
+async fn published_answers_survive_every_drop_point_5191() {
     let mut table: Vec<(usize, bool, usize, bool)> = Vec::new();
     let mut polls_to_complete = None;
     for polls in 0..DRIVER_POLL_BUDGET {
-        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+        // Two suspensions per gateway call so the sweep has several interior
+        // landing points rather than exactly one.
+        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 2);
         let (mut ctx, state) = driver.parts();
         ctx.user_msg_id = None;
         let mut future = Box::pin(run_terminal_outcome_delivery(ctx, state));
         let completed = poll_at_most(&mut future, polls);
         drop(future);
-        table.push((
-            polls,
-            completed,
-            driver.completed_publications(),
-            driver.marker(),
-        ));
+
+        let landed = driver.completed_publications();
+        let marker = driver.marker();
+        table.push((polls, completed, landed, marker));
+        if landed > 0 {
+            assert!(
+                marker,
+                "a published answer was un-suppressed by a drop at poll {polls} \
+                 (publications_landed={landed}, completed={completed})"
+            );
+        }
         if completed {
             polls_to_complete = Some(polls);
             break;
@@ -861,52 +1128,49 @@ async fn driver_drop_sweep_measures_the_current_marker_at_every_suspension_5191(
     let polls_to_complete =
         polls_to_complete.expect("the driven future must complete inside the sweep's poll budget");
 
-    for (polls, completed, landed, marker) in &table {
-        if *completed {
-            assert!(
-                *marker,
-                "a completed committed delivery must leave the watcher marked (polls={polls})"
-            );
-        } else {
-            assert!(
-                !*marker,
-                "BASELINE: dropping at poll {polls} leaves the watcher unmarked \
-                 (publications_landed={landed})"
-            );
-        }
-    }
-
-    // The sweep is only a witness for a late settle if it can drop AFTER a
-    // publish actually landed. Measured value for this fixture: exactly one
-    // such point. S1-fix inverts the marker expectation there.
+    // Measured shape, not a floor. The derivation, so a reviewer can redo it:
+    //   * this sweep constructs the driver with `yields_per_call = 2`, so every
+    //     gateway future returns `Pending` twice before it resolves;
+    //   * `poll_at_most(&mut future, polls)` polls exactly `polls` times and
+    //     then the future is dropped, so row `polls` is "drop after N polls";
+    //   * poll 1 enters the replace and suspends, poll 2 suspends again, poll 3
+    //     resolves it — `completed_publications` becomes 1 on poll 3;
+    //   * the epilogue's stale-prefix `delete_message` drain then suspends
+    //     twice the same way and resolves on poll 5, which is also where the
+    //     whole future completes;
+    //   * so the rows with `landed > 0 && !completed` are exactly polls 3 and 4:
+    //     two post-success drop points.
+    // The S1-prep sweep on the same code path reports 1 instead, because it
+    // builds its driver with `yields_per_call = 1`.
+    // Pinning the exact number keeps the sweep from silently degrading into a
+    // witness that never actually lands after a success — which is how the
+    // entry-versus-success conflation this suite previously carried went
+    // unnoticed.
     let post_success_drop_points = table
         .iter()
         .filter(|(_, completed, landed, _)| !*completed && *landed > 0)
         .count();
     assert_eq!(
-        post_success_drop_points, 1,
-        "measured shape: exactly one drop point sits after a publish resolved and \
-         before the future completes; table={table:?}"
+        post_success_drop_points, 2,
+        "the sweep must land after a publish RESOLVED, twice for this fixture; \
+         table={table:?}"
     );
     assert!(
         polls_to_complete >= 3,
-        "the sweep needs interior suspension points to be a witness at all, \
-         but the future completed in {polls_to_complete} polls"
+        "the sweep needs interior suspension points to be a witness at all, but the \
+         future completed in {polls_to_complete} polls"
     );
 }
 
-/// #5191 S1-prep (U8 pre-measurement): the legacy long-chunk arm is reachable
-/// from this driver. A body that needs several Discord messages, with no
-/// ordered tmux range, routes past both cut-over decisions into
-/// `apply_bridge_long_chunks_legacy`, which sends new chunks and deletes the
-/// placeholder instead of replacing in place.
+/// W4b — the legacy long-chunk arm (A3) also publishes under the claim.
 ///
-/// That matters because the ordering witnesses have to cover more than one
-/// publishing arm: a claim placed correctly for the inline replace says nothing
-/// about this one. The baseline is the same — this arm also publishes with the
-/// watcher marker still unset.
+/// A claim placed correctly for the inline replace says nothing about the other
+/// arms. This drives the second one so that moving the `try_claim` statement
+/// past a publishing arm cannot pass unnoticed.
+///
+/// Kills a `try_claim` call moved down to just before the inline replace.
 #[tokio::test]
-async fn driver_reaches_the_legacy_long_chunk_arm_with_an_unordered_range_5191() {
+async fn claim_marks_the_watcher_before_the_legacy_long_chunk_publish_5191() {
     let driver =
         TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1).with_body("chunk ".repeat(1_200));
     let (ctx, state) = driver.parts();
@@ -924,11 +1188,107 @@ async fn driver_reaches_the_legacy_long_chunk_arm_with_an_unordered_range_5191()
         "the long-chunk arm must not take the inline replace; observed={observed:?}"
     );
     assert!(
-        observed.iter().all(|call| !call.marker_at_entry),
-        "BASELINE: the long-chunk arm also publishes with turn_delivered unset"
+        observed
+            .iter()
+            .filter(|call| call.call == DriverCall::Send)
+            .all(|call| call.marker_at_entry),
+        "every chunk of the long-chunk arm must be sent under the claim; \
+         observed={observed:?}"
+    );
+    assert!(output.terminal_delivery_committed);
+    assert!(driver.marker());
+}
+
+/// W-XCLAIM — `D1` ONLY: the claim owns the `Arc` it CASed and never
+/// re-resolves the channel key, so replacing the registry entry mid-turn cannot
+/// make this bridge write to the replacement's marker.
+///
+/// NEGATIVE NOTE, REQUIRED READING: this green is NOT coverage of the opposite
+/// direction. `D2` — the replacement watcher reads its own fresh `false` marker
+/// and relays the same answer anyway — is NOT closed by this slice and is not
+/// tested anywhere. Closing it needs a generation-transfer or
+/// registry-replacement protocol, which is a separate axis. See `L2`. Anyone
+/// reading this test as "handle replacement is handled" is reading it wrong.
+///
+/// Kills a claim that stores the channel key and re-resolves it at settle time.
+#[tokio::test]
+async fn claim_never_writes_to_a_replacement_watchers_marker_5191() {
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Failed, 1);
+    let (ctx, state) = driver.parts();
+    let mut future = Box::pin(run_terminal_outcome_delivery(ctx, state));
+
+    // Enter the publish so the claim is live, then swap the registry entry for
+    // a different watcher with its own, independent marker.
+    assert!(!poll_at_most(&mut future, 1));
+    assert!(driver.marker(), "the claim is live");
+    let replacement = Arc::new(AtomicBool::new(true));
+    driver.shared.tmux_watchers.insert(
+        ChannelId::new(DRIVER_CHANNEL_ID),
+        TmuxWatcherHandle {
+            tmux_session_name: format!("{DRIVER_TMUX_SESSION}-replacement"),
+            output_path: "replacement.jsonl".to_string(),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_offset: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            pause_epoch: Arc::new(AtomicU64::new(0)),
+            turn_delivered: Arc::clone(&replacement),
+            last_heartbeat_ts_ms: Arc::new(AtomicI64::new(
+                crate::services::discord::tmux_watcher_registry::tmux_watcher_now_ms(),
+            )),
+        },
+    );
+
+    assert!(
+        poll_at_most(&mut future, DRIVER_POLL_BUDGET),
+        "the driven future must complete inside the poll budget"
+    );
+
+    assert!(
+        !driver.marker(),
+        "the failed turn rolls back the marker it actually claimed"
     );
     assert!(
-        output.terminal_delivery_committed,
-        "a successful long-chunk send commits the terminal delivery"
+        replacement.load(Ordering::Acquire),
+        "the replacement watcher's own marker must be untouched (D1)"
+    );
+}
+
+/// W-FALLBACK — `L3`, pinned as a KNOWN RESIDUE, not as a fix.
+///
+/// `SentFallbackAfterEditFailure` means the in-place edit failed but a fallback
+/// POST did publish the body. The existing contract classifies that as "not
+/// committed" (there is a regression test in `terminal_delivery` that fails if
+/// the predicate ever starts committing it), so the turn is preserved for retry
+/// and settle gives the marker back — for an answer that IS on Discord.
+///
+/// THIS SLICE DOES NOT CLOSE THAT. The behaviour is identical to before the
+/// claim existed, so it is not a regression, but a duplicate reproduced through
+/// this path is `L3` and not a failure of the claim. Closing it needs a
+/// separate "the body was observed to land" signal threaded out of the
+/// publishing arms, which is a different axis.
+///
+/// When that signal arrives this test is expected to FAIL, and that failure is
+/// the intended notification that the contract changed.
+#[tokio::test]
+async fn fallback_post_that_published_still_releases_the_claim_5191_l3() {
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::FallbackAfterEditFailure, 1);
+    let (ctx, state) = driver.parts();
+    let output = tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+        .await
+        .expect("terminal outcome delivery must not hang");
+
+    assert_eq!(
+        driver.completed_publications(),
+        1,
+        "the fallback POST landed"
+    );
+    assert!(
+        output.preserve_inflight_for_cleanup_retry,
+        "the existing contract does not commit a fallback-after-edit-failure"
+    );
+    assert!(
+        !driver.marker(),
+        "KNOWN RESIDUE (L3): the body was published, yet the claim is released, \
+         so the watcher can still relay it. This slice does not close that."
     );
 }

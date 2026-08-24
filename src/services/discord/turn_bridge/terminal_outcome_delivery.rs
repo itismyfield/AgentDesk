@@ -268,6 +268,10 @@ pub(super) async fn run_terminal_outcome_delivery(
             ),
         }
     } else {
+        // #5191 R2: the binding must OUTLIVE the publishing fork below, which
+        // closes before the settle. `WatcherDeliveryClaim::unarmed` documents
+        // why (design r3 §5's table does not compile if taken literally).
+        let mut claim = contracts::WatcherDeliveryClaim::unarmed();
         queue_retry_silence::apply(
             claude_tui_followup_pre_submit_requeue_candidate,
             claude_tui_followup_busy_readiness_timeout,
@@ -403,6 +407,13 @@ pub(super) async fn run_terminal_outcome_delivery(
                 inflight_state.turn_start_offset,
             )
             .format_and_prefix(response_sent_offset == 0, &delivery_response);
+            // #5191 R2: claim `turn_delivered` BEFORE any of the six publishing arms
+            // below can put the answer on Discord — one statement, see `try_claim`.
+            claim.try_claim(
+                &shared_owned,
+                watcher_owner_channel_id,
+                bridge_relay_delegated_to_watcher,
+            );
             if can_chain_locally {
                 // #5264 PR-B: the admitted latch narrows the PINNED receipt/frontier end
                 // only. The legacy #3041 exclusion lease keeps the observed tmux end;
@@ -759,6 +770,12 @@ pub(super) async fn run_terminal_outcome_delivery(
             }
         }
 
+        // #5191 R2: settle BEFORE the epilogue, never after it — a late settle stays
+        // armed across the epilogue's awaits, where a drop un-publishes. See `settle`.
+        claim.settle(bridge_epilogue_marks_watcher_delivered(
+            preserve_inflight_for_cleanup_retry,
+            bridge_relay_delegated_to_watcher,
+        ));
         handle_delivery_epilogue(
             DeliveryEpilogueMessage::PostCommit,
             DeliveryEpilogueContext {

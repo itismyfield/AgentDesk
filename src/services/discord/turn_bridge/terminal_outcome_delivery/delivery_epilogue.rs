@@ -379,7 +379,7 @@ pub(super) async fn handle_delivery_epilogue(
         // #3041 P1-2 (codex P1-c): a B2 Skip set
         // `preserve_inflight_for_cleanup_retry = true`, so this gate (encoded in
         // `bridge_epilogue_marks_watcher_delivered`) does NOT mark the watcher
-        // delivered — the bridge never delivered the range; the holder owns it.
+        // delivered — the bridge never delivered the range; the holder owns it. #5191 R2: an idempotent confirm on a turn the caller already claimed, and still the ONLY writer on the paths that never reach the claim (`L1`) — see `WatcherDeliveryClaim::settle`, and do not move that settle after this call.
         if bridge_epilogue_marks_watcher_delivered(
             preserve_inflight_for_cleanup_retry,
             bridge_relay_delegated_to_watcher,
