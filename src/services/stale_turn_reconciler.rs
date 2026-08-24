@@ -91,6 +91,7 @@ pub(crate) async fn reconcile_stale_turns_pg(
         pool,
         None,
         independent_tmux_liveness,
+        channel_inflight_observation,
         Some((registry, site)),
     )
     .await?
@@ -107,7 +108,7 @@ pub(crate) async fn reconcile_stale_turn_by_key_pg(
         pool,
         session_key,
         independent_tmux_liveness,
-        channel_inflight_state_present,
+        channel_inflight_observation,
     )
     .await
 }
@@ -121,13 +122,14 @@ async fn reconcile_stale_turn_by_key_with_probes_pg<L, I>(
     inflight_probe: I,
 ) -> Result<SessionReconcileOutcome>
 where
-    L: Fn(&str, &str) -> IndependentLiveness + Copy + Send + 'static,
-    I: Fn(&str, &str) -> InflightPresence + Copy + Send + 'static,
+    L: Fn(&str, &str) -> IndependentLiveness + Clone + Send + 'static,
+    I: Fn(&str, &str) -> InflightObservation + Clone + Send + 'static,
 {
     match reconcile_stale_turns_matching_with_warrant_pg(
         pool,
         Some(session_key),
-        liveness_probe,
+        liveness_probe.clone(),
+        inflight_probe.clone(),
         None,
     )
     .await?
@@ -224,47 +226,181 @@ async fn load_precondition_diagnostic_pg(
     }))
 }
 
-/// Whether a persistent inflight-turn record exists for a session's channel.
-/// `Unknown` is NOT "absent": an unparseable session key or an unreadable
-/// runtime root must fail closed, exactly like an unprobeable tmux pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InflightPresence {
-    Present,
+/// One observation of the persistent inflight-turn record for a session's
+/// channel. `Unknown` is NOT "absent": an unparseable session key, an
+/// unreadable runtime root, or two rows claiming one tmux session all mean "we
+/// could not establish this", never "nothing is running". A `Present`
+/// observation carries the episode's identity so that `Present(A) ->
+/// Present(B)` cannot collapse into "nothing changed".
+///
+/// How `Unknown` behaves depends on which gate reads it, and the two are
+/// deliberately different. The `IdleWithoutInflight` qualification demands
+/// `Absent`, so `Unknown` fails closed there. The apply-time check below is a
+/// transition test, so `Unknown -> Unknown` proceeds: a session this host can
+/// never probe (a remote session key, for instance) must not become
+/// permanently unreconcilable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InflightObservation {
+    Present(crate::services::discord::zombie_foreground_release::InflightEpisodeIdentity),
     Absent,
     Unknown,
 }
 
-fn channel_inflight_state_present(session_key: &str, provider: &str) -> InflightPresence {
+impl InflightObservation {
+    /// The 3-valued presence, without identity, for logs. The reconciler never
+    /// records an episode identity in a log line.
+    fn presence_label(&self) -> &'static str {
+        match self {
+            Self::Present(_) => "present",
+            Self::Absent => "absent",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Did the external inflight authority move between the candidate decision
+    /// and this observation?
+    ///
+    /// This is a transition test, NOT an absolute predicate. The stale-heartbeat
+    /// qualification never required inflight absence, so demanding `Absent` at
+    /// apply time would let one leftover orphan record block that row's recovery
+    /// forever. Requiring only "no transition since the candidate decision"
+    /// keeps a pre-existing `Present` reconcilable while still refusing to idle
+    /// a row whose authority changed under us.
+    fn changed_since(&self, baseline: &Self) -> bool {
+        match (baseline, self) {
+            (Self::Present(before), Self::Present(after)) => {
+                // Required axes: no production writer reassigns either one
+                // inside an episode.
+                before.started_at != after.started_at
+                    || before.user_msg_id != after.user_msg_id
+                    // Auxiliary axes: a production writer can fill each in, or
+                    // restamp it, on a row that is already on disk, so each
+                    // fires only when BOTH observations carry a value. See
+                    // `InflightEpisodeIdentity` for the per-field measurement.
+                    || differs_when_both_present(&before.turn_nonce, &after.turn_nonce)
+                    || differs_when_both_present(
+                        &before.turn_start_offset,
+                        &after.turn_start_offset,
+                    )
+            }
+            // Every other pairing is a presence change and holds the tick:
+            // `Present->Absent`, `Present->Unknown`, `Absent->Present`,
+            // `Absent->Unknown`, `Unknown->Present`, `Unknown->Absent`.
+            (Self::Absent, Self::Absent) | (Self::Unknown, Self::Unknown) => false,
+            _ => true,
+        }
+    }
+}
+
+/// An auxiliary identity axis fires only when both observations carry a value.
+/// A field going from absent to present is the writer filling it in, not the
+/// authority changing hands.
+fn differs_when_both_present<T: PartialEq>(before: &Option<T>, after: &Option<T>) -> bool {
+    matches!((before, after), (Some(before), Some(after)) if before != after)
+}
+
+fn channel_inflight_observation(session_key: &str, provider: &str) -> InflightObservation {
     let Some(identity) = SessionIdentity::parse(session_key) else {
-        return InflightPresence::Unknown;
+        return InflightObservation::Unknown;
     };
     let Some(db_provider) = ProviderKind::from_str(provider) else {
-        return InflightPresence::Unknown;
+        return InflightObservation::Unknown;
     };
     if identity.host != crate::services::platform::hostname_short() {
-        return InflightPresence::Unknown;
+        return InflightObservation::Unknown;
     }
     let Some((tmux_provider, _)) = identity.provider_and_channel() else {
-        return InflightPresence::Unknown;
+        return InflightObservation::Unknown;
     };
     if tmux_provider != db_provider {
-        return InflightPresence::Unknown;
+        return InflightObservation::Unknown;
     }
     use crate::services::discord::zombie_foreground_release::InflightEpisodeLookup;
     match crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name(
         &db_provider,
         &identity.tmux_name,
     ) {
-        InflightEpisodeLookup::Claimed(_) => InflightPresence::Present,
-        InflightEpisodeLookup::Unclaimed => InflightPresence::Absent,
+        InflightEpisodeLookup::Claimed(episode) => InflightObservation::Present(episode),
+        InflightEpisodeLookup::Unclaimed => InflightObservation::Absent,
         // A store that could not be read, and a tmux session two rows both
         // claim, are both "we do not know". Reporting either as `Absent` would
         // let a read failure authorize destruction, and would let whichever row
         // a directory scan happened to yield first decide the verdict.
         InflightEpisodeLookup::Unprobeable | InflightEpisodeLookup::Ambiguous => {
-            InflightPresence::Unknown
+            InflightObservation::Unknown
         }
     }
+}
+
+async fn probe_inflight<I>(candidate: &StaleTurnCandidate, probe: &I) -> InflightObservation
+where
+    I: Fn(&str, &str) -> InflightObservation + Clone + Send + 'static,
+{
+    let key = candidate.session_key.clone();
+    let provider = candidate.provider.clone();
+    let probe = probe.clone();
+    tokio::task::spawn_blocking(move || probe(&key, &provider))
+        .await
+        .unwrap_or(InflightObservation::Unknown)
+}
+
+async fn probe_tmux<L>(candidate: &StaleTurnCandidate, probe: &L) -> IndependentLiveness
+where
+    L: Fn(&str, &str) -> IndependentLiveness + Clone + Send + 'static,
+{
+    let key = candidate.session_key.clone();
+    let provider = candidate.provider.clone();
+    let probe = probe.clone();
+    tokio::task::spawn_blocking(move || probe(&key, &provider))
+        .await
+        .unwrap_or(IndependentLiveness::LiveOrAmbiguous)
+}
+
+fn tmux_is_terminal(liveness: IndependentLiveness) -> bool {
+    matches!(
+        liveness,
+        IndependentLiveness::NoPane | IndependentLiveness::ReadyForInput
+    )
+}
+
+/// The apply-time re-read of both external authorities.
+///
+/// The two axes are checked differently, exactly as the design specifies. The
+/// inflight axis is a compare-and-swap against what the candidate decision saw,
+/// because a pre-existing record is not disqualifying. The tmux axis is an
+/// absolute predicate — apply-time evidence must still be terminal — so
+/// `NoPane -> ReadyForInput` moves but still passes. Neither is stronger than
+/// the other; a live pane and a changed episode each hold the tick.
+///
+/// A held tick is written to nothing — no ledger, no circuit, no column, no
+/// file — so the next tick re-captures a fresh baseline and decides again. That
+/// is why a transition can never become a permanent denial: whatever the new
+/// authority is, the next tick treats it as the baseline and reconciles as soon
+/// as it stops moving.
+async fn external_authority_permits_apply<L, I>(
+    candidate: &StaleTurnCandidate,
+    liveness_probe: &L,
+    inflight_probe: &I,
+    baseline_inflight: &InflightObservation,
+) -> bool
+where
+    L: Fn(&str, &str) -> IndependentLiveness + Clone + Send + 'static,
+    I: Fn(&str, &str) -> InflightObservation + Clone + Send + 'static,
+{
+    let apply_tmux = probe_tmux(candidate, liveness_probe).await;
+    let apply_inflight = probe_inflight(candidate, inflight_probe).await;
+    if tmux_is_terminal(apply_tmux) && !apply_inflight.changed_since(baseline_inflight) {
+        return true;
+    }
+    tracing::info!(
+        target: "reconcile",
+        session_key = %candidate.session_key,
+        ?apply_tmux,
+        baseline_inflight = baseline_inflight.presence_label(),
+        apply_inflight = apply_inflight.presence_label(),
+        "held this tick because external authority moved after the candidate decision; the next tick re-decides from a fresh baseline"
+    );
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,41 +423,30 @@ async fn reconcile_idle_without_inflight_pg<L, I>(
     inflight_probe: I,
 ) -> Result<CandidateApplyOutcome>
 where
-    L: Fn(&str, &str) -> IndependentLiveness + Copy + Send + 'static,
-    I: Fn(&str, &str) -> InflightPresence + Copy + Send + 'static,
+    L: Fn(&str, &str) -> IndependentLiveness + Clone + Send + 'static,
+    I: Fn(&str, &str) -> InflightObservation + Clone + Send + 'static,
 {
     let Some(candidate) = load_busy_session_pg(pool, session_key).await? else {
         return Ok(CandidateApplyOutcome::Unchanged);
     };
 
-    let key = candidate.session_key.clone();
-    let provider = candidate.provider.clone();
-    let inflight = tokio::task::spawn_blocking(move || inflight_probe(&key, &provider))
-        .await
-        .unwrap_or(InflightPresence::Unknown);
-    if inflight != InflightPresence::Absent {
+    let baseline_inflight = probe_inflight(&candidate, &inflight_probe).await;
+    if baseline_inflight != InflightObservation::Absent {
         tracing::info!(
             target: "reconcile",
             session_key = %candidate.session_key,
-            ?inflight,
+            inflight = baseline_inflight.presence_label(),
             "preserved busy session because an inflight turn record was present or unprobeable"
         );
         return Ok(CandidateApplyOutcome::Unchanged);
     }
 
-    let key = candidate.session_key.clone();
-    let provider = candidate.provider.clone();
-    let liveness = tokio::task::spawn_blocking(move || liveness_probe(&key, &provider))
-        .await
-        .unwrap_or(IndependentLiveness::LiveOrAmbiguous);
-    if !matches!(
-        liveness,
-        IndependentLiveness::NoPane | IndependentLiveness::ReadyForInput
-    ) {
+    let baseline_tmux = probe_tmux(&candidate, &liveness_probe).await;
+    if !tmux_is_terminal(baseline_tmux) {
         tracing::info!(
             target: "reconcile",
             session_key = %candidate.session_key,
-            ?liveness,
+            liveness = ?baseline_tmux,
             "preserved busy session without inflight because independent liveness was not terminal"
         );
         return Ok(CandidateApplyOutcome::Unchanged);
@@ -329,6 +454,23 @@ where
 
     #[cfg(test)]
     await_stale_sweep_apply_barrier().await;
+
+    // Both external authorities are re-read here, immediately before the
+    // destructive UPDATE. This path's candidate qualification already required
+    // `Absent`, so the transition test reduces to "still `Absent`" — one rule
+    // shared with the stale-heartbeat path above.
+    if !external_authority_permits_apply(
+        &candidate,
+        &liveness_probe,
+        &inflight_probe,
+        &baseline_inflight,
+    )
+    .await
+    {
+        // Same reporting as a failed DB CAS, for the same reason: retryable,
+        // not "this session does not qualify".
+        return Ok(CandidateApplyOutcome::PreconditionChanged);
+    }
 
     let reconciled = reconcile_idle_without_inflight_candidate_pg(pool, &candidate).await?;
     if reconciled > 0 {
@@ -401,6 +543,9 @@ async fn reconcile_idle_without_inflight_candidate_pg(
     })
 }
 
+/// The outer wrapper hands the production inflight probe to the shared path, so
+/// the existing suites exercise the real `channel_inflight_observation` on both
+/// sides of the barrier rather than an injected stand-in.
 #[cfg(test)]
 async fn reconcile_stale_turns_matching_pg<F>(
     pool: &PgPool,
@@ -408,13 +553,17 @@ async fn reconcile_stale_turns_matching_pg<F>(
     probe: F,
 ) -> Result<usize>
 where
-    F: Fn(&str, &str) -> IndependentLiveness + Copy + Send + 'static,
+    F: Fn(&str, &str) -> IndependentLiveness + Clone + Send + 'static,
 {
-    Ok(
-        reconcile_stale_turns_matching_with_warrant_pg(pool, session_key, probe, None)
-            .await?
-            .reconciled,
+    Ok(reconcile_stale_turns_matching_with_warrant_pg(
+        pool,
+        session_key,
+        probe,
+        channel_inflight_observation,
+        None,
     )
+    .await?
+    .reconciled)
 }
 
 fn structural_candidate_apply(eligible: bool) -> bool {
@@ -436,32 +585,41 @@ async fn destructive_warrant_bind(
     .await
 }
 
-async fn reconcile_stale_turns_matching_with_warrant_pg<F>(
+async fn reconcile_stale_turns_matching_with_warrant_pg<L, I>(
     pool: &PgPool,
     session_key: Option<&str>,
-    probe: F,
+    liveness_probe: L,
+    inflight_probe: I,
     automatic_warrant: Option<(Option<&HealthRegistry>, AxisBSite)>,
 ) -> Result<ApplySummary>
 where
-    F: Fn(&str, &str) -> IndependentLiveness + Copy + Send + 'static,
+    L: Fn(&str, &str) -> IndependentLiveness + Clone + Send + 'static,
+    I: Fn(&str, &str) -> InflightObservation + Clone + Send + 'static,
 {
     let candidates = load_stale_turn_candidates_pg(pool, session_key).await?;
     let mut summary = ApplySummary::default();
 
     for candidate in candidates {
-        let key = candidate.session_key.clone();
-        let provider = candidate.provider.clone();
-        let liveness = tokio::task::spawn_blocking(move || probe(&key, &provider))
-            .await
-            .unwrap_or(IndependentLiveness::LiveOrAmbiguous);
-        if !matches!(
-            liveness,
-            IndependentLiveness::NoPane | IndependentLiveness::ReadyForInput
-        ) {
+        // Read the inflight authority FIRST, before the tmux gate, so the
+        // protected span starts as early as this loop can make it. Anything
+        // later — after the tmux probe, or after the warrant await — would let
+        // a turn that starts during the skipped step be captured as the
+        // baseline and then compare equal to itself at apply time, which is the
+        // exact shape this slice exists to refuse. The cost of reading it for
+        // candidates that go on to fail the tmux gate is accepted: a wider
+        // protected span is worth more than a saved probe.
+        //
+        // It is a baseline, never a gate. The stale-heartbeat qualification
+        // does not require inflight absence, so gating on it here would let a
+        // pre-existing orphan record deny this row forever.
+        let baseline_inflight = probe_inflight(&candidate, &inflight_probe).await;
+
+        let baseline_tmux = probe_tmux(&candidate, &liveness_probe).await;
+        if !tmux_is_terminal(baseline_tmux) {
             tracing::info!(
                 target: "reconcile",
                 session_key = %candidate.session_key,
-                ?liveness,
+                liveness = ?baseline_tmux,
                 "preserved stale busy session because independent liveness was not terminal"
             );
             continue;
@@ -486,6 +644,27 @@ where
 
         #[cfg(test)]
         await_stale_sweep_apply_barrier().await;
+
+        // The correction this slice lands: this shared path used to read no
+        // inflight record at all, on any of the three entry points that reach
+        // it (both automatic sweeps and the operator's first branch).
+        if !external_authority_permits_apply(
+            &candidate,
+            &liveness_probe,
+            &inflight_probe,
+            &baseline_inflight,
+        )
+        .await
+        {
+            // Surface this the same way a failed DB CAS is surfaced. Both mean
+            // "a precondition this decision was built on is no longer true, so
+            // retry against a fresh snapshot", and the operator has no way to
+            // act on the difference. Reporting it as a plain no-op instead
+            // would tell a caller its session simply did not qualify, which is
+            // a different and wrong instruction.
+            summary.precondition_changed = true;
+            continue;
+        }
 
         let updated = reconcile_candidate_pg(pool, &candidate).await?;
         if updated == 0 {
@@ -621,6 +800,11 @@ mod tests {
     use super::*;
     use sqlx::Row;
 
+    /// Upper bound for any single wait in this module. Generous enough that a
+    /// loaded PostgreSQL fixture never trips it, short enough that a wedged
+    /// witness releases the shared build token in minutes rather than an hour.
+    const WITNESS_DEADLINE: Duration = Duration::from_secs(90);
+
     async fn allow_legacy_working_status(pool: &PgPool) {
         sqlx::query("ALTER TABLE sessions DROP CONSTRAINT sessions_status_known_check")
             .execute(pool)
@@ -754,6 +938,7 @@ mod tests {
                 &pool,
                 Some(automatic),
                 |_, _| IndependentLiveness::NoPane,
+                |_, _| InflightObservation::Unknown,
                 Some((None, AxisBSite::BootReconcileSweep)),
             )
             .await
@@ -869,8 +1054,8 @@ mod tests {
             crate::services::platform::hostname_short()
         );
         assert_eq!(
-            channel_inflight_state_present(&session_key, "claude"),
-            InflightPresence::Unknown,
+            channel_inflight_observation(&session_key, "claude"),
+            InflightObservation::Unknown,
             "the production session-key mapping must retain Unprobeable as Unknown"
         );
 
@@ -882,7 +1067,7 @@ mod tests {
                 &pool,
                 &session_key,
                 |_, _| IndependentLiveness::ReadyForInput,
-                channel_inflight_state_present,
+                channel_inflight_observation,
             )
             .await
             .unwrap(),
@@ -942,7 +1127,7 @@ mod tests {
                 &pool,
                 "host:zombie-fresh-heartbeat",
                 |_, _| IndependentLiveness::ReadyForInput,
-                |_, _| InflightPresence::Absent,
+                |_, _| InflightObservation::Absent,
             )
             .await
             .unwrap(),
@@ -989,7 +1174,7 @@ mod tests {
                 &pool,
                 "host:live-inflight",
                 |_, _| IndependentLiveness::ReadyForInput,
-                |_, _| InflightPresence::Present,
+                |_, _| episode("episode-live", 7, Some("nonce-live")),
             )
             .await
             .unwrap(),
@@ -1002,7 +1187,7 @@ mod tests {
                 &pool,
                 "host:live-pane",
                 |_, _| IndependentLiveness::LiveOrAmbiguous,
-                |_, _| InflightPresence::Absent,
+                |_, _| InflightObservation::Absent,
             )
             .await
             .unwrap(),
@@ -1016,7 +1201,7 @@ mod tests {
                 &pool,
                 "host:unknown-inflight",
                 |_, _| IndependentLiveness::ReadyForInput,
-                |_, _| InflightPresence::Unknown,
+                |_, _| InflightObservation::Unknown,
             )
             .await
             .unwrap(),
@@ -1031,7 +1216,7 @@ mod tests {
                 &pool,
                 "host:live-dispatch-fresh",
                 |_, _| IndependentLiveness::NoPane,
-                |_, _| InflightPresence::Absent,
+                |_, _| InflightObservation::Absent,
             )
             .await
             .unwrap(),
@@ -1114,6 +1299,66 @@ mod tests {
         pg_db.drop().await;
     }
 
+    /// One `Present` observation with an explicit episode identity.
+    fn episode(
+        started_at: &str,
+        user_msg_id: u64,
+        turn_nonce: Option<&str>,
+    ) -> InflightObservation {
+        episode_at_offset(started_at, user_msg_id, turn_nonce, None)
+    }
+
+    fn episode_at_offset(
+        started_at: &str,
+        user_msg_id: u64,
+        turn_nonce: Option<&str>,
+        turn_start_offset: Option<u64>,
+    ) -> InflightObservation {
+        InflightObservation::Present(
+            crate::services::discord::zombie_foreground_release::InflightEpisodeIdentity {
+                started_at: started_at.to_string(),
+                user_msg_id,
+                turn_nonce: turn_nonce.map(str::to_string),
+                turn_start_offset,
+            },
+        )
+    }
+
+    /// A probe whose reading changes after the candidate decision: call `0` is
+    /// the candidate baseline, every later call is the apply-time re-read.
+    fn transitioning<T: Clone + Send + 'static>(
+        baseline: T,
+        after: T,
+    ) -> impl Fn(&str, &str) -> T + Clone + Send + 'static {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        move |_, _| {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                baseline.clone()
+            } else {
+                after.clone()
+            }
+        }
+    }
+
+    /// Every witness in this module runs under a hard deadline. A probe, a pool
+    /// wait, or a join that never returns must FAIL the test rather than park
+    /// the lane; expiry that resolved to green would disarm the witness.
+    async fn within_deadline<F: std::future::Future>(future: F) -> F::Output {
+        tokio::time::timeout(WITNESS_DEADLINE, future)
+            .await
+            .expect("stale-turn witness exceeded its hard deadline")
+    }
+
+    /// Rendezvous at the apply barrier under the same deadline. A barrier that
+    /// is never reached means the production path bailed out before the seam —
+    /// a mis-built fixture, not a passing contract — and that must surface as a
+    /// failure within `WITNESS_DEADLINE` instead of blocking forever.
+    async fn rendezvous(barrier: &std::sync::Arc<StaleSweepApplyBarrierPoint>, phase: &str) {
+        tokio::time::timeout(WITNESS_DEADLINE, barrier.wait())
+            .await
+            .unwrap_or_else(|_| panic!("stale-sweep apply barrier was never reached at {phase}"));
+    }
+
     fn apply_barrier() -> (
         StaleSweepApplyBarrier,
         std::sync::Arc<StaleSweepApplyBarrierPoint>,
@@ -1153,20 +1398,20 @@ mod tests {
                 &task_pool,
                 key,
                 |_, _| IndependentLiveness::NoPane,
-                |_, _| InflightPresence::Unknown,
+                |_, _| InflightObservation::Unknown,
             )
             .await
             .unwrap()
         });
-        reached.wait().await;
+        rendezvous(&reached, "candidate load").await;
         sqlx::query("UPDATE sessions SET last_heartbeat = NOW() - INTERVAL '10 minutes' WHERE session_key = $1")
             .bind(key)
             .execute(&pool)
             .await
             .unwrap();
-        resume.wait().await;
+        rendezvous(&resume, "apply resume").await;
         assert!(matches!(
-            task.await.unwrap(),
+            within_deadline(task).await.unwrap(),
             SessionReconcileOutcome::PreconditionChanged(_)
         ));
         assert_eq!(load_state(&pool, key).await.0, "turn_active");
@@ -1177,7 +1422,7 @@ mod tests {
                 &pool,
                 key,
                 |_, _| IndependentLiveness::NoPane,
-                |_, _| InflightPresence::Unknown,
+                |_, _| InflightObservation::Unknown,
             )
             .await
             .unwrap(),
@@ -1203,21 +1448,21 @@ mod tests {
                 &task_pool,
                 key,
                 |_, _| IndependentLiveness::ReadyForInput,
-                |_, _| InflightPresence::Absent,
+                |_, _| InflightObservation::Absent,
             )
             .await
             .unwrap()
         });
-        reached.wait().await;
+        rendezvous(&reached, "candidate load").await;
         sqlx::query("UPDATE sessions SET last_heartbeat = NOW() WHERE session_key = $1")
             .bind(key)
             .execute(&pool)
             .await
             .unwrap();
-        resume.wait().await;
+        rendezvous(&resume, "apply resume").await;
 
         assert!(matches!(
-            task.await.unwrap(),
+            within_deadline(task).await.unwrap(),
             SessionReconcileOutcome::PreconditionChanged(_)
         ));
         assert_eq!(load_state(&pool, key).await.0, "turn_active");
@@ -1275,19 +1520,20 @@ mod tests {
                 &task_pool,
                 Some(key),
                 |_, _| IndependentLiveness::NoPane,
+                |_, _| InflightObservation::Unknown,
                 None,
             )
             .await
             .unwrap()
         });
-        reached.wait().await;
+        rendezvous(&reached, "candidate load").await;
         sqlx::query("UPDATE sessions SET provider = 'codex' WHERE session_key = $1")
             .bind(key)
             .execute(&pool)
             .await
             .unwrap();
-        resume.wait().await;
-        assert!(task.await.unwrap().precondition_changed);
+        rendezvous(&resume, "apply resume").await;
+        assert!(within_deadline(task).await.unwrap().precondition_changed);
         let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         assert!(
             output.contains("reason=\"precondition_changed\""),
@@ -1336,12 +1582,12 @@ mod tests {
                 &task_pool,
                 key,
                 |_, _| IndependentLiveness::NoPane,
-                |_, _| InflightPresence::Unknown,
+                |_, _| InflightObservation::Unknown,
             )
             .await
             .unwrap()
         });
-        reached.wait().await;
+        rendezvous(&reached, "candidate load").await;
         sqlx::query("UPDATE sessions SET provider = 'codex' WHERE session_key = $1")
             .bind(key)
             .execute(&pool)
@@ -1357,13 +1603,372 @@ mod tests {
             heartbeat_before, heartbeat_after,
             "interleaving must change only provider"
         );
-        resume.wait().await;
+        rendezvous(&resume, "apply resume").await;
 
         assert!(matches!(
-            task.await.unwrap(),
+            within_deadline(task).await.unwrap(),
             SessionReconcileOutcome::PreconditionChanged(_)
         ));
         assert_eq!(load_state(&pool, key).await.0, "turn_active");
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// I-5a — the destructive UPDATE is preceded by a tmux re-probe on the
+    /// shared stale-heartbeat path, so a pane that comes back to life after the
+    /// candidate decision holds the tick. The counter pins that the probe is
+    /// actually called twice; a single reading cannot satisfy both assertions.
+    #[tokio::test]
+    async fn apply_time_tmux_reprobe_holds_a_pane_that_came_back_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let held = "remote-host:tmux-reprobe-held";
+        let idle_path = "remote-host:tmux-reprobe-idle-path";
+        seed_session(
+            &pool,
+            held,
+            "turn_active",
+            None,
+            STALE_TURN_GRACE.as_secs() as i64 + 60,
+        )
+        .await;
+        // The operator's IdleWithoutInflight branch takes a fresh heartbeat.
+        seed_session(&pool, idle_path, "turn_active", None, 30).await;
+
+        assert_eq!(
+            within_deadline(reconcile_stale_turns_matching_with_warrant_pg(
+                &pool,
+                Some(held),
+                transitioning(
+                    IndependentLiveness::NoPane,
+                    IndependentLiveness::LiveOrAmbiguous,
+                ),
+                |_, _| InflightObservation::Unknown,
+                None,
+            ))
+            .await
+            .unwrap()
+            .reconciled,
+            0,
+            "a pane that revived between the candidate decision and the update must hold the tick"
+        );
+        assert_eq!(load_state(&pool, held).await.0, "turn_active");
+
+        // Same rule on the operator's second branch, reported as retryable.
+        assert!(matches!(
+            within_deadline(reconcile_stale_turn_by_key_with_probes_pg(
+                &pool,
+                idle_path,
+                transitioning(
+                    IndependentLiveness::ReadyForInput,
+                    IndependentLiveness::LiveOrAmbiguous,
+                ),
+                |_, _| InflightObservation::Absent,
+            ))
+            .await
+            .unwrap(),
+            SessionReconcileOutcome::PreconditionChanged(_)
+        ));
+        assert_eq!(load_state(&pool, idle_path).await.0, "turn_active");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// I-5b — the shared stale-heartbeat path re-reads the inflight record too.
+    /// It never did before, and that gap is exactly what let a turn that started
+    /// after the candidate decision be idled.
+    ///
+    /// Both directions are asserted together on purpose. A transition
+    /// (`Absent -> Present`) holds the tick, but a presence that was already
+    /// there at the candidate decision and never moved still reconciles: the
+    /// stale-heartbeat qualification never required inflight absence, so an
+    /// absolute `Absent` requirement at apply time would turn one leftover
+    /// orphan record into a permanent denial for that row.
+    #[tokio::test]
+    async fn apply_time_inflight_reprobe_holds_a_new_turn_without_denying_a_stable_orphan_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let arrived = "remote-host:inflight-arrived";
+        let orphan = "remote-host:inflight-stable-orphan";
+        let idle_path = "remote-host:inflight-idle-path";
+        for key in [arrived, orphan] {
+            seed_session(
+                &pool,
+                key,
+                "turn_active",
+                None,
+                STALE_TURN_GRACE.as_secs() as i64 + 60,
+            )
+            .await;
+        }
+        seed_session(&pool, idle_path, "turn_active", None, 30).await;
+
+        assert_eq!(
+            within_deadline(reconcile_stale_turns_matching_with_warrant_pg(
+                &pool,
+                Some(arrived),
+                |_, _| IndependentLiveness::NoPane,
+                transitioning(
+                    InflightObservation::Absent,
+                    episode("episode-arrived", 21, Some("nonce-arrived")),
+                ),
+                None,
+            ))
+            .await
+            .unwrap()
+            .reconciled,
+            0,
+            "a turn that started after the candidate decision must hold the tick"
+        );
+        assert_eq!(load_state(&pool, arrived).await.0, "turn_active");
+
+        assert_eq!(
+            within_deadline(reconcile_stale_turns_matching_with_warrant_pg(
+                &pool,
+                Some(orphan),
+                |_, _| IndependentLiveness::NoPane,
+                |_, _| episode("episode-orphan", 22, Some("nonce-orphan")),
+                None,
+            ))
+            .await
+            .unwrap()
+            .reconciled,
+            1,
+            "an inflight record that never moved is not a new permanent denial"
+        );
+        assert_eq!(load_state(&pool, orphan).await.0, "idle");
+
+        // The operator's second branch shares the rule; there the candidate
+        // qualification is already `Absent`, so it reduces to "still absent".
+        assert!(matches!(
+            within_deadline(reconcile_stale_turn_by_key_with_probes_pg(
+                &pool,
+                idle_path,
+                |_, _| IndependentLiveness::ReadyForInput,
+                transitioning(
+                    InflightObservation::Absent,
+                    episode("episode-idle-path", 23, None),
+                ),
+            ))
+            .await
+            .unwrap(),
+            // An external hold is reported exactly like a failed DB CAS: the
+            // operator is told to retry against a fresh snapshot, not that the
+            // session failed to qualify.
+            SessionReconcileOutcome::PreconditionChanged(_)
+        ));
+        assert_eq!(load_state(&pool, idle_path).await.0, "turn_active");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// I-10 — the inflight baseline is captured before the tmux gate, so the
+    /// span this slice protects starts as early as the candidate loop can make
+    /// it. A turn that starts while the tmux pane is being probed must still
+    /// land on the `Absent -> Present` side of the comparison rather than being
+    /// absorbed as the baseline.
+    #[tokio::test]
+    async fn inflight_baseline_is_captured_before_the_tmux_gate_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let key = "remote-host:probe-order";
+        seed_session(
+            &pool,
+            key,
+            "turn_active",
+            None,
+            STALE_TURN_GRACE.as_secs() as i64 + 60,
+        )
+        .await;
+
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let tmux_order = order.clone();
+        let inflight_order = order.clone();
+        assert_eq!(
+            within_deadline(reconcile_stale_turns_matching_with_warrant_pg(
+                &pool,
+                Some(key),
+                move |_, _| {
+                    tmux_order.lock().unwrap().push("tmux");
+                    IndependentLiveness::NoPane
+                },
+                move |_, _| {
+                    inflight_order.lock().unwrap().push("inflight");
+                    InflightObservation::Unknown
+                },
+                None,
+            ))
+            .await
+            .unwrap()
+            .reconciled,
+            1
+        );
+        assert_eq!(
+            order.lock().unwrap().as_slice(),
+            ["inflight", "tmux", "tmux", "inflight"],
+            "the inflight baseline must precede the tmux gate, or a turn that starts \
+             during the tmux probe is captured as the baseline and compares equal to itself"
+        );
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// I-9 (ERRATUM E1) — presence alone is not the re-probe operand.
+    /// `Present(A) -> Present(B)` is a transition even though both readings are
+    /// "present", because the authority behind them is not the same episode.
+    ///
+    /// The hold is not a denial: the same row reconciles on the next tick, whose
+    /// candidate decision re-captures `Present(B)` as its own baseline. And a
+    /// re-write of the SAME episode is not a transition, which is why identity
+    /// is compared on stable fields rather than on mtime or size.
+    #[tokio::test]
+    async fn inflight_identity_swap_holds_one_tick_then_self_resolves_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let swapped = "remote-host:identity-swap";
+        let rewritten = "remote-host:identity-rewritten";
+        for key in [swapped, rewritten] {
+            seed_session(
+                &pool,
+                key,
+                "turn_active",
+                None,
+                STALE_TURN_GRACE.as_secs() as i64 + 60,
+            )
+            .await;
+        }
+
+        assert_eq!(
+            within_deadline(reconcile_stale_turns_matching_with_warrant_pg(
+                &pool,
+                Some(swapped),
+                |_, _| IndependentLiveness::NoPane,
+                transitioning(
+                    episode("episode-a", 31, Some("nonce-a")),
+                    episode("episode-b", 32, Some("nonce-b")),
+                ),
+                None,
+            ))
+            .await
+            .unwrap()
+            .reconciled,
+            0,
+            "a live turn that replaced an orphan record must not collapse into no transition"
+        );
+        assert_eq!(load_state(&pool, swapped).await.0, "turn_active");
+
+        // Self-resolution: nothing recorded the hold, so the next tick takes
+        // `Present(B)` as its baseline and applies once B stops moving.
+        assert_eq!(
+            within_deadline(reconcile_stale_turns_matching_with_warrant_pg(
+                &pool,
+                Some(swapped),
+                |_, _| IndependentLiveness::NoPane,
+                |_, _| episode("episode-b", 32, Some("nonce-b")),
+                None,
+            ))
+            .await
+            .unwrap()
+            .reconciled,
+            1,
+            "the held tick must not latch: the next tick re-decides from a fresh baseline"
+        );
+        assert_eq!(load_state(&pool, swapped).await.0, "idle");
+
+        // The counter-direction that rules out an mtime/size identity: the same
+        // episode persisted again, with only unobserved progress advancing.
+        assert_eq!(
+            within_deadline(reconcile_stale_turns_matching_with_warrant_pg(
+                &pool,
+                Some(rewritten),
+                |_, _| IndependentLiveness::NoPane,
+                |_, _| episode("episode-same", 33, Some("nonce-same")),
+                None,
+            ))
+            .await
+            .unwrap()
+            .reconciled,
+            1,
+            "re-persisting the same episode is not a transition"
+        );
+        assert_eq!(load_state(&pool, rewritten).await.0, "idle");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// I-11 — `turn_start_offset` is the axis that separates two turns the
+    /// required axes cannot.
+    ///
+    /// `started_at` has one-second resolution and TUI-direct turns carry
+    /// `user_msg_id == 0`, so two consecutive turns collide on both required
+    /// axes; a legacy row with no `turn_nonce` leaves that auxiliary axis
+    /// abstaining too. The canonical `inflight::InflightTurnIdentity` already
+    /// carries the offset for exactly this collision.
+    #[tokio::test]
+    async fn same_second_zero_id_turns_are_separated_by_the_start_offset_pg() {
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let collided = "remote-host:offset-collision";
+        let abstains = "remote-host:offset-abstains";
+        for key in [collided, abstains] {
+            seed_session(
+                &pool,
+                key,
+                "turn_active",
+                None,
+                STALE_TURN_GRACE.as_secs() as i64 + 60,
+            )
+            .await;
+        }
+        let same_second = "2026-08-24 12:00:00";
+
+        assert_eq!(
+            within_deadline(reconcile_stale_turns_matching_with_warrant_pg(
+                &pool,
+                Some(collided),
+                |_, _| IndependentLiveness::NoPane,
+                transitioning(
+                    // The orphan: legacy row, no nonce to break the tie.
+                    episode_at_offset(same_second, 0, None, Some(4096)),
+                    // The live turn that replaced it: same second, same zero id.
+                    episode_at_offset(same_second, 0, Some("nonce-new"), Some(8192)),
+                ),
+                None,
+            ))
+            .await
+            .unwrap()
+            .reconciled,
+            0,
+            "two turns that collide on started_at and user_msg_id must still be told apart"
+        );
+        assert_eq!(load_state(&pool, collided).await.0, "turn_active");
+
+        // The counter-direction that keeps the axis auxiliary rather than
+        // required: production restamps the offset on a row already on disk, so
+        // an observation that carries no offset must not fabricate a change.
+        assert_eq!(
+            within_deadline(reconcile_stale_turns_matching_with_warrant_pg(
+                &pool,
+                Some(abstains),
+                |_, _| IndependentLiveness::NoPane,
+                transitioning(
+                    episode_at_offset(same_second, 41, Some("nonce-same"), None),
+                    episode_at_offset(same_second, 41, Some("nonce-same"), Some(512)),
+                ),
+                None,
+            ))
+            .await
+            .unwrap()
+            .reconciled,
+            1,
+            "an axis only one observation carries must abstain, not invent a transition"
+        );
+        assert_eq!(load_state(&pool, abstains).await.0, "idle");
+
         pool.close().await;
         pg_db.drop().await;
     }
