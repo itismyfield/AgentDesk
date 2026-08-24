@@ -294,7 +294,7 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
         .as_ref()
         .expect("IoError restores the detached pre-frame pin");
     assert!(Arc::ptr_eq(failed_pin, &pre_frame_delivery_pin));
-    assert!(Arc::ptr_ne(failed_pin, &incumbent_delivery_pin));
+    assert!(!Arc::ptr_eq(failed_pin, &incumbent_delivery_pin));
     assert_eq!(failed.watcher_slots, 1);
     assert!(!state_dirty);
     assert_ne!(
@@ -327,7 +327,7 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
         .as_ref()
         .expect("successful retry retains the first adopted pin");
     assert!(Arc::ptr_eq(retried_pin, &pre_frame_delivery_pin));
-    assert!(Arc::ptr_ne(retried_pin, &incumbent_delivery_pin));
+    assert!(!Arc::ptr_eq(retried_pin, &incumbent_delivery_pin));
     let durable = load_inflight_state(&provider, channel_id).expect("load retried durable row");
     assert_eq!(
         durable.watcher_owner_channel_id,
@@ -364,7 +364,7 @@ fn authoritative_pin_uses_incumbent_after_provisional_reuse_and_never_overwrites
         "turn_bridge_runtime_ready",
     );
     assert!(!claim.should_spawn());
-    assert!(Arc::ptr_ne(
+    assert!(!Arc::ptr_eq(
         &incumbent_delivery_pin,
         &provisional_delivery_pin
     ));
@@ -377,7 +377,7 @@ fn authoritative_pin_uses_incumbent_after_provisional_reuse_and_never_overwrites
     pin_watcher_delivery_incarnation(&mut pin, &watcher);
     let adopted = pin.as_ref().expect("incumbent marker is adopted");
     assert!(Arc::ptr_eq(adopted, &incumbent_delivery_pin));
-    assert!(Arc::ptr_ne(adopted, &provisional_delivery_pin));
+    assert!(!Arc::ptr_eq(adopted, &provisional_delivery_pin));
     drop(watcher);
 
     let first_adoption = Arc::clone(adopted);
@@ -390,7 +390,7 @@ fn authoritative_pin_uses_incumbent_after_provisional_reuse_and_never_overwrites
         .expect("replacement is visible");
     pin_watcher_delivery_incarnation(&mut pin, &watcher);
     assert!(Arc::ptr_eq(pin.as_ref().unwrap(), &first_adoption));
-    assert!(Arc::ptr_ne(
+    assert!(!Arc::ptr_eq(
         pin.as_ref().unwrap(),
         &replacement_delivery_pin
     ));
@@ -419,7 +419,7 @@ async fn runtime_adoption_pins_authoritative_incumbent_not_provisional_marker() 
     let incumbent_delivery_pin = Arc::clone(&incumbent.turn_delivered);
     shared.tmux_watchers.insert(owner, incumbent);
     let unrelated_provisional_marker = Arc::new(AtomicBool::new(false));
-    assert!(Arc::ptr_ne(
+    assert!(!Arc::ptr_eq(
         &incumbent_delivery_pin,
         &unrelated_provisional_marker
     ));
@@ -453,7 +453,7 @@ async fn runtime_adoption_pins_authoritative_incumbent_not_provisional_marker() 
         .as_ref()
         .expect("runtime adoption must publish a watcher incarnation pin");
     assert!(Arc::ptr_eq(pinned, &incumbent_delivery_pin));
-    assert!(Arc::ptr_ne(pinned, &unrelated_provisional_marker));
+    assert!(!Arc::ptr_eq(pinned, &unrelated_provisional_marker));
     let registry = shared
         .tmux_watchers
         .get(&owner)

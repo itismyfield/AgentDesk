@@ -759,7 +759,7 @@ mod tests {
             state.watcher_delivery_pin.as_ref().unwrap(),
             &incumbent,
         ));
-        assert!(Arc::ptr_ne(
+        assert!(!Arc::ptr_eq(
             state.watcher_delivery_pin.as_ref().unwrap(),
             &replacement,
         ));
