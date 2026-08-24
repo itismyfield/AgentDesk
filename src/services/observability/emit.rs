@@ -274,8 +274,8 @@ pub fn record_invariant_check(condition: bool, violation: InvariantViolation<'_>
 /// - `validate_inflight_state_for_save_with_delivery_rewind_reason` downgrades
 ///   when the #3416 enforce guard SKIPS the backward inflight write, so the
 ///   offset is preserved and nothing bad persists — but the same function also
-///   downgrades a permitted full-reset rewind (#3933), which the guard does NOT
-///   skip, so that backward write goes on to be written.
+///   downgrades when its full-reset shape classifier matches (#3933), which the
+///   guard does NOT skip, so that backward write goes on to be written.
 /// - `observe_cross_channel_tmux_claim` records every cross-channel watcher
 ///   claim at `Warn` — intended and unintended alike — with no guard involved
 ///   and no claim about what was or was not persisted.
@@ -285,13 +285,12 @@ pub fn record_invariant_check(condition: bool, violation: InvariantViolation<'_>
 /// the tracing level, and the same choice is carried on the structured
 /// `invariant_violation` event, so the level a stored violation was logged at
 /// is recoverable from the record. Any stronger reading has to come from the
-/// invariant's own payload fields. (The `Warn` tracing line also carries
-/// `INVARIANT_WARN_DOWNGRADE_SUFFIX`, which names the #3552 motivating case as
-/// fixed text on every `Warn` — it is not a per-call-site verified claim.)
+/// invariant's own payload fields. The `Warn` tracing line also carries the
+/// call-site-neutral `INVARIANT_WARN_DOWNGRADE_SUFFIX`.
 ///
-/// Neither level suppresses analytics: both emit the `invariant_violation`
-/// event and its `guard_fires` counter, so dashboards/PG keep full visibility
-/// while the operator-facing ERROR log stays clean.
+/// Neither level suppresses the structured `invariant_violation` event. Where
+/// provider and channel are both present, both severity paths also update the
+/// same `guard_fires` bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvariantSeverity {
     Error,
@@ -318,7 +317,7 @@ impl InvariantSeverity {
     }
 }
 
-const INVARIANT_WARN_DOWNGRADE_SUFFIX: &str = "(handled by downstream guard — downgraded to WARN)";
+const INVARIANT_WARN_DOWNGRADE_SUFFIX: &str = "(downgraded to WARN)";
 
 // Keep the tracing call and its test witness behind one token. A regression
 // that routes `Warn` through the `error` arm (or removes the arm entirely)
@@ -1161,12 +1160,12 @@ mod tests {
 
     #[test]
     fn warn_severity_invariant_still_emits_event_without_error_level() {
-        // #3552: a violation recorded at WARN must keep full structured-event
-        // visibility — the analytics `invariant_violation` event and its
-        // `guard_fires` counter are emitted exactly as for ERROR. Since #5500
-        // the payload's `severity` field names the chosen level, so the two
-        // records are no longer indistinguishable; every other recorded field is
-        // unchanged. The recorder still returns `false` (violation observed), so
+        // #3552: a violation recorded at WARN must keep structured-event
+        // visibility. With provider and channel present, it also updates the
+        // same `guard_fires` bucket as ERROR. Since #5500 the payload's
+        // `severity` field names the chosen level, so the two records are no
+        // longer indistinguishable; every other recorded field is unchanged.
+        // The recorder still returns `false` (violation observed), so
         // callers/debug_asserts behave exactly as before.
         let _guard = super::super::test_runtime_lock();
         super::super::reset_for_tests();
@@ -1199,7 +1198,7 @@ mod tests {
                 turn_id: None,
                 invariant: "last_offset_monotonic",
                 code_location: "src/services/observability/emit.rs:test",
-                message: "handled-by-guard violation",
+                message: "warn-selected violation",
                 details: json!({"downgraded": true}),
             },
             InvariantSeverity::Warn,
@@ -1221,7 +1220,7 @@ mod tests {
             .iter()
             .filter(|event| {
                 event.event_type == "invariant_violation"
-                    && event.payload["message"] == "handled-by-guard violation"
+                    && event.payload["message"] == "warn-selected violation"
                     && event.payload["details"]["downgraded"] == json!(true)
             })
             .collect();
@@ -1272,7 +1271,7 @@ mod tests {
                     turn_id: None,
                     invariant: "warn_route_4422",
                     code_location: "src/services/observability/emit.rs:test",
-                    message: "handled rewind",
+                    message: "warn-selected rewind",
                     details: json!({}),
                 },
                 InvariantSeverity::Warn,
@@ -1299,7 +1298,7 @@ mod tests {
         assert_eq!(logs[0].invariant, "warn_route_4422");
         assert_eq!(
             logs[0].rendered_message,
-            format!("[invariant] handled rewind {INVARIANT_WARN_DOWNGRADE_SUFFIX}")
+            format!("[invariant] warn-selected rewind {INVARIANT_WARN_DOWNGRADE_SUFFIX}")
         );
         assert_eq!(logs[1].severity, InvariantSeverity::Error);
         assert_eq!(logs[1].invariant, "error_route_4422");

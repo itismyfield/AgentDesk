@@ -384,23 +384,15 @@ fn record_inflight_invariant(
     )
 }
 
-/// #3552 (pure, testable): map "this offset-monotonic violation is already
-/// safely handled" to the tracing level it is recorded at — WARN when handled,
-/// ERROR otherwise. The motivating case is the #3416 enforce guard SKIPPING the
-/// backward write (offset preserved, zero data loss), where the paired
-/// `#3416 enforce` WARN is the only operator log needed and the duplicate ERROR
-/// noise (~17/day) disappears.
+/// #3552 (pure, testable): map the call site's mechanical WARN selection to
+/// the tracing level used for an offset-monotonic violation. `true` selects
+/// WARN; `false` selects ERROR.
 ///
-/// The caller decides what counts as handled, and since #3933 it is broader
-/// than the enforce skip: `validate_inflight_state_for_save_with_delivery_rewind_reason`
-/// also passes `true` for a permitted delivery rewind, which the guard does not
-/// skip, so that backward write goes on to be written. WARN here therefore does
-/// not imply that nothing was written — see
-/// `InvariantSeverity`. Both levels emit the same `invariant_violation` event;
-/// since #5500 its payload's `severity` names the level, and the call site
-/// records the discriminators that say which branch produced it.
-fn offset_monotonic_invariant_severity(violation_safely_handled: bool) -> ObsSeverity {
-    if violation_safely_handled {
+/// This helper does not infer why WARN was selected. The call site records the
+/// branch discriminators on the structured `invariant_violation` event; since
+/// #5500 its payload's `severity` also names the selected level.
+fn offset_monotonic_invariant_severity(warn_downgrade_selected: bool) -> ObsSeverity {
+    if warn_downgrade_selected {
         ObsSeverity::Warn
     } else {
         ObsSeverity::Error
@@ -3332,14 +3324,10 @@ mod stall_recovery_tests {
     }
 
     #[test]
-    fn offset_monotonic_severity_warns_when_violation_safely_handled() {
+    fn offset_monotonic_severity_uses_warn_when_downgrade_selected() {
         use crate::services::observability::InvariantSeverity;
-        // #3552: a violation the caller reports as already safely handled is
-        // recorded at WARN (no ERROR noise); otherwise it stays ERROR. The
-        // enforce-skip case is one input, not the only one — since #3933 the
-        // caller also reports a permitted delivery rewind as handled even though
-        // that one persists its backward write, so this helper deliberately
-        // takes the decided predicate rather than re-deriving it.
+        // #3552: this helper applies the call site's mechanical severity
+        // selection without interpreting why the WARN branch was selected.
         assert_eq!(
             offset_monotonic_invariant_severity(true),
             InvariantSeverity::Warn
