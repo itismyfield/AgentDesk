@@ -4401,6 +4401,7 @@ pub(crate) use stale_sweep_witness_support::StaleSweepWarrantFixture;
 mod stall_watchdog_auto_heal_tests {
     use super::super::HealthRegistry;
     use crate::config::TestEnvVarGuard;
+    #[cfg(unix)]
     use crate::services::discord::health::reachability::verdict::{
         ReachabilityVerdict, TransportUnknownEvidence,
     };
