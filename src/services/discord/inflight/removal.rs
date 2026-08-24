@@ -477,23 +477,67 @@ fn stale_removal_reason_for_path(
     stale_removal_reason(state, inflight_age_secs_for_path(path)?, current_generation)
 }
 
+enum LockedInflightRead {
+    State(InflightTurnState),
+    GoneOrMalformed,
+    Unreadable,
+}
+
+fn read_inflight_state_for_probe_under_lock(path: &Path) -> LockedInflightRead {
+    match fs::read_to_string(path) {
+        Ok(content) => parse_inflight_state_content(&content)
+            .map(LockedInflightRead::State)
+            .unwrap_or(LockedInflightRead::GoneOrMalformed),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            LockedInflightRead::GoneOrMalformed
+        }
+        Err(_) => LockedInflightRead::Unreadable,
+    }
+}
+
+pub(in crate::services::discord) struct InflightProbeLoad {
+    pub(in crate::services::discord) states: Vec<InflightTurnState>,
+    pub(in crate::services::discord) complete: bool,
+}
+
 pub(super) fn load_inflight_states_from_root(
     root: &Path,
     provider: &ProviderKind,
 ) -> Vec<InflightTurnState> {
+    load_inflight_states_for_probe_from_root(root, provider).states
+}
+
+pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
+    root: &Path,
+    provider: &ProviderKind,
+) -> InflightProbeLoad {
     let dir = inflight_provider_dir(root, provider);
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return InflightProbeLoad {
+                states: Vec::new(),
+                complete: error.kind() == std::io::ErrorKind::NotFound,
+            };
+        }
     };
     let mut states = Vec::new();
+    let mut complete = true;
     let mut tmux_owners: HashMap<String, u64> = HashMap::new();
     let current_generation = crate::services::discord::runtime_store::process_generation();
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(_) => {
+                complete = false;
+                continue;
+            }
+        };
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
         let Ok(content) = fs::read_to_string(&path) else {
+            complete = false;
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] ⚠ failed to read inflight state file: {}",
@@ -511,11 +555,30 @@ pub(super) fn load_inflight_states_from_root(
                         path.display()
                     );
                     let Ok(_lock) = lock_inflight_state_path(&path) else {
+                        complete = false;
                         continue;
                     };
-                    match read_inflight_state_content(&path) {
-                        Some(locked_state) => (locked_state, false),
-                        None => {
+                    match fs::read_to_string(&path) {
+                        Ok(locked_content) => match parse_inflight_state_content(&locked_content) {
+                            Ok(locked_state) => (locked_state, false),
+                            Err(_) => {
+                                log_loader_inflight_remove(
+                                    provider,
+                                    channel_id_from_path(&path),
+                                    user_msg_id_for_inflight_remove_log(&path),
+                                    "load_inflight_states_from_root_malformed",
+                                    &path,
+                                    None,
+                                    current_generation,
+                                );
+                                let _ = fs::remove_file(&path);
+                                continue;
+                            }
+                        },
+                        Err(error) => {
+                            if error.kind() != std::io::ErrorKind::NotFound {
+                                complete = false;
+                            }
                             log_loader_inflight_remove(
                                 provider,
                                 channel_id_from_path(&path),
@@ -538,20 +601,25 @@ pub(super) fn load_inflight_states_from_root(
                 path.display()
             );
             let Ok(_lock) = lock_inflight_state_path(&path) else {
+                complete = false;
                 continue;
             };
-            let Some(locked_state) = read_inflight_state_content(&path) else {
-                log_loader_inflight_remove(
-                    provider,
-                    channel_id_from_path(&path),
-                    user_msg_id_for_inflight_remove_log(&path),
-                    "load_inflight_states_from_root_provider_mismatch",
-                    &path,
-                    None,
-                    current_generation,
-                );
-                let _ = fs::remove_file(&path);
-                continue;
+            let locked_state = match read_inflight_state_for_probe_under_lock(&path) {
+                LockedInflightRead::State(state) => state,
+                read => {
+                    complete &= !matches!(read, LockedInflightRead::Unreadable);
+                    log_loader_inflight_remove(
+                        provider,
+                        channel_id_from_path(&path),
+                        user_msg_id_for_inflight_remove_log(&path),
+                        "load_inflight_states_from_root_provider_mismatch",
+                        &path,
+                        None,
+                        current_generation,
+                    );
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
             };
             if locked_state.provider_kind().as_ref() != Some(provider) {
                 log_loader_inflight_remove(
@@ -571,20 +639,25 @@ pub(super) fn load_inflight_states_from_root(
         }
         if stale_removal_reason_for_path(&path, &state, current_generation).is_some() {
             let Ok(_lock) = lock_inflight_state_path(&path) else {
+                complete = false;
                 continue;
             };
-            let Some(locked_state) = read_inflight_state_content(&path) else {
-                log_loader_inflight_remove(
-                    provider,
-                    channel_id_from_path(&path),
-                    user_msg_id_for_inflight_remove_log(&path),
-                    "load_inflight_states_from_root_stale",
-                    &path,
-                    None,
-                    current_generation,
-                );
-                let _ = fs::remove_file(&path);
-                continue;
+            let locked_state = match read_inflight_state_for_probe_under_lock(&path) {
+                LockedInflightRead::State(state) => state,
+                read => {
+                    complete &= !matches!(read, LockedInflightRead::Unreadable);
+                    log_loader_inflight_remove(
+                        provider,
+                        channel_id_from_path(&path),
+                        user_msg_id_for_inflight_remove_log(&path),
+                        "load_inflight_states_from_root_stale",
+                        &path,
+                        None,
+                        current_generation,
+                    );
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
             };
             if locked_state.provider_kind().as_ref() != Some(provider) {
                 log_loader_inflight_remove(
@@ -629,10 +702,13 @@ pub(super) fn load_inflight_states_from_root(
             finalizer_backfilled = false;
             state = locked_state;
         }
-        if finalizer_backfilled
-            && let Some(locked_state) = backfill_finalizer_turn_id_under_lock(root, &path, provider)
-        {
-            state = locked_state;
+        if finalizer_backfilled {
+            if let Some(locked_state) = backfill_finalizer_turn_id_under_lock(root, &path, provider)
+            {
+                state = locked_state;
+            } else {
+                complete = false;
+            }
         }
         if let Some(tmux_session_name) = state
             .tmux_session_name
@@ -659,7 +735,7 @@ pub(super) fn load_inflight_states_from_root(
         }
         states.push(state);
     }
-    states
+    InflightProbeLoad { states, complete }
 }
 
 #[cfg(test)]

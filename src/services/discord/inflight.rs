@@ -86,6 +86,7 @@ use self::rebind_reap::{
 };
 mod removal;
 pub(crate) use self::removal::invalidate_stale_generation;
+pub(in crate::services::discord) use self::removal::load_inflight_states_for_probe_from_root;
 use self::removal::load_inflight_states_from_root;
 #[cfg(test)]
 use self::removal::{

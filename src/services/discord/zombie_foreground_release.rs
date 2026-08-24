@@ -252,9 +252,8 @@ pub(crate) enum InflightEpisodeLookup {
     Claimed(InflightEpisodeIdentity),
     /// The store was readable and no row claims this tmux session.
     Unclaimed,
-    /// The runtime root could not be resolved, or exists but cannot be listed.
-    /// The loader turns both into an empty vector, which is indistinguishable
-    /// from "nothing is running" unless it is caught here.
+    /// The runtime root could not be resolved, or provider enumeration / a
+    /// candidate row could not be read or revalidated under its lock.
     Unprobeable,
     /// More than one row claims this tmux session, so the loader's
     /// `inflight_tmux_one_to_one` invariant is broken. No single row is
@@ -292,20 +291,16 @@ pub(crate) fn inflight_episode_lookup_for_tmux_name(
     let Some(root) = super::inflight::inflight_runtime_root() else {
         return InflightEpisodeLookup::Unprobeable;
     };
-    // A root that exists but cannot be listed yields the same empty vector as
-    // an empty store. `NotFound` is the one error that really does mean "no
-    // episode was ever recorded here".
-    if let Err(error) = std::fs::read_dir(&root)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
+    // Keep the loader's cleanup/backfill behaviour, but retain whether every
+    // candidate row could be inspected. Only a missing provider directory is a
+    // complete empty store; all other enumeration/read failures are unknown.
+    let loaded = super::inflight::load_inflight_states_for_probe_from_root(&root, provider);
+    if !loaded.complete {
         return InflightEpisodeLookup::Unprobeable;
     }
-
-    let mut claims = super::inflight::load_inflight_states(provider)
-        .into_iter()
-        .filter(|state| {
-            !state.rebind_origin && state.tmux_session_name.as_deref() == Some(tmux_name)
-        });
+    let mut claims = loaded.states.into_iter().filter(|state| {
+        !state.rebind_origin && state.tmux_session_name.as_deref() == Some(tmux_name)
+    });
     let Some(claim) = claims.next() else {
         return InflightEpisodeLookup::Unclaimed;
     };
@@ -888,16 +883,24 @@ mod tests {
 
             let root = crate::services::discord::inflight::inflight_runtime_root()
                 .expect("the isolated root resolves");
-            std::fs::create_dir_all(root.parent().expect("the inflight root has a parent"))
-                .unwrap();
-            // Occupy the store path with a non-directory, so `read_dir` fails
-            // with something other than `NotFound`.
-            std::fs::write(&root, b"not a directory").unwrap();
+            std::fs::create_dir_all(&root).unwrap();
+            // Occupy the provider path with a non-directory. A missing provider
+            // directory is complete empty; this other `read_dir` failure is not.
+            std::fs::write(root.join(ProviderKind::Claude.as_str()), b"not a directory").unwrap();
 
             assert_eq!(
                 lookup(),
                 super::super::InflightEpisodeLookup::Unprobeable,
-                "a read failure is not evidence that no turn is running"
+                "a provider-directory read failure is not evidence of absence"
+            );
+
+            std::fs::remove_file(root.join(ProviderKind::Claude.as_str())).unwrap();
+            std::fs::create_dir_all(root.join(ProviderKind::Claude.as_str()).join("77.json"))
+                .unwrap();
+            assert_eq!(
+                lookup(),
+                super::super::InflightEpisodeLookup::Unprobeable,
+                "an unreadable candidate JSON row is not evidence of absence"
             );
         }
     }
