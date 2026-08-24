@@ -127,7 +127,7 @@
       }
     },
     "structural_candidate_apply": {
-      "comment": "#5464 T5 S6a: per-file structural/warrant counts must match. Equality detects one-sided deletion but does not prove control-flow dominance or argument identity.",
+      "comment": "#5464 T5 S6b-B: per-file structural/warrant counts are a two-sided pairing check, not no-growth; one-sided mismatch and per-file growth fail closed, while paired deletion or count-preserving relocation/replacement remain invisible. See the module docstring.",
       "files": {
         "src/services/discord/health/recovery/watchdog_decisions.rs": 1,
         "src/services/discord/relay_recovery.rs": 2,
@@ -136,7 +136,7 @@
       }
     },
     "destructive_warrant_bind": {
-      "comment": "#5464 T5 S6a: the checker fails closed on either direction of per-file mismatch. This lexical invariant proves neither control-flow dominance nor argument identity; semantic consumer tests establish the shipped outcomes.",
+      "comment": "#5464 T5 S6b-B: per-file warrant/structural counts are a two-sided pairing check, not no-growth; calls do not prove result consumption, argument identity, or control-flow dominance. The stale-sweep behavioral witness enforces veto consumption. See the module docstring.",
       "files": {
         "src/services/discord/health/recovery/watchdog_decisions.rs": 1,
         "src/services/discord/relay_recovery.rs": 2,

@@ -79,6 +79,8 @@ pub use mailbox::purge_idle_channel_mailbox_registry_entry;
 // #5147: re-exported as a module (not as loose constants) so a consumer reads
 // `self_watchdog::TCP_TIMEOUT` — a name that says which timeout — rather than a
 // bare `TCP_TIMEOUT` at the health root.
+#[cfg(all(test, unix))]
+pub(crate) use recovery::StaleSweepWarrantFixture;
 #[allow(unused_imports)]
 pub(crate) use recovery::self_watchdog;
 #[allow(unused_imports)]

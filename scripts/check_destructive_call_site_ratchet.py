@@ -14,8 +14,35 @@ can remain unseen.
 
 The ``identity_fence_bind`` and ``delivery_fence_bind`` categories are the
 inverse of the others: they count the FENCED entry points, not unfenced
-destruction. The #5464 T5 S6a warrant categories similarly count a lexical
-per-file pair, not control-flow dominance or argument identity.
+destruction.
+
+The ``structural_candidate_apply`` and ``destructive_warrant_bind`` warrant
+categories require equal per-file pair counts and fail closed on either
+one-sided mismatch. This is a two-sided check, not a no-growth check: one-sided
+deletion is rejected by pairing, while a paired addition in an existing file or
+a move to a new destination requires a reviewed baseline diff. The bounded
+lexical inventory cannot detect paired deletion, a count-preserving relocation,
+or replacement of one pair by another pair in the same file.
+
+Its remaining limits are explicit:
+
+* **Return-value discard:** the inventory counts calls, not whether the warrant
+  result is consumed. Spelling both symbols while discarding the warrant bool is
+  invisible. The stale-sweep behavioral witness, not the return type, enforces
+  consumption by proving that a production veto stops destructive apply.
+* **Argument identity:** equal counts do not prove both calls describe the same
+  candidate.
+* **Control-flow dominance:** equal counts do not prove the warrant dominates the
+  destructive operation or that no branch bypasses it.
+* **Unused diagnostics are not enforcement:** some named discarded results may
+  receive an ordinary unused-binding warning, for either struct or scalar
+  returns, but ``_``/``_name`` can suppress it and ``DestructiveWarrant`` has no
+  ``#[must_use]`` contract. It is neither type enforcement nor required-CI
+  protection.
+
+The behavioral witness covers return-value discard and veto bypass. It does not
+prove argument identity or control-flow dominance at other sites.
+
 Pinning fence binders does NOT make an unfenced destructive removal
 impossible — those spell the unfenced helper names and land in
 ``registry_remove`` instead.  What it does is force any change to the set of
@@ -394,11 +421,11 @@ def _snapshot(
                 "files": dict(sorted(counts["inflight_row_clear_call"].items())),
             },
             "structural_candidate_apply": {
-                "comment": "#5464 T5 S6a: per-file structural/warrant counts must match.",
+                "comment": '#5464 T5 S6b-B: per-file structural/warrant counts are a two-sided pairing check, not no-growth; one-sided mismatch and per-file growth fail closed, while paired deletion or count-preserving relocation/replacement remain invisible. See the module docstring.',
                 "files": dict(sorted(counts["structural_candidate_apply"].items())),
             },
             "destructive_warrant_bind": {
-                "comment": "#5464 T5 S6a: lexical mismatch fails closed; dominance is unproved.",
+                "comment": '#5464 T5 S6b-B: per-file warrant/structural counts are a two-sided pairing check, not no-growth; calls do not prove result consumption, argument identity, or control-flow dominance. The stale-sweep behavioral witness enforces veto consumption. See the module docstring.',
                 "files": dict(sorted(counts["destructive_warrant_bind"].items())),
             },
         },

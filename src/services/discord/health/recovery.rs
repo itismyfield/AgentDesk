@@ -4258,6 +4258,146 @@ mod stall_watchdog_pure_tests {
     }
 }
 
+#[cfg(all(test, unix))]
+mod stale_sweep_witness_support {
+    use std::os::unix::fs::MetadataExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
+
+    use serenity::all::ChannelId;
+
+    use super::super::super::tmux_watcher_registry::{TmuxWatcherHandle, tmux_watcher_now_ms};
+    use super::super::HealthRegistry;
+    use super::super::reachability::discovery::TranscriptFileId;
+    use super::super::reachability::ledger::{
+        LedgerIncarnation, LedgerObligation, ReachabilityLedger, bootstrap_ledger_at, ledger_path,
+        read_ledger_at, write_ledger_at,
+    };
+    use super::super::reachability::verdict::ReachabilityVerdict;
+    use crate::services::provider::ProviderKind;
+
+    /// Test-only production-path fixture for a stale-sweep warrant verdict.
+    ///
+    /// Fields drop in declaration order. Keep `env_guard`, `temp_dir`, then
+    /// `env_lock` in that order so the environment is restored, the isolated root
+    /// is removed, and the shared environment lock E is released last.
+    pub(crate) struct StaleSweepWarrantFixture {
+        registry: HealthRegistry,
+        session_key: String,
+        ledger_path: std::path::PathBuf,
+        _env_guard: crate::config::TestEnvVarGuard,
+        _temp_dir: tempfile::TempDir,
+        _env_lock: crate::config::test_env_lock::SharedTestEnvLockGuard,
+    }
+
+    impl StaleSweepWarrantFixture {
+        pub(crate) async fn transport_unknown(channel_id: u64) -> Result<Self, String> {
+            let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+            let temp_dir = tempfile::TempDir::new().map_err(|error| error.to_string())?;
+            let env_guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                temp_dir.path(),
+            );
+
+            let registry = HealthRegistry::new();
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            registry
+                .register(ProviderKind::Claude.as_str().to_string(), shared.clone())
+                .await;
+
+            let transcript_path = temp_dir.path().join("transcript.jsonl");
+            std::fs::write(&transcript_path, b"{}\n").map_err(|error| error.to_string())?;
+            let tmux_session_name = format!("AgentDesk-claude-{channel_id}");
+            shared.tmux_watchers.insert(
+                ChannelId::new(channel_id),
+                TmuxWatcherHandle {
+                    tmux_session_name: tmux_session_name.clone(),
+                    output_path: transcript_path.to_string_lossy().to_string(),
+                    paused: Arc::new(AtomicBool::new(false)),
+                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    pause_epoch: Arc::new(AtomicU64::new(0)),
+                    turn_delivered: Arc::new(AtomicBool::new(false)),
+                    last_heartbeat_ts_ms: Arc::new(AtomicI64::new(tmux_watcher_now_ms())),
+                },
+            );
+
+            let path = ledger_path(&ProviderKind::Claude, channel_id)
+                .ok_or_else(|| "ledger path unavailable".to_string())?;
+            let metadata =
+                std::fs::metadata(&transcript_path).map_err(|error| error.to_string())?;
+            let incarnation = LedgerIncarnation::new(
+                tmux_session_name.clone(),
+                0,
+                None,
+                TranscriptFileId {
+                    dev: metadata.dev(),
+                    ino: metadata.ino(),
+                },
+            );
+            bootstrap_ledger_at(&path, incarnation.clone(), 0)?;
+            let now = chrono::Utc::now().timestamp();
+            let first_observed_at_epoch_ms = now
+                .checked_sub(700)
+                .and_then(|seconds| seconds.checked_mul(1_000))
+                .and_then(|millis| u64::try_from(millis).ok())
+                .ok_or_else(|| "fixture timestamp underflow".to_string())?;
+            write_ledger_at(
+                &path,
+                &ReachabilityLedger {
+                    schema_version: 1,
+                    incarnation,
+                    cursor_offset: metadata.len(),
+                    bootstrap_offset: 0,
+                    last_observed_len: 0,
+                    obligations: vec![LedgerObligation {
+                        start: 0,
+                        end: 1,
+                        first_observed_at_epoch_ms,
+                    }],
+                    counters: Default::default(),
+                },
+            )?;
+
+            let fixture = Self {
+                registry,
+                session_key: format!("host:{tmux_session_name}"),
+                ledger_path: path,
+                _env_guard: env_guard,
+                _temp_dir: temp_dir,
+                _env_lock: env_lock,
+            };
+            let snapshot = fixture
+                .registry
+                .snapshot_watcher_state_for_provider(&ProviderKind::Claude, channel_id)
+                .await
+                .ok_or_else(|| "fixture did not publish a watcher-state snapshot".to_string())?;
+            match snapshot.reachability_observation() {
+                Some((ReachabilityVerdict::TransportUnknown { .. }, _)) => Ok(fixture),
+                other => Err(format!("fixture verdict drifted: {other:?}")),
+            }
+        }
+
+        pub(crate) fn flip_to_reachable(&self) -> Result<(), String> {
+            let mut ledger = read_ledger_at(&self.ledger_path)
+                .ok_or_else(|| "fixture ledger unreadable".to_string())?;
+            ledger.obligations.clear();
+            write_ledger_at(&self.ledger_path, &ledger)
+        }
+
+        pub(crate) fn registry(&self) -> &HealthRegistry {
+            &self.registry
+        }
+
+        pub(crate) fn session_key(&self) -> &str {
+            &self.session_key
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) use stale_sweep_witness_support::StaleSweepWarrantFixture;
+
 #[cfg(test)]
 mod stall_watchdog_auto_heal_tests {
     use super::super::HealthRegistry;
