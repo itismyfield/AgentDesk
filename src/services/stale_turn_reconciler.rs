@@ -250,13 +250,20 @@ fn channel_inflight_state_present(session_key: &str, provider: &str) -> Inflight
     if tmux_provider != db_provider {
         return InflightPresence::Unknown;
     }
-    if crate::services::discord::zombie_foreground_release::inflight_state_present_for_tmux_name(
+    use crate::services::discord::zombie_foreground_release::InflightEpisodeLookup;
+    match crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name(
         &db_provider,
         &identity.tmux_name,
     ) {
-        InflightPresence::Present
-    } else {
-        InflightPresence::Absent
+        InflightEpisodeLookup::Claimed(_) => InflightPresence::Present,
+        InflightEpisodeLookup::Unclaimed => InflightPresence::Absent,
+        // A store that could not be read, and a tmux session two rows both
+        // claim, are both "we do not know". Reporting either as `Absent` would
+        // let a read failure authorize destruction, and would let whichever row
+        // a directory scan happened to yield first decide the verdict.
+        InflightEpisodeLookup::Unprobeable | InflightEpisodeLookup::Ambiguous => {
+            InflightPresence::Unknown
+        }
     }
 }
 
@@ -840,6 +847,52 @@ mod tests {
                 ("turn_active".to_string(), Some("original".to_string()))
             );
         }
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// The last production hop: an unreadable provider directory must map to
+    /// `Unknown`, and the operator-only destructive qualification must abstain.
+    #[tokio::test]
+    async fn unreadable_inflight_provider_maps_unknown_and_preserves_busy_session_pg() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _root_guard =
+            crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", tmp.path());
+        let root = tmp.path().join("runtime").join("discord_inflight");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(ProviderKind::Claude.as_str()), b"not a directory").unwrap();
+
+        let tmux_name = ProviderKind::Claude.build_tmux_session_name("5464999");
+        let session_key = format!(
+            "{}:{tmux_name}",
+            crate::services::platform::hostname_short()
+        );
+        assert_eq!(
+            channel_inflight_state_present(&session_key, "claude"),
+            InflightPresence::Unknown,
+            "the production session-key mapping must retain Unprobeable as Unknown"
+        );
+
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        seed_session(&pool, &session_key, "turn_active", None, 30).await;
+        assert_eq!(
+            reconcile_stale_turn_by_key_with_probes_pg(
+                &pool,
+                &session_key,
+                |_, _| IndependentLiveness::ReadyForInput,
+                channel_inflight_state_present,
+            )
+            .await
+            .unwrap(),
+            SessionReconcileOutcome::Unchanged,
+            "an unreadable inflight store must not authorize IdleWithoutInflight"
+        );
+        assert_eq!(
+            load_state(&pool, &session_key).await,
+            ("turn_active".to_string(), Some("original".to_string()))
+        );
 
         pool.close().await;
         pg_db.drop().await;

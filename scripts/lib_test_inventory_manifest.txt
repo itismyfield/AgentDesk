@@ -6652,8 +6652,11 @@ services::discord::watcher_lifecycle_decision::tests::normal_completion_waits_fo
 services::discord::watcher_lifecycle_decision::tests::stream_disconnect_with_dead_tmux_becomes_stop_signal
 services::discord::watcher_lifecycle_decision::tests::watcher_activity_heartbeat_falls_back_to_now_without_runtime_output
 services::discord::watcher_lifecycle_decision::tests::watcher_activity_heartbeat_uses_runtime_output_mtime
+services::discord::zombie_foreground_release::tests::fixtures::an_unlistable_store_is_unprobeable_rather_than_unclaimed
 services::discord::zombie_foreground_release::tests::fixtures::cancelled_turn_with_live_inflight_keeps_its_foreground_slot
+services::discord::zombie_foreground_release::tests::fixtures::episode_identity_is_extracted_from_the_stable_fields_only
 services::discord::zombie_foreground_release::tests::fixtures::uncancelled_live_turn_keeps_its_foreground_slot
+services::discord::zombie_foreground_release::tests::fixtures::unreadable_ambiguous_and_rebind_only_stores_are_not_reported_as_a_claim
 services::discord::zombie_foreground_release::tests::fixtures::zombie_foreground_turn_is_released_and_the_queue_survives
 services::discord::zombie_foreground_release::tests::idle_mailbox_is_a_hold_not_a_release
 services::discord::zombie_foreground_release::tests::issue_5176_zombie_shape_releases
@@ -7593,6 +7596,7 @@ services::stale_turn_reconciler::tests::provider_only_interleaving_fails_the_can
 services::stale_turn_reconciler::tests::stale_busy_candidates_reconcile_only_after_terminal_liveness_pg
 services::stale_turn_reconciler::tests::stale_candidate_cas_rejects_heartbeat_move_and_is_non_latching_pg
 services::stale_turn_reconciler::tests::tmux_identity_rejects_provider_mismatch_and_spinner_is_busy
+services::stale_turn_reconciler::tests::unreadable_inflight_provider_maps_unknown_and_preserves_busy_session_pg
 services::task_completion_v1::tests::canonical_round_trip_and_field_permutation
 services::task_completion_v1::tests::duplicate_and_escaped_duplicate_keys_are_rejected
 services::task_completion_v1::tests::escaped_whitespace_ids_are_rejected_before_value_normalization

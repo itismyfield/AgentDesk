@@ -210,19 +210,109 @@ pub(in crate::services::discord) fn tui_structurally_idle(
     )
 }
 
-/// #5176 — is a persistent inflight-turn record still claiming this tmux
-/// session? The stale-turn reconciler needs the same "no turn-bridge loop owns
-/// this" evidence the release guard uses, but a session key carries a tmux name
-/// rather than a Discord channel id, so presence is resolved by tmux name there.
-/// `rebind_origin` rows are synthetic reattach markers, not a running turn, and
-/// must not read as liveness.
-pub(crate) fn inflight_state_present_for_tmux_name(
+/// Stable identity of one persisted inflight episode.
+///
+/// Progress fields are deliberately excluded. `current_msg_id`, `last_offset`,
+/// and the state file's mtime/size all move while the same turn stays
+/// authoritative, so an identity built from them would report a transition on
+/// every tick of a live turn and starve recovery.
+///
+/// `started_at` and `user_msg_id` have no production in-episode assignment site
+/// and are the required axes. `turn_nonce` and `turn_start_offset` are
+/// auxiliary — each fires only when BOTH observations carry a value — because
+/// each has production writers that fill it in or restamp it on a row that is
+/// already on disk: `turn_nonce` at synthetic episode start, and
+/// `turn_start_offset` at `tui_prompt_relay/synthetic_start.rs` and
+/// `tui_prompt_relay/codex_idle_rollout.rs`, both of which restamp the offset
+/// when a runtime (re)binds to the episode. Firing there is correct rather than
+/// spurious — a runtime just claimed the row — and one held tick is not a
+/// denial, because the next tick re-baselines on the restamped value.
+///
+/// `turn_start_offset` is carried because the canonical
+/// `inflight::InflightTurnIdentity` already carries it for a collision this
+/// repository has proven: two consecutive `user_msg_id == 0` TUI-direct turns
+/// collide on `started_at`'s one-second resolution, and a legacy row may have
+/// no `turn_nonce` to break the tie.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InflightEpisodeIdentity {
+    pub(crate) started_at: String,
+    pub(crate) user_msg_id: u64,
+    pub(crate) turn_nonce: Option<String>,
+    pub(crate) turn_start_offset: Option<u64>,
+}
+
+/// What the persisted inflight records say about one tmux session.
+///
+/// The three failure shapes are kept apart from `Unclaimed` on purpose: a read
+/// that could not happen, and a claim that is not attributable to one episode,
+/// are both "we do not know", and neither is evidence that no turn is running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InflightEpisodeLookup {
+    /// Exactly one non-`rebind_origin` row claims this tmux session.
+    Claimed(InflightEpisodeIdentity),
+    /// The store was readable and no row claims this tmux session.
+    Unclaimed,
+    /// The runtime root could not be resolved, or provider enumeration / a
+    /// candidate row could not be read or revalidated under its lock.
+    Unprobeable,
+    /// More than one row claims this tmux session, so the loader's
+    /// `inflight_tmux_one_to_one` invariant is broken. No single row is
+    /// authoritative, and which one a directory scan yields first is not
+    /// stable, so picking one would make the observation nondeterministic in
+    /// both directions: it could mask a live claim behind a stale one, or
+    /// invent a transition between two rows that both stayed put.
+    Ambiguous,
+}
+
+/// #5176 — which persistent inflight-turn record, if any, still claims this
+/// tmux session? The stale-turn reconciler needs the same "no turn-bridge loop
+/// owns this" evidence the release guard uses, but a session key carries a tmux
+/// name rather than a Discord channel id, so presence is resolved by tmux name
+/// there. `rebind_origin` rows are synthetic reattach markers, not a running
+/// turn, and must not read as liveness.
+///
+/// #5464 T5 S6b — presence alone used to be the answer (`-> bool`). It is too
+/// coarse for the reconciler's apply-time check: a candidate-time orphan record
+/// and an apply-time live turn are both "present", so the two collapse into
+/// "nothing changed" and the live row is idled anyway. `load_inflight_states`
+/// already parses every state file before the presence filter runs, so
+/// returning the claiming episode's identity costs no extra I/O and no extra
+/// parse pass.
+///
+/// NOTE: `load_inflight_states` is not a read-only probe. It takes the
+/// per-path lock and deletes rows it finds malformed or provider-mismatched,
+/// backfills finalizer ids, and emits the one-to-one invariant event. That
+/// behaviour predates this function; it is named here because the reconciler
+/// now calls it from the boot sweep, which is the widest entry point it has.
+pub(crate) fn inflight_episode_lookup_for_tmux_name(
     provider: &ProviderKind,
     tmux_name: &str,
-) -> bool {
-    super::inflight::load_inflight_states(provider)
-        .into_iter()
-        .any(|state| !state.rebind_origin && state.tmux_session_name.as_deref() == Some(tmux_name))
+) -> InflightEpisodeLookup {
+    let Some(root) = super::inflight::inflight_runtime_root() else {
+        return InflightEpisodeLookup::Unprobeable;
+    };
+    // Keep the loader's cleanup/backfill behaviour, but retain whether every
+    // candidate row could be inspected. Only a missing provider directory is a
+    // complete empty store; all other enumeration/read failures are unknown.
+    let loaded = super::inflight::load_inflight_states_for_probe_from_root(&root, provider);
+    if !loaded.complete {
+        return InflightEpisodeLookup::Unprobeable;
+    }
+    let mut claims = loaded.states.into_iter().filter(|state| {
+        !state.rebind_origin && state.tmux_session_name.as_deref() == Some(tmux_name)
+    });
+    let Some(claim) = claims.next() else {
+        return InflightEpisodeLookup::Unclaimed;
+    };
+    if claims.next().is_some() {
+        return InflightEpisodeLookup::Ambiguous;
+    }
+    InflightEpisodeLookup::Claimed(InflightEpisodeIdentity {
+        started_at: claim.started_at,
+        user_msg_id: claim.user_msg_id,
+        turn_nonce: claim.turn_nonce,
+        turn_start_offset: claim.turn_start_offset,
+    })
 }
 
 pub(in crate::services::discord) fn collect_zombie_foreground_evidence(
@@ -638,6 +728,179 @@ mod tests {
                     .as_ref()
                     .is_some_and(|active| Arc::ptr_eq(active, &token)),
                 "a live turn-bridge loop owns the canonical exit; the release must not steal it"
+            );
+        }
+
+        const CLAIMED_TMUX: &str = "AgentDesk-claude-5464-claimed";
+
+        /// One persisted row claiming `CLAIMED_TMUX`, with every identity axis
+        /// set to a distinguishable value so a witness can tell which field the
+        /// extractor actually read.
+        fn episode_row(
+            channel_id: ChannelId,
+            started_at: &str,
+            user_msg_id: u64,
+            turn_nonce: Option<&str>,
+            turn_start_offset: Option<u64>,
+        ) -> InflightTurnState {
+            let mut state = inflight_row(channel_id);
+            state.tmux_session_name = Some(CLAIMED_TMUX.to_string());
+            state.started_at = started_at.to_string();
+            state.user_msg_id = user_msg_id;
+            state.turn_nonce = turn_nonce.map(str::to_string);
+            state.turn_start_offset = turn_start_offset;
+            state
+        }
+
+        fn persist(state: &InflightTurnState) {
+            crate::services::discord::inflight::save_inflight_state(state)
+                .expect("seed an inflight row");
+        }
+
+        fn lookup() -> super::super::InflightEpisodeLookup {
+            super::super::inflight_episode_lookup_for_tmux_name(&ProviderKind::Claude, CLAIMED_TMUX)
+        }
+
+        /// The identity EXTRACTION axis of ERRATUM E1, driven through the real
+        /// loader against a real on-disk row.
+        ///
+        /// The reconciler's transition witnesses inject `InflightObservation`
+        /// values directly, so none of them executes this function. Without
+        /// this test, rebuilding the identity out of progress fields — swapping
+        /// `user_msg_id` for `current_msg_id`, or `turn_start_offset` for
+        /// `last_offset` — would still compile and leave every one of those
+        /// witnesses green, while at runtime every tick would report a fresh
+        /// transition, hold forever, and starve recovery. That is precisely the
+        /// harm E1-2 rejected mtime/size for.
+        #[test]
+        fn episode_identity_is_extracted_from_the_stable_fields_only() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _root = isolated_runtime_root(&tmp);
+            let channel_id = ChannelId::new(5_464_101);
+
+            let mut state = episode_row(
+                channel_id,
+                "2026-08-24 12:00:00",
+                700,
+                Some("nonce-a"),
+                Some(4096),
+            );
+            // Progress fields are given values that must NOT show up in the
+            // identity; each is distinct from every identity value above.
+            state.current_msg_id = 9_001;
+            state.last_offset = 55_555;
+            persist(&state);
+
+            let super::super::InflightEpisodeLookup::Claimed(identity) = lookup() else {
+                panic!("one persisted row claiming this tmux session must read as Claimed");
+            };
+            assert_eq!(
+                identity,
+                super::super::InflightEpisodeIdentity {
+                    started_at: "2026-08-24 12:00:00".to_string(),
+                    user_msg_id: 700,
+                    turn_nonce: Some("nonce-a".to_string()),
+                    turn_start_offset: Some(4096),
+                },
+                "identity must come from the stable fields, not from current_msg_id/last_offset"
+            );
+
+            // The real counter-direction for mtime/size: the same episode
+            // persisted again with only progress advancing. The file's contents,
+            // size and mtime all change; the identity must not.
+            state.current_msg_id = 9_002;
+            state.last_offset = 66_666;
+            state.full_response = "streamed more assistant text".to_string();
+            persist(&state);
+            let super::super::InflightEpisodeLookup::Claimed(after_progress) = lookup() else {
+                panic!("the same episode must still read as Claimed after a progress rewrite");
+            };
+            assert_eq!(
+                after_progress, identity,
+                "re-persisting the same episode is not a change of authority"
+            );
+        }
+
+        /// The three non-`Claimed` answers, each of which the reconciler must
+        /// NOT read as "no turn is running".
+        #[test]
+        fn unreadable_ambiguous_and_rebind_only_stores_are_not_reported_as_a_claim() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _root = isolated_runtime_root(&tmp);
+
+            assert_eq!(
+                lookup(),
+                super::super::InflightEpisodeLookup::Unclaimed,
+                "an empty store is a readable absence"
+            );
+
+            // A synthetic reattach marker is not a running turn.
+            let mut rebind = episode_row(
+                ChannelId::new(5_464_102),
+                "2026-08-24 12:00:01",
+                701,
+                None,
+                None,
+            );
+            rebind.rebind_origin = true;
+            persist(&rebind);
+            assert_eq!(
+                lookup(),
+                super::super::InflightEpisodeLookup::Unclaimed,
+                "a rebind_origin row must not read as liveness"
+            );
+
+            // Two rows claiming one tmux session: the loader's one-to-one
+            // invariant is broken, so no single row is authoritative and a
+            // directory scan's order must not get to decide.
+            persist(&episode_row(
+                ChannelId::new(5_464_103),
+                "2026-08-24 12:00:02",
+                702,
+                Some("nonce-b"),
+                Some(1),
+            ));
+            persist(&episode_row(
+                ChannelId::new(5_464_104),
+                "2026-08-24 12:00:03",
+                703,
+                Some("nonce-c"),
+                Some(2),
+            ));
+            assert_eq!(
+                lookup(),
+                super::super::InflightEpisodeLookup::Ambiguous,
+                "two claims on one tmux session cannot resolve to one identity"
+            );
+        }
+
+        /// A store that cannot be listed is not an empty store. The loader
+        /// turns both into an empty vector, so this has to be caught before it.
+        #[test]
+        fn an_unlistable_store_is_unprobeable_rather_than_unclaimed() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _root = isolated_runtime_root(&tmp);
+
+            let root = crate::services::discord::inflight::inflight_runtime_root()
+                .expect("the isolated root resolves");
+            std::fs::create_dir_all(&root).unwrap();
+            // Occupy the provider path with a non-directory. A missing provider
+            // directory is complete empty; this other `read_dir` failure is not.
+            std::fs::write(root.join(ProviderKind::Claude.as_str()), b"not a directory").unwrap();
+
+            assert_eq!(
+                lookup(),
+                super::super::InflightEpisodeLookup::Unprobeable,
+                "a provider-directory read failure is not evidence of absence"
+            );
+
+            std::fs::remove_file(root.join(ProviderKind::Claude.as_str())).unwrap();
+            std::fs::create_dir_all(root.join(ProviderKind::Claude.as_str()).join("77.json"))
+                .unwrap();
+            assert_eq!(
+                lookup(),
+                super::super::InflightEpisodeLookup::Unprobeable,
+                "an unreadable candidate JSON row is not evidence of absence"
             );
         }
     }
