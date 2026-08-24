@@ -3379,6 +3379,29 @@ mod tests {
     }
 
     #[test]
+    fn delivery_record_rollout_unpinned_defaults_report_shadow_warning() {
+        let json = delivery_record_rollout_health_json_for_flags(
+            resolve_shadow_flag(None),
+            resolve_authority_flag(None),
+        );
+
+        assert_eq!(json["shadow_enabled"], false);
+        assert_eq!(json["authority_enabled"], true);
+        assert_eq!(json["mode"], "authority_only");
+        assert_eq!(json["dedup_authority"], "durable_delivery_record_frontier");
+        assert_eq!(json["same_turn_backward_write_enforcement"], "enforcing");
+        assert_eq!(json["flag_source"]["shadow"], "compiled_default");
+        assert_eq!(json["flag_source"]["authority"], "compiled_default");
+        assert_eq!(json["warning_count"], 1);
+
+        let warnings = json["configuration_warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        let only_warning = warnings[0].as_str().unwrap();
+        assert!(only_warning.starts_with("delivery_record_shadow_disabled"));
+        assert!(!only_warning.starts_with("delivery_record_authority_disabled"));
+    }
+
+    #[test]
     fn delivery_record_rollout_health_reports_enforcing_modes() {
         let shadow_only = delivery_record_rollout_health_json_for_flags(
             FlagResolution::compiled_default(true),
