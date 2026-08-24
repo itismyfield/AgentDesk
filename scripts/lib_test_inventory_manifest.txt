@@ -3236,6 +3236,7 @@ services::discord::outbound::delivery_record::tests::delivered_frontier_end_dive
 services::discord::outbound::delivery_record::tests::delivery_record_rollout_health_reports_enforcing_modes
 services::discord::outbound::delivery_record::tests::delivery_record_rollout_health_reports_flag_source_across_truth_table
 services::discord::outbound::delivery_record::tests::delivery_record_rollout_health_reports_off_as_observable_warning
+services::discord::outbound::delivery_record::tests::delivery_record_rollout_unpinned_defaults_report_shadow_warning
 services::discord::outbound::delivery_record::tests::delivery_record_serde_roundtrip
 services::discord::outbound::delivery_record::tests::edit_failure_recheck_detects_rotate_between_eof_and_frontier_4508
 services::discord::outbound::delivery_record::tests::edit_failure_recheck_detects_same_generation_truncate_during_snapshot_4508

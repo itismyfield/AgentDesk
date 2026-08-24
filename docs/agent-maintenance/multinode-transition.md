@@ -640,8 +640,9 @@ the deploy gate reads its existing top-level readiness predicates, including
 `fully_recovered`, and never reads `release_source.observation_status`.
 
 **Acceptance.** T1 S8 closes when both nodes return this object from public
-`/api/health`, and both report the same 40-hex `deployed_repo_head` with
-`deployed_repo_dirty` of `"false"`:
+`/api/health`, report the same 40-hex `deployed_repo_head` with
+`deployed_repo_dirty` of `"false"`, and retain the existing `fully_recovered` and
+canonical deploy/drain evidence requirements:
 
 ```jsonc
 "delivery_record_rollout": {
@@ -651,31 +652,31 @@ the deploy gate reads its existing top-level readiness predicates, including
   "dedup_authority": "durable_delivery_record_frontier",
   "same_turn_backward_write_enforcement": "enforcing",
   "flag_source": { "shadow": "compiled_default", "authority": "compiled_default" },
-  "warning_count": 0,
-  "configuration_warnings": []
+  "warning_count": 1,
+  "configuration_warnings": [
+    "delivery_record_shadow_disabled: authority is enabled without shadow mirror telemetry"
+  ]
 }
 ```
 
-This is the target, not the current state. The observation fields landed first as
-a deploy no-op; #5071 T1 S8-2 then flipped the AUTHORITY compiled default ON, so
-an unpinned node now reports `authority_enabled: true` with
-`flag_source.authority: compiled_default`. `warning_count` is still 1, but the
-warning changed identity: `delivery_record_authority_disabled` is gone and
-`delivery_record_shadow_disabled` took its place, because the SHADOW compiled
-default is deliberately still OFF. The block above therefore names two remaining
-steps, not one — reaching `warning_count: 0` needs the shadow axis on as well,
-which contradicts its own `shadow_enabled: false` row; whichever way S8 closes
-that (promote shadow, or accept the shadow warning and keep the count at 1), the
-acceptance block has to be edited to say so.
+This is the accepted configuration. #5071 T1 S8-2 made the AUTHORITY compiled
+default ON, so an unpinned node uses the durable delivery-record frontier as its
+dedup authority. The SHADOW compiled default remains intentionally OFF because it
+is an independent telemetry axis. Its sole
+`delivery_record_shadow_disabled: authority is enabled without shadow mirror telemetry`
+warning is therefore an expected accepted-configuration warning; a
+`delivery_record_authority_disabled` warning is not accepted. Promoting the
+SHADOW compiled default ON is a separate rollout decision and is not a T1 S8
+acceptance requirement.
 
-Reaching `compiled_default` on both axes also requires
-deleting the two `AGENTDESK_DELIVERY_RECORD_*` lines from mac-book's
-`launchd.env` — and that deletion is only safe after both nodes report the
-promoted commit as `deployed_repo_head`. Removing the pins while the old binary
-is running regresses mac-book to in-memory authority, the opposite of the
-rollout. Deleting the lines is also not enough on its own: `deploy-release.sh`
-regenerates the plist and merges `launchd.env` into it, so a `launchctl kickstart`
-without a redeploy leaves the old values live in the plist.
+Removing the two host-local `AGENTDESK_DELIVERY_RECORD_*` pins from mac-book's
+`launchd.env` is an operational action separate from this code PR. Actual removal
+is blocked until #5504 receives P0 dual-review CLEAN, lands on `main`, and a safe
+canonical deploy can run. Never delete the pins while the old binary is running:
+that regresses mac-book to in-memory authority, the opposite of the rollout. Pin
+removal alone is also insufficient: the canonical redeploy must regenerate the
+plist from the updated `launchd.env`; a `launchctl kickstart` without that
+redeploy leaves the old values live in the plist.
 
 ## Updating This Page
 
