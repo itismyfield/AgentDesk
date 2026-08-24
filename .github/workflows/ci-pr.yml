@@ -227,6 +227,11 @@ jobs:
               - 'src/services/discord/router/intake_dispatch.rs'
               - 'src/services/discord/router/intake_dispatch/**'
               - 'src/services/observability/**'
+              # #5464 T5 S6b: the stale-turn apply-time contract is PG-only, so
+              # the PG lane has to run when its own file changes. Pays off the
+              # matching rule3 debt entry rather than leaving the new
+              # apply-time witnesses unreachable on a path-filtered PR.
+              - 'src/services/stale_turn_reconciler.rs'
               - 'src/config.rs'
               - 'Cargo.toml'
               - 'Cargo.lock'

@@ -79,7 +79,6 @@ src/services/maintenance/jobs/db_retention.rs
 src/services/pipeline_routes.rs
 src/services/session_resume.rs
 src/services/settings.rs
-src/services/stale_turn_reconciler.rs
 src/voice/announce_meta.rs
 src/voice/turn_link.rs
 [rule4]
