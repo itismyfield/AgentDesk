@@ -868,6 +868,76 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn transport_unknown_warrant_vetoes_the_destructive_apply_and_reachable_releases_it_pg() {
+        // Canonical authority order is E -> P: the fixture retains E before
+        // TestPostgresDb acquires P. Teardown below reverses that order.
+        let fixture =
+            crate::services::discord::health::StaleSweepWarrantFixture::transport_unknown(
+                5_464_101,
+            )
+            .await
+            .unwrap();
+        let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+        let key = fixture.session_key();
+        seed_session(
+            &pool,
+            key,
+            "turn_active",
+            None,
+            STALE_TURN_GRACE.as_secs() as i64 + 60,
+        )
+        .await;
+
+        let liveness_probe = |_: &str, _: &str| IndependentLiveness::NoPane;
+        let inflight_probe = |_: &str, _: &str| InflightObservation::Unknown;
+        let automatic_warrant = Some((Some(fixture.registry()), AxisBSite::BootReconcileSweep));
+        let vetoed = reconcile_stale_turns_matching_with_warrant_pg(
+            &pool,
+            Some(key),
+            liveness_probe,
+            inflight_probe,
+            automatic_warrant,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            vetoed.reconciled, 0,
+            "axis-B Deny must stop the destructive apply"
+        );
+        assert!(
+            !vetoed.precondition_changed,
+            "warrant veto must not be reported as a precondition change"
+        );
+        assert_eq!(
+            load_state(&pool, key).await,
+            ("turn_active".to_string(), Some("original".to_string())),
+            "the row must survive untouched"
+        );
+
+        fixture.flip_to_reachable().unwrap();
+        let released = reconcile_stale_turns_matching_with_warrant_pg(
+            &pool,
+            Some(key),
+            liveness_probe,
+            inflight_probe,
+            automatic_warrant,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            released.reconciled, 1,
+            "the same candidate must release once the axis-B verdict turns Reachable"
+        );
+        assert_eq!(load_state(&pool, key).await.0, "idle");
+
+        pool.close().await;
+        pg_db.drop().await;
+        drop(fixture);
+    }
+
     #[tokio::test]
     async fn stale_busy_candidates_reconcile_only_after_terminal_liveness_pg() {
         let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
