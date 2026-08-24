@@ -224,6 +224,36 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
             "same_turn_identity": same_turn_identity,
             "path": path.display().to_string(),
             "delivery_rewind_reason": delivery_rewind_reason.map(InflightDeliveryRewindReason::as_str),
+            // #5500: severity alone collapses the WARN reasons into one label.
+            // Record which branch applied so a stored event can be triaged after
+            // the fact. Both values are already computed above — nothing new is
+            // derived here.
+            //
+            // `full_reset_signature_matched` is the local `is_legitimate_full_reset`
+            // classifier, named on the wire for what it actually is: a SHAPE test
+            // on the incoming state (`same_turn_identity` AND `full_response`
+            // empty AND `response_sent_offset == 0`). It is evidence that the
+            // rewind matched the #3933 re-stream signature and was therefore
+            // permitted — NOT a proof that the rewind was legitimate. The step
+            // from "matched" to "legitimate" rests on the #3933 assumption stated
+            // above (a genuine backward regression carries a non-empty body),
+            // which nothing here verifies: the guard has only the incoming state
+            // to decide from. Recording the raw classifier keeps that assumption
+            // auditable instead of baking its conclusion into the event. It is
+            // worth a key because the dominant stored shape (`next == 0`, null
+            // rewind reason) turns on exactly this test, and the empty-body half
+            // cannot otherwise be reconstructed from the event.
+            //
+            // Together with `severity` the pair is exhaustive HERE: WARN with
+            // `enforce_skips_backward_write` → the write was skipped; WARN with
+            // `full_reset_signature_matched` → the guard did not skip it, so the
+            // backward write proceeds (the two are mutually exclusive —
+            // `authority_blocks_backward_inflight_write` returns false whenever
+            // the signature matched); WARN with neither → the #4110 reasoned
+            // rewind, named by `delivery_rewind_reason`. Absence of a key means
+            // UNKNOWN (written before this change), never "false".
+            "full_reset_signature_matched": is_legitimate_full_reset,
+            "enforce_skips_backward_write": enforce_skips_backward_write,
         }),
         offset_monotonic_severity,
     );
@@ -249,6 +279,24 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
             "next": state.last_offset,
             "same_turn_identity": same_turn_identity,
             "path": path.display().to_string(),
+            // #5500: the same two discriminators as the response_sent_offset
+            // record above, because `offset_monotonic_severity` is one decision
+            // shared by both invariants — these fields explain THIS event's
+            // severity, they do not describe this event's own offsets.
+            //
+            // Read `full_reset_signature_matched` carefully here: the signature is
+            // a shape test on `full_response` and `response_sent_offset` and says
+            // NOTHING about `last_offset`. It appears on this record because
+            // #3933 lets it downgrade both invariants at once, not because a
+            // full-response reset justifies a backward `last_offset`. Nothing in
+            // this function verifies that it does.
+            //
+            // On this record the pair is exhaustive for WARN: the #4110 reasoned
+            // rewind is structurally impossible whenever this event fires (it
+            // requires `last_offset_monotonic`, which is false here), so a WARN
+            // is always explained by exactly one of these two keys.
+            "full_reset_signature_matched": is_legitimate_full_reset,
+            "enforce_skips_backward_write": enforce_skips_backward_write,
         }),
         offset_monotonic_severity,
     );

@@ -261,19 +261,61 @@ pub fn record_invariant_check(condition: bool, violation: InvariantViolation<'_>
     record_invariant_check_with_severity(condition, violation, InvariantSeverity::Error)
 }
 
-/// #3552: severity for a recorded invariant violation. `Error` is the default
-/// (ERROR-level tracing log) used by every breach that actually persists bad
-/// state. `Warn` is used ONLY when a downstream guard has *already handled* the
-/// condition (e.g. the #3416 enforce path skips the backward inflight write and
-/// preserves the offset → zero data loss), so an ERROR is inappropriate noise.
-/// The structured `invariant_violation` analytics event (incl. `guard_fires`)
-/// is emitted identically in both cases — only the tracing log level changes —
-/// so dashboards/PG analytics keep full visibility while the operator-facing
-/// ERROR log stays clean.
+/// #3552: the tracing level a recorded invariant violation is logged at, and
+/// (since #5500) the value persisted as the event payload's `severity`.
+///
+/// `Error` is the default — `record_invariant_check` picks it for every caller
+/// that does not opt out. `Warn` is chosen by a call site that judges an
+/// operator-facing ERROR to be inappropriate noise for that condition. That
+/// judgement belongs to the call site, and the reasons already differ. Two of
+/// the current `Warn` sites (not a complete list) are enough to rule out any
+/// single reading:
+///
+/// - `validate_inflight_state_for_save_with_delivery_rewind_reason` downgrades
+///   when the #3416 enforce guard SKIPS the backward inflight write, so the
+///   offset is preserved and nothing bad persists — but the same function also
+///   downgrades a permitted full-reset rewind (#3933), which the guard does NOT
+///   skip, so that backward write goes on to be written.
+/// - `observe_cross_channel_tmux_claim` records every cross-channel watcher
+///   claim at `Warn` — intended and unintended alike — with no guard involved
+///   and no claim about what was or was not persisted.
+///
+/// So `Warn` on its own does NOT mean "a downstream guard handled it" or "zero
+/// data loss". What this enum guarantees is narrow and mechanical: it selects
+/// the tracing level, and the same choice is carried on the structured
+/// `invariant_violation` event, so the level a stored violation was logged at
+/// is recoverable from the record. Any stronger reading has to come from the
+/// invariant's own payload fields. (The `Warn` tracing line also carries
+/// `INVARIANT_WARN_DOWNGRADE_SUFFIX`, which names the #3552 motivating case as
+/// fixed text on every `Warn` — it is not a per-call-site verified claim.)
+///
+/// Neither level suppresses analytics: both emit the `invariant_violation`
+/// event and its `guard_fires` counter, so dashboards/PG keep full visibility
+/// while the operator-facing ERROR log stays clean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvariantSeverity {
     Error,
     Warn,
+}
+
+impl InvariantSeverity {
+    /// Stable wire name for the persisted `invariant_violation` payload.
+    ///
+    /// #5500: the analytics event previously carried no severity at all, so the
+    /// level a violation was logged at was unrecoverable from a stored event —
+    /// the WARN and ERROR records were byte-for-byte identical. These strings
+    /// are part of the event contract; changing them silently re-partitions
+    /// every stored event.
+    ///
+    /// The field reports which level the call site chose and nothing more; see
+    /// the `InvariantSeverity` docs for why `warn` does not by itself mean the
+    /// condition was handled or that nothing persisted.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InvariantSeverity::Error => "error",
+            InvariantSeverity::Warn => "warn",
+        }
+    }
 }
 
 const INVARIANT_WARN_DOWNGRADE_SUFFIX: &str = "(handled by downstream guard — downgraded to WARN)";
@@ -422,6 +464,15 @@ pub fn record_invariant_check_with_severity(
             "invariant": invariant,
             "code_location": violation.code_location,
             "message": violation.message,
+            // #5500: carry the tracing level this call site chose. It used to
+            // exist ONLY as a log LEVEL, so every stored event was byte-for-byte
+            // identical across Error and Warn and the choice could not be read
+            // back off the record at all. What the level MEANS is the
+            // invariant's own business (see `InvariantSeverity`) — this field
+            // only makes the choice recoverable. Events written before this
+            // change have no `severity` key; absence means UNKNOWN, never
+            // "fine".
+            "severity": severity.as_str(),
             "details": violation.details,
         }),
     );
@@ -1011,6 +1062,62 @@ mod tests {
         assert_eq!(recovery.payload["reason"], "watchdog");
     }
 
+    /// #5500: the persisted event must carry the severity. Before this, the
+    /// analytics record was byte-for-byte identical across Error and Warn — the
+    /// distinction existed only as a tracing log LEVEL — so the level a stored
+    /// violation was logged at could not be read back off the record.
+    /// `relay_signal_alert` counts these rows by column with a default threshold
+    /// of 1 for `offset_invariant_violation`, so the collapse left an alerting
+    /// operator with no in-record discriminator to start from.
+    #[test]
+    fn invariant_violation_persists_its_severity_5500() {
+        let _guard = super::super::test_runtime_lock();
+        super::super::reset_for_tests();
+
+        for (severity, expected, marker) in [
+            (InvariantSeverity::Error, "error", "5500-error-marker"),
+            (InvariantSeverity::Warn, "warn", "5500-warn-marker"),
+        ] {
+            assert!(!record_invariant_check_with_severity(
+                false,
+                InvariantViolation {
+                    provider: Some("Claude"),
+                    channel_id: Some(5500),
+                    dispatch_id: None,
+                    session_key: None,
+                    turn_id: None,
+                    invariant: "response_sent_offset_monotonic",
+                    code_location: "src/services/observability/emit.rs:test",
+                    message: marker,
+                    details: json!({"marker": marker}),
+                },
+                severity,
+            ));
+
+            // Isolation-robust: filter by this iteration's unique marker rather
+            // than demanding a single invariant_violation ring-wide — other tests
+            // push their own events into the shared global ring in parallel.
+            let events = events::recent(50);
+            let mine: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    event.event_type == "invariant_violation"
+                        && event.payload["details"]["marker"] == json!(marker)
+                })
+                .collect();
+            assert_eq!(
+                mine.len(),
+                1,
+                "exactly one event must carry this iteration's marker: {events:?}"
+            );
+            assert_eq!(
+                mine[0].payload["severity"],
+                json!(expected),
+                "the persisted payload must name the severity ({expected})"
+            );
+        }
+    }
+
     #[test]
     fn relay_delete_records_required_fields_and_outcome() {
         // #3607: every wired delete site funnels through emit_relay_delete. The
@@ -1054,12 +1161,13 @@ mod tests {
 
     #[test]
     fn warn_severity_invariant_still_emits_event_without_error_level() {
-        // #3552: a violation downgraded to WARN (because a downstream guard
-        // already handled it) must keep full structured-event visibility — the
-        // analytics `invariant_violation` event (incl. guard_fires) is identical
-        // to the ERROR case; only the tracing log LEVEL changes. The recorder
-        // still returns `false` (violation observed), so callers/debug_asserts
-        // behave exactly as before.
+        // #3552: a violation recorded at WARN must keep full structured-event
+        // visibility — the analytics `invariant_violation` event and its
+        // `guard_fires` counter are emitted exactly as for ERROR. Since #5500
+        // the payload's `severity` field names the chosen level, so the two
+        // records are no longer indistinguishable; every other recorded field is
+        // unchanged. The recorder still returns `false` (violation observed), so
+        // callers/debug_asserts behave exactly as before.
         let _guard = super::super::test_runtime_lock();
         super::super::reset_for_tests();
 
@@ -1104,9 +1212,10 @@ mod tests {
         // tests that don't hold `test_runtime_lock()` can concurrently push their
         // own `invariant_violation` events into the same global ring on a parallel
         // (self-hosted) runner, which would otherwise inflate the count past 1.
-        // The analytics event is byte-for-byte identical across Error/Warn (only
-        // the tracing log LEVEL differs), so presence of this exact event — emitted
-        // despite the WARN downgrade — is what proves the test's intent.
+        // Presence of this exact event — emitted despite the WARN downgrade — is
+        // what proves the test's intent; the `severity` field that now separates
+        // the two records is pinned by
+        // `invariant_violation_persists_its_severity_5500`.
         let events = events::recent(50);
         let downgraded_events: Vec<_> = events
             .iter()
@@ -1128,8 +1237,9 @@ mod tests {
             downgraded_event.payload["invariant"],
             "last_offset_monotonic"
         );
-        // The downgrade only changes the tracing log level; the structured event
-        // is emitted identically and carries the same provider/channel as ERROR.
+        // The downgrade changes the tracing level and, since #5500, the payload's
+        // `severity`; every other recorded field — provider/channel included — is
+        // unaffected by it.
         assert_eq!(downgraded_event.provider.as_deref(), Some("codex"));
         assert_eq!(downgraded_event.channel_id, Some(7));
     }

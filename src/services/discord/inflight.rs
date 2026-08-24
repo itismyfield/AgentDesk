@@ -384,15 +384,23 @@ fn record_inflight_invariant(
     )
 }
 
-/// #3552 (pure, testable): the offset-monotonic invariants on the save path are
-/// paired with the #3416 enforce guard. When that guard will SKIP the backward
-/// write (`enforce_skips_backward_write`), the violation is already safely
-/// handled (offset preserved, zero data loss) → record at WARN so the paired
-/// `#3416 enforce` WARN is the only operator log and the duplicate ERROR noise
-/// (~17/day) disappears. Otherwise the backward write persists → ERROR (a
-/// genuine breach). The structured analytics event is identical either way.
-fn offset_monotonic_invariant_severity(enforce_skips_backward_write: bool) -> ObsSeverity {
-    if enforce_skips_backward_write {
+/// #3552 (pure, testable): map "this offset-monotonic violation is already
+/// safely handled" to the tracing level it is recorded at — WARN when handled,
+/// ERROR otherwise. The motivating case is the #3416 enforce guard SKIPPING the
+/// backward write (offset preserved, zero data loss), where the paired
+/// `#3416 enforce` WARN is the only operator log needed and the duplicate ERROR
+/// noise (~17/day) disappears.
+///
+/// The caller decides what counts as handled, and since #3933 it is broader
+/// than the enforce skip: `validate_inflight_state_for_save_with_delivery_rewind_reason`
+/// also passes `true` for a permitted delivery rewind, which the guard does not
+/// skip, so that backward write goes on to be written. WARN here therefore does
+/// not imply that nothing was written — see
+/// `InvariantSeverity`. Both levels emit the same `invariant_violation` event;
+/// since #5500 its payload's `severity` names the level, and the call site
+/// records the discriminators that say which branch produced it.
+fn offset_monotonic_invariant_severity(violation_safely_handled: bool) -> ObsSeverity {
+    if violation_safely_handled {
         ObsSeverity::Warn
     } else {
         ObsSeverity::Error
@@ -3324,11 +3332,14 @@ mod stall_recovery_tests {
     }
 
     #[test]
-    fn offset_monotonic_severity_downgrades_only_when_enforce_skips() {
+    fn offset_monotonic_severity_warns_when_violation_safely_handled() {
         use crate::services::observability::InvariantSeverity;
-        // #3552: when the #3416 enforce guard will skip the backward write the
-        // violation is already handled → WARN (no ERROR noise). When it will NOT
-        // skip (enforce OFF → write persists) it stays ERROR (a genuine breach).
+        // #3552: a violation the caller reports as already safely handled is
+        // recorded at WARN (no ERROR noise); otherwise it stays ERROR. The
+        // enforce-skip case is one input, not the only one — since #3933 the
+        // caller also reports a permitted delivery rewind as handled even though
+        // that one persists its backward write, so this helper deliberately
+        // takes the decided predicate rather than re-deriving it.
         assert_eq!(
             offset_monotonic_invariant_severity(true),
             InvariantSeverity::Warn
