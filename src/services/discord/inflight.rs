@@ -384,15 +384,15 @@ fn record_inflight_invariant(
     )
 }
 
-/// #3552 (pure, testable): the offset-monotonic invariants on the save path are
-/// paired with the #3416 enforce guard. When that guard will SKIP the backward
-/// write (`enforce_skips_backward_write`), the violation is already safely
-/// handled (offset preserved, zero data loss) → record at WARN so the paired
-/// `#3416 enforce` WARN is the only operator log and the duplicate ERROR noise
-/// (~17/day) disappears. Otherwise the backward write persists → ERROR (a
-/// genuine breach). The structured analytics event is identical either way.
-fn offset_monotonic_invariant_severity(enforce_skips_backward_write: bool) -> ObsSeverity {
-    if enforce_skips_backward_write {
+/// #3552 (pure, testable): map the call site's mechanical WARN selection to
+/// the tracing level used for an offset-monotonic violation. `true` selects
+/// WARN; `false` selects ERROR.
+///
+/// This helper does not infer why WARN was selected. The call site records the
+/// branch discriminators on the structured `invariant_violation` event; since
+/// #5500 its payload's `severity` also names the selected level.
+fn offset_monotonic_invariant_severity(warn_downgrade_selected: bool) -> ObsSeverity {
+    if warn_downgrade_selected {
         ObsSeverity::Warn
     } else {
         ObsSeverity::Error
@@ -3324,11 +3324,10 @@ mod stall_recovery_tests {
     }
 
     #[test]
-    fn offset_monotonic_severity_downgrades_only_when_enforce_skips() {
+    fn offset_monotonic_severity_uses_warn_when_downgrade_selected() {
         use crate::services::observability::InvariantSeverity;
-        // #3552: when the #3416 enforce guard will skip the backward write the
-        // violation is already handled → WARN (no ERROR noise). When it will NOT
-        // skip (enforce OFF → write persists) it stays ERROR (a genuine breach).
+        // #3552: this helper applies the call site's mechanical severity
+        // selection without interpreting why the WARN branch was selected.
         assert_eq!(
             offset_monotonic_invariant_severity(true),
             InvariantSeverity::Warn

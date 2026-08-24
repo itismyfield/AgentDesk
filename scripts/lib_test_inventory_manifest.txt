@@ -3099,7 +3099,7 @@ services::discord::inflight::stall_recovery_tests::inflight_unknown_runtime_kind
 services::discord::inflight::stall_recovery_tests::inflight_unknown_runtime_kind_string_deserializes_as_none
 services::discord::inflight::stall_recovery_tests::inflight_v8_claude_tui_round_trips_with_fifo_for_rollback_compat
 services::discord::inflight::stall_recovery_tests::load_inflight_states_revalidates_malformed_row_under_lock
-services::discord::inflight::stall_recovery_tests::offset_monotonic_severity_downgrades_only_when_enforce_skips
+services::discord::inflight::stall_recovery_tests::offset_monotonic_severity_uses_warn_when_downgrade_selected
 services::discord::inflight::stall_recovery_tests::ownerless_external_input_stale_only_for_unowned_pre_placeholder_synthetic_rows
 services::discord::inflight::stall_recovery_tests::reanchor_bind_requires_old_panel_and_bumps_generation_from_disk
 services::discord::inflight::stall_recovery_tests::runtime_kind_round_trips_and_direct_tui_has_no_fifo_requirement
@@ -6981,6 +6981,7 @@ services::message_outbox_recovery_tests::worker_claim_race_has_one_owner_and_no_
 services::observability::cancellation_observability_tests::turn_cancelled_emit_records_normalized_payload_without_pg
 services::observability::emit::tests::every_emit_surface_records_one_recent_event
 services::observability::emit::tests::invariant_severity_routes_to_exact_log_level_and_suffix_4422
+services::observability::emit::tests::invariant_violation_persists_its_severity_5500
 services::observability::emit::tests::relay_delete_records_required_fields_and_outcome
 services::observability::emit::tests::relay_root_cause_metric_wrappers_record_persistent_events
 services::observability::emit::tests::warn_severity_invariant_still_emits_event_without_error_level

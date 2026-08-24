@@ -157,15 +157,10 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
     // turn); the enforcing variant lives in the standby/refresh path.
     let last_offset_monotonic = !same_turn_identity || state.last_offset >= existing.last_offset;
 
-    // #3552: when the #3416 enforce guard (below) will SKIP this backward write
-    // and preserve the offset (zero data loss), the offset-monotonic violation
-    // has already been safely handled — record it at WARN instead of ERROR so
-    // the paired `#3416 enforce` WARN is the only operator-facing log, killing
-    // the duplicate ERROR-log noise. When enforce is OFF a GENUINE (non-reset)
-    // backward write actually persists below, so that violation stays ERROR (a
-    // real breach); the legitimate re-stream reset (#3933) is handled separately
-    // just before the records below. Computed BEFORE the records so the severity
-    // is correct; the enforce branch itself (skip + return false) is unchanged.
+    // #3552: the severity selection is computed before the records below. The
+    // enforce-skip and rewind-classifier branches select WARN; otherwise a
+    // backward-write violation selects ERROR. The enforce branch itself (skip +
+    // return false) is unchanged.
     // #3933: a legitimate Gemini/Qwen `RetryBoundary` reset rewinds the SAME
     // turn's frontier to the start — `full_response` cleared and
     // `response_sent_offset` back to 0 — to re-stream the answer
@@ -199,18 +194,13 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
         last_offset_monotonic,
         is_legitimate_delivery_rewind,
     );
-    // #3933: a legitimate full reset PERSISTS its backward write (it is a permitted
-    // re-stream rewind, so the enforce guard does NOT skip it —
-    // `enforce_skips_backward_write` is false). That rewind is intended, not a
-    // data-loss regression, so it must not surface an operator-facing ERROR: treat
-    // it as "safely handled" (WARN) exactly like the enforce-skip case. This is a
+    // #3933: select WARN for either mechanical branch: the enforce guard skips
+    // the backward write, or the rewind classifier permits it. This is a
     // severity-label change ONLY — the enforce guard, the debug tripwire (which
     // still keys off `enforce_skips_backward_write`), and the on-disk schema are
     // all unchanged.
-    let monotonic_violation_safely_handled =
-        enforce_skips_backward_write || is_legitimate_delivery_rewind;
-    let offset_monotonic_severity =
-        offset_monotonic_invariant_severity(monotonic_violation_safely_handled);
+    let warn_downgrade_selected = enforce_skips_backward_write || is_legitimate_delivery_rewind;
+    let offset_monotonic_severity = offset_monotonic_invariant_severity(warn_downgrade_selected);
 
     record_inflight_invariant_with_severity(
         monotonic_offset,
@@ -224,6 +214,36 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
             "same_turn_identity": same_turn_identity,
             "path": path.display().to_string(),
             "delivery_rewind_reason": delivery_rewind_reason.map(InflightDeliveryRewindReason::as_str),
+            // #5500: severity alone collapses the WARN reasons into one label.
+            // Record which branch applied so a stored event can be triaged after
+            // the fact. Both values are already computed above — nothing new is
+            // derived here.
+            //
+            // `full_reset_signature_matched` is the local `is_legitimate_full_reset`
+            // classifier, named on the wire for what it actually is: a SHAPE test
+            // on the incoming state (`same_turn_identity` AND `full_response`
+            // empty AND `response_sent_offset == 0`). It is evidence that the
+            // rewind matched the #3933 re-stream signature and was therefore
+            // permitted — NOT a proof that the rewind was legitimate. The step
+            // from "matched" to "legitimate" rests on the #3933 assumption stated
+            // above (a genuine backward regression carries a non-empty body),
+            // which nothing here verifies: the guard has only the incoming state
+            // to decide from. Recording the raw classifier keeps that assumption
+            // auditable instead of baking its conclusion into the event. It is
+            // worth a key because the dominant stored shape (`next == 0`, null
+            // rewind reason) turns on exactly this test, and the empty-body half
+            // cannot otherwise be reconstructed from the event.
+            //
+            // Together with `severity` the pair is exhaustive HERE: WARN with
+            // `enforce_skips_backward_write` → the write was skipped; WARN with
+            // `full_reset_signature_matched` → the guard did not skip it, so the
+            // backward write proceeds (the two are mutually exclusive —
+            // `authority_blocks_backward_inflight_write` returns false whenever
+            // the signature matched); WARN with neither → the #4110 reasoned
+            // rewind, named by `delivery_rewind_reason`. Absence of a key means
+            // UNKNOWN (written before this change), never "false".
+            "full_reset_signature_matched": is_legitimate_full_reset,
+            "enforce_skips_backward_write": enforce_skips_backward_write,
         }),
         offset_monotonic_severity,
     );
@@ -249,6 +269,24 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
             "next": state.last_offset,
             "same_turn_identity": same_turn_identity,
             "path": path.display().to_string(),
+            // #5500: the same two discriminators as the response_sent_offset
+            // record above, because `offset_monotonic_severity` is one decision
+            // shared by both invariants — these fields explain THIS event's
+            // severity, they do not describe this event's own offsets.
+            //
+            // Read `full_reset_signature_matched` carefully here: the signature is
+            // a shape test on `full_response` and `response_sent_offset` and says
+            // NOTHING about `last_offset`. It appears on this record because
+            // #3933 lets it downgrade both invariants at once, not because a
+            // full-response reset justifies a backward `last_offset`. Nothing in
+            // this function verifies that it does.
+            //
+            // On this record the pair is exhaustive for WARN: the #4110 reasoned
+            // rewind is structurally impossible whenever this event fires (it
+            // requires `last_offset_monotonic`, which is false here), so a WARN
+            // is always explained by exactly one of these two keys.
+            "full_reset_signature_matched": is_legitimate_full_reset,
+            "enforce_skips_backward_write": enforce_skips_backward_write,
         }),
         offset_monotonic_severity,
     );
