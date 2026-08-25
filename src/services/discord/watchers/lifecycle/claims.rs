@@ -9,25 +9,80 @@ pub(crate) enum WatcherClaimAction {
     ReuseExisting,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct WatcherClaimOutcome {
-    pub(crate) action: WatcherClaimAction,
+#[derive(Debug, Clone)]
+pub(in crate::services::discord) struct WatcherClaimIncarnation {
     owner_channel_id: ChannelId,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub(in crate::services::discord) paused: Arc<std::sync::atomic::AtomicBool>,
+    pub(in crate::services::discord) resume_offset: Arc<std::sync::Mutex<Option<u64>>>,
+    pub(in crate::services::discord) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl WatcherClaimOutcome {
-    fn new(action: WatcherClaimAction, owner_channel_id: ChannelId) -> Self {
+impl WatcherClaimIncarnation {
+    fn from_handle(owner_channel_id: ChannelId, handle: &TmuxWatcherHandle) -> Self {
         Self {
-            action,
             owner_channel_id,
+            cancel: Arc::clone(&handle.cancel),
+            paused: Arc::clone(&handle.paused),
+            resume_offset: Arc::clone(&handle.resume_offset),
+            turn_delivered: Arc::clone(&handle.turn_delivered),
         }
     }
 
-    pub(crate) fn owner_channel_id(self) -> ChannelId {
+    #[rustfmt::skip]
+    pub(in crate::services::discord) fn adopt_if_current<T>(
+        &self,
+        watchers: &TmuxWatcherRegistry,
+        adopt: impl FnOnce(&Self) -> T,
+    ) -> Option<T> {
+        let guard = lock_tmux_watcher_registry();
+        #[cfg(test)]
+        if EVICT_CLAIM_BEFORE_ADOPTION.compare_exchange(
+            self.owner_channel_id.get(), 0,
+            std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst,
+        ).is_ok() {
+            let _ = watchers.remove_locked(&guard, &self.owner_channel_id);
+        }
+        let current = watchers.get(&self.owner_channel_id)?;
+        if !Arc::ptr_eq(&current.cancel, &self.cancel)
+            || current.cancel.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return None;
+        }
+        drop(current);
+        Some(adopt(self))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WatcherClaimOutcome {
+    pub(crate) action: WatcherClaimAction,
+    owner_channel_id: ChannelId,
+    incarnation: WatcherClaimIncarnation,
+}
+
+impl WatcherClaimOutcome {
+    fn new(
+        action: WatcherClaimAction,
+        owner_channel_id: ChannelId,
+        incarnation: WatcherClaimIncarnation,
+    ) -> Self {
+        Self {
+            action,
+            owner_channel_id,
+            incarnation,
+        }
+    }
+
+    pub(crate) fn owner_channel_id(&self) -> ChannelId {
         self.owner_channel_id
     }
 
-    pub(crate) fn should_spawn(self) -> bool {
+    pub(in crate::services::discord) fn incarnation(&self) -> &WatcherClaimIncarnation {
+        &self.incarnation
+    }
+
+    pub(crate) fn should_spawn(&self) -> bool {
         matches!(
             self.action,
             WatcherClaimAction::SpawnFresh
@@ -37,7 +92,7 @@ impl WatcherClaimOutcome {
         )
     }
 
-    pub(crate) fn replaced_existing(self) -> bool {
+    pub(crate) fn replaced_existing(&self) -> bool {
         matches!(
             self.action,
             WatcherClaimAction::SpawnReplacedStale
@@ -46,7 +101,7 @@ impl WatcherClaimOutcome {
         )
     }
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self.action {
             WatcherClaimAction::SpawnFresh => "spawn_fresh",
             WatcherClaimAction::SpawnReplacedStale => "spawn_replaced_stale",
@@ -55,6 +110,30 @@ impl WatcherClaimOutcome {
             WatcherClaimAction::ReuseExisting => "reuse_existing",
         }
     }
+}
+
+#[cfg(test)]
+#[rustfmt::skip]
+static EVICT_CLAIM_BEFORE_ADOPTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(in crate::services::discord) struct ClaimAdoptionEvictionGuard(u64);
+
+#[cfg(test)]
+#[rustfmt::skip]
+impl Drop for ClaimAdoptionEvictionGuard {
+    fn drop(&mut self) {
+        let _ = EVICT_CLAIM_BEFORE_ADOPTION.compare_exchange(
+            self.0, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
+#[cfg(test)]
+#[rustfmt::skip]
+pub(in crate::services::discord) fn evict_claim_before_adoption_for_test(owner: ChannelId) -> ClaimAdoptionEvictionGuard {
+    EVICT_CLAIM_BEFORE_ADOPTION.store(owner.get(), std::sync::atomic::Ordering::SeqCst);
+    ClaimAdoptionEvictionGuard(owner.get())
 }
 
 pub(crate) fn find_watcher_by_tmux_session(
@@ -413,13 +492,23 @@ pub(crate) fn claim_watcher(
                     "watcher_slots": watchers.len(),
                 }),
             );
+            let incarnation = watchers
+                .by_tmux_session
+                .get(&requested_tmux)
+                .map(|entry| WatcherClaimIncarnation::from_handle(existing_channel_id, &entry))
+                .expect("registry lock keeps the selected incumbent installed");
             return WatcherClaimOutcome::new(
                 WatcherClaimAction::ReuseExisting,
                 existing_channel_id,
+                incarnation,
             );
         }
     }
 
+    // The claim result owns the exact Arc identity installed by this mutation.
+    // Consumers may safely use it after the registry lock is released without
+    // re-resolving the channel to a replacement watcher incarnation.
+    let installed_incarnation = WatcherClaimIncarnation::from_handle(channel_id, &handle);
     let outcome = if let Some(entry) = watchers.get(&channel_id) {
         let previous_tmux = entry.tmux_session_name.clone();
         let same_tmux = previous_tmux == requested_tmux;
@@ -458,23 +547,44 @@ pub(crate) fn claim_watcher(
             source,
         );
         if force_replace_live_same_tmux && same_tmux {
-            WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedForced, channel_id)
+            WatcherClaimOutcome::new(
+                WatcherClaimAction::SpawnReplacedForced,
+                channel_id,
+                installed_incarnation.clone(),
+            )
         } else if same_tmux {
-            WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedStale, channel_id)
+            WatcherClaimOutcome::new(
+                WatcherClaimAction::SpawnReplacedStale,
+                channel_id,
+                installed_incarnation.clone(),
+            )
         } else {
             WatcherClaimOutcome::new(
                 WatcherClaimAction::SpawnReplacedDifferentSession,
                 channel_id,
+                installed_incarnation.clone(),
             )
         }
     } else {
         watchers.insert_locked(&guard, channel_id, handle);
         if force_replace_live_same_tmux && removed_stale_same_tmux {
-            WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedForced, channel_id)
+            WatcherClaimOutcome::new(
+                WatcherClaimAction::SpawnReplacedForced,
+                channel_id,
+                installed_incarnation.clone(),
+            )
         } else if removed_stale_same_tmux {
-            WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedStale, channel_id)
+            WatcherClaimOutcome::new(
+                WatcherClaimAction::SpawnReplacedStale,
+                channel_id,
+                installed_incarnation.clone(),
+            )
         } else {
-            WatcherClaimOutcome::new(WatcherClaimAction::SpawnFresh, channel_id)
+            WatcherClaimOutcome::new(
+                WatcherClaimAction::SpawnFresh,
+                channel_id,
+                installed_incarnation,
+            )
         }
     };
     let slot_present = watchers.contains_key(&channel_id);

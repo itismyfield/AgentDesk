@@ -73,15 +73,16 @@ use self::tmux_session_files::{
     reset_stale_local_relay_offset_if_output_regressed, sweep_orphan_session_files,
 };
 pub(crate) use self::tmux_session_files::{stamp_spawn_markers, write_spawn_nonce};
+#[rustfmt::skip]
 #[cfg(test)]
-pub(in crate::services::discord) use self::watcher_lifecycle::claim_cross_channel_tmux_watcher_for_test;
+pub(in crate::services::discord) use self::watcher_lifecycle::{claim_cross_channel_tmux_watcher_for_test, evict_claim_before_adoption_for_test};
 use self::watcher_lifecycle::*;
 pub(in crate::services::discord) use self::watcher_lifecycle::{
-    ThreadFollowUpParent, claim_or_replace_watcher, claim_or_replace_watcher_with_thread_parent,
-    claim_or_reuse_watcher, claim_or_reuse_watcher_with_thread_parent,
-    clear_recovery_handled_channels, fail_dispatch_for_ready_for_input_stall,
-    refresh_session_heartbeat_from_tmux_output, restore_tmux_watchers,
-    session_belongs_to_current_runtime, store_recovery_handled_channels,
+    ThreadFollowUpParent, WatcherClaimIncarnation, claim_or_replace_watcher,
+    claim_or_replace_watcher_with_thread_parent, claim_or_reuse_watcher,
+    claim_or_reuse_watcher_with_thread_parent, clear_recovery_handled_channels,
+    fail_dispatch_for_ready_for_input_stall, refresh_session_heartbeat_from_tmux_output,
+    restore_tmux_watchers, session_belongs_to_current_runtime, store_recovery_handled_channels,
     thread_follow_up_parent_channel_id, thread_follow_up_parent_from_live,
     try_claim_watcher_with_thread_parent,
 };

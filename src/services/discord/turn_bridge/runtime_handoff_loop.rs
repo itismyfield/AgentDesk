@@ -64,6 +64,13 @@ impl RuntimeHandoffLoopMessage {
     }
 }
 
+fn adopt_claimed_watcher_delivery_marker(
+    pin: &mut Option<Arc<std::sync::atomic::AtomicBool>>,
+    marker: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    *pin = Some(Arc::clone(marker));
+}
+
 pub(super) struct RuntimeHandoffLoopOutcome {
     pub(super) guarded_save_outcome: Option<crate::services::discord::inflight::GuardedSaveOutcome>,
     pub(super) retry_message: Option<RuntimeHandoffLoopMessage>,
@@ -84,6 +91,7 @@ pub(super) struct RuntimeHandoffLoopState<'a> {
     pub(super) watcher_owner_channel_id: &'a mut ChannelId,
     pub(super) standby_relay_owns_output: &'a mut bool,
     pub(super) watcher_relay_available_for_turn: &'a mut bool,
+    pub(super) watcher_delivery_pin: &'a mut Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) watcher_handoff_claim_outcome: &'a mut WatcherHandoffClaimOutcome,
     pub(super) tmux_handed_off: &'a mut bool,
     pub(super) watcher_owns_assistant_relay: &'a mut bool,
@@ -118,6 +126,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
     let mut watcher_owner_channel_id = *state.watcher_owner_channel_id;
     let mut standby_relay_owns_output = *state.standby_relay_owns_output;
     let mut watcher_relay_available_for_turn = *state.watcher_relay_available_for_turn;
+    let mut watcher_delivery_pin = state.watcher_delivery_pin.clone();
     let mut watcher_handoff_claim_outcome = *state.watcher_handoff_claim_outcome;
     let mut tmux_handed_off = *state.tmux_handed_off;
     let mut watcher_owns_assistant_relay = *state.watcher_owns_assistant_relay;
@@ -131,6 +140,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
     let pre_frame_watcher_owner_channel_id = watcher_owner_channel_id;
     let pre_frame_standby_relay_owns_output = standby_relay_owns_output;
     let pre_frame_watcher_relay_available_for_turn = watcher_relay_available_for_turn;
+    let pre_frame_watcher_delivery_pin = watcher_delivery_pin.clone();
     let pre_frame_watcher_handoff_claim_outcome = watcher_handoff_claim_outcome;
     let pre_frame_tmux_handed_off = tmux_handed_off;
     let pre_frame_watcher_owns_assistant_relay = watcher_owns_assistant_relay;
@@ -220,7 +230,12 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                 };
                 let pre_claim_persisted = inflight_state.clone();
                 #[cfg(unix)]
-                let (watcher_claimed, watcher_claim_replaced_existing, owner_changed_after_claim) = {
+                let (
+                    watcher_claimed,
+                    watcher_claim_replaced_existing,
+                    owner_changed_after_claim,
+                    watcher_claim_incarnation,
+                ) = {
                     // #1135: Reuse a live watcher for the same
                     // tmux session; replace only stale or
                     // different-session incumbents.
@@ -239,10 +254,12 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     watcher_owner_channel_id = claim.owner_channel_id();
                     let owner_changed =
                         inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
+                    let incarnation = claim.incarnation().clone();
                     (
                         claim.should_spawn(),
                         claim.replaced_existing(),
                         owner_changed,
+                        Some(incarnation),
                     )
                 };
                 #[cfg(not(unix))]
@@ -271,6 +288,8 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     cancel_provisional_watcher_claim_if_matches(
                         shared_owned.as_ref(),
                         watcher_owner_channel_id,
+                        &tmux_session_name,
+                        &output_path,
                         &cancel,
                     );
                 }
@@ -327,18 +346,12 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                                 "  [{ts}] ⏭ standby relay: skipping tmux watcher spawn for channel {}; spawning JSONL→Discord standby_relay",
                                 channel_id
                             );
-                            // Drop the registered watcher slot so a
-                            // subsequent turn does not falsely reuse
-                            // a "live" watcher that we never spawned.
-                            // Do NOT call `cancel.store(true)` on the
-                            // returned handle: the inner cancel Arc
-                            // is shared with the local `cancel` and
-                            // would pre-cancel the standby_relay we
-                            // are about to spawn (Codex P1 review on
-                            // PR #2012). The cancel Arc is otherwise
-                            // unused on this branch since no watcher
-                            // task ever reads it.
-                            let _ = shared_owned.tmux_watchers.remove(&watcher_owner_channel_id);
+                            // Retire only this provisional watcher. Do not
+                            // cancel: the standby relay is the successor owner.
+                            let _ = shared_owned
+                                .tmux_watchers
+                                .remove_tmux_session_if_current(&tmux_session_name, &cancel);
+                            watcher_delivery_pin = None;
                             if let Some(http_for_standby) =
                                 shared_owned.serenity_http_or_token_fallback()
                             {
@@ -454,57 +467,72 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                                 "  [{ts}] ⚠ no Http source (neither cached_serenity_ctx nor cached_bot_token); tmux watcher not started for channel {}",
                                 channel_id
                             );
-                            if let Some((_, handle)) =
-                                shared_owned.tmux_watchers.remove(&watcher_owner_channel_id)
-                            {
-                                handle.cancel.store(true, Ordering::Relaxed);
-                            }
+                            cancel_provisional_watcher_claim_if_matches(
+                                shared_owned.as_ref(),
+                                watcher_owner_channel_id,
+                                &tmux_session_name,
+                                &output_path,
+                                &cancel,
+                            );
+                            watcher_delivery_pin = None;
                         }
                     }
                 }
+                #[cfg(unix)]
                 if watcher_ready_for_relay {
-                    tmux_handed_off = true;
-                    inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
-                    watcher_owns_assistant_relay = true;
-                    if let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
-                    {
-                        watcher_relay_available_for_turn = true;
-                        if let Ok(mut guard) = watcher.resume_offset.lock() {
-                            *guard = Some(last_offset);
-                        }
-                        watcher.turn_delivered.store(false, Ordering::Relaxed);
-                        // #1452 (Codex P1): publish the mailbox-finalization
-                        // debt BEFORE unpausing the watcher.
-                        //
-                        // The watcher's terminal `swap(false, AcqRel)` runs
-                        // as soon as it sees a Done event; if we delayed
-                        // the store until the bridge's later delegation
-                        // decision (line 2419+), the watcher could swap
-                        // first, observe `false`, skip `mailbox_finish_turn`,
-                        // and the bridge's late `store(true)` would leave
-                        // stale debt that either keeps `cancel_token`
-                        // permanently set OR is consumed by a future
-                        // watcher event for the WRONG turn.
-                        //
-                        // #3016 phase-5b2: the legacy
-                        // `mailbox_finalize_owed` store that used to
-                        // publish "bridge will delegate finalization"
-                        // here is removed; the `register_start` below
-                        // (RelayOwnerKind::Watcher) is the ledger
-                        // authority that replaced it.
-                        // #3016 phase 3: register the turn with the
-                        // single-authority finalizer BEFORE
-                        // unpausing the watcher — same as the
-                        // `handle_watcher_runtime_handoff` helper.
-                        // This legacy `StreamMessage::TmuxReady`
-                        // handoff does NOT go through that helper, so
-                        // without this the watcher terminal would
-                        // have no Watcher-owned ledger entry — and
-                        // a busy-pane gate-timeout would finalize
-                        // immediately instead of arming the
-                        // deadline-backstop. Registering here with
-                        // the same finalizer id makes it defer.
-                        shared_owned
+                    let watcher_claim_incarnation = watcher_claim_incarnation
+                        .as_ref()
+                        .expect("unix watcher claim carries its exact incarnation");
+                    let adopted = watcher_claim_incarnation.adopt_if_current(
+                        &shared_owned.tmux_watchers,
+                        |watcher_claim_incarnation| {
+                            adopt_claimed_watcher_delivery_marker(
+                                &mut watcher_delivery_pin,
+                                &watcher_claim_incarnation.turn_delivered,
+                            );
+                            if let Ok(mut guard) = watcher_claim_incarnation.resume_offset.lock() {
+                                *guard = Some(last_offset);
+                            }
+                            watcher_claim_incarnation
+                                .turn_delivered
+                                .store(false, Ordering::Relaxed);
+                            tmux_handed_off = true;
+                            watcher_relay_available_for_turn = true;
+                            watcher_owns_assistant_relay = true;
+                            inflight_state
+                                .set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
+                    // #1452 (Codex P1): publish the mailbox-finalization
+                    // debt BEFORE unpausing the watcher.
+                    //
+                    // The watcher's terminal `swap(false, AcqRel)` runs
+                    // as soon as it sees a Done event; if we delayed
+                    // the store until the bridge's later delegation
+                    // decision (line 2419+), the watcher could swap
+                    // first, observe `false`, skip `mailbox_finish_turn`,
+                    // and the bridge's late `store(true)` would leave
+                    // stale debt that either keeps `cancel_token`
+                    // permanently set OR is consumed by a future
+                    // watcher event for the WRONG turn.
+                    //
+                    // #3016 phase-5b2: the legacy
+                    // `mailbox_finalize_owed` store that used to
+                    // publish "bridge will delegate finalization"
+                    // here is removed; the `register_start` below
+                    // (RelayOwnerKind::Watcher) is the ledger
+                    // authority that replaced it.
+                    // #3016 phase 3: register the turn with the
+                    // single-authority finalizer BEFORE
+                    // unpausing the watcher — same as the
+                    // `handle_watcher_runtime_handoff` helper.
+                    // This legacy `StreamMessage::TmuxReady`
+                    // handoff does NOT go through that helper, so
+                    // without this the watcher terminal would
+                    // have no Watcher-owned ledger entry — and
+                    // a busy-pane gate-timeout would finalize
+                    // immediately instead of arming the
+                    // deadline-backstop. Registering here with
+                    // the same finalizer id makes it defer.
+                    shared_owned
                         .turn_finalizer
                         .register_start_with_completion_admission(
                             super::turn_finalizer::TurnKey::new(
@@ -519,18 +547,30 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             // at register time.
                             &shared_owned,
                         );
-                        // #1452 (Codex iter 3 P1) / #3016 phase-5b2:
-                        // unpause uses Release ordering so a watcher
-                        // observing `paused = false` is guaranteed to
-                        // also observe the prior writes — the
-                        // `register_start` (RelayOwnerKind::Watcher)
-                        // ledger entry that now drives the
-                        // gate-timeout defer. With Relaxed ordering on
-                        // a weakly-ordered platform the writes could
-                        // be reordered, letting the watcher unpause
-                        // and submit a terminal before the ledger
-                        // knows the turn exists.
-                        watcher.paused.store(false, Ordering::Release);
+                    // #1452 (Codex iter 3 P1) / #3016 phase-5b2:
+                    // unpause uses Release ordering so a watcher
+                    // observing `paused = false` is guaranteed to
+                    // also observe the prior writes — the
+                    // `register_start` (RelayOwnerKind::Watcher)
+                    // ledger entry that now drives the
+                    // gate-timeout defer. With Relaxed ordering on
+                    // a weakly-ordered platform the writes could
+                    // be reordered, letting the watcher unpause
+                    // and submit a terminal before the ledger
+                    // knows the turn exists.
+                            watcher_claim_incarnation
+                                .paused
+                                .store(false, Ordering::Release);
+                        },
+                    )
+                    .is_some();
+                    if !adopted {
+                        tmux_handed_off = false;
+                        watcher_relay_available_for_turn = false;
+                        watcher_owns_assistant_relay = false;
+                        watcher_delivery_pin = None;
+                        watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
+                        inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::None);
                     }
                 }
             } else {
@@ -581,6 +621,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             watcher_owner_channel_id: &mut watcher_owner_channel_id,
                             standby_relay_owns_output: &mut standby_relay_owns_output,
                             watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+                            watcher_delivery_pin: &mut watcher_delivery_pin,
                             watcher_handoff_claim_outcome: &mut watcher_handoff_claim_outcome,
                             tmux_handed_off: &mut tmux_handed_off,
                             watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
@@ -613,6 +654,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             watcher_owner_channel_id: &mut watcher_owner_channel_id,
                             standby_relay_owns_output: &mut standby_relay_owns_output,
                             watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+                            watcher_delivery_pin: &mut watcher_delivery_pin,
                             watcher_handoff_claim_outcome: &mut watcher_handoff_claim_outcome,
                             tmux_handed_off: &mut tmux_handed_off,
                             watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
@@ -646,6 +688,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             watcher_owner_channel_id: &mut watcher_owner_channel_id,
                             standby_relay_owns_output: &mut standby_relay_owns_output,
                             watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+                            watcher_delivery_pin: &mut watcher_delivery_pin,
                             watcher_handoff_claim_outcome: &mut watcher_handoff_claim_outcome,
                             tmux_handed_off: &mut tmux_handed_off,
                             watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
@@ -810,6 +853,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
         watcher_owner_channel_id = pre_frame_watcher_owner_channel_id;
         standby_relay_owns_output = pre_frame_standby_relay_owns_output;
         watcher_relay_available_for_turn = pre_frame_watcher_relay_available_for_turn;
+        watcher_delivery_pin = pre_frame_watcher_delivery_pin;
         watcher_handoff_claim_outcome = pre_frame_watcher_handoff_claim_outcome;
         tmux_handed_off = pre_frame_tmux_handed_off;
         watcher_owns_assistant_relay = pre_frame_watcher_owns_assistant_relay;
@@ -823,6 +867,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
     *state.watcher_owner_channel_id = watcher_owner_channel_id;
     *state.standby_relay_owns_output = standby_relay_owns_output;
     *state.watcher_relay_available_for_turn = watcher_relay_available_for_turn;
+    *state.watcher_delivery_pin = watcher_delivery_pin;
     *state.watcher_handoff_claim_outcome = watcher_handoff_claim_outcome;
     *state.tmux_handed_off = tmux_handed_off;
     *state.watcher_owns_assistant_relay = watcher_owns_assistant_relay;

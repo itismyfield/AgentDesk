@@ -5904,6 +5904,7 @@ services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_un
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
 services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failure_gate_precedes_emit_stream_and_finalize
 services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failure_outcomes_abort_without_arming_cleanup
+services::discord::turn_bridge::bridge_entry_persist::tests::cancelled_watcher_is_unavailable_and_not_pinned_during_reconcile
 services::discord::turn_bridge::bridge_entry_persist::tests::cleared_watcher_owner_falls_back_to_delivery_channel
 services::discord::turn_bridge::bridge_entry_persist::tests::durable_placeholder_clear_and_response_advance_suppresses_restart_notice_edit
 services::discord::turn_bridge::bridge_entry_persist::tests::post_authority_owner_snapshot_observes_same_identity_watcher_adoption
@@ -5912,6 +5913,7 @@ services::discord::turn_bridge::bridge_entry_persist::tests::pre_authority_abort
 services::discord::turn_bridge::bridge_entry_persist::tests::recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate
 services::discord::turn_bridge::bridge_entry_persist::tests::same_turn_owner_advancement_suppresses_bridge_stream_relay
 services::discord::turn_bridge::bridge_entry_persist::tests::saved_competing_bind_reconciliation_invalidates_candidate_edit_cache
+services::discord::turn_bridge::bridge_entry_persist::tests::saved_exit_reconcile_preserves_first_pin_across_registry_replacement
 services::discord::turn_bridge::bridge_entry_persist::tests::saved_reconciliation_preserves_existing_anchor_edit_cache
 services::discord::turn_bridge::bridge_entry_persist::tests::stream_authority_loss_relinquishes_guards_before_visible_finalization
 services::discord::turn_bridge::bridge_latency_spans::tests::empty_span_renders_all_dashes
@@ -6074,9 +6076,13 @@ services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_guarded_save_restamps_output_path_when_this_turn_still_owns_the_row
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_guarded_save_skips_and_does_not_clobber_a_re_owned_row
 services::discord::turn_bridge::runtime_handoff_loop::guarded_save::tests::tmux_ready_guarded_save_uses_explicit_pre_mutation_identity
+services::discord::turn_bridge::runtime_handoff_loop::tests::direct_tmux_adoption_rejects_claim_evicted_before_publication
 services::discord::turn_bridge::runtime_handoff_loop::tests::legacy_tmux_ready_reowned_row_never_claims_or_starts_watcher
 services::discord::turn_bridge::runtime_handoff_loop::tests::process_ready_skips_reowned_row_and_does_not_queue_stale_flush
 services::discord::turn_bridge::runtime_handoff_loop::tests::process_runtime_ready_first_population_is_saved
+services::discord::turn_bridge::runtime_handoff_loop::tests::provisional_cleanup_preserves_replacement_incarnation
+services::discord::turn_bridge::runtime_handoff_loop::tests::runtime_adoption_pins_authoritative_incumbent_not_provisional_marker
+services::discord::turn_bridge::runtime_handoff_loop::tests::runtime_adoption_rejects_claim_evicted_before_publication
 services::discord::turn_bridge::runtime_handoff_loop::tests::runtime_ready_reowned_row_never_claims_or_starts_watcher
 services::discord::turn_bridge::runtime_handoff_loop::tests::second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoint
 services::discord::turn_bridge::runtime_handoff_loop::tests::thread_follow_up_tmux_ready_claim_records_intended_classification_4984

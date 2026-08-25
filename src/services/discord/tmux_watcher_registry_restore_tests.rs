@@ -72,7 +72,8 @@ fn session_rebind_retains_owner_when_called_after_watcher_teardown() {
     let handle = live_watcher_handle(tmux);
     let cancel = handle.cancel.clone();
     registry.insert(channel, handle);
-    registry.remove_tmux_session_if_current(tmux, &cancel);
+    assert!(registry.remove_tmux_session_if_current(tmux, &cancel).is_some());
+    assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
     assert_eq!(registry.owner_channel_for_tmux_session(tmux), None);
 
     assert!(registry.retain_owner_during_session_rebind(tmux, channel));

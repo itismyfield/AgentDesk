@@ -44,16 +44,18 @@ struct HandoffObservation {
     claim_outcome: WatcherHandoffClaimOutcome,
     tmux_handed_off: bool,
     watcher_relay_available: bool,
+    watcher_delivery_pin: Option<Arc<AtomicBool>>,
     watcher_slots: usize,
 }
 
-async fn dispatch_process_handoff(
+async fn dispatch_process_handoff_with_pin(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &mut InflightTurnState,
     message: RuntimeHandoffLoopMessage,
     state_dirty: &mut bool,
     done: bool,
+    initial_watcher_delivery_pin: Option<Arc<AtomicBool>>,
 ) -> HandoffObservation {
     let channel_id = ChannelId::new(state.channel_id);
     let mut terminal_control_ready_observed = false;
@@ -61,6 +63,7 @@ async fn dispatch_process_handoff(
     let mut watcher_owner_channel_id = channel_id;
     let mut standby_relay_owns_output = false;
     let mut watcher_relay_available_for_turn = false;
+    let mut watcher_delivery_pin = initial_watcher_delivery_pin;
     let mut watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
     let mut tmux_handed_off = false;
     let mut watcher_owns_assistant_relay = false;
@@ -87,6 +90,7 @@ async fn dispatch_process_handoff(
             watcher_owner_channel_id: &mut watcher_owner_channel_id,
             standby_relay_owns_output: &mut standby_relay_owns_output,
             watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+            watcher_delivery_pin: &mut watcher_delivery_pin,
             watcher_handoff_claim_outcome: &mut watcher_handoff_claim_outcome,
             tmux_handed_off: &mut tmux_handed_off,
             watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
@@ -106,8 +110,21 @@ async fn dispatch_process_handoff(
         claim_outcome: watcher_handoff_claim_outcome,
         tmux_handed_off,
         watcher_relay_available: watcher_relay_available_for_turn,
+        watcher_delivery_pin,
         watcher_slots: shared.tmux_watchers.len(),
     }
+}
+
+async fn dispatch_process_handoff(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &mut InflightTurnState,
+    message: RuntimeHandoffLoopMessage,
+    state_dirty: &mut bool,
+    done: bool,
+) -> HandoffObservation {
+    dispatch_process_handoff_with_pin(shared, provider, state, message, state_dirty, done, None)
+        .await
 }
 
 #[tokio::test]
@@ -200,6 +217,7 @@ async fn transient_runtime_stamp_io_error_restores_local_and_requeues_exact_hand
     assert_eq!(observed.retry_message, Some(message));
     assert!(!observed.terminal_control_ready_observed);
     assert_eq!(observed.tmux_last_offset, None);
+    assert!(observed.watcher_delivery_pin.is_none());
     assert_eq!(
         observed.watcher_owner_channel_id,
         ChannelId::new(state.channel_id)
@@ -247,20 +265,21 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
         },
     };
     let shared = crate::services::discord::make_shared_data_for_tests();
-    shared.tmux_watchers.insert(
-        incumbent_channel,
-        live_watcher_handle(tmux_session_name, output_path),
-    );
+    let incumbent = live_watcher_handle(tmux_session_name, output_path);
+    let incumbent_delivery_pin = Arc::clone(&incumbent.turn_delivered);
+    shared.tmux_watchers.insert(incumbent_channel, incumbent);
+    let pre_frame_delivery_pin = Arc::new(AtomicBool::new(false));
     let mut state_dirty = false;
     let _fail_second_stamp = guarded_save::fail_guarded_runtime_atomic_stamp_on_call(2);
 
-    let failed = dispatch_process_handoff(
+    let failed = dispatch_process_handoff_with_pin(
         &shared,
         &provider,
         &mut state,
         message.clone(),
         &mut state_dirty,
         false,
+        Some(Arc::clone(&pre_frame_delivery_pin)),
     )
     .await;
 
@@ -270,6 +289,12 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
     assert_eq!(failed.claim_outcome, WatcherHandoffClaimOutcome::None);
     assert!(!failed.tmux_handed_off);
     assert!(!failed.watcher_relay_available);
+    let failed_pin = failed
+        .watcher_delivery_pin
+        .as_ref()
+        .expect("IoError restores the detached pre-frame pin");
+    assert!(Arc::ptr_eq(failed_pin, &pre_frame_delivery_pin));
+    assert!(!Arc::ptr_eq(failed_pin, &incumbent_delivery_pin));
     assert_eq!(failed.watcher_slots, 1);
     assert!(!state_dirty);
     assert_ne!(
@@ -284,18 +309,25 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
         "IoError must retain the exact last committed row while detached owner rolls back",
     );
 
-    let retried = dispatch_process_handoff(
+    let retried = dispatch_process_handoff_with_pin(
         &shared,
         &provider,
         &mut state,
         message,
         &mut state_dirty,
         false,
+        failed.watcher_delivery_pin,
     )
     .await;
     assert_eq!(retried.outcome, Some(GuardedSaveOutcome::Saved));
     assert!(retried.retry_message.is_none());
     assert_eq!(retried.watcher_owner_channel_id, incumbent_channel);
+    let retried_pin = retried
+        .watcher_delivery_pin
+        .as_ref()
+        .expect("successful retry retains the first adopted pin");
+    assert!(!Arc::ptr_eq(retried_pin, &pre_frame_delivery_pin));
+    assert!(Arc::ptr_eq(retried_pin, &incumbent_delivery_pin));
     let durable = load_inflight_state(&provider, channel_id).expect("load retried durable row");
     assert_eq!(
         durable.watcher_owner_channel_id,
@@ -309,6 +341,108 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
         state_dirty,
         "post-stamp relay activation remains an ordinary guarded-flush delta",
     );
+}
+
+#[cfg(unix)]
+#[rustfmt::skip]
+async fn assert_claim_eviction_fails_closed(channel_id: u64, message: RuntimeHandoffLoopMessage) {
+    let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+    let provider = ProviderKind::Codex;
+    let mut state = runtime_seed(provider.clone(), channel_id);
+    save_inflight_state(&state).unwrap();
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let (tmux, output) = match &message {
+        RuntimeHandoffLoopMessage::TmuxReady { tmux_session_name, output_path, .. } => (tmux_session_name, output_path),
+        RuntimeHandoffLoopMessage::RuntimeReady { handoff: RuntimeHandoff::CodexTui { tmux_session_name, rollout_path, .. } } => (tmux_session_name, rollout_path),
+        _ => unreachable!(),
+    };    shared.tmux_watchers.insert(ChannelId::new(channel_id), live_watcher_handle(tmux, output));
+    let _eviction = crate::services::discord::tmux::evict_claim_before_adoption_for_test(ChannelId::new(channel_id));
+    let mut dirty = false;
+    let observed = dispatch_process_handoff(&shared, &provider, &mut state, message, &mut dirty, false).await;
+    assert_eq!((observed.outcome, observed.claim_outcome), (Some(GuardedSaveOutcome::Saved), WatcherHandoffClaimOutcome::None));
+    assert!(!observed.tmux_handed_off && !observed.watcher_relay_available && observed.watcher_delivery_pin.is_none());
+    assert_eq!(state.effective_relay_owner_kind(), crate::services::discord::inflight::RelayOwnerKind::None);
+}
+
+#[cfg(unix)]
+#[rustfmt::skip]
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_adoption_rejects_claim_evicted_before_publication() {
+    assert_claim_eviction_fails_closed(42_592_609, RuntimeHandoffLoopMessage::RuntimeReady { handoff: RuntimeHandoff::CodexTui { rollout_path: "/runtime/claim-evicted.jsonl".into(), thread_id: None, tmux_session_name: "AgentDesk-codex-claim-evicted".into(), last_offset: 10_240 } }).await;
+}
+
+#[cfg(unix)]
+#[rustfmt::skip]
+#[tokio::test(flavor = "current_thread")]
+async fn direct_tmux_adoption_rejects_claim_evicted_before_publication() {
+    assert_claim_eviction_fails_closed(42_592_610, RuntimeHandoffLoopMessage::TmuxReady { output_path: "/runtime/direct-claim-evicted.jsonl".into(), input_fifo_path: "/runtime/direct.input".into(), tmux_session_name: "AgentDesk-codex-direct-claim-evicted".into(), last_offset: 10_241 }).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_adoption_pins_authoritative_incumbent_not_provisional_marker() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let root = tempfile::tempdir().expect("runtime root");
+    let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let provider = ProviderKind::Codex;
+    let channel_id = 42_592_606;
+    let owner = ChannelId::new(channel_id + 100);
+    let tmux_session_name = "AgentDesk-codex-incarnation-pin";
+    let output_path = "/runtime/incarnation-pin.jsonl";
+    let mut state = runtime_seed(provider.clone(), channel_id);
+    save_inflight_state(&state).expect("seed pre-handoff row");
+    state = load_inflight_state(&provider, channel_id).expect("load exact pre-handoff row");
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let incumbent = live_watcher_handle(tmux_session_name, output_path);
+    let incumbent_delivery_pin = Arc::clone(&incumbent.turn_delivered);
+    shared.tmux_watchers.insert(owner, incumbent);
+    let unrelated_provisional_marker = Arc::new(AtomicBool::new(false));
+    assert!(!Arc::ptr_eq(
+        &incumbent_delivery_pin,
+        &unrelated_provisional_marker
+    ));
+    let mut state_dirty = false;
+
+    let observed = dispatch_process_handoff(
+        &shared,
+        &provider,
+        &mut state,
+        RuntimeHandoffLoopMessage::RuntimeReady {
+            handoff: RuntimeHandoff::CodexTui {
+                rollout_path: output_path.to_string(),
+                thread_id: Some("codex-thread-incarnation-pin".to_string()),
+                tmux_session_name: tmux_session_name.to_string(),
+                last_offset: 9_216,
+            },
+        },
+        &mut state_dirty,
+        false,
+    )
+    .await;
+
+    assert_eq!(observed.outcome, Some(GuardedSaveOutcome::Saved));
+    assert_eq!(
+        observed.claim_outcome,
+        WatcherHandoffClaimOutcome::ReusedExisting
+    );
+    assert_eq!(observed.watcher_owner_channel_id, owner);
+    let pinned = observed
+        .watcher_delivery_pin
+        .as_ref()
+        .expect("runtime adoption must publish a watcher incarnation pin");
+    assert!(Arc::ptr_eq(pinned, &incumbent_delivery_pin));
+    assert!(!Arc::ptr_eq(pinned, &unrelated_provisional_marker));
+    let registry = shared
+        .tmux_watchers
+        .get(&owner)
+        .expect("incumbent survives reuse");
+    assert!(Arc::ptr_eq(pinned, &registry.turn_delivered));
 }
 
 #[tokio::test]
@@ -488,4 +622,46 @@ async fn runtime_ready_reowned_row_never_claims_or_starts_watcher() {
         42_592_604,
     )
     .await;
+}
+
+#[cfg(unix)]
+#[test]
+fn provisional_cleanup_preserves_replacement_incarnation() {
+    let provider = ProviderKind::Codex;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let owner = ChannelId::new(42_592_608);
+    let tmux_session_name = "AgentDesk-codex-cleanup-race";
+    let output_path = "/runtime/cleanup-race.jsonl";
+    let provisional = live_watcher_handle(tmux_session_name, output_path);
+    let provisional_cancel = Arc::clone(&provisional.cancel);
+    shared.tmux_watchers.insert(owner, provisional);
+
+    let replacement = live_watcher_handle(tmux_session_name, output_path);
+    let replacement_cancel = Arc::clone(&replacement.cancel);
+    let replacement_claim = crate::services::discord::tmux::claim_or_replace_watcher(
+        &shared.tmux_watchers,
+        owner,
+        replacement,
+        &provider,
+        "turn_bridge_runtime_cleanup_race",
+    );
+    assert!(replacement_claim.should_spawn());
+    assert!(provisional_cancel.load(Ordering::Relaxed));
+    assert!(!replacement_cancel.load(Ordering::Relaxed));
+
+    cancel_provisional_watcher_claim_if_matches(
+        shared.as_ref(),
+        owner,
+        tmux_session_name,
+        output_path,
+        &provisional_cancel,
+    );
+
+    let registered = shared
+        .tmux_watchers
+        .get(&owner)
+        .expect("replacement must survive stale provisional cleanup");
+    assert!(Arc::ptr_eq(&registered.cancel, &replacement_cancel));
+    assert!(!registered.cancel.load(Ordering::Relaxed));
+    assert!(provisional_cancel.load(Ordering::Relaxed));
 }

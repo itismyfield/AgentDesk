@@ -101,6 +101,7 @@ pub(super) struct BridgeStreamTickState<'a> {
     pub(super) last_status_panel_text: &'a mut String,
     pub(super) watcher_owns_assistant_relay: &'a mut bool,
     pub(super) watcher_relay_available_for_turn: &'a mut bool,
+    pub(super) watcher_delivery_pin: &'a mut Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) standby_relay_owns_output: &'a mut bool,
     pub(super) watcher_owner_channel_id: &'a mut ChannelId,
     pub(super) full_response: &'a mut String,
@@ -221,6 +222,7 @@ pub(super) async fn run_bridge_stream_tick(
     let mut last_status_panel_text = std::mem::take(state.last_status_panel_text);
     let mut watcher_owns_assistant_relay = *state.watcher_owns_assistant_relay;
     let mut watcher_relay_available_for_turn = *state.watcher_relay_available_for_turn;
+    let mut watcher_delivery_pin = state.watcher_delivery_pin.clone();
     let mut standby_relay_owns_output = *state.standby_relay_owns_output;
     let mut watcher_owner_channel_id = *state.watcher_owner_channel_id;
     let mut full_response = std::mem::take(state.full_response);
@@ -277,6 +279,7 @@ pub(super) async fn run_bridge_stream_tick(
                 watcher_owner_channel_id: &mut watcher_owner_channel_id,
                 watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
                 watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+                watcher_delivery_pin: &mut watcher_delivery_pin,
                 standby_relay_owns_output: &mut standby_relay_owns_output,
                 status_panel_msg_id: &mut status_panel_msg_id,
                 status_panel_generation: &mut status_panel_generation,
@@ -321,6 +324,7 @@ pub(super) async fn run_bridge_stream_tick(
             *state.last_status_panel_text = last_status_panel_text;
             *state.watcher_owns_assistant_relay = watcher_owns_assistant_relay;
             *state.watcher_relay_available_for_turn = watcher_relay_available_for_turn;
+            *state.watcher_delivery_pin = watcher_delivery_pin.clone();
             *state.standby_relay_owns_output = standby_relay_owns_output;
             *state.watcher_owner_channel_id = watcher_owner_channel_id;
             *state.full_response = full_response;

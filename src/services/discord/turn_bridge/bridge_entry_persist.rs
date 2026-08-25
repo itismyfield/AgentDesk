@@ -19,9 +19,27 @@ pub(super) struct BridgeEntryRuntimeState<'a> {
     pub(super) watcher_owner_channel_id: &'a mut ChannelId,
     pub(super) watcher_owns_assistant_relay: &'a mut bool,
     pub(super) watcher_relay_available_for_turn: &'a mut bool,
+    pub(super) watcher_delivery_pin: &'a mut Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) standby_relay_owns_output: &'a mut bool,
     pub(super) status_panel_msg_id: &'a mut Option<MessageId>,
     pub(super) status_panel_generation: &'a mut u64,
+}
+
+struct LiveWatcherRelayObservation {
+    turn_delivered: Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn live_watcher_relay_observation(
+    shared: &SharedData,
+    owner_channel_id: ChannelId,
+) -> Option<LiveWatcherRelayObservation> {
+    let watcher = shared.tmux_watchers.get(&owner_channel_id)?;
+    if watcher.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    Some(LiveWatcherRelayObservation {
+        turn_delivered: Arc::clone(&watcher.turn_delivered),
+    })
 }
 
 fn relay_owner_flags(
@@ -120,16 +138,22 @@ pub(super) fn reconcile_runtime_locals_from_inflight_state(
         state.inflight_state.watcher_owner_channel_id,
         state.inflight_state.channel_id,
     );
-    let watcher_registered =
-        live_watcher_registered_for_relay(shared, *state.watcher_owner_channel_id);
+    let watcher = live_watcher_relay_observation(shared, *state.watcher_owner_channel_id);
     (
         *state.watcher_owns_assistant_relay,
         *state.watcher_relay_available_for_turn,
         *state.standby_relay_owns_output,
     ) = relay_owner_flags(
         state.inflight_state.effective_relay_owner_kind(),
-        watcher_registered,
+        watcher.is_some(),
     );
+    if *state.watcher_owns_assistant_relay
+        && let Some(watcher) = watcher
+    {
+        state
+            .watcher_delivery_pin
+            .get_or_insert(watcher.turn_delivered);
+    }
     *state.status_panel_msg_id = state
         .inflight_state
         .status_message_id
@@ -641,6 +665,122 @@ mod tests {
                 && defuse < early_return
                 && early_return < finalize
         );
+    }
+
+    struct ReconcileHarness<'a> {
+        runtime: BridgeEntryRuntimeState<'a>,
+    }
+
+    impl<'a> ReconcileHarness<'a> {
+        fn new(durable: &'a mut InflightTurnState, owner: ChannelId) -> Self {
+            let full_response = Box::leak(Box::new(String::new()));
+            let zero = || Box::leak(Box::new(0usize));
+            Self {
+                runtime: BridgeEntryRuntimeState {
+                    inflight_state: durable,
+                    full_response,
+                    response_sent_offset: zero(),
+                    bridge_confirmed_response_sent_offset: zero(),
+                    current_msg_id: Box::leak(Box::new(MessageId::new(1))),
+                    current_tool_line: Box::leak(Box::new(None)),
+                    prev_tool_status: Box::leak(Box::new(None)),
+                    last_tool_name: Box::leak(Box::new(None)),
+                    last_tool_summary: Box::leak(Box::new(None)),
+                    any_tool_used: Box::leak(Box::new(false)),
+                    has_post_tool_text: Box::leak(Box::new(false)),
+                    streaming_rollover_frozen_msg_ids: Box::leak(Box::new(Vec::new())),
+                    tmux_last_offset: Box::leak(Box::new(None)),
+                    watcher_owner_channel_id: Box::leak(Box::new(owner)),
+                    watcher_owns_assistant_relay: Box::leak(Box::new(false)),
+                    watcher_relay_available_for_turn: Box::leak(Box::new(false)),
+                    watcher_delivery_pin: Box::leak(Box::new(None)),
+                    standby_relay_owns_output: Box::leak(Box::new(false)),
+                    status_panel_msg_id: Box::leak(Box::new(None)),
+                    status_panel_generation: Box::leak(Box::new(0)),
+                },
+            }
+        }
+    }
+
+    fn watcher_handle(
+        marker: Arc<std::sync::atomic::AtomicBool>,
+        cancelled: bool,
+    ) -> TmuxWatcherHandle {
+        TmuxWatcherHandle {
+            tmux_session_name: "AgentDesk-pin-reconcile".into(),
+            output_path: "/tmp/pin-reconcile.jsonl".into(),
+            paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: Arc::new(std::sync::Mutex::new(None)),
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(cancelled)),
+            pause_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: marker,
+            last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        }
+    }
+
+    fn watcher_durable(owner: ChannelId) -> InflightTurnState {
+        let mut durable = InflightTurnState::new(
+            ProviderKind::Codex,
+            owner.get(),
+            None,
+            1,
+            2,
+            0,
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        durable.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        durable
+    }
+
+    #[test]
+    fn saved_exit_reconcile_preserves_first_pin_across_registry_replacement() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let owner = ChannelId::new(4_259_612);
+        let incumbent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        shared
+            .tmux_watchers
+            .insert(owner, watcher_handle(incumbent.clone(), false));
+        let mut durable = watcher_durable(owner);
+        let mut harness = ReconcileHarness::new(&mut durable, owner);
+        reconcile_runtime_locals_from_inflight_state(&shared, &mut harness.runtime);
+        let replacement = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        shared
+            .tmux_watchers
+            .insert(owner, watcher_handle(replacement.clone(), false));
+        let mut last_edit_text = String::new();
+        let mut projection = super::stream_loop::exit_reconcile::SavedExitCandidateProjection {
+            runtime: harness.runtime,
+            last_edit_text: &mut last_edit_text,
+        };
+        super::stream_loop::exit_reconcile::reconcile_saved_exit_candidate(
+            &shared,
+            &mut projection,
+            MessageId::new(1),
+        );
+        let pin = projection.runtime.watcher_delivery_pin.as_ref().unwrap();
+        assert!(Arc::ptr_eq(pin, &incumbent));
+        assert!(!Arc::ptr_eq(pin, &replacement));
+    }
+
+    #[test]
+    fn cancelled_watcher_is_unavailable_and_not_pinned_during_reconcile() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let owner = ChannelId::new(4_259_613);
+        let marker = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        shared
+            .tmux_watchers
+            .insert(owner, watcher_handle(marker, true));
+        let mut durable = watcher_durable(owner);
+        let mut harness = ReconcileHarness::new(&mut durable, owner);
+        reconcile_runtime_locals_from_inflight_state(&shared, &mut harness.runtime);
+        assert!(*harness.runtime.watcher_owns_assistant_relay);
+        assert!(!*harness.runtime.watcher_relay_available_for_turn);
+        assert!(harness.runtime.watcher_delivery_pin.is_none());
     }
 
     #[test]

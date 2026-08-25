@@ -21,6 +21,7 @@ pub(super) struct WatcherRuntimeHandoffState<'a> {
     pub(super) watcher_owner_channel_id: &'a mut ChannelId,
     pub(super) standby_relay_owns_output: &'a mut bool,
     pub(super) watcher_relay_available_for_turn: &'a mut bool,
+    pub(super) watcher_delivery_pin: &'a mut Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) watcher_handoff_claim_outcome: &'a mut WatcherHandoffClaimOutcome,
     pub(super) tmux_handed_off: &'a mut bool,
     pub(super) watcher_owns_assistant_relay: &'a mut bool,
@@ -31,15 +32,16 @@ pub(super) struct WatcherRuntimeHandoffState<'a> {
 pub(super) fn cancel_provisional_watcher_claim_if_matches(
     shared: &SharedData,
     owner_channel_id: ChannelId,
+    tmux_session_name: &str,
+    output_path: &str,
     provisional_cancel: &Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let owns_slot = shared
-        .tmux_watchers
-        .get(&owner_channel_id)
-        .is_some_and(|handle| Arc::ptr_eq(&handle.cancel, provisional_cancel));
-    if owns_slot && let Some((_, handle)) = shared.tmux_watchers.remove(&owner_channel_id) {
-        handle.cancel.store(true, Ordering::Relaxed);
-    }
+    shared.tmux_watchers.cancel_and_remove_channel_if_current(
+        &owner_channel_id,
+        tmux_session_name,
+        output_path,
+        provisional_cancel,
+    );
 }
 
 pub(super) fn handle_watcher_runtime_handoff(
@@ -61,6 +63,7 @@ pub(super) fn handle_watcher_runtime_handoff(
     let watcher_owner_channel_id = state.watcher_owner_channel_id;
     let standby_relay_owns_output = state.standby_relay_owns_output;
     let watcher_relay_available_for_turn = state.watcher_relay_available_for_turn;
+    let watcher_delivery_pin = state.watcher_delivery_pin;
     let watcher_handoff_claim_outcome = state.watcher_handoff_claim_outcome;
     let tmux_handed_off = state.tmux_handed_off;
     let watcher_owns_assistant_relay = state.watcher_owns_assistant_relay;
@@ -160,7 +163,12 @@ pub(super) fn handle_watcher_runtime_handoff(
     };
     let pre_claim_persisted = inflight_state.clone();
     #[cfg(unix)]
-    let (watcher_claimed, watcher_claim_replaced_existing, owner_changed_after_claim) = {
+    let (
+        watcher_claimed,
+        watcher_claim_replaced_existing,
+        owner_changed_after_claim,
+        watcher_claim_incarnation,
+    ) = {
         let claim = super::super::tmux::claim_or_reuse_watcher_with_thread_parent(
             &shared_owned.tmux_watchers,
             channel_id,
@@ -177,10 +185,12 @@ pub(super) fn handle_watcher_runtime_handoff(
         let owner_changed =
             inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
         *state_dirty |= owner_changed;
+        let incarnation = claim.incarnation().clone();
         (
             claim.should_spawn(),
             claim.replaced_existing(),
             owner_changed,
+            Some(incarnation),
         )
     };
     #[cfg(not(unix))]
@@ -204,6 +214,8 @@ pub(super) fn handle_watcher_runtime_handoff(
                 cancel_provisional_watcher_claim_if_matches(
                     shared_owned.as_ref(),
                     *watcher_owner_channel_id,
+                    &tmux_session_name,
+                    &output_path,
                     &cancel,
                 );
             }
@@ -241,7 +253,12 @@ pub(super) fn handle_watcher_runtime_handoff(
                     "  [{ts}] ⏭ standby relay: skipping tmux watcher spawn for channel {}; spawning JSONL→Discord standby_relay",
                     channel_id
                 );
-                let _ = shared_owned.tmux_watchers.remove(watcher_owner_channel_id);
+                // Retire only this provisional watcher. Do not cancel:
+                // the standby relay is the successor owner.
+                let _ = shared_owned
+                    .tmux_watchers
+                    .remove_tmux_session_if_current(&tmux_session_name, &cancel);
+                *watcher_delivery_pin = None;
                 if let Some(http_for_standby) = shared_owned.serenity_http_or_token_fallback() {
                     let placeholder_msg_id_opt = if inflight_state.current_msg_id == 0 {
                         None
@@ -379,39 +396,49 @@ pub(super) fn handle_watcher_runtime_handoff(
                     "  [{ts}] ⚠ no Http source (neither cached_serenity_ctx nor cached_bot_token); tmux watcher not started for channel {}",
                     channel_id
                 );
-                if let Some((_, handle)) =
-                    shared_owned.tmux_watchers.remove(watcher_owner_channel_id)
-                {
-                    handle
-                        .cancel
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                }
+                cancel_provisional_watcher_claim_if_matches(
+                    shared_owned.as_ref(),
+                    *watcher_owner_channel_id,
+                    &tmux_session_name,
+                    &output_path,
+                    &cancel,
+                );
+                *watcher_delivery_pin = None;
             }
         }
     }
+    #[cfg(unix)]
     if watcher_ready_for_relay {
-        *tmux_handed_off = true;
-        inflight_state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
-        *watcher_owns_assistant_relay = true;
-    }
-    if watcher_ready_for_relay {
-        if let Some(watcher) = shared_owned.tmux_watchers.get(watcher_owner_channel_id) {
-            *watcher_relay_available_for_turn = true;
-            if let Ok(mut guard) = watcher.resume_offset.lock() {
-                *guard = Some(last_offset);
-            }
-            watcher
-                .turn_delivered
-                .store(false, std::sync::atomic::Ordering::Relaxed);
-            // #3016 phase 2: register the turn with the single-authority
-            // finalizer BEFORE unpausing the watcher. Message arrival order in
-            // the actor replaces the deleted Release/AcqRel ordering: the
-            // ledger now knows the turn exists (with the watcher as relay
-            // owner) before the watcher can submit its terminal. The ledger is
-            // the authority that superseded the legacy `mailbox_finalize_owed`
-            // flag (removed in #3016 phase-5b2) and the CAS revoke deleted from
-            // the bridge finalize branches below.
-            shared_owned
+        let watcher_claim_incarnation = watcher_claim_incarnation
+            .as_ref()
+            .expect("unix watcher claim carries its exact incarnation");
+        let adopted = watcher_claim_incarnation.adopt_if_current(
+            &shared_owned.tmux_watchers,
+            |watcher_claim_incarnation| {
+                super::adopt_claimed_watcher_delivery_marker(
+                    watcher_delivery_pin,
+                    &watcher_claim_incarnation.turn_delivered,
+                );
+                if let Ok(mut guard) = watcher_claim_incarnation.resume_offset.lock() {
+                    *guard = Some(last_offset);
+                }
+                watcher_claim_incarnation
+                    .turn_delivered
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                *tmux_handed_off = true;
+                *watcher_relay_available_for_turn = true;
+                *watcher_owns_assistant_relay = true;
+                inflight_state
+                    .set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
+        // #3016 phase 2: register the turn with the single-authority
+        // finalizer BEFORE unpausing the watcher. Message arrival order in
+        // the actor replaces the deleted Release/AcqRel ordering: the
+        // ledger now knows the turn exists (with the watcher as relay
+        // owner) before the watcher can submit its terminal. The ledger is
+        // the authority that superseded the legacy `mailbox_finalize_owed`
+        // flag (removed in #3016 phase-5b2) and the CAS revoke deleted from
+        // the bridge finalize branches below.
+        shared_owned
                 .turn_finalizer
                 .register_start_with_completion_admission(
                     super::super::turn_finalizer::TurnKey::new(
@@ -425,9 +452,19 @@ pub(super) fn handle_watcher_runtime_handoff(
                     // #3016 phase-5a: prime the reconcile cache at register time.
                     shared_owned,
                 );
-            watcher
-                .paused
-                .store(false, std::sync::atomic::Ordering::Release);
+                watcher_claim_incarnation
+                    .paused
+                    .store(false, std::sync::atomic::Ordering::Release);
+            },
+        )
+        .is_some();
+        if !adopted {
+            *tmux_handed_off = false;
+            *watcher_relay_available_for_turn = false;
+            *watcher_owns_assistant_relay = false;
+            *watcher_delivery_pin = None;
+            *watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
+            inflight_state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::None);
         }
     }
     *state_dirty = tmux_ready_state_dirty_after_guarded_save(*state_dirty, Some(outcome));

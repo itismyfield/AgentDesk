@@ -457,6 +457,29 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
     let mut last_status_panel_text = String::new();
     let mut watcher_owns_assistant_relay = false;
     let mut watcher_relay_available_for_turn = false;
+    let tick_delivery_pin = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    shared.tmux_watchers.insert(
+        channel,
+        crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: "AgentDesk-tool-flag-tick-pin".into(),
+            output_path: "/tmp/tool-flag-tick-pin.jsonl".into(),
+            paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: std::sync::Arc::clone(&tick_delivery_pin),
+            last_heartbeat_ts_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+        },
+    );
+    inflight_state
+        .set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+    inflight_state.set_watcher_owner_channel_id(channel.get());
+    crate::services::discord::inflight::save_inflight_state(&inflight_state)
+        .expect("publish watcher-owned tick row");
+    baseline.clone_from(&inflight_state);
+    let mut watcher_delivery_pin = None;
     let mut standby_relay_owns_output = false;
     let mut watcher_owner_channel_id = ChannelId::new(1);
     let mut streaming_rollover_frozen_msg_ids: Vec<MessageId> = Vec::new();
@@ -515,6 +538,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
             last_status_panel_text: &mut last_status_panel_text,
             watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
             watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+            watcher_delivery_pin: &mut watcher_delivery_pin,
             standby_relay_owns_output: &mut standby_relay_owns_output,
             watcher_owner_channel_id: &mut watcher_owner_channel_id,
             full_response: &mut full_response,
@@ -569,4 +593,10 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
         (true, true),
         "and the mechanism that prevents the rewind is the fence's re-seed",
     );
+    assert!(std::sync::Arc::ptr_eq(
+        watcher_delivery_pin
+            .as_ref()
+            .expect("the real tick writes its detached pin back to caller-owned state"),
+        &tick_delivery_pin,
+    ));
 }

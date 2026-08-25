@@ -17,7 +17,7 @@ use tool_arms::{
     handle_stream_tool_message, reconcile_exact_stream_frame_after_tool_outcome,
 };
 mod content_arms;
-mod exit_reconcile;
+pub(super) mod exit_reconcile;
 mod expected_identity;
 #[cfg(test)]
 #[path = "stream_loop/expected_identity_tests.rs"]
@@ -46,10 +46,8 @@ pub(super) async fn run_stream_loop(
     let (role_binding, turn_id) = (ctx.role_binding, ctx.turn_id);
     let voice_progress_playback_channel_id = ctx.voice_progress_playback_channel_id;
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;
-    let footer_owner = ctx.footer_owner;
-    let status_panel_started_at = ctx.status_panel_started_at;
-    let status_interval = ctx.status_interval;
-    let context_window_tokens = ctx.context_window_tokens;
+    let (footer_owner, status_panel_started_at) = (ctx.footer_owner, ctx.status_panel_started_at);
+    let (status_interval, context_window_tokens) = (ctx.status_interval, ctx.context_window_tokens);
     let context_compact_percent = ctx.context_compact_percent;
     let context_compact_lower_bound_tokens =
         crate::services::discord::adk_session::fetch_context_thresholds(shared_owned.api_port)
@@ -73,6 +71,7 @@ pub(super) async fn run_stream_loop(
     #[rustfmt::skip]
     let (mut has_post_tool_text, mut tmux_handed_off, mut watcher_owns_assistant_relay) = (*state.has_post_tool_text, *state.tmux_handed_off, *state.watcher_owns_assistant_relay);
     let mut watcher_relay_available_for_turn = *state.watcher_relay_available_for_turn;
+    let mut watcher_delivery_pin = state.watcher_delivery_pin.clone();
     let mut watcher_handoff_claim_outcome = *state.watcher_handoff_claim_outcome;
     let mut standby_relay_owns_output = *state.standby_relay_owns_output;
     let mut last_assistant_text_line = state.last_assistant_text_line.take();
@@ -633,6 +632,7 @@ pub(super) async fn run_stream_loop(
                                     standby_relay_owns_output: &mut standby_relay_owns_output,
                                     watcher_relay_available_for_turn:
                                         &mut watcher_relay_available_for_turn,
+                                    watcher_delivery_pin: &mut watcher_delivery_pin,
                                     watcher_handoff_claim_outcome:
                                         &mut watcher_handoff_claim_outcome,
                                     tmux_handed_off: &mut tmux_handed_off,
@@ -671,6 +671,7 @@ pub(super) async fn run_stream_loop(
                                     standby_relay_owns_output: &mut standby_relay_owns_output,
                                     watcher_relay_available_for_turn:
                                         &mut watcher_relay_available_for_turn,
+                                    watcher_delivery_pin: &mut watcher_delivery_pin,
                                     watcher_handoff_claim_outcome:
                                         &mut watcher_handoff_claim_outcome,
                                     tmux_handed_off: &mut tmux_handed_off,
@@ -717,6 +718,7 @@ pub(super) async fn run_stream_loop(
                                     standby_relay_owns_output: &mut standby_relay_owns_output,
                                     watcher_relay_available_for_turn:
                                         &mut watcher_relay_available_for_turn,
+                                    watcher_delivery_pin: &mut watcher_delivery_pin,
                                     watcher_handoff_claim_outcome:
                                         &mut watcher_handoff_claim_outcome,
                                     tmux_handed_off: &mut tmux_handed_off,
@@ -754,6 +756,7 @@ pub(super) async fn run_stream_loop(
                                     standby_relay_owns_output: &mut standby_relay_owns_output,
                                     watcher_relay_available_for_turn:
                                         &mut watcher_relay_available_for_turn,
+                                    watcher_delivery_pin: &mut watcher_delivery_pin,
                                     watcher_handoff_claim_outcome:
                                         &mut watcher_handoff_claim_outcome,
                                     tmux_handed_off: &mut tmux_handed_off,
@@ -851,6 +854,7 @@ pub(super) async fn run_stream_loop(
                 last_status_panel_text: &mut last_status_panel_text,
                 watcher_owns_assistant_relay: &mut watcher_owns_assistant_relay,
                 watcher_relay_available_for_turn: &mut watcher_relay_available_for_turn,
+                watcher_delivery_pin: &mut watcher_delivery_pin,
                 standby_relay_owns_output: &mut standby_relay_owns_output,
                 watcher_owner_channel_id: &mut watcher_owner_channel_id,
                 full_response: &mut full_response,
@@ -896,24 +900,20 @@ pub(super) async fn run_stream_loop(
 
     *state.full_response = full_response;
     *state.last_edit_text = last_edit_text;
-    *state.done = done;
-    *state.cancelled = cancelled;
-    *state.rx_disconnected = rx_disconnected;
-    *state.current_tool_line = current_tool_line;
-    *state.prev_tool_status = prev_tool_status;
-    *state.last_tool_name = last_tool_name;
+    (*state.done, *state.cancelled) = (done, cancelled);
+    (*state.rx_disconnected, *state.current_tool_line) = (rx_disconnected, current_tool_line);
+    (*state.prev_tool_status, *state.last_tool_name) = (prev_tool_status, last_tool_name);
     *state.last_tool_summary = last_tool_summary;
     *state.accumulated_input_tokens = accumulated_input_tokens;
     *state.accumulated_cache_create_tokens = accumulated_cache_create_tokens;
     *state.accumulated_cache_read_tokens = accumulated_cache_read_tokens;
     *state.accumulated_output_tokens = accumulated_output_tokens;
-    *state.spin_idx = spin_idx;
-    *state.restart_followup_pending = restart_followup_pending;
-    *state.any_tool_used = any_tool_used;
-    *state.has_post_tool_text = has_post_tool_text;
+    (*state.spin_idx, *state.restart_followup_pending) = (spin_idx, restart_followup_pending);
+    (*state.any_tool_used, *state.has_post_tool_text) = (any_tool_used, has_post_tool_text);
     *state.tmux_handed_off = tmux_handed_off;
     *state.watcher_owns_assistant_relay = watcher_owns_assistant_relay;
     *state.watcher_relay_available_for_turn = watcher_relay_available_for_turn;
+    *state.watcher_delivery_pin = watcher_delivery_pin;
     *state.watcher_handoff_claim_outcome = watcher_handoff_claim_outcome;
     *state.standby_relay_owns_output = standby_relay_owns_output;
     *state.last_assistant_text_line = last_assistant_text_line;
