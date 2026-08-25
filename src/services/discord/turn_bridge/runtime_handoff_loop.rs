@@ -64,13 +64,6 @@ impl RuntimeHandoffLoopMessage {
     }
 }
 
-fn pin_watcher_delivery_marker(
-    pin: &mut Option<Arc<std::sync::atomic::AtomicBool>>,
-    marker: &Arc<std::sync::atomic::AtomicBool>,
-) {
-    pin.get_or_insert_with(|| Arc::clone(marker));
-}
-
 fn adopt_claimed_watcher_delivery_marker(
     pin: &mut Option<Arc<std::sync::atomic::AtomicBool>>,
     marker: &Arc<std::sync::atomic::AtomicBool>,

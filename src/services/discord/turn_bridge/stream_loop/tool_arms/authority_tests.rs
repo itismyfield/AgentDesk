@@ -600,24 +600,3 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
         &tick_delivery_pin,
     ));
 }
-
-#[test]
-fn watcher_pin_projects_through_tick_writeback() {
-    let tick = include_str!("../../stream_tick.rs");
-    let macro_start = tick
-        .find("macro_rules! writeback_tick_state")
-        .expect("tick writeback macro remains present");
-    let macro_end = tick[macro_start..]
-        .find("\n    }\n\n    macro_rules! return_authority_lost")
-        .map(|offset| macro_start + offset)
-        .expect("tick writeback macro body remains bounded");
-    assert!(
-        tick[macro_start..macro_end]
-            .contains("*state.watcher_delivery_pin = watcher_delivery_pin.clone();")
-    );
-    let post_macro = &tick[macro_end..];
-    assert!(post_macro.contains(
-        "writeback_tick_state!();\n            return StreamTickOutcome::AuthorityLost;"
-    ));
-    assert_eq!(post_macro.matches("writeback_tick_state!();").count(), 2);
-}

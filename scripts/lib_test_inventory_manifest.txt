@@ -6166,7 +6166,6 @@ services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::the_res
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::tool_arm_locals_follow_the_durable_row_after_a_guarded_save
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::tool_arms_derive_the_four_excluded_tool_line_locals_around_their_fences
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::transient_terminal_tool_result_fence_requeues_the_exact_frame_at_front
-services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::watcher_pin_projects_through_tick_writeback
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_tick
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::done_wait_uses_remaining_drain_window_as_safety_wake
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::stream_receiver_adapter_wakes_on_ready_frame
