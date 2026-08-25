@@ -35,16 +35,16 @@ class SourceContractTests(unittest.TestCase):
         self.assertEqual(ratchet.growth_errors(self.actual, self.baseline), [])
 
     def test_registry_remeasurement_and_p2_1_classification_are_explicit(self) -> None:
-        # #5071 T3-A2 re-pin: post_stream_exit.rs moved its one call site from
-        # `tmux_watchers.remove(&channel_id)` to `remove_tmux_session_if_current`,
-        # so 9/2 became 8/3 within the same 10-file set. The category total, the
-        # per-file counts, and the P2-1 classification below are unchanged.
+        # #5504 Stack A moved five channel-only handoff cleanup spellings behind
+        # one exact-tuple cleanup helper, so 8/3/3/2 became 3/3/4/2. The baseline
+        # comment stays at the historical no-growth ceiling; this assertion pins
+        # the safer checked-in tree without relaxing that ceiling.
         self.assertEqual(
             self.registry_subcounts,
             {
-                "direct_channel_remove": 8,
+                "direct_channel_remove": 3,
                 "remove_if_current": 3,
-                "cancel_and_remove_if_current": 3,
+                "cancel_and_remove_if_current": 4,
                 "remove_locked_helper": 2,
             },
         )
