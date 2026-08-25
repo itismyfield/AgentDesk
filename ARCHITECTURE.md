@@ -993,6 +993,7 @@ src/
 │   │   │   │   ├── channel_writeback.rs
 │   │   │   │   └── contracts.rs
 │   │   │   ├── headless_delivery/
+│   │   │   │   ├── durable_outbox.rs
 │   │   │   │   ├── intake_outbox_argument.rs
 │   │   │   │   ├── outcome.rs
 │   │   │   │   └── production_seam_tests.rs
