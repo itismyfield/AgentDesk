@@ -1245,13 +1245,17 @@ mod generation_allocation_tests {
                 "pub(in crate::services::discord) fn process_generation_binding() -> ProcessGenerationAllocation {",
             )
             .expect("process generation accessor must remain bounded by the binding reader")
+            .0
+            .split_once("#[cfg(not(test))]")
+            .expect("process generation production branch must remain present")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("process generation production and test branches must remain separate")
             .0;
         assert_eq!(
-            process_reader
-                .matches("process_generation_binding().generation")
-                .count(),
-            1,
-            "production row writers must keep reading the published binding generation"
+            process_reader.trim(),
+            "{\n        process_generation_binding().generation\n    }",
+            "production row writers must return the published binding generation directly"
         );
 
         let allocator = source
@@ -1260,6 +1264,12 @@ mod generation_allocation_tests {
             .1
             .split_once("fn allocate_generation_epoch() -> ProcessGenerationAllocation {")
             .expect("process generation allocator must remain bounded by epoch allocation")
+            .0
+            .split_once("#[cfg(not(test))]")
+            .expect("production allocator branch must remain present")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("production and test allocator branches must remain separate")
             .0;
         for required in [
             "allocate_once_with(",
