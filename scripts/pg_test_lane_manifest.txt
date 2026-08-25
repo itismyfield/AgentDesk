@@ -79,6 +79,7 @@ src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
+src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs
 src/services/discord/turn_bridge/intake_settlement/tests.rs
 src/services/discord/turn_bridge/recovery_text.rs
 src/services/discord/turn_bridge/voice_completion_tests.rs
@@ -192,6 +193,7 @@ services::discord::task_notification_delivery::tests
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
+services::discord::turn_bridge::headless_delivery::production_seam_tests
 services::discord::turn_bridge::intake_settlement::tests
 services::discord::turn_bridge::recovery_text::tests
 services::discord::turn_bridge::voice_completion::voice_completion_tests
@@ -806,6 +808,12 @@ services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::restoring_retry_failure_terminalizes_dispatch_and_requeues_entry_pg
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::terminal_failure_reconciles_phase_gate_and_releases_semaphore_pg
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::terminal_fallback_finalizes_run_once_pg
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_active_statuses_return_existing_id_and_terminal_statuses_retry_pg
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_concurrent_duplicates_converge_on_one_active_row_pg
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_exact_identity_is_content_free_and_owner_sensitive_pg
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_existing_sent_row_is_immediately_visible_pg
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_provider_channel_and_generation_axes_are_distinct_pg
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_rollout_falls_back_to_ttl_zero_for_off_or_incomplete_identity_pg
 services::discord::turn_bridge::intake_settlement::tests::cancel_prompt_replace_commit_closes_row_pg
 services::discord::turn_bridge::intake_settlement::tests::fresh_off_and_observe_leave_own_rows_for_worker_pg
 services::discord::turn_bridge::intake_settlement::tests::preserved_for_retry_leaves_row_open_pg

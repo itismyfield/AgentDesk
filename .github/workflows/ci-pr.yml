@@ -197,6 +197,8 @@ jobs:
               - 'src/services/discord/tmux_watcher/**'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/**'
+              - 'src/services/discord/turn_bridge/headless_delivery.rs'
+              - 'src/services/discord/turn_bridge/headless_delivery/**'
               - 'src/services/discord/turn_bridge/intake_settlement/**'
               - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
               - 'src/services/scheduled_messages.rs'

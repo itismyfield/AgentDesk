@@ -259,6 +259,7 @@ fn headless_direct_fallback_prefers_notify_http(delivery_bot: Option<&str>) -> b
     caller_supplied_delivery_bot(delivery_bot).is_some()
 }
 
+mod durable_outbox;
 mod intake_outbox_argument;
 use intake_outbox_argument::HeadlessDeliveryRuntimeArguments;
 pub(super) use intake_outbox_argument::{
@@ -282,6 +283,7 @@ pub(super) async fn enqueue_headless_delivery(
         session_key,
         delivery_bot,
         provider,
+        born_generation,
         content,
         cancel_token,
     } = arguments.into_runtime_arguments();
@@ -301,10 +303,12 @@ pub(super) async fn enqueue_headless_delivery(
         let delivery_cancel_token = cancel_token.filter(|token| !token.is_completion_cleanup());
         // Terminal headless responses are per-turn facts. Identical content in
         // back-to-back E2E or operator turns must still be delivered.
-        match crate::services::message_outbox::enqueue_outbox_pg_returning_outcome_with_ttl_and_cancel(
+        match durable_outbox::enqueue_headless_outbox(
             pool,
             outbox_message,
-            0,
+            owning_user_msg_id,
+            provider,
+            born_generation,
             delivery_cancel_token,
         )
         .await
@@ -372,10 +376,10 @@ pub(super) async fn enqueue_headless_delivery(
                                         "[outbox] terminal delivery marker write failed for session {session_key} row {outbox_id} (already enqueued; waiting for visible delivery): {error}"
                                     );
                                     return classify_visible_outbox_result(
-                                        wait_for_headless_delivery_outbox_visible(
+                                        durable_outbox::wait_for_headless_delivery_outbox_visible(
                                             pool,
                                             outbox_id,
-                                            HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT,
+                                            durable_outbox::HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT,
                                         )
                                         .await,
                                     );
@@ -395,10 +399,10 @@ pub(super) async fn enqueue_headless_delivery(
                     }
                 }
                 return classify_visible_outbox_result(
-                    wait_for_headless_delivery_outbox_visible(
+                    durable_outbox::wait_for_headless_delivery_outbox_visible(
                         pool,
                         outbox_id,
-                        HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT,
+                        durable_outbox::HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT,
                     )
                     .await,
                 );
@@ -483,56 +487,6 @@ pub(super) async fn enqueue_headless_delivery(
         Ok(())
     };
     run_headless_direct_fallback(suppress_for_cancel, || direct_fallback).await
-}
-
-const HEADLESS_DELIVERY_OUTBOX_VISIBLE_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(30);
-const HEADLESS_DELIVERY_OUTBOX_VISIBLE_POLL: std::time::Duration =
-    std::time::Duration::from_millis(100);
-
-async fn wait_for_headless_delivery_outbox_visible(
-    pool: &sqlx::PgPool,
-    outbox_id: i64,
-    timeout: std::time::Duration,
-) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let row = sqlx::query("SELECT status, error FROM message_outbox WHERE id = $1")
-            .bind(outbox_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| {
-                format!("poll headless delivery outbox row {outbox_id} failed: {error}")
-            })?;
-        let Some(row) = row else {
-            return Err(format!(
-                "headless delivery outbox row {outbox_id} disappeared before visible delivery"
-            ));
-        };
-        let status: String = row
-            .try_get("status")
-            .map_err(|error| format!("read headless outbox row {outbox_id} status: {error}"))?;
-        match status.as_str() {
-            "sent" => return Ok(()),
-            "failed" => {
-                let error: Option<String> = row.try_get("error").ok().flatten();
-                return Err(format!(
-                    "headless delivery outbox row {outbox_id} failed before visible delivery: {}",
-                    error.unwrap_or_else(|| "unknown error".to_string())
-                ));
-            }
-            _ => {}
-        }
-
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return Err(format!(
-                "headless delivery outbox row {outbox_id} remained {status} for {}s before visible delivery",
-                timeout.as_secs()
-            ));
-        }
-        tokio::time::sleep(HEADLESS_DELIVERY_OUTBOX_VISIBLE_POLL.min(deadline - now)).await;
-    }
 }
 
 #[cfg(test)]

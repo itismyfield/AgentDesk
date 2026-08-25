@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "1f9c70953f73303277746c82ddf525ffdf9a8ef1",
+  "measured_at_sha": "e6da66ce5e88c071d7e5752dd22975db1ccb054d",
   "records": [
     {
       "root": "migrations/postgres",
@@ -26172,15 +26172,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:6b98acd364a422d4d33ac37d892a33586593edda27ff2c9dca44c09ff872762a"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/discord/turn_bridge/headless_delivery.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:91af556b20919d91aac84778812720431133114a8835613ef2b46848fb116369"
     },
     {
@@ -26191,6 +26182,69 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:f16359883a37ed4d71359d1f1111598320fb119c26523ff283d0f442efbe0400"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/headless_delivery/durable_outbox.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e830e435b47a961dd1b80e6f4fc1a9a4fb0aee693bede36c5cb81e7f783a839e"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7ae5ba03348def810bb1a673ccc10f19245bc9f935fc19a2860e98844808c2c3"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:95afb8004c086bd699c39b6a9aa4b219cef19690fa05d1739e8146da0e251bc0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e3238edea17bf28e60e9fb4d168b8d45cee60690b8327977c4b6dde5d10ec0ed"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:621c19bafd87d15c2514ab709b2b99e2f52d2952d9e18cac5ae18724ca8e0297"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:99d8d8dd94733a0f128607d1e5a186fbcfbbf6a2cc7560c0086eb312e9d48677"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a4de3e39096c25ab2315e3c02f1534efe705740308af0da5052d16bcfa3aebb2"
     },
     {
       "root": "src",
@@ -27946,6 +28000,15 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:0c51a98a29aa823ff9c4732a9b790d33633367c2d096c6279dd59e1c79c9734a"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/message_outbox.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:07fa31a084f83bd7b5224b4e58bb11286795cb81d87cfed6898d13b47cef2327"
     },
     {
       "root": "src",

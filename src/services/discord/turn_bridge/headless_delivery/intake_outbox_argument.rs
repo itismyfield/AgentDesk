@@ -19,6 +19,7 @@ pub(in crate::services::discord::turn_bridge) struct HeadlessDeliveryArguments<'
     // intake outbox owner. It has no runtime effect in this slice.
     _intake_outbox_id: IntakeOutboxArgument,
     provider: &'a ProviderKind,
+    born_generation: u64,
     content: &'a str,
     cancel_token: Option<&'a CancelToken>,
 }
@@ -40,6 +41,7 @@ pub(super) struct HeadlessDeliveryRuntimeArguments<'a> {
     pub(super) session_key: Option<&'a str>,
     pub(super) delivery_bot: Option<&'a str>,
     pub(super) provider: &'a ProviderKind,
+    pub(super) born_generation: u64,
     pub(super) content: &'a str,
     pub(super) cancel_token: Option<&'a CancelToken>,
 }
@@ -55,6 +57,7 @@ impl<'a> HeadlessDeliveryArguments<'a> {
             session_key: self.session_key,
             delivery_bot: self.delivery_bot,
             provider: self.provider,
+            born_generation: self.born_generation,
             content: self.content,
             cancel_token: self.cancel_token,
         }
@@ -73,6 +76,7 @@ pub(in crate::services::discord::turn_bridge) fn assemble_headless_delivery_argu
         delivery_bot: inflight_state.delivery_bot.as_deref(),
         _intake_outbox_id: IntakeOutboxArgument::from_inflight(inflight_state),
         provider: inputs.provider,
+        born_generation: inflight_state.born_generation,
         content: inputs.content,
         cancel_token: inputs.cancel_token,
     }
