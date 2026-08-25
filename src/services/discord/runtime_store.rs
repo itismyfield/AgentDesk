@@ -199,25 +199,167 @@ pub fn generation_path() -> Option<PathBuf> {
     agentdesk_root().map(|root| root.join("runtime").join("generation"))
 }
 
-/// Load the current generation counter (returns 0 if file missing/corrupt).
-pub fn load_generation() -> u64 {
-    generation_path()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(0)
+// <epoch-provenance-surface>
+
+/// How this process's generation was selected; variants describe observed calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum GenerationAllocationRoute {
+    /// `read_generation_counter` returned `Parsed` or `Absent`, `atomic_write`
+    /// returned `Ok`, `next != current`, and `fsync_parent_dir` returned `Ok`.
+    AdvancedWithSyncedRename,
+    /// `atomic_write` returned `Ok`, but `fsync_parent_dir` returned `Err`.
+    ParentSyncFailed,
+    /// `atomic_write` and `fsync_parent_dir` returned `Ok`, but
+    /// `read_generation_counter` returned `Failed`.
+    CounterReadFailed,
+    /// `atomic_write` returned `Ok`, but `next == current`; parent sync skipped.
+    Saturated,
+    /// `atomic_write` returned `Err`.
+    WriteFailed,
+    /// `lock_generation_path` returned `Err`; an unsynchronized
+    /// `read_generation_counter` followed and no write was attempted.
+    LockFailed,
+    /// No generation path was available; no filesystem call was attempted.
+    PathUnavailable,
+    /// No transaction is bound, or a test pin supplied no provenance.
+    Unwitnessed,
 }
 
+/// Generation and allocation route are published as one value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) struct ProcessGenerationAllocation {
+    pub(in crate::services::discord) generation: u64,
+    route: GenerationAllocationRoute,
+}
+
+/// Counter reads retain establishment and bounded failure detail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CounterReadFailure {
+    Io(std::io::ErrorKind),
+    Parse,
+}
+
+impl CounterReadFailure {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Io(_) => "io",
+            Self::Parse => "parse",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CounterRead {
+    Parsed(u64),
+    Absent,
+    Failed(CounterReadFailure),
+}
+
+impl CounterRead {
+    fn value(self) -> u64 {
+        match self {
+            Self::Parsed(value) => value,
+            Self::Absent | Self::Failed(_) => 0,
+        }
+    }
+
+    fn established(self) -> bool {
+        !matches!(self, Self::Failed(_))
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Parsed(_) => "parsed",
+            Self::Absent => "absent",
+            Self::Failed(CounterReadFailure::Io(_)) => "io_error",
+            Self::Failed(CounterReadFailure::Parse) => "parse_error",
+        }
+    }
+
+    fn failure(self) -> Option<CounterReadFailure> {
+        match self {
+            Self::Failed(failure) => Some(failure),
+            Self::Parsed(_) | Self::Absent => None,
+        }
+    }
+}
+
+impl GenerationAllocationRoute {
+    fn advanced(self) -> bool {
+        matches!(self, Self::AdvancedWithSyncedRename)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AdvancedWithSyncedRename => "advanced_with_synced_rename",
+            Self::ParentSyncFailed => "parent_sync_failed",
+            Self::CounterReadFailed => "counter_read_failed",
+            Self::Saturated => "saturated",
+            Self::WriteFailed => "write_failed",
+            Self::LockFailed => "lock_failed",
+            Self::PathUnavailable => "path_unavailable",
+            Self::Unwitnessed => "unwitnessed",
+        }
+    }
+}
+
+impl ProcessGenerationAllocation {
+    pub(in crate::services::discord) fn epoch_advanced(self) -> bool {
+        self.route.advanced()
+    }
+
+    pub(in crate::services::discord) fn epoch_route(self) -> &'static str {
+        self.route.as_str()
+    }
+}
+
+// </epoch-provenance-surface>
+
+/// Load the current generation counter (returns 0 if missing or unreadable).
+pub fn load_generation() -> u64 {
+    generation_path().map_or(0, |path| read_generation_counter(&path).value())
+}
+
+/// Production publishes generation and route in one lock-free read cell.
 #[cfg(not(test))]
-static PROCESS_GENERATION: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+static PROCESS_GENERATION: std::sync::OnceLock<ProcessGenerationAllocation> =
+    std::sync::OnceLock::new();
 #[cfg(test)]
-static TEST_PROCESS_GENERATION: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(u64::MAX);
+static TEST_PROCESS_GENERATION_OVERRIDE: std::sync::Mutex<Option<u64>> =
+    std::sync::Mutex::new(None);
 #[cfg(test)]
-static TEST_ALLOCATED_PROCESS_GENERATION: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(u64::MAX);
+static TEST_PROCESS_GENERATION_ALLOCATION: std::sync::Mutex<Option<ProcessGenerationAllocation>> =
+    std::sync::Mutex::new(None);
+static PROCESS_GENERATION_ALLOCATION_TRANSACTION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
-static TEST_PROCESS_GENERATION_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+fn lock_unpoisoned<T>(cell: &'static std::sync::Mutex<T>) -> std::sync::MutexGuard<'static, T> {
+    cell.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(test)]
+fn test_generation_override() -> std::sync::MutexGuard<'static, Option<u64>> {
+    lock_unpoisoned(&TEST_PROCESS_GENERATION_OVERRIDE)
+}
+
+#[cfg(test)]
+fn test_allocation_memo() -> std::sync::MutexGuard<'static, Option<ProcessGenerationAllocation>> {
+    lock_unpoisoned(&TEST_PROCESS_GENERATION_ALLOCATION)
+}
+
+fn allocate_once_with(
+    cell: &std::sync::OnceLock<ProcessGenerationAllocation>,
+    transaction: &std::sync::Mutex<()>,
+    allocate: impl FnOnce() -> ProcessGenerationAllocation,
+) -> ProcessGenerationAllocation {
+    if let Some(bound) = cell.get() {
+        return *bound;
+    }
+    let _transaction = transaction
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    *cell.get_or_init(allocate)
+}
 
 struct GenerationFileLock {
     _file: fs::File,
@@ -255,99 +397,255 @@ fn lock_generation_path(path: &Path) -> Result<GenerationFileLock, String> {
     Ok(GenerationFileLock { _file: file })
 }
 
-/// Allocate the immutable generation epoch for this dcserver process exactly
-/// once. Every concurrent provider task joins the same OnceLock initializer, so
-/// only one durable flock/read/increment/atomic-write transaction can run.
+struct GenerationIo<L, R, W, F> {
+    path: Option<PathBuf>,
+    lock: L,
+    read: R,
+    write: W,
+    fsync: F,
+}
+
+/// Allocate once, publishing generation and route together.
 pub fn allocate_process_generation() -> u64 {
+    allocate_process_generation_binding().generation
+}
+
+pub(in crate::services::discord) fn allocate_process_generation_binding()
+-> ProcessGenerationAllocation {
     #[cfg(not(test))]
     {
-        *PROCESS_GENERATION.get_or_init(allocate_durable_generation)
+        allocate_once_with(
+            &PROCESS_GENERATION,
+            &PROCESS_GENERATION_ALLOCATION_TRANSACTION,
+            allocate_generation_epoch,
+        )
     }
     #[cfg(test)]
     {
-        let overridden = TEST_PROCESS_GENERATION.load(std::sync::atomic::Ordering::Acquire);
-        if overridden != u64::MAX {
-            return overridden;
+        if let Some(generation) = *test_generation_override() {
+            return ProcessGenerationAllocation {
+                generation,
+                route: GenerationAllocationRoute::Unwitnessed,
+            };
         }
-        let allocated =
-            TEST_ALLOCATED_PROCESS_GENERATION.load(std::sync::atomic::Ordering::Acquire);
-        if allocated != u64::MAX {
-            return allocated;
+        if let Some(bound) = *test_allocation_memo() {
+            return bound;
         }
-        let _lock = TEST_PROCESS_GENERATION_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let allocated =
-            TEST_ALLOCATED_PROCESS_GENERATION.load(std::sync::atomic::Ordering::Acquire);
-        if allocated != u64::MAX {
-            return allocated;
+        let _allocation = lock_unpoisoned(&PROCESS_GENERATION_ALLOCATION_TRANSACTION);
+        if let Some(generation) = *test_generation_override() {
+            return ProcessGenerationAllocation {
+                generation,
+                route: GenerationAllocationRoute::Unwitnessed,
+            };
         }
-        let allocated = allocate_durable_generation();
-        TEST_ALLOCATED_PROCESS_GENERATION.store(allocated, std::sync::atomic::Ordering::Release);
+        if let Some(bound) = *test_allocation_memo() {
+            return bound;
+        }
+        let allocated = allocate_generation_epoch();
+        *test_allocation_memo() = Some(allocated);
         allocated
     }
 }
 
-fn allocate_durable_generation() -> u64 {
-    let Some(path) = generation_path() else {
-        return 0;
+fn allocate_generation_epoch() -> ProcessGenerationAllocation {
+    allocate_generation_epoch_with_io(GenerationIo {
+        path: generation_path(),
+        lock: lock_generation_path,
+        read: read_generation_counter,
+        write: atomic_write,
+        fsync: fsync_parent_dir,
+    })
+}
+
+fn read_generation_counter(path: &Path) -> CounterRead {
+    match fs::read_to_string(path) {
+        Ok(body) => match body.trim().parse::<u64>() {
+            Ok(value) => CounterRead::Parsed(value),
+            Err(_) => CounterRead::Failed(CounterReadFailure::Parse),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => CounterRead::Absent,
+        Err(error) => CounterRead::Failed(CounterReadFailure::Io(error.kind())),
+    }
+}
+
+fn allocate_generation_epoch_with_io<L, R, W, F>(
+    io: GenerationIo<L, R, W, F>,
+) -> ProcessGenerationAllocation
+where
+    L: FnOnce(&Path) -> Result<GenerationFileLock, String>,
+    R: FnOnce(&Path) -> CounterRead,
+    W: FnOnce(&Path, &str) -> Result<(), String>,
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
+    use GenerationAllocationRoute as Route;
+
+    let Some(path) = io.path else {
+        tracing::warn!(
+            path = "<unavailable>",
+            current = 0u64,
+            next = 0u64,
+            counter_read = "not_attempted",
+            counter_detail = "not_attempted",
+            route = Route::PathUnavailable.as_str(),
+            epoch_advanced = false,
+            "runtime generation counter path is unavailable; allocation was not attempted"
+        );
+        return ProcessGenerationAllocation {
+            generation: 0,
+            route: Route::PathUnavailable,
+        };
     };
-    let Ok(_lock) = lock_generation_path(&path) else {
-        tracing::error!(path = %path.display(), "failed to lock runtime generation counter");
-        return load_generation();
+
+    let _lock = match (io.lock)(&path) {
+        Ok(lock) => lock,
+        Err(error) => {
+            let read = (io.read)(&path);
+            let generation = read.value();
+            tracing::error!(
+                path = %path.display(),
+                current = generation,
+                next = generation,
+                counter_read = read.as_str(),
+                counter_detail = read.failure().map_or("none", CounterReadFailure::as_str),
+                error = %error,
+                route = Route::LockFailed.as_str(),
+                epoch_advanced = false,
+                "failed to lock runtime generation counter"
+            );
+            return ProcessGenerationAllocation {
+                generation,
+                route: Route::LockFailed,
+            };
+        }
     };
-    let current = fs::read_to_string(&path)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(0);
+
+    let read = (io.read)(&path);
+    let current = read.value();
     let next = current.saturating_add(1);
-    match atomic_write(&path, &next.to_string()) {
-        Ok(()) => next,
+    match (io.write)(&path, &next.to_string()) {
         Err(error) => {
             tracing::error!(
                 path = %path.display(),
                 current,
                 next,
+                counter_read = read.as_str(),
+                counter_detail = read.failure().map_or("none", CounterReadFailure::as_str),
                 error = %error,
+                route = Route::WriteFailed.as_str(),
+                epoch_advanced = false,
                 "failed to allocate runtime process generation"
             );
-            current
+            ProcessGenerationAllocation {
+                generation: current,
+                route: Route::WriteFailed,
+            }
         }
+        Ok(()) if next == current => {
+            tracing::error!(
+                path = %path.display(),
+                current,
+                next,
+                counter_read = read.as_str(),
+                counter_detail = read.failure().map_or("none", CounterReadFailure::as_str),
+                route = Route::Saturated.as_str(),
+                epoch_advanced = false,
+                "runtime process generation counter is saturated"
+            );
+            ProcessGenerationAllocation {
+                generation: next,
+                route: Route::Saturated,
+            }
+        }
+        Ok(()) => match (io.fsync)(&path) {
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    current,
+                    next,
+                    counter_read = read.as_str(),
+                    counter_detail = read.failure().map_or("none", CounterReadFailure::as_str),
+                    error = %error,
+                    route = Route::ParentSyncFailed.as_str(),
+                    epoch_advanced = false,
+                    "runtime generation counter was renamed but parent-directory sync returned an error"
+                );
+                ProcessGenerationAllocation {
+                    generation: next,
+                    route: Route::ParentSyncFailed,
+                }
+            }
+            Ok(()) if !read.established() => {
+                tracing::warn!(
+                    path = %path.display(),
+                    current,
+                    next,
+                    counter_read = read.as_str(),
+                    counter_detail = read.failure().map_or("none", CounterReadFailure::as_str),
+                    route = Route::CounterReadFailed.as_str(),
+                    epoch_advanced = false,
+                    "runtime generation counter was renamed, but the prior value was not established"
+                );
+                ProcessGenerationAllocation {
+                    generation: next,
+                    route: Route::CounterReadFailed,
+                }
+            }
+            Ok(()) => {
+                tracing::info!(
+                    path = %path.display(),
+                    current,
+                    next,
+                    counter_read = read.as_str(),
+                    counter_detail = read.failure().map_or("none", CounterReadFailure::as_str),
+                    route = Route::AdvancedWithSyncedRename.as_str(),
+                    epoch_advanced = true,
+                    "allocated runtime process generation"
+                );
+                ProcessGenerationAllocation {
+                    generation: next,
+                    route: Route::AdvancedWithSyncedRename,
+                }
+            }
+        },
     }
 }
 
-/// Return the immutable generation allocated to this process. Before the
-/// SharedData boot path allocates it, tests and constructor-only tooling fall
-/// back to the durable counter for compatibility.
+/// Return the process generation; before boot allocation, use the on-disk
+/// counter for constructor-only compatibility.
 pub fn process_generation() -> u64 {
+    process_generation_binding().generation
+}
+
+pub(in crate::services::discord) fn process_generation_binding() -> ProcessGenerationAllocation {
     #[cfg(not(test))]
-    if let Some(generation) = PROCESS_GENERATION.get() {
-        return *generation;
+    if let Some(bound) = PROCESS_GENERATION.get() {
+        return *bound;
     }
     #[cfg(test)]
-    {
-        let generation = TEST_PROCESS_GENERATION.load(std::sync::atomic::Ordering::Acquire);
-        if generation != u64::MAX {
-            return generation;
-        }
+    if let Some(generation) = *test_generation_override() {
+        return ProcessGenerationAllocation {
+            generation,
+            route: GenerationAllocationRoute::Unwitnessed,
+        };
     }
-    load_generation()
+    ProcessGenerationAllocation {
+        generation: load_generation(),
+        route: GenerationAllocationRoute::Unwitnessed,
+    }
 }
 
 /// Preview the epoch that the replacement process will allocate without
-/// mutating the durable counter while the old process is still quiescing.
+/// mutating the on-disk counter while the old process is still quiescing.
 pub fn next_process_generation() -> u64 {
     load_generation().saturating_add(1)
 }
 
 #[cfg(test)]
 pub fn set_process_generation_for_tests(generation: Option<u64>) {
-    TEST_PROCESS_GENERATION.store(
-        generation.unwrap_or(u64::MAX),
-        std::sync::atomic::Ordering::Release,
-    );
+    let _allocation = lock_unpoisoned(&PROCESS_GENERATION_ALLOCATION_TRANSACTION);
+    *test_generation_override() = generation;
     if generation.is_none() {
-        TEST_ALLOCATED_PROCESS_GENERATION.store(u64::MAX, std::sync::atomic::Ordering::Release);
+        *test_allocation_memo() = None;
     }
 }
 
@@ -532,11 +830,11 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
 /// helper makes.
 ///
 /// Deliberately a second call rather than a flag on `atomic_write`: the inflight
-/// hot path must not pay a directory fsync, and callers that need durability
-/// want the two failures separable (a rename error aborts, a directory fsync
-/// error is post-commit and its only caller uses it to skip the derived index —
-/// #5254 §E8.2). The directory is opened read-only because opening one for
-/// writing fails with `EISDIR`.
+/// hot path must not pay a directory fsync, and callers need rename and parent
+/// sync failures separable. Gateway identity recovery skips its derived index
+/// on failure; generation allocation records a non-advanced route after its
+/// rename. The directory is opened read-only because opening one for writing
+/// fails with `EISDIR`.
 pub(crate) fn fsync_parent_dir(path: &Path) -> std::io::Result<()> {
     let parent = path
         .parent()
@@ -624,6 +922,399 @@ pub(crate) fn best_effort_atomic_write_logged(
             error = %error,
             "best-effort atomic write failed"
         );
+    }
+}
+
+#[cfg(test)]
+mod generation_allocation_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[derive(Clone)]
+    struct CapturingWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn io<F>(
+        path: PathBuf,
+        fsync: F,
+    ) -> GenerationIo<
+        impl FnOnce(&Path) -> Result<GenerationFileLock, String>,
+        impl FnOnce(&Path) -> CounterRead,
+        impl FnOnce(&Path, &str) -> Result<(), String>,
+        F,
+    >
+    where
+        F: FnOnce(&Path) -> std::io::Result<()>,
+    {
+        GenerationIo {
+            path: Some(path),
+            lock: lock_generation_path,
+            read: read_generation_counter,
+            write: atomic_write,
+            fsync,
+        }
+    }
+
+    fn expect(
+        binding: ProcessGenerationAllocation,
+        generation: u64,
+        route: GenerationAllocationRoute,
+    ) {
+        assert_eq!(binding, ProcessGenerationAllocation { generation, route });
+        assert_eq!(binding.epoch_route(), route.as_str());
+        assert_eq!(
+            binding.epoch_advanced(),
+            matches!(route, GenerationAllocationRoute::AdvancedWithSyncedRename)
+        );
+    }
+
+    fn fail_lock(_: &Path) -> Result<GenerationFileLock, String> {
+        Err("lock".into())
+    }
+
+    fn panic_lock(_: &Path) -> Result<GenerationFileLock, String> {
+        panic!("lock")
+    }
+
+    fn panic_read(_: &Path) -> CounterRead {
+        panic!("read")
+    }
+
+    fn fail_write(_: &Path, _: &str) -> Result<(), String> {
+        Err("write".into())
+    }
+
+    fn panic_write(_: &Path, _: &str) -> Result<(), String> {
+        panic!("write")
+    }
+
+    fn panic_fsync(_: &Path) -> std::io::Result<()> {
+        panic!("fsync")
+    }
+
+    #[test]
+    fn core_truth_table_routes_and_side_effects_are_exact() {
+        let root = tempfile::tempdir().unwrap();
+        let seeded = |name: &str, value: &str| {
+            let path = root.path().join(name).join("generation");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, value).unwrap();
+            path
+        };
+        let path = seeded("parent-failed", "7");
+        expect(
+            allocate_generation_epoch_with_io(io(path.clone(), |_| {
+                Err(std::io::Error::from(std::io::ErrorKind::Other))
+            })),
+            8,
+            GenerationAllocationRoute::ParentSyncFailed,
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "8");
+        expect(
+            allocate_generation_epoch_with_io(io(seeded("parsed", "7"), |_| Ok(()))),
+            8,
+            GenerationAllocationRoute::AdvancedWithSyncedRename,
+        );
+        expect(
+            allocate_generation_epoch_with_io(io(
+                root.path().join("absent").join("generation"),
+                |_| Ok(()),
+            )),
+            1,
+            GenerationAllocationRoute::AdvancedWithSyncedRename,
+        );
+        let path = seeded("unreadable", "nan");
+        expect(
+            allocate_generation_epoch_with_io(io(path.clone(), |_| Ok(()))),
+            1,
+            GenerationAllocationRoute::CounterReadFailed,
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "1");
+        expect(
+            allocate_generation_epoch_with_io(io(seeded("unreadable-parent", "nan"), |_| {
+                Err(std::io::Error::from(std::io::ErrorKind::Other))
+            })),
+            1,
+            GenerationAllocationRoute::ParentSyncFailed,
+        );
+
+        let path = seeded("lock-failed", "7");
+        expect(
+            allocate_generation_epoch_with_io(GenerationIo {
+                path: Some(path.clone()),
+                lock: fail_lock,
+                read: read_generation_counter,
+                write: panic_write,
+                fsync: panic_fsync,
+            }),
+            7,
+            GenerationAllocationRoute::LockFailed,
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "7");
+        let path = seeded("write-failed", "7");
+        expect(
+            allocate_generation_epoch_with_io(GenerationIo {
+                path: Some(path.clone()),
+                lock: lock_generation_path,
+                read: read_generation_counter,
+                write: fail_write,
+                fsync: panic_fsync,
+            }),
+            7,
+            GenerationAllocationRoute::WriteFailed,
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "7");
+        let path = seeded("saturated", &u64::MAX.to_string());
+        expect(
+            allocate_generation_epoch_with_io(io(path.clone(), |_| panic!("fsync"))),
+            u64::MAX,
+            GenerationAllocationRoute::Saturated,
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), u64::MAX.to_string());
+        expect(
+            allocate_generation_epoch_with_io(GenerationIo {
+                path: None,
+                lock: panic_lock,
+                read: panic_read,
+                write: panic_write,
+                fsync: panic_fsync,
+            }),
+            0,
+            GenerationAllocationRoute::PathUnavailable,
+        );
+    }
+
+    #[test]
+    fn production_shaped_once_cell_publishes_generation_and_route_together() {
+        let cell = std::sync::OnceLock::new();
+        let transaction = std::sync::Mutex::new(());
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let allocate = || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ProcessGenerationAllocation {
+                generation: 42,
+                route: GenerationAllocationRoute::ParentSyncFailed,
+            }
+        };
+        expect(
+            allocate_once_with(&cell, &transaction, allocate),
+            42,
+            GenerationAllocationRoute::ParentSyncFailed,
+        );
+        expect(
+            allocate_once_with(&cell, &transaction, allocate),
+            42,
+            GenerationAllocationRoute::ParentSyncFailed,
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let production = include_str!("runtime_store.rs")
+            .split_once("/// Production publishes")
+            .unwrap()
+            .1
+            .split_once("struct GenerationFileLock")
+            .unwrap()
+            .0;
+        let declaration = "static PROCESS_GENERATION: std::sync::OnceLock<";
+        assert!(production.contains(declaration));
+    }
+
+    #[test]
+    fn test_pin_memo_fallback_and_reset_remain_structurally_separate() {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let path = generation_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        set_process_generation_for_tests(None);
+
+        std::fs::write(&path, "7").unwrap();
+        expect(
+            allocate_process_generation_binding(),
+            8,
+            GenerationAllocationRoute::AdvancedWithSyncedRename,
+        );
+        std::fs::write(&path, "19").unwrap();
+        expect(
+            process_generation_binding(),
+            19,
+            GenerationAllocationRoute::Unwitnessed,
+        );
+
+        set_process_generation_for_tests(Some(73));
+        expect(
+            allocate_process_generation_binding(),
+            73,
+            GenerationAllocationRoute::Unwitnessed,
+        );
+        expect(
+            process_generation_binding(),
+            73,
+            GenerationAllocationRoute::Unwitnessed,
+        );
+
+        set_process_generation_for_tests(None);
+        std::fs::write(&path, "40").unwrap();
+        expect(
+            process_generation_binding(),
+            40,
+            GenerationAllocationRoute::Unwitnessed,
+        );
+        expect(
+            allocate_process_generation_binding(),
+            41,
+            GenerationAllocationRoute::AdvancedWithSyncedRename,
+        );
+        set_process_generation_for_tests(None);
+    }
+
+    #[test]
+    fn production_composer_advances_with_synced_parent() {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let path = root.path().join("runtime").join("generation");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "7").unwrap();
+
+        expect(
+            allocate_generation_epoch(),
+            8,
+            GenerationAllocationRoute::AdvancedWithSyncedRename,
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "8");
+
+        let source = include_str!("runtime_store.rs");
+        let composer = source
+            .split_once("fn allocate_generation_epoch() -> ProcessGenerationAllocation {")
+            .unwrap()
+            .1
+            .split_once("fn read_generation_counter")
+            .unwrap()
+            .0;
+        for binding in [
+            "path: generation_path()",
+            "lock: lock_generation_path",
+            "read: read_generation_counter",
+            "write: atomic_write",
+            "fsync: fsync_parent_dir",
+        ] {
+            assert_eq!(composer.matches(binding).count(), 1, "binding={binding}");
+        }
+    }
+
+    #[test]
+    fn counter_read_failure_preserves_copy_detail() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            read_generation_counter(&root.path().join("missing")),
+            CounterRead::Absent
+        );
+        let malformed = root.path().join("malformed");
+        std::fs::write(&malformed, "nan").unwrap();
+        assert_eq!(
+            read_generation_counter(&malformed),
+            CounterRead::Failed(CounterReadFailure::Parse)
+        );
+        let directory = root.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(matches!(read_generation_counter(&directory),
+            CounterRead::Failed(CounterReadFailure::Io(kind))
+                if kind != std::io::ErrorKind::NotFound));
+    }
+
+    fn capture_site_a(run: impl FnOnce()) -> String {
+        let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(CapturingWriter(buffer.clone()))
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let logs = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert_eq!(logs.lines().count(), 1, "logs={logs}");
+        logs
+    }
+
+    #[test]
+    fn site_a_emits_one_detailed_record_for_counter_read_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("generation");
+        std::fs::write(&path, "nan").unwrap();
+        let record = capture_site_a(|| {
+            allocate_generation_epoch_with_io(io(path, |_| Ok(())));
+        });
+        for field in [
+            "counter_read=\"parse_error\"",
+            "counter_detail=\"parse\"",
+            "route=\"counter_read_failed\"",
+            "epoch_advanced=false",
+        ] {
+            assert!(record.contains(field), "{field}: {record}");
+        }
+    }
+
+    #[test]
+    fn real_lock_failure_and_synced_advance_are_reachable() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("lock").join("generation");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "7").unwrap();
+        std::fs::create_dir(path.with_extension("lock")).unwrap();
+        expect(
+            allocate_generation_epoch_with_io(io(path, |_| Ok(()))),
+            7,
+            GenerationAllocationRoute::LockFailed,
+        );
+        #[cfg(unix)]
+        {
+            let path = root.path().join("advanced").join("generation");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "7").unwrap();
+            expect(
+                allocate_generation_epoch_with_io(io(path, fsync_parent_dir)),
+                8,
+                GenerationAllocationRoute::AdvancedWithSyncedRename,
+            );
+        }
+    }
+
+    /// Lexical tripwire only: synonyms, moved text, and rewrites remain review work.
+    #[test]
+    fn epoch_provenance_surface_makes_no_survival_claim() {
+        let source = include_str!("runtime_store.rs");
+        let surface = source
+            .split_once("// <epoch-provenance-surface>")
+            .unwrap()
+            .1
+            .split_once("// </epoch-provenance-surface>")
+            .unwrap()
+            .0
+            .to_ascii_lowercase();
+        for word in ["durable", "persistent", "persisted", "survive", "crash"] {
+            assert!(!surface.contains(word), "forbidden={word}");
+        }
     }
 }
 
