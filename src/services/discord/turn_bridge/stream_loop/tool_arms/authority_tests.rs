@@ -458,7 +458,28 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
     let mut watcher_owns_assistant_relay = false;
     let mut watcher_relay_available_for_turn = false;
     let tick_delivery_pin = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut watcher_delivery_pin = Some(std::sync::Arc::clone(&tick_delivery_pin));
+    shared.tmux_watchers.insert(
+        channel,
+        crate::services::discord::TmuxWatcherHandle {
+            tmux_session_name: "AgentDesk-tool-flag-tick-pin".into(),
+            output_path: "/tmp/tool-flag-tick-pin.jsonl".into(),
+            paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resume_offset: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pause_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_delivered: std::sync::Arc::clone(&tick_delivery_pin),
+            last_heartbeat_ts_ms: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+        },
+    );
+    inflight_state
+        .set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+    inflight_state.set_watcher_owner_channel_id(channel.get());
+    crate::services::discord::inflight::save_inflight_state(&inflight_state)
+        .expect("publish watcher-owned tick row");
+    baseline.clone_from(&inflight_state);
+    let mut watcher_delivery_pin = None;
     let mut standby_relay_owns_output = false;
     let mut watcher_owner_channel_id = ChannelId::new(1);
     let mut streaming_rollover_frozen_msg_ids: Vec<MessageId> = Vec::new();
@@ -583,27 +604,24 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
 #[test]
 fn watcher_pin_projects_through_tick_writeback() {
     let tick = include_str!("../../stream_tick.rs");
-    let production_tick = tick
-        .split("#[cfg(test)]")
-        .next()
-        .expect("production stream tick prefix");
-    let reconcile = production_tick
-        .find("watcher_delivery_pin: &mut watcher_delivery_pin,")
-        .expect("guarded tick reconciliation projects the watcher incarnation pin");
-    let writeback_macro = production_tick
+    let macro_start = tick
         .find("macro_rules! writeback_tick_state")
         .expect("tick writeback macro remains present");
-    let pin_writeback = production_tick[writeback_macro..]
-        .find("*state.watcher_delivery_pin = watcher_delivery_pin.clone();")
-        .map(|offset| writeback_macro + offset)
-        .expect("tick writeback returns the pin to caller-owned state");
-    let early_return = production_tick[pin_writeback..]
-        .find("return StreamTickOutcome::AuthorityLost;")
-        .map(|offset| pin_writeback + offset)
-        .expect("authority loss follows the shared pin writeback");
-    let final_writeback = production_tick
-        .rfind("writeback_tick_state!();")
-        .expect("continuing ticks use the same writeback macro");
-    assert!(reconcile < writeback_macro && pin_writeback < early_return);
-    assert!(early_return < final_writeback);
+    let macro_end = tick[macro_start..]
+        .find("\n    }\n\n    macro_rules! return_authority_lost")
+        .map(|offset| macro_start + offset)
+        .expect("tick writeback macro body remains bounded");
+    assert!(
+        tick[macro_start..macro_end]
+            .contains("*state.watcher_delivery_pin = watcher_delivery_pin.clone();")
+    );
+    assert!(tick[macro_end..].contains(
+        "writeback_tick_state!();\n            return StreamTickOutcome::AuthorityLost;"
+    ));
+    assert_eq!(
+        tick[macro_end..]
+            .matches("writeback_tick_state!();")
+            .count(),
+        2
+    );
 }
