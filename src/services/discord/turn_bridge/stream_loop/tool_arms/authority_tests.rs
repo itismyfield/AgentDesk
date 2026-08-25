@@ -615,13 +615,9 @@ fn watcher_pin_projects_through_tick_writeback() {
         tick[macro_start..macro_end]
             .contains("*state.watcher_delivery_pin = watcher_delivery_pin.clone();")
     );
-    assert!(tick[macro_end..].contains(
+    let post_macro = &tick[macro_end..];
+    assert!(post_macro.contains(
         "writeback_tick_state!();\n            return StreamTickOutcome::AuthorityLost;"
     ));
-    assert_eq!(
-        tick[macro_end..]
-            .matches("writeback_tick_state!();")
-            .count(),
-        2
-    );
+    assert_eq!(post_macro.matches("writeback_tick_state!();").count(), 2);
 }

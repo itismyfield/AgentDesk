@@ -344,58 +344,30 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
 }
 
 #[cfg(unix)]
-#[test]
-fn authoritative_pin_uses_incumbent_after_provisional_reuse_and_never_overwrites() {
+#[rustfmt::skip]
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_adoption_rejects_claim_evicted_before_publication() {
+    let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let root = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
     let provider = ProviderKind::Codex;
+    let mut state = runtime_seed(provider.clone(), 42_592_609);
+    save_inflight_state(&state).unwrap();
     let shared = crate::services::discord::make_shared_data_for_tests();
-    let owner = ChannelId::new(42_592_607);
-    let tmux_session_name = "AgentDesk-codex-pin-helper";
-    let output_path = "/runtime/pin-helper.jsonl";
-    let incumbent = live_watcher_handle(tmux_session_name, output_path);
-    let incumbent_delivery_pin = Arc::clone(&incumbent.turn_delivered);
-    shared.tmux_watchers.insert(owner, incumbent);
-
-    let provisional = live_watcher_handle(tmux_session_name, output_path);
-    let provisional_delivery_pin = Arc::clone(&provisional.turn_delivered);
-    let claim = crate::services::discord::tmux::claim_or_reuse_watcher(
-        &shared.tmux_watchers,
-        owner,
-        provisional,
-        &provider,
-        "turn_bridge_runtime_ready",
-    );
-    assert!(!claim.should_spawn());
-    assert!(!Arc::ptr_eq(
-        &incumbent_delivery_pin,
-        &provisional_delivery_pin
-    ));
-
-    let mut pin = None;
-    let watcher = shared
-        .tmux_watchers
-        .get(&owner)
-        .expect("incumbent survives reuse");
-    pin_watcher_delivery_marker(&mut pin, &watcher.turn_delivered);
-    let adopted = pin.as_ref().expect("incumbent marker is adopted");
-    assert!(Arc::ptr_eq(adopted, &incumbent_delivery_pin));
-    assert!(!Arc::ptr_eq(adopted, &provisional_delivery_pin));
-    drop(watcher);
-
-    let first_adoption = Arc::clone(adopted);
-    let replacement = live_watcher_handle("AgentDesk-codex-pin-replacement", output_path);
-    let replacement_delivery_pin = Arc::clone(&replacement.turn_delivered);
-    shared.tmux_watchers.insert(owner, replacement);
-    let watcher = shared
-        .tmux_watchers
-        .get(&owner)
-        .expect("replacement is visible");
-    pin_watcher_delivery_marker(&mut pin, &watcher.turn_delivered);
-    assert!(Arc::ptr_eq(pin.as_ref().unwrap(), &first_adoption));
-    adopt_claimed_watcher_delivery_marker(&mut pin, &watcher.turn_delivered);
-    assert!(Arc::ptr_eq(
-        pin.as_ref().unwrap(),
-        &replacement_delivery_pin
-    ));
+    let tmux = "AgentDesk-codex-claim-evicted";
+    let output = "/runtime/claim-evicted.jsonl";
+    shared.tmux_watchers.insert(ChannelId::new(state.channel_id), live_watcher_handle(tmux, output));
+    let _eviction = crate::services::discord::tmux::evict_claim_before_adoption_for_test(ChannelId::new(state.channel_id));
+    let mut dirty = false;
+    let observed = dispatch_process_handoff(&shared, &provider, &mut state,
+        RuntimeHandoffLoopMessage::RuntimeReady { handoff: RuntimeHandoff::CodexTui {
+            rollout_path: output.into(), thread_id: None, tmux_session_name: tmux.into(), last_offset: 10_240,
+        } }, &mut dirty, false).await;
+    assert_eq!(observed.outcome, Some(GuardedSaveOutcome::Saved));
+    assert_eq!(observed.claim_outcome, WatcherHandoffClaimOutcome::None);
+    assert!(!observed.tmux_handed_off && !observed.watcher_relay_available);
+    assert!(observed.watcher_delivery_pin.is_none());
+    assert_eq!(state.effective_relay_owner_kind(), crate::services::discord::inflight::RelayOwnerKind::None);
 }
 
 #[tokio::test(flavor = "current_thread")]

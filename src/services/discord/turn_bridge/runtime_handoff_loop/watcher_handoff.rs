@@ -407,27 +407,29 @@ pub(super) fn handle_watcher_runtime_handoff(
             }
         }
     }
-    if watcher_ready_for_relay {
-        *tmux_handed_off = true;
-        inflight_state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
-        *watcher_owns_assistant_relay = true;
-    }
     #[cfg(unix)]
     if watcher_ready_for_relay {
         let watcher_claim_incarnation = watcher_claim_incarnation
             .as_ref()
             .expect("unix watcher claim carries its exact incarnation");
-        *watcher_relay_available_for_turn = true;
-        super::adopt_claimed_watcher_delivery_marker(
-            watcher_delivery_pin,
-            &watcher_claim_incarnation.turn_delivered,
-        );
-        if let Ok(mut guard) = watcher_claim_incarnation.resume_offset.lock() {
-            *guard = Some(last_offset);
-        }
-        watcher_claim_incarnation
-            .turn_delivered
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let adopted = watcher_claim_incarnation.adopt_if_current(
+            &shared_owned.tmux_watchers,
+            |watcher_claim_incarnation| {
+                super::adopt_claimed_watcher_delivery_marker(
+                    watcher_delivery_pin,
+                    &watcher_claim_incarnation.turn_delivered,
+                );
+                if let Ok(mut guard) = watcher_claim_incarnation.resume_offset.lock() {
+                    *guard = Some(last_offset);
+                }
+                watcher_claim_incarnation
+                    .turn_delivered
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                *tmux_handed_off = true;
+                *watcher_relay_available_for_turn = true;
+                *watcher_owns_assistant_relay = true;
+                inflight_state
+                    .set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
         // #3016 phase 2: register the turn with the single-authority
         // finalizer BEFORE unpausing the watcher. Message arrival order in
         // the actor replaces the deleted Release/AcqRel ordering: the
@@ -450,9 +452,20 @@ pub(super) fn handle_watcher_runtime_handoff(
                     // #3016 phase-5a: prime the reconcile cache at register time.
                     shared_owned,
                 );
-        watcher_claim_incarnation
-            .paused
-            .store(false, std::sync::atomic::Ordering::Release);
+                watcher_claim_incarnation
+                    .paused
+                    .store(false, std::sync::atomic::Ordering::Release);
+            },
+        )
+        .is_some();
+        if !adopted {
+            *tmux_handed_off = false;
+            *watcher_relay_available_for_turn = false;
+            *watcher_owns_assistant_relay = false;
+            *watcher_delivery_pin = None;
+            *watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
+            inflight_state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::None);
+        }
     }
     *state_dirty = tmux_ready_state_dirty_after_guarded_save(*state_dirty, Some(outcome));
     if done {

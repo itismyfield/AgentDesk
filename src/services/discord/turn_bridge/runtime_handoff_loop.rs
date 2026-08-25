@@ -490,20 +490,24 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     let watcher_claim_incarnation = watcher_claim_incarnation
                         .as_ref()
                         .expect("unix watcher claim carries its exact incarnation");
-                    tmux_handed_off = true;
-                    inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
-                    watcher_owns_assistant_relay = true;
-                    watcher_relay_available_for_turn = true;
-                    adopt_claimed_watcher_delivery_marker(
-                        &mut watcher_delivery_pin,
-                        &watcher_claim_incarnation.turn_delivered,
-                    );
-                    if let Ok(mut guard) = watcher_claim_incarnation.resume_offset.lock() {
-                        *guard = Some(last_offset);
-                    }
-                    watcher_claim_incarnation
-                        .turn_delivered
-                        .store(false, Ordering::Relaxed);
+                    let adopted = watcher_claim_incarnation.adopt_if_current(
+                        &shared_owned.tmux_watchers,
+                        |watcher_claim_incarnation| {
+                            adopt_claimed_watcher_delivery_marker(
+                                &mut watcher_delivery_pin,
+                                &watcher_claim_incarnation.turn_delivered,
+                            );
+                            if let Ok(mut guard) = watcher_claim_incarnation.resume_offset.lock() {
+                                *guard = Some(last_offset);
+                            }
+                            watcher_claim_incarnation
+                                .turn_delivered
+                                .store(false, Ordering::Relaxed);
+                            tmux_handed_off = true;
+                            watcher_relay_available_for_turn = true;
+                            watcher_owns_assistant_relay = true;
+                            inflight_state
+                                .set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
                     // #1452 (Codex P1): publish the mailbox-finalization
                     // debt BEFORE unpausing the watcher.
                     //
@@ -561,9 +565,20 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     // be reordered, letting the watcher unpause
                     // and submit a terminal before the ledger
                     // knows the turn exists.
-                    watcher_claim_incarnation
-                        .paused
-                        .store(false, Ordering::Release);
+                            watcher_claim_incarnation
+                                .paused
+                                .store(false, Ordering::Release);
+                        },
+                    )
+                    .is_some();
+                    if !adopted {
+                        tmux_handed_off = false;
+                        watcher_relay_available_for_turn = false;
+                        watcher_owns_assistant_relay = false;
+                        watcher_delivery_pin = None;
+                        watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
+                        inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::None);
+                    }
                 }
             } else {
                 watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
