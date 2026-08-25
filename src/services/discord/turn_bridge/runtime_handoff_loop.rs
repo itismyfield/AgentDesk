@@ -71,6 +71,13 @@ fn pin_watcher_delivery_marker(
     pin.get_or_insert_with(|| Arc::clone(marker));
 }
 
+fn adopt_claimed_watcher_delivery_marker(
+    pin: &mut Option<Arc<std::sync::atomic::AtomicBool>>,
+    marker: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    *pin = Some(Arc::clone(marker));
+}
+
 pub(super) struct RuntimeHandoffLoopOutcome {
     pub(super) guarded_save_outcome: Option<crate::services::discord::inflight::GuardedSaveOutcome>,
     pub(super) retry_message: Option<RuntimeHandoffLoopMessage>,
@@ -351,6 +358,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             let _ = shared_owned
                                 .tmux_watchers
                                 .remove_tmux_session_if_current(&tmux_session_name, &cancel);
+                            watcher_delivery_pin = None;
                             if let Some(http_for_standby) =
                                 shared_owned.serenity_http_or_token_fallback()
                             {
@@ -473,6 +481,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                                 &output_path,
                                 &cancel,
                             );
+                            watcher_delivery_pin = None;
                         }
                     }
                 }
@@ -485,7 +494,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
                     watcher_owns_assistant_relay = true;
                     watcher_relay_available_for_turn = true;
-                    pin_watcher_delivery_marker(
+                    adopt_claimed_watcher_delivery_marker(
                         &mut watcher_delivery_pin,
                         &watcher_claim_incarnation.turn_delivered,
                     );

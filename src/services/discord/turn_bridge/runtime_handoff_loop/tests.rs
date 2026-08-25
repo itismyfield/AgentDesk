@@ -326,8 +326,8 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
         .watcher_delivery_pin
         .as_ref()
         .expect("successful retry retains the first adopted pin");
-    assert!(Arc::ptr_eq(retried_pin, &pre_frame_delivery_pin));
-    assert!(!Arc::ptr_eq(retried_pin, &incumbent_delivery_pin));
+    assert!(!Arc::ptr_eq(retried_pin, &pre_frame_delivery_pin));
+    assert!(Arc::ptr_eq(retried_pin, &incumbent_delivery_pin));
     let durable = load_inflight_state(&provider, channel_id).expect("load retried durable row");
     assert_eq!(
         durable.watcher_owner_channel_id,
@@ -391,7 +391,8 @@ fn authoritative_pin_uses_incumbent_after_provisional_reuse_and_never_overwrites
         .expect("replacement is visible");
     pin_watcher_delivery_marker(&mut pin, &watcher.turn_delivered);
     assert!(Arc::ptr_eq(pin.as_ref().unwrap(), &first_adoption));
-    assert!(!Arc::ptr_eq(
+    adopt_claimed_watcher_delivery_marker(&mut pin, &watcher.turn_delivered);
+    assert!(Arc::ptr_eq(
         pin.as_ref().unwrap(),
         &replacement_delivery_pin
     ));

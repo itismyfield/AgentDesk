@@ -64,28 +64,6 @@ fn restored_owner_makes_missing_registry_resolve_for_live_session() {
 }
 
 #[test]
-fn remove_tmux_session_if_current_preserves_the_removed_cancel_marker() {
-    let registry = TmuxWatcherRegistry::new();
-    let tmux = "AgentDesk-standby-successor-cleanup";
-    let channel = ChannelId::new(4_794_001);
-    let handle = live_watcher_handle(tmux);
-    let cancel = handle.cancel.clone();
-    registry.insert(channel, handle);
-
-    assert!(
-        registry
-            .remove_tmux_session_if_current(tmux, &cancel)
-            .is_some(),
-        "the exact provisional slot must be retired"
-    );
-    assert!(
-        !cancel.load(std::sync::atomic::Ordering::Relaxed),
-        "retiring a watcher for a standby successor must not pre-cancel that successor"
-    );
-    assert!(registry.get(&channel).is_none());
-}
-
-#[test]
 fn session_rebind_retains_owner_when_called_after_watcher_teardown() {
     let registry = TmuxWatcherRegistry::new();
     let tmux = "AgentDesk-claude-adk-cc";
@@ -94,7 +72,8 @@ fn session_rebind_retains_owner_when_called_after_watcher_teardown() {
     let handle = live_watcher_handle(tmux);
     let cancel = handle.cancel.clone();
     registry.insert(channel, handle);
-    registry.remove_tmux_session_if_current(tmux, &cancel);
+    assert!(registry.remove_tmux_session_if_current(tmux, &cancel).is_some());
+    assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
     assert_eq!(registry.owner_channel_for_tmux_session(tmux), None);
 
     assert!(registry.retain_owner_during_session_rebind(tmux, channel));

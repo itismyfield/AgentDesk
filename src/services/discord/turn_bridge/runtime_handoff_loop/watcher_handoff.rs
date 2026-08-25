@@ -258,6 +258,7 @@ pub(super) fn handle_watcher_runtime_handoff(
                 let _ = shared_owned
                     .tmux_watchers
                     .remove_tmux_session_if_current(&tmux_session_name, &cancel);
+                *watcher_delivery_pin = None;
                 if let Some(http_for_standby) = shared_owned.serenity_http_or_token_fallback() {
                     let placeholder_msg_id_opt = if inflight_state.current_msg_id == 0 {
                         None
@@ -402,6 +403,7 @@ pub(super) fn handle_watcher_runtime_handoff(
                     &output_path,
                     &cancel,
                 );
+                *watcher_delivery_pin = None;
             }
         }
     }
@@ -416,7 +418,7 @@ pub(super) fn handle_watcher_runtime_handoff(
             .as_ref()
             .expect("unix watcher claim carries its exact incarnation");
         *watcher_relay_available_for_turn = true;
-        super::pin_watcher_delivery_marker(
+        super::adopt_claimed_watcher_delivery_marker(
             watcher_delivery_pin,
             &watcher_claim_incarnation.turn_delivered,
         );
