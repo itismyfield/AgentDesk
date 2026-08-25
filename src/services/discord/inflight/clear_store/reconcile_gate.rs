@@ -83,15 +83,13 @@ fn generation_relation(born_generation: u64, current_generation: u64) -> &'stati
 /// constructor-only tooling and tests.
 ///
 /// DOES NOT PROVE — which is why this is no longer spelled
-/// `generation_subsystem_available` (#5462 S5 r3): allocation success, an epoch
-/// advanced past the previous process's, or a fence worth trusting.
-/// `runtime_store::allocate_generation_epoch` returns a generation-and-route
-/// binding, and `allocate_process_generation_binding` publishes it as one value.
-/// Five allocation outcomes can be positive without advancing:
-/// `ParentSyncFailed`, `CounterReadFailed`, `Saturated`, `WriteFailed`, and
-/// `LockFailed`. `Unwitnessed` is also observed, but is not an allocation
-/// outcome. This reconcile path sees only `process_generation()`'s bare `u64`,
-/// not the route recorded by `runtime_store`.
+/// `generation_subsystem_available` (#5462 S5 r3): which process authored a row
+/// or whether a successful allocation survived a crash. The public destructive
+/// paths consume the published generation-and-route binding, but the route is
+/// only syscall-allocation provenance. Five allocation outcomes can be positive
+/// without advancing: `ParentSyncFailed`, `CounterReadFailed`, `Saturated`,
+/// `WriteFailed`, and `LockFailed`; `Unwitnessed` is observable but is not an
+/// allocation outcome.
 ///
 /// The false half is why this is the allocated epoch, not a path probe:
 /// `LockFailed` and `WriteFailed` can reach zero while the path is `Some`, and
@@ -104,15 +102,13 @@ fn generation_relation(born_generation: u64, current_generation: u64) -> &'stati
 /// That fallback reads zero wherever the counter cannot be read — absent on a
 /// first boot, or present but unparseable, which `load_generation()` collapses
 /// into the same `unwrap_or(0)` — and only there does §9-9's population mix into
-/// §9-8's `legacy_zero`. Separating even that needs the allocation route
-/// propagated into this bare-`u64` observation, which this slice does not do.
+/// §9-8's `legacy_zero`. The `Unwitnessed` route now identifies that fallback at
+/// observation time, but does not establish which process authored the row.
 ///
-/// This remains the pure `current_generation > 0` fact and does not inspect
-/// allocation provenance. Five non-advanced routes can still return a positive
-/// generation; `path_unavailable` is the only route that is always zero. The
-/// same observation now carries `epoch_route` and `epoch_advanced` from the one
-/// allocation binding, but neither field changes the deletion decision. Route
-/// describes syscall-success provenance, not crash survival.
+/// This remains the pure `current_generation > 0` fact. The observation also
+/// carries the allocation route, but that route records syscall-allocation
+/// provenance, not row authorship or survival across a crash, and it never
+/// changes the deletion decision.
 fn current_generation_nonzero(current_generation: u64) -> bool {
     current_generation > 0
 }
@@ -408,6 +404,26 @@ mod tests {
             .expect("reconcile generation gate allow event")
     }
 
+    fn emitted_refusal_payload(channel_id: u64) -> serde_json::Value {
+        crate::services::observability::events::recent(usize::MAX)
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.event_type == "invariant_violation"
+                    && event.channel_id == Some(channel_id)
+                    && event.payload["invariant"] == "reconcile_never_clears_current_generation_row"
+                    && event.payload["details"]["site"] == "clear_inflight_state_for_reconcile"
+            })
+            .map(|event| event.payload["details"].clone())
+            .expect("reconcile generation gate refusal event")
+    }
+
+    fn seed_generation_counter(root: &std::path::Path, generation: u64) {
+        let path = root.join("runtime").join("generation");
+        std::fs::create_dir_all(path.parent().expect("generation parent")).unwrap();
+        std::fs::write(path, generation.to_string()).unwrap();
+    }
+
     #[test]
     fn current_generation_predicate_is_nonzero_and_exact() {
         let current = 5462;
@@ -670,6 +686,74 @@ mod tests {
             let extra = emitted_allow_payload(nonmatching.channel_id);
             assert_eq!(extra["epoch_route"], bound.epoch_route());
             assert_eq!(extra["epoch_advanced"], expected_advanced);
+        }
+    }
+
+    #[test]
+    fn public_reconcile_observes_production_shaped_published_routes() {
+        for (index, (parent_sync_succeeds, expected_route)) in [
+            (false, "parent_sync_failed"),
+            (true, "advanced_with_synced_rename"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+            let root = TempDir::new().expect("temp root");
+            let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                root.path(),
+            );
+            crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+            seed_generation_counter(root.path(), 54_61);
+            let _publication =
+                crate::services::discord::runtime_store::allocate_and_publish_process_generation_for_tests(
+                    parent_sync_succeeds,
+                );
+
+            let matching = row(62_000 + index as u64 * 2, 54_62);
+            seed(
+                &root.path().join("runtime").join("discord_inflight"),
+                &matching,
+            );
+            let matching_path = inflight_state_path(
+                &root.path().join("runtime").join("discord_inflight"),
+                &ProviderKind::Claude,
+                matching.channel_id,
+            );
+            let refusal = clear_inflight_state_for_reconcile(&ProviderKind::Claude, &matching);
+            assert_eq!(
+                refusal,
+                ReconcileClearOutcome::LiveGenerationSkipped {
+                    fresh_born_generation: 54_62,
+                }
+            );
+            assert!(matching_path.exists());
+            let refusal = emitted_refusal_payload(matching.channel_id);
+            assert_eq!(refusal["current_generation"], 54_62);
+            assert_eq!(refusal["epoch_route"], expected_route);
+            assert_eq!(refusal["epoch_advanced"], parent_sync_succeeds);
+
+            let nonmatching = row(62_001 + index as u64 * 2, 54_61);
+            seed(
+                &root.path().join("runtime").join("discord_inflight"),
+                &nonmatching,
+            );
+            let nonmatching_path = inflight_state_path(
+                &root.path().join("runtime").join("discord_inflight"),
+                &ProviderKind::Claude,
+                nonmatching.channel_id,
+            );
+            let allowed = clear_inflight_state_for_reconcile(&ProviderKind::Claude, &nonmatching);
+            assert_eq!(
+                allowed,
+                ReconcileClearOutcome::Delegated(GuardedClearOutcome::Cleared)
+            );
+            assert!(!nonmatching_path.exists());
+            let allowed = emitted_allow_payload(nonmatching.channel_id);
+            assert_eq!(allowed["current_generation"], 54_62);
+            assert_eq!(allowed["epoch_route"], expected_route);
+            assert_eq!(allowed["epoch_advanced"], parent_sync_succeeds);
         }
     }
 

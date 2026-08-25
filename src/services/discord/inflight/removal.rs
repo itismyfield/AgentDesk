@@ -798,6 +798,48 @@ mod loader_gate_observation_tests {
             .expect("loader gate allow event")
     }
 
+    fn emitted_refusal_payload(channel_id: u64) -> serde_json::Value {
+        crate::services::observability::events::recent(usize::MAX)
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.event_type == "invariant_violation"
+                    && event.channel_id == Some(channel_id)
+                    && event.payload["invariant"] == "reconcile_never_clears_current_generation_row"
+                    && event.payload["details"]["site"] == "load_inflight_states_from_root_stale"
+            })
+            .map(|event| event.payload["details"].clone())
+            .expect("loader generation gate refusal event")
+    }
+
+    fn seed_generation_counter(root: &std::path::Path, generation: u64) {
+        let path = root.join("runtime").join("generation");
+        std::fs::create_dir_all(path.parent().expect("generation parent")).unwrap();
+        std::fs::write(path, generation.to_string()).unwrap();
+    }
+
+    struct TmuxAliveOverrideReset;
+
+    impl Drop for TmuxAliveOverrideReset {
+        fn drop(&mut self) {
+            set_test_tmux_alive_override(None);
+        }
+    }
+
+    fn seed_stale(root: &std::path::Path, state: &InflightTurnState) -> std::path::PathBuf {
+        super::super::save_inflight_state_in_root(root, state).expect("seed loader row");
+        let path = inflight_state_path(root, &ProviderKind::Claude, state.channel_id);
+        filetime::set_file_mtime(
+            &path,
+            filetime::FileTime::from_unix_time(
+                chrono::Utc::now().timestamp() - INFLIGHT_MAX_AGE_SECS as i64 - 2,
+                0,
+            ),
+        )
+        .expect("age row past loader threshold");
+        path
+    }
+
     // The allow counter is §9-2's denominator, so its fields are the filter that
     // isolates the transfer condition (current generation, no tmux name) — the
     // one combination this fence deliberately does not refuse.
@@ -902,6 +944,60 @@ mod loader_gate_observation_tests {
             let extra = emitted_allow_payload(nonmatching.channel_id);
             assert_eq!(extra["epoch_route"], bound.epoch_route());
             assert_eq!(extra["epoch_advanced"], expected_advanced);
+        }
+    }
+
+    #[test]
+    fn public_loader_observes_production_shaped_published_routes() {
+        for (index, (parent_sync_succeeds, expected_route)) in [
+            (false, "parent_sync_failed"),
+            (true, "advanced_with_synced_rename"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+            let root = tempfile::tempdir().expect("temp root");
+            let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                root.path(),
+            );
+            crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+            seed_generation_counter(root.path(), 54_61);
+            let _publication =
+                crate::services::discord::runtime_store::allocate_and_publish_process_generation_for_tests(
+                    parent_sync_succeeds,
+                );
+            set_test_tmux_alive_override(Some(&[]));
+            let _tmux_override = TmuxAliveOverrideReset;
+
+            let inflight_root = root.path().join("runtime").join("discord_inflight");
+            let matching = row(63_000 + index as u64 * 2, 54_62, Some("named"));
+            let matching_path = seed_stale(&inflight_root, &matching);
+            let loaded =
+                load_inflight_states_for_probe_from_root(&inflight_root, &ProviderKind::Claude);
+            assert_eq!(loaded.states.len(), 1);
+            assert!(matching_path.exists());
+            let refusal = emitted_refusal_payload(matching.channel_id);
+            assert_eq!(refusal["current_generation"], 54_62);
+            assert_eq!(refusal["epoch_route"], expected_route);
+            assert_eq!(refusal["epoch_advanced"], parent_sync_succeeds);
+
+            let nonmatching = row(63_001 + index as u64 * 2, 54_61, Some("named"));
+            let nonmatching_path = seed_stale(&inflight_root, &nonmatching);
+            let loaded =
+                load_inflight_states_for_probe_from_root(&inflight_root, &ProviderKind::Claude);
+            assert!(
+                loaded
+                    .states
+                    .iter()
+                    .all(|state| state.channel_id != nonmatching.channel_id)
+            );
+            assert!(!nonmatching_path.exists());
+            let allowed = emitted_allow_payload(nonmatching.channel_id);
+            assert_eq!(allowed["current_generation"], 54_62);
+            assert_eq!(allowed["epoch_route"], expected_route);
+            assert_eq!(allowed["epoch_advanced"], parent_sync_succeeds);
         }
     }
 

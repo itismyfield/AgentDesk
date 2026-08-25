@@ -321,6 +321,21 @@ pub(in crate::services::discord) fn process_generation_allocation_for_tests(
     ProcessGenerationAllocation { generation, route }
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) struct TestProcessGenerationPublication {
+    previous_override: Option<u64>,
+    previous_allocation: Option<ProcessGenerationAllocation>,
+}
+
+#[cfg(test)]
+impl Drop for TestProcessGenerationPublication {
+    fn drop(&mut self) {
+        let _allocation = lock_unpoisoned(&PROCESS_GENERATION_ALLOCATION_TRANSACTION);
+        *test_generation_override() = self.previous_override;
+        *test_allocation_memo() = self.previous_allocation;
+    }
+}
+
 // </epoch-provenance-surface>
 
 /// Load the current generation counter (returns 0 if missing or unreadable).
@@ -621,7 +636,17 @@ where
 /// Return the process generation; before boot allocation, use the on-disk
 /// counter for constructor-only compatibility.
 pub fn process_generation() -> u64 {
-    process_generation_binding().generation
+    #[cfg(not(test))]
+    {
+        process_generation_binding().generation
+    }
+    #[cfg(test)]
+    {
+        if let Some(generation) = *test_generation_override() {
+            return generation;
+        }
+        load_generation()
+    }
 }
 
 pub(in crate::services::discord) fn process_generation_binding() -> ProcessGenerationAllocation {
@@ -630,15 +655,55 @@ pub(in crate::services::discord) fn process_generation_binding() -> ProcessGener
         return *bound;
     }
     #[cfg(test)]
-    if let Some(generation) = *test_generation_override() {
-        return ProcessGenerationAllocation {
-            generation,
-            route: GenerationAllocationRoute::Unwitnessed,
-        };
+    {
+        if let Some(generation) = *test_generation_override() {
+            return ProcessGenerationAllocation {
+                generation,
+                route: GenerationAllocationRoute::Unwitnessed,
+            };
+        }
+        if let Some(bound) = *test_allocation_memo() {
+            return bound;
+        }
     }
     ProcessGenerationAllocation {
         generation: load_generation(),
         route: GenerationAllocationRoute::Unwitnessed,
+    }
+}
+
+#[cfg(test)]
+fn test_parent_sync_failure(_: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("injected parent sync failure"))
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn allocate_and_publish_process_generation_for_tests(
+    parent_sync_succeeds: bool,
+) -> TestProcessGenerationPublication {
+    let _allocation = lock_unpoisoned(&PROCESS_GENERATION_ALLOCATION_TRANSACTION);
+    let allocated = if parent_sync_succeeds {
+        allocate_generation_epoch_with_io(GenerationIo {
+            path: generation_path(),
+            lock: lock_generation_path,
+            read: read_generation_counter,
+            write: atomic_write,
+            fsync: fsync_parent_dir,
+        })
+    } else {
+        allocate_generation_epoch_with_io(GenerationIo {
+            path: generation_path(),
+            lock: lock_generation_path,
+            read: read_generation_counter,
+            write: atomic_write,
+            fsync: test_parent_sync_failure,
+        })
+    };
+    let previous_override = test_generation_override().take();
+    let previous_allocation = test_allocation_memo().replace(allocated);
+    TestProcessGenerationPublication {
+        previous_override,
+        previous_allocation,
     }
 }
 
@@ -1162,8 +1227,13 @@ mod generation_allocation_tests {
         std::fs::write(&path, "19").unwrap();
         expect(
             process_generation_binding(),
+            8,
+            GenerationAllocationRoute::AdvancedWithSyncedRename,
+        );
+        assert_eq!(
+            process_generation(),
             19,
-            GenerationAllocationRoute::Unwitnessed,
+            "the ordinary cfg(test) generation accessor must keep its disk fallback"
         );
 
         set_process_generation_for_tests(Some(73));

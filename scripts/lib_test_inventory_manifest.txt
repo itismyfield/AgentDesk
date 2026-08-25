@@ -2892,6 +2892,7 @@ services::discord::inflight::clear_store::reconcile_gate::tests::current_generat
 services::discord::inflight::clear_store::reconcile_gate::tests::legacy_zero_generation_remains_fail_open
 services::discord::inflight::clear_store::reconcile_gate::tests::normal_reconcile_clear_uses_fresh_locked_generation
 services::discord::inflight::clear_store::reconcile_gate::tests::observation_labels_and_allocation_only_evaluation_api_are_exact
+services::discord::inflight::clear_store::reconcile_gate::tests::public_reconcile_observes_production_shaped_published_routes
 services::discord::inflight::clear_store::reconcile_gate::tests::refusal_warn_describes_the_fresh_row_not_the_stale_snapshot
 services::discord::inflight::destructive_commit::tests::generation_advance_aborts_before_cancel_store
 services::discord::inflight::destructive_commit::tests::typed_outcomes_cover_commit_and_every_pin_field
@@ -2979,6 +2980,7 @@ services::discord::inflight::removal::loader_gate_observation_tests::loader_allo
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_marks_the_unnamed_current_generation_row
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_kind_is_distinct_from_the_reconcile_fence_kind
 services::discord::inflight::removal::loader_gate_observation_tests::observation_labels_and_allocation_only_evaluation_api_are_exact
+services::discord::inflight::removal::loader_gate_observation_tests::public_loader_observes_production_shaped_published_routes
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_guarded_save_does_not_resurrect_a_deleted_row
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_guarded_save_preserves_newer_owner_bytes_on_identity_mismatch
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_patch_accepts_same_value_prior_write_within_ui_group
