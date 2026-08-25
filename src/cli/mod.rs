@@ -3,6 +3,7 @@ pub(crate) mod client;
 pub(crate) mod dcserver;
 pub(crate) mod dcserver_pg_bootstrap;
 pub(crate) mod dcserver_restart_marker;
+mod dcserver_restart_wait;
 pub(crate) mod direct;
 pub(crate) mod discord;
 pub(crate) mod discord_thread_create;
