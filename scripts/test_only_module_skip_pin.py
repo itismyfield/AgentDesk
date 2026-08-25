@@ -62,6 +62,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/health/reachability/obligation_tests.rs",
         "src/services/discord/inflight/save_store/bridge_entry_guard_tests.rs",
         "src/services/discord/inflight/save_store/post_loop_identity_guard_tests.rs",
+        "src/services/discord/outbound/manual_delivery/production_nonce_tests.rs",
         "src/services/discord/outbound/turn_output_controller/fresh_send_tests.rs",
         "src/services/discord/placeholder_controller/queued_card_gate/tests.rs",
         "src/services/discord/placeholder_live_events/tests.rs",
