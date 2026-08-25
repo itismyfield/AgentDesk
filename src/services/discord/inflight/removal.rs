@@ -78,6 +78,13 @@ fn loader_gate_refuses(state: &InflightTurnState, current_generation: u64) -> bo
     row_is_current_generation(state, current_generation) && state.tmux_session_name.is_some()
 }
 
+fn loader_gate_refuses_with_allocation(
+    state: &InflightTurnState,
+    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
+) -> bool {
+    loader_gate_refuses(state, allocation.generation)
+}
+
 /// §7.2-1's refusal payload for the loader fence, filed under an invariant name
 /// it SHARES with `clear_store::reconcile_gate::refusal_details`.
 ///
@@ -93,17 +100,23 @@ fn loader_gate_refuses(state: &InflightTurnState, current_generation: u64) -> bo
 /// site's `clear_*_for_reconcile`. A §9-2-style query filtering an unprefixed
 /// field (`details->>'tmux_session_name' IS NOT NULL`) therefore counts this
 /// site only, and drops every reconcile-gate row without saying so.
-fn record_loader_generation_gate(state: &InflightTurnState, current_generation: u64, path: &Path) {
+fn record_loader_generation_gate(
+    state: &InflightTurnState,
+    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
+    path: &Path,
+) {
     record_inflight_invariant_with_severity(
         false,
         state,
         "reconcile_never_clears_current_generation_row",
         "src/services/discord/inflight/removal.rs:load_inflight_states_from_root",
-        "destructive inflight loader must preserve a named row authored by the running process",
+        "destructive inflight loader must preserve a named row matching the process generation",
         serde_json::json!({
             "site": "load_inflight_states_from_root_stale",
             "born_generation": state.born_generation,
-            "current_generation": current_generation,
+            "current_generation": allocation.generation,
+            "epoch_route": allocation.epoch_route(),
+            "epoch_advanced": allocation.epoch_advanced(),
             "user_msg_id": state.user_msg_id,
             "finalizer_turn_id": state.finalizer_turn_id,
             "turn_nonce": state.turn_nonce,
@@ -168,10 +181,12 @@ const LOADER_GENERATION_GATE_ALLOWED: &str = "loader_generation_gate_allowed";
 fn emit_loader_generation_gate_allowed(
     provider: &ProviderKind,
     state: &InflightTurnState,
-    current_generation: u64,
+    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
     path: &Path,
 ) {
-    let current_generation_row = row_is_current_generation(state, current_generation);
+    let current_generation_row = row_is_current_generation(state, allocation.generation);
+    let epoch_route = allocation.epoch_route();
+    let epoch_advanced = allocation.epoch_advanced();
     let tmux_session_name_present = state.tmux_session_name.is_some();
     crate::services::observability::emit_inflight_lifecycle_event(
         provider.as_str(),
@@ -183,7 +198,9 @@ fn emit_loader_generation_gate_allowed(
         serde_json::json!({
             "site": "load_inflight_states_from_root_stale",
             "born_generation": state.born_generation,
-            "current_generation": current_generation,
+            "current_generation": allocation.generation,
+            "epoch_route": epoch_route,
+            "epoch_advanced": epoch_advanced,
             "current_generation_row": current_generation_row,
             "tmux_session_name_present": tmux_session_name_present,
             "user_msg_id": state.user_msg_id,
@@ -195,7 +212,9 @@ fn emit_loader_generation_gate_allowed(
         channel_id = state.channel_id,
         user_msg_id = state.user_msg_id,
         born_generation = state.born_generation,
-        current_generation,
+        current_generation = allocation.generation,
+        epoch_route,
+        epoch_advanced,
         current_generation_row,
         tmux_session_name_present,
         site = "load_inflight_states_from_root_stale",
@@ -524,7 +543,8 @@ pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
     let mut states = Vec::new();
     let mut complete = true;
     let mut tmux_owners: HashMap<String, u64> = HashMap::new();
-    let current_generation = crate::services::discord::runtime_store::process_generation();
+    let allocation = crate::services::discord::runtime_store::process_generation_binding();
+    let current_generation = allocation.generation;
     for entry in entries {
         let path = match entry {
             Ok(entry) => entry.path(),
@@ -675,15 +695,10 @@ pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
             if let Some(reason) =
                 stale_removal_reason_for_path(&path, &locked_state, current_generation)
             {
-                if loader_gate_refuses(&locked_state, current_generation) {
-                    record_loader_generation_gate(&locked_state, current_generation, &path);
+                if loader_gate_refuses_with_allocation(&locked_state, allocation) {
+                    record_loader_generation_gate(&locked_state, allocation, &path);
                 } else {
-                    emit_loader_generation_gate_allowed(
-                        provider,
-                        &locked_state,
-                        current_generation,
-                        &path,
-                    );
+                    emit_loader_generation_gate_allowed(provider, &locked_state, allocation, &path);
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!("  [{ts}] ⚠ {}: {}", reason, path.display());
                     log_loader_inflight_remove(
@@ -761,6 +776,15 @@ mod loader_gate_observation_tests {
         state
     }
 
+    fn allocation(
+        generation: u64,
+        route: crate::services::discord::runtime_store::GenerationAllocationRoute,
+    ) -> crate::services::discord::runtime_store::ProcessGenerationAllocation {
+        crate::services::discord::runtime_store::process_generation_allocation_for_tests(
+            generation, route,
+        )
+    }
+
     fn emitted_allow_payload(channel_id: u64) -> serde_json::Value {
         crate::services::observability::events::recent(usize::MAX)
             .into_iter()
@@ -783,7 +807,10 @@ mod loader_gate_observation_tests {
         emit_loader_generation_gate_allowed(
             &ProviderKind::Claude,
             &state,
-            54_62,
+            crate::services::discord::runtime_store::process_generation_allocation_for_tests(
+                54_62,
+                crate::services::discord::runtime_store::GenerationAllocationRoute::AdvancedWithSyncedRename,
+            ),
             Path::new("/tmp/54630.json"),
         );
 
@@ -805,7 +832,10 @@ mod loader_gate_observation_tests {
         emit_loader_generation_gate_allowed(
             &ProviderKind::Claude,
             &state,
-            54_62,
+            crate::services::discord::runtime_store::process_generation_allocation_for_tests(
+                54_62,
+                crate::services::discord::runtime_store::GenerationAllocationRoute::AdvancedWithSyncedRename,
+            ),
             Path::new("/tmp/54631.json"),
         );
 
@@ -823,5 +853,70 @@ mod loader_gate_observation_tests {
             LOADER_GENERATION_GATE_ALLOWED,
             "reconcile_generation_gate_allowed"
         );
+    }
+
+    #[test]
+    fn allocation_route_is_observed_but_never_changes_loader_preservation() {
+        use crate::services::discord::runtime_store::GenerationAllocationRoute as Route;
+
+        for (index, route) in [
+            Route::AdvancedWithSyncedRename,
+            Route::ParentSyncFailed,
+            Route::CounterReadFailed,
+            Route::Saturated,
+            Route::WriteFailed,
+            Route::LockFailed,
+            Route::PathUnavailable,
+            Route::Unwitnessed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bound = allocation(54_62, route);
+            let expected_advanced = matches!(route, Route::AdvancedWithSyncedRename);
+            let matching = row(61_000 + index as u64 * 2, bound.generation, Some("named"));
+            assert!(
+                loader_gate_refuses_with_allocation(&matching, bound),
+                "a positive non-advanced route must preserve the same matching row: {}",
+                bound.epoch_route(),
+            );
+            let details = serde_json::json!({
+                "epoch_route": bound.epoch_route(),
+                "epoch_advanced": bound.epoch_advanced(),
+            });
+            assert_eq!(details["epoch_route"], bound.epoch_route());
+            assert_eq!(details["epoch_advanced"], expected_advanced);
+
+            let nonmatching = row(61_001 + index as u64 * 2, 54_61, Some("named"));
+            assert!(
+                !loader_gate_refuses_with_allocation(&nonmatching, bound),
+                "route must not over-suppress an ordinary stale row: {}",
+                bound.epoch_route(),
+            );
+            emit_loader_generation_gate_allowed(
+                &ProviderKind::Claude,
+                &nonmatching,
+                bound,
+                Path::new("/tmp/loader-route-proof.json"),
+            );
+            let extra = emitted_allow_payload(nonmatching.channel_id);
+            assert_eq!(extra["epoch_route"], bound.epoch_route());
+            assert_eq!(extra["epoch_advanced"], expected_advanced);
+        }
+    }
+
+    /// Lexical tripwire only: aliases or helper extraction can evade it. The
+    /// route-complete execution test above is the semantic proof.
+    #[test]
+    fn observation_labels_and_allocation_only_evaluation_api_are_exact() {
+        let production = include_str!("removal.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap()
+            .0;
+        assert_eq!(production.matches("\"epoch_route\"").count(), 2);
+        assert_eq!(production.matches("\"epoch_advanced\"").count(), 2);
+        assert_eq!(production.matches("epoch_route,").count(), 2);
+        assert_eq!(production.matches("epoch_advanced,").count(), 2);
+        assert_eq!(production.matches("ProcessGenerationAllocation").count(), 3);
     }
 }

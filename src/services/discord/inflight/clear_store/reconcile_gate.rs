@@ -1,7 +1,8 @@
 //! Generation fence for boot/startup reconcile row removal (#5462 S2).
 //!
-//! Reconcile callers must not unlink a row authored by the running process. The
-//! root-explicit helpers below keep the decisive read, generation check, identity
+//! Reconcile callers must not unlink a row whose `born_generation` matches this
+//! process's generation. The root-explicit helpers below keep the decisive read,
+//! generation check, identity
 //! check, and unlink inside one inflight sidecar flock critical section.
 
 use super::*;
@@ -11,7 +12,9 @@ use super::*;
 /// not gain a reconcile-only variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum ReconcileClearOutcome {
-    /// The locked, freshly-read row was authored by the running process.
+    /// The locked, freshly-read row's `born_generation` matches the process
+    /// generation. That is a generation match, not a claim about which process
+    /// wrote the row.
     ///
     /// Carries that row's `born_generation` (#5462 S5 r2): the fence judges the
     /// row it re-read under the lock, and the caller's snapshot can already be
@@ -104,9 +107,12 @@ fn generation_relation(born_generation: u64, current_generation: u64) -> &'stati
 /// §9-8's `legacy_zero`. Separating even that needs the allocation route
 /// propagated into this bare-`u64` observation, which this slice does not do.
 ///
-/// Takes the generation the caller already observed instead of starting or
-/// re-reading allocation: this bare-`u64` observation must not move the epoch it
-/// reports on.
+/// This remains the pure `current_generation > 0` fact and does not inspect
+/// allocation provenance. Five non-advanced routes can still return a positive
+/// generation; `path_unavailable` is the only route that is always zero. The
+/// same observation now carries `epoch_route` and `epoch_advanced` from the one
+/// allocation binding, but neither field changes the deletion decision. Route
+/// describes syscall-success provenance, not crash survival.
 fn current_generation_nonzero(current_generation: u64) -> bool {
     current_generation > 0
 }
@@ -140,13 +146,14 @@ pub(in crate::services::discord) fn clear_inflight_state_for_reconcile(
     let Some(root) = inflight_runtime_root() else {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);
     };
-    let current_generation = crate::services::discord::runtime_store::process_generation();
-    let outcome =
-        clear_inflight_state_for_reconcile_in_root(&root, provider, snapshot, current_generation);
+    let allocation = crate::services::discord::runtime_store::process_generation_binding();
+    let outcome = clear_inflight_state_for_reconcile_with_allocation_in_root(
+        &root, provider, snapshot, allocation,
+    );
     observe_reconcile_outcome(
         provider,
         snapshot,
-        current_generation,
+        allocation,
         "clear_inflight_state_for_reconcile",
         &inflight_state_path(&root, provider, snapshot.channel_id),
         outcome,
@@ -162,13 +169,14 @@ pub(in crate::services::discord) fn clear_rebind_origin_for_reconcile(
     let Some(root) = inflight_runtime_root() else {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);
     };
-    let current_generation = crate::services::discord::runtime_store::process_generation();
-    let outcome =
-        clear_rebind_origin_for_reconcile_in_root(&root, provider, snapshot, current_generation);
+    let allocation = crate::services::discord::runtime_store::process_generation_binding();
+    let outcome = clear_rebind_origin_for_reconcile_with_allocation_in_root(
+        &root, provider, snapshot, allocation,
+    );
     observe_reconcile_outcome(
         provider,
         snapshot,
-        current_generation,
+        allocation,
         "clear_rebind_origin_for_reconcile",
         &inflight_state_path(&root, provider, snapshot.channel_id),
         outcome,
@@ -209,13 +217,15 @@ fn refusal_details(
     site: &'static str,
     snapshot: &InflightTurnState,
     fresh_born_generation: u64,
-    current_generation: u64,
+    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
     path: &std::path::Path,
 ) -> serde_json::Value {
     serde_json::json!({
         "site": site,
         "born_generation": fresh_born_generation,
-        "current_generation": current_generation,
+        "current_generation": allocation.generation,
+        "epoch_route": allocation.epoch_route(),
+        "epoch_advanced": allocation.epoch_advanced(),
         "snapshot_born_generation": snapshot.born_generation,
         "snapshot_user_msg_id": snapshot.user_msg_id,
         "snapshot_finalizer_turn_id": snapshot.finalizer_turn_id,
@@ -230,7 +240,7 @@ fn refusal_details(
 fn observe_reconcile_outcome(
     provider: &ProviderKind,
     snapshot: &InflightTurnState,
-    current_generation: u64,
+    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
     site: &'static str,
     path: &std::path::Path,
     outcome: ReconcileClearOutcome,
@@ -244,14 +254,8 @@ fn observe_reconcile_outcome(
                 snapshot,
                 "reconcile_never_clears_current_generation_row",
                 "src/services/discord/inflight/clear_store/reconcile_gate.rs",
-                "reconcile must preserve a row authored by the running process",
-                refusal_details(
-                    site,
-                    snapshot,
-                    fresh_born_generation,
-                    current_generation,
-                    path,
-                ),
+                "reconcile must preserve a row matching the process generation",
+                refusal_details(site, snapshot, fresh_born_generation, allocation, path),
                 ObsSeverity::Warn,
             );
         }
@@ -260,7 +264,9 @@ fn observe_reconcile_outcome(
             // separate a fence passing real work through from one whose callers
             // all bounce off the identity guard behind it — a regression that
             // looks healthy in a bare allow count.
-            let facts = AllowedGenerationFacts::observe(snapshot, current_generation);
+            let facts = AllowedGenerationFacts::observe(snapshot, allocation.generation);
+            let epoch_route = allocation.epoch_route();
+            let epoch_advanced = allocation.epoch_advanced();
             let delegated_outcome = format!("{delegated:?}");
             crate::services::observability::emit_inflight_lifecycle_event(
                 provider.as_str(),
@@ -272,9 +278,11 @@ fn observe_reconcile_outcome(
                 serde_json::json!({
                     "site": site,
                     "born_generation": snapshot.born_generation,
-                    "current_generation": current_generation,
+                    "current_generation": allocation.generation,
                     "generation_relation": facts.relation,
                     "current_generation_nonzero": facts.current_generation_nonzero,
+                    "epoch_route": epoch_route,
+                    "epoch_advanced": epoch_advanced,
                     "delegated_outcome": delegated_outcome,
                     "user_msg_id": snapshot.user_msg_id,
                     "path": path.display().to_string(),
@@ -285,9 +293,11 @@ fn observe_reconcile_outcome(
                 channel_id = snapshot.channel_id,
                 user_msg_id = snapshot.user_msg_id,
                 born_generation = snapshot.born_generation,
-                current_generation,
+                current_generation = allocation.generation,
                 generation_relation = facts.relation,
                 current_generation_nonzero = facts.current_generation_nonzero,
+                epoch_route,
+                epoch_advanced,
                 delegated_outcome = ?delegated,
                 site,
                 path = %path.display(),
@@ -295,6 +305,24 @@ fn observe_reconcile_outcome(
             );
         }
     }
+}
+
+fn clear_inflight_state_for_reconcile_with_allocation_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    snapshot: &InflightTurnState,
+    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
+) -> ReconcileClearOutcome {
+    clear_inflight_state_for_reconcile_in_root(root, provider, snapshot, allocation.generation)
+}
+
+fn clear_rebind_origin_for_reconcile_with_allocation_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    snapshot: &InflightTurnState,
+    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
+) -> ReconcileClearOutcome {
+    clear_rebind_origin_for_reconcile_in_root(root, provider, snapshot, allocation.generation)
 }
 
 fn clear_inflight_state_for_reconcile_in_root(
@@ -356,6 +384,28 @@ mod tests {
 
     fn seed(root: &std::path::Path, state: &InflightTurnState) {
         super::super::save_inflight_state_in_root(root, state).expect("seed inflight row");
+    }
+
+    fn allocation(
+        generation: u64,
+        route: crate::services::discord::runtime_store::GenerationAllocationRoute,
+    ) -> crate::services::discord::runtime_store::ProcessGenerationAllocation {
+        crate::services::discord::runtime_store::process_generation_allocation_for_tests(
+            generation, route,
+        )
+    }
+
+    fn emitted_allow_payload(channel_id: u64) -> serde_json::Value {
+        crate::services::observability::events::recent(usize::MAX)
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.event_type == "inflight_lifecycle"
+                    && event.channel_id == Some(channel_id)
+                    && event.payload["kind"] == "reconcile_generation_gate_allowed"
+            })
+            .map(|event| event.payload["extra"].clone())
+            .expect("reconcile generation gate allow event")
     }
 
     #[test]
@@ -477,7 +527,10 @@ mod tests {
             "clear_inflight_state_for_reconcile",
             &snapshot,
             fresh_born_generation,
-            54_62,
+            crate::services::discord::runtime_store::process_generation_allocation_for_tests(
+                54_62,
+                crate::services::discord::runtime_store::GenerationAllocationRoute::AdvancedWithSyncedRename,
+            ),
             &path,
         );
         assert_eq!(details["born_generation"], 54_62);
@@ -540,5 +593,98 @@ mod tests {
             }
         );
         assert!(inflight_state_path(temp.path(), &ProviderKind::Claude, 54_622).exists());
+    }
+
+    #[test]
+    fn allocation_route_is_observed_but_never_changes_the_reconcile_decision() {
+        use crate::services::discord::runtime_store::GenerationAllocationRoute as Route;
+
+        let routes = [
+            Route::AdvancedWithSyncedRename,
+            Route::ParentSyncFailed,
+            Route::CounterReadFailed,
+            Route::Saturated,
+            Route::WriteFailed,
+            Route::LockFailed,
+            Route::PathUnavailable,
+            Route::Unwitnessed,
+        ];
+        for (index, route) in routes.into_iter().enumerate() {
+            let bound = allocation(54_62, route);
+            let expected_advanced = matches!(route, Route::AdvancedWithSyncedRename);
+            let temp = TempDir::new().expect("temp root");
+
+            let matching = row(60_000 + index as u64 * 2, bound.generation);
+            seed(temp.path(), &matching);
+            let matching_path =
+                inflight_state_path(temp.path(), &ProviderKind::Claude, matching.channel_id);
+            let matching_outcome = clear_inflight_state_for_reconcile_with_allocation_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                &matching,
+                bound,
+            );
+            assert_eq!(
+                matching_outcome,
+                ReconcileClearOutcome::LiveGenerationSkipped {
+                    fresh_born_generation: 54_62,
+                },
+                "route={}",
+                bound.epoch_route(),
+            );
+            assert!(matching_path.exists(), "route={}", bound.epoch_route());
+            let details = refusal_details(
+                "clear_inflight_state_for_reconcile",
+                &matching,
+                54_62,
+                bound,
+                &matching_path,
+            );
+            assert_eq!(details["epoch_route"], bound.epoch_route());
+            assert_eq!(details["epoch_advanced"], expected_advanced);
+
+            let nonmatching = row(60_001 + index as u64 * 2, 54_61);
+            seed(temp.path(), &nonmatching);
+            let nonmatching_path =
+                inflight_state_path(temp.path(), &ProviderKind::Claude, nonmatching.channel_id);
+            let delegated = clear_inflight_state_for_reconcile_with_allocation_in_root(
+                temp.path(),
+                &ProviderKind::Claude,
+                &nonmatching,
+                bound,
+            );
+            assert_eq!(
+                delegated,
+                ReconcileClearOutcome::Delegated(GuardedClearOutcome::Cleared),
+                "route={}",
+                bound.epoch_route(),
+            );
+            observe_reconcile_outcome(
+                &ProviderKind::Claude,
+                &nonmatching,
+                bound,
+                "clear_inflight_state_for_reconcile",
+                &nonmatching_path,
+                delegated,
+            );
+            let extra = emitted_allow_payload(nonmatching.channel_id);
+            assert_eq!(extra["epoch_route"], bound.epoch_route());
+            assert_eq!(extra["epoch_advanced"], expected_advanced);
+        }
+    }
+
+    /// Lexical tripwire only: aliases or helper extraction can evade it. The
+    /// route-complete execution test above is the semantic proof.
+    #[test]
+    fn observation_labels_and_allocation_only_evaluation_api_are_exact() {
+        let production = include_str!("reconcile_gate.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap()
+            .0;
+        assert_eq!(production.matches("\"epoch_route\"").count(), 2);
+        assert_eq!(production.matches("\"epoch_advanced\"").count(), 2);
+        assert_eq!(production.matches("epoch_route,").count(), 2);
+        assert_eq!(production.matches("epoch_advanced,").count(), 2);
+        assert_eq!(production.matches("ProcessGenerationAllocation").count(), 4);
     }
 }
