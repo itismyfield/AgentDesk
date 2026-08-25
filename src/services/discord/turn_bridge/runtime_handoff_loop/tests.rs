@@ -345,29 +345,39 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
 
 #[cfg(unix)]
 #[rustfmt::skip]
-#[tokio::test(flavor = "current_thread")]
-async fn runtime_adoption_rejects_claim_evicted_before_publication() {
+async fn assert_claim_eviction_fails_closed(channel_id: u64, message: RuntimeHandoffLoopMessage) {
     let _lock = crate::config::shared_test_env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let root = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
     let provider = ProviderKind::Codex;
-    let mut state = runtime_seed(provider.clone(), 42_592_609);
+    let mut state = runtime_seed(provider.clone(), channel_id);
     save_inflight_state(&state).unwrap();
     let shared = crate::services::discord::make_shared_data_for_tests();
-    let tmux = "AgentDesk-codex-claim-evicted";
-    let output = "/runtime/claim-evicted.jsonl";
-    shared.tmux_watchers.insert(ChannelId::new(state.channel_id), live_watcher_handle(tmux, output));
-    let _eviction = crate::services::discord::tmux::evict_claim_before_adoption_for_test(ChannelId::new(state.channel_id));
+    let (tmux, output) = match &message {
+        RuntimeHandoffLoopMessage::TmuxReady { tmux_session_name, output_path, .. } => (tmux_session_name, output_path),
+        RuntimeHandoffLoopMessage::RuntimeReady { handoff: RuntimeHandoff::CodexTui { tmux_session_name, rollout_path, .. } } => (tmux_session_name, rollout_path),
+        _ => unreachable!(),
+    };    shared.tmux_watchers.insert(ChannelId::new(channel_id), live_watcher_handle(tmux, output));
+    let _eviction = crate::services::discord::tmux::evict_claim_before_adoption_for_test(ChannelId::new(channel_id));
     let mut dirty = false;
-    let observed = dispatch_process_handoff(&shared, &provider, &mut state,
-        RuntimeHandoffLoopMessage::RuntimeReady { handoff: RuntimeHandoff::CodexTui {
-            rollout_path: output.into(), thread_id: None, tmux_session_name: tmux.into(), last_offset: 10_240,
-        } }, &mut dirty, false).await;
-    assert_eq!(observed.outcome, Some(GuardedSaveOutcome::Saved));
-    assert_eq!(observed.claim_outcome, WatcherHandoffClaimOutcome::None);
-    assert!(!observed.tmux_handed_off && !observed.watcher_relay_available);
-    assert!(observed.watcher_delivery_pin.is_none());
+    let observed = dispatch_process_handoff(&shared, &provider, &mut state, message, &mut dirty, false).await;
+    assert_eq!((observed.outcome, observed.claim_outcome), (Some(GuardedSaveOutcome::Saved), WatcherHandoffClaimOutcome::None));
+    assert!(!observed.tmux_handed_off && !observed.watcher_relay_available && observed.watcher_delivery_pin.is_none());
     assert_eq!(state.effective_relay_owner_kind(), crate::services::discord::inflight::RelayOwnerKind::None);
+}
+
+#[cfg(unix)]
+#[rustfmt::skip]
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_adoption_rejects_claim_evicted_before_publication() {
+    assert_claim_eviction_fails_closed(42_592_609, RuntimeHandoffLoopMessage::RuntimeReady { handoff: RuntimeHandoff::CodexTui { rollout_path: "/runtime/claim-evicted.jsonl".into(), thread_id: None, tmux_session_name: "AgentDesk-codex-claim-evicted".into(), last_offset: 10_240 } }).await;
+}
+
+#[cfg(unix)]
+#[rustfmt::skip]
+#[tokio::test(flavor = "current_thread")]
+async fn direct_tmux_adoption_rejects_claim_evicted_before_publication() {
+    assert_claim_eviction_fails_closed(42_592_610, RuntimeHandoffLoopMessage::TmuxReady { output_path: "/runtime/direct-claim-evicted.jsonl".into(), input_fifo_path: "/runtime/direct.input".into(), tmux_session_name: "AgentDesk-codex-direct-claim-evicted".into(), last_offset: 10_241 }).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -29,19 +29,7 @@ impl WatcherClaimIncarnation {
         }
     }
 
-    #[cfg(test)]
-    fn evict_before_adoption(
-        &self,
-        watchers: &TmuxWatcherRegistry,
-        guard: &crate::services::discord::TmuxWatcherRegistryGuard,
-    ) {
-        if EVICT_CLAIM_BEFORE_ADOPTION.swap(0, std::sync::atomic::Ordering::SeqCst)
-            == self.owner_channel_id.get()
-        {
-            let _ = watchers.remove_locked(guard, &self.owner_channel_id);
-        }
-    }
-
+    #[rustfmt::skip]
     pub(in crate::services::discord) fn adopt_if_current<T>(
         &self,
         watchers: &TmuxWatcherRegistry,
@@ -49,7 +37,12 @@ impl WatcherClaimIncarnation {
     ) -> Option<T> {
         let guard = lock_tmux_watcher_registry();
         #[cfg(test)]
-        self.evict_before_adoption(watchers, &guard);
+        if EVICT_CLAIM_BEFORE_ADOPTION.compare_exchange(
+            self.owner_channel_id.get(), 0,
+            std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst,
+        ).is_ok() {
+            let _ = watchers.remove_locked(&guard, &self.owner_channel_id);
+        }
         let current = watchers.get(&self.owner_channel_id)?;
         if !Arc::ptr_eq(&current.cancel, &self.cancel)
             || current.cancel.load(std::sync::atomic::Ordering::Relaxed)
@@ -120,25 +113,27 @@ impl WatcherClaimOutcome {
 }
 
 #[cfg(test)]
-static EVICT_CLAIM_BEFORE_ADOPTION: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+#[rustfmt::skip]
+static EVICT_CLAIM_BEFORE_ADOPTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
-pub(in crate::services::discord) struct ClaimAdoptionEvictionGuard;
+pub(in crate::services::discord) struct ClaimAdoptionEvictionGuard(u64);
 
 #[cfg(test)]
+#[rustfmt::skip]
 impl Drop for ClaimAdoptionEvictionGuard {
     fn drop(&mut self) {
-        EVICT_CLAIM_BEFORE_ADOPTION.store(0, std::sync::atomic::Ordering::SeqCst);
+        let _ = EVICT_CLAIM_BEFORE_ADOPTION.compare_exchange(
+            self.0, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst,
+        );
     }
 }
 
 #[cfg(test)]
-pub(in crate::services::discord) fn evict_claim_before_adoption_for_test(
-    owner: ChannelId,
-) -> ClaimAdoptionEvictionGuard {
+#[rustfmt::skip]
+pub(in crate::services::discord) fn evict_claim_before_adoption_for_test(owner: ChannelId) -> ClaimAdoptionEvictionGuard {
     EVICT_CLAIM_BEFORE_ADOPTION.store(owner.get(), std::sync::atomic::Ordering::SeqCst);
-    ClaimAdoptionEvictionGuard
+    ClaimAdoptionEvictionGuard(owner.get())
 }
 
 pub(crate) fn find_watcher_by_tmux_session(

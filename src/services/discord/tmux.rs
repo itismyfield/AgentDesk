@@ -73,10 +73,9 @@ use self::tmux_session_files::{
     reset_stale_local_relay_offset_if_output_regressed, sweep_orphan_session_files,
 };
 pub(crate) use self::tmux_session_files::{stamp_spawn_markers, write_spawn_nonce};
+#[rustfmt::skip]
 #[cfg(test)]
-pub(in crate::services::discord) use self::watcher_lifecycle::claim_cross_channel_tmux_watcher_for_test;
-#[cfg(test)]
-pub(in crate::services::discord) use self::watcher_lifecycle::evict_claim_before_adoption_for_test;
+pub(in crate::services::discord) use self::watcher_lifecycle::{claim_cross_channel_tmux_watcher_for_test, evict_claim_before_adoption_for_test};
 use self::watcher_lifecycle::*;
 pub(in crate::services::discord) use self::watcher_lifecycle::{
     ThreadFollowUpParent, WatcherClaimIncarnation, claim_or_replace_watcher,
