@@ -627,6 +627,45 @@ pub(crate) async fn enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx(
     .map_err(Into::into)
 }
 
+/// Exact-identity enqueue for durable handoffs.
+///
+/// `dedupe_key` is supplied by the owning domain rather than derived from
+/// rendered content. The 0096 partial unique index makes every
+/// non-failed/non-cancelled row active; the no-op conflict update returns that
+/// row's id. Terminal rows no longer participate, so a genuine retry inserts a
+/// fresh id.
+pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_exact_dedupe_and_cancel(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+    dedupe_key: &str,
+    cancel_token: Option<&CancelToken>,
+) -> Result<OutboxEnqueueOutcome, OutboxEnqueueError> {
+    validate_outbox_source(message.source)?;
+    if cancel_requested(cancel_token) {
+        return Ok(OutboxEnqueueOutcome::Cancelled);
+    }
+    let reason_code = normalized_reason_code(message.reason_code);
+    let id = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO message_outbox
+         (target, content, bot, source, reason_code, session_key, dedupe_key, dedupe_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() + INTERVAL '30 days')
+         ON CONFLICT (dedupe_key)
+             WHERE dedupe_key IS NOT NULL AND status NOT IN ('failed', 'cancelled')
+         DO UPDATE SET dedupe_key = EXCLUDED.dedupe_key
+         RETURNING id",
+    )
+    .bind(message.target)
+    .bind(message.content)
+    .bind(message.bot)
+    .bind(message.source)
+    .bind(reason_code)
+    .bind(message.session_key)
+    .bind(dedupe_key)
+    .fetch_one(pool)
+    .await?;
+    Ok(OutboxEnqueueOutcome::Enqueued { id })
+}
+
 pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_ttl_and_cancel(
     pool: &PgPool,
     message: OutboxMessage<'_>,

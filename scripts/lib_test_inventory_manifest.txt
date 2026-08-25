@@ -6006,6 +6006,10 @@ services::discord::turn_bridge::followup_requeue::tests::pre_submit_retry_reacti
 services::discord::turn_bridge::followup_requeue::tests::retry_cap_preserves_entry_and_stops_auto_kickoff_4888
 services::discord::turn_bridge::followup_requeue::tests::uncapped_retry_arms_only_after_terminal_projection_settles_4888
 services::discord::turn_bridge::guards::tests::merged_id_zero_state_drives_guard_key_owner_and_cleanup_identity
+services::discord::turn_bridge::headless_delivery::durable_outbox::tests::durable_rollout_defaults_off_and_requires_an_explicit_true_value
+services::discord::turn_bridge::headless_delivery::durable_outbox::tests::exact_identity_key_changes_on_each_required_axis
+services::discord::turn_bridge::headless_delivery::durable_outbox::tests::exact_identity_preserves_session_bytes_and_excludes_content
+services::discord::turn_bridge::headless_delivery::durable_outbox::tests::exact_identity_requires_owner_and_session_routing_key_is_bounded
 services::discord::turn_bridge::headless_delivery::headless_delivery_tests::headless_cleanup_deletes_processing_with_codex_tool_log_block
 services::discord::turn_bridge::headless_delivery::headless_delivery_tests::headless_cleanup_deletes_status_only_codex_placeholder
 services::discord::turn_bridge::headless_delivery::headless_delivery_tests::headless_cleanup_edits_partial_answer_without_korean_processing_footer
@@ -6023,6 +6027,13 @@ services::discord::turn_bridge::headless_delivery::outcome::tests::pg_error_dire
 services::discord::turn_bridge::headless_delivery::outcome::tests::typed_headless_outcomes_preserve_commit_dispositions
 services::discord::turn_bridge::headless_delivery::production_seam_tests::absent_outbox_pool_reaches_cancel_check_and_suppresses_direct_fallback
 services::discord::turn_bridge::headless_delivery::production_seam_tests::direct_fallback_notify_http_preference_is_caller_supplied_only
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_active_statuses_return_existing_id_and_terminal_statuses_retry_pg
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_concurrent_duplicates_converge_on_one_active_row_pg
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_exact_identity_is_content_free_and_owner_sensitive_pg
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_exact_path_observes_cancellation_before_database_work
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_existing_sent_row_is_immediately_visible_pg
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_provider_channel_and_generation_axes_are_distinct_pg
+services::discord::turn_bridge::headless_delivery::production_seam_tests::durable_rollout_falls_back_to_ttl_zero_for_off_or_incomplete_identity_pg
 services::discord::turn_bridge::headless_delivery::production_seam_tests::outbox_enqueue_error_reaches_cancel_check_then_direct_fallback
 services::discord::turn_bridge::intake_settlement::tests::cancel_prompt_replace_commit_closes_row_pg
 services::discord::turn_bridge::intake_settlement::tests::classify_preserve_precedes_every_terminal_receipt
