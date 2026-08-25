@@ -1390,6 +1390,25 @@ _restart_marker_consumed_root() {
   return 1
 }
 
+_restart_persisted_identity_root() {
+  # A phase-1 success must be attributable to this request. Health and marker
+  # consumption are useful observations, but neither carries the request nonce.
+  local expected_nonce="$1"
+  shift
+  local root identity
+
+  _restart_nonce_is_path_safe "$expected_nonce" || return 1
+  for root in "$@"; do
+    identity="$(_restart_request_artifact_path \
+      "$root" restart_persisted "$expected_nonce")" || continue
+    if _restart_artifact_nonce_matches "$identity" "$expected_nonce"; then
+      printf '%s' "$root"
+      return 0
+    fi
+  done
+  return 1
+}
+
 _release_unacknowledged_restart_lease() {
   # Called once the runtime has acknowledged durability. The runtime that
   # published the acknowledgement removes its own restart_pending and exits
@@ -1625,6 +1644,9 @@ request_restart_drain_mode_or_fail() {
   local root
   local acquired_root
   local consumed_root
+  local proof_root
+  local health_observed=0
+  local consumption_observed=0
   local job_state
   local nonce entropy marker_rc terminal_path
 
@@ -1744,32 +1766,35 @@ request_restart_drain_mode_or_fail() {
   done
 
   while [ "$waited" -lt "$ack_wait" ]; do
-    if _restart_pending_acknowledged "$port"; then
-      echo "▸ [gate] ${scope} restart admission fence observed on :${port} (not attributable to this request's nonce)"
+    if proof_root="$(_restart_persisted_identity_root "$nonce" "${roots[@]}")"; then
+      echo "✓ [gate] ${scope} restart persistence acknowledged for this request at ${proof_root}"
       AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
-      AGENTDESK_RESTART_DRAIN_VERDICT="fence-observed:nonce-unattributed"
+      AGENTDESK_RESTART_DRAIN_VERDICT="acknowledged:identity"
       return 0
     fi
-    # #1447 review P2: idle runtime may consume the marker (restart_ctrl
-    # deletes restart_pending and calls exit(0) once all turns drain) before
-    # our 1s poll observes the in-memory flag. If a marker we just wrote
-    # has disappeared, the runtime acknowledged it the only way it can.
-    if consumed_root="$(_restart_marker_consumed_root "${roots[@]}")"; then
-      echo "▸ [gate] ${scope} restart drain marker consumed by runtime at ${consumed_root} — treating as acknowledged"
-      AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
-      AGENTDESK_RESTART_DRAIN_VERDICT="consumed:our-nonce-unobserved"
-      for root in "${roots[@]}"; do
-        if [ -f "$root/restart_persisted" ] \
-          && grep -Fqx "nonce=${nonce}" "$root/restart_persisted" 2>/dev/null; then
-          AGENTDESK_RESTART_DRAIN_VERDICT="acknowledged:nonce"
-          break
-        fi
-      done
-      return 0
+    if [ "$health_observed" -eq 0 ] && _restart_pending_acknowledged "$port"; then
+      echo "▸ [gate] ${scope} restart admission fence observed on :${port}; waiting for request-specific persistence"
+      health_observed=1
+    fi
+    # Marker consumption can precede terminal publication. Record it, but keep
+    # waiting: disappearance alone is not attributable to this request's nonce.
+    if [ "$consumption_observed" -eq 0 ] \
+      && consumed_root="$(_restart_marker_consumed_root "${roots[@]}")"; then
+      echo "▸ [gate] ${scope} restart drain marker consumed at ${consumed_root}; waiting for request-specific persistence"
+      consumption_observed=1
     fi
     sleep 1
     waited=$((waited + 1))
   done
+
+  # Close the final sleep/timeout edge before applying weaker launchd and caller
+  # timeout policies.
+  if proof_root="$(_restart_persisted_identity_root "$nonce" "${roots[@]}")"; then
+    echo "✓ [gate] ${scope} restart persistence acknowledged for this request at ${proof_root}"
+    AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
+    AGENTDESK_RESTART_DRAIN_VERDICT="acknowledged:identity"
+    return 0
+  fi
 
   job_state=$(_launchd_job_state "$label")
   if [ "$job_state" = "not running" ]; then
@@ -1787,22 +1812,6 @@ request_restart_drain_mode_or_fail() {
     echo "▸ [gate] ${scope} launchd job is not running; cleared restart drain marker (no in-flight turns to drain)"
     return 0
   fi
-  # Late-arriving consumption: a marker may have been consumed between the
-  # last poll and the post-loop launchd check. Same ack semantics as above.
-  if consumed_root="$(_restart_marker_consumed_root "${roots[@]}")"; then
-    echo "▸ [gate] ${scope} restart drain marker consumed by runtime at ${consumed_root} during timeout window — treating as acknowledged"
-    AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
-    AGENTDESK_RESTART_DRAIN_VERDICT="consumed:our-nonce-unobserved"
-    for root in "${roots[@]}"; do
-      if [ -f "$root/restart_persisted" ] \
-        && grep -Fqx "nonce=${nonce}" "$root/restart_persisted" 2>/dev/null; then
-        AGENTDESK_RESTART_DRAIN_VERDICT="acknowledged:nonce"
-        break
-      fi
-    done
-    return 0
-  fi
-
   # Drain condition removed: a stuck/hung turn that never drains must not
   # permanently block a deploy. #4735 durable restart relay reattaches turns
   # after restart (silent reattach + inflight rebind), so an unacknowledged
@@ -1819,7 +1828,14 @@ request_restart_drain_mode_or_fail() {
   echo "⚠ [gate] ${scope} restart drain mode not acknowledged within ${ack_wait}s — proceeding anyway (drain condition removed; durable relay reattaches turns)" >&2
   clear_restart_drain_mode "$runtime_root" "$nonce" || true
   AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
-  AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1
+  # deploy-release has a request-specific phase-2 durability gate. Do not let
+  # this phase-1 timeout disable its own downstream authority. The restart skill
+  # has no phase 2, so its established permissive timeout remains unchanged.
+  if [ "$source" = "deploy-release" ]; then
+    AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=0
+  else
+    AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1
+  fi
   AGENTDESK_RESTART_DRAIN_VERDICT="not evaluated: restart drain acknowledgement timed out"
   return 0
 }
