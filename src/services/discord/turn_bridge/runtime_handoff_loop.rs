@@ -346,15 +346,11 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                                 "  [{ts}] ⏭ standby relay: skipping tmux watcher spawn for channel {}; spawning JSONL→Discord standby_relay",
                                 channel_id
                             );
-                            // Retire only the exact provisional slot; the
-                            // standby relay below owns an independent cancel.
-                            cancel_provisional_watcher_claim_if_matches(
-                                shared_owned.as_ref(),
-                                watcher_owner_channel_id,
-                                &tmux_session_name,
-                                &output_path,
-                                &cancel,
-                            );
+                            // Retire only this provisional watcher. Do not
+                            // cancel: the standby relay is the successor owner.
+                            let _ = shared_owned
+                                .tmux_watchers
+                                .remove_tmux_session_if_current(&tmux_session_name, &cancel);
                             if let Some(http_for_standby) =
                                 shared_owned.serenity_http_or_token_fallback()
                             {

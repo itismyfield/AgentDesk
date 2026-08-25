@@ -36,14 +36,14 @@ class SourceContractTests(unittest.TestCase):
 
     def test_registry_remeasurement_and_p2_1_classification_are_explicit(self) -> None:
         # #5504 Stack A moved five channel-only handoff cleanup spellings behind
-        # one exact-tuple cleanup helper, so 8/3/3/2 became 3/3/4/2. The baseline
+        # exact cleanup helpers, so 8/3/3/2 became 3/5/4/2. The baseline
         # comment stays at the historical no-growth ceiling; this assertion pins
         # the safer checked-in tree without relaxing that ceiling.
         self.assertEqual(
             self.registry_subcounts,
             {
                 "direct_channel_remove": 3,
-                "remove_if_current": 3,
+                "remove_if_current": 5,
                 "cancel_and_remove_if_current": 4,
                 "remove_locked_helper": 2,
             },
