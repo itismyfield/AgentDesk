@@ -9,25 +9,52 @@ pub(crate) enum WatcherClaimAction {
     ReuseExisting,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+pub(in crate::services::discord) struct WatcherClaimIncarnation {
+    pub(in crate::services::discord) paused: Arc<std::sync::atomic::AtomicBool>,
+    pub(in crate::services::discord) resume_offset: Arc<std::sync::Mutex<Option<u64>>>,
+    pub(in crate::services::discord) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl WatcherClaimIncarnation {
+    fn from_handle(handle: &TmuxWatcherHandle) -> Self {
+        Self {
+            paused: Arc::clone(&handle.paused),
+            resume_offset: Arc::clone(&handle.resume_offset),
+            turn_delivered: Arc::clone(&handle.turn_delivered),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct WatcherClaimOutcome {
     pub(crate) action: WatcherClaimAction,
     owner_channel_id: ChannelId,
+    incarnation: WatcherClaimIncarnation,
 }
 
 impl WatcherClaimOutcome {
-    fn new(action: WatcherClaimAction, owner_channel_id: ChannelId) -> Self {
+    fn new(
+        action: WatcherClaimAction,
+        owner_channel_id: ChannelId,
+        incarnation: WatcherClaimIncarnation,
+    ) -> Self {
         Self {
             action,
             owner_channel_id,
+            incarnation,
         }
     }
 
-    pub(crate) fn owner_channel_id(self) -> ChannelId {
+    pub(crate) fn owner_channel_id(&self) -> ChannelId {
         self.owner_channel_id
     }
 
-    pub(crate) fn should_spawn(self) -> bool {
+    pub(in crate::services::discord) fn incarnation(&self) -> &WatcherClaimIncarnation {
+        &self.incarnation
+    }
+
+    pub(crate) fn should_spawn(&self) -> bool {
         matches!(
             self.action,
             WatcherClaimAction::SpawnFresh
@@ -37,7 +64,7 @@ impl WatcherClaimOutcome {
         )
     }
 
-    pub(crate) fn replaced_existing(self) -> bool {
+    pub(crate) fn replaced_existing(&self) -> bool {
         matches!(
             self.action,
             WatcherClaimAction::SpawnReplacedStale
@@ -46,7 +73,7 @@ impl WatcherClaimOutcome {
         )
     }
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self.action {
             WatcherClaimAction::SpawnFresh => "spawn_fresh",
             WatcherClaimAction::SpawnReplacedStale => "spawn_replaced_stale",
@@ -413,13 +440,23 @@ pub(crate) fn claim_watcher(
                     "watcher_slots": watchers.len(),
                 }),
             );
+            let incarnation = watchers
+                .by_tmux_session
+                .get(&requested_tmux)
+                .map(|entry| WatcherClaimIncarnation::from_handle(&entry))
+                .expect("registry lock keeps the selected incumbent installed");
             return WatcherClaimOutcome::new(
                 WatcherClaimAction::ReuseExisting,
                 existing_channel_id,
+                incarnation,
             );
         }
     }
 
+    // The claim result owns the exact Arc identity installed by this mutation.
+    // Consumers may safely use it after the registry lock is released without
+    // re-resolving the channel to a replacement watcher incarnation.
+    let installed_incarnation = WatcherClaimIncarnation::from_handle(&handle);
     let outcome = if let Some(entry) = watchers.get(&channel_id) {
         let previous_tmux = entry.tmux_session_name.clone();
         let same_tmux = previous_tmux == requested_tmux;
@@ -458,23 +495,44 @@ pub(crate) fn claim_watcher(
             source,
         );
         if force_replace_live_same_tmux && same_tmux {
-            WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedForced, channel_id)
+            WatcherClaimOutcome::new(
+                WatcherClaimAction::SpawnReplacedForced,
+                channel_id,
+                installed_incarnation.clone(),
+            )
         } else if same_tmux {
-            WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedStale, channel_id)
+            WatcherClaimOutcome::new(
+                WatcherClaimAction::SpawnReplacedStale,
+                channel_id,
+                installed_incarnation.clone(),
+            )
         } else {
             WatcherClaimOutcome::new(
                 WatcherClaimAction::SpawnReplacedDifferentSession,
                 channel_id,
+                installed_incarnation.clone(),
             )
         }
     } else {
         watchers.insert_locked(&guard, channel_id, handle);
         if force_replace_live_same_tmux && removed_stale_same_tmux {
-            WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedForced, channel_id)
+            WatcherClaimOutcome::new(
+                WatcherClaimAction::SpawnReplacedForced,
+                channel_id,
+                installed_incarnation.clone(),
+            )
         } else if removed_stale_same_tmux {
-            WatcherClaimOutcome::new(WatcherClaimAction::SpawnReplacedStale, channel_id)
+            WatcherClaimOutcome::new(
+                WatcherClaimAction::SpawnReplacedStale,
+                channel_id,
+                installed_incarnation.clone(),
+            )
         } else {
-            WatcherClaimOutcome::new(WatcherClaimAction::SpawnFresh, channel_id)
+            WatcherClaimOutcome::new(
+                WatcherClaimAction::SpawnFresh,
+                channel_id,
+                installed_incarnation,
+            )
         }
     };
     let slot_present = watchers.contains_key(&channel_id);
@@ -496,6 +554,69 @@ pub(crate) fn claim_watcher(
         "watcher replacement must leave a channel-owned watcher slot"
     );
     outcome
+}
+
+#[cfg(test)]
+mod incarnation_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+
+    fn handle(
+        marker: Arc<AtomicBool>,
+        resume: Arc<std::sync::Mutex<Option<u64>>>,
+    ) -> TmuxWatcherHandle {
+        TmuxWatcherHandle {
+            tmux_session_name: "AgentDesk-5504-claim-incarnation".into(),
+            output_path: "/tmp/5504-claim-incarnation.jsonl".into(),
+            paused: Arc::new(AtomicBool::new(false)),
+            resume_offset: resume,
+            cancel: Arc::new(AtomicBool::new(false)),
+            pause_epoch: Arc::new(AtomicU64::new(1)),
+            turn_delivered: marker,
+            last_heartbeat_ts_ms: Arc::new(AtomicI64::new(
+                crate::services::discord::tmux_watcher_now_ms(),
+            )),
+        }
+    }
+
+    #[test]
+    fn reuse_claim_snapshot_mutates_selected_incumbent_not_later_replacement() {
+        let watchers = TmuxWatcherRegistry::new();
+        let owner = ChannelId::new(55_040_001);
+        let incumbent_marker = Arc::new(AtomicBool::new(true));
+        let incumbent_resume = Arc::new(std::sync::Mutex::new(None));
+        watchers.insert(
+            owner,
+            handle(incumbent_marker.clone(), incumbent_resume.clone()),
+        );
+        let claim = claim_or_reuse_watcher(
+            &watchers,
+            owner,
+            handle(
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(std::sync::Mutex::new(None)),
+            ),
+            &ProviderKind::Codex,
+            "turn_bridge_runtime_ready",
+        );
+        assert_eq!(claim.action, WatcherClaimAction::ReuseExisting);
+
+        let replacement_marker = Arc::new(AtomicBool::new(true));
+        let replacement_resume = Arc::new(std::sync::Mutex::new(None));
+        let replacement = handle(replacement_marker.clone(), replacement_resume.clone());
+        replacement.paused.store(true, Ordering::Relaxed);
+        watchers.insert(owner, replacement);
+        let selected = claim.incarnation();
+        *selected.resume_offset.lock().unwrap() = Some(5504);
+        selected.turn_delivered.store(false, Ordering::Relaxed);
+        selected.paused.store(false, Ordering::Release);
+
+        assert_eq!(*incumbent_resume.lock().unwrap(), Some(5504));
+        assert!(!incumbent_marker.load(Ordering::Relaxed));
+        assert_eq!(*replacement_resume.lock().unwrap(), None);
+        assert!(replacement_marker.load(Ordering::Relaxed));
+        assert!(watchers.get(&owner).unwrap().paused.load(Ordering::Acquire));
+    }
 }
 
 #[cfg(test)]

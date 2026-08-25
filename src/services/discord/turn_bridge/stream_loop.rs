@@ -17,7 +17,7 @@ use tool_arms::{
     handle_stream_tool_message, reconcile_exact_stream_frame_after_tool_outcome,
 };
 mod content_arms;
-mod exit_reconcile;
+pub(super) mod exit_reconcile;
 mod expected_identity;
 #[cfg(test)]
 #[path = "stream_loop/expected_identity_tests.rs"]

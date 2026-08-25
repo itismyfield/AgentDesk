@@ -5462,6 +5462,7 @@ services::discord::tmux::tui_completion_gate_tests::legacy_tmux_wrapper_skips_th
 services::discord::tmux::tui_completion_gate_tests::missing_runtime_kind_skips_the_gate
 services::discord::tmux::tui_completion_gate_tests::process_backend_skips_the_gate
 services::discord::tmux::tui_completion_gate_tests::rebind_origin_inflight_skips_the_gate
+services::discord::tmux::watcher_lifecycle::claims::incarnation_tests::reuse_claim_snapshot_mutates_selected_incumbent_not_later_replacement
 services::discord::tmux::watcher_lifecycle::claude_restore::claude_tui_transcript_fallback_tests::applies_launch_time_floor_to_skip_prior_session_transcripts
 services::discord::tmux::watcher_lifecycle::claude_restore::claude_tui_transcript_fallback_tests::excludes_transcripts_claimed_by_other_shared_workspace_sessions
 services::discord::tmux::watcher_lifecycle::claude_restore::claude_tui_transcript_fallback_tests::missing_launch_context_uses_restored_cwd_with_marker_mtime_floor
@@ -5904,6 +5905,7 @@ services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_un
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
 services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failure_gate_precedes_emit_stream_and_finalize
 services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failure_outcomes_abort_without_arming_cleanup
+services::discord::turn_bridge::bridge_entry_persist::tests::cancelled_watcher_is_unavailable_and_not_pinned_during_reconcile
 services::discord::turn_bridge::bridge_entry_persist::tests::cleared_watcher_owner_falls_back_to_delivery_channel
 services::discord::turn_bridge::bridge_entry_persist::tests::durable_placeholder_clear_and_response_advance_suppresses_restart_notice_edit
 services::discord::turn_bridge::bridge_entry_persist::tests::post_authority_owner_snapshot_observes_same_identity_watcher_adoption
@@ -5912,9 +5914,9 @@ services::discord::turn_bridge::bridge_entry_persist::tests::pre_authority_abort
 services::discord::turn_bridge::bridge_entry_persist::tests::recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate
 services::discord::turn_bridge::bridge_entry_persist::tests::same_turn_owner_advancement_suppresses_bridge_stream_relay
 services::discord::turn_bridge::bridge_entry_persist::tests::saved_competing_bind_reconciliation_invalidates_candidate_edit_cache
+services::discord::turn_bridge::bridge_entry_persist::tests::saved_exit_reconcile_preserves_first_pin_across_registry_replacement
 services::discord::turn_bridge::bridge_entry_persist::tests::saved_reconciliation_preserves_existing_anchor_edit_cache
 services::discord::turn_bridge::bridge_entry_persist::tests::stream_authority_loss_relinquishes_guards_before_visible_finalization
-services::discord::turn_bridge::bridge_entry_persist::tests::watcher_reconcile_pins_live_incumbent_once_across_registry_replacement
 services::discord::turn_bridge::bridge_latency_spans::tests::empty_span_renders_all_dashes
 services::discord::turn_bridge::bridge_latency_spans::tests::first_output_never_post_dates_first_relay_when_marked_in_order
 services::discord::turn_bridge::bridge_latency_spans::tests::fresh_span_has_only_the_anchor
@@ -6163,7 +6165,7 @@ services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::the_res
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::tool_arm_locals_follow_the_durable_row_after_a_guarded_save
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::tool_arms_derive_the_four_excluded_tool_line_locals_around_their_fences
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::transient_terminal_tool_result_fence_requeues_the_exact_frame_at_front
-services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::watcher_pin_projects_through_tick_writeback_and_saved_exit_reconcile
+services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::watcher_pin_projects_through_tick_writeback
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_tick
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::done_wait_uses_remaining_drain_window_as_safety_wake
 services::discord::turn_bridge::stream_receiver::ready_drain_unit_tests::stream_receiver_adapter_wakes_on_ready_frame

@@ -64,11 +64,11 @@ impl RuntimeHandoffLoopMessage {
     }
 }
 
-fn pin_watcher_delivery_incarnation(
+fn pin_watcher_delivery_marker(
     pin: &mut Option<Arc<std::sync::atomic::AtomicBool>>,
-    watcher: &TmuxWatcherHandle,
+    marker: &Arc<std::sync::atomic::AtomicBool>,
 ) {
-    pin.get_or_insert_with(|| Arc::clone(&watcher.turn_delivered));
+    pin.get_or_insert_with(|| Arc::clone(marker));
 }
 
 pub(super) struct RuntimeHandoffLoopOutcome {
@@ -230,7 +230,12 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                 };
                 let pre_claim_persisted = inflight_state.clone();
                 #[cfg(unix)]
-                let (watcher_claimed, watcher_claim_replaced_existing, owner_changed_after_claim) = {
+                let (
+                    watcher_claimed,
+                    watcher_claim_replaced_existing,
+                    owner_changed_after_claim,
+                    watcher_claim_incarnation,
+                ) = {
                     // #1135: Reuse a live watcher for the same
                     // tmux session; replace only stale or
                     // different-session incumbents.
@@ -249,16 +254,23 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     watcher_owner_channel_id = claim.owner_channel_id();
                     let owner_changed =
                         inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
+                    let incarnation = claim.incarnation().clone();
                     (
                         claim.should_spawn(),
                         claim.replaced_existing(),
                         owner_changed,
+                        Some(incarnation),
                     )
                 };
                 #[cfg(not(unix))]
-                let (watcher_claimed, watcher_claim_replaced_existing, owner_changed_after_claim) = {
+                let (
+                    watcher_claimed,
+                    watcher_claim_replaced_existing,
+                    owner_changed_after_claim,
+                    watcher_claim_incarnation,
+                ) = {
                     let _ = handle;
-                    (false, false, false)
+                    (false, false, false, None)
                 };
                 if owner_changed_after_claim {
                     let claim_expected =
@@ -473,49 +485,55 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     }
                 }
                 if watcher_ready_for_relay {
+                    let watcher_claim_incarnation = watcher_claim_incarnation
+                        .as_ref()
+                        .expect("unix watcher claim carries its exact incarnation");
                     tmux_handed_off = true;
                     inflight_state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
                     watcher_owns_assistant_relay = true;
-                    if let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
-                    {
-                        watcher_relay_available_for_turn = true;
-                        pin_watcher_delivery_incarnation(&mut watcher_delivery_pin, &watcher);
-                        if let Ok(mut guard) = watcher.resume_offset.lock() {
-                            *guard = Some(last_offset);
-                        }
-                        watcher.turn_delivered.store(false, Ordering::Relaxed);
-                        // #1452 (Codex P1): publish the mailbox-finalization
-                        // debt BEFORE unpausing the watcher.
-                        //
-                        // The watcher's terminal `swap(false, AcqRel)` runs
-                        // as soon as it sees a Done event; if we delayed
-                        // the store until the bridge's later delegation
-                        // decision (line 2419+), the watcher could swap
-                        // first, observe `false`, skip `mailbox_finish_turn`,
-                        // and the bridge's late `store(true)` would leave
-                        // stale debt that either keeps `cancel_token`
-                        // permanently set OR is consumed by a future
-                        // watcher event for the WRONG turn.
-                        //
-                        // #3016 phase-5b2: the legacy
-                        // `mailbox_finalize_owed` store that used to
-                        // publish "bridge will delegate finalization"
-                        // here is removed; the `register_start` below
-                        // (RelayOwnerKind::Watcher) is the ledger
-                        // authority that replaced it.
-                        // #3016 phase 3: register the turn with the
-                        // single-authority finalizer BEFORE
-                        // unpausing the watcher — same as the
-                        // `handle_watcher_runtime_handoff` helper.
-                        // This legacy `StreamMessage::TmuxReady`
-                        // handoff does NOT go through that helper, so
-                        // without this the watcher terminal would
-                        // have no Watcher-owned ledger entry — and
-                        // a busy-pane gate-timeout would finalize
-                        // immediately instead of arming the
-                        // deadline-backstop. Registering here with
-                        // the same finalizer id makes it defer.
-                        shared_owned
+                    watcher_relay_available_for_turn = true;
+                    pin_watcher_delivery_marker(
+                        &mut watcher_delivery_pin,
+                        &watcher_claim_incarnation.turn_delivered,
+                    );
+                    if let Ok(mut guard) = watcher_claim_incarnation.resume_offset.lock() {
+                        *guard = Some(last_offset);
+                    }
+                    watcher_claim_incarnation
+                        .turn_delivered
+                        .store(false, Ordering::Relaxed);
+                    // #1452 (Codex P1): publish the mailbox-finalization
+                    // debt BEFORE unpausing the watcher.
+                    //
+                    // The watcher's terminal `swap(false, AcqRel)` runs
+                    // as soon as it sees a Done event; if we delayed
+                    // the store until the bridge's later delegation
+                    // decision (line 2419+), the watcher could swap
+                    // first, observe `false`, skip `mailbox_finish_turn`,
+                    // and the bridge's late `store(true)` would leave
+                    // stale debt that either keeps `cancel_token`
+                    // permanently set OR is consumed by a future
+                    // watcher event for the WRONG turn.
+                    //
+                    // #3016 phase-5b2: the legacy
+                    // `mailbox_finalize_owed` store that used to
+                    // publish "bridge will delegate finalization"
+                    // here is removed; the `register_start` below
+                    // (RelayOwnerKind::Watcher) is the ledger
+                    // authority that replaced it.
+                    // #3016 phase 3: register the turn with the
+                    // single-authority finalizer BEFORE
+                    // unpausing the watcher — same as the
+                    // `handle_watcher_runtime_handoff` helper.
+                    // This legacy `StreamMessage::TmuxReady`
+                    // handoff does NOT go through that helper, so
+                    // without this the watcher terminal would
+                    // have no Watcher-owned ledger entry — and
+                    // a busy-pane gate-timeout would finalize
+                    // immediately instead of arming the
+                    // deadline-backstop. Registering here with
+                    // the same finalizer id makes it defer.
+                    shared_owned
                         .turn_finalizer
                         .register_start_with_completion_admission(
                             super::turn_finalizer::TurnKey::new(
@@ -530,19 +548,20 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             // at register time.
                             &shared_owned,
                         );
-                        // #1452 (Codex iter 3 P1) / #3016 phase-5b2:
-                        // unpause uses Release ordering so a watcher
-                        // observing `paused = false` is guaranteed to
-                        // also observe the prior writes — the
-                        // `register_start` (RelayOwnerKind::Watcher)
-                        // ledger entry that now drives the
-                        // gate-timeout defer. With Relaxed ordering on
-                        // a weakly-ordered platform the writes could
-                        // be reordered, letting the watcher unpause
-                        // and submit a terminal before the ledger
-                        // knows the turn exists.
-                        watcher.paused.store(false, Ordering::Release);
-                    }
+                    // #1452 (Codex iter 3 P1) / #3016 phase-5b2:
+                    // unpause uses Release ordering so a watcher
+                    // observing `paused = false` is guaranteed to
+                    // also observe the prior writes — the
+                    // `register_start` (RelayOwnerKind::Watcher)
+                    // ledger entry that now drives the
+                    // gate-timeout defer. With Relaxed ordering on
+                    // a weakly-ordered platform the writes could
+                    // be reordered, letting the watcher unpause
+                    // and submit a terminal before the ledger
+                    // knows the turn exists.
+                    watcher_claim_incarnation
+                        .paused
+                        .store(false, Ordering::Release);
                 }
             } else {
                 watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;

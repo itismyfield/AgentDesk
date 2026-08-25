@@ -581,7 +581,7 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
 }
 
 #[test]
-fn watcher_pin_projects_through_tick_writeback_and_saved_exit_reconcile() {
+fn watcher_pin_projects_through_tick_writeback() {
     let tick = include_str!("../../stream_tick.rs");
     let production_tick = tick
         .split("#[cfg(test)]")
@@ -606,14 +606,4 @@ fn watcher_pin_projects_through_tick_writeback_and_saved_exit_reconcile() {
         .expect("continuing ticks use the same writeback macro");
     assert!(reconcile < writeback_macro && pin_writeback < early_return);
     assert!(early_return < final_writeback);
-
-    let exit = include_str!("../exit_reconcile.rs");
-    let exit_pin = exit
-        .find("watcher_delivery_pin: &mut *state.watcher_delivery_pin,")
-        .expect("saved exit reconciliation projects the same caller-owned pin");
-    let exit_reconcile = exit[exit_pin..]
-        .find("reconcile_runtime_locals_from_inflight_state(")
-        .map(|offset| exit_pin + offset)
-        .expect("exit pin reaches production durable reconciliation");
-    assert!(exit_pin < exit_reconcile);
 }

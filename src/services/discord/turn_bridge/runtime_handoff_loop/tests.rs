@@ -374,7 +374,7 @@ fn authoritative_pin_uses_incumbent_after_provisional_reuse_and_never_overwrites
         .tmux_watchers
         .get(&owner)
         .expect("incumbent survives reuse");
-    pin_watcher_delivery_incarnation(&mut pin, &watcher);
+    pin_watcher_delivery_marker(&mut pin, &watcher.turn_delivered);
     let adopted = pin.as_ref().expect("incumbent marker is adopted");
     assert!(Arc::ptr_eq(adopted, &incumbent_delivery_pin));
     assert!(!Arc::ptr_eq(adopted, &provisional_delivery_pin));
@@ -388,7 +388,7 @@ fn authoritative_pin_uses_incumbent_after_provisional_reuse_and_never_overwrites
         .tmux_watchers
         .get(&owner)
         .expect("replacement is visible");
-    pin_watcher_delivery_incarnation(&mut pin, &watcher);
+    pin_watcher_delivery_marker(&mut pin, &watcher.turn_delivered);
     assert!(Arc::ptr_eq(pin.as_ref().unwrap(), &first_adoption));
     assert!(!Arc::ptr_eq(
         pin.as_ref().unwrap(),
