@@ -64,16 +64,16 @@ fn generation_relation(born_generation: u64, current_generation: u64) -> &'stati
 ///
 /// PROVES: exactly that split, and nothing else, and only on the far side of
 /// this process's own allocation. Once the epoch is allocated and positive,
-/// every row this process writes carries that positive `born_generation` — none
-/// of the three positive-failure routes below stamps a zero — so a zero-born row
-/// it meets after that point is a legacy binary's.
+/// every row this process authors is stamped with that positive
+/// `born_generation`, so a zero-born row it meets after that point is a legacy
+/// binary's.
 ///
 /// The one exception is not a failure MODE but a TIMING window: before the
 /// allocation lands, `process_generation()` falls back to `load_generation()`,
 /// which reads zero on a boot whose counter is absent or unreadable, so a row
 /// born in that window carries `born_generation = 0` from THIS binary and does
 /// land in the zero bucket. The `Residual (§9-9)` paragraph below is that
-/// window, not a fourth failure route. A normal boot closes it before it can
+/// window, not a failure route. A normal boot closes it before it can
 /// produce such a row: `run_bot_build_shared_data` calls
 /// `allocate_process_generation` while it builds `SharedData`, so the epoch is
 /// fixed before intake opens, and what keeps the fallback reachable at all is
@@ -82,22 +82,17 @@ fn generation_relation(born_generation: u64, current_generation: u64) -> &'stati
 /// DOES NOT PROVE — which is why this is no longer spelled
 /// `generation_subsystem_available` (#5462 S5 r3): allocation success, an epoch
 /// advanced past the previous process's, or a fence worth trusting.
-/// `allocate_durable_generation` fails POSITIVE on three routes and every one of
-/// them reads `true` here. A `lock_generation_path` failure falls back to
-/// `load_generation()` and returns the previous process's counter unchanged, so
-/// this process shares that process's generation. An `atomic_write` failure
-/// returns the pre-increment `current`, positive whenever the counter already
-/// was. And a counter at `u64::MAX` writes successfully while
-/// `saturating_add(1)` leaves the epoch exactly where it was. Telling those from
-/// a real allocation needs the allocation's own provenance carried into the
-/// observation, which means touching `runtime_store` — deferred, not solved.
+/// `runtime_store::allocate_generation_epoch` returns a generation-and-route
+/// binding, and `allocate_process_generation_binding` publishes it as one value.
+/// Five allocation outcomes can be positive without advancing:
+/// `ParentSyncFailed`, `CounterReadFailed`, `Saturated`, `WriteFailed`, and
+/// `LockFailed`. `Unwitnessed` is also observed, but is not an allocation
+/// outcome. This reconcile path sees only `process_generation()`'s bare `u64`,
+/// not the route recorded by `runtime_store`.
 ///
-/// The false half is the honest one, and is why this is the allocated epoch
-/// rather than a path probe: the same two failures reach ZERO instead when the
-/// counter is missing, corrupt, or absent on a first boot, and
-/// `generation_path() == None` is a third route to zero. The path is `Some` in
-/// the first two, so a probe would call the subsystem available while the epoch
-/// it reports on is zero.
+/// The false half is why this is the allocated epoch, not a path probe:
+/// `LockFailed` and `WriteFailed` can reach zero while the path is `Some`, and
+/// `generation_path() == None` is a third zero route.
 ///
 /// Residual (§9-9) — ONLY WHERE THE COUNTER CANNOT BE READ: the pre-allocation
 /// window returns `load_generation()`, the value the PREVIOUS process wrote, so
@@ -106,12 +101,12 @@ fn generation_relation(born_generation: u64, current_generation: u64) -> &'stati
 /// That fallback reads zero wherever the counter cannot be read — absent on a
 /// first boot, or present but unparseable, which `load_generation()` collapses
 /// into the same `unwrap_or(0)` — and only there does §9-9's population mix into
-/// §9-8's `legacy_zero`. Separating even that needs a provenance field this
-/// slice does not add.
+/// §9-8's `legacy_zero`. Separating even that needs the allocation route
+/// propagated into this bare-`u64` observation, which this slice does not do.
 ///
-/// Takes the epoch the caller already read instead of reading it again: this is
-/// an observation, and `allocate_process_generation` is a `OnceLock` initializer
-/// that would move the very epoch the observation reports on.
+/// Takes the generation the caller already observed instead of starting or
+/// re-reading allocation: this bare-`u64` observation must not move the epoch it
+/// reports on.
 fn current_generation_nonzero(current_generation: u64) -> bool {
     current_generation > 0
 }
@@ -391,9 +386,9 @@ mod tests {
     }
 
     // A zero epoch is the only signal §9-8 has that this deployment could not
-    // produce a generation, and a path probe cannot see the two failure routes
+    // produce a generation, and a path probe cannot see the failure routes
     // that keep the path `Some`. The true side classifies nothing beyond that —
-    // see the predicate's docstring for the three positive allocation failures
+    // see the predicate's docstring for the positive non-advanced routes
     // it cannot separate.
     #[test]
     fn current_generation_nonzero_is_the_allocated_epoch_not_a_path_probe() {
