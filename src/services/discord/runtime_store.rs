@@ -1206,6 +1206,39 @@ mod generation_allocation_tests {
         assert!(production.contains(declaration));
     }
 
+    /// Bounded lexical architecture pin for the literal `cfg(not(test))` reader block.
+    /// It catches reconstruction or field detachment inside that block, but does not claim
+    /// semantic coverage for aliases, macros, or a reader moved outside these source bounds.
+    #[test]
+    fn production_binding_lexically_returns_the_stored_allocation_whole() {
+        let source = include_str!("runtime_store.rs");
+        let reader = source
+            .split_once(
+                "pub(in crate::services::discord) fn process_generation_binding() -> ProcessGenerationAllocation {",
+            )
+            .expect("process generation binding reader must remain present")
+            .1
+            .split_once("#[cfg(test)]\nfn test_parent_sync_failure")
+            .expect("bounded reader end must remain present")
+            .0;
+        let production_read = reader
+            .split_once("#[cfg(not(test))]")
+            .expect("production reader branch must remain present")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("production and test reader branches must remain separate")
+            .0;
+        let cell_read = "if let Some(bound) = PROCESS_GENERATION.get() {";
+        let whole_allocation_return = "return *bound;";
+
+        assert_eq!(production_read.matches(cell_read).count(), 1);
+        assert_eq!(production_read.matches(whole_allocation_return).count(), 1);
+        assert!(
+            !production_read.contains("ProcessGenerationAllocation {"),
+            "the production reader must not reconstruct generation and route fields"
+        );
+    }
+
     #[test]
     fn test_pin_memo_fallback_and_reset_remain_structurally_separate() {
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
