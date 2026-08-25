@@ -1005,14 +1005,44 @@ mod loader_gate_observation_tests {
     /// route-complete execution test above is the semantic proof.
     #[test]
     fn observation_labels_and_allocation_only_evaluation_api_are_exact() {
-        let production = include_str!("removal.rs")
-            .split_once("#[cfg(test)]")
-            .unwrap()
+        let source = include_str!("removal.rs");
+        let observation = source
+            .split_once("fn loader_gate_refuses_with_allocation(")
+            .expect("loader allocation observation must remain present")
+            .1
+            .split_once("/// Thread-local test seam for `tmux_pane_alive_for_stale_check`.")
+            .expect("loader allocation observation must remain bounded")
             .0;
-        assert_eq!(production.matches("\"epoch_route\"").count(), 2);
-        assert_eq!(production.matches("\"epoch_advanced\"").count(), 2);
-        assert_eq!(production.matches("epoch_route,").count(), 2);
-        assert_eq!(production.matches("epoch_advanced,").count(), 2);
-        assert_eq!(production.matches("ProcessGenerationAllocation").count(), 3);
+        assert_eq!(observation.matches("\"epoch_route\"").count(), 2);
+        assert_eq!(observation.matches("\"epoch_advanced\"").count(), 2);
+        assert_eq!(observation.matches("epoch_route,").count(), 2);
+        assert_eq!(observation.matches("epoch_advanced,").count(), 2);
+        assert_eq!(
+            observation.matches("ProcessGenerationAllocation").count(),
+            3
+        );
+
+        let public_loader = source
+            .split_once("fn load_inflight_states_for_probe_from_root(")
+            .expect("public probe loader must remain present")
+            .1
+            .split_once(
+                "#[cfg(test)]
+mod loader_gate_observation_tests",
+            )
+            .expect("public probe loader must remain bounded by its tests")
+            .0;
+        assert_eq!(
+            public_loader
+                .matches("let allocation = crate::services::discord::runtime_store::process_generation_binding();")
+                .count(),
+            1,
+        );
+        assert_eq!(
+            public_loader
+                .matches("loader_gate_refuses_with_allocation(&locked_state, allocation)")
+                .count(),
+            1,
+        );
     }
 }
