@@ -6080,8 +6080,8 @@ services::discord::turn_bridge::runtime_handoff_loop::tests::legacy_tmux_ready_r
 services::discord::turn_bridge::runtime_handoff_loop::tests::process_ready_skips_reowned_row_and_does_not_queue_stale_flush
 services::discord::turn_bridge::runtime_handoff_loop::tests::process_runtime_ready_first_population_is_saved
 services::discord::turn_bridge::runtime_handoff_loop::tests::provisional_cleanup_preserves_replacement_incarnation
-services::discord::turn_bridge::runtime_handoff_loop::tests::runtime_adoption_rejects_claim_evicted_before_publication
 services::discord::turn_bridge::runtime_handoff_loop::tests::runtime_adoption_pins_authoritative_incumbent_not_provisional_marker
+services::discord::turn_bridge::runtime_handoff_loop::tests::runtime_adoption_rejects_claim_evicted_before_publication
 services::discord::turn_bridge::runtime_handoff_loop::tests::runtime_ready_reowned_row_never_claims_or_starts_watcher
 services::discord::turn_bridge::runtime_handoff_loop::tests::second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoint
 services::discord::turn_bridge::runtime_handoff_loop::tests::thread_follow_up_tmux_ready_claim_records_intended_classification_4984
