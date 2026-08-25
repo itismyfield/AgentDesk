@@ -1273,6 +1273,28 @@ mod generation_allocation_tests {
                 "production allocation must publish the whole allocation through the canonical cell"
             );
         }
+
+        let composer = source
+            .split_once("fn allocate_generation_epoch() -> ProcessGenerationAllocation {")
+            .expect("production allocation composer must remain present")
+            .1
+            .split_once("fn read_generation_counter(path: &Path) -> CounterRead {")
+            .expect("production allocation composer must remain bounded")
+            .0;
+        for required in [
+            "allocate_generation_epoch_with_io(GenerationIo {",
+            "path: generation_path(),",
+            "lock: lock_generation_path,",
+            "read: read_generation_counter,",
+            "write: atomic_write,",
+            "fsync: fsync_parent_dir,",
+        ] {
+            assert_eq!(composer.matches(required).count(), 1);
+        }
+        assert!(
+            !composer.contains("ProcessGenerationAllocation {"),
+            "the production allocation composer must not rewrite a route"
+        );
     }
 
     #[test]
