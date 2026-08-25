@@ -81,6 +81,15 @@ cli::dcserver_restart_marker::tests::reservation_blocks_new_exclusive_writer_dur
 cli::dcserver_restart_marker::tests::reservation_race_returns_replaced_without_force_kill
 cli::dcserver_restart_marker::tests::staging_publish_eexist_preserves_existing_owner
 cli::dcserver_restart_marker::tests::staging_write_failure_never_touches_canonical_marker
+cli::dcserver_restart_wait::tests::s5a_already_owned_preserves_owner_and_refuses_force_kill
+cli::dcserver_restart_wait::tests::s5a_create_io_failure_force_kills_once
+cli::dcserver_restart_wait::tests::s5a_marker_absence_acknowledges_immediately
+cli::dcserver_restart_wait::tests::s5a_no_runtime_root_force_kills_once_and_falls_through
+cli::dcserver_restart_wait::tests::s5a_process_gone_reports_graceful_exit_without_force_kill
+cli::dcserver_restart_wait::tests::s5a_resolve_error_refuses_force_kill
+cli::dcserver_restart_wait::tests::s5a_timeout_missing_marker_preserves_acknowledgement
+cli::dcserver_restart_wait::tests::s5a_timeout_removed_owned_force_kills_once
+cli::dcserver_restart_wait::tests::s5a_timeout_replacement_is_preserved_without_force_kill
 cli::discord::tests::configured_token_fallback_keeps_order_and_empty_error
 cli::discord::tests::destination_contract_accepts_only_the_three_legacy_send_shapes
 cli::discord::tests::hash_resolution_failure_keeps_the_legacy_error_text
