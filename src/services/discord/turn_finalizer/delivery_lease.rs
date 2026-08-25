@@ -290,17 +290,17 @@ mod tests {
     #[test]
     fn commit_on_unleased_is_noop() {
         let c = cell();
-        assert!(!c.commit(LeaseHolder::Bridge, turn(), 0, 1, LeaseOutcome::Delivered));
+        let h = LeaseHolder::bridge_attempt();
+        assert!(!c.commit(h, turn(), 0, 1, LeaseOutcome::Delivered));
         assert!(matches!(c.read(), LeaseSnapshot::Unleased));
     }
 
     #[test]
     fn release_compare_and_release_noop_on_holder_mismatch() {
         let c = cell();
-        let owner = LeaseHolder::Bridge;
+        let owner = LeaseHolder::bridge_attempt();
         let stale = LeaseHolder::Watcher { instance_id: 99 };
         assert!(c.try_acquire(turn(), owner, 0, 8, 1_000));
-        // A stale actor cannot release the live lease.
         assert!(!c.release(stale, turn(), 0, 8));
         assert!(matches!(c.read(), LeaseSnapshot::Leased { .. }));
         // The true holder releases successfully → back to Unleased.
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn deadline_reclaim_never_touches_committed() {
         let c = cell();
-        let h = LeaseHolder::Bridge;
+        let h = LeaseHolder::bridge_attempt();
         assert!(c.try_acquire(turn(), h, 0, 3, 10));
         assert!(c.commit(h, turn(), 0, 3, LeaseOutcome::Delivered));
         // A Committed lease awaits an explicit release; deadline reclaim is a

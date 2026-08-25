@@ -22,6 +22,59 @@ use unix_journal::{
     Disposition, begin_controller_terminal as journal_begin,
     settle_controller_terminal as journal_settle,
 };
+
+#[rustfmt::skip]
+struct ControllerExactAckLease<'a> {
+    shared: &'a SharedData, cell: &'a DeliveryLeaseCell, owner: ChannelId,
+    session: Option<&'a str>, output_path: Option<&'a str>,
+    exact_ack: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    admission_denied: std::sync::atomic::AtomicBool,
+}
+impl toc::DeliveryLease for ControllerExactAckLease<'_> {
+    #[rustfmt::skip]
+    fn try_acquire(
+        &self,
+        key: DeliveryLeaseKey,
+        holder: LeaseHolder,
+        start: u64,
+        end: u64,
+        deadline_ms: u64,
+    ) -> bool {
+        self.shared.tmux_watchers.with_bridge_publication_admission(
+            self.owner, self.session, self.output_path, self.exact_ack,
+            || self.cell.try_acquire(key, holder, start, end, deadline_ms),
+        ).unwrap_or_else(|| { self.admission_denied.store(true, std::sync::atomic::Ordering::Release); false })
+    }
+    fn commit(
+        &self,
+        holder: LeaseHolder,
+        key: DeliveryLeaseKey,
+        start: u64,
+        end: u64,
+        outcome: crate::services::discord::LeaseOutcome,
+    ) -> bool {
+        let committed = self.cell.commit(holder, key, start, end, outcome);
+        if committed
+            && outcome == crate::services::discord::LeaseOutcome::Delivered
+            && let Some(ack) = self.exact_ack
+        {
+            ack.store(true, std::sync::atomic::Ordering::Release);
+        }
+        committed
+    }
+    fn release(&self, holder: LeaseHolder, key: DeliveryLeaseKey, start: u64, end: u64) -> bool {
+        self.cell.release(holder, key, start, end)
+    }
+    fn renew(&self, holder: LeaseHolder, key: DeliveryLeaseKey, deadline_ms: u64) -> bool {
+        self.cell.renew(holder, key, deadline_ms)
+    }
+    fn reclaim_if_expired(&self, now_ms: u64) -> bool {
+        self.cell.reclaim_if_expired(now_ms)
+    }
+    fn read(&self) -> crate::services::discord::LeaseSnapshot {
+        self.cell.read()
+    }
+}
 #[cfg(unix)]
 #[rustfmt::skip]
 pub(super) fn begin_pinned_terminal(
@@ -218,6 +271,7 @@ impl toc::PostHeartbeatGuard for BridgePostHeartbeatGuard {}
 /// `gateway` is the bridge's already-constructed `Arc<dyn TurnGateway>` (passed as
 /// `&dyn`); the test injects a fake driving the REAL controller + real cell.
 #[allow(clippy::too_many_arguments)]
+#[rustfmt::skip]
 pub(super) async fn deliver_short_replace_via_controller(
     gateway: &dyn TurnGateway,
     shared: &SharedData,
@@ -225,6 +279,7 @@ pub(super) async fn deliver_short_replace_via_controller(
     channel_id: ChannelId,
     watcher_owner_channel_id: ChannelId,
     tmux_session_name: Option<&str>,
+    output_path: Option<&str>,
     cell: &Arc<DeliveryLeaseCell>,
     placeholder_controller: &super::super::placeholder_controller::PlaceholderController,
     msg_id: MessageId,
@@ -234,11 +289,9 @@ pub(super) async fn deliver_short_replace_via_controller(
     lease_key: Option<DeliveryLeaseKey>,
     start: u64,
     end: u64,
+    exact_ack: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> toc::DeliveryOutcome {
-    let holder = LeaseHolder::Bridge;
-    // Self-heal like the legacy acquire (terminal_delivery.rs:516): reclaim an
-    // EXPIRED prior holder before the controller's acquire (a stale dead lease
-    // must not make this acquire lose and B2-skip a deliverable range).
+    let holder = LeaseHolder::bridge_attempt();
     cell.reclaim_if_expired(lease_now_ms());
     let heartbeat = BridgePostHeartbeat { cell: cell.clone() };
     // Identity-gated advance: INLINE before any post-send await (I1). Site 5's
@@ -263,7 +316,11 @@ pub(super) async fn deliver_short_replace_via_controller(
     #[rustfmt::skip]
     let mut journal = unix_journal::begin_controller_terminal(shared, provider,
         Disposition::ShortReplace, (watcher_owner_channel_id, channel_id), Some((start, end)));
-    let outcome = toc::deliver_turn_output(
+    #[rustfmt::skip]
+    let exact_ack_lease = ControllerExactAckLease { shared, cell,
+        owner: watcher_owner_channel_id, session: tmux_session_name, output_path, exact_ack,
+        admission_denied: std::sync::atomic::AtomicBool::new(false) };
+    let mut outcome = toc::deliver_turn_output(
         gateway,
         toc::TurnOutputCtx {
             turn,
@@ -274,7 +331,7 @@ pub(super) async fn deliver_short_replace_via_controller(
             holder,
             // Lease cell is keyed by `watcher_owner_channel_id` (acquired by the
             // caller via `delivery_lease(watcher_owner_channel_id)`, mod.rs:6105).
-            lease: &**cell,
+            lease: &exact_ack_lease,
             // EDIT TARGET = the bridge's delivery channel (codex r1 [High]): the
             // controller POSTs `replace_message_with_outcome(ctx.channel_id, ..)`
             // (controller:830), which legacy site 5 routes through `channel_id`
@@ -312,6 +369,7 @@ pub(super) async fn deliver_short_replace_via_controller(
         },
     )
     .await;
+    if exact_ack_lease.admission_denied.load(std::sync::atomic::Ordering::Acquire) { outcome = toc::DeliveryOutcome::Skipped; }
     // #3089 B2a: shadow-mirror durable delivered frontier — flag-gated, observe-only,
     // Delivered-only (I2), OFF=no-op. Keyed by `watcher_owner_channel_id` (the
     // OFFSET-AUTHORITY channel where `advance_tmux_relay_confirmed_end` advanced
@@ -356,6 +414,7 @@ pub(super) async fn deliver_short_replace_via_controller(
 /// advance only on success; send failure commits NotDelivered and preserves the
 /// anchor for retry.
 #[allow(clippy::too_many_arguments)]
+#[rustfmt::skip]
 pub(super) async fn deliver_long_chunks_via_controller(
     gateway: &dyn TurnGateway,
     shared: &SharedData,
@@ -363,6 +422,7 @@ pub(super) async fn deliver_long_chunks_via_controller(
     channel_id: ChannelId,
     watcher_owner_channel_id: ChannelId,
     tmux_session_name: Option<&str>,
+    output_path: Option<&str>,
     cell: &Arc<DeliveryLeaseCell>,
     placeholder_controller: &super::super::placeholder_controller::PlaceholderController,
     msg_id: MessageId,
@@ -372,8 +432,9 @@ pub(super) async fn deliver_long_chunks_via_controller(
     lease_key: Option<DeliveryLeaseKey>,
     start: u64,
     end: u64,
+    exact_ack: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> toc::DeliveryOutcome {
-    let holder = LeaseHolder::Bridge;
+    let holder = LeaseHolder::bridge_attempt();
     cell.reclaim_if_expired(lease_now_ms());
     let heartbeat = BridgePostHeartbeat { cell: cell.clone() };
     let advance = |range: (u64, u64)| -> bool {
@@ -390,14 +451,18 @@ pub(super) async fn deliver_long_chunks_via_controller(
     #[rustfmt::skip]
     let mut journal = unix_journal::begin_controller_terminal(shared, provider,
         Disposition::LongChunks, (watcher_owner_channel_id, channel_id), Some((start, end)));
-    let outcome = toc::deliver_turn_output(
+    #[rustfmt::skip]
+    let exact_ack_lease = ControllerExactAckLease { shared, cell,
+        owner: watcher_owner_channel_id, session: tmux_session_name, output_path, exact_ack,
+        admission_denied: std::sync::atomic::AtomicBool::new(false) };
+    let mut outcome = toc::deliver_turn_output(
         gateway,
         toc::TurnOutputCtx {
             turn,
             lease_key,
             owner: RelayOwnerKind::None,
             holder,
-            lease: &**cell,
+            lease: &exact_ack_lease,
             channel_id,
             placeholder_controller,
             placeholder: toc::PlaceholderSlot::Active {
@@ -422,6 +487,7 @@ pub(super) async fn deliver_long_chunks_via_controller(
         },
     )
     .await;
+    if exact_ack_lease.admission_denied.load(std::sync::atomic::Ordering::Acquire) { outcome = toc::DeliveryOutcome::Skipped; }
     if let toc::DeliveryOutcome::Delivered {
         new_chunks: Some(chunks),
         ..
@@ -464,6 +530,7 @@ pub(super) async fn apply_bridge_long_chunks_controller(
     channel_id: ChannelId,
     watcher_owner_channel_id: ChannelId,
     tmux_session_name: Option<&str>,
+    output_path: Option<&str>,
     cell: &Arc<DeliveryLeaseCell>,
     placeholder_controller: &super::super::placeholder_controller::PlaceholderController,
     msg_id: MessageId,
@@ -478,6 +545,7 @@ pub(super) async fn apply_bridge_long_chunks_controller(
     session_key: Option<&str>,
     turn_id: Option<&str>,
     lease_key: Option<DeliveryLeaseKey>,
+    exact_ack: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     locals: BridgeLongChunksLocals<'_>,
 ) {
     let outcome = deliver_long_chunks_via_controller(
@@ -487,6 +555,7 @@ pub(super) async fn apply_bridge_long_chunks_controller(
         channel_id,
         watcher_owner_channel_id,
         tmux_session_name,
+        output_path,
         cell,
         placeholder_controller,
         msg_id,
@@ -496,6 +565,7 @@ pub(super) async fn apply_bridge_long_chunks_controller(
         lease_key,
         start,
         end,
+        exact_ack,
     )
     .await;
     apply_bridge_long_chunks_outcome(
@@ -532,21 +602,20 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
     dispatch_id: Option<&str>,
     session_key: Option<&str>,
     turn_id: Option<&str>,
+    exact_ack: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     // #4564: inbound turn id of the delivered turn (delivery channel = `channel_id`),
     // threaded from the caller's inflight snapshot so the completed-turn ledger is
     // keyed by the inbound channel, not `watcher_owner_channel_id`.
     ledger_user_msg_id: u64,
     locals: BridgeLongChunksLocals<'_>,
 ) {
-    if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        tracing::info!(
-            channel_id = channel_id.get(),
-            "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate long terminal send (channel {})",
-            channel_id
-        );
+    if matches!(
+        lease_acquire,
+        BridgeLeaseAcquire::Skip | BridgeLeaseAcquire::StaleIncarnation
+    ) {
         *locals.preserve_inflight_for_cleanup_retry = true;
-        *locals.bridge_skip_holder_owns_inflight = true;
+        *locals.bridge_skip_holder_owns_inflight =
+            matches!(lease_acquire, BridgeLeaseAcquire::Skip);
         return;
     }
     let lease = match lease_acquire {
@@ -556,7 +625,7 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
     #[rustfmt::skip]
     let mut journal = unix_journal::begin_controller_terminal(shared, provider,
         Disposition::LongChunksLegacy, (watcher_owner_channel_id, channel_id),
-        lease.as_ref().map(|lease| lease.range()));
+        lease.as_ref().and_then(|lease| lease.durable_range()));
     match send_ordered_long_terminal_response(
         shared,
         gateway,
@@ -580,14 +649,16 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
             *locals.response_sent_offset = full_response_len;
             *locals.inflight_response_sent_offset = full_response_len;
             if let Some(lease) = lease {
-                let lease_range = lease.range();
-                let committed = lease.commit_and_advance(
+                let lease_range = lease.durable_range();
+                let committed = lease.commit_and_settle(
                     shared,
                     watcher_owner_channel_id,
                     tmux_session_name,
                     crate::services::discord::LeaseOutcome::Delivered,
+                    true,
+                    exact_ack,
                 );
-                if committed {
+                if committed && let Some(lease_range) = lease_range {
                     dr::record_long_chunk_terminal_delivery(
                         shared,
                         provider,
@@ -611,11 +682,13 @@ pub(super) async fn apply_bridge_long_chunks_legacy(
                 error
             );
             if let Some(lease) = lease {
-                lease.commit_and_advance(
+                lease.commit_and_settle(
                     shared,
                     watcher_owner_channel_id,
                     tmux_session_name,
                     crate::services::discord::LeaseOutcome::NotDelivered,
+                    true,
+                    exact_ack,
                 );
             }
             *locals.preserve_inflight_for_cleanup_retry = true;
@@ -762,6 +835,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
     channel_id: ChannelId,
     watcher_owner_channel_id: ChannelId,
     tmux_session_name: Option<&str>,
+    output_path: Option<&str>,
     cell: &Arc<DeliveryLeaseCell>,
     placeholder_controller: &super::super::placeholder_controller::PlaceholderController,
     msg_id: MessageId,
@@ -776,6 +850,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
     session_key: Option<&str>,
     turn_id: Option<&str>,
     lease_key: Option<DeliveryLeaseKey>,
+    exact_ack: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
     locals: BridgeShortReplaceLocals<'_>,
 ) {
     let outcome = deliver_short_replace_via_controller(
@@ -785,6 +860,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
         channel_id,
         watcher_owner_channel_id,
         tmux_session_name,
+        output_path,
         cell,
         placeholder_controller,
         msg_id,
@@ -794,6 +870,7 @@ pub(super) async fn apply_bridge_short_replace_controller(
         lease_key,
         start,
         end,
+        exact_ack,
     )
     .await;
     apply_bridge_short_replace_outcome(
@@ -1094,7 +1171,7 @@ mod tests {
         fn pinned(shared: &Arc<SharedData>, root: &std::path::Path, owner: ChannelId, user: u64) -> (PinnedBridgeDeliveryLease, ExactJsonlSourceIdentity) {
             let (acquire, range, _inflight, source) = pinned_parts(shared, root, owner, user);
             let lease = match acquire { BridgeLeaseAcquire::Held(lease) => lease, _ => panic!("held") };
-            (lease.pin_exact_source(shared, &ProviderKind::Codex, ch(), range).unwrap(), source)
+            (lease.pin_exact_source(shared, &ProviderKind::Codex, ch(), range, None).unwrap(), source)
         }
 
         // #5264 PR-B: `prepare_bridge_lease` is the ONLY production route into the pinned
@@ -1140,7 +1217,8 @@ mod tests {
                         &inflight,
                         shared.as_ref(),
                         &ProviderKind::Codex,
-                        ch()
+                        ch(),
+                        None
                     ),
                     PreparedBridgeLease::Pinned(_)
                 ),
@@ -1160,7 +1238,8 @@ mod tests {
                         &skip_inflight,
                         skip_shared.as_ref(),
                         &ProviderKind::Codex,
-                        ch()
+                        ch(),
+                        None
                     ),
                     PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Skip)
                 ),
@@ -1180,7 +1259,8 @@ mod tests {
                         &legacy_inflight,
                         legacy_shared.as_ref(),
                         &ProviderKind::Codex,
-                        ch()
+                        ch(),
+                        None
                     ),
                     PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Held(_))
                 ),
@@ -1208,7 +1288,8 @@ mod tests {
                         &committed_inflight,
                         err_shared.as_ref(),
                         &ProviderKind::Codex,
-                        ch()
+                        ch(),
+                        None
                     ),
                     PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Held(_))
                 ),
@@ -1237,7 +1318,8 @@ mod tests {
                         &pin_inflight,
                         pin_shared.as_ref(),
                         &ProviderKind::Codex,
-                        owner_ch()
+                        owner_ch(),
+                        None,
                     ),
                     PreparedBridgeLease::Legacy(BridgeLeaseAcquire::NoRange)
                 ),
@@ -1268,7 +1350,8 @@ mod tests {
                         &drifted,
                         stale_shared.as_ref(),
                         &ProviderKind::Codex,
-                        ch()
+                        ch(),
+                        None
                     ),
                     PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Skip)
                 ),
@@ -1451,6 +1534,7 @@ mod tests {
         // Drive the REAL controller with EXPLICIT delivery vs owner channels so a
         // test can assert the edit routes to the delivery channel while the
         // lease/advance use the owner channel (codex r1 [High]).
+        #[rustfmt::skip]
         async fn run_split(
             gw: &ShortReplaceFakeGateway,
             shared: &Arc<SharedData>,
@@ -1464,8 +1548,7 @@ mod tests {
                 &ProviderKind::Claude,
                 delivery_channel,
                 owner_channel,
-                Some("AgentDesk-claude-8151"),
-                cell,
+                Some("AgentDesk-claude-8151"), None, cell,
                 &shared.ui.placeholder_controller,
                 MessageId::new(MSG),
                 "answer body",
@@ -1474,6 +1557,7 @@ mod tests {
                 Some(lease_key()),
                 START,
                 END,
+                None,
             )
             .await
         }
@@ -1700,6 +1784,7 @@ mod tests {
             assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 7); let gw = long_gateway(true, true); gw.clock.store(usize::MAX, Ordering::SeqCst); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert_eq!(gw.send_calls.load(Ordering::SeqCst), 1); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let broken = runtime_root_guard(); std::fs::create_dir_all(broken._temp.path().join("runtime")).unwrap(); std::fs::write(broken._temp.path().join("runtime/discord_delivery_records"), b"blocked").unwrap(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, broken._temp.path(), ch(), 8); let gw = long_gateway(true, true); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, true).await.0); assert_eq!((gw.send_calls.load(Ordering::SeqCst), shared.committed_relay_offset(ch())), (1, 64)); assert!(dr::read_record(&provider, CH).is_none()); assert!(!dr::historical_pinned_delivery_exists(&source, 9001)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased));
         }
 
+        #[rustfmt::skip]
         async fn run_long_apply(
             gw: &LongChunksFakeGateway,
             locals: &mut Locals,
@@ -1713,6 +1798,7 @@ mod tests {
                 ch(),
                 ch(),
                 Some("AgentDesk-claude-8151"),
+                None,
                 &cell,
                 &shared.ui.placeholder_controller,
                 MessageId::new(MSG),
@@ -1726,8 +1812,7 @@ mod tests {
                 None,
                 None,
                 None,
-                Some(lease_key()),
-                BridgeLongChunksLocals {
+                Some(lease_key()), None, BridgeLongChunksLocals {
                     terminal_delivery_committed: &mut locals.committed,
                     terminal_body_visible: &mut locals.visible,
                     completion_footer_terminal_text: &mut locals.footer,
@@ -1825,6 +1910,7 @@ mod tests {
         // transport; the write-back sets preserve + the skip-holder flag. Mutation:
         // Transient→ProceedMarkerless would POST → replace_calls == 1.
         #[tokio::test(flavor = "current_thread")]
+        #[rustfmt::skip]
         async fn bridge_short_replace_acquire_transient_no_send() {
             let shared = make_shared_data_for_tests();
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
@@ -1848,8 +1934,12 @@ mod tests {
                 "Transient acquire-fail MUST NOT POST (mutation to ProceedMarkerless POSTs)"
             );
             let locals = apply(outcome, false, 100);
-            assert!(locals.preserve && locals.skip_holder, "B2-skip locals set");
-            assert!(!locals.committed);
+            assert!(locals.preserve && locals.skip_holder, "B2-skip locals set"); assert!(!locals.committed);
+            let shared = make_shared_data_for_tests(); let cell = Arc::new(DeliveryLeaseCell::new(ch()));
+            let live = crate::services::discord::TmuxWatcherHandle { tmux_session_name: "live".into(), output_path: "out".into(), paused: Arc::new(std::sync::atomic::AtomicBool::new(false)), resume_offset: Arc::new(std::sync::Mutex::new(None)), cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)), pause_epoch: Arc::new(AtomicU64::new(0)), turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)), last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(crate::services::discord::tmux_watcher_now_ms())) };
+            shared.tmux_watchers.insert(ch(), live); let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
+            let outcome = run(&gw, &shared, &cell).await; assert!(matches!(outcome, toc::DeliveryOutcome::Skipped)); assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 0);
+            let locals = apply(outcome, false, 100); assert!(locals.preserve && !locals.skip_holder, "stale incarnation preserves bridge ownership");
         }
 
         // (4) the advance identity gate: confirmed EditedOriginal advances exactly
@@ -1886,7 +1976,7 @@ mod tests {
         async fn bridge_short_replace_heartbeat_before_commit() {
             use crate::services::discord::{DELIVERY_LEASE_HEARTBEAT_MS, DeliveryLeaseHeartbeat};
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
-            let holder = LeaseHolder::Bridge;
+            let holder = LeaseHolder::bridge_attempt();
             let short = lease_now_ms().saturating_add(100);
             assert!(cell.try_acquire(lease_key(), holder, START, END, short));
             let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), holder, lease_key());
@@ -2087,6 +2177,7 @@ mod tests {
         }
 
         #[tokio::test(flavor = "current_thread")]
+        #[rustfmt::skip]
         async fn bridge_long_chunks_acquire_transient_no_send() {
             let shared = make_shared_data_for_tests();
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
@@ -2106,6 +2197,7 @@ mod tests {
                 ch(),
                 ch(),
                 Some("AgentDesk-claude-8151"),
+                None,
                 &cell,
                 &shared.ui.placeholder_controller,
                 MessageId::new(MSG),
@@ -2119,8 +2211,7 @@ mod tests {
                 None,
                 None,
                 None,
-                Some(lease_key()),
-                BridgeLongChunksLocals {
+                Some(lease_key()), None, BridgeLongChunksLocals {
                     terminal_delivery_committed: &mut locals.committed,
                     terminal_body_visible: &mut locals.visible,
                     completion_footer_terminal_text: &mut locals.footer,

@@ -1,6 +1,6 @@
 //! Post-commit terminal delivery epilogue for terminal outcome delivery.
 
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
 
 use super::super::streaming_edit_text::TuiErrorClassification;
 use super::*;
@@ -45,8 +45,6 @@ pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) preserve_inflight_for_cleanup_retry: bool,
     pub(super) should_complete_work_dispatch_after_delivery: bool,
     pub(super) should_fail_dispatch_after_delivery: bool,
-    pub(super) bridge_relay_delegated_to_watcher: bool,
-    pub(super) watcher_owner_channel_id: ChannelId,
     pub(super) can_chain_locally: bool,
     pub(super) inflight_generation: u64,
 }
@@ -91,8 +89,6 @@ pub(super) async fn handle_delivery_epilogue(
     let should_complete_work_dispatch_after_delivery =
         ctx.should_complete_work_dispatch_after_delivery;
     let should_fail_dispatch_after_delivery = ctx.should_fail_dispatch_after_delivery;
-    let bridge_relay_delegated_to_watcher = ctx.bridge_relay_delegated_to_watcher;
-    let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
     let can_chain_locally = ctx.can_chain_locally;
     let inflight_generation = ctx.inflight_generation;
 
@@ -374,19 +370,8 @@ pub(super) async fn handle_delivery_epilogue(
             .await;
         }
 
-        // Signal the watcher that this turn's response was already delivered.
-        // Prevents the watcher from relaying the same response when it resumes.
-        // #3041 P1-2 (codex P1-c): a B2 Skip set
-        // `preserve_inflight_for_cleanup_retry = true`, so this gate (encoded in
-        // `bridge_epilogue_marks_watcher_delivered`) does NOT mark the watcher
-        // delivered — the bridge never delivered the range; the holder owns it.
-        if bridge_epilogue_marks_watcher_delivered(
-            preserve_inflight_for_cleanup_retry,
-            bridge_relay_delegated_to_watcher,
-        ) && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
-        {
-            watcher.turn_delivered.store(true, Ordering::Release);
-        }
+        // Exact watcher ACK is stamped by the winning publication settlement before
+        // release. Never look up the registry's current replacement here.
 
         if can_chain_locally
             && !preserve_inflight_for_cleanup_retry

@@ -182,8 +182,8 @@ use status_panel::{
 };
 use terminal_delivery::{
     BridgeLeaseAcquire, bridge_delivery_lease_for_inflight, bridge_delivery_lease_key_for_inflight,
-    bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
-    bridge_epilogue_skip_save_is_identity_guarded, empty_sink_commits_fully_consumed_response,
+    bridge_epilogue_clears_inflight, bridge_epilogue_skip_save_is_identity_guarded,
+    bridge_publication_lease_for_inflight, empty_sink_commits_fully_consumed_response,
     empty_sink_preserves_retry, mirror_frozen_prefix_ids, send_ordered_long_terminal_response,
     should_complete_work_dispatch_after_terminal_delivery,
     should_fail_dispatch_after_terminal_delivery, silent_turn_skip_marks_committed,
@@ -800,6 +800,7 @@ pub(super) fn spawn_turn_bridge(
                     codex_tui_terminal_range: stream_loop_output.codex_tui_terminal_range,
                     watcher_owner_channel_id,
                     watcher_handoff_claim_outcome,
+                    watcher_delivery_pin: watcher_delivery_pin.clone(),
                     bridge_created_response_placeholder_msg_id,
                     bridge_relay_delegated_to_watcher,
                     bridge_output_owner,

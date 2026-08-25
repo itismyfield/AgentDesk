@@ -38,8 +38,65 @@ pub(in crate::services::discord) enum LeaseHolder {
     Watcher { instance_id: u64 },
     /// The standby / output sink relay.
     Sink,
-    /// The bridge (turn-bridge handoff path).
-    Bridge,
+    /// One bridge publication attempt. The id prevents expiry/reacquire ABA.
+    Bridge { attempt_id: u64 },
+}
+
+static BRIDGE_DELIVERY_LEASE_SEQ: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+#[derive(Clone, Copy)]
+pub(in crate::services::discord) struct LateWatcherAdmission {
+    pub(in crate::services::discord) suppress: bool,
+    pub(in crate::services::discord) retry_stale: bool,
+}
+
+pub(in crate::services::discord) fn late_watcher_admission(
+    stale: bool,
+    delivered: bool,
+) -> LateWatcherAdmission {
+    LateWatcherAdmission {
+        suppress: delivered,
+        retry_stale: stale && !delivered,
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::services::discord) struct LateWatcherObservation {
+    pub(in crate::services::discord) acquired: bool,
+    pub(in crate::services::discord) stale: bool,
+    pub(in crate::services::discord) delivered: bool,
+}
+
+pub(in crate::services::discord) fn settle_late_watcher_admission(
+    cell: &DeliveryLeaseCell,
+    holder: LeaseHolder,
+    key: DeliveryLeaseKey,
+    range: (u64, u64),
+    observation: LateWatcherObservation,
+    suppressed: &mut bool,
+) -> (bool, Option<LateWatcherAdmission>) {
+    let admission = observation
+        .acquired
+        .then(|| late_watcher_admission(observation.stale, observation.delivered))
+        .filter(|admission| admission.suppress || admission.retry_stale);
+    if let Some(admission) = admission {
+        *suppressed |= admission.suppress;
+        if admission.suppress || admission.retry_stale {
+            let _ = cell.release(holder, key, range.0, range.1);
+            return (false, Some(admission));
+        }
+    }
+    (observation.acquired, admission)
+}
+
+impl LeaseHolder {
+    pub(in crate::services::discord) fn bridge_attempt() -> Self {
+        Self::Bridge {
+            attempt_id: BRIDGE_DELIVERY_LEASE_SEQ
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 /// The three-way commit outcome (#3041 §3). `Unknown` is the safety value for

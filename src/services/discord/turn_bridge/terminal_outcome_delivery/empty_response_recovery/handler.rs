@@ -418,11 +418,13 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
             terminal_delivery_committed = silent_turn_skip_marks_committed(&lease_acquire);
             match lease_acquire {
                 BridgeLeaseAcquire::Held(lease) => {
-                    lease.commit_and_advance(
+                    lease.commit_and_settle(
                         shared_owned.as_ref(),
                         watcher_owner_channel_id,
                         inflight_state.tmux_session_name.as_deref(),
                         crate::services::discord::LeaseOutcome::Delivered,
+                        false,
+                        None,
                     );
                 }
                 BridgeLeaseAcquire::Skip => {
@@ -447,6 +449,10 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                 BridgeLeaseAcquire::NoRange => {
                     // No offset to advance (zero/inverted range): the suppression
                     // resolves the (empty) range. B6 holds (no advance).
+                }
+                BridgeLeaseAcquire::StaleIncarnation => {
+                    terminal_delivery_committed = false;
+                    preserve_inflight_for_cleanup_retry = true;
                 }
             }
             true

@@ -267,6 +267,30 @@ impl TmuxWatcherRegistry {
         self.by_tmux_session.get(&tmux_session_name)
     }
 
+    #[rustfmt::skip]
+    pub(in crate::services::discord) fn with_bridge_publication_admission<T>(
+        &self, owner_channel_id: ChannelId,
+        expected_tmux_session_name: Option<&str>,
+        expected_output_path: Option<&str>,
+        expected_turn_delivered: Option<&Arc<std::sync::atomic::AtomicBool>>,
+        act: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let _guard = lock_tmux_watcher_registry(); let current = self.get(&owner_channel_id);
+        match expected_turn_delivered {
+            Some(expected) => {
+                let current = current?;
+                let exact = Some(current.tmux_session_name.as_str()) == expected_tmux_session_name
+                    && Some(current.output_path.as_str()) == expected_output_path
+                    && Arc::ptr_eq(&current.turn_delivered, expected)
+                    && !current.cancel.load(std::sync::atomic::Ordering::Acquire);
+                drop(current);
+                exact.then(act)
+            }
+            None => (!current.is_some_and(|current| !current.cancel.load(
+                std::sync::atomic::Ordering::Acquire) && !current.heartbeat_stale())).then(act),
+        }
+    }
+
     // #3034: test-only convenience wrapper (prod code calls `insert_locked`
     // with an explicit registry guard). Used only by `#[cfg(test)]` setup.
     #[allow(dead_code)]

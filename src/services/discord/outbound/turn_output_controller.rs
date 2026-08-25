@@ -2920,7 +2920,7 @@ mod tests {
                 turn: turn_key(channel),
                 lease_key: Some(lease_key(channel)),
                 owner: RelayOwnerKind::None,
-                holder: LeaseHolder::Bridge,
+                holder: LeaseHolder::bridge_attempt(),
                 lease: lease.as_ref(),
                 channel_id: channel,
                 placeholder_controller: &controller,

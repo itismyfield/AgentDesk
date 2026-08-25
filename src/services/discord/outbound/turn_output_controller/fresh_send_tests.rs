@@ -274,9 +274,10 @@ fn no_range_pseudo_range_lease_closes_concurrent_dedup_gap() {
     let turn = TurnKey::new(channel, 4046, 1);
     let key = DeliveryLeaseKey::from_turn_key(turn);
     let expected = super::fresh_send::pseudo_range(4096, body);
+    let holder = LeaseHolder::bridge_attempt();
     assert!(lease.try_acquire(
         key.clone(),
-        LeaseHolder::Bridge,
+        holder,
         expected.0,
         expected.1,
         lease_now_ms().saturating_add(TURN_OUTPUT_LEASE_TTL_MS),
@@ -299,7 +300,7 @@ fn no_range_pseudo_range_lease_closes_concurrent_dedup_gap() {
     assert!(!delivery_record::recent_fresh_send_content_matches(
         &provider, channel, tmux, body
     ));
-    assert!(lease.release(LeaseHolder::Bridge, key, expected.0, expected.1));
+    assert!(lease.release(holder, key, expected.0, expected.1));
 }
 
 #[test]

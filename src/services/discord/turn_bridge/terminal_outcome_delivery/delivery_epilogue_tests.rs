@@ -213,8 +213,6 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
             preserve_inflight_for_cleanup_retry: false,
             should_complete_work_dispatch_after_delivery: false,
             should_fail_dispatch_after_delivery: false,
-            bridge_relay_delegated_to_watcher: false,
-            watcher_owner_channel_id: channel_id,
             can_chain_locally: false,
             inflight_generation: 0,
         },
@@ -239,25 +237,6 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
         "the production epilogue must route an identity-mismatch outcome to WARN; logs={logs}"
     );
 }
-
-// ===========================================================================
-// #5191 S1-prep — a driver for `run_terminal_outcome_delivery`, plus the
-// CURRENT-behaviour characterization it pins.
-//
-// Until this block, nothing in the tree drove `run_terminal_outcome_delivery`:
-// the header on `contracts::TerminalRangeEnds` says so outright ("Nothing
-// drives `run_terminal_outcome_delivery`, so no test observes which end the
-// legacy fallback actually consumes"). The harness below assembles the full
-// context/state pair, a fake gateway that samples `watcher.turn_delivered` at
-// every publish entry, a seeded runtime root + inflight row, and a seeded
-// watcher-registry slot, then drives the A5 inline terminal-replace arm.
-//
-// S1-prep CHANGES NO PRODUCTION BEHAVIOUR. What it fixes is the baseline: the
-// marker is `false` when the bridge enters the publish, and only the epilogue's
-// post-commit store turns it `true`. The S1-fix slice deliberately flips the
-// first of those assertions (pre-publish CAS claim); these tests are written so
-// that flip shows up as an intentional edit here rather than as silence.
-// ===========================================================================
 
 /// Publish-shaped gateway calls the driver observes, in call order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -496,6 +475,7 @@ impl TerminalDeliveryDriver {
             temp.path(),
         );
         let provider = ProviderKind::Claude;
+        let output_path = temp.path().join("driver.jsonl").display().to_string();
         let mut inflight = InflightTurnState::new(
             provider.clone(),
             DRIVER_CHANNEL_ID,
@@ -506,7 +486,7 @@ impl TerminalDeliveryDriver {
             "driver prompt".to_string(),
             None,
             Some(DRIVER_TMUX_SESSION.to_string()),
-            None,
+            Some(output_path.clone()),
             None,
             0,
         );
@@ -520,7 +500,7 @@ impl TerminalDeliveryDriver {
             ChannelId::new(DRIVER_CHANNEL_ID),
             TmuxWatcherHandle {
                 tmux_session_name: DRIVER_TMUX_SESSION.to_string(),
-                output_path: temp.path().join("driver.jsonl").display().to_string(),
+                output_path,
                 paused: Arc::new(AtomicBool::new(false)),
                 resume_offset: Arc::new(Mutex::new(None)),
                 cancel: Arc::new(AtomicBool::new(false)),
@@ -568,6 +548,34 @@ impl TerminalDeliveryDriver {
         self.marker.load(Ordering::Acquire)
     }
 
+    /// Replace the registered watcher while retaining this driver's old exact
+    /// pin. A subsequent run must classify the old pin as stale before calling
+    /// any gateway method.
+    fn replace_current_watcher(&self) -> Arc<AtomicBool> {
+        let replacement = Arc::new(AtomicBool::new(false));
+        let output_path = self
+            .inflight
+            .output_path
+            .clone()
+            .expect("driver watcher output path");
+        self.shared.tmux_watchers.insert(
+            ChannelId::new(DRIVER_CHANNEL_ID),
+            TmuxWatcherHandle {
+                tmux_session_name: DRIVER_TMUX_SESSION.to_string(),
+                output_path,
+                paused: Arc::new(AtomicBool::new(false)),
+                resume_offset: Arc::new(Mutex::new(None)),
+                cancel: Arc::new(AtomicBool::new(false)),
+                pause_epoch: Arc::new(AtomicU64::new(0)),
+                turn_delivered: Arc::clone(&replacement),
+                last_heartbeat_ts_ms: Arc::new(AtomicI64::new(
+                    crate::services::discord::tmux_watcher_registry::tmux_watcher_now_ms(),
+                )),
+            },
+        );
+        replacement
+    }
+
     /// How many publishing calls have RESOLVED successfully. This — not the
     /// entry observations — is what "an answer is already on Discord" means.
     fn completed_publications(&self) -> usize {
@@ -611,6 +619,7 @@ impl TerminalDeliveryDriver {
                 codex_tui_terminal_range: None,
                 watcher_owner_channel_id: channel_id,
                 watcher_handoff_claim_outcome: WatcherHandoffClaimOutcome::None,
+                watcher_delivery_pin: Some(Arc::clone(&self.marker)),
                 bridge_created_response_placeholder_msg_id: None,
                 bridge_relay_delegated_to_watcher: false,
                 bridge_output_owner: None,
@@ -677,17 +686,20 @@ fn poll_at_most<F: Future>(future: &mut Pin<Box<F>>, polls: usize) -> bool {
     false
 }
 
-/// #5191 S1-prep baseline. The bridge enters its terminal publish with
-/// `watcher.turn_delivered` STILL FALSE, and only the epilogue's post-commit
-/// store turns it true afterwards.
-///
-/// This is the exact ordering the duplicate-relay symptom rides on: between the
-/// publish landing on Discord and the epilogue store, a resuming watcher reads
-/// `false` and relays the same answer again. S1-fix moves a CAS claim ahead of
-/// the fork, at which point `marker_at_entry` below becomes `true` — an
-/// intentional edit to this assertion, not a silent behaviour change.
 #[tokio::test]
-async fn driver_terminal_publish_currently_starts_with_the_watcher_marker_unset_5191() {
+#[rustfmt::skip]
+async fn driver_prompt_too_long_acks_and_advances_exact_range_5191() {
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+    let (mut ctx, mut state) = driver.parts();
+    ctx.is_prompt_too_long = true; ctx.tmux_last_offset = Some(64);
+    state.inflight_state.turn_start_offset = Some(0);
+    let output = run_terminal_outcome_delivery(ctx, state).await;
+    assert!(driver.marker()); assert!(output.status_panel_terminal_committed);
+    assert_eq!(driver.shared.committed_relay_offset(ChannelId::new(DRIVER_CHANNEL_ID)), 64);
+}
+
+#[tokio::test]
+async fn driver_terminal_publish_acks_exact_watcher_only_after_success_5191() {
     let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
     assert!(
         !driver.marker(),
@@ -708,11 +720,11 @@ async fn driver_terminal_publish_currently_starts_with_the_watcher_marker_unset_
     );
     assert!(
         !publishes[0].marker_at_entry,
-        "BASELINE: today the bridge publishes with turn_delivered still false"
+        "the success ACK must not be stored before gateway publication"
     );
     assert!(
         driver.marker(),
-        "the epilogue's post-commit store is what leaves the marker true today"
+        "Delivered lease settlement must ACK the exact watcher"
     );
     assert!(
         output.terminal_delivery_committed,
@@ -724,13 +736,6 @@ async fn driver_terminal_publish_currently_starts_with_the_watcher_marker_unset_
     );
 }
 
-/// #5191 S1-prep baseline. A replace that is NOT committed preserves the turn
-/// for retry, and `bridge_epilogue_marks_watcher_delivered` therefore refuses to
-/// mark the watcher — the marker stays false end to end.
-///
-/// S1-fix must keep this false: a claim taken before the fork has to be ROLLED
-/// BACK here. If it ever reports true, the watcher is permanently suppressed for
-/// a turn that was never delivered, which is the slice's absolute-line failure.
 #[tokio::test]
 async fn driver_uncommitted_terminal_replace_leaves_the_watcher_unmarked_5191() {
     let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Failed, 1);
@@ -755,15 +760,6 @@ async fn driver_uncommitted_terminal_replace_leaves_the_watcher_unmarked_5191() 
     );
 }
 
-/// #5191 S1-prep: the driver can drive an UNWIND out of the production publish
-/// and observe the marker afterwards. That capability is the whole reason this
-/// harness exists ahead of S1-fix — the P0 witness (a claim leaking through a
-/// panic and permanently suppressing the watcher) is unreachable without it.
-///
-/// The baseline value is `false` because nothing claims the marker yet. After
-/// S1-fix the claim sets it true before the publish and the guard's `Drop` must
-/// restore it to false along this same unwind; the assertion text stays, the
-/// mechanism under it changes.
 #[tokio::test]
 async fn driver_publish_panic_unwinds_and_leaves_the_watcher_unmarked_5191() {
     let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::PanicMidPublish, 1);
@@ -802,39 +798,6 @@ async fn driver_publish_panic_unwinds_and_leaves_the_watcher_unmarked_5191() {
     drop(future);
 }
 
-/// #5191 S1-prep: the manual-poll DROP SWEEP, and the marker table it measures.
-///
-/// Every gateway call the driver serves suspends once, so dropping the driven
-/// future after `n` polls lands at real interior points of the production call
-/// graph. Today the table is uniform: no reachable drop point leaves the marker
-/// set, because only the epilogue's post-commit store sets it and nothing
-/// suspends after that store.
-///
-/// S1-fix inverts the interesting half — once a publish has RESOLVED
-/// successfully, a drop must leave the marker `true` — and that inversion is
-/// what kills a mutant that moves `settle` behind the epilogue.
-///
-/// ENTRY IS NOT SUCCESS. The fake gateway records an entry observation when the
-/// production code reaches the method, then suspends, and only resolves the
-/// outcome on a later poll. So a drop at the poll that entered the publish is
-/// NOT a post-success drop: nothing was delivered there, and rolling the marker
-/// back at that point is correct rather than a defect. The invariant and the
-/// counting below are therefore built on `completed_publications`, never on the
-/// entry observations. Measured for this fixture (one suspension per gateway
-/// call): the publish resolves on poll 2, and the single post-success
-/// non-completing drop point is poll 2 — the epilogue's stale-prefix drain.
-///
-/// MEASURED CONSTRAINT (#5191 U7). A spin-polled task cannot resolve the
-/// epilogue's voice-completion lookup: `voice_channel_for_background` awaits
-/// `cached_config`, which awaits a `tokio::task::spawn_blocking` config load
-/// that never resolves while the polling task itself monopolises the
-/// current-thread runtime. The sweep therefore drives the production shape that
-/// skips it — a turn with no anchored user message, which the epilogue already
-/// documents as a real recovery shape ("A recovery turn with no anchored user
-/// message (user_msg_id == 0) is never a voice turn"). This is an ordinary
-/// production input, not a test-only bypass: the publish, the stale-prefix
-/// drain and the post-commit marker store all still run. The `.await`-driven
-/// tests above cover the anchored-user-message shape.
 #[tokio::test]
 async fn driver_drop_sweep_measures_the_current_marker_at_every_suspension_5191() {
     // (polls, completed, publications_landed, marker)
@@ -867,18 +830,19 @@ async fn driver_drop_sweep_measures_the_current_marker_at_every_suspension_5191(
                 *marker,
                 "a completed committed delivery must leave the watcher marked (polls={polls})"
             );
+        } else if *landed > 0 {
+            assert!(
+                *marker,
+                "a post-success drop must retain the exact ACK (polls={polls})"
+            );
         } else {
             assert!(
                 !*marker,
-                "BASELINE: dropping at poll {polls} leaves the watcher unmarked \
-                 (publications_landed={landed})"
+                "a pre-success drop must not ACK the watcher (polls={polls})"
             );
         }
     }
 
-    // The sweep is only a witness for a late settle if it can drop AFTER a
-    // publish actually landed. Measured value for this fixture: exactly one
-    // such point. S1-fix inverts the marker expectation there.
     let post_success_drop_points = table
         .iter()
         .filter(|(_, completed, landed, _)| !*completed && *landed > 0)
@@ -895,16 +859,6 @@ async fn driver_drop_sweep_measures_the_current_marker_at_every_suspension_5191(
     );
 }
 
-/// #5191 S1-prep (U8 pre-measurement): the legacy long-chunk arm is reachable
-/// from this driver. A body that needs several Discord messages, with no
-/// ordered tmux range, routes past both cut-over decisions into
-/// `apply_bridge_long_chunks_legacy`, which sends new chunks and deletes the
-/// placeholder instead of replacing in place.
-///
-/// That matters because the ordering witnesses have to cover more than one
-/// publishing arm: a claim placed correctly for the inline replace says nothing
-/// about this one. The baseline is the same — this arm also publishes with the
-/// watcher marker still unset.
 #[tokio::test]
 async fn driver_reaches_the_legacy_long_chunk_arm_with_an_unordered_range_5191() {
     let driver =
@@ -925,10 +879,40 @@ async fn driver_reaches_the_legacy_long_chunk_arm_with_an_unordered_range_5191()
     );
     assert!(
         observed.iter().all(|call| !call.marker_at_entry),
-        "BASELINE: the long-chunk arm also publishes with turn_delivered unset"
+        "the long-chunk arm must not ACK before gateway success"
     );
     assert!(
         output.terminal_delivery_committed,
         "a successful long-chunk send commits the terminal delivery"
+    );
+}
+
+#[tokio::test]
+async fn driver_replacement_watcher_rejects_old_pin_before_transport_5191() {
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let replacement = driver.replace_current_watcher();
+
+    let (ctx, state) = driver.parts();
+    let output = tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+        .await
+        .expect("stale watcher admission must not hang");
+
+    assert!(
+        driver.observations().is_empty(),
+        "StaleIncarnation must suppress every gateway publication"
+    );
+    assert_eq!(driver.completed_publications(), 0);
+    assert!(!output.terminal_delivery_committed);
+    assert!(
+        output.preserve_inflight_for_cleanup_retry,
+        "a stale source remains retryable under the current incarnation"
+    );
+    assert!(
+        !driver.marker(),
+        "the old watcher pin must remain unacknowledged"
+    );
+    assert!(
+        !replacement.load(Ordering::Acquire),
+        "the replacement watcher must not inherit the old pin's ACK"
     );
 }

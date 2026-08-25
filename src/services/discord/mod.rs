@@ -177,7 +177,9 @@ pub(in crate::services::discord) use tmux_watcher_registry::{
 
 pub(in crate::services::discord) use delivery_lease_cell::{
     DELIVERY_LEASE_DEADLINE_MS, DELIVERY_LEASE_HEARTBEAT_MS, DeliveryLeaseCell,
-    DeliveryLeaseHeartbeat, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
+    DeliveryLeaseHeartbeat, LateWatcherAdmission, LateWatcherObservation, LeaseHolder,
+    LeaseOutcome, LeaseSnapshot, late_watcher_admission, lease_now_ms,
+    settle_late_watcher_admission,
 };
 pub(crate) use meeting_orchestrator as meeting;
 #[allow(unused_imports)]
@@ -3927,7 +3929,7 @@ mod queued_placeholder_cluster_characterization_tests {
                 LeaseOutcome::Unknown,
             ] {
                 let cell = DeliveryLeaseCell::new(ChannelId::new(7));
-                let holder = LeaseHolder::Bridge;
+                let holder = LeaseHolder::bridge_attempt();
                 assert!(cell.try_acquire(turn(), holder, 100, 200, 1_000));
                 assert!(
                     cell.commit(holder, turn(), 100, 200, outcome),

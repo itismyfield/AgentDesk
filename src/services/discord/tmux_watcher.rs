@@ -895,7 +895,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let TerminalRelayPlan {
             relay_coord,
             mut slot_guard,
-            relay_decision,
+            mut relay_decision,
             session_bound_relay_owns_terminal_delivery,
             ssh_direct_pending,
             watcher_direct_fallback_requested,
@@ -969,8 +969,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             cutover_short_replace,
         );
         let watcher_lease_acquired = watcher_terminal_lease_range.is_some()
-            // #3041 B3: reclaim elapsed leases on the shared monotonic clock; a live
-            // heartbeat remains protected and other watchers B2-skip.
             && try_acquire_watcher_delivery_lease(
                 &watcher_lease_cell,
                 watcher_lease_holder,
@@ -978,9 +976,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 watcher_lease_start,
                 watcher_lease_end,
             );
-        // B2: another holder means no duplicate send. Controller cutover handles its
-        // own acquire failure; same-holder retries remain bounded by monotonic advance.
-        let watcher_lease_b2_skip = watcher_will_direct_send
+        #[rustfmt::skip]
+        let (watcher_lease_acquired, late_admission) = crate::services::discord::settle_late_watcher_admission(&watcher_lease_cell, watcher_lease_holder, watcher_lease_key.clone(), (watcher_lease_start, watcher_lease_end), crate::services::discord::LateWatcherObservation { acquired: watcher_lease_acquired, stale: watcher_lease_acquired && WatcherSourceAuthority { generation_mtime_ns: read_generation_file_mtime_ns(&tmux_session_name), reset_incarnation: shared.relay_frontier_token(channel_id).reset_incarnation } != source_authority, delivered: watcher_lease_acquired && turn_delivered.load(std::sync::atomic::Ordering::Acquire) }, &mut relay_decision.suppressed);
+        let watcher_lease_b2_skip = late_admission.is_none()
+            && watcher_will_direct_send
             && watcher_lease_end > watcher_lease_start
             && !watcher_lease_acquired
             && !cutover_short_replace;
@@ -1027,11 +1026,9 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         );
 
         let mut retry_terminal_delivery_from_offset = false;
-        // #4194: bound every await in the slot-held terminal relay expression.
-        // On timeout, fall into the same failed-undelivered rewind path as a
-        // transient send failure; never advance watermarks from this branch.
         let relay_ok = match watcher_relay_emission_with_timeout(async {
-            if session_bound_relay_owns_terminal_delivery {
+            if let Some(admission) = late_admission { retry_terminal_delivery_from_offset = admission.retry_stale; false
+            } else if session_bound_relay_owns_terminal_delivery {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 👁 Delegating terminal response to session-bound StreamRelay sink ({} chars, offset {}, task_notification_kind={})",
@@ -1399,7 +1396,10 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 continue 'watcher_loop;
             }
         }
-        if watcher_direct_fallback_requested && !watcher_direct_fallback_authorized {
+        if watcher_direct_fallback_requested
+            && !watcher_direct_fallback_authorized
+            && late_admission.is_none()
+        {
             slot_guard.release();
             continue 'watcher_loop;
         }

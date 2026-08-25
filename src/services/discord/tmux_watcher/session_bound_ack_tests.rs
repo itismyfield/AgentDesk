@@ -5,6 +5,10 @@
 //! excluded from the cap by the audit's `production_rust_files()` filter).
 
 use super::*;
+use crate::services::discord::{
+    ChannelId, DeliveryLeaseCell, DeliveryLeaseKey, LateWatcherObservation, LeaseHolder,
+    LeaseSnapshot, lease_now_ms, settle_late_watcher_admission,
+};
 
 #[test]
 fn relay_slot_guard_releases_on_drop() {
@@ -622,7 +626,7 @@ mod inflight_sink_marker_gate {
     #[test]
     fn committed_covered_skips_for_non_sink() {
         let snap = LeaseSnapshot::Leased {
-            holder: LeaseHolder::Bridge,
+            holder: LeaseHolder::Bridge { attempt_id: 1 },
             key: turn(),
             deadline_ms: NOW + 1,
             start: START,
@@ -748,4 +752,73 @@ fn korean_answer_under_the_character_limit_stays_one_message() {
     let overflowing = "한".repeat(2100);
     assert!(should_send(true, &overflowing));
     assert!(!should_send(false, &overflowing));
+}
+
+fn settle_late_admission(
+    acquired: bool,
+    stale: bool,
+    delivered: bool,
+) -> (bool, Option<(bool, bool)>, LeaseSnapshot, bool) {
+    let channel_id = ChannelId::new(994_5191);
+    let cell = DeliveryLeaseCell::new(channel_id);
+    let key = DeliveryLeaseKey::new(channel_id, 7, 11, None, None);
+    let holder = LeaseHolder::Watcher { instance_id: 13 };
+    if acquired {
+        assert!(cell.try_acquire(key.clone(), holder, 20, 40, lease_now_ms() + 10_000));
+    }
+    let mut suppressed = false;
+    let (held, admission) = settle_late_watcher_admission(
+        &cell,
+        holder,
+        key,
+        (20, 40),
+        LateWatcherObservation {
+            acquired,
+            stale,
+            delivered,
+        },
+        &mut suppressed,
+    );
+    (
+        held,
+        admission.map(|value| (value.suppress, value.retry_stale)),
+        cell.read(),
+        suppressed,
+    )
+}
+
+#[test]
+fn late_watcher_settlement_preserves_current_lease_for_transport() {
+    let (held, admission, snapshot, suppressed) = settle_late_admission(true, false, false);
+    assert!(held);
+    assert_eq!(admission, None);
+    assert!(matches!(snapshot, LeaseSnapshot::Leased { .. }));
+    assert!(!suppressed);
+}
+
+#[test]
+fn late_watcher_settlement_releases_exact_ack_without_transport() {
+    let (held, admission, snapshot, suppressed) = settle_late_admission(true, false, true);
+    assert!(!held);
+    assert_eq!(admission, Some((true, false)));
+    assert!(matches!(snapshot, LeaseSnapshot::Unleased));
+    assert!(suppressed);
+}
+
+#[test]
+fn late_watcher_settlement_releases_stale_source_for_retry() {
+    let (held, admission, snapshot, suppressed) = settle_late_admission(true, true, false);
+    assert!(!held);
+    assert_eq!(admission, Some((false, true)));
+    assert!(matches!(snapshot, LeaseSnapshot::Unleased));
+    assert!(!suppressed);
+}
+
+#[test]
+fn late_watcher_settlement_ignores_authority_without_acquire() {
+    let (held, admission, snapshot, suppressed) = settle_late_admission(false, false, false);
+    assert!(!held);
+    assert_eq!(admission, None);
+    assert!(matches!(snapshot, LeaseSnapshot::Unleased));
+    assert!(!suppressed);
 }

@@ -52,6 +52,14 @@ pub(super) async fn handle_cancel_prompt_replace(
     ctx: CancelPromptReplaceContext<'_>,
     state: CancelPromptReplaceState<'_>,
 ) -> CancelPromptReplaceOutcome {
+    handle_cancel_prompt_replace_with_pin(message, ctx, None, state).await
+}
+
+#[rustfmt::skip]
+pub(super) async fn handle_cancel_prompt_replace_with_pin(
+    message: CancelPromptReplaceMessage, ctx: CancelPromptReplaceContext<'_>,
+    watcher_delivery_pin: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    state: CancelPromptReplaceState<'_>) -> CancelPromptReplaceOutcome {
     let shared_owned = Arc::clone(ctx.shared_owned);
     let gateway = Arc::clone(ctx.gateway);
     let provider = ctx.provider.clone();
@@ -171,10 +179,6 @@ pub(super) async fn handle_cancel_prompt_replace(
             Some(restart_mode) => TmuxCleanupPolicy::PreserveSessionAndInflight { restart_mode },
             None => TmuxCleanupPolicy::PreserveSession,
         };
-        // #3169 (death #3): the `None`-cancel_source fallback uses the
-        // shared `ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON` sentinel so the
-        // tmux_runtime SIGINT guard recognises this anonymous internal
-        // teardown and suppresses claude's session-killing teardown SIGINT.
         let cancel_source = cancel_token
             .cancel_source()
             .unwrap_or_else(|| tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON.to_string());
@@ -219,46 +223,48 @@ pub(super) async fn handle_cancel_prompt_replace(
         let preserved_restart_mode = cancel_token.restart_mode();
         let remaining_response =
             response_portion_after_offset(&full_response, response_sent_offset);
-        let terminal_response = if let Some(restart_mode) = preserved_restart_mode {
-            handoff_interrupted_message(restart_mode, remaining_response)
-        } else if remaining_response.trim().is_empty() {
-            "[Stopped]".to_string()
-        } else {
-            let formatted = banner.format_discord_body(remaining_response);
-            format!("{}\n\n[Stopped]", formatted)
-        };
+        let (terminal_response, stop_carries_response) =
+            if let Some(restart_mode) = preserved_restart_mode {
+                (
+                    handoff_interrupted_message(restart_mode, remaining_response),
+                    !crate::services::discord::response_sanitizer::sanitize_hidden_context_and_strip_chrome(
+                        remaining_response.trim(),
+                    )
+                    .trim()
+                    .is_empty(),
+                )
+            } else {
+                let formatted = banner.format_discord_body(remaining_response);
+                let carries = !formatted.trim().is_empty();
+                (
+                    if carries {
+                        format!("{formatted}\n\n[Stopped]")
+                    } else {
+                        "[Stopped]".to_string()
+                    },
+                    carries,
+                )
+            };
         let terminal_response = banner.prefix(response_sent_offset == 0, terminal_response);
 
-        // #3041 P1-2 (site 1 — cancel/stop terminal replace): acquire the
-        // shared delivery lease BEFORE delivering the `[Stopped]` body; a B2
-        // Skip means the holder owns this turn/range → do NOT deliver+advance.
-        // (codex P1-a) lease on `watcher_owner_channel_id` — the cell + TurnKey
-        // channel the WATCHER uses (a reused watcher can own a channel != this
-        // bridge's `channel_id`), so the two CONTEND on one cell (single-holder
-        // B2) instead of both delivering = duplicate.
-        let stop_lease_acquire = bridge_delivery_lease_for_inflight(
-            shared_owned.as_ref(),
-            watcher_owner_channel_id,
-            shared_owned.restart.current_generation,
-            &inflight_state,
-            tmux_last_offset,
-        );
-        if matches!(stop_lease_acquire, BridgeLeaseAcquire::Skip) {
+        #[rustfmt::skip]
+        let stop_lease_acquire = bridge_publication_lease_for_inflight(
+            shared_owned.as_ref(), watcher_owner_channel_id, shared_owned.restart.current_generation,
+            &inflight_state, tmux_last_offset, &terminal_response, watcher_delivery_pin);
+        if matches!(
+            stop_lease_acquire,
+            BridgeLeaseAcquire::Skip | BridgeLeaseAcquire::StaleIncarnation
+        ) {
+            let skip_holder_owns = matches!(stop_lease_acquire, BridgeLeaseAcquire::Skip);
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 channel_id = channel_id.get(),
-                "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate cancel/stop terminal replace (channel {})",
+                stale_incarnation = !skip_holder_owns,
+                "  [{ts}] bridge skipped cancel/stop terminal replace before transport (channel {})",
                 channel_id
             );
-            // #3041 P1-2 (codex P1-c): a B2 Skip means the holder (the watcher)
-            // owns this range — the bridge is a TRUE no-op on completion
-            // side-effects. PRESERVE inflight so the epilogue does NOT clear it
-            // (~9017) / mark `watcher.turn_delivered` (~8356); a still-retry-able
-            // turn is re-delivered by ACK-poll if the holder ultimately fails.
-            // (codex P1-2 R3) the holder owns the inflight lifecycle → make the
-            // epilogue save identity-guarded so it never resurrects a cleared row.
             preserve_inflight_for_cleanup_retry = true;
-            bridge_skip_holder_owns_inflight = true;
+            bridge_skip_holder_owns_inflight = skip_holder_owns;
         } else {
             let stop_lease = match stop_lease_acquire {
                 BridgeLeaseAcquire::Held(lease) => Some(lease),
@@ -281,23 +287,26 @@ pub(super) async fn handle_cancel_prompt_replace(
             if replace_committed {
                 status_panel_terminal_committed = true;
             }
-            // B6: the ONLY confirmed_end advance is via a successful lease
-            // `Held` commits; `NoRange` has no new bytes and never advances (codex
-            // P1-b: a degenerate equal-nonzero range must not advance).
             if let Some(lease) = stop_lease {
-                let lease_range = lease.range();
+                let lease_range = lease.durable_range();
                 let outcome = if replace_committed {
                     crate::services::discord::LeaseOutcome::Delivered
                 } else {
                     crate::services::discord::LeaseOutcome::NotDelivered
                 };
-                let committed = lease.commit_and_advance(
+                let committed = lease.commit_and_settle(
                     shared_owned.as_ref(),
                     watcher_owner_channel_id,
                     inflight_state.tmux_session_name.as_deref(),
                     outcome,
+                    stop_carries_response,
+                    watcher_delivery_pin,
                 );
-                if replace_committed && committed {
+                if stop_carries_response
+                    && replace_committed
+                    && committed
+                    && let Some(lease_range) = lease_range
+                {
                     terminal_delivery::record_stopped_turn_terminal_replace_delivery(
                         shared_owned.as_ref(),
                         &provider,
@@ -339,28 +348,24 @@ pub(super) async fn handle_cancel_prompt_replace(
             full_response = format!("{mention} {full_response}");
         }
         let display_response = banner.prefix(response_sent_offset == 0, full_response.clone());
-        // #3041 P1-2 (site 2 — prompt-too-long terminal replace): same lease
-        // routing as site 1 — acquire before replace; B2-skip if held. (codex
-        // P1-a) lease on `watcher_owner_channel_id` (shared cell + TurnKey).
-        let plt_lease_acquire = bridge_delivery_lease_for_inflight(
-            shared_owned.as_ref(),
-            watcher_owner_channel_id,
-            shared_owned.restart.current_generation,
-            &inflight_state,
-            tmux_last_offset,
-        );
-        if matches!(plt_lease_acquire, BridgeLeaseAcquire::Skip) {
+        #[rustfmt::skip]
+        let plt_lease_acquire = bridge_publication_lease_for_inflight(
+            shared_owned.as_ref(), watcher_owner_channel_id, shared_owned.restart.current_generation,
+            &inflight_state, tmux_last_offset, &display_response, watcher_delivery_pin);
+        if matches!(
+            plt_lease_acquire,
+            BridgeLeaseAcquire::Skip | BridgeLeaseAcquire::StaleIncarnation
+        ) {
+            let skip_holder_owns = matches!(plt_lease_acquire, BridgeLeaseAcquire::Skip);
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 channel_id = channel_id.get(),
-                "  [{ts}] 🌉 #3041 B2: delivery lease held by another holder — bridge skipped duplicate prompt-too-long terminal replace (channel {})",
+                stale_incarnation = !skip_holder_owns,
+                "  [{ts}] bridge skipped prompt-too-long terminal replace before transport (channel {})",
                 channel_id
             );
-            // #3041 P1-2 (codex P1-c): preserve retry on a B2 Skip — holder owns
-            // delivery; do NOT clear inflight / mark the watcher delivered.
-            // (codex P1-2 R3) holder owns the inflight lifecycle on a Skip.
             preserve_inflight_for_cleanup_retry = true;
-            bridge_skip_holder_owns_inflight = true;
+            bridge_skip_holder_owns_inflight = skip_holder_owns;
         } else {
             let plt_lease = match plt_lease_acquire {
                 BridgeLeaseAcquire::Held(lease) => Some(lease),
@@ -383,31 +388,22 @@ pub(super) async fn handle_cancel_prompt_replace(
             if replace_committed {
                 status_panel_terminal_committed = true;
             }
-            // B6: advance only through a successful lease; NoRange never advances.
             if let Some(lease) = plt_lease {
-                let lease_range = lease.range();
+                let lease_range = lease.durable_range();
                 let outcome = if replace_committed {
                     crate::services::discord::LeaseOutcome::Delivered
                 } else {
                     crate::services::discord::LeaseOutcome::NotDelivered
                 };
-                let committed = lease.commit_and_advance(
-                    shared_owned.as_ref(),
-                    watcher_owner_channel_id,
-                    inflight_state.tmux_session_name.as_deref(),
-                    outcome,
-                );
-                if replace_committed && committed {
+                #[rustfmt::skip]
+                let committed = lease.commit_and_settle(shared_owned.as_ref(), watcher_owner_channel_id,
+                    inflight_state.tmux_session_name.as_deref(), outcome, false, watcher_delivery_pin);
+                if replace_committed && committed && let Some(lease_range) = lease_range {
                     super::super::super::outbound::delivery_record::record_delivered_frontier_with_body(
-                        shared_owned.as_ref(),
-                        &provider,
-                        watcher_owner_channel_id,
-                        inflight_state.tmux_session_name.as_deref(),
-                        lease_range,
-                        current_msg_id.get(),
-                        channel_id.get(),
-                        &full_response,
-                        Some(inflight_state.user_msg_id), // #4564 explicit inbound id (delivery channel)
+                        shared_owned.as_ref(), &provider, watcher_owner_channel_id,
+                        inflight_state.tmux_session_name.as_deref(), lease_range,
+                        current_msg_id.get(), channel_id.get(), &full_response,
+                        Some(inflight_state.user_msg_id),
                     );
                 }
             }

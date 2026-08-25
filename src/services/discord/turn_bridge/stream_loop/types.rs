@@ -114,12 +114,13 @@ pub(in crate::services::discord::turn_bridge) fn prepare_bridge_lease(
     shared: &SharedData,
     provider: &ProviderKind,
     delivery_channel: ChannelId,
+    exact_ack: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> PreparedBridgeLease {
-    use BridgeLeaseAcquire::{Held, NoRange, Skip};
+    use BridgeLeaseAcquire::{Held, NoRange, Skip, StaleIncarnation};
     let Some(admitted) = admitted else {
         return PreparedBridgeLease::Legacy(acquire);
     };
-    if matches!(acquire, Skip) {
+    if matches!(acquire, Skip | StaleIncarnation) {
         return PreparedBridgeLease::Legacy(acquire);
     }
     #[cfg(not(unix))]
@@ -145,33 +146,36 @@ pub(in crate::services::discord::turn_bridge) fn prepare_bridge_lease(
             // honest report: no range and no lease are held any more, and the fallback still
             // delivers.
             Held(lease) => lease
-                .pin_exact_source(shared, provider, delivery_channel, source)
+                .pin_exact_source(shared, provider, delivery_channel, source, exact_ack)
                 .map_or(
                     PreparedBridgeLease::Legacy(NoRange),
                     PreparedBridgeLease::Pinned,
                 ),
             NoRange => PreparedBridgeLease::Legacy(NoRange),
-            Skip => unreachable!(),
+            Skip | StaleIncarnation => unreachable!(),
         },
     }
 }
 
 macro_rules! dispatch_pinned_terminal {
-    ($shared:ident $gateway:ident $provider:ident $owner:ident $inflight:ident $end:ident $admitted:ident $channel:ident $message:ident $body:ident $start:ident $dispatch:ident $session:ident $turn:ident $long:ident $full:ident $footer_mode:ident $committed:ident $visible:ident $sent:ident $footer:ident $preserve:ident $skip_owner:ident $handled:ident) => {{
+    ($shared:ident $gateway:ident $provider:ident $owner:ident $inflight:ident $end:ident $admitted:ident $channel:ident $message:ident $body:ident $start:ident $dispatch:ident $session:ident $turn:ident $long:ident $full:ident $footer_mode:ident $pin:ident $committed:ident $visible:ident $sent:ident $footer:ident $preserve:ident $skip_owner:ident $handled:ident) => {{
         if $admitted.is_some() {
             let prepared = $crate::services::discord::turn_bridge::stream_loop::types::prepare_bridge_lease(
-                bridge_delivery_lease_for_inflight(
+                bridge_publication_lease_for_inflight(
                     $shared.as_ref(),
                     $owner,
                     $shared.restart.current_generation,
                     &$inflight,
                     $end,
+                    &$body,
+                    $pin.as_ref(),
                 ),
                 $admitted,
                 &$inflight,
                 $shared.as_ref(),
                 &$provider,
                 $channel,
+                $pin.clone(),
             );
             match prepared {
                 $crate::services::discord::turn_bridge::stream_loop::types::PreparedBridgeLease::Pinned(pinned) => {
@@ -241,6 +245,11 @@ macro_rules! dispatch_pinned_terminal {
                 $crate::services::discord::turn_bridge::stream_loop::types::PreparedBridgeLease::Legacy(BridgeLeaseAcquire::Skip) => {
                     $preserve = true;
                     $skip_owner = true;
+                    $handled = true;
+                }
+                $crate::services::discord::turn_bridge::stream_loop::types::PreparedBridgeLease::Legacy(BridgeLeaseAcquire::StaleIncarnation) => {
+                    $preserve = true;
+                    $skip_owner = false;
                     $handled = true;
                 }
                 // The pinned end is not consumed after this match, and the legacy fallback

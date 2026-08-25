@@ -19,7 +19,7 @@ use super::{streaming_edit_text::TuiErrorClassification, *};
 use busy_followup_retry::{apply_busy_requeue_if_pending, handle_empty_response_and_busy_requeue};
 use cancel_prompt_replace::{
     CancelPromptReplaceContext, CancelPromptReplaceMessage, CancelPromptReplaceOutcome,
-    CancelPromptReplaceState, handle_cancel_prompt_replace,
+    CancelPromptReplaceState, handle_cancel_prompt_replace_with_pin,
 };
 pub(super) use contracts::{
     TerminalOutcomeDeliveryContext, TerminalOutcomeDeliveryOutcome, TerminalOutcomeDeliveryOutput,
@@ -64,6 +64,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let codex_tui_terminal_range = ctx.codex_tui_terminal_range;
     let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
     let watcher_handoff_claim_outcome = ctx.watcher_handoff_claim_outcome;
+    let watcher_delivery_pin = ctx.watcher_delivery_pin;
     let bridge_created_response_placeholder_msg_id = ctx.bridge_created_response_placeholder_msg_id;
     let bridge_relay_delegated_to_watcher = ctx.bridge_relay_delegated_to_watcher;
     let bridge_output_owner = ctx.bridge_output_owner;
@@ -196,7 +197,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         } else {
             CancelPromptReplaceMessage::PromptTooLong
         };
-        let outcome = handle_cancel_prompt_replace(
+        let outcome = handle_cancel_prompt_replace_with_pin(
             message,
             CancelPromptReplaceContext {
                 shared_owned: &shared_owned,
@@ -214,6 +215,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 response_sent_offset,
                 inflight_generation,
             },
+            watcher_delivery_pin.as_ref(),
             CancelPromptReplaceState {
                 full_response: &mut full_response,
                 active_background_child_session_ids: &mut active_background_child_session_ids,
@@ -424,7 +426,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                 let mut pinned_handled = false;
                 #[cfg(unix)]
-                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled);
+                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode watcher_delivery_pin terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled);
                 if !pinned_handled && long {
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                     let bridge_end = tmux_last_offset.unwrap_or(0);
@@ -452,6 +454,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             channel_id,
                             watcher_owner_channel_id,
                             inflight_state.tmux_session_name.as_deref(),
+                            inflight_state.output_path.as_deref(),
                             &cell,
                             &shared_owned.ui.placeholder_controller,
                             current_msg_id,
@@ -466,6 +469,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
                             Some(bridge_lease_key.clone()),
+                            watcher_delivery_pin.as_ref(),
                             terminal_controller_cutover::BridgeLongChunksLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
                                 terminal_body_visible: &mut terminal_body_visible,
@@ -482,12 +486,14 @@ pub(super) async fn run_terminal_outcome_delivery(
                         )
                         .await;
                     } else {
-                        let lease_acquire = bridge_delivery_lease_for_inflight(
+                        let lease_acquire = bridge_publication_lease_for_inflight(
                             shared_owned.as_ref(),
                             watcher_owner_channel_id,
                             shared_owned.restart.current_generation,
                             &inflight_state,
                             tmux_last_offset,
+                            &delivery_response,
+                            watcher_delivery_pin.as_ref(),
                         );
                         terminal_controller_cutover::apply_bridge_long_chunks_legacy(
                             lease_acquire,
@@ -505,6 +511,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             dispatch_id.as_deref(),
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
+                            watcher_delivery_pin.as_ref(),
                             inflight_state.user_msg_id,
                             terminal_controller_cutover::BridgeLongChunksLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
@@ -554,6 +561,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             channel_id,
                             watcher_owner_channel_id,
                             inflight_state.tmux_session_name.as_deref(),
+                            inflight_state.output_path.as_deref(),
                             &cell,
                             &shared_owned.ui.placeholder_controller,
                             current_msg_id,
@@ -568,6 +576,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             adk_session_key.as_deref(),
                             Some(turn_id.as_str()),
                             Some(bridge_lease_key.clone()),
+                            watcher_delivery_pin.as_ref(),
                             terminal_controller_cutover::BridgeShortReplaceLocals {
                                 terminal_delivery_committed: &mut terminal_delivery_committed,
                                 terminal_body_visible: &mut terminal_body_visible,
@@ -588,21 +597,21 @@ pub(super) async fn run_terminal_outcome_delivery(
                         // `watcher_owner_channel_id` BEFORE delivering so the
                         // watcher and bridge serialize. On B2 Skip the holder owns
                         // this range/turn, so do NOT deliver+advance.
-                        let lease_acquire =
-                            match terminal_controller_cutover::bridge_terminal_lease_range(
-                                Some((bridge_start, tmux_last_offset.unwrap_or(0))),
-                                cutover_short_replace,
-                            ) {
-                                Some(_) => bridge_delivery_lease_for_inflight(
-                                    shared_owned.as_ref(),
-                                    watcher_owner_channel_id,
-                                    shared_owned.restart.current_generation,
-                                    &inflight_state,
-                                    tmux_last_offset,
-                                ),
-                                None => BridgeLeaseAcquire::NoRange,
-                            };
-                        if matches!(lease_acquire, BridgeLeaseAcquire::Skip) {
+                        let lease_acquire = bridge_publication_lease_for_inflight(
+                            shared_owned.as_ref(),
+                            watcher_owner_channel_id,
+                            shared_owned.restart.current_generation,
+                            &inflight_state,
+                            tmux_last_offset,
+                            &delivery_response,
+                            watcher_delivery_pin.as_ref(),
+                        );
+                        if matches!(
+                            lease_acquire,
+                            BridgeLeaseAcquire::Skip | BridgeLeaseAcquire::StaleIncarnation
+                        ) {
+                            let skip_holder_owns =
+                                matches!(lease_acquire, BridgeLeaseAcquire::Skip);
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             tracing::info!(
                                 channel_id = channel_id.get(),
@@ -614,7 +623,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                             // mark the watcher delivered. (codex P1-2 R3)
                             // identity-guard the save.
                             preserve_inflight_for_cleanup_retry = true;
-                            bridge_skip_holder_owns_inflight = true;
+                            bridge_skip_holder_owns_inflight = skip_holder_owns;
                         } else {
                             // `Held(lease)` commits through the lease; `NoRange`
                             // delivers without a lease and without offset advance.
@@ -654,20 +663,25 @@ pub(super) async fn run_terminal_outcome_delivery(
                                 // through the lease commit — `Delivered` on a committed
                                 // replace, `NotDelivered` otherwise.
                                 let outcome = if let Some(lease) = lease {
-                                    let lease_range = lease.range();
+                                    let lease_range = lease.durable_range();
                                     let outcome = if replace_committed {
                                         crate::services::discord::LeaseOutcome::Delivered
                                     } else {
                                         crate::services::discord::LeaseOutcome::NotDelivered
                                     };
-                                    let committed = lease.commit_and_advance(
+                                    let committed = lease.commit_and_settle(
                                         shared_owned.as_ref(),
                                         watcher_owner_channel_id,
                                         inflight_state.tmux_session_name.as_deref(),
                                         outcome,
+                                        true,
+                                        watcher_delivery_pin.as_ref(),
                                     );
                                     // #3630: mirror delivered frontier for post-restart no-inflight dedup.
-                                    if replace_committed && committed {
+                                    if replace_committed
+                                        && committed
+                                        && let Some(lease_range) = lease_range
+                                    {
                                         super::super::outbound::delivery_record::record_delivered_frontier_with_body(
                                             shared_owned.as_ref(),
                                             &provider,
@@ -791,8 +805,6 @@ pub(super) async fn run_terminal_outcome_delivery(
                 preserve_inflight_for_cleanup_retry,
                 should_complete_work_dispatch_after_delivery,
                 should_fail_dispatch_after_delivery,
-                bridge_relay_delegated_to_watcher,
-                watcher_owner_channel_id,
                 can_chain_locally,
                 inflight_generation,
             },

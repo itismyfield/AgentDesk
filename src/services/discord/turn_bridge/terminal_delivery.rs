@@ -449,16 +449,6 @@ pub(super) fn advance_tmux_relay_confirmed_end(
     );
 }
 
-/// #3041 P1-2: per-channel global counter that mints a unique `instance_id` for
-/// each bridge delivery-lease attempt. `LeaseHolder::Bridge` has no `instance_id`
-/// field today (only the watcher's holder kind carries one), so the bridge holder
-/// identity is `(Bridge, turn, range)`. The counter is retained as future-proofing
-/// / observability anchor but does not enter the lease key; the turn+range identity
-/// already distinguishes sequential bridge attempts (each turn re-keys on its own
-/// pinned `TurnKey`).
-static BRIDGE_DELIVERY_LEASE_SEQ: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
-
 /// #3041 P1-2: RAII-ish guard that routes the BRIDGE's terminal delivery through
 /// the SAME per-channel [`crate::services::discord::DeliveryLeaseCell`] the
 /// watcher (P1-1) uses, so the watcher and the bridge are SERIALIZED — whoever
@@ -493,15 +483,17 @@ pub(super) struct BridgeDeliveryLease {
     end: u64,
     heartbeat: Option<crate::services::discord::DeliveryLeaseHeartbeat>,
     release_on_drop: bool,
+    advances_frontier: bool,
 }
 #[cfg(unix)]
 pub(super) struct PinnedBridgeDeliveryLease {
     lease: BridgeDeliveryLease,
     source: CodexRange,
     provider: ProviderKind,
-    reset_incarnation: u64,
     committed_current: Option<bool>,
     message_id: Option<u64>,
+    reset_incarnation: u64,
+    exact_ack: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 #[cfg(unix)]
 pub(super) enum PinnedBridgeCommit {
@@ -528,6 +520,8 @@ pub(super) enum BridgeLeaseAcquire {
     /// precisely because it never advances the offset, so B6 ("no advance outside
     /// a lease commit") is not violated.
     NoRange,
+    /// The pinned watcher incarnation was replaced before bridge admission.
+    StaleIncarnation,
 }
 
 /// #3041 P1-2 (codex P1-c): whether the silent-turn suppression site (mod.rs
@@ -549,15 +543,6 @@ pub(super) fn silent_turn_skip_marks_committed(acquire: &BridgeLeaseAcquire) -> 
 /// when the delivery-lease acquire returns [`BridgeLeaseAcquire::Skip`] — the
 /// live holder (the watcher) owns delivery of this range, so the bridge must be a
 /// TRUE no-op on completion side-effects.
-///
-/// These two pure predicates mirror the downstream epilogue gates so the
-/// "a Skip preserves retry state" contract is unit-testable without driving the
-/// whole 5000-line turn loop:
-///   * [`bridge_epilogue_clears_inflight`] — the `~9017` clear-vs-preserve fork:
-///     a preserved turn is SAVED (re-deliverable), never cleared.
-///   * [`bridge_epilogue_marks_watcher_delivered`] — the `~8422` gate that signs
-///     the watcher off as already-delivered: a preserved turn must NOT mark the
-///     watcher delivered (it never delivered the range).
 ///
 /// `~9017`: the bridge clears inflight ONLY when neither preserving for retry nor
 /// delegating output to another owner. A preserved turn is saved, not cleared.
@@ -592,16 +577,6 @@ pub(super) fn bridge_epilogue_skip_save_is_identity_guarded(
     bridge_skip_holder_owns_inflight
 }
 
-/// `~8422`: the bridge signs the watcher off as already-delivered ONLY when not
-/// preserving for retry and not delegating relay to the watcher. A preserved turn
-/// must NOT mark the watcher delivered.
-pub(super) fn bridge_epilogue_marks_watcher_delivered(
-    preserve_inflight_for_cleanup_retry: bool,
-    bridge_relay_delegated_to_watcher: bool,
-) -> bool {
-    !preserve_inflight_for_cleanup_retry && !bridge_relay_delegated_to_watcher
-}
-
 pub(super) fn bridge_delivery_lease_key_for_inflight(
     watcher_owner_channel_id: ChannelId,
     generation: u64,
@@ -629,6 +604,47 @@ pub(super) fn bridge_delivery_lease_for_inflight(
         inflight.turn_start_offset.unwrap_or(0),
         target_end,
     )
+}
+
+pub(super) fn bridge_publication_lease_for_inflight(
+    shared: &SharedData,
+    watcher_owner_channel_id: ChannelId,
+    generation: u64,
+    inflight: &crate::services::discord::inflight::InflightTurnState,
+    target_end: Option<u64>,
+    body: &str,
+    watcher_delivery_pin: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> BridgeLeaseAcquire {
+    let start = inflight.turn_start_offset.unwrap_or(0);
+    let (end, advances_frontier) = target_end.filter(|end| *end > start).map_or_else(
+        || {
+            let width = u64::try_from(body.len().max(1)).unwrap_or(u64::MAX);
+            (start.saturating_add(width), false)
+        },
+        |end| (end, true),
+    );
+    let key =
+        bridge_delivery_lease_key_for_inflight(watcher_owner_channel_id, generation, inflight);
+    let cell = shared.delivery_lease(watcher_owner_channel_id);
+    let acquire = || {
+        BridgeDeliveryLease::acquire_on_cell(
+            cell.clone(),
+            key.clone(),
+            start,
+            end,
+            advances_frontier,
+        )
+    };
+    shared
+        .tmux_watchers
+        .with_bridge_publication_admission(
+            watcher_owner_channel_id,
+            inflight.tmux_session_name.as_deref(),
+            inflight.output_path.as_deref(),
+            watcher_delivery_pin,
+            acquire,
+        )
+        .unwrap_or(BridgeLeaseAcquire::StaleIncarnation)
 }
 
 impl BridgeDeliveryLease {
@@ -662,9 +678,18 @@ impl BridgeDeliveryLease {
         if end <= start {
             return BridgeLeaseAcquire::NoRange;
         }
-        let _seq = BRIDGE_DELIVERY_LEASE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let holder = crate::services::discord::LeaseHolder::Bridge;
         let cell = shared.delivery_lease(channel_id);
+        Self::acquire_on_cell(cell, key, start, end, true)
+    }
+
+    fn acquire_on_cell(
+        cell: std::sync::Arc<crate::services::discord::DeliveryLeaseCell>,
+        key: crate::services::discord::DeliveryLeaseKey,
+        start: u64,
+        end: u64,
+        advances_frontier: bool,
+    ) -> BridgeLeaseAcquire {
+        let holder = crate::services::discord::LeaseHolder::bridge_attempt();
         // SELF-HEALING acquire (mirrors the watcher B3): reclaim the lease IFF it
         // is EXPIRED (a dead holder that acquired but died before commit/release).
         // A LIVE holder mid-send keeps its deadline pushed forward by its
@@ -695,6 +720,7 @@ impl BridgeDeliveryLease {
             end,
             heartbeat,
             release_on_drop: true,
+            advances_frontier,
         })
     }
 
@@ -705,6 +731,10 @@ impl BridgeDeliveryLease {
     /// offset-consistent with the in-memory advance (no offset-space mixing).
     pub(super) fn range(&self) -> (u64, u64) {
         (self.start, self.end)
+    }
+
+    pub(super) fn durable_range(&self) -> Option<(u64, u64)> {
+        self.advances_frontier.then_some((self.start, self.end))
     }
 
     fn commit_lease(&mut self, outcome: crate::services::discord::LeaseOutcome) -> bool {
@@ -725,21 +755,41 @@ impl BridgeDeliveryLease {
     /// `true` iff the commit succeeded (debug invariant: the bridge must be able to
     /// commit its own freshly-acquired lease).
     pub(super) fn commit_and_advance(
-        mut self,
+        self,
         shared: &SharedData,
         watcher_owner_channel_id: ChannelId,
         tmux_session_name: Option<&str>,
         outcome: crate::services::discord::LeaseOutcome,
     ) -> bool {
-        // STOP the heartbeat BEFORE the commit so the renew loop cannot race it.
-        let committed = self.commit_lease(outcome);
-        debug_assert!(
-            committed,
-            "bridge must be able to commit its own freshly-acquired delivery lease"
-        );
-        if committed && outcome == crate::services::discord::LeaseOutcome::Delivered {
-            // B6: the ONLY confirmed_end advance on the bridge terminal path now
-            // flows through this successful lease commit.
+        self.commit_and_settle(
+            shared,
+            watcher_owner_channel_id,
+            tmux_session_name,
+            outcome,
+            true,
+            None,
+        )
+    }
+
+    pub(super) fn commit_and_settle(
+        mut self,
+        shared: &SharedData,
+        watcher_owner_channel_id: ChannelId,
+        tmux_session_name: Option<&str>,
+        outcome: crate::services::discord::LeaseOutcome,
+        carries_response: bool,
+        exact_ack: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> bool {
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.stop();
+        }
+        let committed =
+            self.cell
+                .commit(self.holder, self.key.clone(), self.start, self.end, outcome);
+        if committed
+            && self.advances_frontier
+            && outcome == crate::services::discord::LeaseOutcome::Delivered
+        {
             advance_tmux_relay_confirmed_end(
                 shared,
                 watcher_owner_channel_id,
@@ -747,10 +797,13 @@ impl BridgeDeliveryLease {
                 tmux_session_name,
             );
         }
-        // Release (compare-and-release, identity-matched) so the cell returns to
-        // Unleased for the NEXT turn — this is what lets the OTHER actor (watcher)
-        // proceed. Idempotent no-op if the lease was reclaimed (holder presumed
-        // dead) in the meantime.
+        if committed
+            && carries_response
+            && outcome == crate::services::discord::LeaseOutcome::Delivered
+            && let Some(ack) = exact_ack
+        {
+            ack.store(true, std::sync::atomic::Ordering::Release);
+        }
         let _ = self.release_lease();
         committed
     }
@@ -764,6 +817,7 @@ impl BridgeDeliveryLease {
         provider: &ProviderKind,
         delivery_channel: ChannelId,
         source: CodexRange,
+        exact_ack: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Option<PinnedBridgeDeliveryLease> {
         let exact = &source.source;
         let owner =
@@ -778,14 +832,14 @@ impl BridgeDeliveryLease {
         {
             return None;
         }
-        let reset_incarnation = shared.relay_frontier_token(owner).reset_incarnation;
         (generation() == exact.generation_mtime_ns).then_some(PinnedBridgeDeliveryLease {
             lease: self,
             source,
             provider: provider.clone(),
-            reset_incarnation,
             committed_current: None,
             message_id: None,
+            reset_incarnation: shared.relay_frontier_token(owner).reset_incarnation,
+            exact_ack,
         })
     }
 }
@@ -851,7 +905,8 @@ impl PinnedBridgeDeliveryLease {
                     } else {
                         crate::services::discord::LeaseOutcome::Unknown
                     };
-                    if !self.lease.commit_lease(outcome) {
+                    let committed = self.lease.commit_lease(outcome);
+                    if !committed {
                         return Some(PinnedBridgeCommit::Rejected);
                     }
                     self.lease.release_on_drop = false;
@@ -901,6 +956,11 @@ impl PinnedBridgeDeliveryLease {
             &self.source.result,
             self.source.identity.user_msg_id,
         );
+        if matches!(disposition, PinnedBridgeCommit::Current)
+            && let Some(ack) = self.exact_ack.as_ref()
+        {
+            ack.store(true, std::sync::atomic::Ordering::Release);
+        }
         let released = self.lease.release_lease();
         debug_assert!(
             released,
@@ -928,11 +988,11 @@ impl Drop for BridgeDeliveryLease {
 #[cfg(test)]
 mod tests {
     use super::{
-        bridge_epilogue_clears_inflight, bridge_epilogue_marks_watcher_delivered,
-        bridge_epilogue_skip_save_is_identity_guarded, empty_sink_commits_fully_consumed_response,
-        empty_sink_preserves_retry, mirror_frozen_prefix_ids,
-        record_stopped_turn_terminal_replace_delivery, replace_outcome_commits_terminal_delivery,
-        send_ordered_long_terminal_chunks, should_complete_work_dispatch_after_terminal_delivery,
+        bridge_epilogue_clears_inflight, bridge_epilogue_skip_save_is_identity_guarded,
+        empty_sink_commits_fully_consumed_response, empty_sink_preserves_retry,
+        mirror_frozen_prefix_ids, record_stopped_turn_terminal_replace_delivery,
+        replace_outcome_commits_terminal_delivery, send_ordered_long_terminal_chunks,
+        should_complete_work_dispatch_after_terminal_delivery,
         should_fail_dispatch_after_terminal_delivery, terminal_delivery_should_send_new_chunks,
     };
     use crate::services::discord::formatting;
@@ -1133,20 +1193,12 @@ mod tests {
     // #3041 P1-2 (codex P1-c): every bridge skip arm sets
     // `preserve_inflight_for_cleanup_retry = true`. These predicates encode the two
     // downstream epilogue gates the production loop now routes through; the
-    // assertions prove a Skip (preserve = true) is a TRUE no-op on completion
-    // side-effects — inflight is NOT cleared and the watcher is NOT marked
-    // delivered — so the turn stays fully retry-able if the holder later fails.
     #[test]
-    fn bridge_skip_preserves_inflight_and_does_not_mark_watcher_delivered() {
+    fn bridge_skip_preserves_inflight() {
         // A B2 Skip sets preserve = true → the epilogue must NOT clear inflight…
         assert!(
             !bridge_epilogue_clears_inflight(true, false, false),
             "a preserved (skipped) turn must NOT clear inflight — it stays retry-able"
-        );
-        // …and must NOT mark the watcher delivered (the bridge never delivered it).
-        assert!(
-            !bridge_epilogue_marks_watcher_delivered(true, false),
-            "a preserved (skipped) turn must NOT mark the watcher delivered"
         );
     }
 
@@ -1224,11 +1276,8 @@ mod tests {
     }
 
     #[test]
-    fn bridge_non_skip_normal_completion_clears_and_marks_delivered() {
-        // A normal committed turn (preserve = false, no delegation, not a
-        // restart-cancel) DOES clear inflight and DOES mark the watcher delivered.
+    fn bridge_non_skip_normal_completion_clears_inflight() {
         assert!(bridge_epilogue_clears_inflight(false, false, false));
-        assert!(bridge_epilogue_marks_watcher_delivered(false, false));
     }
 
     #[test]
@@ -1237,9 +1286,6 @@ mod tests {
         assert!(!bridge_epilogue_clears_inflight(false, true, false));
         // A restart-mode cancel saves inflight on its own branch → never clear here.
         assert!(!bridge_epilogue_clears_inflight(false, false, true));
-        // Relay delegated to the watcher → the watcher relays itself; the bridge
-        // must not also sign it off as delivered.
-        assert!(!bridge_epilogue_marks_watcher_delivered(false, true));
     }
 
     /// #3089 A1 r3 pin — terminal_delivery does NOT commit a fallback-after-
@@ -1561,6 +1607,7 @@ mod tests {
 
         use super::super::{
             BridgeDeliveryLease, BridgeLeaseAcquire, bridge_delivery_lease_key_for_inflight,
+            bridge_publication_lease_for_inflight,
         };
         use crate::services::discord::inflight::InflightTurnState;
         use crate::services::provider::ProviderKind;
@@ -1590,7 +1637,7 @@ mod tests {
             assert!(matches!(
                 shared.delivery_lease(ch).read(),
                 LeaseSnapshot::Leased {
-                    holder: LeaseHolder::Bridge,
+                    holder: LeaseHolder::Bridge { .. },
                     ..
                 }
             ));
@@ -1718,11 +1765,134 @@ mod tests {
             let lease = match acquire {
                 BridgeLeaseAcquire::Held(lease) => lease,
                 BridgeLeaseAcquire::Skip => panic!("degenerate id-0 bridge key must acquire"),
-                BridgeLeaseAcquire::NoRange => panic!("test range is non-empty"),
+                BridgeLeaseAcquire::NoRange | BridgeLeaseAcquire::StaleIncarnation => {
+                    panic!("test range is non-empty")
+                }
             };
 
             assert!(lease.commit_and_advance(&shared, ch, None, LeaseOutcome::Delivered));
             assert_eq!(shared.committed_relay_offset(ch), 64);
+        }
+
+        #[tokio::test(start_paused = true)]
+        #[rustfmt::skip]
+        async fn exact_watcher_pin_admits_bridge_and_rejects_replacement() {
+            use std::sync::Arc;
+            use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+
+            let shared = make_shared_data_for_tests();
+            let ch = channel();
+            let session = "AgentDesk-codex-exact-pin";
+            let output_path = "/tmp/agentdesk-exact-pin.jsonl";
+            let old_pin = Arc::new(AtomicBool::new(false));
+            let handle = |pin: Arc<AtomicBool>| crate::services::discord::TmuxWatcherHandle {
+                tmux_session_name: session.to_string(),
+                output_path: output_path.to_string(),
+                paused: Arc::new(AtomicBool::new(false)),
+                resume_offset: Arc::new(std::sync::Mutex::new(None)),
+                cancel: Arc::new(AtomicBool::new(false)),
+                pause_epoch: Arc::new(AtomicU64::new(0)),
+                turn_delivered: pin,
+                last_heartbeat_ts_ms: Arc::new(AtomicI64::new(
+                    crate::services::discord::tmux_watcher_now_ms(),
+                )),
+            };
+            shared.tmux_watchers.insert(ch, handle(old_pin.clone()));
+            let mut inflight = InflightTurnState::new(
+                ProviderKind::Codex,
+                ch.get(),
+                Some("agentdesk-test".to_string()),
+                42,
+                0,
+                123,
+                "prompt".to_string(),
+                None,
+                Some(session.to_string()),
+                Some(output_path.to_string()),
+                Some("/tmp/in.fifo".to_string()),
+                0,
+            );
+            inflight.turn_start_offset = Some(0);
+
+            let lease = match super::super::bridge_publication_lease_for_inflight(
+                &shared,
+                ch,
+                1,
+                &inflight,
+                Some(64),
+                "answer",
+                Some(&old_pin),
+            ) {
+                BridgeLeaseAcquire::Held(lease) => lease,
+                _ => panic!("the exact current watcher pin must admit bridge publication"),
+            };
+            assert!(lease.commit_and_settle(
+                &shared,
+                ch,
+                Some(session),
+                LeaseOutcome::Delivered,
+                true,
+                Some(&old_pin),
+            ));
+            assert!(old_pin.load(Ordering::Acquire));
+
+            let replacement_pin = Arc::new(AtomicBool::new(false));
+            shared
+                .tmux_watchers
+                .insert(ch, handle(replacement_pin.clone()));
+            assert!(matches!(
+                super::super::bridge_publication_lease_for_inflight(
+                    &shared,
+                    ch,
+                    2,
+                    &inflight,
+                    Some(128),
+                    "replacement answer",
+                    Some(&old_pin),
+                ),
+                BridgeLeaseAcquire::StaleIncarnation
+            ));
+            assert!(!replacement_pin.load(Ordering::Acquire));
+            assert!(matches!(super::super::bridge_publication_lease_for_inflight(
+                &shared, ch, 3, &inflight, Some(128), "answer", None), BridgeLeaseAcquire::StaleIncarnation));
+            assert!(!replacement_pin.load(Ordering::Acquire));
+            shared.tmux_watchers.remove(&ch);
+            assert!(matches!(super::super::bridge_publication_lease_for_inflight(
+                &shared, ch, 4, &inflight, Some(128), "headless answer", None), BridgeLeaseAcquire::Held(_)));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn settlement_acks_only_response_carrying_delivered_outcome() {
+            for (index, outcome, carries_response, expect_ack, expect_frontier) in [
+                (0, LeaseOutcome::Delivered, true, true, 64),
+                (1, LeaseOutcome::Delivered, false, false, 64),
+                (2, LeaseOutcome::NotDelivered, true, false, 0),
+                (3, LeaseOutcome::Unknown, true, false, 0),
+            ] {
+                let shared = make_shared_data_for_tests();
+                let ch = channel();
+                let ack = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let lease =
+                    match BridgeDeliveryLease::acquire(&shared, ch, turn(200 + index), 0, Some(64))
+                    {
+                        BridgeLeaseAcquire::Held(lease) => lease,
+                        _ => panic!("fresh real range must acquire"),
+                    };
+                assert!(lease.commit_and_settle(
+                    &shared,
+                    ch,
+                    None,
+                    outcome,
+                    carries_response,
+                    Some(&ack),
+                ));
+                assert_eq!(
+                    ack.load(std::sync::atomic::Ordering::Acquire),
+                    expect_ack,
+                    "case {index} ACK mismatch"
+                );
+                assert_eq!(shared.committed_relay_offset(ch), expect_frontier);
+            }
         }
 
         #[tokio::test(start_paused = true)]
@@ -2024,7 +2194,7 @@ mod tests {
             // delegates to) now hits a DIFFERENT holder → identity mismatch →
             // `false`. This is the commit==false branch the mod.rs bool gate guards.
             let committed = cell.commit(
-                LeaseHolder::Bridge,
+                LeaseHolder::bridge_attempt(),
                 turn(90),
                 0,
                 64,
@@ -2277,13 +2447,13 @@ mod tests {
                     let mut invalid = source.clone();
                     mutate(&mut invalid);
                     #[rustfmt::skip]
-                    assert!(held_lease(&invalid_shared, ch, 4).pin_exact_source(&invalid_shared, &provider, ch, range(invalid)).is_none());
+                    assert!(held_lease(&invalid_shared, ch, 4).pin_exact_source(&invalid_shared, &provider, ch, range(invalid), None).is_none());
                 }
                 let current_shared = make_shared_data_for_tests();
                 let rollout_b = root.path().join("rollout-b.jsonl");
                 std::fs::write(&rollout_b, [b'y'; 64]).unwrap();
                 #[rustfmt::skip]
-                let current = held_lease(&current_shared, ch, 5).pin_exact_source(&current_shared, &provider, ch, range(source.clone())).unwrap().commit_after_send_observing(&current_shared, 5_264_001, |_| {
+                let current = held_lease(&current_shared, ch, 5).pin_exact_source(&current_shared, &provider, ch, range(source.clone()), None).unwrap().commit_after_send_observing(&current_shared, 5_264_001, |_| {
                     assert!(crate::services::tmux_common::source_authority_contention_key_for_tests(|| advance_source(tmux, &rollout, 64)).is_some());
                     assert!(crate::services::tmux_common::source_authority_contention_key_for_tests(|| install_source(tmux, Some(0), binding(&rollout_b, "other-session"))).is_some());
                 });
@@ -2302,7 +2472,7 @@ mod tests {
                 assert_eq!((current_frontier.generation_mtime_ns, current_frontier.range), (g1, (0, 64)));
                 let reset_shared = make_shared_data_for_tests();
                 #[rustfmt::skip]
-                let reset = held_lease(&reset_shared, ch, 8).pin_exact_source(&reset_shared, &provider, ch, range(source.clone())).unwrap();
+                let reset = held_lease(&reset_shared, ch, 8).pin_exact_source(&reset_shared, &provider, ch, range(source.clone()), None).unwrap();
                 let reset_coord = reset_shared.tmux_relay_coord(ch);
                 #[rustfmt::skip]
                 assert!({ reset_coord.confirmed_end_offset.store(64, Ordering::Release); reset_coord.reset_confirmed_frontier(64, 0) });
@@ -2311,7 +2481,7 @@ mod tests {
                 advance_source(tmux, &rollout, 64);
                 let swapped_shared = make_shared_data_for_tests();
                 #[rustfmt::skip]
-                let swapped = held_lease(&swapped_shared, ch, 6).pin_exact_source(&swapped_shared, &provider, ch, range(source.clone())).unwrap();
+                let swapped = held_lease(&swapped_shared, ch, 6).pin_exact_source(&swapped_shared, &provider, ch, range(source.clone()), None).unwrap();
                 #[rustfmt::skip]
                 assert!(matches!(swapped.commit_after_send(&swapped_shared, 5_264_002), PinnedBridgeCommit::Historical));
                 assert_eq!(swapped_shared.committed_relay_offset(ch), 0);
@@ -2319,7 +2489,7 @@ mod tests {
                 install_source(tmux, Some(0), binding(&rollout, "raw-session"));
                 let replaced_shared = make_shared_data_for_tests();
                 #[rustfmt::skip]
-                let replaced = held_lease(&replaced_shared, ch, 7).pin_exact_source(&replaced_shared, &provider, ch, range(source.clone())).unwrap();
+                let replaced = held_lease(&replaced_shared, ch, 7).pin_exact_source(&replaced_shared, &provider, ch, range(source.clone()), None).unwrap();
                 install_source(tmux, Some(0), binding(&rollout_b, "other-session"));
                 #[rustfmt::skip]
                 assert!(matches!(replaced.commit_after_send(&replaced_shared, 5_264_003), PinnedBridgeCommit::Historical));
@@ -2328,7 +2498,7 @@ mod tests {
                 let coord = stale_shared.tmux_relay_coord(ch);
                 coord.confirmed_end_offset.store(100, Ordering::Release);
                 #[rustfmt::skip]
-                let stale = held_lease(&stale_shared, ch, 8).pin_exact_source(&stale_shared, &provider, ch, range(source.clone())).unwrap();
+                let stale = held_lease(&stale_shared, ch, 8).pin_exact_source(&stale_shared, &provider, ch, range(source.clone()), None).unwrap();
                 assert!(coord.reset_confirmed_frontier(100, 0));
                 let g2 = stamp(1_800_526_400);
                 let current_source = ExactJsonlSourceIdentity {

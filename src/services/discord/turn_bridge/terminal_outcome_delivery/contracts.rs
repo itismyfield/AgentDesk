@@ -15,6 +15,8 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryCont
     pub(in crate::services::discord::turn_bridge) watcher_owner_channel_id: ChannelId,
     pub(in crate::services::discord::turn_bridge) watcher_handoff_claim_outcome:
         WatcherHandoffClaimOutcome,
+    pub(in crate::services::discord::turn_bridge) watcher_delivery_pin:
+        Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(in crate::services::discord::turn_bridge) bridge_created_response_placeholder_msg_id:
         Option<MessageId>,
     pub(in crate::services::discord::turn_bridge) bridge_relay_delegated_to_watcher: bool,
