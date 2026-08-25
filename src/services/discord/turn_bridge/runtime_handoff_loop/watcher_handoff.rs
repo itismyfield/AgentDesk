@@ -194,19 +194,9 @@ pub(super) fn handle_watcher_runtime_handoff(
         )
     };
     #[cfg(not(unix))]
-    let (
-        watcher_claimed,
-        watcher_claim_replaced_existing,
-        owner_changed_after_claim,
-        watcher_claim_incarnation,
-    ) = {
+    let (watcher_claimed, watcher_claim_replaced_existing, owner_changed_after_claim) = {
         let _ = handle;
-        (
-            false,
-            false,
-            false,
-            None::<super::super::tmux::WatcherClaimIncarnation>,
-        )
+        (false, false, false)
     };
     if owner_changed_after_claim {
         let claim_expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(
@@ -422,6 +412,7 @@ pub(super) fn handle_watcher_runtime_handoff(
         inflight_state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
         *watcher_owns_assistant_relay = true;
     }
+    #[cfg(unix)]
     if watcher_ready_for_relay {
         let watcher_claim_incarnation = watcher_claim_incarnation
             .as_ref()

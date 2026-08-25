@@ -343,6 +343,7 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn authoritative_pin_uses_incumbent_after_provisional_reuse_and_never_overwrites() {
     let provider = ProviderKind::Codex;
@@ -640,6 +641,7 @@ async fn runtime_ready_reowned_row_never_claims_or_starts_watcher() {
     .await;
 }
 
+#[cfg(unix)]
 #[test]
 fn provisional_cleanup_preserves_replacement_incarnation() {
     let provider = ProviderKind::Codex;
