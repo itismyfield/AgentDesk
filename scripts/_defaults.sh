@@ -965,9 +965,8 @@ assert_restart_helpers_loaded() {
   # restart-drain helpers. Returns non-zero (so callers can `if !` and exit 1)
   # instead of letting a missing function silently `command not found`. See
   # #1447: silent fail of agentdesk-restart when these helpers were absent.
-  # Public entry points only. The #5245 internal helpers (_set_restart_marker_roots,
-  # _restart_marker_consumed_root, _release_unacknowledged_restart_lease) are
-  # deliberately NOT listed: this contract is checked against a possibly older
+  # Public entry points only. Internal marker/CAS helpers are deliberately not
+  # listed: this contract is checked against a possibly older
   # mirror of this file (restart_agentdesk.sh sources the release workspace copy),
   # and such a copy is self-consistent — listing them would make the restart skill
   # hard-fail on an un-updated node for no correctness gain.
@@ -990,41 +989,15 @@ assert_restart_helpers_loaded() {
   return 0
 }
 
-# --- #5245 phase 1: the shell and the runtime watch different directories ---
+# --- #5245 Phase 2A-S: one canonical restart-marker root ---
 #
-# deploy-release.sh passes "$ADK_REL/runtime" as the restart marker directory
-# (scripts/deploy-release.sh, the request_restart_drain_mode_or_fail call).
-# The runtime resolves its own marker directory through
-# crate::agentdesk_runtime_root() (src/config.rs), which returns
-# $AGENTDESK_ROOT_DIR verbatim — i.e. "$ADK_REL", without the "runtime"
-# component. No Rust code reads or writes "$ROOT/runtime/restart_*". The two
-# writers therefore never met: the deploy wrote restart_pending where nothing
-# was watching, and waited for restart_persisted where nothing was writing.
-#
-# Moving the Rust side alone cannot repair a node, because the process that has
-# to observe a deploy's restart request is always the binary that is *already
-# running* — the old one. So phase 1 makes the shell write to and read from
-# BOTH directories; the Rust move and the removal of the old directory are
-# separate, later slices.
-#
-# The second directory is never derived from the first. `dirname` would be
-# wrong for skills/agentdesk-restart/scripts/restart_agentdesk.sh, which passes
-# "$HOME/.adk/release" — already the runtime's own root, whose dirname is
-# "$HOME/.adk". The caller states the mirror explicitly through
-# AGENTDESK_RESTART_MARKER_MIRROR_ROOT; deploy-release.sh sets it to the same
-# $ADK_REL it appends "/runtime" to. Unset or empty (every other caller) keeps
-# the single-root behaviour byte for byte.
-_set_restart_marker_roots() {
-  local primary="$1"
-  local mirror="${AGENTDESK_RESTART_MARKER_MIRROR_ROOT:-}"
-  RESTART_MARKER_ROOTS=()
-  if [ -z "$primary" ]; then
-    return 1
-  fi
-  RESTART_MARKER_ROOTS+=("$primary")
-  if [ -n "$mirror" ] && [ "$mirror" != "$primary" ]; then
-    RESTART_MARKER_ROOTS+=("$mirror")
-  fi
+# `$AGENTDESK_ROOT_DIR` / `$ADK_REL` is the long-established watched root. All
+# shipped runtimes and shell callers agree on it, so widening publication to a
+# second root would create split authority rather than an upgrade bridge.
+_set_restart_marker_root() {
+  local root="$1"
+  [ -n "$root" ] || return 1
+  RESTART_MARKER_ROOT="$root"
   return 0
 }
 
@@ -1053,6 +1026,46 @@ _restart_artifact_nonce_matches() {
   [ -n "$expected_nonce" ] || return 1
   [ -f "$artifact" ] \
     && grep -Fqx -- "nonce=${expected_nonce}" "$artifact" 2>/dev/null
+}
+
+_restart_terminal_witness_class() {
+  local root="$1"
+  local expected_nonce="$2"
+  local artifact identity
+
+  _restart_nonce_is_path_safe "$expected_nonce" || return 1
+  for artifact in restart_persisted restart_cancelled; do
+    identity="$(_restart_request_artifact_path "$root" "$artifact" "$expected_nonce")" \
+      || continue
+    if _restart_artifact_nonce_matches "$identity" "$expected_nonce"; then
+      printf 'identity:%s' "$artifact"
+      return 0
+    fi
+    if [ "${AGENTDESK_RESTART_LEGACY_INDEX_COMPAT:-1}" != "0" ] \
+      && _restart_artifact_nonce_matches "$root/$artifact" "$expected_nonce"; then
+      printf 'legacy-index:%s' "$artifact"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_restart_reclaim_terminal_witnessed_marker() {
+  local root="$1"
+  local marker="$root/restart_pending"
+  local nonce witness
+
+  [ -f "$marker" ] || return 0
+  nonce="$(grep -m1 '^nonce=' "$marker" 2>/dev/null || true)"
+  nonce="${nonce#nonce=}"
+  _restart_nonce_is_path_safe "$nonce" || return 0
+  witness="$(_restart_terminal_witness_class "$root" "$nonce")" || return 0
+  case "$witness" in
+    legacy-index:*)
+      echo "⚠ [gate] restart-marker-reclaim root=${root} nonce=${nonce} proof=legacy-index decision=dispose" >&2
+      ;;
+  esac
+  _restart_dispose_marker_by_own_nonce "$root" "$nonce"
 }
 
 _purge_restart_artifacts_by_own_nonce() {
@@ -1234,11 +1247,36 @@ _restart_sweep_terminal_identities() {
   done
 }
 
+_restart_sweep_terminal_indexes() {
+  local root="$1"
+  local grace="${AGENTDESK_RESTART_TERMINAL_RETENTION_SECS:-3600}"
+  local canonical="$root/restart_pending"
+  local artifact nonce witness
+
+  for artifact in "$root/restart_persisted" "$root/restart_cancelled"; do
+    [ -f "$artifact" ] || continue
+    nonce="$(grep -m1 '^nonce=' "$artifact" 2>/dev/null || true)"
+    nonce="${nonce#nonce=}"
+    _restart_nonce_is_path_safe "$nonce" || continue
+    _restart_artifact_nonce_matches "$canonical" "$nonce" && continue
+    witness="$(_restart_artifact_age_allows_reclaim \
+      "$root" "$artifact" "$grace" terminal-index)" || continue
+    # Fixed terminal names are compatibility indexes, not request authority.
+    # The canonical-marker guard plus this unlink-adjacent identity/body recheck
+    # narrows but does not close the pathname replacement seam.
+    [ ! -e "$canonical" ] || continue
+    [ "$(_restart_stat_identity "$artifact")" = "$witness" ] || continue
+    _restart_artifact_nonce_matches "$artifact" "$nonce" || continue
+    rm -f "$artifact" 2>/dev/null || true
+  done
+}
+
 _restart_sweep_artifacts() {
   local root="$1"
 
   _restart_sweep_marker_identities "$root"
   _restart_sweep_terminal_identities "$root"
+  _restart_sweep_terminal_indexes "$root"
 }
 
 # Generate a path-safe entropy suffix, preferring uuidgen and falling back to
@@ -1375,74 +1413,33 @@ _restart_terminal_publish() {
 }
 
 _restart_marker_consumed_root() {
-  # Prints the first root whose restart_pending has disappeared, or returns 1
-  # when every root still holds its marker. "Any", not "all": during this
-  # transition exactly one of the two markers gets consumed, because the
-  # running binary watches exactly one directory. Requiring both to vanish
-  # would silently delete the idle-runtime acknowledgement path.
-  local root
-  for root in "$@"; do
-    if [ ! -e "$root/restart_pending" ]; then
-      printf '%s' "$root"
-      return 0
-    fi
-  done
-  return 1
+  local root="$1"
+  [ ! -e "$root/restart_pending" ] || return 1
+  printf '%s' "$root"
 }
 
-_restart_persisted_identity_root() {
-  # A phase-1 success must be attributable to this request. Health and marker
-  # consumption are useful observations, but neither carries the request nonce.
-  local expected_nonce="$1"
-  shift
-  local root identity
+_restart_persistence_proof_class() {
+  local root="$1"
+  local expected_nonce="$2"
+  local identity
 
-  _restart_nonce_is_path_safe "$expected_nonce" || return 1
-  for root in "$@"; do
-    identity="$(_restart_request_artifact_path \
-      "$root" restart_persisted "$expected_nonce")" || continue
-    if _restart_artifact_nonce_matches "$identity" "$expected_nonce"; then
-      printf '%s' "$root"
-      return 0
-    fi
-  done
+  identity="$(_restart_request_artifact_path \
+    "$root" restart_persisted "$expected_nonce")" || return 1
+  if _restart_artifact_nonce_matches "$identity" "$expected_nonce"; then
+    printf 'identity'
+    return 0
+  fi
+  if [ "${AGENTDESK_RESTART_LEGACY_INDEX_COMPAT:-1}" != "0" ] \
+    && _restart_artifact_nonce_matches "$root/restart_persisted" "$expected_nonce"; then
+    printf 'legacy-index'
+    return 0
+  fi
   return 1
-}
-
-_release_unacknowledged_restart_lease() {
-  # Called once the runtime has acknowledged durability. The runtime that
-  # published the acknowledgement removes its own restart_pending and exits
-  # (runtime_bootstrap/spawns.rs). The other root has no consumer at all — no
-  # Rust code reads "$ROOT/runtime/restart_*" — so its marker would outlive
-  # this deploy and make the next request fail O_EXCL acquisition with
-  # "restart drain marker already owned". Before #5245 this leak was
-  # unreachable because the acknowledgement never arrived and every exit from
-  # the gate went through clear_restart_drain_mode.
-  #
-  # The acknowledged root is deliberately left alone: deleting its marker would
-  # race the runtime's post-rename recheck, which reads a missing marker as
-  # "superseded" and withdraws the acknowledgement it just published.
-  local expected_nonce="$1"; shift
-  local ack_root="$1"; shift
-  local root marker
-  for root in "$@"; do
-    if [ "$root" = "$ack_root" ]; then
-      continue
-    fi
-    marker="$root/restart_pending"
-    # Only ever release the lease this request owns. The helper performs the
-    # canonical CAS and removes this nonce's immutable identity name.
-    if _restart_artifact_nonce_matches "$marker" "$expected_nonce"; then
-      _restart_dispose_marker_by_own_nonce "$root" "$expected_nonce" || true
-    fi
-  done
-  return 0
 }
 
 clear_restart_drain_mode() {
   local runtime_root="$1"
   local nonce="${2:-${AGENTDESK_RESTART_REQUEST_NONCE:-}}"
-  local roots=()
   local root
   local rc=0
   if [ -z "$runtime_root" ]; then
@@ -1453,19 +1450,16 @@ clear_restart_drain_mode() {
     echo "✗ [gate] restart cancellation requires a path-safe request nonce" >&2
     return 1
   fi
-  _set_restart_marker_roots "$runtime_root" || return 1
-  roots=("${RESTART_MARKER_ROOTS[@]}")
+  _set_restart_marker_root "$runtime_root" || return 1
+  root="$RESTART_MARKER_ROOT"
 
-  for root in "${roots[@]}"; do
-    # Terminal-first is the crash contract: cancellation must be visible before
-    # either the canonical lease or its request-specific identity is disposed.
-    if ! _restart_terminal_publish "$root" restart_cancelled "$nonce" \
-      "cancelled_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; then
-      rc=1
-      continue
-    fi
-    _restart_dispose_marker_by_own_nonce "$root" "$nonce" || rc=1
-  done
+  # Terminal-first is the crash contract: cancellation must be visible before
+  # either the canonical lease or its request-specific identity is disposed.
+  if ! _restart_terminal_publish "$root" restart_cancelled "$nonce" \
+    "cancelled_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; then
+    return 1
+  fi
+  _restart_dispose_marker_by_own_nonce "$root" "$nonce" || rc=1
   return "$rc"
 }
 
@@ -1522,44 +1516,36 @@ wait_for_restart_persistence_or_fail() {
   local expected_nonce="$3"
   local max_wait="${4:-30}"
   local waited=0
-  local roots=()
-  local root ack
+  local root proof_class
 
   if [ -z "$runtime_root" ]; then
     echo "✗ [gate] ${scope} runtime root is required for restart persistence" >&2
     return 1
   fi
-  if [ -z "$expected_nonce" ]; then
-    # Widening WHERE the acknowledgement may appear must not widen WHAT counts
-    # as one. With an empty expected nonce the `grep -Fqx` below would match a
-    # bare "nonce=" line, so an empty nonce is refused rather than compared.
-    echo "✗ [gate] ${scope} restart persistence requires this request's nonce" >&2
+  if ! _restart_nonce_is_path_safe "$expected_nonce"; then
+    echo "✗ [gate] ${scope} restart persistence requires this request's path-safe nonce" >&2
     return 1
   fi
-  _set_restart_marker_roots "$runtime_root" || return 1
-  roots=("${RESTART_MARKER_ROOTS[@]}")
+  _set_restart_marker_root "$runtime_root" || return 1
+  root="$RESTART_MARKER_ROOT"
 
   while [ "$waited" -lt "$max_wait" ]; do
-    for root in "${roots[@]}"; do
-      ack="$root/restart_persisted"
-      # Nonce equality remains the entire gate. An acknowledgement carrying any
-      # other nonce belongs to another request and proves nothing about this
-      # one; absence of the file at every root proves nothing either.
-      if [ -f "$ack" ] \
-        && grep -Fqx "nonce=${expected_nonce}" "$ack" 2>/dev/null; then
-        echo "✓ [gate] ${scope} restart persistence acknowledged by runtime at ${root}"
-        _release_unacknowledged_restart_lease "$expected_nonce" "$root" "${roots[@]}"
-        return 0
-      fi
-    done
+    if proof_class="$(_restart_persistence_proof_class "$root" "$expected_nonce")"; then
+      case "$proof_class" in
+        identity)
+          echo "✓ [gate] ${scope} restart persistence acknowledged by runtime at ${root} proof=identity"
+          ;;
+        legacy-index)
+          echo "⚠ [gate] ${scope} restart persistence acknowledged by rollback-compatible fixed index at ${root} proof=legacy-index" >&2
+          ;;
+      esac
+      return 0
+    fi
     sleep 1
     waited=$((waited + 1))
   done
 
   clear_restart_drain_mode "$runtime_root" "$expected_nonce" || true
-  for root in "${roots[@]}"; do
-    rm -f "$root/restart_persisted" 2>/dev/null || true
-  done
   echo "✗ [gate] ${scope} restart persistence was not acknowledged within ${max_wait}s" >&2
   echo "  Cleared restart_pending and refused bootout: the in-flight delivery frontier is not durable." >&2
   return 1
@@ -1639,12 +1625,9 @@ request_restart_drain_mode_or_fail() {
   local exempt_csv="${6:-${AGENTDESK_RESTART_EXEMPT_CHANNELS:-}}"
   local ack_wait="${AGENTDESK_RESTART_DRAIN_ACK_WAIT:-20}"
   local waited=0
-  local roots=()
-  local acquired=()
   local root
-  local acquired_root
   local consumed_root
-  local proof_root
+  local proof_class
   local health_observed=0
   local consumption_observed=0
   local job_state
@@ -1661,8 +1644,8 @@ request_restart_drain_mode_or_fail() {
     echo "✗ [gate] ${scope} runtime root is required for restart drain mode" >&2
     return 1
   fi
-  _set_restart_marker_roots "$runtime_root" || return 1
-  roots=("${RESTART_MARKER_ROOTS[@]}")
+  _set_restart_marker_root "$runtime_root" || return 1
+  root="$RESTART_MARKER_ROOT"
 
   # 2026-05-26 adk-cdx incident: block restart_pending when any non-exempt
   # channel has a live turn. Without this, destructive E2E that restart
@@ -1674,19 +1657,21 @@ request_restart_drain_mode_or_fail() {
     return 1
   fi
 
-  for root in "${roots[@]}"; do
-    mkdir -p "$root" || {
-      echo "✗ [gate] failed to create ${scope} runtime root: $root" >&2
-      return 1
-    }
-    _restart_reclaim_legacy_marker_if_stale "$root" || {
-      echo "✗ [gate] failed to reclaim legacy restart marker at ${root}" >&2
-      return 1
-    }
-    if [ "${AGENTDESK_RESTART_SWEEP_ON_DRAIN:-1}" != "0" ]; then
-      _restart_sweep_artifacts "$root"
-    fi
-  done
+  mkdir -p "$root" || {
+    echo "✗ [gate] failed to create ${scope} runtime root: $root" >&2
+    return 1
+  }
+  _restart_reclaim_terminal_witnessed_marker "$root" || {
+    echo "✗ [gate] failed to reclaim terminal-witnessed restart marker at ${root}" >&2
+    return 1
+  }
+  _restart_reclaim_legacy_marker_if_stale "$root" || {
+    echo "✗ [gate] failed to reclaim legacy restart marker at ${root}" >&2
+    return 1
+  }
+  if [ "${AGENTDESK_RESTART_SWEEP_ON_DRAIN:-1}" != "0" ]; then
+    _restart_sweep_artifacts "$root"
+  fi
 
   entropy="$(_restart_nonce_entropy)" || {
     echo "✗ [gate] failed to generate restart nonce entropy" >&2
@@ -1702,74 +1687,54 @@ request_restart_drain_mode_or_fail() {
     return 1
   fi
 
-  # Per root, reserve the immutable identity before clearing stale same-nonce
-  # terminal identities, then publish the canonical lease. The runtime cannot
-  # consume this request before canonical publication, and a same-nonce actor
-  # cannot reach cleanup after the identity reservation succeeds.
-  for root in "${roots[@]}"; do
-    if _restart_stage_marker_identity "$root" "$nonce" "$source" "$scope" "$label"; then
+  # Reserve the immutable identity before clearing stale same-nonce terminal
+  # identities, then publish the sole canonical watched lease.
+  if _restart_stage_marker_identity "$root" "$nonce" "$source" "$scope" "$label"; then
+    marker_rc=0
+  else
+    marker_rc=$?
+  fi
+  if [ "$marker_rc" -eq 0 ]; then
+    for terminal_path in \
+      "$(_restart_request_artifact_path "$root" restart_persisted "$nonce")" \
+      "$(_restart_request_artifact_path "$root" restart_cancelled "$nonce")"; do
+      if [ -e "$terminal_path" ]; then
+        _purge_restart_artifacts_by_own_nonce "$root" "$nonce" "$terminal_path" || {
+          echo "✗ [gate] failed to clear stale terminal artifact: $terminal_path" >&2
+          rm -f "$(_restart_request_artifact_path "$root" restart_pending "$nonce")" 2>/dev/null || true
+          return 1
+        }
+      fi
+    done
+    if _restart_link_canonical_marker "$root" "$nonce"; then
       marker_rc=0
     else
       marker_rc=$?
     fi
-    if [ "$marker_rc" -eq 0 ]; then
-      for terminal_path in \
-        "$(_restart_request_artifact_path "$root" restart_persisted "$nonce")" \
-        "$(_restart_request_artifact_path "$root" restart_cancelled "$nonce")"; do
-        if [ -e "$terminal_path" ]; then
-          _purge_restart_artifacts_by_own_nonce "$root" "$nonce" "$terminal_path" || {
-            echo "✗ [gate] failed to clear stale terminal artifact: $terminal_path" >&2
-            rm -f "$(_restart_request_artifact_path "$root" restart_pending "$nonce")" 2>/dev/null || true
-            if [ "${#acquired[@]}" -gt 0 ]; then
-              for acquired_root in "${acquired[@]}"; do
-                _restart_dispose_marker_by_own_nonce "$acquired_root" "$nonce" || true
-              done
-            fi
-            return 1
-          }
-        fi
-      done
-      if _restart_link_canonical_marker "$root" "$nonce"; then
-        marker_rc=0
-      else
-        marker_rc=$?
-      fi
-    fi
-    case "$marker_rc" in
-      0)
-        acquired+=("$root")
-        ;;
-      1)
-        echo "✗ [gate] refused:restart-lease-held root=$root" >&2
-        ;;
-      2)
-        echo "✗ [gate] refused:marker-create-failed root=$root" >&2
-        ;;
-      3)
-        echo "✗ [gate] refused:marker-nonce-unsafe root=$root" >&2
-        ;;
-      4)
-        echo "✗ [gate] refused:marker-nonce-reused root=$root" >&2
-        ;;
-      *)
-        echo "✗ [gate] refused:marker-create-failed root=$root rc=$marker_rc" >&2
-        ;;
-    esac
-    if [ "$marker_rc" -ne 0 ]; then
-      if [ "${#acquired[@]}" -gt 0 ]; then
-        for acquired_root in "${acquired[@]}"; do
-          _restart_dispose_marker_by_own_nonce "$acquired_root" "$nonce" || true
-        done
-      fi
-      return 1
-    fi
-  done
+  fi
+  case "$marker_rc" in
+    0) : ;;
+    1) echo "✗ [gate] refused:restart-lease-held root=$root" >&2 ;;
+    2) echo "✗ [gate] refused:marker-create-failed root=$root" >&2 ;;
+    3) echo "✗ [gate] refused:marker-nonce-unsafe root=$root" >&2 ;;
+    4) echo "✗ [gate] refused:marker-nonce-reused root=$root" >&2 ;;
+    *) echo "✗ [gate] refused:marker-create-failed root=$root rc=$marker_rc" >&2 ;;
+  esac
+  [ "$marker_rc" -eq 0 ] || return 1
 
   while [ "$waited" -lt "$ack_wait" ]; do
-    if proof_root="$(_restart_persisted_identity_root "$nonce" "${roots[@]}")"; then
-      echo "✓ [gate] ${scope} restart persistence acknowledged for this request at ${proof_root}"
+    if proof_class="$(_restart_persistence_proof_class "$root" "$nonce")"; then
+      case "$proof_class" in
+        identity)
+          echo "✓ [gate] ${scope} restart persistence acknowledged for this request at ${root} proof=identity"
+          AGENTDESK_RESTART_DRAIN_VERDICT="acknowledged:identity"
+          ;;
+        legacy-index)
+          echo "⚠ [gate] ${scope} restart persistence acknowledged by rollback-compatible fixed index at ${root} proof=legacy-index" >&2
+          AGENTDESK_RESTART_DRAIN_VERDICT="acknowledged:legacy-index"
+          ;;
+      esac
       AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
-      AGENTDESK_RESTART_DRAIN_VERDICT="acknowledged:identity"
       return 0
     fi
     if [ "$health_observed" -eq 0 ] && _restart_pending_acknowledged "$port"; then
@@ -1779,7 +1744,7 @@ request_restart_drain_mode_or_fail() {
     # Marker consumption can precede terminal publication. Record it, but keep
     # waiting: disappearance alone is not attributable to this request's nonce.
     if [ "$consumption_observed" -eq 0 ] \
-      && consumed_root="$(_restart_marker_consumed_root "${roots[@]}")"; then
+      && consumed_root="$(_restart_marker_consumed_root "$root")"; then
       echo "▸ [gate] ${scope} restart drain marker consumed at ${consumed_root}; waiting for request-specific persistence"
       consumption_observed=1
     fi
@@ -1789,10 +1754,18 @@ request_restart_drain_mode_or_fail() {
 
   # Close the final sleep/timeout edge before applying weaker launchd and caller
   # timeout policies.
-  if proof_root="$(_restart_persisted_identity_root "$nonce" "${roots[@]}")"; then
-    echo "✓ [gate] ${scope} restart persistence acknowledged for this request at ${proof_root}"
+  if proof_class="$(_restart_persistence_proof_class "$root" "$nonce")"; then
+    case "$proof_class" in
+      identity)
+        echo "✓ [gate] ${scope} restart persistence acknowledged for this request at ${root} proof=identity"
+        AGENTDESK_RESTART_DRAIN_VERDICT="acknowledged:identity"
+        ;;
+      legacy-index)
+        echo "⚠ [gate] ${scope} restart persistence acknowledged by rollback-compatible fixed index at ${root} proof=legacy-index" >&2
+        AGENTDESK_RESTART_DRAIN_VERDICT="acknowledged:legacy-index"
+        ;;
+    esac
     AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
-    AGENTDESK_RESTART_DRAIN_VERDICT="acknowledged:identity"
     return 0
   fi
 
@@ -1803,9 +1776,7 @@ request_restart_drain_mode_or_fail() {
     # and call exit(0) — flapping under KeepAlive. The service is not
     # running, so there is nothing to drain; dispose only this request's marker
     # through the nonce CAS so a newer actor's canonical lease survives.
-    for root in "${roots[@]}"; do
-      _restart_dispose_marker_by_own_nonce "$root" "$nonce" || true
-    done
+    _restart_dispose_marker_by_own_nonce "$root" "$nonce" || true
     AGENTDESK_RESTART_REQUEST_NONCE="$nonce"
     AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED=1
     AGENTDESK_RESTART_DRAIN_VERDICT="not evaluated: launchd job is not running"

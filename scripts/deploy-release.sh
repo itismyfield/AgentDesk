@@ -2483,17 +2483,11 @@ fi
 # durable; the replacement watcher then resumes from those committed offsets.
 AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS=1
 export AGENTDESK_RESTART_ALLOW_FOREIGN_TURNS
-# #5245: this deploy has always written its restart request to "$ADK_REL/runtime"
-# while the process that must observe it watches "$ADK_REL" — crate::
-# agentdesk_runtime_root() (src/config.rs) returns $AGENTDESK_ROOT_DIR verbatim,
-# and no Rust code reads "$ROOT/runtime/restart_*". At deploy time the observer
-# is always the OLD binary, so the mirror is what reaches an unupgraded node.
-# Stated, not derived: this is the same $ADK_REL the call below appends
-# "/runtime" to — `dirname` of the argument would be a different claim.
-AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$ADK_REL"
-export AGENTDESK_RESTART_MARKER_MIRROR_ROOT
+# #5245 Phase 2A-S: `$ADK_REL` remains the sole canonical watched root.
+# Every shipped runtime and restart-marker writer already agrees on this path;
+# `$ADK_REL/runtime` stores other runtime state but is not a restart-marker root.
 if ! request_restart_drain_mode_or_fail \
-    "release" "$PLIST_REL" "$REL_PORT" "$ADK_REL/runtime" "deploy-release"; then
+    "release" "$PLIST_REL" "$REL_PORT" "$ADK_REL" "deploy-release"; then
     exit 1
 fi
 RESTART_REQUEST_NONCE="${AGENTDESK_RESTART_REQUEST_NONCE:-}"
@@ -2501,11 +2495,11 @@ RESTART_REQUEST_NONCE="${AGENTDESK_RESTART_REQUEST_NONCE:-}"
 if [ "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-0}" != "1" ]; then
     if [ -z "$RESTART_REQUEST_NONCE" ]; then
         echo "✗ [gate] release restart request nonce missing" >&2
-        clear_restart_drain_mode "$ADK_REL/runtime" || true
+        clear_restart_drain_mode "$ADK_REL" || true
         exit 1
     fi
     if ! wait_for_restart_persistence_or_fail \
-        "release" "$ADK_REL/runtime" "$RESTART_REQUEST_NONCE" 30; then
+        "release" "$ADK_REL" "$RESTART_REQUEST_NONCE" 30; then
         exit 1
     fi
 else
@@ -2518,7 +2512,11 @@ fi
 # Remove a marker left by an older deploy so its quiet window cannot mask this
 # restart boundary after the runtime has proved its replay frontier durable.
 rm -f "$ADK_REL/logs/relay-watchdog.deploy-marker" 2>/dev/null || true
-rm -f "$ADK_REL/runtime/restart_persisted" 2>/dev/null || true
+# Remove only the fixed compatibility index for the request just proved. The
+# request-specific identity remains available for rollback-era readers/sweep.
+if grep -Fqx -- "nonce=${RESTART_REQUEST_NONCE}" "$ADK_REL/restart_persisted" 2>/dev/null; then
+    rm -f "$ADK_REL/restart_persisted" 2>/dev/null || true
+fi
 
 # Stop release only after migration and the durable persistence acknowledgement.
 echo "▸ Stopping release..."
