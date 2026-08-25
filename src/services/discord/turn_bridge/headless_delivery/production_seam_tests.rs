@@ -147,69 +147,53 @@ async fn durable_test_pool(
     Some((pg_db, pool))
 }
 
-async fn durable_enqueue(
+async fn durable_enqueue_with(
     pool: &sqlx::PgPool,
     content: &str,
-    owner: Option<MessageId>,
-    session_key: Option<&str>,
-) -> OutboxEnqueueOutcome {
-    durable_enqueue_as(pool, content, owner, session_key, &ProviderKind::Claude, 7).await
-}
-
-async fn durable_enqueue_as(
-    pool: &sqlx::PgPool,
-    content: &str,
-    owner: Option<MessageId>,
+    target: &str,
+    owner: Option<u64>,
     session_key: Option<&str>,
     provider: &ProviderKind,
-    born_generation: u64,
+    generation: u64,
+    enabled: bool,
 ) -> OutboxEnqueueOutcome {
     durable_outbox::enqueue_headless_outbox_with_rollout(
         pool,
         OutboxMessage {
-            target: "channel:5191",
+            target,
             content,
             bot: "claude",
             source: "headless_turn",
             reason_code: Some("headless.delivery"),
             session_key,
         },
-        owner,
+        owner.map(MessageId::new),
         provider,
-        born_generation,
+        generation,
         None,
-        true,
+        enabled,
     )
     .await
     .unwrap()
 }
 
-async fn durable_enqueue_with_rollout(
+async fn durable_enqueue(
     pool: &sqlx::PgPool,
-    owner: Option<MessageId>,
+    content: &str,
+    owner: u64,
     session_key: Option<&str>,
-    provider: &ProviderKind,
-    generation: u64,
-    durable_enabled: bool,
 ) -> OutboxEnqueueOutcome {
-    durable_outbox::enqueue_headless_outbox_with_rollout(
+    durable_enqueue_with(
         pool,
-        OutboxMessage {
-            target: "channel:5191",
-            content: "same",
-            bot: "claude",
-            source: "headless_turn",
-            reason_code: Some("headless.delivery"),
-            session_key,
-        },
-        owner,
-        provider,
-        generation,
-        None,
-        durable_enabled,
+        content,
+        "channel:5191",
+        Some(owner),
+        session_key,
+        &ProviderKind::Claude,
+        7,
+        true,
     )
     .await
-    .unwrap()
 }
 
 fn enqueued_id(outcome: OutboxEnqueueOutcome) -> i64 {
@@ -225,48 +209,18 @@ async fn durable_exact_identity_is_content_free_and_owner_sensitive_pg() {
     else {
         return;
     };
-    let first = durable_enqueue(
-        &pool,
-        "first rendering",
-        Some(MessageId::new(8)),
-        Some(" session "),
-    )
-    .await;
-    let duplicate = durable_enqueue(
-        &pool,
-        "different rendering",
-        Some(MessageId::new(8)),
-        Some(" session "),
-    )
-    .await;
-    let different_owner = durable_enqueue(
-        &pool,
-        "first rendering",
-        Some(MessageId::new(9)),
-        Some(" session "),
-    )
-    .await;
-    let different_session = durable_enqueue(
-        &pool,
-        "first rendering",
-        Some(MessageId::new(8)),
-        Some("session"),
-    )
-    .await;
-
-    let id = enqueued_id(first);
+    let id = enqueued_id(durable_enqueue(&pool, "first rendering", 8, Some(" session ")).await);
     assert_eq!(
-        duplicate,
+        durable_enqueue(&pool, "different rendering", 8, Some(" session ")).await,
         OutboxEnqueueOutcome::Enqueued { id },
         "rendered content must not change exact identity"
     );
     assert!(matches!(
-        different_owner,
-        OutboxEnqueueOutcome::Enqueued { id: other }
-            if other != id
+        durable_enqueue(&pool, "first rendering", 9, Some(" session ")).await,
+        OutboxEnqueueOutcome::Enqueued { id: other } if other != id
     ));
     assert_eq!(
-        different_session,
+        durable_enqueue(&pool, "first rendering", 8, Some("session")).await,
         OutboxEnqueueOutcome::Enqueued { id },
         "session routing bytes are preserved but are not a replacement for the required identity tuple"
     );
@@ -297,65 +251,21 @@ async fn durable_provider_channel_and_generation_axes_are_distinct_pg() {
     else {
         return;
     };
-    let owner = Some(MessageId::new(8));
-    let first = durable_enqueue_as(
-        &pool,
-        "answer",
-        owner,
-        Some("session"),
-        &ProviderKind::Claude,
-        7,
-    )
-    .await;
-    let first_id = enqueued_id(first);
-    let new_generation = durable_enqueue_as(
-        &pool,
-        "answer",
-        owner,
-        Some("session"),
-        &ProviderKind::Claude,
-        8,
-    )
-    .await;
-    let new_provider = durable_enqueue_as(
-        &pool,
-        "answer",
-        owner,
-        Some("session"),
-        &ProviderKind::Codex,
-        7,
-    )
-    .await;
-    for outcome in [new_generation, new_provider] {
+    let first_id = enqueued_id(durable_enqueue(&pool, "answer", 8, Some("session")).await);
+    let variants = [
+        ("channel:5191", ProviderKind::Claude, 8),
+        ("channel:5191", ProviderKind::Codex, 7),
+        ("channel:5192", ProviderKind::Claude, 7),
+    ];
+    for (target, provider, generation) in variants {
         assert!(matches!(
-            outcome,
-            OutboxEnqueueOutcome::Enqueued { id }
-                if id != first_id
+            durable_enqueue_with(
+                &pool, "answer", target, Some(8), Some("session"), &provider, generation, true,
+            )
+            .await,
+            OutboxEnqueueOutcome::Enqueued { id } if id != first_id
         ));
     }
-    let other_channel = durable_outbox::enqueue_headless_outbox_with_rollout(
-        &pool,
-        OutboxMessage {
-            target: "channel:5192",
-            content: "answer",
-            bot: "claude",
-            source: "headless_turn",
-            reason_code: Some("headless.delivery"),
-            session_key: Some("session"),
-        },
-        owner,
-        &ProviderKind::Claude,
-        7,
-        None,
-        true,
-    )
-    .await
-    .expect("enqueue other-channel durable row");
-    assert!(matches!(
-        other_channel,
-        OutboxEnqueueOutcome::Enqueued { id }
-            if id != first_id
-    ));
 }
 
 #[tokio::test]
@@ -374,9 +284,8 @@ async fn durable_active_statuses_return_existing_id_and_terminal_statuses_retry_
         .into_iter()
         .enumerate()
     {
-        let owner = MessageId::new(100 + index as u64);
-        let first = durable_enqueue(&pool, "answer", Some(owner), Some("session")).await;
-        let id = enqueued_id(first);
+        let owner = 100 + index as u64;
+        let id = enqueued_id(durable_enqueue(&pool, "answer", owner, Some("session")).await);
         sqlx::query("UPDATE message_outbox SET status=$1 WHERE id=$2")
             .bind(status)
             .bind(id)
@@ -384,16 +293,14 @@ async fn durable_active_statuses_return_existing_id_and_terminal_statuses_retry_
             .await
             .expect("set active status");
         assert_eq!(
-            durable_enqueue(&pool, "changed answer", Some(owner), Some("session")).await,
+            durable_enqueue(&pool, "changed answer", owner, Some("session")).await,
             OutboxEnqueueOutcome::Enqueued { id },
             "active {status} row must be the durable handoff"
         );
     }
-
     for (index, status) in ["failed", "cancelled"].into_iter().enumerate() {
-        let owner = MessageId::new(200 + index as u64);
-        let first = durable_enqueue(&pool, "answer", Some(owner), Some("session")).await;
-        let id = enqueued_id(first);
+        let owner = 200 + index as u64;
+        let id = enqueued_id(durable_enqueue(&pool, "answer", owner, Some("session")).await);
         sqlx::query(
             "UPDATE message_outbox
              SET status=$1,
@@ -407,9 +314,8 @@ async fn durable_active_statuses_return_existing_id_and_terminal_statuses_retry_
         .await
         .expect("set terminal status");
         assert!(matches!(
-            durable_enqueue(&pool, "changed answer", Some(owner), Some("session")).await,
-            OutboxEnqueueOutcome::Enqueued { id: fresh }
-                if fresh != id
+            durable_enqueue(&pool, "changed answer", owner, Some("session")).await,
+            OutboxEnqueueOutcome::Enqueued { id: fresh } if fresh != id
         ));
     }
 }
@@ -420,19 +326,10 @@ async fn durable_concurrent_duplicates_converge_on_one_active_row_pg() {
     else {
         return;
     };
-    let left = durable_enqueue(
-        &pool,
-        "left rendering",
-        Some(MessageId::new(5191)),
-        Some("session"),
+    let (left, right) = tokio::join!(
+        durable_enqueue(&pool, "left rendering", 5191, Some("session")),
+        durable_enqueue(&pool, "right rendering", 5191, Some("session")),
     );
-    let right = durable_enqueue(
-        &pool,
-        "right rendering",
-        Some(MessageId::new(5191)),
-        Some("session"),
-    );
-    let (left, right) = tokio::join!(left, right);
     assert_eq!(left, right);
 }
 
@@ -442,28 +339,14 @@ async fn durable_existing_sent_row_is_immediately_visible_pg() {
     else {
         return;
     };
-    let id = enqueued_id(
-        durable_enqueue(
-            &pool,
-            "visible answer",
-            Some(MessageId::new(5192)),
-            Some("session"),
-        )
-        .await,
-    );
+    let id = enqueued_id(durable_enqueue(&pool, "visible answer", 5192, Some("session")).await);
     sqlx::query("UPDATE message_outbox SET status='sent', sent_at=NOW() WHERE id=$1")
         .bind(id)
         .execute(&pool)
         .await
         .expect("mark durable row sent");
     assert_eq!(
-        durable_enqueue(
-            &pool,
-            "re-rendered answer",
-            Some(MessageId::new(5192)),
-            Some("session"),
-        )
-        .await,
+        durable_enqueue(&pool, "re-rendered answer", 5192, Some("session")).await,
         OutboxEnqueueOutcome::Enqueued { id }
     );
     assert_eq!(
@@ -485,60 +368,50 @@ async fn durable_rollout_falls_back_to_ttl_zero_for_off_or_incomplete_identity_p
     let over_bound = "x".repeat(durable_outbox::MAX_HEADLESS_SESSION_ROUTING_KEY_BYTES + 1);
     let unsupported = ProviderKind::Unsupported("issue-5191-test".to_string());
     for (enabled, owner, session, provider, generation) in [
-        (
-            false,
-            Some(MessageId::new(8)),
-            Some("session"),
-            &ProviderKind::Claude,
-            7,
-        ),
+        (false, Some(8), Some("session"), &ProviderKind::Claude, 7),
         (true, None, Some("session"), &ProviderKind::Claude, 7),
         (
             true,
-            Some(MessageId::new(8)),
+            Some(8),
             Some(over_bound.as_str()),
             &ProviderKind::Claude,
             7,
         ),
-        (
-            true,
-            Some(MessageId::new(8)),
-            Some("session"),
-            &ProviderKind::Claude,
-            0,
-        ),
-        (
-            true,
-            Some(MessageId::new(8)),
-            Some("session"),
-            &unsupported,
-            7,
-        ),
+        (true, Some(8), Some("session"), &ProviderKind::Claude, 0),
+        (true, Some(8), Some("session"), &unsupported, 7),
     ] {
-        let first =
-            durable_enqueue_with_rollout(&pool, owner, session, provider, generation, enabled)
-                .await;
-        let second =
-            durable_enqueue_with_rollout(&pool, owner, session, provider, generation, enabled)
-                .await;
+        let enqueue = || {
+            durable_enqueue_with(
+                &pool,
+                "same",
+                "channel:5191",
+                owner,
+                session,
+                provider,
+                generation,
+                enabled,
+            )
+        };
         assert_ne!(
-            first, second,
+            enqueue().await,
+            enqueue().await,
             "legacy TTL-zero path must not suppress duplicates"
         );
     }
-    let missing_session_first = durable_enqueue_with_rollout(
+    let missing_session = durable_enqueue_with(
         &pool,
-        Some(MessageId::new(8)),
+        "same",
+        "channel:5191",
+        Some(8),
         None,
         &ProviderKind::Claude,
         7,
         true,
     )
     .await;
-    let missing_session_duplicate =
-        durable_enqueue(&pool, "different", Some(MessageId::new(8)), None).await;
     assert_eq!(
-        missing_session_first, missing_session_duplicate,
+        missing_session,
+        durable_enqueue(&pool, "different", 8, None).await,
         "the required identity tuple remains complete without an optional routing key"
     );
 }
