@@ -32,15 +32,16 @@ pub(super) struct WatcherRuntimeHandoffState<'a> {
 pub(super) fn cancel_provisional_watcher_claim_if_matches(
     shared: &SharedData,
     owner_channel_id: ChannelId,
+    tmux_session_name: &str,
+    output_path: &str,
     provisional_cancel: &Arc<std::sync::atomic::AtomicBool>,
 ) {
-    let owns_slot = shared
-        .tmux_watchers
-        .get(&owner_channel_id)
-        .is_some_and(|handle| Arc::ptr_eq(&handle.cancel, provisional_cancel));
-    if owns_slot && let Some((_, handle)) = shared.tmux_watchers.remove(&owner_channel_id) {
-        handle.cancel.store(true, Ordering::Relaxed);
-    }
+    shared.tmux_watchers.cancel_and_remove_channel_if_current(
+        &owner_channel_id,
+        tmux_session_name,
+        output_path,
+        provisional_cancel,
+    );
 }
 
 pub(super) fn handle_watcher_runtime_handoff(
@@ -200,7 +201,12 @@ pub(super) fn handle_watcher_runtime_handoff(
         watcher_claim_incarnation,
     ) = {
         let _ = handle;
-        (false, false, false, None)
+        (
+            false,
+            false,
+            false,
+            None::<super::super::tmux::WatcherClaimIncarnation>,
+        )
     };
     if owner_changed_after_claim {
         let claim_expected = crate::services::discord::inflight::InflightTurnIdentity::from_state(
@@ -218,6 +224,8 @@ pub(super) fn handle_watcher_runtime_handoff(
                 cancel_provisional_watcher_claim_if_matches(
                     shared_owned.as_ref(),
                     *watcher_owner_channel_id,
+                    &tmux_session_name,
+                    &output_path,
                     &cancel,
                 );
             }
@@ -255,7 +263,13 @@ pub(super) fn handle_watcher_runtime_handoff(
                     "  [{ts}] ⏭ standby relay: skipping tmux watcher spawn for channel {}; spawning JSONL→Discord standby_relay",
                     channel_id
                 );
-                let _ = shared_owned.tmux_watchers.remove(watcher_owner_channel_id);
+                cancel_provisional_watcher_claim_if_matches(
+                    shared_owned.as_ref(),
+                    *watcher_owner_channel_id,
+                    &tmux_session_name,
+                    &output_path,
+                    &cancel,
+                );
                 if let Some(http_for_standby) = shared_owned.serenity_http_or_token_fallback() {
                     let placeholder_msg_id_opt = if inflight_state.current_msg_id == 0 {
                         None
@@ -393,13 +407,13 @@ pub(super) fn handle_watcher_runtime_handoff(
                     "  [{ts}] ⚠ no Http source (neither cached_serenity_ctx nor cached_bot_token); tmux watcher not started for channel {}",
                     channel_id
                 );
-                if let Some((_, handle)) =
-                    shared_owned.tmux_watchers.remove(watcher_owner_channel_id)
-                {
-                    handle
-                        .cancel
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                }
+                cancel_provisional_watcher_claim_if_matches(
+                    shared_owned.as_ref(),
+                    *watcher_owner_channel_id,
+                    &tmux_session_name,
+                    &output_path,
+                    &cancel,
+                );
             }
         }
     }

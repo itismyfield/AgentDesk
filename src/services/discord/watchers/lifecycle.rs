@@ -80,10 +80,10 @@ mod claims;
 pub(in crate::services::discord) use self::claims::claim_cross_channel_tmux_watcher_for_test;
 pub(super) use self::claims::*;
 pub(in crate::services::discord) use self::claims::{
-    ThreadFollowUpParent, claim_or_replace_watcher, claim_or_replace_watcher_with_thread_parent,
-    claim_or_reuse_watcher, claim_or_reuse_watcher_with_thread_parent,
-    thread_follow_up_parent_channel_id, thread_follow_up_parent_from_live,
-    try_claim_watcher_with_thread_parent,
+    ThreadFollowUpParent, WatcherClaimIncarnation, claim_or_replace_watcher,
+    claim_or_replace_watcher_with_thread_parent, claim_or_reuse_watcher,
+    claim_or_reuse_watcher_with_thread_parent, thread_follow_up_parent_channel_id,
+    thread_follow_up_parent_from_live, try_claim_watcher_with_thread_parent,
 };
 
 #[path = "lifecycle/restore.rs"]

@@ -639,3 +639,44 @@ async fn runtime_ready_reowned_row_never_claims_or_starts_watcher() {
     )
     .await;
 }
+
+#[test]
+fn provisional_cleanup_preserves_replacement_incarnation() {
+    let provider = ProviderKind::Codex;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let owner = ChannelId::new(42_592_608);
+    let tmux_session_name = "AgentDesk-codex-cleanup-race";
+    let output_path = "/runtime/cleanup-race.jsonl";
+    let provisional = live_watcher_handle(tmux_session_name, output_path);
+    let provisional_cancel = Arc::clone(&provisional.cancel);
+    shared.tmux_watchers.insert(owner, provisional);
+
+    let replacement = live_watcher_handle(tmux_session_name, output_path);
+    let replacement_cancel = Arc::clone(&replacement.cancel);
+    let replacement_claim = crate::services::discord::tmux::claim_or_replace_watcher(
+        &shared.tmux_watchers,
+        owner,
+        replacement,
+        &provider,
+        "turn_bridge_runtime_cleanup_race",
+    );
+    assert!(replacement_claim.should_spawn());
+    assert!(provisional_cancel.load(Ordering::Relaxed));
+    assert!(!replacement_cancel.load(Ordering::Relaxed));
+
+    cancel_provisional_watcher_claim_if_matches(
+        shared.as_ref(),
+        owner,
+        tmux_session_name,
+        output_path,
+        &provisional_cancel,
+    );
+
+    let registered = shared
+        .tmux_watchers
+        .get(&owner)
+        .expect("replacement must survive stale provisional cleanup");
+    assert!(Arc::ptr_eq(&registered.cancel, &replacement_cancel));
+    assert!(!registered.cancel.load(Ordering::Relaxed));
+    assert!(provisional_cancel.load(Ordering::Relaxed));
+}

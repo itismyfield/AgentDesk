@@ -270,7 +270,12 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     watcher_claim_incarnation,
                 ) = {
                     let _ = handle;
-                    (false, false, false, None)
+                    (
+                        false,
+                        false,
+                        false,
+                        None::<super::tmux::WatcherClaimIncarnation>,
+                    )
                 };
                 if owner_changed_after_claim {
                     let claim_expected =
@@ -293,6 +298,8 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     cancel_provisional_watcher_claim_if_matches(
                         shared_owned.as_ref(),
                         watcher_owner_channel_id,
+                        &tmux_session_name,
+                        &output_path,
                         &cancel,
                     );
                 }
@@ -349,18 +356,15 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                                 "  [{ts}] ⏭ standby relay: skipping tmux watcher spawn for channel {}; spawning JSONL→Discord standby_relay",
                                 channel_id
                             );
-                            // Drop the registered watcher slot so a
-                            // subsequent turn does not falsely reuse
-                            // a "live" watcher that we never spawned.
-                            // Do NOT call `cancel.store(true)` on the
-                            // returned handle: the inner cancel Arc
-                            // is shared with the local `cancel` and
-                            // would pre-cancel the standby_relay we
-                            // are about to spawn (Codex P1 review on
-                            // PR #2012). The cancel Arc is otherwise
-                            // unused on this branch since no watcher
-                            // task ever reads it.
-                            let _ = shared_owned.tmux_watchers.remove(&watcher_owner_channel_id);
+                            // Retire only the exact provisional slot; the
+                            // standby relay below owns an independent cancel.
+                            cancel_provisional_watcher_claim_if_matches(
+                                shared_owned.as_ref(),
+                                watcher_owner_channel_id,
+                                &tmux_session_name,
+                                &output_path,
+                                &cancel,
+                            );
                             if let Some(http_for_standby) =
                                 shared_owned.serenity_http_or_token_fallback()
                             {
@@ -476,11 +480,13 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                                 "  [{ts}] ⚠ no Http source (neither cached_serenity_ctx nor cached_bot_token); tmux watcher not started for channel {}",
                                 channel_id
                             );
-                            if let Some((_, handle)) =
-                                shared_owned.tmux_watchers.remove(&watcher_owner_channel_id)
-                            {
-                                handle.cancel.store(true, Ordering::Relaxed);
-                            }
+                            cancel_provisional_watcher_claim_if_matches(
+                                shared_owned.as_ref(),
+                                watcher_owner_channel_id,
+                                &tmux_session_name,
+                                &output_path,
+                                &cancel,
+                            );
                         }
                     }
                 }
