@@ -458,6 +458,7 @@ AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-su
 | `AGENTDESK_DCSERVER_LABEL` | Override launchd service label |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | Status polling interval (default: 5) |
 | `AGENTDESK_TURN_TIMEOUT_SECS` | Turn watchdog timeout in seconds (default: 3600) |
+| `AGENTDESK_HEADLESS_DISCORD_NONCE` | Opt in (`1` or `true`) to an enforced Discord nonce for trusted durable `headless_turn` outbox rows on the <=2,000-character manual/v3 inline path. Default is off. Retries of one parsed positive row ID reuse the same nonce, but Discord applies duplicate suppression only within its bounded recent-nonce retention window; this is not indefinite deduplication, and oversize attachment/chunk paths are outside this rollout. |
 | `AGENTDESK_GH_PATH` / `AGENTDESK_CODEX_PATH` / `AGENTDESK_GEMINI_PATH` | Override resolved provider/CLI binary paths |
 | `RUST_LOG` | Standard tracing filter (default: `agentdesk=info`) |
 

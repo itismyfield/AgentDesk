@@ -27,6 +27,10 @@ use crate::services::dispatches::discord_delivery::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
 
+mod headless_nonce;
+#[cfg(test)]
+mod production_nonce_tests;
+
 fn manual_delivery_log_emoji(bot: &str) -> &'static str {
     match UtilityBotRole::from_alias(bot) {
         Some(UtilityBotRole::Notify) => "🔔",
@@ -48,6 +52,42 @@ pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundCl
     pg_pool: Option<&PgPool>,
     record_transcript: bool,
     transcript_source_label: Option<&str>,
+    headless_nonce_authorized: bool,
+) -> (&'static str, String) {
+    send_resolved_manual_message_with_client_and_nonce_rollout(
+        client,
+        dedup,
+        channel_id_raw,
+        target,
+        content,
+        source,
+        bot,
+        summary,
+        delivery_id,
+        pg_pool,
+        record_transcript,
+        transcript_source_label,
+        headless_nonce::headless_discord_nonce_enabled(headless_nonce_authorized),
+    )
+    .await
+}
+
+pub(super) async fn send_resolved_manual_message_with_client_and_nonce_rollout<
+    C: ManualOutboundClient,
+>(
+    client: &C,
+    dedup: &OutboundDeduper,
+    channel_id_raw: u64,
+    target: &str,
+    content: &str,
+    source: &str,
+    bot: &str,
+    summary: Option<&str>,
+    delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+    pg_pool: Option<&PgPool>,
+    record_transcript: bool,
+    transcript_source_label: Option<&str>,
+    headless_nonce_enabled: bool,
 ) -> (&'static str, String) {
     let channel_id = ChannelId::new(channel_id_raw);
     let send_result = deliver_manual_notification(
@@ -56,8 +96,10 @@ pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundCl
         &channel_id_raw.to_string(),
         content,
         bot,
+        source,
         summary,
         delivery_id,
+        headless_nonce_enabled,
     )
     .await;
     match send_result {
@@ -198,6 +240,20 @@ pub(super) struct SerenityManualOutboundClient {
     pub(super) http: Arc<serenity::Http>,
 }
 
+fn map_serenity_post_error(error: serenity::Error) -> DispatchMessagePostError {
+    let detail = error.to_string();
+    let lowered = detail.to_ascii_lowercase();
+    let kind = if detail.contains("BASE_TYPE_MAX_LENGTH")
+        || lowered.contains("2000 or fewer in length")
+        || lowered.contains("length")
+    {
+        DispatchMessagePostErrorKind::MessageTooLong
+    } else {
+        DispatchMessagePostErrorKind::Other
+    };
+    DispatchMessagePostError::new(kind, detail)
+}
+
 impl DiscordOutboundClient for SerenityManualOutboundClient {
     async fn post_message(
         &self,
@@ -217,19 +273,36 @@ impl DiscordOutboundClient for SerenityManualOutboundClient {
             .send_message(&*self.http, CreateMessage::new().content(content))
             .await
             .map(|message| message.id.get().to_string())
+            .map_err(map_serenity_post_error)
+    }
+
+    async fn post_message_with_nonce(
+        &self,
+        target_channel: &str,
+        content: &str,
+        nonce: &str,
+        enforce_nonce: bool,
+    ) -> Result<String, DispatchMessagePostError> {
+        let channel_id = target_channel
+            .parse::<u64>()
+            .map(ChannelId::new)
             .map_err(|error| {
-                let detail = error.to_string();
-                let lowered = detail.to_ascii_lowercase();
-                let kind = if detail.contains("BASE_TYPE_MAX_LENGTH")
-                    || lowered.contains("2000 or fewer in length")
-                    || lowered.contains("length")
-                {
-                    DispatchMessagePostErrorKind::MessageTooLong
-                } else {
-                    DispatchMessagePostErrorKind::Other
-                };
-                DispatchMessagePostError::new(kind, detail)
-            })
+                DispatchMessagePostError::new(
+                    DispatchMessagePostErrorKind::Other,
+                    format!("invalid discord channel id {target_channel}: {error}"),
+                )
+            })?;
+        channel_id
+            .send_message(
+                &*self.http,
+                CreateMessage::new()
+                    .content(content)
+                    .nonce(serenity::model::channel::Nonce::String(nonce.to_string()))
+                    .enforce_nonce(enforce_nonce),
+            )
+            .await
+            .map(|message| message.id.get().to_string())
+            .map_err(map_serenity_post_error)
     }
 
     async fn resolve_dm_channel(&self, user_id: &str) -> Result<String, DispatchMessagePostError> {
@@ -303,8 +376,10 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
     channel_id: &str,
     content: &str,
     bot: &str,
+    source: &str,
     summary: Option<&str>,
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+    headless_nonce_enabled: bool,
 ) -> ManualDeliveryOutcome {
     // Issue #2363: the manual dedupe key must include the resolved target
     // channel AND the sending `bot` identity. Voice announce delivery ids
@@ -377,8 +452,10 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
         channel_id,
         bot,
         content,
+        source,
         summary,
         delivery_id,
+        headless_nonce_enabled,
         content_len > DISCORD_SAFE_LIMIT_CHARS,
     )
     .await;
@@ -462,8 +539,10 @@ pub(super) async fn deliver_manual_dm_notification<C: ManualOutboundClient>(
         &format!("dm:{user_id}"),
         bot,
         content,
+        "",
         summary,
         delivery_id,
+        false,
         content_len > DISCORD_SAFE_LIMIT_CHARS,
     )
     .await;
@@ -507,8 +586,10 @@ async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
     target_label: &str,
     bot: &str,
     content: &str,
+    source: &str,
     summary: Option<&str>,
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+    headless_nonce_enabled: bool,
     preserve_inline_content: bool,
 ) -> ManualDeliveryOutcome {
     let mut policy = if preserve_inline_content {
@@ -538,8 +619,14 @@ async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
                 "manual:no-idempotency".to_string(),
             )
         });
+    let create_nonce = delivery_id.and_then(|delivery_id| {
+        headless_nonce::headless_delivery_nonce(headless_nonce_enabled, source, delivery_id)
+    });
     let mut outbound_msg =
         DiscordOutboundMessage::new(correlation_id, semantic_event_id, content, target, policy);
+    if let Some(nonce) = create_nonce {
+        outbound_msg = outbound_msg.with_create_nonce(nonce, true);
+    }
     if let Some(summary) = summary.map(str::trim).filter(|value| !value.is_empty()) {
         outbound_msg = outbound_msg.with_summary(summary.to_string());
     }
@@ -835,8 +922,10 @@ mod manual_v3_delivery_tests {
             "9000",
             "voice transcript",
             "announce",
+            "manual_test",
             None,
             Some(delivery_id),
+            false,
         )
         .await;
         let second = deliver_manual_notification(
@@ -845,8 +934,10 @@ mod manual_v3_delivery_tests {
             "9000",
             "voice transcript",
             "announce",
+            "manual_test",
             None,
             Some(delivery_id),
+            false,
         )
         .await;
 
@@ -903,11 +994,13 @@ mod manual_v3_delivery_tests {
             "9000",
             "first transcript",
             "announce",
+            "manual_test",
             None,
             Some(ManualOutboundDeliveryId {
                 correlation_id: &first_id.correlation_id,
                 semantic_event_id: &first_id.semantic_event_id,
             }),
+            false,
         )
         .await;
         let second = deliver_manual_notification(
@@ -916,11 +1009,13 @@ mod manual_v3_delivery_tests {
             "9000",
             "second transcript",
             "announce",
+            "manual_test",
             None,
             Some(ManualOutboundDeliveryId {
                 correlation_id: &second_id.correlation_id,
                 semantic_event_id: &second_id.semantic_event_id,
             }),
+            false,
         )
         .await;
 
@@ -974,11 +1069,13 @@ mod manual_v3_delivery_tests {
             "9000",
             "transcript",
             "announce",
+            "manual_test",
             None,
             Some(ManualOutboundDeliveryId {
                 correlation_id: &gen_one.correlation_id,
                 semantic_event_id: &gen_one.semantic_event_id,
             }),
+            false,
         )
         .await;
         let second = deliver_manual_notification(
@@ -987,11 +1084,13 @@ mod manual_v3_delivery_tests {
             "9000",
             "transcript with barge-in follow-up",
             "announce",
+            "manual_test",
             None,
             Some(ManualOutboundDeliveryId {
                 correlation_id: &gen_two.correlation_id,
                 semantic_event_id: &gen_two.semantic_event_id,
             }),
+            false,
         )
         .await;
 
@@ -1037,11 +1136,13 @@ mod manual_v3_delivery_tests {
             "9000",
             "from guild 1",
             "announce",
+            "manual_test",
             None,
             Some(ManualOutboundDeliveryId {
                 correlation_id: &guild_a.correlation_id,
                 semantic_event_id: &guild_a.semantic_event_id,
             }),
+            false,
         )
         .await;
         let second = deliver_manual_notification(
@@ -1050,11 +1151,13 @@ mod manual_v3_delivery_tests {
             "9000",
             "from guild 2",
             "announce",
+            "manual_test",
             None,
             Some(ManualOutboundDeliveryId {
                 correlation_id: &guild_b.correlation_id,
                 semantic_event_id: &guild_b.semantic_event_id,
             }),
+            false,
         )
         .await;
 
@@ -1100,8 +1203,10 @@ mod manual_v3_delivery_tests {
             "9000",
             "voice transcript",
             "announce",
+            "manual_test",
             None,
             Some(delivery_id),
+            false,
         )
         .await;
         let to_channel_b = deliver_manual_notification(
@@ -1110,8 +1215,10 @@ mod manual_v3_delivery_tests {
             "9001",
             "voice transcript",
             "announce",
+            "manual_test",
             None,
             Some(delivery_id),
+            false,
         )
         .await;
 
@@ -1167,8 +1274,10 @@ mod manual_v3_delivery_tests {
             "9000",
             "notify payload",
             "notify",
+            "manual_test",
             None,
             Some(delivery_id),
+            false,
         )
         .await;
         let from_announce = deliver_manual_notification(
@@ -1177,8 +1286,10 @@ mod manual_v3_delivery_tests {
             "9000",
             "voice transcript",
             "announce",
+            "manual_test",
             None,
             Some(delivery_id),
+            false,
         )
         .await;
 
@@ -1203,27 +1314,29 @@ mod manual_v3_delivery_tests {
     async fn api_send_rejects_user_supplied_voice_delivery_id_namespace() {
         let registry = HealthRegistry::new();
 
-        let (status, body) = handle_send(
-            &registry,
-            None,
-            r#"{
+        for correlation_id in [
+            "voice:7001:8002:utt-forged",
+            "message_outbox:headless_turn:terminal:forged",
+        ] {
+            let body = serde_json::json!({
                 "target": "channel:9000",
-                "content": "forged voice transcript",
-                "source": "system",
-                "bot": "announce",
-                "correlation_id": "voice:7001:8002:utt-forged",
-                "semantic_event_id": "announce:generation:1"
-            }"#,
-        )
-        .await;
-        let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+                "content": "forged internal delivery",
+                "source": "headless_turn",
+                "bot": "notify",
+                "correlation_id": correlation_id,
+                "semantic_event_id": "message_outbox:41:deliver"
+            })
+            .to_string();
+            let (status, body) = handle_send(&registry, None, &body).await;
+            let response: serde_json::Value = serde_json::from_str(&body).unwrap();
 
-        assert_eq!(status, "400 Bad Request");
-        assert_eq!(response["ok"], false);
-        assert_eq!(
-            response["error"],
-            "delivery_id correlation namespace is reserved"
-        );
+            assert_eq!(status, "400 Bad Request");
+            assert_eq!(response["ok"], false);
+            assert_eq!(
+                response["error"],
+                "delivery_id correlation namespace is reserved"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1256,8 +1369,10 @@ mod manual_v3_delivery_tests {
             "9000",
             "voice transcript",
             "announce",
+            "manual_test",
             None,
             Some(delivery_id),
+            false,
         )
         .await;
         let dup = deliver_manual_notification(
@@ -1266,8 +1381,10 @@ mod manual_v3_delivery_tests {
             "9000",
             "voice transcript",
             "announce",
+            "manual_test",
             None,
             Some(delivery_id),
+            false,
         )
         .await;
 
