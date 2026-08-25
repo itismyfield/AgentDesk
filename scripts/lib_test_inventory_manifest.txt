@@ -3306,6 +3306,11 @@ services::discord::outbound::delivery_record::tests::watcher_long_chunk_same_cha
 services::discord::outbound::delivery_record::tests::watcher_owner_context_preserves_frontier_and_resolves_current_generation_3751
 services::discord::outbound::delivery_record::tests::watcher_owner_context_rejects_stale_or_wrong_session_3751
 services::discord::outbound::delivery_record::tests::watcher_owner_context_survives_delivery_record_rewrite_3751
+services::discord::outbound::manual_delivery::headless_nonce::tests::durable_identity_accepts_only_complete_headless_outbox_delivery_ids
+services::discord::outbound::manual_delivery::headless_nonce::tests::durable_row_parser_rejects_non_positive_and_overflow_identities
+services::discord::outbound::manual_delivery::headless_nonce::tests::flag_is_compiled_default_off_and_only_explicitly_enabled
+services::discord::outbound::manual_delivery::headless_nonce::tests::inline_nonce_is_stable_by_parsed_durable_row_across_retry_variations
+services::discord::outbound::manual_delivery::headless_nonce::tests::nonce_requires_flag_source_and_complete_durable_identity
 services::discord::outbound::manual_delivery::manual_v3_delivery_tests::api_send_rejects_user_supplied_voice_delivery_id_namespace
 services::discord::outbound::manual_delivery::manual_v3_delivery_tests::manual_delivery_log_emoji_preserves_legacy_mapping
 services::discord::outbound::manual_delivery::manual_v3_delivery_tests::manual_dm_notification_uses_v3_dm_target_and_dedupes_before_resolve
@@ -3318,6 +3323,7 @@ services::discord::outbound::manual_delivery::manual_v3_delivery_tests::voice_an
 services::discord::outbound::manual_delivery::manual_v3_delivery_tests::voice_announce_new_utterance_does_not_dedupe_against_prior_send
 services::discord::outbound::manual_delivery::manual_v3_delivery_tests::voice_announce_same_delivery_id_different_target_channel_does_not_dedupe
 services::discord::outbound::manual_delivery::manual_v3_delivery_tests::voice_announce_same_utterance_and_generation_dedupes_at_health_layer
+services::discord::outbound::manual_delivery::production_nonce_tests::production_serenity_inline_path_serializes_canonical_durable_row_nonces
 services::discord::outbound::message::tests::legacy_outbound_envelope_defaults_create_nonce_fields
 services::discord::outbound::reaction_control::tests::queue_reaction_delivery_uses_fallback_only_on_failure
 services::discord::outbound::reaction_control::tests::reaction_control_reply_ids_are_stable_for_queued_card_failure
@@ -3361,6 +3367,7 @@ services::discord::outbound::send_gate::send_source_tests::dm_default_agent_allo
 services::discord::outbound::send_gate::send_source_tests::from_header_parses_known_caller_classes
 services::discord::outbound::send_gate::send_source_tests::headless_turn_is_allowed_internal_send_source
 services::discord::outbound::send_gate::send_source_tests::loopback_internal_keeps_existing_internal_label_acceptance
+services::discord::outbound::send_gate::send_source_tests::reserved_gate_requires_explicit_outbox_authority_and_preserves_voice_delivery
 services::discord::outbound::send_gate::send_source_tests::unknown_caller_class_only_allows_known_agents
 services::discord::outbound::send_target::send_target_parse_tests::agent_target_with_empty_id_is_bad_request
 services::discord::outbound::send_target::send_target_parse_tests::agent_target_with_role_id_parses_after_trimming

@@ -633,6 +633,9 @@ src/
 │   │   │   ├── bounded_cache_file.rs
 │   │   │   └── claude.rs
 │   │   ├── outbound/
+│   │   │   ├── manual_delivery/
+│   │   │   │   ├── headless_nonce.rs
+│   │   │   │   └── production_nonce_tests.rs
 │   │   │   ├── turn_output_controller/
 │   │   │   │   ├── fresh_send.rs
 │   │   │   │   └── fresh_send_tests.rs

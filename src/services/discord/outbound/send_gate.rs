@@ -98,6 +98,12 @@ pub(crate) async fn send_message_with_backends_and_delivery_id_for_caller(
 
 const HEADLESS_TURN_OUTBOX_SOURCE: &str = "headless_turn";
 
+pub(super) fn production_manual_outbound_client(
+    http: std::sync::Arc<serenity::Http>,
+) -> SerenityManualOutboundClient {
+    SerenityManualOutboundClient { http }
+}
+
 pub(in crate::services::discord) fn dm_default_agent_authorizes_unmapped_private_channel(
     is_private_channel: bool,
     source: &str,
@@ -119,6 +125,10 @@ pub(in crate::services::discord) fn dm_default_agent_authorizes_unmapped_private
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ManualOutboundOptions {
     pub(crate) allow_unbound_internal_channel: bool,
+    /// Grants the durable message-outbox producer access to its reserved
+    /// delivery-id namespace and inline Discord nonce rollout. This is
+    /// intentionally independent from unbound-channel authorization.
+    pub(crate) trusted_internal_outbox: bool,
     pub(crate) record_transcript: bool,
     pub(crate) transcript_source_label: Option<String>,
 }
@@ -150,6 +160,19 @@ pub(crate) async fn send_message_with_backends_and_delivery_options(
     .await
 }
 
+fn rejects_untrusted_message_outbox_delivery_id(
+    delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+    trusted_internal_outbox_path: bool,
+) -> bool {
+    !trusted_internal_outbox_path
+        && delivery_id.is_some_and(|delivery_id| {
+            delivery_id
+                .correlation_id
+                .trim_start()
+                .starts_with("message_outbox:")
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn send_message_with_backends_and_delivery_options_for_caller(
     registry: &HealthRegistry,
@@ -163,6 +186,16 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
     options: ManualOutboundOptions,
     caller_class: SendCallerClass,
 ) -> (&'static str, String) {
+    if rejects_untrusted_message_outbox_delivery_id(delivery_id, options.trusted_internal_outbox) {
+        return (
+            "400 Bad Request",
+            serde_json::json!({
+                "ok": false,
+                "error": "delivery_id correlation namespace is reserved"
+            })
+            .to_string(),
+        );
+    }
     if content.is_empty() {
         return (
             "400 Bad Request",
@@ -325,7 +358,7 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
         Err(resp) => return resp,
     };
 
-    let outbound_client = SerenityManualOutboundClient { http };
+    let outbound_client = production_manual_outbound_client(http);
     send_resolved_manual_message_with_client(
         &outbound_client,
         shared_outbound_deduper(),
@@ -339,6 +372,7 @@ async fn send_message_with_backends_and_delivery_options_for_caller(
         pg_pool,
         options.record_transcript,
         options.transcript_source_label.as_deref(),
+        options.trusted_internal_outbox,
     )
     .await
 }
@@ -362,8 +396,47 @@ mod send_source_tests {
     use super::{
         SendCallerClass, dm_default_agent_authorizes_unmapped_private_channel,
         is_allowed_send_source, is_allowed_send_source_for,
+        rejects_untrusted_message_outbox_delivery_id,
     };
     use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn reserved_gate_requires_explicit_outbox_authority_and_preserves_voice_delivery() {
+        let voice = super::ManualOutboundDeliveryId {
+            correlation_id: "voice:7001:8002:utterance",
+            semantic_event_id: "announce:generation:1",
+        };
+        let outbox = super::ManualOutboundDeliveryId {
+            correlation_id: "message_outbox:headless_turn:terminal:session-a",
+            semantic_event_id: "message_outbox:41:deliver",
+        };
+
+        assert!(!rejects_untrusted_message_outbox_delivery_id(
+            Some(voice),
+            false
+        ));
+        assert!(rejects_untrusted_message_outbox_delivery_id(
+            Some(outbox),
+            false
+        ));
+        // Unbound-channel permission is not message-outbox authority.
+        let unbound_only = super::ManualOutboundOptions {
+            allow_unbound_internal_channel: true,
+            ..Default::default()
+        };
+        assert!(rejects_untrusted_message_outbox_delivery_id(
+            Some(outbox),
+            unbound_only.trusted_internal_outbox,
+        ));
+        let trusted_outbox = super::ManualOutboundOptions {
+            trusted_internal_outbox: true,
+            ..Default::default()
+        };
+        assert!(!rejects_untrusted_message_outbox_delivery_id(
+            Some(outbox),
+            trusted_outbox.trusted_internal_outbox,
+        ));
+    }
 
     #[test]
     fn headless_turn_is_allowed_internal_send_source() {

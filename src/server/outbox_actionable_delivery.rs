@@ -54,6 +54,7 @@ async fn deliver_with_bot(
         }),
         crate::services::discord::health::ManualOutboundOptions {
             allow_unbound_internal_channel: true,
+            trusted_internal_outbox: true,
             ..Default::default()
         },
     )
