@@ -313,6 +313,14 @@ impl ProcessGenerationAllocation {
     }
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) fn process_generation_allocation_for_tests(
+    generation: u64,
+    route: GenerationAllocationRoute,
+) -> ProcessGenerationAllocation {
+    ProcessGenerationAllocation { generation, route }
+}
+
 // </epoch-provenance-surface>
 
 /// Load the current generation counter (returns 0 if missing or unreadable).
