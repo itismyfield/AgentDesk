@@ -212,20 +212,15 @@ set -e
 assert_eq "503 shim exits 22 when called with -sf (catches regression)" "22" "$shim_with_f_rc"
 assert_eq "503 shim exits 0 when called without -f" "0" "$shim_without_f_rc"
 
-echo "== Test 5b: marker-consumed during wait counts as acknowledgement =="
-# Simulate a runtime that deletes the marker mid-wait (the restart_ctrl race
-# Codex flagged in #1447 review). Stub curl to always fail (so health-detail
-# probe never returns success) — the only positive ack path left is the
-# "marker disappeared" branch.
+echo "== Test 5b: marker consumption is diagnostic-only =="
+# Delete the marker without publishing a request-specific terminal identity.
+# Disappearance is observable, but cannot acknowledge this request.
 mkdir -p "$TMP_FIXTURE_DIR/bin_fail"
 cat >"$TMP_FIXTURE_DIR/bin_fail/curl" <<'EOF'
 #!/usr/bin/env bash
 exit 7
 EOF
 chmod +x "$TMP_FIXTURE_DIR/bin_fail/curl"
-
-# Stub _launchd_job_state so the post-loop branch reports "running" — forcing
-# the helper to rely on marker-consumed ack.
 _launchd_job_state() { echo "running"; }
 ( for _ in $(seq 1 50); do
     [ -e "$TMP_RUNTIME/restart_pending" ] && break
@@ -235,14 +230,20 @@ _launchd_job_state() { echo "running"; }
 BG_PID=$!
 set +e
 PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
-  AGENTDESK_RESTART_DRAIN_ACK_WAIT=10 \
-  request_restart_drain_mode_or_fail "test" "test.label" 0 "$TMP_RUNTIME" "smoke-test" \
-  >/dev/null 2>&1
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
+  request_restart_drain_mode_or_fail \
+    "test" "test.label" 0 "$TMP_RUNTIME" "deploy-release" \
+    >"$TMP_FIXTURE_DIR/consumed-only.out" 2>&1
 rc=$?
 set -e
 wait "$BG_PID" 2>/dev/null || true
 unset -f _launchd_job_state
-assert_eq "drain helper returns 0 when marker is consumed mid-wait" "0" "$rc"
+assert_eq "consumption-only deploy phase 1 remains permissive" "0" "$rc"
+assert_eq "consumption alone reaches timeout, not acknowledgement" \
+  "not evaluated: restart drain acknowledgement timed out" \
+  "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
+assert_eq "consumption-only deploy still requires phase 2" "0" \
+  "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-missing}"
 
 echo "== Test 5c: health_turn_snapshot fails closed when counters absent =="
 # Regression for #1447 review iteration 4 P2: previously a redacted body
@@ -738,34 +739,40 @@ else
   pass "8h: sibling mirror marker cleared on the not-running branch"
 fi
 
-# --- 8i: consumption in EITHER root is the idle-runtime acknowledgement -----
-# Only one binary is running, so only one of the two markers is ever consumed.
-# Requiring both to vanish would delete the #1447 ack path outright.
+# --- 8i: delayed terminal publication remains the only success authority -----
+# Consumption may precede the immutable identity. The helper records the former
+# and waits until the latter exists before returning success.
 rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
 _launchd_job_state() { echo "running"; }
 ( for _ in $(seq 1 60); do
     [ -e "$DUAL_MIRROR/restart_pending" ] && break
     sleep 0.1
   done
-  command rm -f "$DUAL_MIRROR/restart_pending" ) &
+  nonce=$(dual_nonce_of "$DUAL_MIRROR/restart_pending")
+  command rm -f "$DUAL_MIRROR/restart_pending"
+  sleep 2
+  printf 'nonce=%s\n' "$nonce" >"$DUAL_MIRROR/restart_persisted.$nonce" ) &
 BG_PID=$!
 set +e
-consumed_out=$(AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
+AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
   PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
-  AGENTDESK_RESTART_DRAIN_ACK_WAIT=10 \
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=5 \
   request_restart_drain_mode_or_fail "test" "test.label" 0 "$DUAL_PRIMARY" "smoke-test" \
-  2>&1)
+  >"$TMP_D/consumed.out" 2>&1
 rc=$?
 set -e
+consumed_out=$(cat "$TMP_D/consumed.out")
 wait "$BG_PID" 2>/dev/null || true
 unset -f _launchd_job_state
-assert_eq "8i: marker consumed in the runtime root alone counts as ack" "0" "$rc"
+assert_eq "8i: marker consumption waits for identity persistence" "0" "$rc"
 case "$consumed_out" in
-  *"consumed by runtime at $DUAL_MIRROR"*)
-    pass "8i: ack names the root whose marker was consumed" ;;
+  *"consumed at $DUAL_MIRROR; waiting for request-specific persistence"*)
+    pass "8i: consumption is diagnostic-only" ;;
   *)
-    fail "8i: ack names the root whose marker was consumed (got: $consumed_out)" ;;
+    fail "8i: consumption is diagnostic-only (got: $consumed_out)" ;;
 esac
+assert_eq "8i: identity proof is the eventual authority" \
+  "acknowledged:identity" "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
 
 # Negative twin: while BOTH markers survive, the consumed-branch must not fire.
 rm -f "$DUAL_PRIMARY"/restart_* "$DUAL_MIRROR"/restart_* 2>/dev/null || true
@@ -779,7 +786,7 @@ survived_out=$(AGENTDESK_RESTART_MARKER_MIRROR_ROOT="$DUAL_MIRROR" \
 set -e
 unset -f _launchd_job_state
 case "$survived_out" in
-  *"consumed by runtime"*)
+  *"restart drain marker consumed"*)
     fail "8i: both markers intact must NOT be read as consumption" ;;
   *)
     pass "8i: both markers intact must NOT be read as consumption" ;;
@@ -860,12 +867,12 @@ rc=$?
 set -e
 assert_eq "8l: without the mirror variable the parent directory is NOT consulted" "1" "$rc"
 
-echo "== Test 9: #5254 S1 — drain verdict and durability-skip observability =="
+echo "== Test 9: #5254 S4 P1 — terminal authority and deploy composition =="
 S1_TMP=$(mktemp -d)
 trap 'rm -rf "$TMP_FIXTURE_DIR" "$TMP_RUNTIME" "$TMPDIR_TEST" "$TMP_RUNTIME2" "$TMP_RUNTIME3" "$TMP_D" "$S1_TMP"' EXIT
 
-# The health boolean proves only that the admission fence is armed. It carries
-# no request nonce, so this path must not claim request acknowledgement.
+# Health is diagnostic-only. Without a request-specific terminal identity,
+# deploy phase 1 reaches its ordinary timeout and must leave phase 2 required.
 mkdir -p "$S1_TMP/health-root" "$S1_TMP/bin_health"
 cat >"$S1_TMP/bin_health/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -873,36 +880,30 @@ printf '%s' '{"providers":[{"name":"a","restart_pending":true}]}'
 EOF
 chmod +x "$S1_TMP/bin_health/curl"
 guard_no_foreign_active_turns_or_warn() { return 0; }
+_launchd_job_state() { echo "running"; }
 set +e
 PATH="$S1_TMP/bin_health:$PATH" \
   AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
   request_restart_drain_mode_or_fail \
-    "test" "test.label" 0 "$S1_TMP/health-root" "smoke-test" \
+    "test" "test.label" 0 "$S1_TMP/health-root" "deploy-release" \
     >"$S1_TMP/health.out" 2>&1
 rc=$?
 set -e
-assert_eq "fence-observed path returns 0" "0" "$rc"
-assert_eq "attribution is claimed only when a nonce artifact exists" \
-  "fence-observed:nonce-unattributed" "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
-if grep -Fq 'acknowledged by runtime' "$S1_TMP/health.out"; then
-  fail "the fence-observed exit does not claim acknowledgement"
+unset -f _launchd_job_state
+assert_eq "health-only deploy phase 1 remains permissive" "0" "$rc"
+assert_eq "S4-M21 killer: health alone reaches timeout" \
+  "not evaluated: restart drain acknowledgement timed out" \
+  "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
+assert_eq "health-only deploy still requires phase 2" "0" \
+  "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-missing}"
+if grep -Fq 'waiting for request-specific persistence' "$S1_TMP/health.out"; then
+  pass "the health observation waits without terminal authority"
 else
-  pass "the fence-observed exit does not claim acknowledgement"
-fi
-if grep -Fq 'restart admission fence observed' "$S1_TMP/health.out"; then
-  pass "the fence-observed exit names only the observed fence"
-else
-  fail "the fence-observed exit names only the observed fence"
-fi
-if export -p | grep -Fq 'AGENTDESK_RESTART_DRAIN_VERDICT'; then
-  pass "the consumer observes the verdict"
-else
-  fail "the consumer observes the verdict"
+  fail "the health observation waits without terminal authority"
 fi
 
-# A matching durable nonce artifact is the only S1 path allowed to use the
-# acknowledged:nonce vocabulary. S2 will later make this artifact dispositive;
-# S1 records it without changing the existing return decision.
+# A matching request-specific persisted identity is the only phase-1 success
+# authority in this S4 slice.
 # shellcheck source=/dev/null
 . "$DEFAULTS_SH"
 guard_no_foreign_active_turns_or_warn() { return 0; }
@@ -913,7 +914,7 @@ mkdir -p "$S1_TMP/nonce-root"
   done
   nonce=$(grep '^nonce=' "$S1_TMP/nonce-root/restart_pending" 2>/dev/null | head -1 | cut -d= -f2- || true)
   [ -n "$nonce" ] || exit 1
-  printf 'nonce=%s\n' "$nonce" >"$S1_TMP/nonce-root/restart_persisted"
+  printf 'nonce=%s\n' "$nonce" >"$S1_TMP/nonce-root/restart_persisted.$nonce"
   rm -f "$S1_TMP/nonce-root/restart_pending" ) &
 S1_BG=$!
 set +e
@@ -927,13 +928,15 @@ set -e
 wait "$S1_BG" 2>/dev/null || true
 assert_eq "matching nonce artifact path returns 0" "0" "$rc"
 assert_eq "matching nonce artifact is named as acknowledged" \
-  "acknowledged:nonce" "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
+  "acknowledged:identity" "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
 
-# Marker consumption without our durable nonce is a distinct observation. S1
-# still preserves the existing success return; S2 will decide this state.
+# Marker consumption is also diagnostic-only. Publish no identity so this
+# timing-independent witness cannot pass merely because the next poll observes
+# a terminal file.
 # shellcheck source=/dev/null
 . "$DEFAULTS_SH"
 guard_no_foreign_active_turns_or_warn() { return 0; }
+_launchd_job_state() { echo "running"; }
 mkdir -p "$S1_TMP/consumed-root"
 ( for _ in $(seq 1 50); do
     [ -f "$S1_TMP/consumed-root/restart_pending" ] && break
@@ -943,19 +946,29 @@ mkdir -p "$S1_TMP/consumed-root"
 S1_BG=$!
 set +e
 PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
-  AGENTDESK_RESTART_DRAIN_ACK_WAIT=10 \
+  AGENTDESK_RESTART_DRAIN_ACK_WAIT=2 \
   request_restart_drain_mode_or_fail \
-    "test" "test.label" 0 "$S1_TMP/consumed-root" "smoke-test" \
+    "test" "test.label" 0 "$S1_TMP/consumed-root" "deploy-release" \
     >"$S1_TMP/consumed.out" 2>&1
 rc=$?
 set -e
 wait "$S1_BG" 2>/dev/null || true
-assert_eq "consumed path without our nonce keeps its existing success return" "0" "$rc"
-assert_eq "consumed path without our nonce has its own verdict" \
-  "consumed:our-nonce-unobserved" "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
+unset -f _launchd_job_state
+assert_eq "consumption-only deploy phase 1 remains permissive" "0" "$rc"
+assert_eq "S4-M22 killer: consumption alone reaches timeout" \
+  "not evaluated: restart drain acknowledgement timed out" \
+  "${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
+assert_eq "consumption-only deploy still requires phase 2" "0" \
+  "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-missing}"
+if grep -Fq 'waiting for request-specific persistence' "$S1_TMP/consumed.out"; then
+  pass "the consumption observation waits without terminal authority"
+else
+  fail "the consumption observation waits without terminal authority"
+fi
 
-# The two NOT_REQUIRED outcomes remain behaviorally identical, but now carry
-# distinguishable reasons for the deploy consumer.
+# The approved S4 policy retains a cold escape when launchd is already stopped:
+# no running publisher can create request-specific phase-2 proof before bootout.
+# This is intentionally distinct from an ordinary timeout while launchd runs.
 # shellcheck source=/dev/null
 . "$DEFAULTS_SH"
 guard_no_foreign_active_turns_or_warn() { return 0; }
@@ -970,6 +983,8 @@ PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
 rc=$?
 set -e
 assert_eq "stopped runtime path returns 0" "0" "$rc"
+assert_eq "stopped runtime retains the approved cold escape" "1" \
+  "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-missing}"
 stopped_verdict="${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
 assert_eq "stopped runtime names the unevaluated reason" \
   "not evaluated: launchd job is not running" "$stopped_verdict"
@@ -984,11 +999,13 @@ set +e
 PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
   AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
   request_restart_drain_mode_or_fail \
-    "test" "running.label" 0 "$S1_TMP/timeout-root" "smoke-test" \
+    "test" "running.label" 0 "$S1_TMP/timeout-root" "deploy-release" \
     >"$S1_TMP/timeout.out" 2>&1
 rc=$?
 set -e
-assert_eq "timeout path retains its existing success return" "0" "$rc"
+assert_eq "deploy timeout remains phase-1 permissive" "0" "$rc"
+assert_eq "deploy timeout leaves phase 2 required" "0" \
+  "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-missing}"
 timeout_verdict="${AGENTDESK_RESTART_DRAIN_VERDICT:-missing}"
 assert_eq "timeout names why durability was not evaluated" \
   "not evaluated: restart drain acknowledgement timed out" "$timeout_verdict"
@@ -1015,6 +1032,61 @@ if [ -n "$durability_end" ] && [ -n "$terminal_line" ] && [ "$durability_end" -l
 else
   fail "the skip observation precedes the terminal marker"
 fi
+
+run_actual_deploy_composition() {
+  local case_dir root out phase1_rc rc
+  case_dir=$(mktemp -d)
+  root="$case_dir/release/runtime"
+  out="$case_dir/phase2.out"
+  mkdir -p "$root"
+
+  # Actual phase 1 must populate the same out-parameters deploy-release reads.
+  # Keep `out` lexical and assign it before either redirect so no stale/global
+  # value can manufacture this witness.
+  # shellcheck source=/dev/null
+  . "$DEFAULTS_SH"
+  guard_no_foreign_active_turns_or_warn() { return 0; }
+  _launchd_job_state() { echo "running"; }
+  unset AGENTDESK_RESTART_MARKER_MIRROR_ROOT
+  set +e
+  PATH="$TMP_FIXTURE_DIR/bin_fail:$PATH" \
+    AGENTDESK_RESTART_DRAIN_ACK_WAIT=1 \
+    request_restart_drain_mode_or_fail \
+      "release" "running.label" 0 "$root" "deploy-release" \
+      >"$case_dir/phase1.out" 2>&1
+  phase1_rc=$?
+  set -e
+  unset -f _launchd_job_state
+
+  assert_eq "composition phase 1 keeps its permissive return" "0" "$phase1_rc"
+  assert_eq "composition phase 1 leaves durability required" "0" \
+    "${AGENTDESK_RESTART_PERSISTENCE_NOT_REQUIRED:-missing}"
+  RESTART_REQUEST_NONCE="${AGENTDESK_RESTART_REQUEST_NONCE:-}"
+  [ -n "$RESTART_REQUEST_NONCE" ] \
+    || fail "composition phase 1 exports a request nonce"
+  ADK_REL="$case_dir/release"
+  export ADK_REL
+
+  set +e
+  (
+    # shellcheck source=/dev/null
+    . "$DEFAULTS_SH"
+    unset AGENTDESK_RESTART_MARKER_MIRROR_ROOT
+    eval "$(<"$S1_TMP/durability-region.sh")"
+  ) >"$out" 2>&1
+  rc=$?
+  set -e
+
+  assert_eq "actual phase1 to phase2 composition refuses missing proof" "1" "$rc"
+  if grep -Fq 'restart persistence was not acknowledged' "$out"; then
+    pass "actual composition exposes the production phase-2 refusal"
+  else
+    fail "actual composition exposes the production phase-2 refusal"
+  fi
+  rm -rf "$case_dir"
+}
+
+run_actual_deploy_composition
 
 skip_out=$(REGION="$S1_TMP/durability-region.sh" bash -c '
   set -euo pipefail
