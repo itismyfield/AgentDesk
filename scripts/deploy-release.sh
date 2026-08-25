@@ -2512,11 +2512,8 @@ fi
 # Remove a marker left by an older deploy so its quiet window cannot mask this
 # restart boundary after the runtime has proved its replay frontier durable.
 rm -f "$ADK_REL/logs/relay-watchdog.deploy-marker" 2>/dev/null || true
-# Remove only the fixed compatibility index for the request just proved. The
-# request-specific identity remains available for rollback-era readers/sweep.
-if grep -Fqx -- "nonce=${RESTART_REQUEST_NONCE}" "$ADK_REL/restart_persisted" 2>/dev/null; then
-    rm -f "$ADK_REL/restart_persisted" 2>/dev/null || true
-fi
+# Fixed compatibility indexes remain available until the retention sweep can
+# prove that no same-nonce canonical pending marker still depends on them.
 
 # Stop release only after migration and the durable persistence acknowledgement.
 echo "▸ Stopping release..."

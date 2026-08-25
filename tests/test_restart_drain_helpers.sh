@@ -841,6 +841,11 @@ terminal_line=$(grep -nF 'echo "═══ Deploy Complete ═══"' "$DEPLOY_S
 if [ -n "$durability_begin" ] && [ -n "$durability_end" ]; then
   sed -n "$((durability_begin + 1)),$((durability_end - 1))p" "$DEPLOY_SH" >"$S1_TMP/durability-region.sh"
 fi
+stop_line=$(grep -nF '# Stop release only after migration and the durable persistence acknowledgement.' "$DEPLOY_SH" | cut -d: -f1 || true)
+[ -n "$stop_line" ] || fail "post-proof cleanup stop sentinel exists"
+if [ -n "$durability_end" ] && [ -n "$stop_line" ]; then
+  sed -n "$((durability_end + 1)),$((stop_line - 1))p" "$DEPLOY_SH" >"$S1_TMP/post-proof-cleanup-region.sh"
+fi
 if [ -n "$durability_end" ] && [ -n "$terminal_line" ] && [ "$durability_end" -lt "$terminal_line" ]; then
   pass "the skip observation precedes the terminal marker"
 else
@@ -899,6 +904,60 @@ run_actual_deploy_composition() {
 }
 
 run_actual_deploy_composition
+
+# A rollback-era runtime may leave only the fixed compatibility index while its
+# same-nonce canonical pending marker is still linked. Execute the production
+# post-proof cleanup region, then enter the public request path: retaining that
+# fixed witness is what lets admission reclaim the leaked lease.
+legacy_cleanup_root="$S1_TMP/legacy-cleanup-root"
+mkdir -p "$legacy_cleanup_root/logs"
+real_entropy=$(declare -f _restart_nonce_entropy)
+real_date=$(declare -f date 2>/dev/null || true)
+_restart_nonce_entropy() { printf entropy; }
+date() {
+  if [ "$1" = -u ] && [ "$2" = +%Y%m%dT%H%M%S ]; then
+    printf cleanup
+  else
+    command date "$@"
+  fi
+}
+unset RANDOM
+RANDOM=0
+legacy_cleanup_nonce="cleanup-$$-0-entropy"
+_restart_stage_and_link_marker \
+  "$legacy_cleanup_root" "$legacy_cleanup_nonce" deploy-release release running.label
+printf 'nonce=%s\n' "$legacy_cleanup_nonce" >"$legacy_cleanup_root/restart_persisted"
+ADK_REL="$legacy_cleanup_root"
+RESTART_REQUEST_NONCE="$legacy_cleanup_nonce"
+eval "$(<"$S1_TMP/post-proof-cleanup-region.sh")"
+if _restart_artifact_nonce_matches \
+  "$legacy_cleanup_root/restart_persisted" "$legacy_cleanup_nonce"; then
+  pass "deploy cleanup preserves sole legacy index beside same-nonce pending"
+else
+  fail "deploy cleanup preserves sole legacy index beside same-nonce pending"
+fi
+guard_no_foreign_active_turns_or_warn() { return 0; }
+_launchd_job_state() { echo "not running"; }
+unset RANDOM
+RANDOM=0
+set +e
+AGENTDESK_RESTART_DRAIN_ACK_WAIT=0 \
+  request_restart_drain_mode_or_fail \
+    test test.label 0 "$legacy_cleanup_root" deploy-release \
+    >"$S1_TMP/legacy-cleanup-request.out" 2>&1
+legacy_cleanup_rc=$?
+set -e
+assert_eq "next request reclaims leaked pending via retained legacy index" \
+  "0" "$legacy_cleanup_rc"
+if grep -Fq 'proof=legacy-index' "$S1_TMP/legacy-cleanup-request.out" \
+  && ! grep -Fq 'refused:restart-lease-held' "$S1_TMP/legacy-cleanup-request.out"; then
+  pass "legacy cleanup regression traverses production reclaim authority"
+else
+  fail "legacy cleanup regression traverses production reclaim authority"
+fi
+unset -f _launchd_job_state date
+eval "$real_entropy"
+[ -n "$real_date" ] && eval "$real_date"
 
 skip_out=$(REGION="$S1_TMP/durability-region.sh" bash -c '
   set -euo pipefail
