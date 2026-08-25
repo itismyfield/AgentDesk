@@ -322,17 +322,20 @@ pub(in crate::services::discord) fn process_generation_allocation_for_tests(
 }
 
 #[cfg(test)]
+std::thread_local! {
+    static TEST_PROCESS_GENERATION_BINDING: std::cell::Cell<Option<ProcessGenerationAllocation>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
 pub(in crate::services::discord) struct TestProcessGenerationPublication {
-    previous_override: Option<u64>,
-    previous_allocation: Option<ProcessGenerationAllocation>,
+    previous_binding: Option<ProcessGenerationAllocation>,
 }
 
 #[cfg(test)]
 impl Drop for TestProcessGenerationPublication {
     fn drop(&mut self) {
-        let _allocation = lock_unpoisoned(&PROCESS_GENERATION_ALLOCATION_TRANSACTION);
-        *test_generation_override() = self.previous_override;
-        *test_allocation_memo() = self.previous_allocation;
+        TEST_PROCESS_GENERATION_BINDING.set(self.previous_binding);
     }
 }
 
@@ -662,7 +665,7 @@ pub(in crate::services::discord) fn process_generation_binding() -> ProcessGener
                 route: GenerationAllocationRoute::Unwitnessed,
             };
         }
-        if let Some(bound) = *test_allocation_memo() {
+        if let Some(bound) = TEST_PROCESS_GENERATION_BINDING.get() {
             return bound;
         }
     }
@@ -699,12 +702,8 @@ pub(in crate::services::discord) fn allocate_and_publish_process_generation_for_
             fsync: test_parent_sync_failure,
         })
     };
-    let previous_override = test_generation_override().take();
-    let previous_allocation = test_allocation_memo().replace(allocated);
-    TestProcessGenerationPublication {
-        previous_override,
-        previous_allocation,
-    }
+    let previous_binding = TEST_PROCESS_GENERATION_BINDING.replace(Some(allocated));
+    TestProcessGenerationPublication { previous_binding }
 }
 
 /// Preview the epoch that the replacement process will allocate without
@@ -1237,6 +1236,43 @@ mod generation_allocation_tests {
             !production_read.contains("ProcessGenerationAllocation {"),
             "the production reader must not reconstruct generation and route fields"
         );
+
+        let process_reader = source
+            .split_once("pub fn process_generation() -> u64 {")
+            .expect("process generation accessor must remain present")
+            .1
+            .split_once(
+                "pub(in crate::services::discord) fn process_generation_binding() -> ProcessGenerationAllocation {",
+            )
+            .expect("process generation accessor must remain bounded by the binding reader")
+            .0;
+        assert_eq!(
+            process_reader
+                .matches("process_generation_binding().generation")
+                .count(),
+            1,
+            "production row writers must keep reading the published binding generation"
+        );
+
+        let allocator = source
+            .split_once("pub(in crate::services::discord) fn allocate_process_generation_binding()")
+            .expect("process generation allocator must remain present")
+            .1
+            .split_once("fn allocate_generation_epoch() -> ProcessGenerationAllocation {")
+            .expect("process generation allocator must remain bounded by epoch allocation")
+            .0;
+        for required in [
+            "allocate_once_with(",
+            "&PROCESS_GENERATION,",
+            "&PROCESS_GENERATION_ALLOCATION_TRANSACTION,",
+            "allocate_generation_epoch,",
+        ] {
+            assert_eq!(
+                allocator.matches(required).count(),
+                1,
+                "production allocation must publish the whole allocation through the canonical cell"
+            );
+        }
     }
 
     #[test]
@@ -1260,14 +1296,10 @@ mod generation_allocation_tests {
         std::fs::write(&path, "19").unwrap();
         expect(
             process_generation_binding(),
-            8,
-            GenerationAllocationRoute::AdvancedWithSyncedRename,
-        );
-        assert_eq!(
-            process_generation(),
             19,
-            "the ordinary cfg(test) generation accessor must keep its disk fallback"
+            GenerationAllocationRoute::Unwitnessed,
         );
+        assert_eq!(process_generation(), 19);
 
         set_process_generation_for_tests(Some(73));
         expect(
