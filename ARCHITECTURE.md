@@ -53,6 +53,7 @@ src/
 │   ├── mod.rs
 │   ├── monitoring.rs
 │   ├── query.rs
+│   ├── restart_terminal_proof.rs
 │   ├── run.rs
 │   └── utils.rs
 ├── compat/

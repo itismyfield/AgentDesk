@@ -776,8 +776,8 @@ fn unsafe_nonce_terminal_read_is_absent_and_never_promotes_the_index() {
 
     // §E5.4's second sentence: this arm also leaves the label. §E5.8 4-R makes
     // diagnostic confidence the only residual risk, so the label is load-bearing.
-    let arm = include_str!("gateway_lease_recovery.rs")
-        .split_once("let Some(identity) = restart_request_artifact_path(root, name, nonce)")
+    let arm = include_str!("../../../cli/restart_terminal_proof.rs")
+        .split_once("let Some(identity) = request_artifact_path(root, name, nonce)")
         .expect("unsafe-nonce read arm")
         .1
         .split_once("};")
