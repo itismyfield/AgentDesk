@@ -901,32 +901,37 @@ mod loader_gate_observation_tests {
     fn allocation_route_is_observed_but_never_changes_loader_preservation() {
         use crate::services::discord::runtime_store::GenerationAllocationRoute as Route;
 
-        for (index, route) in [
-            Route::AdvancedWithSyncedRename,
-            Route::ParentSyncFailed,
-            Route::CounterReadFailed,
-            Route::Saturated,
-            Route::WriteFailed,
-            Route::LockFailed,
-            Route::PathUnavailable,
-            Route::Unwitnessed,
+        for (index, (route, expected_route, expected_advanced)) in [
+            (
+                Route::AdvancedWithSyncedRename,
+                "advanced_with_synced_rename",
+                true,
+            ),
+            (Route::ParentSyncFailed, "parent_sync_failed", false),
+            (Route::CounterReadFailed, "counter_read_failed", false),
+            (Route::Saturated, "saturated", false),
+            (Route::WriteFailed, "write_failed", false),
+            (Route::LockFailed, "lock_failed", false),
+            (Route::PathUnavailable, "path_unavailable", false),
+            (Route::Unwitnessed, "unwitnessed", false),
         ]
         .into_iter()
         .enumerate()
         {
             let bound = allocation(54_62, route);
-            let expected_advanced = matches!(route, Route::AdvancedWithSyncedRename);
             let matching = row(61_000 + index as u64 * 2, bound.generation, Some("named"));
             assert!(
                 loader_gate_refuses_with_allocation(&matching, bound),
                 "a positive non-advanced route must preserve the same matching row: {}",
                 bound.epoch_route(),
             );
-            let details = serde_json::json!({
-                "epoch_route": bound.epoch_route(),
-                "epoch_advanced": bound.epoch_advanced(),
-            });
-            assert_eq!(details["epoch_route"], bound.epoch_route());
+            record_loader_generation_gate(
+                &matching,
+                bound,
+                Path::new("/tmp/loader-route-proof.json"),
+            );
+            let details = emitted_refusal_payload(matching.channel_id);
+            assert_eq!(details["epoch_route"], expected_route);
             assert_eq!(details["epoch_advanced"], expected_advanced);
 
             let nonmatching = row(61_001 + index as u64 * 2, 54_61, Some("named"));
@@ -956,6 +961,9 @@ mod loader_gate_observation_tests {
         .into_iter()
         .enumerate()
         {
+            let _tmux_lock = super::super::stall_recovery_tests::stale_override_test_mutex()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
             let root = tempfile::tempdir().expect("temp root");
             let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -1043,6 +1051,21 @@ mod loader_gate_observation_tests",
                 .matches("loader_gate_refuses_with_allocation(&locked_state, allocation)")
                 .count(),
             1,
+        );
+
+        let public_witness = source
+            .split_once("fn public_loader_observes_production_shaped_published_routes()")
+            .expect("public loader witness must remain present")
+            .1
+            .split_once("/// Lexical tripwire only")
+            .expect("public loader witness must remain bounded")
+            .0;
+        assert_eq!(
+            public_witness
+                .matches("super::super::stall_recovery_tests::stale_override_test_mutex()")
+                .count(),
+            1,
+            "the process-global tmux override witness must share its canonical test mutex",
         );
     }
 }

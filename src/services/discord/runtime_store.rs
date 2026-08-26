@@ -1230,14 +1230,10 @@ mod generation_allocation_tests {
             .split_once("#[cfg(test)]")
             .expect("production and test reader branches must remain separate")
             .0;
-        let cell_read = "if let Some(bound) = PROCESS_GENERATION.get() {";
-        let whole_allocation_return = "return *bound;";
-
-        assert_eq!(production_read.matches(cell_read).count(), 1);
-        assert_eq!(production_read.matches(whole_allocation_return).count(), 1);
-        assert!(
-            !production_read.contains("ProcessGenerationAllocation {"),
-            "the production reader must not reconstruct generation and route fields"
+        assert_eq!(
+            production_read.trim(),
+            "if let Some(bound) = PROCESS_GENERATION.get() {\n        return *bound;\n    }",
+            "the production reader must exactly return the canonical whole allocation"
         );
 
         let process_reader = source
