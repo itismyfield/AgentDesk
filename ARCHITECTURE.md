@@ -601,12 +601,13 @@ src/
 │   │   │   │   │   ├── runtime_stamp.rs
 │   │   │   │   │   ├── stamp_merge.rs
 │   │   │   │   │   └── stream_loop_patch.rs
+│   │   │   │   ├── tests/
+│   │   │   │   │   └── real_create_tests.rs
 │   │   │   │   ├── bridge_entry_guard_tests.rs
 │   │   │   │   ├── create_monotonic_observer.rs
 │   │   │   │   ├── delivery_rewind.rs
 │   │   │   │   ├── identity_gate.rs
 │   │   │   │   ├── post_loop_identity_guard_tests.rs
-│   │   │   │   ├── tests/real_create_tests.rs
 │   │   │   │   └── rebind_adoption.rs
 │   │   │   ├── stall_recovery_tests/
 │   │   │   │   ├── flake_isolation_4361.rs

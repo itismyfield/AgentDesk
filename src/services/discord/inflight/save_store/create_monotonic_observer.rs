@@ -37,7 +37,6 @@ struct WitnessSlot {
 
 static WITNESSES: LazyLock<Mutex<HashMap<WitnessKey, WitnessSlot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
 fn read_coordinate_witness(path: &Path, turn_start_offset: u64) -> Option<CoordinateWitness> {
     if turn_start_offset < COORDINATE_WINDOW_LEN {
         return None;
