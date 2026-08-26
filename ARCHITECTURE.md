@@ -961,7 +961,8 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── store.rs
 │   │   │   ├── sweep.rs
-│   │   │   └── tombstone.rs
+│   │   │   ├── tombstone.rs
+│   │   │   └── warning_tests.rs
 │   │   ├── tui_direct_pending_start/
 │   │   │   └── watcher_cancel.rs
 │   │   ├── tui_prompt_relay/
