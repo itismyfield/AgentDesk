@@ -5635,6 +5635,7 @@ services::discord::tui_direct_abort_marker::tests::terminal_commit_cover_accepts
 services::discord::tui_direct_abort_marker::tests::terminal_commit_cover_requires_matching_foreign_identity
 services::discord::tui_direct_abort_marker::tests::tombstone_cover_stamp_survives_delivery_failure_and_evidence_gc
 services::discord::tui_direct_abort_marker::tests::unparseable_marker_is_quarantined_not_relooped
+services::discord::tui_direct_abort_marker::warning_tests::deferred_claim_probe_mismatch_is_silent_but_evidence_rejection_warns_once
 services::discord::tui_direct_pending_start::tests::abandoned_presence_clear_keeps_durable_record
 services::discord::tui_direct_pending_start::tests::abort_pin_prefers_last_view_identity_over_successor_row
 services::discord::tui_direct_pending_start::tests::backstop_abort_promotes_queued_follow_up_without_evicting_inflight
