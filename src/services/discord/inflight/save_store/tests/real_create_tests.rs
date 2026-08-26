@@ -58,8 +58,8 @@ fn both_real_turn_call_sites_use_the_typed_create_api() {
                 collect_typed_api_files(&path, root, found);
             } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
                 let source = std::fs::read_to_string(&path).expect("Rust source");
-                if source.contains("save_real_inflight_state_create_new(")
-                    || source.contains("RealInflightCreate::new(")
+                if source.contains(concat!("save_real_inflight_state_", "create_new("))
+                    || source.contains(concat!("RealInflightCreate::", "new("))
                 {
                     found.push(
                         path.strip_prefix(root)
@@ -71,7 +71,6 @@ fn both_real_turn_call_sites_use_the_typed_create_api() {
             }
         }
     }
-
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut typed_api_files = Vec::new();
     collect_typed_api_files(&root.join("src"), root, &mut typed_api_files);
@@ -85,20 +84,19 @@ fn both_real_turn_call_sites_use_the_typed_create_api() {
         ],
         "the real-create observer capability must have exactly two production callers",
     );
-
     let headless = include_str!("../../../router/message_handler/headless_turn.rs");
     let intake = include_str!("../../../router/message_handler/intake_turn.rs");
     for (name, source) in [("headless", headless), ("intake", intake)] {
         assert_eq!(
             source
-                .matches("save_real_inflight_state_create_new(")
+                .matches(concat!("save_real_inflight_state_", "create_new("))
                 .count(),
             1,
             "{name} real-turn birth must use the observer-typed create API exactly once",
         );
         assert_eq!(
             source
-                .matches("RealInflightCreate::new(&inflight_state)")
+                .matches(concat!("RealInflightCreate::", "new(&inflight_state)"))
                 .count(),
             1,
             "{name} must construct the typed real-turn input at its birth site",

@@ -388,6 +388,7 @@ mod tests {
             test_seams::replace_with_revision(ProviderKind::Codex, channel_id, 384, b'z');
         });
         observe_successful_real_create(&state(channel_id, &output, 256));
+        test_seams::clear_anchor_io_hook();
         assert_eq!(
             test_seams::witness_offset(ProviderKind::Codex, channel_id),
             Some(384)
