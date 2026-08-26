@@ -812,12 +812,17 @@ async fn route_to_instance(
                         open_route_age_secs: open_route_age_secs.map(|age| age as u64),
                         resolved_owner,
                     },
-                    Ok(None) | Err(_) => IntakeRouterDecision::DeferredOpenRoute {
+                    Ok(None) => IntakeRouterDecision::DeferredOpenRoute {
                         target_instance_id: target.to_string(),
                         open_route_id: None,
                         open_route_status: None,
                         open_route_age_secs: None,
                         resolved_owner,
+                    },
+                    Err(error) => IntakeRouterDecision::Blocked {
+                        reason: IntakeBlockedReason::RoutingDependencyFailed {
+                            detail: format!("open route lookup post-conflict: {error}"),
+                        },
                     },
                 }
             }
