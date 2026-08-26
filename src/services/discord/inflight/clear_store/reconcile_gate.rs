@@ -615,19 +615,24 @@ mod tests {
     fn allocation_route_is_observed_but_never_changes_the_reconcile_decision() {
         use crate::services::discord::runtime_store::GenerationAllocationRoute as Route;
 
-        let routes = [
-            Route::AdvancedWithSyncedRename,
-            Route::ParentSyncFailed,
-            Route::CounterReadFailed,
-            Route::Saturated,
-            Route::WriteFailed,
-            Route::LockFailed,
-            Route::PathUnavailable,
-            Route::Unwitnessed,
-        ];
-        for (index, route) in routes.into_iter().enumerate() {
+        for (index, (route, expected_route, expected_advanced)) in [
+            (
+                Route::AdvancedWithSyncedRename,
+                "advanced_with_synced_rename",
+                true,
+            ),
+            (Route::ParentSyncFailed, "parent_sync_failed", false),
+            (Route::CounterReadFailed, "counter_read_failed", false),
+            (Route::Saturated, "saturated", false),
+            (Route::WriteFailed, "write_failed", false),
+            (Route::LockFailed, "lock_failed", false),
+            (Route::PathUnavailable, "path_unavailable", false),
+            (Route::Unwitnessed, "unwitnessed", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let bound = allocation(54_62, route);
-            let expected_advanced = matches!(route, Route::AdvancedWithSyncedRename);
             let temp = TempDir::new().expect("temp root");
 
             let matching = row(60_000 + index as u64 * 2, bound.generation);
@@ -649,14 +654,16 @@ mod tests {
                 bound.epoch_route(),
             );
             assert!(matching_path.exists(), "route={}", bound.epoch_route());
-            let details = refusal_details(
-                "clear_inflight_state_for_reconcile",
+            observe_reconcile_outcome(
+                &ProviderKind::Claude,
                 &matching,
-                54_62,
                 bound,
+                "clear_inflight_state_for_reconcile",
                 &matching_path,
+                matching_outcome,
             );
-            assert_eq!(details["epoch_route"], bound.epoch_route());
+            let details = emitted_refusal_payload(matching.channel_id);
+            assert_eq!(details["epoch_route"], expected_route);
             assert_eq!(details["epoch_advanced"], expected_advanced);
 
             let nonmatching = row(60_001 + index as u64 * 2, 54_61);
@@ -684,7 +691,7 @@ mod tests {
                 delegated,
             );
             let extra = emitted_allow_payload(nonmatching.channel_id);
-            assert_eq!(extra["epoch_route"], bound.epoch_route());
+            assert_eq!(extra["epoch_route"], expected_route);
             assert_eq!(extra["epoch_advanced"], expected_advanced);
         }
     }
@@ -771,48 +778,28 @@ mod tests {
         assert_eq!(production.matches("epoch_advanced,").count(), 2);
         assert_eq!(production.matches("ProcessGenerationAllocation").count(), 4);
 
-        fn assert_public_entry_forwards_one_allocation(
-            production: &str,
-            entry: &str,
-            next_entry: &str,
-            decision: &str,
-        ) {
-            let entry = production
-                .split_once(entry)
-                .expect("public reconcile entry must remain present")
-                .1
-                .split_once(next_entry)
-                .expect("public reconcile entry must remain bounded")
-                .0;
-            assert_eq!(
-                entry
-                    .matches(
-                        "let allocation = crate::services::discord::runtime_store::process_generation_binding();",
-                    )
-                    .count(),
-                1,
-            );
-            let decision = format!(
-                "let outcome = {decision}(\n        &root, provider, snapshot, allocation,\n    );"
-            );
-            assert_eq!(entry.matches(&decision).count(), 1);
-            assert_eq!(entry.matches("allocation,").count(), 2);
-            assert_eq!(entry.matches("let allocation =").count(), 1);
-            assert_eq!(entry.matches("return ").count(), 1);
-            assert!(!entry.contains("load_generation()"));
-        }
-
-        assert_public_entry_forwards_one_allocation(
-            production,
-            "pub(in crate::services::discord) fn clear_inflight_state_for_reconcile(",
-            "pub(in crate::services::discord) fn clear_rebind_origin_for_reconcile(",
-            "clear_inflight_state_for_reconcile_with_allocation_in_root",
+        let normal_entry = production
+            .split_once("pub(in crate::services::discord) fn clear_inflight_state_for_reconcile(")
+            .expect("normal public reconcile entry must remain present")
+            .1
+            .split_once("/// Clear a reconcile-owned rebind-origin row")
+            .expect("normal public reconcile entry must remain bounded")
+            .0;
+        assert_eq!(
+            normal_entry.trim(),
+            "provider: &ProviderKind,\n    snapshot: &InflightTurnState,\n) -> ReconcileClearOutcome {\n    let Some(root) = inflight_runtime_root() else {\n        return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);\n    };\n    let allocation = crate::services::discord::runtime_store::process_generation_binding();\n    let outcome = clear_inflight_state_for_reconcile_with_allocation_in_root(\n        &root, provider, snapshot, allocation,\n    );\n    observe_reconcile_outcome(\n        provider,\n        snapshot,\n        allocation,\n        \"clear_inflight_state_for_reconcile\",\n        &inflight_state_path(&root, provider, snapshot.channel_id),\n        outcome,\n    );\n    outcome\n}",
         );
-        assert_public_entry_forwards_one_allocation(
-            production,
-            "pub(in crate::services::discord) fn clear_rebind_origin_for_reconcile(",
-            "/// §7.2-1's refusal payload",
-            "clear_rebind_origin_for_reconcile_with_allocation_in_root",
+
+        let rebind_entry = production
+            .split_once("pub(in crate::services::discord) fn clear_rebind_origin_for_reconcile(")
+            .expect("rebind public reconcile entry must remain present")
+            .1
+            .split_once("/// §7.2-1's refusal payload")
+            .expect("rebind public reconcile entry must remain bounded")
+            .0;
+        assert_eq!(
+            rebind_entry.trim(),
+            "provider: &ProviderKind,\n    snapshot: &InflightTurnState,\n) -> ReconcileClearOutcome {\n    let Some(root) = inflight_runtime_root() else {\n        return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);\n    };\n    let allocation = crate::services::discord::runtime_store::process_generation_binding();\n    let outcome = clear_rebind_origin_for_reconcile_with_allocation_in_root(\n        &root, provider, snapshot, allocation,\n    );\n    observe_reconcile_outcome(\n        provider,\n        snapshot,\n        allocation,\n        \"clear_rebind_origin_for_reconcile\",\n        &inflight_state_path(&root, provider, snapshot.channel_id),\n        outcome,\n    );\n    outcome\n}",
         );
     }
 }

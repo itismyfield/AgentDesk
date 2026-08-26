@@ -1224,16 +1224,13 @@ mod generation_allocation_tests {
             .expect("bounded reader end must remain present")
             .0;
         let production_read = reader
-            .split_once("#[cfg(not(test))]")
-            .expect("production reader branch must remain present")
-            .1
             .split_once("#[cfg(test)]")
             .expect("production and test reader branches must remain separate")
             .0;
         assert_eq!(
-            production_read.trim(),
-            "if let Some(bound) = PROCESS_GENERATION.get() {\n        return *bound;\n    }",
-            "the production reader must exactly return the canonical whole allocation"
+            production_read,
+            "\n    #[cfg(not(test))]\n    if let Some(bound) = PROCESS_GENERATION.get() {\n        return *bound;\n    }\n    ",
+            "the complete production reader prefix must exactly return the canonical whole allocation"
         );
 
         let process_reader = source

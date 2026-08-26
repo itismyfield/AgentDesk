@@ -1052,6 +1052,8 @@ mod loader_gate_observation_tests",
                 .count(),
             1,
         );
+        assert!(!public_loader.contains("allocation.epoch_route()"));
+        assert!(!public_loader.contains("allocation.epoch_advanced()"));
 
         let public_witness = source
             .split_once("fn public_loader_observes_production_shaped_published_routes()")
