@@ -770,5 +770,49 @@ mod tests {
         assert_eq!(production.matches("epoch_route,").count(), 2);
         assert_eq!(production.matches("epoch_advanced,").count(), 2);
         assert_eq!(production.matches("ProcessGenerationAllocation").count(), 4);
+
+        fn assert_public_entry_forwards_one_allocation(
+            production: &str,
+            entry: &str,
+            next_entry: &str,
+            decision: &str,
+        ) {
+            let entry = production
+                .split_once(entry)
+                .expect("public reconcile entry must remain present")
+                .1
+                .split_once(next_entry)
+                .expect("public reconcile entry must remain bounded")
+                .0;
+            assert_eq!(
+                entry
+                    .matches(
+                        "let allocation = crate::services::discord::runtime_store::process_generation_binding();",
+                    )
+                    .count(),
+                1,
+            );
+            let decision = format!(
+                "let outcome = {decision}(\n        &root, provider, snapshot, allocation,\n    );"
+            );
+            assert_eq!(entry.matches(&decision).count(), 1);
+            assert_eq!(entry.matches("allocation,").count(), 2);
+            assert_eq!(entry.matches("let allocation =").count(), 1);
+            assert_eq!(entry.matches("return ").count(), 1);
+            assert!(!entry.contains("load_generation()"));
+        }
+
+        assert_public_entry_forwards_one_allocation(
+            production,
+            "pub(in crate::services::discord) fn clear_inflight_state_for_reconcile(",
+            "pub(in crate::services::discord) fn clear_rebind_origin_for_reconcile(",
+            "clear_inflight_state_for_reconcile_with_allocation_in_root",
+        );
+        assert_public_entry_forwards_one_allocation(
+            production,
+            "pub(in crate::services::discord) fn clear_rebind_origin_for_reconcile(",
+            "/// §7.2-1's refusal payload",
+            "clear_rebind_origin_for_reconcile_with_allocation_in_root",
+        );
     }
 }

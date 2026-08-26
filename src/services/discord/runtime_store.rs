@@ -314,30 +314,64 @@ impl ProcessGenerationAllocation {
 }
 
 #[cfg(test)]
-pub(in crate::services::discord) fn process_generation_allocation_for_tests(
-    generation: u64,
-    route: GenerationAllocationRoute,
-) -> ProcessGenerationAllocation {
-    ProcessGenerationAllocation { generation, route }
-}
+mod test_generation_publication {
+    use super::*;
 
-#[cfg(test)]
-std::thread_local! {
-    static TEST_PROCESS_GENERATION_BINDING: std::cell::Cell<Option<ProcessGenerationAllocation>> =
-        const { std::cell::Cell::new(None) };
-}
+    std::thread_local! {
+        static BINDING: std::cell::Cell<Option<ProcessGenerationAllocation>> =
+            const { std::cell::Cell::new(None) };
+    }
 
-#[cfg(test)]
-pub(in crate::services::discord) struct TestProcessGenerationPublication {
-    previous_binding: Option<ProcessGenerationAllocation>,
-}
+    pub(in crate::services::discord) struct Publication {
+        previous_binding: Option<ProcessGenerationAllocation>,
+    }
 
-#[cfg(test)]
-impl Drop for TestProcessGenerationPublication {
-    fn drop(&mut self) {
-        TEST_PROCESS_GENERATION_BINDING.set(self.previous_binding);
+    impl Drop for Publication {
+        fn drop(&mut self) {
+            BINDING.set(self.previous_binding);
+        }
+    }
+
+    pub(super) fn published_binding() -> Option<ProcessGenerationAllocation> {
+        BINDING.get()
+    }
+
+    pub(in crate::services::discord) fn allocation(
+        generation: u64,
+        route: GenerationAllocationRoute,
+    ) -> ProcessGenerationAllocation {
+        ProcessGenerationAllocation { generation, route }
+    }
+
+    fn parent_sync_failure(_: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::other("injected parent sync failure"))
+    }
+
+    pub(in crate::services::discord) fn allocate_and_publish(
+        parent_sync_succeeds: bool,
+    ) -> Publication {
+        let _allocation = lock_unpoisoned(&PROCESS_GENERATION_ALLOCATION_TRANSACTION);
+        let allocated = allocate_generation_epoch_with_io(GenerationIo {
+            path: generation_path(),
+            lock: lock_generation_path,
+            read: read_generation_counter,
+            write: atomic_write,
+            fsync: if parent_sync_succeeds {
+                fsync_parent_dir
+            } else {
+                parent_sync_failure
+            },
+        });
+        let previous_binding = BINDING.replace(Some(allocated));
+        Publication { previous_binding }
     }
 }
+
+#[cfg(test)]
+pub(in crate::services::discord) use test_generation_publication::{
+    allocate_and_publish as allocate_and_publish_process_generation_for_tests,
+    allocation as process_generation_allocation_for_tests,
+};
 
 // </epoch-provenance-surface>
 
@@ -665,7 +699,7 @@ pub(in crate::services::discord) fn process_generation_binding() -> ProcessGener
                 route: GenerationAllocationRoute::Unwitnessed,
             };
         }
-        if let Some(bound) = TEST_PROCESS_GENERATION_BINDING.get() {
+        if let Some(bound) = test_generation_publication::published_binding() {
             return bound;
         }
     }
@@ -673,37 +707,6 @@ pub(in crate::services::discord) fn process_generation_binding() -> ProcessGener
         generation: load_generation(),
         route: GenerationAllocationRoute::Unwitnessed,
     }
-}
-
-#[cfg(test)]
-fn test_parent_sync_failure(_: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::other("injected parent sync failure"))
-}
-
-#[cfg(test)]
-pub(in crate::services::discord) fn allocate_and_publish_process_generation_for_tests(
-    parent_sync_succeeds: bool,
-) -> TestProcessGenerationPublication {
-    let _allocation = lock_unpoisoned(&PROCESS_GENERATION_ALLOCATION_TRANSACTION);
-    let allocated = if parent_sync_succeeds {
-        allocate_generation_epoch_with_io(GenerationIo {
-            path: generation_path(),
-            lock: lock_generation_path,
-            read: read_generation_counter,
-            write: atomic_write,
-            fsync: fsync_parent_dir,
-        })
-    } else {
-        allocate_generation_epoch_with_io(GenerationIo {
-            path: generation_path(),
-            lock: lock_generation_path,
-            read: read_generation_counter,
-            write: atomic_write,
-            fsync: test_parent_sync_failure,
-        })
-    };
-    let previous_binding = TEST_PROCESS_GENERATION_BINDING.replace(Some(allocated));
-    TestProcessGenerationPublication { previous_binding }
 }
 
 /// Preview the epoch that the replacement process will allocate without
@@ -1217,7 +1220,7 @@ mod generation_allocation_tests {
             )
             .expect("process generation binding reader must remain present")
             .1
-            .split_once("#[cfg(test)]\nfn test_parent_sync_failure")
+            .split_once("/// Preview the epoch that the replacement process will allocate")
             .expect("bounded reader end must remain present")
             .0;
         let production_read = reader
@@ -1271,18 +1274,11 @@ mod generation_allocation_tests {
             .split_once("#[cfg(test)]")
             .expect("production and test allocator branches must remain separate")
             .0;
-        for required in [
-            "allocate_once_with(",
-            "&PROCESS_GENERATION,",
-            "&PROCESS_GENERATION_ALLOCATION_TRANSACTION,",
-            "allocate_generation_epoch,",
-        ] {
-            assert_eq!(
-                allocator.matches(required).count(),
-                1,
-                "production allocation must publish the whole allocation through the canonical cell"
-            );
-        }
+        assert_eq!(
+            allocator.trim(),
+            "{\n        allocate_once_with(\n            &PROCESS_GENERATION,\n            &PROCESS_GENERATION_ALLOCATION_TRANSACTION,\n            allocate_generation_epoch,\n        )\n    }",
+            "the production allocator must exactly return the canonical whole-allocation publication"
+        );
 
         let composer = source
             .split_once("fn allocate_generation_epoch() -> ProcessGenerationAllocation {")
@@ -1291,19 +1287,10 @@ mod generation_allocation_tests {
             .split_once("fn read_generation_counter(path: &Path) -> CounterRead {")
             .expect("production allocation composer must remain bounded")
             .0;
-        for required in [
-            "allocate_generation_epoch_with_io(GenerationIo {",
-            "path: generation_path(),",
-            "lock: lock_generation_path,",
-            "read: read_generation_counter,",
-            "write: atomic_write,",
-            "fsync: fsync_parent_dir,",
-        ] {
-            assert_eq!(composer.matches(required).count(), 1);
-        }
-        assert!(
-            !composer.contains("ProcessGenerationAllocation {"),
-            "the production allocation composer must not rewrite a route"
+        assert_eq!(
+            composer.trim(),
+            "allocate_generation_epoch_with_io(GenerationIo {\n        path: generation_path(),\n        lock: lock_generation_path,\n        read: read_generation_counter,\n        write: atomic_write,\n        fsync: fsync_parent_dir,\n    })\n}",
+            "the production composer must be exactly the canonical allocation tail expression"
         );
     }
 
