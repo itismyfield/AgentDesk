@@ -22,6 +22,10 @@ interface AgentInfoProfileSectionsProps {
   savingDept: boolean;
   onSaveDepartment: (nextDeptId: string) => void;
   selectedProvider: string;
+  providerOptions: string[];
+  providerLabels?: Record<string, string>;
+  providerSelectDisabled?: boolean;
+  providerNotice?: string | null;
   savingProvider: boolean;
   onSaveProvider: (nextProvider: string) => void;
   loadingOffices: boolean;
@@ -45,6 +49,10 @@ export function AgentInfoProfileSections({
   savingDept,
   onSaveDepartment,
   selectedProvider,
+  providerOptions,
+  providerLabels,
+  providerSelectDisabled,
+  providerNotice,
   savingProvider,
   onSaveProvider,
   loadingOffices,
@@ -92,7 +100,7 @@ export function AgentInfoProfileSections({
           <select
             value={selectedProvider}
             onChange={(e) => onSaveProvider(e.target.value)}
-            disabled={savingProvider}
+            disabled={savingProvider || providerSelectDisabled}
             className="min-w-0 w-full rounded-xl border px-3 py-2 text-sm outline-none sm:flex-1"
             style={{
               background: "var(--th-input-bg)",
@@ -100,11 +108,17 @@ export function AgentInfoProfileSections({
               color: "var(--th-text-primary)",
             }}
           >
-            <option value="claude">Claude</option>
-            <option value="codex">Codex</option>
-            <option value="gemini">Gemini</option>
-            <option value="qwen">Qwen</option>
+            {providerOptions.map((provider) => (
+              <option key={provider} value={provider}>
+                {providerLabels?.[provider] ?? provider}
+              </option>
+            ))}
           </select>
+          {providerNotice ? (
+            <span className="self-start text-xs" style={{ color: "var(--th-text-muted)" }}>
+              {providerNotice}
+            </span>
+          ) : null}
           <span className="self-start text-xs sm:shrink-0" style={{ color: "var(--th-text-muted)" }}>
             {savingProvider ? tr("저장 중...", "Saving...") : null}
           </span>

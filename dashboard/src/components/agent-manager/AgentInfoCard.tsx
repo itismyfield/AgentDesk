@@ -31,6 +31,7 @@ import { AgentInfoProfileSections } from "./AgentInfoProfileSections";
 import { AgentInfoRoutingSections } from "./AgentInfoRoutingSections";
 import { inferBindingSource } from "./AgentInfoCardModel";
 import { isDiscordSnowflake } from "./discord-routing";
+import { catalogLabel, useProviderCatalog } from "../../api/providers";
 
 export { getAgentLevel, getAgentTitle } from "./agentProgress";
 
@@ -81,6 +82,7 @@ export default function AgentInfoCard({
   const [selectedProvider, setSelectedProvider] = useState<string>(
     agent.cli_provider ?? "claude",
   );
+  const providerCatalog = useProviderCatalog(selectedProvider);
   const [savingProvider, setSavingProvider] = useState(false);
   const [officeMemberships, setOfficeMemberships] = useState<
     AgentOfficeMembership[]
@@ -533,6 +535,21 @@ export default function AgentInfoCard({
               savingDept={savingDept}
               onSaveDepartment={(nextDeptId) => void saveDepartment(nextDeptId)}
               selectedProvider={selectedProvider}
+              providerOptions={providerCatalog.selectableIds}
+              providerLabels={Object.fromEntries(
+                providerCatalog.selectableIds.map((id) => [
+                  id,
+                  catalogLabel(providerCatalog.entries, id),
+                ]),
+              )}
+              providerSelectDisabled={providerCatalog.loading}
+              providerNotice={
+                providerCatalog.loading
+                  ? tr("프로바이더 목록을 불러오는 중...", "Loading providers...")
+                  : providerCatalog.error
+                    ? tr("카탈로그를 못 불러 로컬 목록을 씁니다.", "Catalog unavailable; using local list.")
+                    : null
+              }
               savingProvider={savingProvider}
               onSaveProvider={(nextProvider) => void saveProvider(nextProvider)}
               loadingOffices={loadingOffices}
