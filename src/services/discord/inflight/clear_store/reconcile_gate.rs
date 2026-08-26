@@ -613,26 +613,28 @@ mod tests {
 
     #[test]
     fn allocation_route_is_observed_but_never_changes_the_reconcile_decision() {
-        use crate::services::discord::runtime_store::GenerationAllocationRoute as Route;
+        use crate::services::discord::runtime_store::GenerationAllocationRoute as R;
 
-        for (index, (route, expected_route, expected_advanced)) in [
+        for (index, (route, generation, stale, expected_route, expected_advanced)) in [
             (
-                Route::AdvancedWithSyncedRename,
+                R::AdvancedWithSyncedRename,
+                5462,
+                5461,
                 "advanced_with_synced_rename",
                 true,
             ),
-            (Route::ParentSyncFailed, "parent_sync_failed", false),
-            (Route::CounterReadFailed, "counter_read_failed", false),
-            (Route::Saturated, "saturated", false),
-            (Route::WriteFailed, "write_failed", false),
-            (Route::LockFailed, "lock_failed", false),
-            (Route::PathUnavailable, "path_unavailable", false),
-            (Route::Unwitnessed, "unwitnessed", false),
+            (R::ParentSyncFailed, 5462, 5461, "parent_sync_failed", false),
+            (R::CounterReadFailed, 1, 0, "counter_read_failed", false),
+            (R::Saturated, u64::MAX, u64::MAX - 1, "saturated", false),
+            (R::WriteFailed, 5461, 5460, "write_failed", false),
+            (R::LockFailed, 5461, 5460, "lock_failed", false),
+            (R::PathUnavailable, 0, 5461, "path_unavailable", false),
+            (R::Unwitnessed, 5461, 5460, "unwitnessed", false),
         ]
         .into_iter()
         .enumerate()
         {
-            let bound = allocation(54_62, route);
+            let bound = allocation(generation, route);
             let temp = TempDir::new().expect("temp root");
 
             let matching = row(60_000 + index as u64 * 2, bound.generation);
@@ -645,15 +647,20 @@ mod tests {
                 &matching,
                 bound,
             );
+            let refuses = bound.generation != 0;
             assert_eq!(
                 matching_outcome,
-                ReconcileClearOutcome::LiveGenerationSkipped {
-                    fresh_born_generation: 54_62,
+                if refuses {
+                    ReconcileClearOutcome::LiveGenerationSkipped {
+                        fresh_born_generation: generation,
+                    }
+                } else {
+                    ReconcileClearOutcome::Delegated(GuardedClearOutcome::Cleared)
                 },
                 "route={}",
-                bound.epoch_route(),
+                bound.epoch_route()
             );
-            assert!(matching_path.exists(), "route={}", bound.epoch_route());
+            assert_eq!(matching_path.exists(), refuses);
             observe_reconcile_outcome(
                 &ProviderKind::Claude,
                 &matching,
@@ -662,11 +669,15 @@ mod tests {
                 &matching_path,
                 matching_outcome,
             );
-            let details = emitted_refusal_payload(matching.channel_id);
+            let details = if refuses {
+                emitted_refusal_payload(matching.channel_id)
+            } else {
+                emitted_allow_payload(matching.channel_id)
+            };
             assert_eq!(details["epoch_route"], expected_route);
             assert_eq!(details["epoch_advanced"], expected_advanced);
 
-            let nonmatching = row(60_001 + index as u64 * 2, 54_61);
+            let nonmatching = row(60_001 + index as u64 * 2, stale);
             seed(temp.path(), &nonmatching);
             let nonmatching_path =
                 inflight_state_path(temp.path(), &ProviderKind::Claude, nonmatching.channel_id);
@@ -777,6 +788,30 @@ mod tests {
         assert_eq!(production.matches("epoch_route,").count(), 2);
         assert_eq!(production.matches("epoch_advanced,").count(), 2);
         assert_eq!(production.matches("ProcessGenerationAllocation").count(), 4);
+        let between = |start, end| {
+            production
+                .split_once(start)
+                .unwrap()
+                .1
+                .split_once(end)
+                .unwrap()
+                .0
+                .trim()
+        };
+        assert_eq!(
+            between(
+                "fn clear_inflight_state_for_reconcile_with_allocation_in_root(",
+                "fn clear_rebind_origin_for_reconcile_with_allocation_in_root(",
+            ),
+            "root: &std::path::Path,\n    provider: &ProviderKind,\n    snapshot: &InflightTurnState,\n    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,\n) -> ReconcileClearOutcome {\n    clear_inflight_state_for_reconcile_in_root(root, provider, snapshot, allocation.generation)\n}"
+        );
+        assert_eq!(
+            between(
+                "fn clear_rebind_origin_for_reconcile_with_allocation_in_root(",
+                "fn clear_inflight_state_for_reconcile_in_root(",
+            ),
+            "root: &std::path::Path,\n    provider: &ProviderKind,\n    snapshot: &InflightTurnState,\n    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,\n) -> ReconcileClearOutcome {\n    clear_rebind_origin_for_reconcile_in_root(root, provider, snapshot, allocation.generation)\n}"
+        );
 
         let normal_entry = production
             .split_once("pub(in crate::services::discord) fn clear_inflight_state_for_reconcile(")

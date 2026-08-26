@@ -899,47 +899,55 @@ mod loader_gate_observation_tests {
 
     #[test]
     fn allocation_route_is_observed_but_never_changes_loader_preservation() {
-        use crate::services::discord::runtime_store::GenerationAllocationRoute as Route;
+        use crate::services::discord::runtime_store::GenerationAllocationRoute as R;
 
-        for (index, (route, expected_route, expected_advanced)) in [
+        for (index, (route, generation, stale, expected_route, expected_advanced)) in [
             (
-                Route::AdvancedWithSyncedRename,
+                R::AdvancedWithSyncedRename,
+                5462,
+                5461,
                 "advanced_with_synced_rename",
                 true,
             ),
-            (Route::ParentSyncFailed, "parent_sync_failed", false),
-            (Route::CounterReadFailed, "counter_read_failed", false),
-            (Route::Saturated, "saturated", false),
-            (Route::WriteFailed, "write_failed", false),
-            (Route::LockFailed, "lock_failed", false),
-            (Route::PathUnavailable, "path_unavailable", false),
-            (Route::Unwitnessed, "unwitnessed", false),
+            (R::ParentSyncFailed, 5462, 5461, "parent_sync_failed", false),
+            (R::CounterReadFailed, 1, 0, "counter_read_failed", false),
+            (R::Saturated, u64::MAX, u64::MAX - 1, "saturated", false),
+            (R::WriteFailed, 5461, 5460, "write_failed", false),
+            (R::LockFailed, 5461, 5460, "lock_failed", false),
+            (R::PathUnavailable, 0, 5461, "path_unavailable", false),
+            (R::Unwitnessed, 5461, 5460, "unwitnessed", false),
         ]
         .into_iter()
         .enumerate()
         {
-            let bound = allocation(54_62, route);
+            let bound = allocation(generation, route);
             let matching = row(61_000 + index as u64 * 2, bound.generation, Some("named"));
-            assert!(
+            let refuses = bound.generation != 0;
+            assert_eq!(
                 loader_gate_refuses_with_allocation(&matching, bound),
-                "a positive non-advanced route must preserve the same matching row: {}",
-                bound.epoch_route(),
+                refuses
             );
-            record_loader_generation_gate(
-                &matching,
-                bound,
-                Path::new("/tmp/loader-route-proof.json"),
-            );
-            let details = emitted_refusal_payload(matching.channel_id);
+            let details = if refuses {
+                record_loader_generation_gate(
+                    &matching,
+                    bound,
+                    Path::new("/tmp/loader-route-proof.json"),
+                );
+                emitted_refusal_payload(matching.channel_id)
+            } else {
+                emit_loader_generation_gate_allowed(
+                    &ProviderKind::Claude,
+                    &matching,
+                    bound,
+                    Path::new("/tmp/loader-route-proof.json"),
+                );
+                emitted_allow_payload(matching.channel_id)
+            };
             assert_eq!(details["epoch_route"], expected_route);
             assert_eq!(details["epoch_advanced"], expected_advanced);
 
-            let nonmatching = row(61_001 + index as u64 * 2, 54_61, Some("named"));
-            assert!(
-                !loader_gate_refuses_with_allocation(&nonmatching, bound),
-                "route must not over-suppress an ordinary stale row: {}",
-                bound.epoch_route(),
-            );
+            let nonmatching = row(61_001 + index as u64 * 2, stale, Some("named"));
+            assert!(!loader_gate_refuses_with_allocation(&nonmatching, bound));
             emit_loader_generation_gate_allowed(
                 &ProviderKind::Claude,
                 &nonmatching,
@@ -947,7 +955,7 @@ mod loader_gate_observation_tests {
                 Path::new("/tmp/loader-route-proof.json"),
             );
             let extra = emitted_allow_payload(nonmatching.channel_id);
-            assert_eq!(extra["epoch_route"], bound.epoch_route());
+            assert_eq!(extra["epoch_route"], expected_route);
             assert_eq!(extra["epoch_advanced"], expected_advanced);
         }
     }
@@ -1014,6 +1022,7 @@ mod loader_gate_observation_tests {
     #[test]
     fn observation_labels_and_allocation_only_evaluation_api_are_exact() {
         let source = include_str!("removal.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
         let observation = source
             .split_once("fn loader_gate_refuses_with_allocation(")
             .expect("loader allocation observation must remain present")
@@ -1028,6 +1037,17 @@ mod loader_gate_observation_tests {
         assert_eq!(
             observation.matches("ProcessGenerationAllocation").count(),
             3
+        );
+        let wrapper = production
+            .split_once("fn loader_gate_refuses_with_allocation(")
+            .unwrap()
+            .1
+            .split_once("/// §7.2-1's refusal payload")
+            .unwrap()
+            .0;
+        assert_eq!(
+            wrapper.trim(),
+            "state: &InflightTurnState,\n    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,\n) -> bool {\n    loader_gate_refuses(state, allocation.generation)\n}"
         );
 
         let public_loader = source
