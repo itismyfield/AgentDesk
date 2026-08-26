@@ -43,14 +43,11 @@ impl AgentChannelBindings {
         match provider {
             ProviderKind::Claude => self.claude_channel(),
             ProviderKind::Codex => self.codex_channel(),
-            ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen
-                if self.configured_provider_kind().as_ref() == Some(provider) =>
-            {
+            ProviderKind::Unsupported(_) => None,
+            other if self.configured_provider_kind().as_ref() == Some(other) => {
                 let primary = self.legacy_primary_channel()?;
                 let explicit_claude = normalized_channel(self.discord_channel_cc.clone());
-                if matches!(provider, ProviderKind::Gemini | ProviderKind::Qwen)
-                    && explicit_claude.as_deref() == Some(primary.as_str())
-                {
+                if explicit_claude.as_deref() == Some(primary.as_str()) {
                     None
                 } else {
                     Some(primary)

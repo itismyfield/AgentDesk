@@ -6,7 +6,6 @@ pub(super) fn voice_auto_join_provider_map(
     let mut map = std::collections::HashMap::new();
     for agent in &cfg.agents {
         for (slot_provider, channel) in agent.channels.iter() {
-            let Some(channel) = channel else { continue };
             let Some(channel_id) = channel.channel_id() else {
                 continue;
             };

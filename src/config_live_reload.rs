@@ -200,9 +200,6 @@ fn agent_launch_fingerprint(config: &Config) -> AgentLaunchFingerprint {
             });
         }
         for (channel_kind, channel) in agent.channels.iter() {
-            let Some(channel) = channel else {
-                continue;
-            };
             let Some(target) = channel.target() else {
                 continue;
             };
@@ -594,18 +591,16 @@ mod tests {
             sensitivity_mode: None,
             voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
-            channels: crate::config::AgentChannels {
-                claude: Some(crate::config::AgentChannel::Detailed(
-                    crate::config::AgentChannelConfig {
-                        id: Some(channel_id.to_string()),
-                        provider: Some("claude".to_string()),
-                        tui_hosting,
-                        runtime: runtime.map(str::to_string),
-                        ..crate::config::AgentChannelConfig::default()
-                    },
-                )),
-                ..crate::config::AgentChannels::default()
-            },
+            channels: crate::config::AgentChannels::new().with(
+                "claude",
+                crate::config::AgentChannel::Detailed(crate::config::AgentChannelConfig {
+                    id: Some(channel_id.to_string()),
+                    provider: Some("claude".to_string()),
+                    tui_hosting,
+                    runtime: runtime.map(str::to_string),
+                    ..crate::config::AgentChannelConfig::default()
+                }),
+            ),
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,
@@ -615,13 +610,14 @@ mod tests {
 
     fn test_agent_with_named_claude_channel(channel_name: &str) -> crate::config::AgentDef {
         let mut agent = test_agent_with_claude_channel("123", None, None);
-        agent.channels.claude = Some(crate::config::AgentChannel::Detailed(
-            crate::config::AgentChannelConfig {
+        agent.channels.insert(
+            "claude",
+            crate::config::AgentChannel::Detailed(crate::config::AgentChannelConfig {
                 name: Some(channel_name.to_string()),
                 provider: Some("claude".to_string()),
                 ..crate::config::AgentChannelConfig::default()
-            },
-        ));
+            }),
+        );
         agent
     }
 

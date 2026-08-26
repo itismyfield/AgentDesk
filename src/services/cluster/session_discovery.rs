@@ -196,8 +196,7 @@ pub fn build_yaml_channel_name_map() -> ChannelNameMap {
     let mut map: ChannelNameMap = ChannelNameMap::new();
     let config = crate::config::load_graceful();
     for agent in &config.agents {
-        for (provider_str, channel_opt) in agent.channels.iter() {
-            let Some(channel) = channel_opt else { continue };
+        for (provider_str, channel) in agent.channels.iter() {
             let Some(provider) = ProviderKind::from_str(provider_str) else {
                 continue;
             };

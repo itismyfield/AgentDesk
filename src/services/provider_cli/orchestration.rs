@@ -222,11 +222,7 @@ fn agent_supports_provider(agent: &crate::config::AgentDef, provider: &str) -> b
     agent
         .channels
         .iter()
-        .into_iter()
         .any(|(provider_key, channel)| {
-            let Some(channel) = channel else {
-                return false;
-            };
             if let Some(channel_provider) = channel.provider() {
                 return channel_provider.eq_ignore_ascii_case(provider);
             }

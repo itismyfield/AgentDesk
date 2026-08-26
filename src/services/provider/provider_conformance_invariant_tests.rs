@@ -102,6 +102,43 @@ fn provider_exec_registry_conformance_invariant() {
         );
     }
 
+    let channels_yaml = concat!(
+        "claude: ch-cc\n",
+        "codex: ch-cdx\n",
+        "gemini: ch-gm\n",
+        "opencode: ch-oc\n",
+        "qwen: ch-qw\n",
+        "future-cli: ch-future\n",
+    );
+    let channels: crate::config::AgentChannels =
+        serde_yaml::from_str(channels_yaml).expect("provider-keyed channels should deserialize");
+    assert_eq!(
+        channels
+            .get("qwen")
+            .and_then(crate::config::AgentChannel::target)
+            .as_deref(),
+        Some("ch-qw")
+    );
+    assert_eq!(
+        channels
+            .get("future-cli")
+            .and_then(crate::config::AgentChannel::target)
+            .as_deref(),
+        Some("ch-future"),
+        "unknown provider keys must survive rolling upgrades"
+    );
+    let encoded_channels =
+        serde_yaml::to_string(&channels).expect("provider-keyed channels should serialize");
+    assert!(encoded_channels.contains("future-cli: ch-future"));
+
+    let mut normalized_channels = crate::config::AgentChannels::new();
+    normalized_channels.insert(
+        " CoDeX ",
+        crate::config::AgentChannel::from("ch-normalized"),
+    );
+    assert!(normalized_channels.contains_key("codex"));
+    assert_eq!(normalized_channels.keys().collect::<Vec<_>>(), vec!["codex"]);
+
     let expected_counterparts = [
         (
             ProviderKind::Claude,

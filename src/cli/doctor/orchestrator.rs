@@ -1312,9 +1312,6 @@ fn check_provider_bindings(cfg: &config::Config, snapshot: &HealthSnapshot) -> C
     for agent in &cfg.agents {
         let mut agent_has_channel = false;
         for (slot_provider, channel) in agent.channels.iter() {
-            let Some(channel) = channel else {
-                continue;
-            };
             let Some(target) = channel.target() else {
                 continue;
             };
