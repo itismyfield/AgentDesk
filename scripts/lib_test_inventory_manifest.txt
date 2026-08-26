@@ -2883,6 +2883,7 @@ services::discord::inflight::budget::tests::bump_persists_attempts_on_restart_ma
 services::discord::inflight::budget::tests::bump_persists_attempts_on_tui_direct_row
 services::discord::inflight::budget::tests::bump_refuses_row_owned_by_newer_turn
 services::discord::inflight::budget::tests::bump_refuses_tui_direct_row_without_offset_proof
+services::discord::inflight::clear_store::reconcile_gate::tests::allocation_route_is_observed_but_never_changes_the_reconcile_decision
 services::discord::inflight::clear_store::reconcile_gate::tests::allow_side_facts_are_wired_from_the_row_then_the_epoch
 services::discord::inflight::clear_store::reconcile_gate::tests::allowed_generation_buckets_separate_the_deferred_populations
 services::discord::inflight::clear_store::reconcile_gate::tests::current_generation_nonzero_is_the_allocated_epoch_not_a_path_probe
@@ -2890,6 +2891,8 @@ services::discord::inflight::clear_store::reconcile_gate::tests::current_generat
 services::discord::inflight::clear_store::reconcile_gate::tests::current_generation_rebind_origin_is_protected
 services::discord::inflight::clear_store::reconcile_gate::tests::legacy_zero_generation_remains_fail_open
 services::discord::inflight::clear_store::reconcile_gate::tests::normal_reconcile_clear_uses_fresh_locked_generation
+services::discord::inflight::clear_store::reconcile_gate::tests::observation_labels_and_allocation_only_evaluation_api_are_exact
+services::discord::inflight::clear_store::reconcile_gate::tests::public_reconcile_observes_production_shaped_published_routes
 services::discord::inflight::clear_store::reconcile_gate::tests::refusal_warn_describes_the_fresh_row_not_the_stale_snapshot
 services::discord::inflight::destructive_commit::tests::generation_advance_aborts_before_cancel_store
 services::discord::inflight::destructive_commit::tests::typed_outcomes_cover_commit_and_every_pin_field
@@ -2972,9 +2975,12 @@ services::discord::inflight::recovery_relay_attempts_tests::restart_marker_rmw_p
 services::discord::inflight::recovery_relay_attempts_tests::restart_marker_skips_corrupt_row_3860
 services::discord::inflight::recovery_relay_attempts_tests::restart_marker_skips_deleted_row_3860
 services::discord::inflight::recovery_relay_attempts_tests::saturated_counter_does_not_weaken_pane_alive_stale_guard
+services::discord::inflight::removal::loader_gate_observation_tests::allocation_route_is_observed_but_never_changes_loader_preservation
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_carries_the_generation_and_name_filter
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_event_marks_the_unnamed_current_generation_row
 services::discord::inflight::removal::loader_gate_observation_tests::loader_allow_kind_is_distinct_from_the_reconcile_fence_kind
+services::discord::inflight::removal::loader_gate_observation_tests::observation_labels_and_allocation_only_evaluation_api_are_exact
+services::discord::inflight::removal::loader_gate_observation_tests::public_loader_observes_production_shaped_published_routes
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_guarded_save_does_not_resurrect_a_deleted_row
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_guarded_save_preserves_newer_owner_bytes_on_identity_mismatch
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_patch_accepts_same_value_prior_write_within_ui_group
@@ -4586,6 +4592,7 @@ services::discord::runtime_store::atomic_write_logging_tests::critical_atomic_wr
 services::discord::runtime_store::generation_allocation_tests::core_truth_table_routes_and_side_effects_are_exact
 services::discord::runtime_store::generation_allocation_tests::counter_read_failure_preserves_copy_detail
 services::discord::runtime_store::generation_allocation_tests::epoch_provenance_surface_makes_no_survival_claim
+services::discord::runtime_store::generation_allocation_tests::production_binding_lexically_returns_the_stored_allocation_whole
 services::discord::runtime_store::generation_allocation_tests::production_composer_advances_with_synced_parent
 services::discord::runtime_store::generation_allocation_tests::production_shaped_once_cell_publishes_generation_and_route_together
 services::discord::runtime_store::generation_allocation_tests::real_lock_failure_and_synced_advance_are_reachable

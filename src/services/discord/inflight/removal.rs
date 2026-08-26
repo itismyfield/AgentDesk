@@ -78,6 +78,13 @@ fn loader_gate_refuses(state: &InflightTurnState, current_generation: u64) -> bo
     row_is_current_generation(state, current_generation) && state.tmux_session_name.is_some()
 }
 
+fn loader_gate_refuses_with_allocation(
+    state: &InflightTurnState,
+    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
+) -> bool {
+    loader_gate_refuses(state, allocation.generation)
+}
+
 /// §7.2-1's refusal payload for the loader fence, filed under an invariant name
 /// it SHARES with `clear_store::reconcile_gate::refusal_details`.
 ///
@@ -93,17 +100,23 @@ fn loader_gate_refuses(state: &InflightTurnState, current_generation: u64) -> bo
 /// site's `clear_*_for_reconcile`. A §9-2-style query filtering an unprefixed
 /// field (`details->>'tmux_session_name' IS NOT NULL`) therefore counts this
 /// site only, and drops every reconcile-gate row without saying so.
-fn record_loader_generation_gate(state: &InflightTurnState, current_generation: u64, path: &Path) {
+fn record_loader_generation_gate(
+    state: &InflightTurnState,
+    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
+    path: &Path,
+) {
     record_inflight_invariant_with_severity(
         false,
         state,
         "reconcile_never_clears_current_generation_row",
         "src/services/discord/inflight/removal.rs:load_inflight_states_from_root",
-        "destructive inflight loader must preserve a named row authored by the running process",
+        "destructive inflight loader must preserve a named row matching the process generation",
         serde_json::json!({
             "site": "load_inflight_states_from_root_stale",
             "born_generation": state.born_generation,
-            "current_generation": current_generation,
+            "current_generation": allocation.generation,
+            "epoch_route": allocation.epoch_route(),
+            "epoch_advanced": allocation.epoch_advanced(),
             "user_msg_id": state.user_msg_id,
             "finalizer_turn_id": state.finalizer_turn_id,
             "turn_nonce": state.turn_nonce,
@@ -168,10 +181,12 @@ const LOADER_GENERATION_GATE_ALLOWED: &str = "loader_generation_gate_allowed";
 fn emit_loader_generation_gate_allowed(
     provider: &ProviderKind,
     state: &InflightTurnState,
-    current_generation: u64,
+    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,
     path: &Path,
 ) {
-    let current_generation_row = row_is_current_generation(state, current_generation);
+    let current_generation_row = row_is_current_generation(state, allocation.generation);
+    let epoch_route = allocation.epoch_route();
+    let epoch_advanced = allocation.epoch_advanced();
     let tmux_session_name_present = state.tmux_session_name.is_some();
     crate::services::observability::emit_inflight_lifecycle_event(
         provider.as_str(),
@@ -183,7 +198,9 @@ fn emit_loader_generation_gate_allowed(
         serde_json::json!({
             "site": "load_inflight_states_from_root_stale",
             "born_generation": state.born_generation,
-            "current_generation": current_generation,
+            "current_generation": allocation.generation,
+            "epoch_route": epoch_route,
+            "epoch_advanced": epoch_advanced,
             "current_generation_row": current_generation_row,
             "tmux_session_name_present": tmux_session_name_present,
             "user_msg_id": state.user_msg_id,
@@ -195,7 +212,9 @@ fn emit_loader_generation_gate_allowed(
         channel_id = state.channel_id,
         user_msg_id = state.user_msg_id,
         born_generation = state.born_generation,
-        current_generation,
+        current_generation = allocation.generation,
+        epoch_route,
+        epoch_advanced,
         current_generation_row,
         tmux_session_name_present,
         site = "load_inflight_states_from_root_stale",
@@ -524,7 +543,8 @@ pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
     let mut states = Vec::new();
     let mut complete = true;
     let mut tmux_owners: HashMap<String, u64> = HashMap::new();
-    let current_generation = crate::services::discord::runtime_store::process_generation();
+    let allocation = crate::services::discord::runtime_store::process_generation_binding();
+    let current_generation = allocation.generation;
     for entry in entries {
         let path = match entry {
             Ok(entry) => entry.path(),
@@ -675,15 +695,10 @@ pub(in crate::services::discord) fn load_inflight_states_for_probe_from_root(
             if let Some(reason) =
                 stale_removal_reason_for_path(&path, &locked_state, current_generation)
             {
-                if loader_gate_refuses(&locked_state, current_generation) {
-                    record_loader_generation_gate(&locked_state, current_generation, &path);
+                if loader_gate_refuses_with_allocation(&locked_state, allocation) {
+                    record_loader_generation_gate(&locked_state, allocation, &path);
                 } else {
-                    emit_loader_generation_gate_allowed(
-                        provider,
-                        &locked_state,
-                        current_generation,
-                        &path,
-                    );
+                    emit_loader_generation_gate_allowed(provider, &locked_state, allocation, &path);
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     tracing::info!("  [{ts}] ⚠ {}: {}", reason, path.display());
                     log_loader_inflight_remove(
@@ -761,6 +776,26 @@ mod loader_gate_observation_tests {
         state
     }
 
+    #[rustfmt::skip]
+    fn allocation(generation: u64, route: crate::services::discord::runtime_store::GenerationAllocationRoute) -> crate::services::discord::runtime_store::ProcessGenerationAllocation {
+        crate::services::discord::runtime_store::process_generation_allocation_for_tests(generation, route)
+    }
+
+    #[rustfmt::skip]
+    fn route_cases() -> [(crate::services::discord::runtime_store::GenerationAllocationRoute, u64, u64, &'static str, bool); 8] {
+        use crate::services::discord::runtime_store::GenerationAllocationRoute as R;
+        [
+            (R::AdvancedWithSyncedRename, 5462, 5461, "advanced_with_synced_rename", true),
+            (R::ParentSyncFailed, 5462, 5461, "parent_sync_failed", false),
+            (R::CounterReadFailed, 1, 0, "counter_read_failed", false),
+            (R::Saturated, u64::MAX, u64::MAX - 1, "saturated", false),
+            (R::WriteFailed, 5461, 5460, "write_failed", false),
+            (R::LockFailed, 5461, 5460, "lock_failed", false),
+            (R::PathUnavailable, 0, 5461, "path_unavailable", false),
+            (R::Unwitnessed, 5461, 5460, "unwitnessed", false),
+        ]
+    }
+
     fn emitted_allow_payload(channel_id: u64) -> serde_json::Value {
         crate::services::observability::events::recent(usize::MAX)
             .into_iter()
@@ -774,6 +809,48 @@ mod loader_gate_observation_tests {
             .expect("loader gate allow event")
     }
 
+    fn emitted_refusal_payload(channel_id: u64) -> serde_json::Value {
+        crate::services::observability::events::recent(usize::MAX)
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.event_type == "invariant_violation"
+                    && event.channel_id == Some(channel_id)
+                    && event.payload["invariant"] == "reconcile_never_clears_current_generation_row"
+                    && event.payload["details"]["site"] == "load_inflight_states_from_root_stale"
+            })
+            .map(|event| event.payload["details"].clone())
+            .expect("loader generation gate refusal event")
+    }
+
+    fn seed_generation_counter(root: &std::path::Path, generation: u64) {
+        let path = root.join("runtime").join("generation");
+        std::fs::create_dir_all(path.parent().expect("generation parent")).unwrap();
+        std::fs::write(path, generation.to_string()).unwrap();
+    }
+
+    struct TmuxAliveOverrideReset;
+
+    impl Drop for TmuxAliveOverrideReset {
+        fn drop(&mut self) {
+            set_test_tmux_alive_override(None);
+        }
+    }
+
+    fn seed_stale(root: &std::path::Path, state: &InflightTurnState) -> std::path::PathBuf {
+        super::super::save_inflight_state_in_root(root, state).expect("seed loader row");
+        let path = inflight_state_path(root, &ProviderKind::Claude, state.channel_id);
+        filetime::set_file_mtime(
+            &path,
+            filetime::FileTime::from_unix_time(
+                chrono::Utc::now().timestamp() - INFLIGHT_MAX_AGE_SECS as i64 - 2,
+                0,
+            ),
+        )
+        .expect("age row past loader threshold");
+        path
+    }
+
     // The allow counter is §9-2's denominator, so its fields are the filter that
     // isolates the transfer condition (current generation, no tmux name) — the
     // one combination this fence deliberately does not refuse.
@@ -783,7 +860,7 @@ mod loader_gate_observation_tests {
         emit_loader_generation_gate_allowed(
             &ProviderKind::Claude,
             &state,
-            54_62,
+            allocation(54_62, crate::services::discord::runtime_store::GenerationAllocationRoute::AdvancedWithSyncedRename),
             Path::new("/tmp/54630.json"),
         );
 
@@ -805,7 +882,7 @@ mod loader_gate_observation_tests {
         emit_loader_generation_gate_allowed(
             &ProviderKind::Claude,
             &state,
-            54_62,
+            allocation(54_62, crate::services::discord::runtime_store::GenerationAllocationRoute::AdvancedWithSyncedRename),
             Path::new("/tmp/54631.json"),
         );
 
@@ -822,6 +899,192 @@ mod loader_gate_observation_tests {
         assert_ne!(
             LOADER_GENERATION_GATE_ALLOWED,
             "reconcile_generation_gate_allowed"
+        );
+    }
+
+    #[test]
+    fn allocation_route_is_observed_but_never_changes_loader_preservation() {
+        for (index, (route, generation, stale, expected_route, expected_advanced)) in
+            route_cases().into_iter().enumerate()
+        {
+            let bound = allocation(generation, route);
+            let matching = row(61_000 + index as u64 * 2, bound.generation, Some("named"));
+            let refuses = bound.generation != 0;
+            assert_eq!(
+                loader_gate_refuses_with_allocation(&matching, bound),
+                refuses
+            );
+            let details = if refuses {
+                record_loader_generation_gate(
+                    &matching,
+                    bound,
+                    Path::new("/tmp/loader-route-proof.json"),
+                );
+                emitted_refusal_payload(matching.channel_id)
+            } else {
+                emit_loader_generation_gate_allowed(
+                    &ProviderKind::Claude,
+                    &matching,
+                    bound,
+                    Path::new("/tmp/loader-route-proof.json"),
+                );
+                emitted_allow_payload(matching.channel_id)
+            };
+            assert_eq!(details["epoch_route"], expected_route);
+            assert_eq!(details["epoch_advanced"], expected_advanced);
+
+            let nonmatching = row(61_001 + index as u64 * 2, stale, Some("named"));
+            assert!(!loader_gate_refuses_with_allocation(&nonmatching, bound));
+            emit_loader_generation_gate_allowed(
+                &ProviderKind::Claude,
+                &nonmatching,
+                bound,
+                Path::new("/tmp/loader-route-proof.json"),
+            );
+            let extra = emitted_allow_payload(nonmatching.channel_id);
+            assert_eq!(extra["epoch_route"], expected_route);
+            assert_eq!(extra["epoch_advanced"], expected_advanced);
+        }
+    }
+
+    fn assert_public_loader_pair(
+        root: &Path,
+        index: usize,
+        bound: crate::services::discord::runtime_store::ProcessGenerationAllocation,
+        stale: u64,
+    ) {
+        let _publication =
+            crate::services::discord::runtime_store::publish_process_generation_allocation_for_tests(bound);
+        for (offset, born, matching) in [(0, bound.generation, true), (1, stale, false)] {
+            let state = row(63_000 + index as u64 * 2 + offset, born, Some("named"));
+            let path = seed_stale(root, &state);
+            let loaded = load_inflight_states_for_probe_from_root(root, &ProviderKind::Claude);
+            let refused = matching && bound.generation != 0;
+            assert_eq!(path.exists(), refused);
+            assert_eq!(
+                loaded
+                    .states
+                    .iter()
+                    .any(|row| row.channel_id == state.channel_id),
+                refused
+            );
+            let payload = if refused {
+                emitted_refusal_payload(state.channel_id)
+            } else {
+                emitted_allow_payload(state.channel_id)
+            };
+            assert_eq!(payload["current_generation"], bound.generation);
+            assert_eq!(payload["epoch_route"], bound.epoch_route());
+            assert_eq!(payload["epoch_advanced"], bound.epoch_advanced());
+            if !refused {
+                assert_eq!(payload["current_generation_row"], false);
+            }
+        }
+    }
+
+    #[test]
+    fn public_loader_observes_production_shaped_published_routes() {
+        let _tmux_lock = super::super::stall_recovery_tests::stale_override_test_mutex()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+        set_test_tmux_alive_override(Some(&[]));
+        let _tmux_override = TmuxAliveOverrideReset;
+        for (sync, expected) in [
+            (false, "parent_sync_failed"),
+            (true, "advanced_with_synced_rename"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "AGENTDESK_ROOT_DIR",
+                root.path(),
+            );
+            seed_generation_counter(root.path(), 54_61);
+            let _publication =
+                crate::services::discord::runtime_store::allocate_and_publish_process_generation_for_tests(sync);
+            assert_eq!(
+                crate::services::discord::runtime_store::process_generation_binding().epoch_route(),
+                expected
+            );
+        }
+        let root = tempfile::tempdir().unwrap();
+        let inflight_root = root.path().join("runtime").join("discord_inflight");
+        for (index, (route, generation, stale, _, _)) in route_cases().into_iter().enumerate() {
+            assert_public_loader_pair(&inflight_root, index, allocation(generation, route), stale);
+        }
+    }
+
+    /// Lexical tripwire only: aliases or helper extraction can evade it. The
+    /// route-complete execution test above is the semantic proof.
+    #[test]
+    fn observation_labels_and_allocation_only_evaluation_api_are_exact() {
+        let source = include_str!("removal.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        let observation = source
+            .split_once("fn loader_gate_refuses_with_allocation(")
+            .expect("loader allocation observation must remain present")
+            .1
+            .split_once("/// Thread-local test seam for `tmux_pane_alive_for_stale_check`.")
+            .expect("loader allocation observation must remain bounded")
+            .0;
+        assert_eq!(observation.matches("\"epoch_route\"").count(), 2);
+        assert_eq!(observation.matches("\"epoch_advanced\"").count(), 2);
+        assert_eq!(observation.matches("epoch_route,").count(), 2);
+        assert_eq!(observation.matches("epoch_advanced,").count(), 2);
+        assert_eq!(
+            observation.matches("ProcessGenerationAllocation").count(),
+            3
+        );
+        let wrapper = production
+            .split_once("fn loader_gate_refuses_with_allocation(")
+            .unwrap()
+            .1
+            .split_once("/// §7.2-1's refusal payload")
+            .unwrap()
+            .0;
+        assert_eq!(
+            wrapper.trim(),
+            "state: &InflightTurnState,\n    allocation: crate::services::discord::runtime_store::ProcessGenerationAllocation,\n) -> bool {\n    loader_gate_refuses(state, allocation.generation)\n}"
+        );
+
+        let public_loader = source
+            .split_once("fn load_inflight_states_for_probe_from_root(")
+            .expect("public probe loader must remain present")
+            .1
+            .split_once(
+                "#[cfg(test)]
+mod loader_gate_observation_tests",
+            )
+            .expect("public probe loader must remain bounded by its tests")
+            .0;
+        assert_eq!(
+            public_loader
+                .matches("let allocation = crate::services::discord::runtime_store::process_generation_binding();")
+                .count(),
+            1,
+        );
+        let stale_decision = public_loader.rsplit_once("            if let Some(reason) =\n                stale_removal_reason_for_path(&path, &locked_state, current_generation)").unwrap().1.split_once("\n        if finalizer_backfilled {").unwrap().0;
+        assert_eq!(
+            stale_decision,
+            "\n            {\n                if loader_gate_refuses_with_allocation(&locked_state, allocation) {\n                    record_loader_generation_gate(&locked_state, allocation, &path);\n                } else {\n                    emit_loader_generation_gate_allowed(provider, &locked_state, allocation, &path);\n                    let ts = chrono::Local::now().format(\"%H:%M:%S\");\n                    tracing::info!(\"  [{ts}] ⚠ {}: {}\", reason, path.display());\n                    log_loader_inflight_remove(\n                        provider,\n                        locked_state.channel_id,\n                        locked_state.user_msg_id,\n                        \"load_inflight_states_from_root_stale\",\n                        &path,\n                        Some(&locked_state),\n                        current_generation,\n                    );\n                    let _ = fs::remove_file(&path);\n                    continue;\n                }\n            }\n            finalizer_backfilled = false;\n            state = locked_state;\n        }"
+        );
+        assert!(!public_loader.contains("allocation.epoch_route()"));
+        assert!(!public_loader.contains("allocation.epoch_advanced()"));
+
+        let public_witness = source
+            .split_once("fn public_loader_observes_production_shaped_published_routes()")
+            .expect("public loader witness must remain present")
+            .1
+            .split_once("/// Lexical tripwire only")
+            .expect("public loader witness must remain bounded")
+            .0;
+        assert_eq!(
+            public_witness
+                .matches("super::super::stall_recovery_tests::stale_override_test_mutex()")
+                .count(),
+            1,
+            "the process-global tmux override witness must share its canonical test mutex",
         );
     }
 }

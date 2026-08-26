@@ -313,6 +313,75 @@ impl ProcessGenerationAllocation {
     }
 }
 
+#[cfg(test)]
+mod test_generation_publication {
+    use super::*;
+
+    std::thread_local! {
+        static BINDING: std::cell::Cell<Option<ProcessGenerationAllocation>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    pub(in crate::services::discord) struct Publication {
+        previous_binding: Option<ProcessGenerationAllocation>,
+    }
+
+    impl Drop for Publication {
+        fn drop(&mut self) {
+            BINDING.set(self.previous_binding);
+        }
+    }
+
+    pub(super) fn published_binding() -> Option<ProcessGenerationAllocation> {
+        BINDING.get()
+    }
+
+    pub(in crate::services::discord) fn allocation(
+        generation: u64,
+        route: GenerationAllocationRoute,
+    ) -> ProcessGenerationAllocation {
+        ProcessGenerationAllocation { generation, route }
+    }
+
+    fn parent_sync_failure(_: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::other("injected parent sync failure"))
+    }
+
+    pub(in crate::services::discord) fn publish(
+        allocated: ProcessGenerationAllocation,
+    ) -> Publication {
+        Publication {
+            previous_binding: BINDING.replace(Some(allocated)),
+        }
+    }
+
+    pub(in crate::services::discord) fn allocate_and_publish(
+        parent_sync_succeeds: bool,
+    ) -> Publication {
+        let _allocation = lock_unpoisoned(&PROCESS_GENERATION_ALLOCATION_TRANSACTION);
+        let allocated = allocate_generation_epoch_with_io(GenerationIo {
+            path: generation_path(),
+            lock: lock_generation_path,
+            read: read_generation_counter,
+            write: atomic_write,
+            fsync: if parent_sync_succeeds {
+                fsync_parent_dir
+            } else {
+                parent_sync_failure
+            },
+        });
+        let previous_binding = BINDING.replace(Some(allocated));
+        Publication { previous_binding }
+    }
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) use test_generation_publication::{
+    allocate_and_publish as allocate_and_publish_process_generation_for_tests,
+    allocation as process_generation_allocation_for_tests,
+    publish as publish_process_generation_allocation_for_tests,
+};
+
 // </epoch-provenance-surface>
 
 /// Load the current generation counter (returns 0 if missing or unreadable).
@@ -613,7 +682,17 @@ where
 /// Return the process generation; before boot allocation, use the on-disk
 /// counter for constructor-only compatibility.
 pub fn process_generation() -> u64 {
-    process_generation_binding().generation
+    #[cfg(not(test))]
+    {
+        process_generation_binding().generation
+    }
+    #[cfg(test)]
+    {
+        if let Some(generation) = *test_generation_override() {
+            return generation;
+        }
+        load_generation()
+    }
 }
 
 pub(in crate::services::discord) fn process_generation_binding() -> ProcessGenerationAllocation {
@@ -622,11 +701,16 @@ pub(in crate::services::discord) fn process_generation_binding() -> ProcessGener
         return *bound;
     }
     #[cfg(test)]
-    if let Some(generation) = *test_generation_override() {
-        return ProcessGenerationAllocation {
-            generation,
-            route: GenerationAllocationRoute::Unwitnessed,
-        };
+    {
+        if let Some(generation) = *test_generation_override() {
+            return ProcessGenerationAllocation {
+                generation,
+                route: GenerationAllocationRoute::Unwitnessed,
+            };
+        }
+        if let Some(bound) = test_generation_publication::published_binding() {
+            return bound;
+        }
     }
     ProcessGenerationAllocation {
         generation: load_generation(),
@@ -1133,6 +1217,85 @@ mod generation_allocation_tests {
         assert!(production.contains(declaration));
     }
 
+    /// Bounded lexical architecture pin for the literal `cfg(not(test))` reader block.
+    /// It catches reconstruction or field detachment inside that block, but does not claim
+    /// semantic coverage for aliases, macros, or a reader moved outside these source bounds.
+    #[test]
+    fn production_binding_lexically_returns_the_stored_allocation_whole() {
+        let source = include_str!("runtime_store.rs");
+        let reader = source
+            .split_once(
+                "pub(in crate::services::discord) fn process_generation_binding() -> ProcessGenerationAllocation {",
+            )
+            .expect("process generation binding reader must remain present")
+            .1
+            .split_once("/// Preview the epoch that the replacement process will allocate")
+            .expect("bounded reader end must remain present")
+            .0;
+        let production_read = reader
+            .split_once("#[cfg(test)]")
+            .expect("production and test reader branches must remain separate")
+            .0;
+        assert_eq!(
+            production_read,
+            "\n    #[cfg(not(test))]\n    if let Some(bound) = PROCESS_GENERATION.get() {\n        return *bound;\n    }\n    ",
+            "the complete production reader prefix must exactly return the canonical whole allocation"
+        );
+
+        let process_reader = source
+            .split_once("pub fn process_generation() -> u64 {")
+            .expect("process generation accessor must remain present")
+            .1
+            .split_once(
+                "pub(in crate::services::discord) fn process_generation_binding() -> ProcessGenerationAllocation {",
+            )
+            .expect("process generation accessor must remain bounded by the binding reader")
+            .0
+            .split_once("#[cfg(not(test))]")
+            .expect("process generation production branch must remain present")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("process generation production and test branches must remain separate")
+            .0;
+        assert_eq!(
+            process_reader.trim(),
+            "{\n        process_generation_binding().generation\n    }",
+            "production row writers must return the published binding generation directly"
+        );
+
+        let allocator = source
+            .split_once("pub(in crate::services::discord) fn allocate_process_generation_binding()")
+            .expect("process generation allocator must remain present")
+            .1
+            .split_once("fn allocate_generation_epoch() -> ProcessGenerationAllocation {")
+            .expect("process generation allocator must remain bounded by epoch allocation")
+            .0
+            .split_once("#[cfg(not(test))]")
+            .expect("production allocator branch must remain present")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("production and test allocator branches must remain separate")
+            .0;
+        assert_eq!(
+            allocator.trim(),
+            "{\n        allocate_once_with(\n            &PROCESS_GENERATION,\n            &PROCESS_GENERATION_ALLOCATION_TRANSACTION,\n            allocate_generation_epoch,\n        )\n    }",
+            "the production allocator must exactly return the canonical whole-allocation publication"
+        );
+
+        let composer = source
+            .split_once("fn allocate_generation_epoch() -> ProcessGenerationAllocation {")
+            .expect("production allocation composer must remain present")
+            .1
+            .split_once("fn read_generation_counter(path: &Path) -> CounterRead {")
+            .expect("production allocation composer must remain bounded")
+            .0;
+        assert_eq!(
+            composer.trim(),
+            "allocate_generation_epoch_with_io(GenerationIo {\n        path: generation_path(),\n        lock: lock_generation_path,\n        read: read_generation_counter,\n        write: atomic_write,\n        fsync: fsync_parent_dir,\n    })\n}",
+            "the production composer must be exactly the canonical allocation tail expression"
+        );
+    }
+
     #[test]
     fn test_pin_memo_fallback_and_reset_remain_structurally_separate() {
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -1157,6 +1320,7 @@ mod generation_allocation_tests {
             19,
             GenerationAllocationRoute::Unwitnessed,
         );
+        assert_eq!(process_generation(), 19);
 
         set_process_generation_for_tests(Some(73));
         expect(
