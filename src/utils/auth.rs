@@ -1,21 +1,20 @@
 /// Compare bearer/admin tokens without short-circuiting on the first mismatch.
 ///
-/// The loop consumes both byte slices up to the longer length and folds the
-/// length mismatch into the accumulator, so equal-prefix and different-length
-/// probes do not exit earlier than same-length probes.
+/// The loop always consumes exactly the expected token length. A caller-controlled
+/// token therefore cannot increase comparison work, while equal-prefix and
+/// same-length probes still avoid an early byte-mismatch exit.
 pub(crate) fn constant_time_token_eq(expected: &str, supplied: &str) -> bool {
     let expected = expected.as_bytes();
     let supplied = supplied.as_bytes();
-    let max_len = expected.len().max(supplied.len());
-    let mut diff = expected.len() ^ supplied.len();
+    let mut diff = 0;
 
-    for index in 0..max_len {
-        let expected_byte = expected.get(index).copied().unwrap_or(0);
+    for index in 0..expected.len() {
+        let expected_byte = expected[index];
         let supplied_byte = supplied.get(index).copied().unwrap_or(0);
-        diff |= (expected_byte ^ supplied_byte) as usize;
+        diff |= expected_byte ^ supplied_byte;
     }
 
-    diff == 0
+    diff == 0 && expected.len() == supplied.len()
 }
 
 #[cfg(test)]
