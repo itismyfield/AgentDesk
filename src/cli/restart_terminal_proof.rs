@@ -9,6 +9,8 @@ pub(crate) fn file_nonce(path: &Path) -> Option<String> {
     })
 }
 
+/// A restart nonce is a pathname component, so validate the whole string.
+/// A line-anchored check could accept `x\n../escape` from its clean first line.
 fn nonce_is_path_safe(nonce: &str) -> bool {
     !nonce.is_empty()
         && nonce != "."
@@ -19,19 +21,26 @@ fn nonce_is_path_safe(nonce: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Build a request-specific artifact path only for a validated nonce.
+/// `None` is fail-closed: callers must not fall back to an unscoped path.
 pub(crate) fn request_artifact_path(root: &Path, name: &str, nonce: &str) -> Option<PathBuf> {
     nonce_is_path_safe(nonce).then(|| root.join(format!("{name}.{nonce}")))
 }
 
+/// Three-valued read of one restart artifact family. Only the per-request
+/// identity name is proof; the fixed-name index is compatibility evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TerminalProof {
+    /// The identity artifact name and body both carry the requested nonce.
     Proven,
+    /// Only the fixed-name compatibility index carries the nonce. Never green.
     LegacyIndexOnly,
     Absent,
 }
 
 pub(crate) fn artifact_proof(root: &Path, name: &str, nonce: &str) -> TerminalProof {
     let Some(identity) = request_artifact_path(root, name, nonce) else {
+        // Unsafe input is `Absent`, with no fixed-index fallback.
         tracing::warn!(
             root = %root.display(),
             name = name,
@@ -65,8 +74,7 @@ fn terminal_proof_with_readers(
 ) -> RestartTerminalProof {
     match read_persisted() {
         TerminalProof::Proven => return RestartTerminalProof::Persisted,
-        // A legacy index is not success proof, but it was published after the
-        // cancellation record and therefore suppresses a cancelled verdict.
+        // A legacy index is neither success proof nor safe cancellation evidence.
         TerminalProof::LegacyIndexOnly => return RestartTerminalProof::Pending,
         TerminalProof::Absent => {}
     }
@@ -75,7 +83,7 @@ fn terminal_proof_with_readers(
         return RestartTerminalProof::Pending;
     }
 
-    // Persisted wins if it lands between the first read and cancellation.
+    // Persisted wins if it lands between the first and final persisted reads.
     match read_persisted() {
         TerminalProof::Proven => RestartTerminalProof::Persisted,
         TerminalProof::LegacyIndexOnly => RestartTerminalProof::Pending,

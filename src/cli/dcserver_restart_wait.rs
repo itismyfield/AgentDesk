@@ -328,7 +328,12 @@ mod tests {
             fs::read_to_string(root.path().join("restart_pending")).unwrap(),
             existing
         );
-        assert_eq!(recorder.stderr.borrow().len(), 1);
+        assert_eq!(
+            *recorder.stderr.borrow(),
+            vec![
+                "   ⚠ restart already owned (source=deploy-release, scope=release, nonce=owner-nonce); preserving the existing restart".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -486,15 +491,23 @@ mod tests {
             "a legacy persisted index suppresses cancellation without becoming success proof"
         );
 
-        let mut persisted_reads = [TerminalProof::Absent, TerminalProof::Proven].into_iter();
-        assert_eq!(
-            super::super::restart_terminal_proof::terminal_proof_with_test_readers(
-                || persisted_reads.next().expect("two persisted reads"),
-                || TerminalProof::Proven,
+        for (second_read, expected) in [
+            (
+                TerminalProof::LegacyIndexOnly,
+                RestartTerminalProof::Pending,
             ),
-            RestartTerminalProof::Persisted,
-            "persisted published after the first read must win over cancellation"
-        );
-        assert!(persisted_reads.next().is_none());
+            (TerminalProof::Proven, RestartTerminalProof::Persisted),
+        ] {
+            let mut persisted_reads = [TerminalProof::Absent, second_read].into_iter();
+            assert_eq!(
+                super::super::restart_terminal_proof::terminal_proof_with_test_readers(
+                    || persisted_reads.next().expect("two persisted reads"),
+                    || TerminalProof::Proven,
+                ),
+                expected,
+                "the final persisted read must suppress an older cancellation"
+            );
+            assert!(persisted_reads.next().is_none());
+        }
     }
 }
