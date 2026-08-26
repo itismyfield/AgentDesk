@@ -74,6 +74,10 @@ impl QuickRestartMarker {
         &self.path
     }
 
+    pub(crate) fn nonce(&self) -> &str {
+        &self.nonce
+    }
+
     pub(crate) fn resolve_ownership(
         &self,
         on_removed_owned: impl FnOnce(),
