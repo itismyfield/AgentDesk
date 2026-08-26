@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
-use super::{ProviderCompactionAdapter, ProviderKind, provider_registry};
+use super::{
+    ProviderCompactionAdapter, ProviderKind, intern_provider_id, provider_registry,
+    supported_provider_ids,
+};
 
 const READY_CAPTURE: &str = "Ready for input (type message + Enter)\n> ";
 const BUSY_CAPTURE: &str = "working\nstill waiting for tool output";
@@ -87,6 +90,68 @@ fn provider_exec_registry_conformance_invariant() {
         !provider_ids.is_empty(),
         "provider registry must not be empty"
     );
+    assert_eq!(
+        supported_provider_ids(),
+        vec!["claude", "codex", "gemini", "opencode", "qwen"]
+    );
+    for provider_id in supported_provider_ids() {
+        assert_eq!(
+            intern_provider_id(&provider_id.to_ascii_uppercase()),
+            Some(provider_id),
+            "provider ids should canonicalize through the registry"
+        );
+    }
+
+    let expected_counterparts = [
+        (
+            ProviderKind::Claude,
+            vec![
+                ProviderKind::Codex,
+                ProviderKind::Gemini,
+                ProviderKind::OpenCode,
+                ProviderKind::Qwen,
+            ],
+        ),
+        (
+            ProviderKind::Codex,
+            vec![
+                ProviderKind::Claude,
+                ProviderKind::Gemini,
+                ProviderKind::OpenCode,
+                ProviderKind::Qwen,
+            ],
+        ),
+        (
+            ProviderKind::Gemini,
+            vec![
+                ProviderKind::Codex,
+                ProviderKind::Claude,
+                ProviderKind::OpenCode,
+                ProviderKind::Qwen,
+            ],
+        ),
+        (
+            ProviderKind::OpenCode,
+            vec![
+                ProviderKind::Codex,
+                ProviderKind::Claude,
+                ProviderKind::Gemini,
+                ProviderKind::Qwen,
+            ],
+        ),
+        (
+            ProviderKind::Qwen,
+            vec![
+                ProviderKind::Codex,
+                ProviderKind::Claude,
+                ProviderKind::Gemini,
+                ProviderKind::OpenCode,
+            ],
+        ),
+    ];
+    for (provider, expected) in expected_counterparts {
+        assert_eq!(provider.preferred_counterparts(), expected);
+    }
     assert_scoped_dispatches_have_no_wildcard_arms();
 }
 
