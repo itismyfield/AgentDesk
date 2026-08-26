@@ -6269,6 +6269,7 @@ services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::pinned_codex_long_chunks_generation_flip_5264
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::pinned_codex_short_replace_generation_flip_5264
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::prepare_bridge_lease_decision_table_5264
+services::discord::turn_bridge::terminal_controller_cutover::tests::controller_bridge_acquire_sites_mint_fresh_attempts
 services::discord::turn_bridge::terminal_delivery::relay_state_contract_refs::contract_symbols_exist
 services::discord::turn_bridge::terminal_delivery::tests::a0_characterization_tests::a0_terminal_delivery_predicate_boundary_is_strictly_greater_than_2000
 services::discord::turn_bridge::terminal_delivery::tests::a0_characterization_tests::a0_terminal_delivery_predicate_gates_on_can_chain_and_over_limit
@@ -6276,6 +6277,7 @@ services::discord::turn_bridge::terminal_delivery::tests::a0_i2_advance_characte
 services::discord::turn_bridge::terminal_delivery::tests::bridge_delegation_and_restart_cancel_never_clear_inflight
 services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::bridge_delivered_advances_offset_once_via_lease_commit
 services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::bridge_id0_without_offset_acquires_degenerate_key_instead_of_skip
+services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::bridge_lease_holder_attempts_are_unique
 services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::bridge_leases_on_watcher_owner_channel_shares_cell_under_reuse
 services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::bridge_not_delivered_does_not_advance
 services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::bridge_release_lets_next_turn_acquire
@@ -6285,6 +6287,7 @@ services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease:
 services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::empty_range_routes_to_no_range
 services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::equal_nonzero_range_is_no_range_and_never_advances
 services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::no_double_advance_on_same_range_recommit
+services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::production_reacquire_rejects_stale_same_key_range_attempt
 services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::reclaimed_lease_commit_is_false_and_never_advances_offset
 services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::silent_turn_skip_does_not_mark_committed
 services::discord::turn_bridge::terminal_delivery::tests::bridge_delivery_lease::watcher_skips_when_bridge_holds_lease
@@ -6463,6 +6466,7 @@ services::discord::turn_finalizer::delivery_lease::tests::nonzero_user_msg_id_le
 services::discord::turn_finalizer::delivery_lease::tests::read_observes_payload_coherent_with_tag_under_race
 services::discord::turn_finalizer::delivery_lease::tests::release_after_commit_returns_to_unleased
 services::discord::turn_finalizer::delivery_lease::tests::release_compare_and_release_noop_on_holder_mismatch
+services::discord::turn_finalizer::delivery_lease::tests::same_key_range_stale_bridge_attempt_cannot_touch_successor
 services::discord::turn_finalizer::delivery_lease::tests::same_turn_stale_range_release_is_noop_after_reacquire
 services::discord::turn_finalizer::delivery_lease::tests::stale_turn_commit_and_release_are_noops_after_reacquire
 services::discord::turn_finalizer::finalize::tests::finalize_chokepoint_publishes_mailbox_release_completion_event

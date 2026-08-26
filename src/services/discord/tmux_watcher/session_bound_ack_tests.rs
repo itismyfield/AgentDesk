@@ -622,7 +622,7 @@ mod inflight_sink_marker_gate {
     #[test]
     fn committed_covered_skips_for_non_sink() {
         let snap = LeaseSnapshot::Leased {
-            holder: LeaseHolder::Bridge,
+            holder: LeaseHolder::Bridge { attempt_id: 1 },
             key: turn(),
             deadline_ms: NOW + 1,
             start: START,

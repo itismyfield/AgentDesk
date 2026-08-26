@@ -3927,7 +3927,7 @@ mod queued_placeholder_cluster_characterization_tests {
                 LeaseOutcome::Unknown,
             ] {
                 let cell = DeliveryLeaseCell::new(ChannelId::new(7));
-                let holder = LeaseHolder::Bridge;
+                let holder = LeaseHolder::Bridge { attempt_id: 1 };
                 assert!(cell.try_acquire(turn(), holder, 100, 200, 1_000));
                 assert!(
                     cell.commit(holder, turn(), 100, 200, outcome),

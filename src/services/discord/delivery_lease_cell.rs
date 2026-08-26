@@ -38,8 +38,9 @@ pub(in crate::services::discord) enum LeaseHolder {
     Watcher { instance_id: u64 },
     /// The standby / output sink relay.
     Sink,
-    /// The bridge (turn-bridge handoff path).
-    Bridge,
+    /// One bridge publication attempt. `attempt_id` distinguishes a reclaimed
+    /// stale attempt from a successor that reacquires the same key and range.
+    Bridge { attempt_id: u64 },
 }
 
 /// The three-way commit outcome (#3041 §3). `Unknown` is the safety value for
