@@ -1066,11 +1066,10 @@ mod loader_gate_observation_tests",
                 .count(),
             1,
         );
+        let stale_decision = public_loader.rsplit_once("            if let Some(reason) =\n                stale_removal_reason_for_path(&path, &locked_state, current_generation)").unwrap().1.split_once("\n        if finalizer_backfilled {").unwrap().0;
         assert_eq!(
-            public_loader
-                .matches("loader_gate_refuses_with_allocation(&locked_state, allocation)")
-                .count(),
-            1,
+            stale_decision,
+            "\n            {\n                if loader_gate_refuses_with_allocation(&locked_state, allocation) {\n                    record_loader_generation_gate(&locked_state, allocation, &path);\n                } else {\n                    emit_loader_generation_gate_allowed(provider, &locked_state, allocation, &path);\n                    let ts = chrono::Local::now().format(\"%H:%M:%S\");\n                    tracing::info!(\"  [{ts}] ⚠ {}: {}\", reason, path.display());\n                    log_loader_inflight_remove(\n                        provider,\n                        locked_state.channel_id,\n                        locked_state.user_msg_id,\n                        \"load_inflight_states_from_root_stale\",\n                        &path,\n                        Some(&locked_state),\n                        current_generation,\n                    );\n                    let _ = fs::remove_file(&path);\n                    continue;\n                }\n            }\n            finalizer_backfilled = false;\n            state = locked_state;\n        }"
         );
         assert!(!public_loader.contains("allocation.epoch_route()"));
         assert!(!public_loader.contains("allocation.epoch_advanced()"));
