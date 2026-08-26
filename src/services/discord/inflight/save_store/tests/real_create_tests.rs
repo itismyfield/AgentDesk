@@ -46,7 +46,6 @@ fn typed_real_create_api_records_successful_turn_births() {
         }],
     );
 }
-
 #[test]
 fn both_real_turn_call_sites_use_the_typed_create_api() {
     fn collect_typed_api_files(dir: &Path, root: &Path, found: &mut Vec<String>) {
@@ -58,29 +57,32 @@ fn both_real_turn_call_sites_use_the_typed_create_api() {
                 collect_typed_api_files(&path, root, found);
             } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
                 let source = std::fs::read_to_string(&path).expect("Rust source");
-                if source.contains(concat!("save_real_inflight_state_", "create_new("))
-                    || source.contains(concat!("RealInflightCreate::", "new("))
-                {
-                    found.push(
-                        path.strip_prefix(root)
-                            .expect("source under root")
-                            .to_string_lossy()
-                            .replace('\\', "/"),
-                    );
+                let api = source
+                    .matches(concat!("save_real_inflight_state_", "create_new"))
+                    .count();
+                let input = source.matches(concat!("RealInflight", "Create")).count();
+                if api + input > 0 {
+                    let relative = path
+                        .strip_prefix(root)
+                        .expect("source under root")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    found.push(format!("{relative}:{api}:{input}"));
                 }
             }
         }
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut typed_api_files = Vec::new();
-    collect_typed_api_files(&root.join("src"), root, &mut typed_api_files);
-    typed_api_files.sort();
+    let mut found = Vec::new();
+    collect_typed_api_files(&root.join("src"), root, &mut found);
+    found.sort();
     assert_eq!(
-        typed_api_files,
+        found,
         vec![
-            "src/services/discord/inflight/save_store.rs",
-            "src/services/discord/router/message_handler/headless_turn.rs",
-            "src/services/discord/router/message_handler/intake_turn.rs",
+            "src/services/discord/inflight.rs:1:1",
+            "src/services/discord/inflight/save_store.rs:2:4",
+            "src/services/discord/router/message_handler/headless_turn.rs:1:1",
+            "src/services/discord/router/message_handler/intake_turn.rs:1:1",
         ],
         "the real-create observer capability must have exactly two production callers",
     );
@@ -96,14 +98,13 @@ fn both_real_turn_call_sites_use_the_typed_create_api() {
         );
         assert_eq!(
             source
-                .matches(concat!("RealInflightCreate::", "new(&inflight_state)"))
+                .matches(concat!("RealInflight", "Create::new(&inflight_state)"))
                 .count(),
             1,
             "{name} must construct the typed real-turn input at its birth site",
         );
     }
 }
-
 #[cfg(unix)]
 #[test]
 fn real_create_observes_while_sidecar_flock_is_held() {
@@ -149,7 +150,6 @@ fn real_create_observes_while_sidecar_flock_is_held() {
         "the flock assertion hook must execute"
     );
 }
-
 #[test]
 fn failed_sync_does_not_stamp_real_create_witness() {
     let temp = tempfile::TempDir::new().expect("runtime root");
