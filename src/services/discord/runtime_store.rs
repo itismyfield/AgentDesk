@@ -347,6 +347,14 @@ mod test_generation_publication {
         Err(std::io::Error::other("injected parent sync failure"))
     }
 
+    pub(in crate::services::discord) fn publish(
+        allocated: ProcessGenerationAllocation,
+    ) -> Publication {
+        Publication {
+            previous_binding: BINDING.replace(Some(allocated)),
+        }
+    }
+
     pub(in crate::services::discord) fn allocate_and_publish(
         parent_sync_succeeds: bool,
     ) -> Publication {
@@ -371,6 +379,7 @@ mod test_generation_publication {
 pub(in crate::services::discord) use test_generation_publication::{
     allocate_and_publish as allocate_and_publish_process_generation_for_tests,
     allocation as process_generation_allocation_for_tests,
+    publish as publish_process_generation_allocation_for_tests,
 };
 
 // </epoch-provenance-surface>

@@ -776,13 +776,24 @@ mod loader_gate_observation_tests {
         state
     }
 
-    fn allocation(
-        generation: u64,
-        route: crate::services::discord::runtime_store::GenerationAllocationRoute,
-    ) -> crate::services::discord::runtime_store::ProcessGenerationAllocation {
-        crate::services::discord::runtime_store::process_generation_allocation_for_tests(
-            generation, route,
-        )
+    #[rustfmt::skip]
+    fn allocation(generation: u64, route: crate::services::discord::runtime_store::GenerationAllocationRoute) -> crate::services::discord::runtime_store::ProcessGenerationAllocation {
+        crate::services::discord::runtime_store::process_generation_allocation_for_tests(generation, route)
+    }
+
+    #[rustfmt::skip]
+    fn route_cases() -> [(crate::services::discord::runtime_store::GenerationAllocationRoute, u64, u64, &'static str, bool); 8] {
+        use crate::services::discord::runtime_store::GenerationAllocationRoute as R;
+        [
+            (R::AdvancedWithSyncedRename, 5462, 5461, "advanced_with_synced_rename", true),
+            (R::ParentSyncFailed, 5462, 5461, "parent_sync_failed", false),
+            (R::CounterReadFailed, 1, 0, "counter_read_failed", false),
+            (R::Saturated, u64::MAX, u64::MAX - 1, "saturated", false),
+            (R::WriteFailed, 5461, 5460, "write_failed", false),
+            (R::LockFailed, 5461, 5460, "lock_failed", false),
+            (R::PathUnavailable, 0, 5461, "path_unavailable", false),
+            (R::Unwitnessed, 5461, 5460, "unwitnessed", false),
+        ]
     }
 
     fn emitted_allow_payload(channel_id: u64) -> serde_json::Value {
@@ -849,10 +860,7 @@ mod loader_gate_observation_tests {
         emit_loader_generation_gate_allowed(
             &ProviderKind::Claude,
             &state,
-            crate::services::discord::runtime_store::process_generation_allocation_for_tests(
-                54_62,
-                crate::services::discord::runtime_store::GenerationAllocationRoute::AdvancedWithSyncedRename,
-            ),
+            allocation(54_62, crate::services::discord::runtime_store::GenerationAllocationRoute::AdvancedWithSyncedRename),
             Path::new("/tmp/54630.json"),
         );
 
@@ -874,10 +882,7 @@ mod loader_gate_observation_tests {
         emit_loader_generation_gate_allowed(
             &ProviderKind::Claude,
             &state,
-            crate::services::discord::runtime_store::process_generation_allocation_for_tests(
-                54_62,
-                crate::services::discord::runtime_store::GenerationAllocationRoute::AdvancedWithSyncedRename,
-            ),
+            allocation(54_62, crate::services::discord::runtime_store::GenerationAllocationRoute::AdvancedWithSyncedRename),
             Path::new("/tmp/54631.json"),
         );
 
@@ -899,26 +904,8 @@ mod loader_gate_observation_tests {
 
     #[test]
     fn allocation_route_is_observed_but_never_changes_loader_preservation() {
-        use crate::services::discord::runtime_store::GenerationAllocationRoute as R;
-
-        for (index, (route, generation, stale, expected_route, expected_advanced)) in [
-            (
-                R::AdvancedWithSyncedRename,
-                5462,
-                5461,
-                "advanced_with_synced_rename",
-                true,
-            ),
-            (R::ParentSyncFailed, 5462, 5461, "parent_sync_failed", false),
-            (R::CounterReadFailed, 1, 0, "counter_read_failed", false),
-            (R::Saturated, u64::MAX, u64::MAX - 1, "saturated", false),
-            (R::WriteFailed, 5461, 5460, "write_failed", false),
-            (R::LockFailed, 5461, 5460, "lock_failed", false),
-            (R::PathUnavailable, 0, 5461, "path_unavailable", false),
-            (R::Unwitnessed, 5461, 5460, "unwitnessed", false),
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, (route, generation, stale, expected_route, expected_advanced)) in
+            route_cases().into_iter().enumerate()
         {
             let bound = allocation(generation, route);
             let matching = row(61_000 + index as u64 * 2, bound.generation, Some("named"));
@@ -960,60 +947,71 @@ mod loader_gate_observation_tests {
         }
     }
 
+    fn assert_public_loader_pair(
+        root: &Path,
+        index: usize,
+        bound: crate::services::discord::runtime_store::ProcessGenerationAllocation,
+        stale: u64,
+    ) {
+        let _publication =
+            crate::services::discord::runtime_store::publish_process_generation_allocation_for_tests(bound);
+        for (offset, born, matching) in [(0, bound.generation, true), (1, stale, false)] {
+            let state = row(63_000 + index as u64 * 2 + offset, born, Some("named"));
+            let path = seed_stale(root, &state);
+            let loaded = load_inflight_states_for_probe_from_root(root, &ProviderKind::Claude);
+            let refused = matching && bound.generation != 0;
+            assert_eq!(path.exists(), refused);
+            assert_eq!(
+                loaded
+                    .states
+                    .iter()
+                    .any(|row| row.channel_id == state.channel_id),
+                refused
+            );
+            let payload = if refused {
+                emitted_refusal_payload(state.channel_id)
+            } else {
+                emitted_allow_payload(state.channel_id)
+            };
+            assert_eq!(payload["current_generation"], bound.generation);
+            assert_eq!(payload["epoch_route"], bound.epoch_route());
+            assert_eq!(payload["epoch_advanced"], bound.epoch_advanced());
+            if !refused {
+                assert_eq!(payload["current_generation_row"], false);
+            }
+        }
+    }
+
     #[test]
     fn public_loader_observes_production_shaped_published_routes() {
-        for (index, (parent_sync_succeeds, expected_route)) in [
+        let _tmux_lock = super::super::stall_recovery_tests::stale_override_test_mutex()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+        set_test_tmux_alive_override(Some(&[]));
+        let _tmux_override = TmuxAliveOverrideReset;
+        for (sync, expected) in [
             (false, "parent_sync_failed"),
             (true, "advanced_with_synced_rename"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let _tmux_lock = super::super::stall_recovery_tests::stale_override_test_mutex()
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-            let root = tempfile::tempdir().expect("temp root");
+        ] {
+            let root = tempfile::tempdir().unwrap();
             let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
                 "AGENTDESK_ROOT_DIR",
                 root.path(),
             );
-            crate::services::discord::runtime_store::set_process_generation_for_tests(None);
             seed_generation_counter(root.path(), 54_61);
             let _publication =
-                crate::services::discord::runtime_store::allocate_and_publish_process_generation_for_tests(
-                    parent_sync_succeeds,
-                );
-            set_test_tmux_alive_override(Some(&[]));
-            let _tmux_override = TmuxAliveOverrideReset;
-
-            let inflight_root = root.path().join("runtime").join("discord_inflight");
-            let matching = row(63_000 + index as u64 * 2, 54_62, Some("named"));
-            let matching_path = seed_stale(&inflight_root, &matching);
-            let loaded =
-                load_inflight_states_for_probe_from_root(&inflight_root, &ProviderKind::Claude);
-            assert_eq!(loaded.states.len(), 1);
-            assert!(matching_path.exists());
-            let refusal = emitted_refusal_payload(matching.channel_id);
-            assert_eq!(refusal["current_generation"], 54_62);
-            assert_eq!(refusal["epoch_route"], expected_route);
-            assert_eq!(refusal["epoch_advanced"], parent_sync_succeeds);
-
-            let nonmatching = row(63_001 + index as u64 * 2, 54_61, Some("named"));
-            let nonmatching_path = seed_stale(&inflight_root, &nonmatching);
-            let loaded =
-                load_inflight_states_for_probe_from_root(&inflight_root, &ProviderKind::Claude);
-            assert!(
-                loaded
-                    .states
-                    .iter()
-                    .all(|state| state.channel_id != nonmatching.channel_id)
+                crate::services::discord::runtime_store::allocate_and_publish_process_generation_for_tests(sync);
+            assert_eq!(
+                crate::services::discord::runtime_store::process_generation_binding().epoch_route(),
+                expected
             );
-            assert!(!nonmatching_path.exists());
-            let allowed = emitted_allow_payload(nonmatching.channel_id);
-            assert_eq!(allowed["current_generation"], 54_62);
-            assert_eq!(allowed["epoch_route"], expected_route);
-            assert_eq!(allowed["epoch_advanced"], parent_sync_succeeds);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let inflight_root = root.path().join("runtime").join("discord_inflight");
+        for (index, (route, generation, stale, _, _)) in route_cases().into_iter().enumerate() {
+            assert_public_loader_pair(&inflight_root, index, allocation(generation, route), stale);
         }
     }
 
