@@ -59,12 +59,41 @@ pub(crate) enum RestartTerminalProof {
     Pending,
 }
 
-pub(crate) fn terminal_proof(root: &Path, nonce: &str) -> RestartTerminalProof {
-    if persisted_proof(root, nonce) == TerminalProof::Proven {
-        RestartTerminalProof::Persisted
-    } else if artifact_proof(root, "restart_cancelled", nonce) == TerminalProof::Proven {
-        RestartTerminalProof::Cancelled
-    } else {
-        RestartTerminalProof::Pending
+fn terminal_proof_with_readers(
+    mut read_persisted: impl FnMut() -> TerminalProof,
+    mut read_cancelled: impl FnMut() -> TerminalProof,
+) -> RestartTerminalProof {
+    match read_persisted() {
+        TerminalProof::Proven => return RestartTerminalProof::Persisted,
+        // A legacy index is not success proof, but it was published after the
+        // cancellation record and therefore suppresses a cancelled verdict.
+        TerminalProof::LegacyIndexOnly => return RestartTerminalProof::Pending,
+        TerminalProof::Absent => {}
     }
+
+    if read_cancelled() != TerminalProof::Proven {
+        return RestartTerminalProof::Pending;
+    }
+
+    // Persisted wins if it lands between the first read and cancellation.
+    match read_persisted() {
+        TerminalProof::Proven => RestartTerminalProof::Persisted,
+        TerminalProof::LegacyIndexOnly => RestartTerminalProof::Pending,
+        TerminalProof::Absent => RestartTerminalProof::Cancelled,
+    }
+}
+
+pub(crate) fn terminal_proof(root: &Path, nonce: &str) -> RestartTerminalProof {
+    terminal_proof_with_readers(
+        || persisted_proof(root, nonce),
+        || artifact_proof(root, "restart_cancelled", nonce),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn terminal_proof_with_test_readers(
+    read_persisted: impl FnMut() -> TerminalProof,
+    read_cancelled: impl FnMut() -> TerminalProof,
+) -> RestartTerminalProof {
+    terminal_proof_with_readers(read_persisted, read_cancelled)
 }

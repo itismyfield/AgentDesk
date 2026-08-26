@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use super::dcserver_restart_marker::{
     QuickRestartMarker, RestartMarkerCreateError, create_quick_restart_marker,
 };
+#[cfg(test)]
+use super::restart_terminal_proof::TerminalProof;
 use super::restart_terminal_proof::{RestartTerminalProof, terminal_proof};
 
 const DEFERRED_TIMEOUT: Duration = Duration::from_secs(30);
@@ -476,5 +478,23 @@ mod tests {
         let result = wait_for_created_marker(root.path(), &marker, &recorder);
         assert_eq!(result, WaitTermination::TimeoutWithoutProof);
         assert!(marker.path().exists());
+
+        write_terminal(root.path(), "restart_cancelled", marker.nonce());
+        assert_eq!(
+            terminal_proof(root.path(), marker.nonce()),
+            RestartTerminalProof::Pending,
+            "a legacy persisted index suppresses cancellation without becoming success proof"
+        );
+
+        let mut persisted_reads = [TerminalProof::Absent, TerminalProof::Proven].into_iter();
+        assert_eq!(
+            super::super::restart_terminal_proof::terminal_proof_with_test_readers(
+                || persisted_reads.next().expect("two persisted reads"),
+                || TerminalProof::Proven,
+            ),
+            RestartTerminalProof::Persisted,
+            "persisted published after the first read must win over cancellation"
+        );
+        assert!(persisted_reads.next().is_none());
     }
 }
