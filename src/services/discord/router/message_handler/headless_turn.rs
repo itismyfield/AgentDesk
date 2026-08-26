@@ -1072,7 +1072,9 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     inflight_state.silent_turn = metadata_silent_flag(metadata.as_ref());
     inflight_state.source = metadata_turn_source(source, metadata.as_ref());
     super::intake_turn::inflight_create_log::log_create_new_inflight_outcome(
-        crate::services::discord::inflight::save_inflight_state_create_new(&inflight_state),
+        crate::services::discord::inflight::save_real_inflight_state_create_new(
+            crate::services::discord::inflight::RealInflightCreate::new(&inflight_state),
+        ),
         &provider,
         &inflight_state,
     );

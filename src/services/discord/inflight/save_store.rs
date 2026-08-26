@@ -13,6 +13,8 @@
 
 use super::*;
 
+#[path = "save_store/create_monotonic_observer.rs"]
+mod create_monotonic_observer;
 #[path = "save_store/delivery_rewind.rs"]
 mod delivery_rewind;
 #[path = "save_store/identity_gate.rs"]
@@ -145,6 +147,12 @@ mod tests {
         state.turn_start_offset = None;
         state
     }
+
+    fn create_real_for_test(state: &InflightTurnState) -> Result<(), CreateNewInflightError> {
+        save_real_inflight_state_create_new(RealInflightCreate::new(state))
+    }
+
+    mod real_create_tests;
 
     fn api_friction_response_pair() -> (String, String) {
         let raw = concat!(
@@ -851,6 +859,30 @@ mod tests {
     }
 }
 
+/// Typed input accepted only by the real Discord/headless turn birth API.
+/// Synthetic recovery and manual rebind callers keep using the unobserved
+/// `save_inflight_state_create_new` API below.
+pub(in crate::services::discord) struct RealInflightCreate<'a> {
+    state: &'a InflightTurnState,
+}
+
+impl<'a> RealInflightCreate<'a> {
+    pub(in crate::services::discord) fn new(state: &'a InflightTurnState) -> Self {
+        Self { state }
+    }
+}
+
+pub(in crate::services::discord) fn save_real_inflight_state_create_new(
+    create: RealInflightCreate<'_>,
+) -> Result<(), CreateNewInflightError> {
+    let Some(root) = inflight_runtime_root() else {
+        return Err(CreateNewInflightError::Internal(
+            "Home directory not found".to_string(),
+        ));
+    };
+    save_inflight_state_create_new_in_root(&root, create.state, true)
+}
+
 pub(in crate::services::discord) fn save_inflight_state_create_new(
     state: &InflightTurnState,
 ) -> Result<(), CreateNewInflightError> {
@@ -859,7 +891,7 @@ pub(in crate::services::discord) fn save_inflight_state_create_new(
             "Home directory not found".to_string(),
         ));
     };
-    save_inflight_state_create_new_in_root(&root, state)
+    save_inflight_state_create_new_in_root(&root, state, false)
 }
 
 /// Test-visible inner form of `save_inflight_state_create_new`. Takes an
@@ -868,6 +900,7 @@ pub(in crate::services::discord) fn save_inflight_state_create_new(
 fn save_inflight_state_create_new_in_root(
     root: &Path,
     state: &InflightTurnState,
+    observe_real_create: bool,
 ) -> Result<(), CreateNewInflightError> {
     let Some(provider) = state.provider_kind() else {
         return Err(CreateNewInflightError::Internal(format!(
@@ -905,8 +938,15 @@ fn save_inflight_state_create_new_in_root(
         Ok(mut file) => {
             file.write_all(json.as_bytes())
                 .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
+            #[cfg(not(test))]
             file.sync_all()
                 .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
+            #[cfg(test)]
+            create_monotonic_observer::test_seams::sync_result(&file)
+                .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
+            if observe_real_create {
+                create_monotonic_observer::observe_successful_real_create(&updated);
+            }
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {

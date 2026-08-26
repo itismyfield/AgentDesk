@@ -472,3 +472,21 @@ mod relay_state_contract_refs {
         use super::validate_inflight_state_for_save as _;
     }
 }
+
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) fn second_fd_cannot_take_lock_nonblocking(path: &Path) -> bool {
+    // BSD flock is process-associated and fork inherits the parent's lock.
+    // Exec a fresh process so its open is a genuinely independent second fd.
+    let lock_path = inflight_state_lock_path(path);
+    std::process::Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import fcntl,sys; f=open(sys.argv[1],'a+'); \
+             blocked=False; \
+             exec(\"try:\\n fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)\\nexcept BlockingIOError:\\n blocked=True\"); \
+             sys.exit(0 if blocked else 1)",
+        )
+        .arg(lock_path)
+        .status()
+        .is_ok_and(|status| status.success())
+}

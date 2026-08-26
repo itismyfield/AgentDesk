@@ -164,7 +164,7 @@ async fn count_signal_last_hour_pg(pool: &PgPool, signal: &RelaySignal) -> Resul
 
 pub(super) fn relay_alert_content(signal: &RelaySignal, count: i64, threshold: u32) -> String {
     format!(
-        "릴레이 누락 신호 임계 초과: `{}` ({}) 최근 1시간 {count}건 (임계 {threshold}). 운영 점검 필요.",
+        "릴레이 이상 신호 임계 초과: `{}` ({}) 최근 1시간 {count}건 (임계 {threshold}). 운영 점검 필요.",
         signal.key, signal.label,
     )
 }
@@ -355,6 +355,19 @@ mod tests {
                 "relay signal table must monitor {expected}; present: {keys:?}"
             );
         }
+        let offset_signal = RELAY_SIGNAL_DEFINITIONS
+            .iter()
+            .find(|signal| signal.key == "offset_invariant_violation")
+            .expect("offset signal");
+        assert_eq!(
+            offset_signal.statuses,
+            &[
+                "last_offset_monotonic",
+                "response_sent_offset_monotonic",
+                "turn_start_offset_monotonic",
+            ],
+            "all three offset invariants must stay wired to operator alerts",
+        );
     }
 
     /// #3579: the operator alert table must NEVER count the watcher-owned
