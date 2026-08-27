@@ -158,17 +158,10 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             report_channel_id,
             report_provider,
             report_message_id,
-        } => {
-            match build_restart_report_context(
-                report_channel_id,
-                report_provider,
-                report_message_id,
-            ) {
-                Ok(context) => super::handle_restart_dcserver(context),
-                Err(error) => eprintln!("Error: {error}"),
-            }
-            Ok(())
-        }
+        } => exit_for_cli(
+            build_restart_report_context(report_channel_id, report_provider, report_message_id)
+                .and_then(super::handle_restart_dcserver),
+        ),
         Commands::DiscordSendfile { path, channel, key } => {
             super::handle_discord_sendfile(&path, channel, &key);
             Ok(())

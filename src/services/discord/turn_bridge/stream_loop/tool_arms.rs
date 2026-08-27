@@ -298,25 +298,23 @@ pub(super) async fn handle_stream_tool_message(
                     any_tool_used: &mut any_tool_used,
                     has_post_tool_text: &mut has_post_tool_text,
                 });
-                restart_visible_authority = Some(authority);
+                if authority != VisibleMutationAuthority::Authorized {
+                    restart_visible_authority = Some(authority);
+                }
                 authority == VisibleMutationAuthority::Authorized
             } else {
                 false
             };
             if restart_bridge_authorized {
-                let mut report = RestartCompletionReport::new(
-                    provider.clone(),
+                if write_tool_arm_pending_restart_report(
+                    &provider,
                     channel_id.get(),
-                    "pending",
-                    format!(
-                        "dcserver restart requested by `{}`; 새 프로세스가 후속 보고를 이어받을 예정입니다.",
-                        request_owner_name
-                    ),
-                );
-                report.current_msg_id =
-                    optional_durable_current_msg_id_from_detached(*current_msg_id);
-                report.channel_name = adk_session_name.clone();
-                if save_restart_report(&report).is_ok() {
+                    optional_durable_current_msg_id_from_detached(*current_msg_id),
+                    adk_session_name.clone(),
+                    request_owner_name,
+                )
+                .is_ok()
+                {
                     restart_followup_pending = true;
                     inflight_state.set_restart_mode(
                         crate::services::discord::InflightRestartMode::DrainRestart,

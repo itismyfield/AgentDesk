@@ -216,7 +216,12 @@ fn tool_arms_derive_the_four_excluded_tool_line_locals_around_their_fences() {
             .unwrap_or_else(|| panic!("tool_arms.rs must still contain `{needle}`"))
     };
 
+    let writer = find("write_tool_arm_pending_restart_report(");
+    let pending = find("restart_followup_pending = true;");
     let restart_fence = find("fence_restart_visible_mutation(");
+    assert_eq!(arms[writer..pending].matches(".is_ok()").count(), 1);
+    let cli = include_str!("../../../../../cli/run.rs");
+    assert!(cli.contains(".and_then(super::handle_restart_dcserver)"));
     let result_fence = find("fence_terminal_tool_result_transition(");
     assert!(
         restart_fence < result_fence,

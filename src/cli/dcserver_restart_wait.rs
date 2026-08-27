@@ -31,7 +31,17 @@ enum QuickRestartRun {
 impl QuickRestartRun {
     fn outcome(self) -> QuickRestartOutcome {
         match self {
-            Self::Handled(_) => QuickRestartOutcome::Handled,
+            Self::Handled(WaitTermination::Persisted) => QuickRestartOutcome::Completed,
+            Self::Handled(WaitTermination::AlreadyOwned) => QuickRestartOutcome::AlreadyOwned,
+            Self::Handled(termination) => QuickRestartOutcome::Failed(match termination {
+                WaitTermination::CreateFailed => "restart marker creation failed",
+                WaitTermination::Cancelled => "dcserver cancelled the restart",
+                WaitTermination::ProcessGoneWithoutProof => {
+                    "dcserver exited without terminal proof"
+                }
+                WaitTermination::TimeoutWithoutProof => "restart timed out without terminal proof",
+                WaitTermination::AlreadyOwned | WaitTermination::Persisted => unreachable!(),
+            }),
             Self::NoRuntimeRoot => QuickRestartOutcome::NoRuntimeRoot,
         }
     }
@@ -39,7 +49,9 @@ impl QuickRestartRun {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum QuickRestartOutcome {
-    Handled,
+    Completed,
+    AlreadyOwned,
+    Failed(&'static str),
     NoRuntimeRoot,
 }
 
@@ -324,6 +336,7 @@ mod tests {
             result,
             QuickRestartRun::Handled(WaitTermination::AlreadyOwned)
         );
+        assert_eq!(result.outcome(), QuickRestartOutcome::AlreadyOwned);
         assert_eq!(
             fs::read_to_string(root.path().join("restart_pending")).unwrap(),
             existing
@@ -345,6 +358,7 @@ mod tests {
             result,
             QuickRestartRun::Handled(WaitTermination::CreateFailed)
         );
+        assert!(matches!(result.outcome(), QuickRestartOutcome::Failed(_)));
         assert!(recorder.stderr.borrow()[0].starts_with("   ⚠ Failed to write restart marker "));
     }
 

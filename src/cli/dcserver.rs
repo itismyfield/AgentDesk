@@ -561,11 +561,11 @@ pub fn parse_restart_dcserver_report_context(
 }
 pub fn handle_restart_dcserver(
     report_context_override: Option<services::discord::restart_report::RestartReportContext>,
-) {
+) -> Result<(), String> {
     use services::discord::load_discord_bot_launch_configs;
     use services::discord::restart_report::{
-        RestartCompletionReport, load_restart_report, restart_report_context_from_env,
-        save_restart_report,
+        cancel_pending_restart_report, restart_report_context_from_env,
+        write_cli_pending_restart_report,
     };
     const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -616,35 +616,23 @@ pub fn handle_restart_dcserver(
         .and_then(read_release_link_target);
 
     if let Some(context) = report_context.as_ref() {
-        let mut pending_report = RestartCompletionReport::new(
-            context.provider.clone(),
-            context.channel_id,
-            "pending",
-            "dcserver restart requested; 새 프로세스가 completion follow-up을 이어받는 중입니다.",
-        );
-        if let Some(existing) = load_restart_report(&context.provider, context.channel_id) {
-            pending_report.current_msg_id = existing.current_msg_id;
-            pending_report.user_msg_id = existing.user_msg_id;
-        }
-        if pending_report.current_msg_id.is_none() {
-            pending_report.current_msg_id = context.current_msg_id;
-        }
-        if let Err(e) = save_restart_report(&pending_report) {
-            eprintln!("⚠ failed to save pending restart follow-up report: {e}");
-        }
+        write_cli_pending_restart_report(context)
+            .map_err(|error| format!("restart follow-up not armed: {error}"))?;
     }
 
-    // Quick restart (#2713): write marker file and wait for dcserver to
-    // self-exit after persisting cheap queue/checkpoint state. Active TUI/tmux
-    // turns survive and are rehydrated by the new process.
-    if matches!(
-        super::dcserver_restart_wait::run_quick_restart_with_production_effects(
-            agentdesk_runtime_root().as_deref(),
-            VERSION,
-        ),
-        super::dcserver_restart_wait::QuickRestartOutcome::Handled
+    match super::dcserver_restart_wait::run_quick_restart_with_production_effects(
+        agentdesk_runtime_root().as_deref(),
+        VERSION,
     ) {
-        return;
+        super::dcserver_restart_wait::QuickRestartOutcome::Completed
+        | super::dcserver_restart_wait::QuickRestartOutcome::AlreadyOwned => return Ok(()),
+        super::dcserver_restart_wait::QuickRestartOutcome::Failed(reason) => {
+            if let Some(context) = report_context.as_ref() {
+                let _ = cancel_pending_restart_report(context);
+            }
+            return Err(format!("quick restart failed: {reason}"));
+        }
+        super::dcserver_restart_wait::QuickRestartOutcome::NoRuntimeRoot => {}
     }
 
     // The supervisor fallback is reachable only when there is no runtime root;
@@ -662,27 +650,24 @@ pub fn handle_restart_dcserver(
                     "✅ Discord bot restarted via launchd '{}' and passed ready check",
                     launchd_label
                 );
-                return;
+                return Ok(());
             }
-            Err(e) => {
-                eprintln!("⚠ launchd restart verification failed: {e}");
-                if let Some(prev) = previous_release.as_ref() {
-                    eprintln!("↩ rolling back current release to {}", prev.display());
-                    match rollback_to_previous_release(&launchd_label, READY_TIMEOUT) {
-                        Ok(restored) => {
-                            println!(
-                                "✅ Rolled back to {} and dcserver passed ready check",
-                                restored.display()
-                            );
-                        }
-                        Err(rollback_err) => {
-                            eprintln!("❌ Rollback failed: {rollback_err}");
-                        }
-                    }
-                } else {
-                    eprintln!("⚠ no previous release link available for rollback");
+            Err(error) => {
+                if let Some(previous) = previous_release.as_ref() {
+                    eprintln!("↩ rolling back current release to {}", previous.display());
+                    return match rollback_to_previous_release(&launchd_label, READY_TIMEOUT) {
+                        Ok(restored) => Err(format!(
+                            "launchd restart failed ({error}); rolled back to {}",
+                            restored.display()
+                        )),
+                        Err(rollback_error) => Err(format!(
+                            "launchd restart failed ({error}); rollback failed: {rollback_error}"
+                        )),
+                    };
                 }
-                return;
+                return Err(format!(
+                    "launchd restart failed ({error}); no previous release available"
+                ));
             }
         }
     }
@@ -692,39 +677,25 @@ pub fn handle_restart_dcserver(
     // running a separate tmux process alongside the supervisor would cause conflicts.
     if is_systemd_service_enabled() || is_systemd_service_active() {
         println!("   systemd user service detected: {}", SYSTEMD_SERVICE_NAME);
-        match restart_systemd_dcserver_and_verify(READY_TIMEOUT) {
-            Ok(()) => {
-                println!(
-                    "✅ Discord bot restarted via systemd '{}' and passed ready check",
-                    SYSTEMD_SERVICE_NAME
-                );
-            }
-            Err(e) => {
-                eprintln!("❌ systemd restart verification failed: {e}");
-                eprintln!("   Hint: check logs with 'journalctl --user -u {SYSTEMD_SERVICE_NAME}'");
-            }
-        }
-        return;
+        restart_systemd_dcserver_and_verify(READY_TIMEOUT)
+            .map_err(|error| format!("systemd restart verification failed: {error}"))?;
+        println!(
+            "✅ Discord bot restarted via systemd '{}' and passed ready check",
+            SYSTEMD_SERVICE_NAME
+        );
+        return Ok(());
     }
 
     // Windows service restart path
     if is_windows_service_installed() {
         println!("   Windows service detected: {}", WINDOWS_SERVICE_NAME);
-        match restart_windows_dcserver_and_verify(READY_TIMEOUT) {
-            Ok(()) => {
-                println!(
-                    "✅ Discord bot restarted via Windows service '{}' and passed ready check",
-                    WINDOWS_SERVICE_NAME
-                );
-            }
-            Err(e) => {
-                eprintln!("❌ Windows service restart failed: {e}");
-                eprintln!(
-                    "   Hint: check with 'nssm status {WINDOWS_SERVICE_NAME}' or 'sc query {WINDOWS_SERVICE_NAME}'"
-                );
-            }
-        }
-        return;
+        restart_windows_dcserver_and_verify(READY_TIMEOUT)
+            .map_err(|error| format!("Windows service restart failed: {error}"))?;
+        println!(
+            "✅ Discord bot restarted via Windows service '{}' and passed ready check",
+            WINDOWS_SERVICE_NAME
+        );
+        return Ok(());
     }
 
     // NOTE: We intentionally do NOT kill AgentDesk-* work sessions here.
@@ -734,8 +705,7 @@ pub fn handle_restart_dcserver(
     // Launch new dcserver inside the tmux fallback session recognized by startup doctor.
     // Write a launcher script to avoid token exposure in ps aux
     let Some(runtime_root) = agentdesk_runtime_root() else {
-        eprintln!("Error: Cannot determine runtime root");
-        return;
+        return Err("Cannot determine runtime root".to_string());
     };
     let scripts_dir = runtime_root.join("scripts");
     let _ = std::fs::create_dir_all(&scripts_dir);
@@ -756,10 +726,7 @@ pub fn handle_restart_dcserver(
         } else {
             match std::env::current_exe() {
                 Ok(p) => p.display().to_string(),
-                Err(e) => {
-                    eprintln!("Error: Cannot determine executable path: {e}");
-                    return;
-                }
+                Err(e) => return Err(format!("Cannot determine executable path: {e}")),
             }
         }
     };
@@ -788,8 +755,7 @@ pub fn handle_restart_dcserver(
         exe
     );
     if let Err(e) = std::fs::write(&launcher_path, &script) {
-        eprintln!("Error: Failed to write launcher script: {e}");
-        return;
+        return Err(format!("Failed to write launcher script: {e}"));
     }
     #[cfg(unix)]
     {
@@ -797,8 +763,7 @@ pub fn handle_restart_dcserver(
         if let Err(e) =
             std::fs::set_permissions(&launcher_path, std::fs::Permissions::from_mode(0o700))
         {
-            eprintln!("Error: Failed to set script permissions: {e}");
-            return;
+            return Err(format!("Failed to set script permissions: {e}"));
         }
     }
 
@@ -818,41 +783,27 @@ pub fn handle_restart_dcserver(
 
     match create_result {
         Ok(output) if output.status.success() => {
-            // Verify the session exists
-            if crate::services::platform::tmux::has_session(tmux_session) {
-                // Use current log size as offset to avoid matching stale "Bot connected" lines
-                let log_offset = dcserver_stdout_log_path()
-                    .and_then(|p| fs::metadata(&p).ok())
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                match verify_dcserver_ready_since(log_offset, READY_TIMEOUT) {
-                    Ok(()) => {
-                        println!(
-                            "✅ Discord bot started in tmux session '{}' and passed ready check",
-                            tmux_session
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "⚠ tmux session '{}' started but ready check failed: {}",
-                            tmux_session, e
-                        );
-                    }
-                }
-            } else {
-                eprintln!(
-                    "❌ tmux session '{}' failed to start. Check with: tmux a -t {}",
-                    tmux_session, tmux_session
-                );
+            if !crate::services::platform::tmux::has_session(tmux_session) {
+                return Err(format!("tmux session '{tmux_session}' failed to start"));
             }
+            let log_offset = dcserver_stdout_log_path()
+                .and_then(|p| fs::metadata(&p).ok())
+                .map(|m| m.len())
+                .unwrap_or(0);
+            verify_dcserver_ready_since(log_offset, READY_TIMEOUT).map_err(|error| {
+                format!("tmux session '{tmux_session}' ready check failed: {error}")
+            })?;
+            println!(
+                "✅ Discord bot started in tmux session '{}' and passed ready check",
+                tmux_session
+            );
+            Ok(())
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("❌ tmux new-session failed: {}", stderr.trim());
-        }
-        Err(e) => {
-            eprintln!("❌ Failed to start tmux session: {}", e);
-        }
+        Ok(output) => Err(format!(
+            "tmux new-session failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(error) => Err(format!("Failed to start tmux session: {error}")),
     }
 }
 
