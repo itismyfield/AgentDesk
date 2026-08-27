@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import type { Department } from "../../types";
@@ -82,6 +82,7 @@ export default function DepartmentFormModal({
 }) {
   const { t } = useI18n();
   const isEdit = !!department;
+  const iconBtnId = useId();
   const {
     register,
     handleSubmit,
@@ -312,18 +313,13 @@ export default function DepartmentFormModal({
             <div className="space-y-4">
               <div className="flex items-start gap-3">
                 <div>
-                  <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                  <label htmlFor={iconBtnId} className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                     {tr("아이콘", "Icon")}
                   </label>
                   <EmojiPicker
+                    id={iconBtnId}
                     value={form.icon}
                     onChange={(emoji) => setValue("icon", emoji, { shouldDirty: true, shouldValidate: true })}
-                    aria-label={
-                      form.icon
-                        ? t({ ko: `선택된 아이콘: ${form.icon}, 아이콘 변경`, en: `Selected icon: ${form.icon}, change icon` })
-                        : t({ ko: "아이콘 선택기 열기", en: "Open icon picker" })
-                    }
-                    dialogLabel={t({ ko: "아이콘 선택", en: "Choose an icon" })}
                   />
                 </div>
                 <div className="flex-1">
