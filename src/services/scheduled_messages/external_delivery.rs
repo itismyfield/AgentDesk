@@ -333,11 +333,7 @@ struct FinishResult<'a> {
     error_code: Option<&'a str>,
 }
 
-async fn finish(
-    pool: &sqlx::PgPool,
-    claim: &ClaimedExternalDelivery,
-    result: FinishResult<'_>,
-) {
+async fn finish(pool: &sqlx::PgPool, claim: &ClaimedExternalDelivery, result: FinishResult<'_>) {
     if let Err(error) = db::finish_external_delivery_pg(
         pool,
         db::ExternalDeliveryFinish {
