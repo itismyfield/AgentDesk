@@ -1427,6 +1427,13 @@ src/
 │   │   └── mod.rs
 │   ├── stale_turn_reconciler/
 │   │   └── test_barriers.rs
+│   ├── stream_json_cli/
+│   │   ├── codec.rs
+│   │   ├── mod.rs
+│   │   ├── policy.rs
+│   │   ├── request.rs
+│   │   ├── runner.rs
+│   │   └── session.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── extract.rs
 │   │   ├── observation.rs
