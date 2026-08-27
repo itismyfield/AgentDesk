@@ -859,39 +859,63 @@ mod tests {
     }
 }
 
-/// Typed input accepted only by the real Discord/headless turn birth API.
-/// Synthetic recovery and manual rebind callers keep using the unobserved
-/// `save_inflight_state_create_new` API below.
-pub(in crate::services::discord) struct RealInflightCreate<'a> {
-    state: &'a InflightTurnState,
-}
+/// Typed input for a real Discord/headless turn birth. Every successful write
+/// through this capability is observed for cross-turn coordinate regression.
+pub(in crate::services::discord) struct RealInflightCreate<'a>(&'a InflightTurnState);
 
 impl<'a> RealInflightCreate<'a> {
     pub(in crate::services::discord) fn new(state: &'a InflightTurnState) -> Self {
-        Self { state }
+        Self(state)
     }
+}
+
+/// Typed input for the two synthetic O_EXCL births. Construction rejects a
+/// real-shaped turn before the filesystem is touched, so production callers
+/// cannot use the unobserved path for a Discord/headless birth.
+pub(in crate::services::discord) struct SyntheticInflightCreate<'a>(&'a InflightTurnState);
+
+impl<'a> SyntheticInflightCreate<'a> {
+    pub(in crate::services::discord) fn new(
+        state: &'a InflightTurnState,
+    ) -> Result<Self, CreateNewInflightError> {
+        let synthetic = state.rebind_origin
+            && state.request_owner_user_id == 0
+            && state.user_msg_id == 0
+            && state.current_msg_id == 0
+            && matches!(
+                state.turn_source,
+                TurnSource::MonitorTriggered | TurnSource::ExternalAdopted
+            );
+        synthetic.then_some(Self(state)).ok_or_else(|| {
+            CreateNewInflightError::Internal(
+                "unobserved create-new requires a synthetic rebind-origin state".to_string(),
+            )
+        })
+    }
+}
+
+fn runtime_root_for_create() -> Result<PathBuf, CreateNewInflightError> {
+    inflight_runtime_root()
+        .ok_or_else(|| CreateNewInflightError::Internal("Home directory not found".to_string()))
 }
 
 pub(in crate::services::discord) fn save_real_inflight_state_create_new(
     create: RealInflightCreate<'_>,
 ) -> Result<(), CreateNewInflightError> {
-    let Some(root) = inflight_runtime_root() else {
-        return Err(CreateNewInflightError::Internal(
-            "Home directory not found".to_string(),
-        ));
-    };
-    save_inflight_state_create_new_in_root(&root, create.state, true)
+    save_inflight_state_create_new_in_root(&runtime_root_for_create()?, create.0, true)
 }
 
-pub(in crate::services::discord) fn save_inflight_state_create_new(
+pub(in crate::services::discord) fn save_synthetic_inflight_state_create_new(
+    create: SyntheticInflightCreate<'_>,
+) -> Result<(), CreateNewInflightError> {
+    save_inflight_state_create_new_in_root(&runtime_root_for_create()?, create.0, false)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn save_inflight_state_create_new_for_test(
     state: &InflightTurnState,
 ) -> Result<(), CreateNewInflightError> {
-    let Some(root) = inflight_runtime_root() else {
-        return Err(CreateNewInflightError::Internal(
-            "Home directory not found".to_string(),
-        ));
-    };
-    save_inflight_state_create_new_in_root(&root, state, false)
+    save_inflight_state_create_new_in_root(&runtime_root_for_create()?, state, false)
 }
 
 /// Test-visible inner form of `save_inflight_state_create_new`. Takes an

@@ -32,7 +32,8 @@ async fn durable_reattach_circuit_open_preserves_every_live_turn_authority() {
         0,
     );
     state.last_watcher_relayed_offset = Some(0);
-    super::super::super::inflight::save_inflight_state_create_new(&state).expect("seed inflight");
+    super::super::super::inflight::save_inflight_state_create_new_for_test(&state)
+        .expect("seed inflight");
     let (watcher, watcher_cancel) = test_watcher_handle(tmux_session, &output_path);
     shared.tmux_watchers.insert(channel, watcher);
 
@@ -174,7 +175,8 @@ async fn zero_originating_message_with_a_distinct_mailbox_anchor_reaches_reattac
     state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
     state.turn_nonce = Some("nonce-4974-zero-origin".to_string());
     state.set_relay_owner_kind(super::super::super::inflight::RelayOwnerKind::Watcher);
-    super::super::super::inflight::save_inflight_state_create_new(&state).expect("seed inflight");
+    super::super::super::inflight::save_inflight_state_create_new_for_test(&state)
+        .expect("seed inflight");
     let (watcher, old_cancel) = test_watcher_handle(&tmux_session, &output_path);
     watcher.last_heartbeat_ts_ms.store(1, Ordering::Release);
     shared.tmux_watchers.insert(channel, watcher);
@@ -290,7 +292,8 @@ async fn first_reserved_dead_frontier_apply_preserves_episode_and_reattaches_wat
     state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
     state.turn_nonce = Some("nonce-4465-first".to_string());
     state.set_relay_owner_kind(super::super::super::inflight::RelayOwnerKind::Watcher);
-    super::super::super::inflight::save_inflight_state_create_new(&state).expect("seed inflight");
+    super::super::super::inflight::save_inflight_state_create_new_for_test(&state)
+        .expect("seed inflight");
     let (watcher, old_cancel) = test_watcher_handle(&tmux_session, &output_path);
     watcher.last_heartbeat_ts_ms.store(1, Ordering::Release);
     shared.tmux_watchers.insert(channel, watcher);

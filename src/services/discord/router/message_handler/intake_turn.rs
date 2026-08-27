@@ -146,7 +146,7 @@ mod intake_outbox_state_builder_tests {
             )
         });
 
-        crate::services::discord::inflight::save_inflight_state_create_new(&state)
+        crate::services::discord::inflight::save_inflight_state_create_new_for_test(&state)
             .expect("persist inflight state with source ids");
         let persisted =
             crate::services::discord::inflight::load_inflight_state(&provider, channel_id)

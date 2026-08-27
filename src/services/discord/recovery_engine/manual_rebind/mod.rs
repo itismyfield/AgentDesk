@@ -728,7 +728,9 @@ async fn rebind_inflight_for_channel_inner(
         // synthetic rebind state (user_msg_id=0, placeholder ids zeroed) would
         // overwrite the real turn's canonical state and break its completion
         // path — the exact race the #897 P2 #1 review flagged.
-        match super::inflight::save_inflight_state_create_new(&state) {
+        match super::inflight::SyntheticInflightCreate::new(&state)
+            .and_then(super::inflight::save_synthetic_inflight_state_create_new)
+        {
             Ok(()) => {}
             Err(super::inflight::CreateNewInflightError::AlreadyExists) => {
                 return Err(RebindError::InflightAlreadyExists);
@@ -1168,7 +1170,7 @@ mod stall_watchdog_respawn_deadlock_tests {
         state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
 
         assert!(
-            super::inflight::save_inflight_state_create_new(&state).is_ok(),
+            super::inflight::save_inflight_state_create_new_for_test(&state).is_ok(),
             "row-absent respawn must keep succeeding through the atomic create-new path"
         );
         assert!(

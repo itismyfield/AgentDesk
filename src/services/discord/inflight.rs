@@ -154,12 +154,10 @@ use self::store::{
 // Save cluster re-exports (original visibility mirrored). The save child declares
 // these `pub(in crate::services::discord)` (the absolute spelling of the parent's
 // original `pub(super)`), so this `pub(super)` re-export does not widen the surface.
-#[cfg(test)]
-pub(super) use self::save_store::save_inflight_state;
 pub(super) use self::save_store::{
-    CreateNewInflightError, RealInflightCreate, save_inflight_delivery_rewind_if_matches_identity,
-    save_inflight_state_create_new, save_inflight_state_if_absent,
-    save_real_inflight_state_create_new,
+    CreateNewInflightError, RealInflightCreate, SyntheticInflightCreate,
+    save_inflight_delivery_rewind_if_matches_identity, save_inflight_state_if_absent,
+    save_real_inflight_state_create_new, save_synthetic_inflight_state_create_new,
 };
 pub(in crate::services::discord) use self::save_store::{
     GuardedSaveOutcome, StreamRelayAuthority, bind_recovery_anchor_if_matches_identity,
@@ -182,6 +180,8 @@ pub(in crate::services::discord) use self::save_store::{
     stamp_claude_e_process_if_matches_identity, stamp_runtime_handoff_if_matches_identity,
     touch_inflight_state_if_matches_identity,
 };
+#[cfg(test)]
+pub(super) use self::save_store::{save_inflight_state, save_inflight_state_create_new_for_test};
 // Explicit-root save seams reached only by the parent's / siblings' test modules.
 #[cfg(test)]
 use self::save_store::{

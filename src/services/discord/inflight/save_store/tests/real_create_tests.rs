@@ -1,4 +1,21 @@
 use super::*;
+
+fn real_state(channel_id: u64, output: &Path, offset: u64) -> InflightTurnState {
+    InflightTurnState::new(
+        ProviderKind::Codex,
+        channel_id,
+        None,
+        1,
+        2,
+        3,
+        "turn".to_string(),
+        None,
+        None,
+        Some(output.display().to_string()),
+        None,
+        offset,
+    )
+}
 #[test]
 fn typed_real_create_api_records_successful_turn_births() {
     let _lock = crate::config::shared_test_env_lock()
@@ -13,20 +30,7 @@ fn typed_real_create_api_records_successful_turn_births() {
     std::fs::write(&output, vec![b'a'; 512]).expect("write output");
     let channel_id = 54_900_008;
     create_monotonic_observer::test_seams::clear_key(ProviderKind::Codex, channel_id);
-    let higher = InflightTurnState::new(
-        ProviderKind::Codex,
-        channel_id,
-        None,
-        1,
-        2,
-        3,
-        "higher".to_string(),
-        None,
-        None,
-        Some(output.display().to_string()),
-        None,
-        256,
-    );
+    let higher = real_state(channel_id, &output, 256);
     create_real_for_test(&higher).expect("higher real create");
     let runtime_root = inflight_runtime_root().expect("runtime root");
     let sidecar = inflight_state_path(&runtime_root, &ProviderKind::Codex, channel_id);
@@ -47,63 +51,26 @@ fn typed_real_create_api_records_successful_turn_births() {
     );
 }
 #[test]
-fn both_real_turn_call_sites_use_the_typed_create_api() {
-    fn collect_typed_api_files(dir: &Path, root: &Path, found: &mut Vec<String>) {
-        for entry in std::fs::read_dir(dir).expect("read source directory") {
-            let entry = entry.expect("source entry");
-            let path = entry.path();
-            let file_type = entry.file_type().expect("source entry type");
-            if file_type.is_dir() {
-                collect_typed_api_files(&path, root, found);
-            } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
-                let source = std::fs::read_to_string(&path).expect("Rust source");
-                let api = source
-                    .matches(concat!("save_real_inflight_state_", "create_new"))
-                    .count();
-                let input = source.matches(concat!("RealInflight", "Create")).count();
-                if api + input > 0 {
-                    let relative = path
-                        .strip_prefix(root)
-                        .expect("source under root")
-                        .to_string_lossy()
-                        .replace('\\', "/");
-                    found.push(format!("{relative}:{api}:{input}"));
-                }
-            }
-        }
-    }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut found = Vec::new();
-    collect_typed_api_files(&root.join("src"), root, &mut found);
-    found.sort();
+fn create_new_inputs_separate_observed_real_from_checked_synthetic_births() {
+    let real = real_state(54_900_009, Path::new("/tmp/real.jsonl"), 0);
+    assert!(SyntheticInflightCreate::new(&real).is_err());
+
+    let mut synthetic = real.clone();
+    synthetic.request_owner_user_id = 0;
+    synthetic.user_msg_id = 0;
+    synthetic.current_msg_id = 0;
+    synthetic.rebind_origin = true;
+    synthetic.turn_source = TurnSource::MonitorTriggered;
+    assert!(SyntheticInflightCreate::new(&synthetic).is_ok());
+
+    let store = include_str!("../../save_store.rs");
     assert_eq!(
-        found,
-        vec![
-            "src/services/discord/inflight.rs:1:1",
-            "src/services/discord/inflight/save_store.rs:2:4",
-            "src/services/discord/router/message_handler/headless_turn.rs:1:1",
-            "src/services/discord/router/message_handler/intake_turn.rs:1:1",
-        ],
-        "the real-create observer capability must have exactly two production callers",
+        store
+            .matches(concat!("save_inflight_state_create_new_", "in_root("))
+            .count(),
+        4,
+        "only the real, checked-synthetic, test-only wrappers and definition may reach raw O_EXCL",
     );
-    let headless = include_str!("../../../router/message_handler/headless_turn.rs");
-    let intake = include_str!("../../../router/message_handler/intake_turn.rs");
-    for (name, source) in [("headless", headless), ("intake", intake)] {
-        assert_eq!(
-            source
-                .matches(concat!("save_real_inflight_state_", "create_new("))
-                .count(),
-            1,
-            "{name} real-turn birth must use the observer-typed create API exactly once",
-        );
-        assert_eq!(
-            source
-                .matches(concat!("RealInflight", "Create::new(&inflight_state)"))
-                .count(),
-            1,
-            "{name} must construct the typed real-turn input at its birth site",
-        );
-    }
 }
 #[cfg(unix)]
 #[test]
@@ -118,20 +85,7 @@ fn real_create_observes_while_sidecar_flock_is_held() {
     );
     let output = temp.path().join("turn.jsonl");
     std::fs::write(&output, vec![b'a'; 512]).expect("write output");
-    let state = InflightTurnState::new(
-        ProviderKind::Codex,
-        54_900_007,
-        Some("adk-test".to_string()),
-        1,
-        2,
-        3,
-        "turn".to_string(),
-        None,
-        Some("AgentDesk-codex-flock-5490".to_string()),
-        Some(output.display().to_string()),
-        None,
-        256,
-    );
+    let state = real_state(54_900_007, &output, 256);
     let sidecar_path = inflight_state_path(temp.path(), &ProviderKind::Codex, state.channel_id);
     let hook_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let hook_fired_in_hook = std::sync::Arc::clone(&hook_fired);
@@ -157,20 +111,7 @@ fn failed_sync_does_not_stamp_real_create_witness() {
     std::fs::write(&output, vec![b'a'; 512]).expect("write output");
     let channel_id = 54_900_006;
     create_monotonic_observer::test_seams::clear_key(ProviderKind::Codex, channel_id);
-    let state = InflightTurnState::new(
-        ProviderKind::Codex,
-        channel_id,
-        Some("adk-test".to_string()),
-        1,
-        2,
-        3,
-        "turn".to_string(),
-        None,
-        Some("AgentDesk-codex-sync-5490".to_string()),
-        Some(output.display().to_string()),
-        None,
-        256,
-    );
+    let state = real_state(channel_id, &output, 256);
     create_monotonic_observer::test_seams::fail_next_sync(std::io::ErrorKind::Other);
     let result = save_inflight_state_create_new_in_root(temp.path(), &state, true);
     assert!(matches!(result, Err(CreateNewInflightError::Internal(_))));

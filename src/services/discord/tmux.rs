@@ -1249,7 +1249,9 @@ async fn ensure_monitor_auto_turn_inflight(
     // (lease + ⏳ anchor lifecycle, #3164/#3174) stays untouched.
     synthetic.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
 
-    match super::inflight::save_inflight_state_create_new(&synthetic) {
+    match super::inflight::SyntheticInflightCreate::new(&synthetic)
+        .and_then(super::inflight::save_synthetic_inflight_state_create_new)
+    {
         Ok(()) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(

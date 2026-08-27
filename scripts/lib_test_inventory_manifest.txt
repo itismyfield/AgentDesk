@@ -3037,7 +3037,7 @@ services::discord::inflight::save_store::tests::matches_identity_save_preserves_
 services::discord::inflight::save_store::tests::non_restart_identity_refresh_save_still_persists_cleaned_api_friction_text
 services::discord::inflight::save_store::tests::output_restamp_save_declines_when_another_turn_owns_the_row
 services::discord::inflight::save_store::tests::output_restamp_save_persists_new_output_path_when_identity_matches
-services::discord::inflight::save_store::tests::real_create_tests::both_real_turn_call_sites_use_the_typed_create_api
+services::discord::inflight::save_store::tests::real_create_tests::create_new_inputs_separate_observed_real_from_checked_synthetic_births
 services::discord::inflight::save_store::tests::real_create_tests::failed_sync_does_not_stamp_real_create_witness
 services::discord::inflight::save_store::tests::real_create_tests::real_create_observes_while_sidecar_flock_is_held
 services::discord::inflight::save_store::tests::real_create_tests::typed_real_create_api_records_successful_turn_births
