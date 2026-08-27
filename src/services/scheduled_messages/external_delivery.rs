@@ -284,10 +284,12 @@ async fn finish_summary(
     finish(
         pool,
         claim,
-        status,
-        Some(successful_count),
-        Some(failed_count),
-        (failed_count > 0).then_some("provider_partial"),
+        FinishResult {
+            status,
+            successful_count: Some(successful_count),
+            failed_count: Some(failed_count),
+            error_code: (failed_count > 0).then_some("provider_partial"),
+        },
     )
     .await;
 }
@@ -300,10 +302,12 @@ async fn finish_failed(
     finish(
         pool,
         claim,
-        "failed",
-        Some(0),
-        Some(claim.requested_count),
-        Some(error_code),
+        FinishResult {
+            status: "failed",
+            successful_count: Some(0),
+            failed_count: Some(claim.requested_count),
+            error_code: Some(error_code),
+        },
     )
     .await;
 }
@@ -312,31 +316,38 @@ async fn finish_unknown(pool: &sqlx::PgPool, claim: &ClaimedExternalDelivery) {
     finish(
         pool,
         claim,
-        "unknown",
-        None,
-        None,
-        Some("delivery_result_unknown"),
+        FinishResult {
+            status: "unknown",
+            successful_count: None,
+            failed_count: None,
+            error_code: Some("delivery_result_unknown"),
+        },
     )
     .await;
 }
 
-#[allow(clippy::too_many_arguments)]
+struct FinishResult<'a> {
+    status: &'a str,
+    successful_count: Option<i16>,
+    failed_count: Option<i16>,
+    error_code: Option<&'a str>,
+}
+
 async fn finish(
     pool: &sqlx::PgPool,
     claim: &ClaimedExternalDelivery,
-    status: &str,
-    successful_count: Option<i16>,
-    failed_count: Option<i16>,
-    error_code: Option<&str>,
+    result: FinishResult<'_>,
 ) {
     if let Err(error) = db::finish_external_delivery_pg(
         pool,
-        claim.id,
-        claim.claim_token,
-        status,
-        successful_count,
-        failed_count,
-        error_code,
+        db::ExternalDeliveryFinish {
+            id: claim.id,
+            claim_token: claim.claim_token,
+            status: result.status,
+            successful_count: result.successful_count,
+            failed_count: result.failed_count,
+            error_code: result.error_code,
+        },
     )
     .await
     {

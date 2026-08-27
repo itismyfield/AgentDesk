@@ -298,15 +298,18 @@ pub async fn mark_external_dispatch_started_pg(
     Ok(result.rows_affected() == 1)
 }
 
-#[allow(clippy::too_many_arguments)]
+pub struct ExternalDeliveryFinish<'a> {
+    pub id: Uuid,
+    pub claim_token: Uuid,
+    pub status: &'a str,
+    pub successful_count: Option<i16>,
+    pub failed_count: Option<i16>,
+    pub error_code: Option<&'a str>,
+}
+
 pub async fn finish_external_delivery_pg(
     pool: &PgPool,
-    id: Uuid,
-    claim_token: Uuid,
-    status: &str,
-    successful_count: Option<i16>,
-    failed_count: Option<i16>,
-    error_code: Option<&str>,
+    finish: ExternalDeliveryFinish<'_>,
 ) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
         "UPDATE scheduled_external_delivery_outbox
@@ -316,12 +319,12 @@ pub async fn finish_external_delivery_pg(
              finished_at = NOW(), updated_at = NOW()
          WHERE id = $1 AND claim_token = $2 AND status = 'processing'",
     )
-    .bind(id)
-    .bind(claim_token)
-    .bind(status)
-    .bind(successful_count)
-    .bind(failed_count)
-    .bind(error_code)
+    .bind(finish.id)
+    .bind(finish.claim_token)
+    .bind(finish.status)
+    .bind(finish.successful_count)
+    .bind(finish.failed_count)
+    .bind(finish.error_code)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() == 1)
