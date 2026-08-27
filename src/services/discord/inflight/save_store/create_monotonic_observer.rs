@@ -1,6 +1,7 @@
 //! Process-local, observe-only continuity witness for real turn creation (#5490).
 //!
-//! A successful real-turn `O_CREAT|O_EXCL` write stamps the output JSONL length
+//! An eligible real-turn `O_CREAT|O_EXCL` write with a known output path and
+//! start offset stamps the output JSONL length
 //! and exact 64 bytes immediately before `turn_start_offset`. A later
 //! lower offset is reported only when the current file is at least as long as
 //! that stamp and the exact window still matches. This avoids the wrapper
@@ -8,7 +9,8 @@
 //!
 //! The witness is process-local, keyed by `(provider, channel)`, and does not
 //! cover process restarts, multiple dcserver processes,
-//! synthetic/manual rebind creation, or later RMW saves.  A replacement file
+//! synthetic/manual rebind creation, pathless ClaudeTui births, or later RMW
+//! saves. A replacement file
 //! whose length is at least the stamped length and whose exact proof window is
 //! identical is a deterministic alias; the observer may report it because no
 //! stronger incarnation proof is available at this boundary.

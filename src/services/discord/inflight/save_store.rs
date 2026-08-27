@@ -878,20 +878,25 @@ impl<'a> SyntheticInflightCreate<'a> {
     pub(in crate::services::discord) fn new(
         state: &'a InflightTurnState,
     ) -> Result<Self, CreateNewInflightError> {
-        let synthetic = state.rebind_origin
-            && state.request_owner_user_id == 0
-            && state.user_msg_id == 0
-            && state.current_msg_id == 0
-            && matches!(
-                state.turn_source,
-                TurnSource::MonitorTriggered | TurnSource::ExternalAdopted
-            );
-        synthetic.then_some(Self(state)).ok_or_else(|| {
-            CreateNewInflightError::Internal(
-                "unobserved create-new requires a synthetic rebind-origin state".to_string(),
-            )
-        })
+        is_synthetic_create_state(state)
+            .then_some(Self(state))
+            .ok_or_else(|| {
+                CreateNewInflightError::Internal(
+                    "unobserved create-new requires a synthetic rebind-origin state".to_string(),
+                )
+            })
     }
+}
+
+fn is_synthetic_create_state(state: &InflightTurnState) -> bool {
+    state.rebind_origin
+        && state.request_owner_user_id == 0
+        && state.user_msg_id == 0
+        && state.current_msg_id == 0
+        && matches!(
+            state.turn_source,
+            TurnSource::MonitorTriggered | TurnSource::ExternalAdopted
+        )
 }
 
 fn runtime_root_for_create() -> Result<PathBuf, CreateNewInflightError> {
@@ -902,29 +907,27 @@ fn runtime_root_for_create() -> Result<PathBuf, CreateNewInflightError> {
 pub(in crate::services::discord) fn save_real_inflight_state_create_new(
     create: RealInflightCreate<'_>,
 ) -> Result<(), CreateNewInflightError> {
-    save_inflight_state_create_new_in_root(&runtime_root_for_create()?, create.0, true)
+    save_inflight_state_create_new_in_root(&runtime_root_for_create()?, create.0)
 }
 
 pub(in crate::services::discord) fn save_synthetic_inflight_state_create_new(
     create: SyntheticInflightCreate<'_>,
 ) -> Result<(), CreateNewInflightError> {
-    save_inflight_state_create_new_in_root(&runtime_root_for_create()?, create.0, false)
+    save_inflight_state_create_new_in_root(&runtime_root_for_create()?, create.0)
 }
 
 #[cfg(test)]
 pub(in crate::services::discord) fn save_inflight_state_create_new_for_test(
     state: &InflightTurnState,
 ) -> Result<(), CreateNewInflightError> {
-    save_inflight_state_create_new_in_root(&runtime_root_for_create()?, state, false)
+    save_inflight_state_create_new_in_root(&runtime_root_for_create()?, state)
 }
 
-/// Test-visible inner form of `save_inflight_state_create_new`. Takes an
-/// explicit root so unit tests can exercise the O_CREAT|O_EXCL semantics
-/// without tripping over `AGENTDESK_ROOT_DIR` env-var races.
+/// Raw O_EXCL primitive. Observation is derived from the persisted state,
+/// never from a caller-controlled flag: every non-synthetic birth observes.
 fn save_inflight_state_create_new_in_root(
     root: &Path,
     state: &InflightTurnState,
-    observe_real_create: bool,
 ) -> Result<(), CreateNewInflightError> {
     let Some(provider) = state.provider_kind() else {
         return Err(CreateNewInflightError::Internal(format!(
@@ -968,7 +971,7 @@ fn save_inflight_state_create_new_in_root(
             #[cfg(test)]
             create_monotonic_observer::test_seams::sync_result(&file)
                 .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
-            if observe_real_create {
+            if !is_synthetic_create_state(&updated) {
                 create_monotonic_observer::observe_successful_real_create(&updated);
             }
             Ok(())

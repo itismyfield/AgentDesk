@@ -40,7 +40,8 @@ fn typed_real_create_api_records_successful_turn_births() {
     lower.turn_start_offset = Some(128);
     lower.last_offset = 128;
     let (_, events) = invariant_test_capture::capture(|| {
-        create_real_for_test(&lower).expect("lower real create");
+        save_inflight_state_create_new_in_root(&runtime_root, &lower)
+            .expect("raw inner real create");
     });
     assert_eq!(
         events,
@@ -69,7 +70,7 @@ fn create_new_inputs_separate_observed_real_from_checked_synthetic_births() {
             .matches(concat!("save_inflight_state_create_new_", "in_root("))
             .count(),
         4,
-        "only the real, checked-synthetic, test-only wrappers and definition may reach raw O_EXCL",
+        "save_store keeps three typed/test wrappers and one raw O_EXCL definition",
     );
 }
 #[cfg(unix)]
@@ -96,7 +97,7 @@ fn real_create_observes_while_sidecar_flock_is_held() {
             "the observer must run before the create sidecar flock is released"
         );
     });
-    let result = save_inflight_state_create_new_in_root(temp.path(), &state, true);
+    let result = save_inflight_state_create_new_in_root(temp.path(), &state);
     create_monotonic_observer::test_seams::clear_anchor_io_hook();
     result.expect("real create");
     assert!(
@@ -113,7 +114,7 @@ fn failed_sync_does_not_stamp_real_create_witness() {
     create_monotonic_observer::test_seams::clear_key(ProviderKind::Codex, channel_id);
     let state = real_state(channel_id, &output, 256);
     create_monotonic_observer::test_seams::fail_next_sync(std::io::ErrorKind::Other);
-    let result = save_inflight_state_create_new_in_root(temp.path(), &state, true);
+    let result = save_inflight_state_create_new_in_root(temp.path(), &state);
     assert!(matches!(result, Err(CreateNewInflightError::Internal(_))));
     assert_eq!(
         create_monotonic_observer::test_seams::witness_offset(ProviderKind::Codex, channel_id),
