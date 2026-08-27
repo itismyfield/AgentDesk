@@ -1328,14 +1328,14 @@ jobs:
           set -euo pipefail
           limit=$((10 * 1024 * 1024))
           failed=0
-          while IFS= read -r path; do
+          while IFS= read -r -d '' path; do
             [ -f "$path" ] || continue
             size=$(git cat-file -s "HEAD:$path")
             if [ "$size" -gt "$limit" ]; then
               printf 'ERROR: tracked file exceeds 10 MiB: %s (%s bytes)\n' "$path" "$size"
               failed=1
             fi
-          done < <(git ls-files)
+          done < <(git ls-files -z)
           exit "$failed"
 
       - name: Install shellcheck
