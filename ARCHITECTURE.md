@@ -117,6 +117,7 @@ src/
 │   │   └── tests.rs
 │   ├── scheduled_messages/
 │   │   ├── agent.rs
+│   │   ├── external_delivery.rs
 │   │   ├── outbox.rs
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
@@ -272,7 +273,9 @@ src/
 │   │   │   ├── helpers.rs
 │   │   │   └── responses.rs
 │   │   ├── scheduled_messages/
+│   │   │   ├── delivery_render.rs
 │   │   │   ├── postgres_tests.rs
+│   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
 │   │   ├── tests/
 │   │   │   ├── preflight_harness/
@@ -1415,7 +1418,10 @@ src/
 │   ├── scheduled_messages/
 │   │   ├── context_snapshot.rs
 │   │   ├── evidence.rs
+│   │   ├── external_delivery.rs
 │   │   ├── postgres_tests.rs
+│   │   ├── provider_targets.rs
+│   │   ├── push_handoff.rs
 │   │   └── timing.rs
 │   ├── session_backend/
 │   │   ├── stream_line.rs

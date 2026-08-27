@@ -565,6 +565,11 @@
       "path": "migrations/postgres/0110_auto_queue_cleanup_tasks_card_rollback.sql",
       "sha256": "c0162fce99a4d0d3d395ca46da42a0de809d877d827fb73fb689df2232be3308",
       "version": 110
+    },
+    {
+      "path": "migrations/postgres/0111_scheduled_external_delivery_outbox.sql",
+      "sha256": "f7ad326201e0be4386e38f334d31be3d8a81441588683c7da0f6c2e5a3ad431c",
+      "version": 111
     }
   ],
   "version": 1

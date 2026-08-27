@@ -5,13 +5,16 @@
 에이전트(또는 사람/시스템)가 **예약 메시지 풀**에 메시지를 저장해 두면, 지정한
 날짜·시간에:
 
-- **push 모드**: 에이전트 개입 없이 시스템이 `notify` bot으로 곧바로 Discord
-  채널에 전송. 수신 에이전트를 의도적으로 깨워야 할 때만 `announce`를 명시
+- **push 모드**: 에이전트 개입 없이 Discord 채널, 카카오 친구, 카카오
+  나에게 보내기 중 하나 이상으로 fan-out. Discord는 `notify` bot이 기본이며,
+  수신 에이전트를 의도적으로 깨워야 할 때만 `announce`를 명시
 - **agent 모드**: 지정된 에이전트의 headless 턴을 대상 Discord 채널에서
   시작하고, 에이전트의 relay된 assistant 답변 자체를 전달 메시지로 사용
 
-push 경로와 agent 실패 시 `push_raw` 강등 경로는 기존
-`message_outbox` → `message_outbox_loop`을 재사용한다. agent 정상 경로는
+Discord push 경로와 agent 실패 시 `push_raw` 강등 경로는 기존
+`message_outbox` → `message_outbox_loop`을 재사용한다. 카카오는 같은 fire
+transaction에서 provider-neutral `scheduled_external_delivery_outbox`로 넘긴다.
+agent 정상 경로는
 outbox를 거치지 않고 기존 headless turn relay로 Discord에 게시된다. 예약
 계층은 이 두 기존 전달 경로 위에 "언제/누가 보낼지"만 추가한다.
 
@@ -20,6 +23,7 @@ outbox를 거치지 않고 기존 headless turn relay로 Discord에 게시된다
 | 기존 컴포넌트 | 역할 재사용 |
 |---|---|
 | `message_outbox` (0001, 0042, 0066) | 최종 Discord 전송 큐. push 모드 발화 시 여기로 enqueue. **outbox drain claim이 이미 `next_attempt_at <= NOW()`를 게이트하므로(`server/mod.rs` claim_pending_message_outbox_batch_pg) 지연 전송·재시도·claim을 outbox가 온전히 소유** — handoff 이후 스케줄러는 관여하지 않는다 |
+| `scheduled_external_delivery_outbox` (0111) | 카카오 및 후속 외부 provider가 공유하는 durable handoff. provider/audience/payload 계약으로 Discord와 분리하고, dispatch fence 이후 모호한 결과는 자동 재생하지 않는다 |
 | headless agent turn (`services/discord/health`) | agent 모드에서 턴 ID를 먼저 예약하고 `start_reserved_headless_agent_turn_with_owner_channel`로 대상 채널에 relay. 완료는 routines와 같은 transcript/quality-event 증거 모델로 판정 |
 | `routines` / `routine_runs` (0035) | 스키마 패턴 차용: 정의 row + 실행 이력 row 분리, `next_due_at` partial index due-scan, lease 기반 중복 실행 방지 |
 | `services/scheduling.rs` | routines와 scheduled messages가 함께 사용하는 `@every`/5-field cron 파싱 및 slot-anchor 다음 시각 계산 |
@@ -49,7 +53,8 @@ recurring 자동화 전반은 `routines`의 영역이다. 이 테이블은 "이 
 
 Postgres 전용 (messages 라우트와 동일하게 pg pool 필수). 마이그레이션:
 `migrations/postgres/0083_scheduled_messages.sql`부터
-`0087_scheduled_message_launch_commit_and_runtime_defer.sql`까지
+`0087_scheduled_message_launch_commit_and_runtime_defer.sql` 및 외부 fan-out용
+`0111_scheduled_external_delivery_outbox.sql`을
 사용한다 (`0079`~`0081`은 최신 upstream 계열이 선점). 라이브에 적용된 0082와
 이어지는 0083의 원문은 immutable하게 유지하고, recurrence anchor 컬럼과 최종
 non-null invariant는 0084/0085에서 additive하게 적용한다. 0086은 agent launch의
@@ -66,7 +71,7 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
     -- 대상
     target_channel_id  TEXT,                        -- Discord 채널 ID.
                                                     -- agent 모드에서 NULL이면 primary channel 사용.
-                                                    -- push 모드에서는 DB CHECK로 필수
+                                                    -- push는 이 값 또는 provider_targets 필수
     bot                TEXT NOT NULL DEFAULT 'notify',    -- info-only 기본값. announce는 agent turn trigger
     -- 전달 방식
     delivery_kind      TEXT NOT NULL DEFAULT 'push',      -- 'push' | 'agent'
@@ -94,6 +99,8 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
     created_by         TEXT,                        -- 생성 주체 (agent id 또는 사용자 식별자)
     -- 메타
     dedupe_key         TEXT,                        -- 생성 시점 중복 방지 (선택, 활성 상태에서 unique)
+    provider_targets   JSONB,                       -- 활성 예약의 검증된 외부 대상
+    provider_target_summary JSONB,                  -- UUID 없는 account/count API 요약
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -105,7 +112,8 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
     CONSTRAINT chk_smsg_agent_required CHECK
         (delivery_kind <> 'agent' OR agent_id IS NOT NULL),
     CONSTRAINT chk_smsg_push_target_required CHECK
-        (delivery_kind <> 'push' OR target_channel_id IS NOT NULL)
+        (delivery_kind <> 'push' OR target_channel_id IS NOT NULL
+         OR provider_targets IS NOT NULL)
 );
 
 -- due-scan 전용 partial index (routines idx_routines_due_scan 패턴)
@@ -192,9 +200,10 @@ scheduled ──(DELETE)──▶ canceled
 firing    ──(DELETE)──▶ canceled   (진행 중 delivery는 interrupted 마킹)
 ```
 
-- **push 모드의 "sent" 판정 = outbox handoff 성공**: `message_outbox` INSERT가
+- **push 모드의 "sent" 판정 = 모든 선택 outbox handoff 성공**: Discord
+  `message_outbox`와 카카오 `scheduled_external_delivery_outbox` INSERT가 모두
   성공하면 delivery는 즉시 터미널(`sent`, 의미상 "handed off"). 부모와
-  delivery를 먼저 lock하고 outbox INSERT와 두 상태 전이를 한 transaction으로
+  delivery를 먼저 lock하고 선택된 outbox INSERT와 두 상태 전이를 한 transaction으로
   commit하므로, 취소가 먼저 이기면 outbox side effect가 생기지 않는다. 이후
   재시도·최종 실패는 outbox가 자체 소유하며(retry_count/next_attempt_at),
   스케줄러는 outbox 상태를 다시 폴링하지 않는다 — 감시 책임을 이중으로 두지
@@ -247,9 +256,9 @@ idle 시 5s 상한까지 늘어나는 기존 백오프 로직을 그대로 사�
 
 2. 발화:
    - claim time에 expires_at 경과 → delivery=interrupted, 부모=expired
-   - push:  active parent+delivery lock → message_outbox INSERT
-            (target=channel_id, content, bot, source='scheduled_message',
-             slot 단위의 만료 없는 durable dedupe key)
+   - push:  active parent+delivery lock → 선택된 Discord/external outbox INSERT
+            (Discord는 slot 단위 durable dedupe, external은 delivery/provider/audience
+             단위 deterministic id와 unique key)
             → 새 row 또는 기존 활성 row ID 확보 + delivery/parent 종료를 같은
               transaction으로 commit하면 delivery=sent(터미널, "handed off").
               이후 재시도/실패는 outbox_loop 소유 — 여기서 다시 감시하지 않는다.
@@ -304,7 +313,11 @@ idle 시 5s 상한까지 늘어나는 기존 백오프 로직을 그대로 사�
 늦은 Discord relay와 replacement turn의 중복 발화를 방지한다.
 pre-call rewind는 모든 turn phase marker를 같은 transaction에서 clear한다. 따라서
 이후 구버전 leader가 같은 slot을 re-arm해도 stale 0086 intent가 남지 않는다.
-Discord runtime 자체가 없는 프로세스는 push와 agent 정의 모두 claim하지 않는다.
+Discord runtime 자체가 없는 프로세스도 카카오 전용 push는 claim할 수 있다.
+Discord target이 있거나 agent 모드인 정의는 runtime-capable leader를 기다린다.
+외부 outbox는 provider I/O 직전에 `dispatch_started_at`을 기록한다. 그 이후 worker
+lease가 사라지면 결과를 `unknown`으로 닫고 payload를 제거하며 자동 재전송하지
+않는다. dispatch 전 설정/OAuth 실패만 최대 5회 bounded backoff로 재시도한다.
 runtime이 booting/cached-context/token-unavailable 상태인 direct agent fire도 retry
 budget을 소비하지 않고 정의를 되돌린다. 원래 recurrence anchor는 유지하고 별도
 `runtime_defer_until`을 15초 뒤로 설정하므로 overdue 정의가 500ms마다 hot-loop하지
@@ -325,7 +338,16 @@ budget을 소비하지 않고 정의를 되돌린다. 원래 recurrence anchor�
 {
   "content": "내일 오전 스탠드업 안건: ...",         // 필수
   "title": "스탠드업 리마인더",                      // 선택
-  "targetChannelId": "1492021444308238487",        // push면 필수, agent면 선택
+  "targetChannelId": "1492021444308238487",        // push는 이 값/아래 대상 중 하나 이상
+  "providerTargets": {
+    "kakao": {
+      "accountId": "default",                     // 생략 시 기본 계정
+      "friendUuids": ["kakao-friend-uuid"],        // 선택, 최대 5명
+      "sendToSelf": true,                          // 카카오 나에게 보내기
+      "imageUrl": "https://cdn.example.com/card.jpg", // 선택, public HTTPS
+      "confirmed": true                            // 외부 발송 명시 확인
+    }
+  },
   "bot": "notify",                                 // 선택, 기본 notify
   "deliveryKind": "agent",                         // 'push' | 'agent', 기본 push
   "agentId": "coder",                              // agent 모드 필수
@@ -347,7 +369,11 @@ budget을 소비하지 않고 정의를 되돌린다. 원래 recurrence anchor�
 - `scheduledAt`이 과거(허용 오차 60s 초과) && `schedule` 없음 → 거부
   (`schedule` 있으면 다음 cron 시각으로 자동 보정 후 응답에 보정값 반환)
 - `deliveryKind='agent'` && `agentId` 없음/미존재 → 거부
-- `deliveryKind='push'` && `targetChannelId` 없음 → 거부
+- `deliveryKind='push'`인데 `targetChannelId`와 `providerTargets`가 모두 없음 → 거부
+- `providerTargets`는 push 전용이며, 카카오 기능/선택 계정 자격 증명이 활성화돼
+  있어야 한다. 친구 UUID는 1~5개 unique printable 값, `sendToSelf`와 친구 목록 중
+  하나 이상, `confirmed=true`가 필수다. 카카오 대상이 있으면 content는 1~200자,
+  imageUrl은 credential/custom-port/private-IP가 없는 public HTTPS만 허용한다.
 - `deliveryKind='push'`인데 `agentId`/`agentInstruction` 값 또는 명시적
   `onAgentFailure`를 보내면 거부한다. PATCH의 명시적 `null`은 기존 agent 전용
   값을 clear하는 요청으로 허용하고, 일반 metadata PATCH는 DB 기본값 `fail`을
@@ -390,7 +416,8 @@ agent를 호출하지 않더라도 agent-bound 대상 채널의 수신 에이전
 `status IN ('scheduled')`일 때만 허용 (firing/터미널이면 409).
 수정 가능 필드: `content`, `title`, `targetChannelId`, `bot`, `agentId`,
 `agentInstruction`, `onAgentFailure`, `scheduledAt`, `schedule`, `timezone`,
-`expiresAt`. 검증은 POST와 동일. 반복 정의의 효과적 `scheduledAt`이
+`expiresAt`, `providerTargets` (`null`은 제거). 검증은 POST와 동일. raw 친구 UUID는
+API 응답에 반환하지 않고 count-only summary만 반환한다. 반복 정의의 효과적 `scheduledAt`이
 과거면 PATCH도 기존 `scheduledAt`을 anchor로 현재 시각 이후의 다음 schedule
 시각으로 보정해 metadata-only 수정이 `@every` cadence를 edit 시각으로 옮기지
 않는다. `schedule`을
@@ -413,8 +440,8 @@ agent를 호출하지 않더라도 agent-bound 대상 채널의 수신 에이전
 발화 경로를 비동기로 태우고 202를 반환한다. 반복 예약이고 원래
 `scheduledAt`이 미래면 이를 delivery의 `resume_scheduled_at`에 영속해,
 즉시 발화가 transient retry를 거쳐도 완료 후 원래 미래 slot을 유지한다.
-이 프로세스에 Discord runtime이 없으면 delivery 종류와 관계없이 claim 전에 503을
-반환한다.
+이 프로세스에 Discord runtime이 없으면 Discord target/agent 정의는 claim 전에
+503을 반환한다. 카카오 전용 push는 durable external outbox로 정상 handoff한다.
 
 ```jsonc
 { "delivery": { "id": "smdel_...", "status": "running" } }
@@ -423,6 +450,8 @@ agent를 호출하지 않더라도 agent-bound 대상 채널의 수신 에이전
 ### GET `/api/scheduled-messages/:id/deliveries` — 발화 이력
 
 쿼리: `limit`(기본 20), `before` 커서.
+각 delivery는 Discord `outboxStatus`와 함께 UUID 없는 `externalDeliveries`
+(provider/audience/account/count/status/errorCode)를 포함한다.
 
 ### 에이전트가 예약을 넣는 경로
 
@@ -433,9 +462,10 @@ agent를 호출하지 않더라도 agent-bound 대상 채널의 수신 에이전
 
 ## 결정 사항 요약
 
-1. **push outbox 재사용 + 감시 책임 단일화**: push와 `push_raw`는
+1. **provider별 outbox + 감시 책임 단일화**: Discord push와 `push_raw`는
    slot 단위 persistent dedupe로 `message_outbox`에 handoff한 뒤 즉시 손을 떼고,
-   재시도/최종 전송은 outbox가 소유한다. agent 정상 전달은 outbox가 아닌
+   카카오는 같은 transaction에서 generic external outbox로 handoff한다.
+   각 provider worker가 재시도/최종 전송을 소유한다. agent 정상 전달은 outbox가 아닌
    headless turn relay와 transcript 증거를 사용한다.
 2. **정의/이력 분리 + fenced lease claim**: `uq_smdel_fire_slot` +
    `FOR UPDATE SKIP LOCKED`로 slot을 하나로 유지하고, 중단 slot은 같은 row에
@@ -458,11 +488,12 @@ agent를 호출하지 않더라도 agent-bound 대상 채널의 수신 에이전
 | 파일 | 내용 |
 |---|---|
 | `migrations/postgres/0083_scheduled_messages.sql` ~ `0087_scheduled_message_launch_commit_and_runtime_defer.sql` | 기존 0082 checksum 보존 + info-only bot 기본값 + recurrence anchor 보정 + launch/rolling-writer ambiguity barrier + runtime defer gate (+ immutable-checksums.json 갱신) |
-| `src/db/scheduled_messages.rs`, `src/db/scheduled_messages/{agent,outbox}.rs` | CRUD + due-claim + delivery/agent-poll/outbox 조회 쿼리 |
+| `migrations/postgres/0111_scheduled_external_delivery_outbox.sql` | provider target + generic durable external outbox + terminal payload scrub |
+| `src/db/scheduled_messages.rs`, `src/db/scheduled_messages/{agent,outbox,external_delivery}.rs` | CRUD + due-claim + delivery/agent-poll/outbox 조회 쿼리 |
 | `src/server/routes/scheduled_messages.rs` | 위 7개 핸들러 |
 | `src/server/routes/mod.rs`, `domains/ops.rs` | 라우트 등록 (protected ops 도메인) |
 | `src/server/routes/docs/inventory/endpoints/part_09.rs` | API docs 인벤토리 항목 (coverage 가드 필수) |
-| `src/services/scheduled_messages.rs`, `src/services/scheduled_messages/{evidence,timing}.rs` | `scheduled_message_loop` 워커 (fire/감시/복구) + 완료 evidence + 반복/retry timing 정책 |
+| `src/services/scheduled_messages.rs`, `src/services/scheduled_messages/{evidence,timing,push_handoff,provider_targets,external_delivery}.rs` | scheduler + 원자적 fan-out + provider payload/worker + 완료 evidence/timing |
 | `src/server/worker_registry.rs` | 워커 등록 항목 추가 (`ScheduledMessages`, leader-only) |
 | `src/server/outbox_gc.rs`, `src/services/maintenance/jobs/db_retention.rs` | 영구 slot dedupe sentinel을 GC/retention에서 보존 |
 | `src/services/scheduling.rs` | routines와 scheduled messages 양쪽이 의존하는 공용 스케줄 문법 + slot-anchor 계산 |

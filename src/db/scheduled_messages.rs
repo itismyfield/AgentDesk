@@ -14,6 +14,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 
 mod agent;
+mod external_delivery;
 mod outbox;
 mod writes;
 pub use agent::{
@@ -21,6 +22,13 @@ pub use agent::{
     list_running_agent_deliveries_pg, mark_delivery_agent_turn_started_pg,
     record_delivery_agent_turn_intent_pg, recover_expired_leases_pg,
     release_agent_delivery_to_poller_pg,
+};
+pub use external_delivery::{
+    ClaimedExternalDelivery, ExternalDeliveryRow, NewExternalDelivery,
+    claim_external_deliveries_pg, enqueue_external_delivery_tx,
+    finish_external_delivery_pg, list_external_deliveries_pg,
+    mark_external_dispatch_started_pg, recover_external_delivery_leases_pg,
+    retry_external_delivery_pg,
 };
 pub use outbox::outbox_statuses_for_deliveries_pg;
 pub use writes::{insert_scheduled_message_pg, insert_scheduled_message_tx};
@@ -44,7 +52,8 @@ pub const KIND_AGENT: &str = "agent";
 const DEFINITION_COLUMNS: &str = "id, content, title, target_channel_id, bot, delivery_kind, \
      agent_id, agent_instruction, on_agent_failure, scheduled_at, schedule, timezone, \
      expires_at, status, in_flight_delivery_id, fire_count, last_fired_at, last_error, \
-     source, created_by, dedupe_key, context_strategy, context_snapshot_id, \
+     source, created_by, dedupe_key, provider_targets, provider_target_summary, \
+     context_strategy, context_snapshot_id, \
      on_context_failure, created_at, updated_at";
 
 pub const CONTEXT_STRATEGY_FRESH: &str = "fresh";
@@ -54,7 +63,7 @@ pub const ON_CONTEXT_FAILURE_FRESH: &str = "fresh";
 
 // ── Row types ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 pub struct ScheduledMessageRow {
     pub id: String,
     pub content: String,
@@ -77,6 +86,8 @@ pub struct ScheduledMessageRow {
     pub source: String,
     pub created_by: Option<String>,
     pub dedupe_key: Option<String>,
+    pub provider_targets: Option<JsonValue>,
+    pub provider_target_summary: Option<JsonValue>,
     /// #4658: 'fresh' (default) or 'snapshot'. Snapshot definitions reference an
     /// immutable context row and run in an isolated fresh provider session.
     pub context_strategy: String,
@@ -112,6 +123,7 @@ impl ScheduledMessageRow {
             "source": self.source,
             "createdBy": self.created_by,
             "dedupeKey": self.dedupe_key,
+            "providerTargets": self.provider_target_summary,
             "contextStrategy": self.context_strategy,
             "contextSnapshotId": self.context_snapshot_id,
             "onContextFailure": self.on_context_failure,
@@ -161,7 +173,7 @@ impl DeliveryRow {
 }
 
 /// A definition claimed for firing together with its delivery slot row.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClaimedFire {
     pub message: ScheduledMessageRow,
     pub delivery_id: String,
@@ -170,7 +182,7 @@ pub struct ClaimedFire {
     pub retry_count: i32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NewScheduledMessage {
     pub content: String,
     pub title: Option<String>,
@@ -187,6 +199,8 @@ pub struct NewScheduledMessage {
     pub source: String,
     pub created_by: Option<String>,
     pub dedupe_key: Option<String>,
+    pub provider_targets: Option<JsonValue>,
+    pub provider_target_summary: Option<JsonValue>,
     /// #4658: 'fresh' (default) or 'snapshot'. Defaulted by the route.
     pub context_strategy: String,
     /// Snapshot id captured before insert (snapshot strategy only). NULL for fresh.
@@ -195,7 +209,7 @@ pub struct NewScheduledMessage {
     pub on_context_failure: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ScheduledMessagePatch {
     pub content: Option<String>,
     pub title: Option<Option<String>>,
@@ -208,6 +222,8 @@ pub struct ScheduledMessagePatch {
     pub schedule: Option<Option<String>>,
     pub timezone: Option<String>,
     pub expires_at: Option<Option<DateTime<Utc>>>,
+    pub provider_targets: Option<Option<JsonValue>>,
+    pub provider_target_summary: Option<Option<JsonValue>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -337,6 +353,7 @@ pub async fn update_scheduled_message_pg(
     if let Some(expires_at) = &patch.expires_at {
         builder.push(", expires_at = ").push_bind(expires_at);
     }
+    external_delivery::apply_definition_patch(&mut builder, patch);
     builder
         .push(" WHERE id = ")
         .push_bind(id)
@@ -474,7 +491,11 @@ pub async fn claim_due_fires_pg(
     let due = sqlx::query_as::<_, ScheduledMessageRow>(&format!(
         "SELECT {DEFINITION_COLUMNS} FROM scheduled_messages
          WHERE status = 'scheduled' AND scheduled_at <= $1
-           AND $2
+           AND ($2 OR (
+               delivery_kind = 'push'
+               AND target_channel_id IS NULL
+               AND provider_targets IS NOT NULL
+           ))
            AND (runtime_defer_until IS NULL OR runtime_defer_until <= $1)
            AND NOT EXISTS (
                SELECT 1

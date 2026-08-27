@@ -22,6 +22,7 @@ use crate::db::scheduled_messages::{
 use crate::error::{AppError, AppResult, ErrorCode};
 
 mod snapshot_capture;
+mod provider_targets;
 
 #[cfg(test)]
 mod postgres_tests;
@@ -74,8 +75,7 @@ fn scheduled_message_bot_or_default(bot: Option<&str>) -> String {
 }
 
 // ── Create ──────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateScheduledMessageBody {
     pub content: String,
@@ -93,8 +93,8 @@ pub struct CreateScheduledMessageBody {
     pub source: Option<String>,
     pub created_by: Option<String>,
     pub dedupe_key: Option<String>,
-    /// #4658: 'fresh' (default) or 'snapshot'. Snapshot freezes the source
-    /// channel's conversation context at creation time.
+    pub provider_targets: Option<JsonValue>,
+    /// #4658: 'fresh' or a source-channel context `snapshot`.
     pub context_strategy: Option<String>,
     /// #4658: 'fail' (default, fail-closed) or 'fresh' (opt-in degrade).
     pub on_context_failure: Option<String>,
@@ -108,9 +108,7 @@ pub async fn create_scheduled_message(
     let pool = pool_or_unavailable(&state)?;
     let new = validate_create(pool, &body).await?;
 
-    // #4658: capture the immutable snapshot atomically with the definition
-    // insert. Success guarantees the snapshot row exists (FK + CHECK); an empty
-    // source channel fails closed with a 400 rather than degrading to fresh.
+    // Capture an immutable snapshot atomically; an empty source fails closed.
     if new.context_strategy == db::CONTEXT_STRATEGY_SNAPSHOT {
         return snapshot_capture::create_scheduled_message_with_snapshot(pool, new).await;
     }
@@ -166,6 +164,11 @@ async fn validate_create(
             "deliveryKind must be 'push' or 'agent'",
         ));
     }
+    let validated_provider_targets = provider_targets::prepare_create(
+        body.provider_targets.as_ref(),
+        content,
+        &delivery_kind,
+    )?;
     let on_agent_failure = body
         .on_agent_failure
         .as_deref()
@@ -178,8 +181,6 @@ async fn validate_create(
         ));
     }
 
-    // #4658: context snapshot strategy. Snapshot is agent-only (push has no
-    // conversation context to freeze).
     let context_strategy = body
         .context_strategy
         .as_deref()
@@ -235,8 +236,6 @@ async fn validate_create(
     let now = Utc::now();
     if scheduled_at < now - Duration::seconds(PAST_TOLERANCE_SECS) {
         match schedule.as_deref() {
-            // Recurring definitions self-correct: the pool's contract is "next
-            // occurrence of the schedule", not the possibly-stale first slot.
             Some(schedule) => {
                 scheduled_at =
                     crate::services::scheduling::next_due_after(schedule, &timezone, now)
@@ -250,8 +249,6 @@ async fn validate_create(
             }
         }
     } else if let Some(schedule) = schedule.as_deref() {
-        // Validate grammar/timezone up front so the fire path never hits an
-        // unparseable recurrence.
         crate::services::scheduling::next_due_after(schedule, &timezone, now)
             .map_err(|error| app_error(StatusCode::BAD_REQUEST, format!("{error}")))?;
     }
@@ -291,6 +288,7 @@ async fn validate_create(
         &delivery_kind,
         target_channel_id.as_deref(),
         agent_id.as_deref(),
+        validated_provider_targets.is_some(),
     )
     .await?;
 
@@ -320,8 +318,9 @@ async fn validate_create(
             .dedupe_key
             .clone()
             .filter(|value| !value.trim().is_empty()),
+        provider_targets: validated_provider_targets.as_ref().map(|targets| targets.stored.clone()),
+        provider_target_summary: validated_provider_targets.map(|targets| targets.summary),
         context_strategy,
-        // Captured in the create transaction (snapshot strategy only); NULL here.
         context_snapshot_id: None,
         on_context_failure,
     })
@@ -362,12 +361,13 @@ async fn validate_targeting(
     delivery_kind: &str,
     target_channel_id: Option<&str>,
     agent_id: Option<&str>,
+    has_provider_targets: bool,
 ) -> Result<(), AppError> {
     if delivery_kind == db::KIND_PUSH {
-        if target_channel_id.is_none() {
+        if target_channel_id.is_none() && !has_provider_targets {
             return Err(app_error(
                 StatusCode::BAD_REQUEST,
-                "targetChannelId is required for push delivery",
+                "targetChannelId or providerTargets is required for push delivery",
             ));
         }
         return Ok(());
@@ -513,7 +513,7 @@ pub async fn get_scheduled_message(
         }
     };
     let deliveries = match db::list_deliveries_pg(pool, &id, 5, None).await {
-        Ok(deliveries) => render_deliveries(pool, deliveries).await,
+        Ok(deliveries) => delivery_render::render_deliveries(pool, deliveries).await,
         Err(error) => {
             return Err(app_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -660,11 +660,9 @@ async fn build_patch(
     let bad_request = |message: String| app_error(StatusCode::BAD_REQUEST, message);
     let mut patch = ScheduledMessagePatch::default();
 
-    // #4658 F4: a snapshot definition's frozen context is bound to the source
-    // channel/agent resolved at capture time. Reject re-targeting it (target
-    // channel or agent) without a re-capture — otherwise one channel's frozen
-    // context would be injected into another channel's turn (cross-channel
-    // bleed). Operators must cancel + recreate to re-capture.
+    // A snapshot definition stays bound to its source. Retargeting could inject
+    // one channel's frozen context into another; cancel and recreate instead.
+    // This keeps captured conversation state from crossing channel boundaries.
     if let Some(offending) = snapshot_patch_retarget_key(&existing.context_strategy, body) {
         return Err(bad_request(format!(
             "{offending} cannot be changed on a context_strategy='snapshot' reservation \
@@ -729,6 +727,7 @@ async fn build_patch(
         .agent_instruction
         .clone()
         .unwrap_or_else(|| existing.agent_instruction.clone());
+    let has_provider_targets = provider_targets::apply_patch(body, &mut patch, existing)?;
     validate_agent_only_fields(
         effective_kind,
         effective_agent.as_deref(),
@@ -740,6 +739,7 @@ async fn build_patch(
         effective_kind,
         effective_target.as_deref(),
         effective_agent.as_deref(),
+        has_provider_targets,
     )
     .await?;
 
@@ -825,7 +825,7 @@ pub async fn trigger_scheduled_message_now(
     let pool = pool_or_unavailable(&state)?;
     if state.health_registry.is_none() {
         match db::get_scheduled_message_pg(pool, &id).await {
-            Ok(Some(row)) if row.status == db::STATUS_SCHEDULED => {
+            Ok(Some(row)) if row.status == db::STATUS_SCHEDULED && needs_discord(&row) => {
                 return Err(app_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Discord runtime is unavailable for scheduled delivery",
@@ -930,7 +930,7 @@ pub async fn list_scheduled_message_deliveries(
     }
     match db::list_deliveries_pg(pool, &id, params.limit.unwrap_or(20), before).await {
         Ok(deliveries) => {
-            let rendered = render_deliveries(pool, deliveries).await;
+            let rendered = delivery_render::render_deliveries(pool, deliveries).await;
             Ok((StatusCode::OK, Json(json!({"deliveries": rendered}))))
         }
         Err(error) => Err(app_error(
@@ -940,45 +940,10 @@ pub async fn list_scheduled_message_deliveries(
     }
 }
 
-/// Enrich delivery rows with the final message_outbox state of their handoff
-/// rows (push handoff is terminal here; the outbox owns delivery from there).
-async fn render_deliveries(
-    pool: &PgPool,
-    deliveries: Vec<crate::db::scheduled_messages::DeliveryRow>,
-) -> Vec<JsonValue> {
-    let outbox_ids: Vec<i64> = deliveries
-        .iter()
-        .flat_map(|delivery| [delivery.outbox_id, delivery.fallback_outbox_id])
-        .flatten()
-        .collect();
-    let statuses = db::outbox_statuses_for_deliveries_pg(pool, &outbox_ids)
-        .await
-        .unwrap_or_default();
-    let status_of = |id: Option<i64>| {
-        id.and_then(|id| {
-            statuses
-                .iter()
-                .find(|(outbox_id, _)| *outbox_id == id)
-                .map(|(_, status)| status.clone())
-        })
-    };
-    deliveries
-        .into_iter()
-        .map(|delivery| {
-            let mut rendered = delivery.to_api_json();
-            if let Some(object) = rendered.as_object_mut() {
-                object.insert(
-                    "outboxStatus".to_string(),
-                    json!(status_of(delivery.outbox_id)),
-                );
-                object.insert(
-                    "fallbackOutboxStatus".to_string(),
-                    json!(status_of(delivery.fallback_outbox_id)),
-                );
-            }
-            rendered
-        })
-        .collect()
+mod delivery_render;
+
+fn needs_discord(message: &ScheduledMessageRow) -> bool {
+    message.delivery_kind == db::KIND_AGENT || message.target_channel_id.is_some()
 }
 
 #[cfg(test)]
