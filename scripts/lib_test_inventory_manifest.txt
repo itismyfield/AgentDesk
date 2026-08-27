@@ -2987,6 +2987,12 @@ services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_patch_preserves_contended_same_owner_ui_group
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_patch_reports_malformed_json_as_io_error
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_patch_reports_non_not_found_read_failure_as_io_error
+services::discord::inflight::save_store::create_monotonic_observer::tests::create_paths_observe_real_but_exclude_all_synthetic_shapes
+services::discord::inflight::save_store::create_monotonic_observer::tests::observer_runs_after_sync_while_sidecar_flock_is_held
+services::discord::inflight::save_store::create_monotonic_observer::tests::path_switch_is_silent_and_same_path_alias_warns
+services::discord::inflight::save_store::create_monotonic_observer::tests::same_path_lower_start_warns
+services::discord::inflight::save_store::create_monotonic_observer::tests::unobservable_births_do_not_allocate_and_evidenced_slots_are_bounded
+services::discord::inflight::save_store::create_monotonic_observer::tests::witness_io_is_outside_mutex_and_revision_blocks_stale_install
 services::discord::inflight::save_store::identity_gate::bridge_entry::tests::placeholder_clear_effect_reports_only_the_bridge_winner
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::claude_e_stamp_preserves_concurrent_progress_and_adopts_exact_persisted_row
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::divergent_claude_e_response_is_non_retryable_and_preserves_process_frame

@@ -148,7 +148,7 @@ fn prelaunch_inflight_runtime_seed_from_paths(
         };
         return (
             Some(tmux_name.to_string()),
-            Some(path),
+            session_exists.then_some(path),
             Some(input_fifo_path),
             end,
         );
@@ -163,7 +163,7 @@ fn prelaunch_inflight_runtime_seed_from_paths(
         .unwrap_or(0);
     (
         Some(tmux_name.to_string()),
-        (!is_claude_tui).then_some(output_path),
+        (!is_claude_tui && session_exists).then_some(output_path),
         Some(input_fifo_path),
         session_exists.then_some(last_offset).unwrap_or(0),
     )
@@ -232,6 +232,20 @@ pub(super) fn prelaunch_inflight_runtime_seed(
         prelaunch_runtime_kind,
         true,
     )
+}
+
+pub(super) fn prelaunch_watcher_output_path(
+    tmux_session_name: Option<&str>,
+    inflight_output_path: Option<&str>,
+    runtime_kind: Option<RuntimeHandoffKind>,
+) -> Option<String> {
+    if runtime_kind == Some(RuntimeHandoffKind::ClaudeTui) {
+        None
+    } else {
+        inflight_output_path
+            .map(str::to_owned)
+            .or_else(|| tmux_session_name.map(|name| tmux_runtime_paths(name).0))
+    }
 }
 
 pub(super) fn prelaunch_inflight_runtime_seed_without_codex_raw(
@@ -909,12 +923,20 @@ mod thread_role_inheritance_tests {
     // this: it passes a path that does not exist, where both 0 and the file length agree.
     #[test]
     fn codex_tui_prelaunch_without_raw_seed_keeps_the_wrapper_end_offset() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), b"0123456789").unwrap();
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            root.path(),
+        );
+        let session = "AgentDesk-codex-fallback";
+        let wrapper_path = tmux_runtime_paths(session).0;
+        std::fs::create_dir_all(std::path::Path::new(&wrapper_path).parent().unwrap()).unwrap();
+        std::fs::write(&wrapper_path, b"0123456789").unwrap();
         let seed = |session_exists| {
             prelaunch_inflight_runtime_seed_from_paths(
-                "AgentDesk-codex-fallback",
-                file.path().display().to_string(),
+                session,
+                wrapper_path.clone(),
                 "/runtime/input".into(),
                 session_exists,
                 Some(RuntimeHandoffKind::CodexTui),
@@ -924,10 +946,31 @@ mod thread_role_inheritance_tests {
         let live = seed(true);
         assert_eq!(
             (live.1.as_deref(), live.3),
-            (Some(file.path().display().to_string().as_str()), 10),
+            (Some(wrapper_path.as_str()), 10),
             "a live session must keep the wrapper end offset, not restart from 0"
         );
-        assert_eq!(seed(false).3, 0, "no session means nothing was relayed yet");
+        let dead = seed(false);
+        assert_eq!((dead.1.as_deref(), dead.3), (None, 0));
+        assert_eq!(
+            prelaunch_watcher_output_path(
+                dead.0.as_deref(),
+                dead.1.as_deref(),
+                Some(RuntimeHandoffKind::CodexTui),
+            ),
+            Some(wrapper_path),
+            "the dead-row watcher fallback must reconstruct exactly the prelaunch wrapper path",
+        );
+        for caller in [
+            include_str!("intake_turn.rs"),
+            include_str!("headless_turn.rs"),
+        ] {
+            assert_eq!(
+                caller
+                    .matches("let watcher_output_path = prelaunch_watcher_output_path(")
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

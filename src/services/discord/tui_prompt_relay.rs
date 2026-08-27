@@ -113,7 +113,7 @@ use self::relay_ownership::{
 };
 
 mod synthetic_orphan_reclaim; // #3982 orphan-at-birth reclaim trigger (see module doc)
-mod synthetic_start;
+pub(in crate::services::discord) mod synthetic_start;
 mod synthetic_start_wiring; // #4002 shared Path-X wiring with #4082 neutral-note gate
 #[cfg(test)]
 pub(in crate::services::discord) use self::synthetic_start::synthetic_start_offset_carry_forward;

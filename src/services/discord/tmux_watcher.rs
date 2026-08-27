@@ -13,7 +13,7 @@ mod entry;
 pub(in crate::services::discord) use self::entry::tmux_output_watcher;
 
 #[path = "tmux_watcher/liveness.rs"]
-mod liveness;
+pub(in crate::services::discord) mod liveness;
 
 pub(super) use self::liveness::watcher_lifecycle_terminal_delivery_observed;
 use self::liveness::*;

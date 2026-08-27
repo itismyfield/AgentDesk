@@ -54,6 +54,21 @@ fn inflight_state_lock_path(path: &Path) -> PathBuf {
     path.with_extension("json.lock")
 }
 
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) fn second_fd_cannot_take_lock_nonblocking(path: &Path) -> bool {
+    use std::os::fd::AsRawFd;
+    let Ok(file) = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(inflight_state_lock_path(path))
+    else {
+        return false;
+    };
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
+}
+
 pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
     let lock_path = inflight_state_lock_path(path);
     if let Some(parent) = lock_path.parent() {
