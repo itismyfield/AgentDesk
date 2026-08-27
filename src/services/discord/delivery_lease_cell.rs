@@ -27,6 +27,127 @@ use std::sync::atomic::AtomicBool;
 //     deadline reclaim: Leased --(deadline elapsed)--> Unleased
 // ===========================================================================
 
+/// A non-empty half-open byte range that is allowed to carry frontier authority.
+#[allow(dead_code)] // #5191 S2c PR-A: dormant until the producer/consumer cutover.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::services::discord) struct PositiveByteRange {
+    start: u64,
+    end: u64,
+}
+
+#[allow(dead_code)] // #5191 S2c PR-A: dormant until the producer/consumer cutover.
+impl PositiveByteRange {
+    pub(in crate::services::discord) fn new(start: u64, end: u64) -> Option<Self> {
+        (end > start).then_some(Self { start, end })
+    }
+
+    pub(in crate::services::discord) fn start(self) -> u64 {
+        self.start
+    }
+
+    pub(in crate::services::discord) fn end(self) -> u64 {
+        self.end
+    }
+}
+
+/// Opaque identity for one permission to publish without a byte frontier.
+#[allow(dead_code)] // #5191 S2c PR-A: dormant until the producer/consumer cutover.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::services::discord) struct PermitId(u64);
+
+impl PermitId {
+    #[cfg(test)]
+    fn for_test(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Publication permission that deliberately exposes no offset or end accessor.
+#[allow(dead_code)] // #5191 S2c PR-A: dormant until the producer/consumer cutover.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::services::discord) struct ZeroWidthPermit {
+    permit_id: PermitId,
+}
+
+impl ZeroWidthPermit {
+    #[cfg(test)]
+    fn for_test(permit_id: PermitId) -> Self {
+        Self { permit_id }
+    }
+
+    #[cfg(test)]
+    fn permit_id(self) -> PermitId {
+        self.permit_id
+    }
+}
+
+/// Typed publication coordinate: only `Positive` may advance a byte frontier.
+#[allow(dead_code)] // #5191 S2c PR-A: dormant until the producer/consumer cutover.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::services::discord) enum PublicationCoordinate {
+    Positive(PositiveByteRange),
+    ZeroWidth(ZeroWidthPermit),
+    NoRange,
+}
+
+#[allow(dead_code)] // #5191 S2c PR-A: dormant until the producer/consumer cutover.
+impl PublicationCoordinate {
+    pub(in crate::services::discord) fn positive_range(self) -> Option<PositiveByteRange> {
+        match self {
+            Self::Positive(range) => Some(range),
+            Self::ZeroWidth(_) | Self::NoRange => None,
+        }
+    }
+}
+
+/// Sink holder generation reserved for the PR-B consumer cutover.
+#[allow(dead_code)] // #5191 S2c PR-A: dormant until the producer/consumer cutover.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::services::discord) struct SinkEpoch(u64);
+
+impl SinkEpoch {
+    #[cfg(test)]
+    fn for_test(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[cfg(test)]
+mod publication_coordinate_tests {
+    use super::*;
+
+    #[test]
+    fn positive_byte_range_requires_strictly_positive_width() {
+        assert_eq!(PositiveByteRange::new(7, 7), None);
+        assert_eq!(PositiveByteRange::new(8, 7), None);
+        let range = PositiveByteRange::new(7, 8).expect("positive range");
+        assert_eq!((range.start(), range.end()), (7, 8));
+    }
+
+    #[test]
+    fn only_positive_coordinate_exposes_frontier_range() {
+        let positive =
+            PublicationCoordinate::Positive(PositiveByteRange::new(3, 9).expect("positive range"));
+        let permit = ZeroWidthPermit::for_test(PermitId::for_test(41));
+        assert_eq!(permit.permit_id(), PermitId::for_test(41));
+        assert_eq!(
+            positive.positive_range().map(PositiveByteRange::end),
+            Some(9)
+        );
+        assert_eq!(
+            PublicationCoordinate::ZeroWidth(permit).positive_range(),
+            None
+        );
+        assert_eq!(PublicationCoordinate::NoRange.positive_range(), None);
+    }
+
+    #[test]
+    fn sink_epoch_is_typed_apart_from_publication_permit() {
+        assert_eq!(SinkEpoch::for_test(7), SinkEpoch::for_test(7));
+        assert_ne!(SinkEpoch::for_test(7), SinkEpoch::for_test(8));
+    }
+}
+
 /// Who currently holds (or is attempting to hold) the delivery lease.
 ///
 /// #3041 P1-0: dormant, wired in P1-1.. — the holder is matched on
