@@ -461,22 +461,19 @@ pub fn any_requested_tui_hosting_driver_available(config: &Config) -> bool {
     }
 
     config.agents.iter().any(|agent| {
-        agent
-            .channels
-            .iter()
-            .any(|(channel_kind, channel)| {
-                let provider_id = channel
-                    .provider()
-                    .unwrap_or_else(|| channel_kind.to_string())
-                    .trim()
-                    .to_ascii_lowercase();
-                if !channel_effective_tui_request(config, channel, &provider_id) {
-                    return false;
-                }
-                ProviderKind::from_str(&provider_id)
-                    .as_ref()
-                    .is_some_and(provider_tui_hosting_driver_available)
-            })
+        agent.channels.iter().any(|(channel_kind, channel)| {
+            let provider_id = channel
+                .provider()
+                .unwrap_or_else(|| channel_kind.to_string())
+                .trim()
+                .to_ascii_lowercase();
+            if !channel_effective_tui_request(config, channel, &provider_id) {
+                return false;
+            }
+            ProviderKind::from_str(&provider_id)
+                .as_ref()
+                .is_some_and(provider_tui_hosting_driver_available)
+        })
     })
 }
 
