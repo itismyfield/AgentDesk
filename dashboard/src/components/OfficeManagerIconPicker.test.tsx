@@ -108,4 +108,49 @@ describe("Office manager icon picker accessibility", () => {
     expect(defaultIcon.getAttribute("role")).toBe("radio");
     expect(defaultIcon.getAttribute("aria-checked")).toBe("true");
   });
+
+  it("contains focus across modal views and restores the opener", async () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    const onClose = vi.fn();
+
+    const target = await render(
+      <OfficeManagerModal
+        offices={[]}
+        allAgents={[]}
+        isKo={false}
+        onClose={onClose}
+        onChanged={() => {}}
+      />,
+    );
+
+    const dialog = target.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.contains(document.activeElement)).toBe(true);
+
+    const addButton = Array.from(target.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Add Office"),
+    );
+    expect(addButton).toBeDefined();
+
+    await act(async () => {
+      addButton?.focus();
+      addButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(target.textContent).toContain("New Office");
+    expect(document.activeElement).toBe(dialog);
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
+    expect(onClose).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      root?.unmount();
+    });
+    root = null;
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
 });

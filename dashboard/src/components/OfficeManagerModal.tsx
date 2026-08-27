@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { X, Plus, Trash2, UserPlus, UserMinus, Settings2 } from "lucide-react";
 import type { Office, Agent } from "../types";
 import AgentAvatar from "./AgentAvatar";
@@ -14,6 +14,7 @@ import {
   SurfaceNotice,
   SurfaceSubsection,
 } from "./common/SurfacePrimitives";
+import { useFocusTrap } from "./common/overlay";
 
 interface OfficeManagerModalProps {
   offices: Office[];
@@ -46,6 +47,23 @@ export default function OfficeManagerModal({
     setDraft,
     toggleMember,
   } = useOfficeManager({ allAgents, onChanged });
+
+  const containerRef = useFocusTrap(true);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (container && !container.contains(document.activeElement)) {
+      container.focus();
+    }
+  }, [containerRef, view]);
 
   const tr = useCallback(
     (ko: string, en: string) => (isKo ? ko : en),
@@ -107,9 +125,11 @@ export default function OfficeManagerModal({
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
+        ref={containerRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="office-manager-title"
+        tabIndex={-1}
         className="mx-4 flex max-h-[84vh] w-full max-w-2xl flex-col rounded-[28px] border"
         style={{
           background:
