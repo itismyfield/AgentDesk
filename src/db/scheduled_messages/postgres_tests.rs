@@ -175,12 +175,14 @@ async fn postgres_external_handoff_scrubs_targets_and_terminal_payload() {
     assert!(
         finish_external_delivery_pg(
             &pool,
-            claim.id,
-            claim.claim_token,
-            "unknown",
-            None,
-            None,
-            Some("delivery_result_unknown"),
+            ExternalDeliveryFinish {
+                id: claim.id,
+                claim_token: claim.claim_token,
+                status: "unknown",
+                successful_count: None,
+                failed_count: None,
+                error_code: Some("delivery_result_unknown"),
+            },
         )
         .await
         .expect("finish ambiguous external delivery")

@@ -24,7 +24,7 @@ pub use agent::{
     release_agent_delivery_to_poller_pg,
 };
 pub use external_delivery::{
-    ClaimedExternalDelivery, ExternalDeliveryRow, NewExternalDelivery,
+    ClaimedExternalDelivery, ExternalDeliveryFinish, ExternalDeliveryRow, NewExternalDelivery,
     claim_external_deliveries_pg, enqueue_external_delivery_tx, finish_external_delivery_pg,
     list_external_deliveries_pg, mark_external_dispatch_started_pg,
     recover_external_delivery_leases_pg, retry_external_delivery_pg,
