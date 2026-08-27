@@ -573,3 +573,227 @@ fn delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire()
          the destruction it was judged against is still pending"
     );
 }
+
+#[test]
+fn watcher_reservation_fresh_pair_and_terminal_lease_are_independent() {
+    use super::{LeaseHolder, LeaseOutcome, lease_now_ms, DELIVERY_LEASE_DEADLINE_MS};
+
+    let coords = Arc::new(dashmap::DashMap::new());
+    let registry = TmuxWatcherRegistry::new_with_coords(Arc::clone(&coords));
+    let channel = ChannelId::new(5_191_000_000_000_000_001);
+    let tmux = "AgentDesk-5191-reservation-fresh";
+    let handle = live_watcher_handle(tmux);
+    let cancel = Arc::clone(&handle.cancel);
+
+    registry.insert(channel, handle);
+    assert!(registry.relay_coords_share_identity_for_test(&coords));
+    assert!(registry.paired_reservation_matches_for_test(tmux, channel, &cancel));
+
+    let cell = {
+        let coord = coords.get(&channel).expect("shared coord");
+        Arc::clone(&coord.delivery_lease)
+    };
+    let key = DeliveryLeaseKey::new(channel, 1, 5_191_000_001, None, None);
+    assert!(cell.try_acquire(
+        key.clone(),
+        LeaseHolder::Watcher { instance_id: 5191 },
+        0,
+        10,
+        lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS),
+    ));
+    assert!(cell.commit(
+        LeaseHolder::Watcher { instance_id: 5191 },
+        key,
+        0,
+        10,
+        LeaseOutcome::Delivered,
+    ));
+    assert!(registry.paired_reservation_matches_for_test(tmux, channel, &cancel));
+}
+
+#[test]
+fn watcher_reservation_hidden_displacements_clear_both_prior_owners() {
+    let coords = Arc::new(dashmap::DashMap::new());
+    let registry = TmuxWatcherRegistry::new_with_coords(Arc::clone(&coords));
+    let channel_a = ChannelId::new(5_191_000_000_000_000_011);
+    let channel_b = ChannelId::new(5_191_000_000_000_000_012);
+    let tmux_a = "AgentDesk-5191-displace-a";
+    let tmux_b = "AgentDesk-5191-displace-b";
+
+    let old_a = live_watcher_handle(tmux_a);
+    let old_a_cancel = Arc::clone(&old_a.cancel);
+    registry.insert(channel_a, old_a);
+    let old_b = live_watcher_handle(tmux_b);
+    let old_b_cancel = Arc::clone(&old_b.cancel);
+    registry.insert(channel_b, old_b);
+
+    let replacement = live_watcher_handle(tmux_b);
+    let replacement_cancel = Arc::clone(&replacement.cancel);
+    registry.insert(channel_a, replacement);
+
+    let cell_a = {
+        let coord = coords.get(&channel_a).expect("channel-a coord");
+        Arc::clone(&coord.delivery_lease)
+    };
+    let cell_b = {
+        let coord = coords.get(&channel_b).expect("channel-b coord");
+        Arc::clone(&coord.delivery_lease)
+    };
+    assert!(!cell_a.watcher_reservation_matches(&old_a_cancel));
+    assert!(!cell_b.watcher_reservation_matches(&old_b_cancel));
+    assert!(registry.paired_reservation_matches_for_test(
+        tmux_b,
+        channel_a,
+        &replacement_cancel,
+    ));
+    assert!(registry.owner_channel_for_tmux_session(tmux_a).is_none());
+    assert_eq!(registry.owner_channel_for_tmux_session(tmux_b), Some(channel_a));
+}
+
+#[test]
+fn watcher_reservation_stale_teardown_preserves_successor_identity() {
+    let coords = Arc::new(dashmap::DashMap::new());
+    let registry = TmuxWatcherRegistry::new_with_coords(Arc::clone(&coords));
+    let channel = ChannelId::new(5_191_000_000_000_000_021);
+    let tmux = "AgentDesk-5191-stale-teardown";
+
+    let predecessor = live_watcher_handle(tmux);
+    let predecessor_cancel = Arc::clone(&predecessor.cancel);
+    registry.insert(channel, predecessor);
+    let predecessor_record = registry
+        .remove_pair_without_payload_for_test(tmux)
+        .expect("predecessor reservation record");
+
+    let successor = live_watcher_handle(tmux);
+    let successor_cancel = Arc::clone(&successor.cancel);
+    registry.insert(channel, successor);
+    assert!(!registry.clear_reservation_for_test(predecessor_record));
+    assert!(!Arc::ptr_eq(&predecessor_cancel, &successor_cancel));
+    assert!(registry.paired_reservation_matches_for_test(
+        tmux,
+        channel,
+        &successor_cancel,
+    ));
+}
+
+#[test]
+fn watcher_reservation_unpair_is_payload_free_and_outer_clear_is_once() {
+    use super::delivery_lease_cell::payload_lock_entries_for_test;
+
+    let registry = TmuxWatcherRegistry::new();
+    let channel = ChannelId::new(5_191_000_000_000_000_031);
+    let tmux = "AgentDesk-5191-payload-free-unpair";
+    let handle = live_watcher_handle(tmux);
+    let cancel = Arc::clone(&handle.cancel);
+    registry.insert(channel, handle);
+
+    let before = payload_lock_entries_for_test();
+    let record = registry
+        .remove_pair_without_payload_for_test(tmux)
+        .expect("paired record");
+    assert_eq!(payload_lock_entries_for_test(), before);
+    assert!(registry.clear_reservation_for_test(record));
+    assert_eq!(payload_lock_entries_for_test(), before + 1);
+
+    let replacement = live_watcher_handle(tmux);
+    let replacement_cancel = Arc::clone(&replacement.cancel);
+    registry.insert(channel, replacement);
+    let before_remove = payload_lock_entries_for_test();
+    assert!(registry.remove(&channel).is_some());
+    assert_eq!(payload_lock_entries_for_test(), before_remove + 1);
+    assert!(!registry.paired_reservation_matches_for_test(
+        tmux,
+        channel,
+        &replacement_cancel,
+    ));
+    assert!(!Arc::ptr_eq(&cancel, &replacement_cancel));
+}
+
+#[test]
+fn watcher_reservation_wrong_requester_fenced_removal_preserves_requester() {
+    use super::tmux_watcher_registry::WatcherIdentityFence;
+    use crate::config::ExecutionIdentityMode;
+
+    const SITE: &str = "s2a_wrong_requester_cell";
+    let coords = Arc::new(dashmap::DashMap::new());
+    let registry = TmuxWatcherRegistry::new_with_coords(Arc::clone(&coords));
+    let owner = ChannelId::new(5_191_000_000_000_000_041);
+    let requester = ChannelId::new(5_191_000_000_000_000_042);
+    let owner_tmux = "AgentDesk-5191-fenced-owner";
+    let requester_tmux = "AgentDesk-5191-fenced-requester";
+
+    let owner_handle = live_watcher_handle(owner_tmux);
+    let owner_cancel = Arc::clone(&owner_handle.cancel);
+    registry.insert(owner, owner_handle);
+    let owner_cell = {
+        let coord = coords.get(&owner).expect("owner coord");
+        Arc::clone(&coord.delivery_lease)
+    };
+    let requester_handle = live_watcher_handle(requester_tmux);
+    let requester_cancel = Arc::clone(&requester_handle.cancel);
+    registry.insert(requester, requester_handle);
+
+    let fence = WatcherIdentityFence::capture(ExecutionIdentityMode::Legacy, SITE, owner_tmux);
+    assert!(registry
+        .under_identity_fence(fence)
+        .with_terminal_delivery_fence(permissive_delivery_fence(requester, SITE))
+        .remove_tmux_session_if_current(owner_tmux, &owner_cancel)
+        .is_some());
+    assert!(registry.paired_reservation_matches_for_test(
+        requester_tmux,
+        requester,
+        &requester_cancel,
+    ));
+    assert!(!registry.paired_reservation_matches_for_test(owner_tmux, owner, &owner_cancel));
+    assert!(!owner_cell.watcher_reservation_matches(&owner_cancel));
+}
+
+#[test]
+fn watcher_reservation_all_central_removal_spellings_clear_pair() {
+    let registry = TmuxWatcherRegistry::new();
+    let cases = [
+        (5_191_000_000_000_000_051, "AgentDesk-5191-remove-channel"),
+        (5_191_000_000_000_000_052, "AgentDesk-5191-remove-session"),
+        (5_191_000_000_000_000_053, "AgentDesk-5191-remove-current"),
+        (5_191_000_000_000_000_054, "AgentDesk-5191-cancel-current"),
+    ];
+    let mut identities = Vec::new();
+    for (raw_channel, tmux) in cases {
+        let channel = ChannelId::new(raw_channel);
+        let handle = live_watcher_handle(tmux);
+        let output = handle.output_path.clone();
+        let cancel = Arc::clone(&handle.cancel);
+        registry.insert(channel, handle);
+        identities.push((channel, tmux, output, cancel));
+    }
+
+    assert!(registry.remove(&identities[0].0).is_some());
+    let guard = super::lock_tmux_watcher_registry();
+    assert!(registry.remove_tmux_session_locked(&guard, identities[1].1).is_some());
+    drop(guard);
+    assert!(registry
+        .remove_tmux_session_if_current(identities[2].1, &identities[2].3)
+        .is_some());
+    assert!(registry.cancel_and_remove_channel_if_current(
+        &identities[3].0,
+        identities[3].1,
+        &identities[3].2,
+        &identities[3].3,
+    ));
+    for (channel, tmux, _, cancel) in identities {
+        assert!(!registry.paired_reservation_matches_for_test(tmux, channel, &cancel));
+    }
+}
+
+#[test]
+fn watcher_reservation_coord_access_under_payload_is_rejected() {
+    let channel = ChannelId::new(5_191_000_000_000_000_061);
+    let registry = TmuxWatcherRegistry::new();
+    let cell = DeliveryLeaseCell::new(channel);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cell.with_state_locked(|_| {
+            registry.insert(channel, live_watcher_handle("AgentDesk-5191-coord-under-payload"));
+        });
+    }));
+    assert!(result.is_err(), "payload-held coord access must panic");
+}

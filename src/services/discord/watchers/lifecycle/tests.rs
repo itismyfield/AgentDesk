@@ -157,6 +157,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reuse_existing_observes_reservation_mismatch_without_repair_or_candidate_write() {
+        let watchers = TmuxWatcherRegistry::new();
+        let owner = ChannelId::new(5_191_000_000_000_000_071);
+        let requester = ChannelId::new(5_191_000_000_000_000_072);
+        let tmux = "AgentDesk-5191-reuse-observe-only";
+        let output = "/tmp/AgentDesk-5191-reuse-observe-only.jsonl";
+        let incumbent = test_watcher_handle(tmux, output);
+        let incumbent_cancel = Arc::clone(&incumbent.cancel);
+        assert!(try_claim_watcher(&watchers, owner, incumbent));
+
+        let mismatched_cancel = Arc::new(AtomicBool::new(false));
+        watchers.replace_paired_cancel_for_test(tmux, Arc::clone(&mismatched_cancel));
+        let candidate = test_watcher_handle(tmux, output);
+        let candidate_cancel = Arc::clone(&candidate.cancel);
+        let outcome = claim_or_reuse_watcher(
+            &watchers,
+            requester,
+            candidate,
+            &ProviderKind::Claude,
+            "s2a-reuse-observe-only",
+        );
+
+        assert_eq!(outcome.action, WatcherClaimAction::ReuseExisting);
+        let current = watchers.get(&owner).expect("incumbent remains installed");
+        assert!(Arc::ptr_eq(&current.cancel, &incumbent_cancel));
+        drop(current);
+        assert!(!watchers.contains_key(&requester));
+        assert!(!watchers.paired_reservation_matches_for_test(tmux, owner, &incumbent_cancel,));
+        assert!(!watchers.paired_reservation_matches_for_test(tmux, requester, &candidate_cancel,));
+    }
+
     /// #4455: a crossed-provider-turn Codex rebind must replace even a live
     /// same-session/same-output incumbent. Reuse would leave its stale
     /// `current_msg_id` render seed and converter generation in authority.

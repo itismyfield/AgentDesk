@@ -1,4 +1,6 @@
 use super::{ChannelId, DeliveryLeaseKey};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 // ===========================================================================
 // #3041 §2-§3 — Delivery-lease `DeliveryLeaseCell` state machine.
@@ -144,7 +146,54 @@ pub(in crate::services::discord) struct DeliveryLeaseCell {
     state_tag: std::sync::atomic::AtomicU8,
     /// Rich lease payload. Mutated by the CAS winner or a deadline reclaim, and
     /// read by `read()` — all under this one mutex (the coherence invariant).
-    payload: std::sync::Mutex<LeaseState>,
+    payload: std::sync::Mutex<DeliveryLeasePayload>,
+}
+
+/// Watcher-incarnation metadata paired with a live registry row. This is
+/// deliberately independent of `LeaseState`: reserving a watcher never
+/// consumes terminal delivery authority.
+#[derive(Clone, Debug)]
+struct WatcherReservation {
+    cancel: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct DeliveryLeasePayload {
+    lease: LeaseState,
+    watcher_reservation: Option<WatcherReservation>,
+}
+
+thread_local! {
+    static PAYLOAD_LOCK_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    #[cfg(test)]
+    static PAYLOAD_LOCK_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+struct PayloadLockMarker;
+impl PayloadLockMarker {
+    fn enter() -> Self {
+        PAYLOAD_LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        #[cfg(test)]
+        PAYLOAD_LOCK_ENTRIES.with(|entries| entries.set(entries.get() + 1));
+        Self
+    }
+}
+impl Drop for PayloadLockMarker {
+    fn drop(&mut self) {
+        PAYLOAD_LOCK_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
+pub(in crate::services::discord) fn assert_payload_not_held() {
+    debug_assert!(
+        PAYLOAD_LOCK_DEPTH.with(|depth| depth.get() == 0),
+        "tmux relay coord accessed while DeliveryLeaseCell payload is held"
+    );
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn payload_lock_entries_for_test() -> usize {
+    PAYLOAD_LOCK_ENTRIES.with(std::cell::Cell::get)
 }
 
 /// A point-in-time snapshot of a [`DeliveryLeaseCell`], returned by `read()`
@@ -321,7 +370,10 @@ impl DeliveryLeaseCell {
         Self {
             channel_id,
             state_tag: std::sync::atomic::AtomicU8::new(TAG_UNLEASED),
-            payload: std::sync::Mutex::new(LeaseState::Unleased),
+            payload: std::sync::Mutex::new(DeliveryLeasePayload {
+                lease: LeaseState::Unleased,
+                watcher_reservation: None,
+            }),
         }
     }
 
@@ -380,7 +432,8 @@ impl DeliveryLeaseCell {
             .payload
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let snapshot = match &*guard {
+        let _payload_lock_marker = PayloadLockMarker::enter();
+        let snapshot = match &guard.lease {
             LeaseState::Unleased => LeaseSnapshot::Unleased,
             LeaseState::Leased {
                 holder,
@@ -414,6 +467,61 @@ impl DeliveryLeaseCell {
         acted
     }
 
+    /// Install the exact claim-time watcher identity without consuming the
+    /// terminal lease state. Called only while the registry transaction lock is held.
+    pub(in crate::services::discord) fn install_watcher_reservation(
+        &self,
+        _registry_guard: &crate::services::discord::TmuxWatcherRegistryGuard,
+        cancel: Arc<AtomicBool>,
+    ) {
+        assert_payload_not_held();
+        let mut guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = PayloadLockMarker::enter();
+        guard.watcher_reservation = Some(WatcherReservation { cancel });
+    }
+
+    /// Clear only the reservation installed for `expected_cancel`. Pointer
+    /// equality prevents stale teardown from clearing a successor.
+    pub(in crate::services::discord) fn clear_watcher_reservation(
+        &self,
+        _registry_guard: &crate::services::discord::TmuxWatcherRegistryGuard,
+        expected_cancel: &Arc<AtomicBool>,
+    ) -> bool {
+        assert_payload_not_held();
+        let mut guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = PayloadLockMarker::enter();
+        let matches = guard
+            .watcher_reservation
+            .as_ref()
+            .is_some_and(|reservation| Arc::ptr_eq(&reservation.cancel, expected_cancel));
+        if matches {
+            guard.watcher_reservation = None;
+        }
+        matches
+    }
+
+    pub(in crate::services::discord) fn watcher_reservation_matches(
+        &self,
+        expected_cancel: &Arc<AtomicBool>,
+    ) -> bool {
+        assert_payload_not_held();
+        let guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = PayloadLockMarker::enter();
+        guard
+            .watcher_reservation
+            .as_ref()
+            .is_some_and(|reservation| Arc::ptr_eq(&reservation.cancel, expected_cancel))
+    }
+
     /// CAS-acquire the lease for the full `(delivery_lease_key, [start,end))`
     /// identity (#3041 §2) on behalf of `holder` until `deadline_ms`. Records
     /// `key` so a later `commit`/`release` carrying a STALE older lease key is
@@ -439,6 +547,7 @@ impl DeliveryLeaseCell {
             .payload
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = PayloadLockMarker::enter();
         // Single-winner gate, taken while holding the payload lock so the tag
         // flip and the payload write publish together. Concurrent acquirers
         // serialize on the mutex; whoever runs second sees a non-`UNLEASED` tag.
@@ -454,7 +563,7 @@ impl DeliveryLeaseCell {
         {
             return false;
         }
-        *guard = LeaseState::Leased {
+        guard.lease = LeaseState::Leased {
             holder,
             key,
             deadline_ms,
@@ -485,7 +594,8 @@ impl DeliveryLeaseCell {
             .payload
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match &*guard {
+        let _payload_lock_marker = PayloadLockMarker::enter();
+        match &guard.lease {
             LeaseState::Leased {
                 holder: cur_holder,
                 key: cur_key,
@@ -497,7 +607,7 @@ impl DeliveryLeaseCell {
                 && *cur_start == start
                 && *cur_end == end =>
             {
-                *guard = LeaseState::Committed {
+                guard.lease = LeaseState::Committed {
                     holder,
                     key,
                     start,
@@ -533,7 +643,8 @@ impl DeliveryLeaseCell {
             .payload
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let matches = match &*guard {
+        let _payload_lock_marker = PayloadLockMarker::enter();
+        let matches = match &guard.lease {
             LeaseState::Leased {
                 holder: cur,
                 key: cur_key,
@@ -553,7 +664,7 @@ impl DeliveryLeaseCell {
         if !matches {
             return false;
         }
-        *guard = LeaseState::Unleased;
+        guard.lease = LeaseState::Unleased;
         self.state_tag.store(TAG_UNLEASED, Ordering::Release);
         true
     }
@@ -588,12 +699,13 @@ impl DeliveryLeaseCell {
             .payload
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = PayloadLockMarker::enter();
         if let LeaseState::Leased {
             holder: cur_holder,
             key: cur_key,
             deadline_ms,
             ..
-        } = &mut *guard
+        } = &mut guard.lease
         {
             if *cur_holder == holder && cur_key == &key {
                 *deadline_ms = new_deadline_ms;
@@ -613,9 +725,10 @@ impl DeliveryLeaseCell {
             .payload
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let LeaseState::Leased { deadline_ms, .. } = &*guard {
+        let _payload_lock_marker = PayloadLockMarker::enter();
+        if let LeaseState::Leased { deadline_ms, .. } = &guard.lease {
             if now_ms >= *deadline_ms {
-                *guard = LeaseState::Unleased;
+                guard.lease = LeaseState::Unleased;
                 self.state_tag.store(TAG_UNLEASED, Ordering::Release);
                 return true;
             }
