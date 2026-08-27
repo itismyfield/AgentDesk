@@ -108,17 +108,19 @@ pub(super) async fn enqueue_entries_into_existing_run_with_pg(
             ));
         }
 
-        let has_active_dispatch = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*)::BIGINT
-             FROM task_dispatches
-             WHERE kanban_card_id = $1
-               AND status IN ('pending', 'dispatched')",
+        let has_active_dispatch = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM task_dispatches
+                 WHERE kanban_card_id = $1
+                   AND status IN ('pending', 'dispatched')
+             )",
         )
         .bind(&card.card_id)
         .fetch_one(&mut *tx)
         .await
         .map_err(|err| format!("query active dispatches for {}: {err}", card.card_id))?;
-        if has_active_dispatch > 0 {
+        if has_active_dispatch {
             return Err(format!(
                 "issue #{} already has an active dispatch and cannot be queued again",
                 entry.issue_number

@@ -1300,16 +1300,17 @@ pub(crate) async fn perform_card_rollback_on_tx(
         return Ok(());
     }
 
-    let has_active_dispatch = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT
-         FROM task_dispatches
-         WHERE kanban_card_id = $1 AND status IN ('pending', 'dispatched')",
+    let has_active_dispatch = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM task_dispatches
+             WHERE kanban_card_id = $1 AND status IN ('pending', 'dispatched')
+         )",
     )
     .bind(card_id)
     .fetch_one(&mut **tx)
     .await
-    .map_err(|error| format!("check active dispatches for card {card_id}: {error}"))?
-        > 0;
+    .map_err(|error| format!("check active dispatches for card {card_id}: {error}"))?;
     if has_active_dispatch {
         // Quiet permanent give-up: the outbox caller treats this as success and
         // deletes the row, so this card rollback receives no retry.
