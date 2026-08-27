@@ -107,6 +107,23 @@ describe("Office manager icon picker accessibility", () => {
     expect(defaultIcon.getAttribute("type")).toBe("button");
     expect(defaultIcon.getAttribute("role")).toBe("radio");
     expect(defaultIcon.getAttribute("aria-checked")).toBe("true");
+
+    const radioGroups = Array.from(
+      target.querySelectorAll<HTMLElement>('[role="radiogroup"][aria-labelledby]'),
+    );
+    expect(radioGroups).toHaveLength(2);
+    expect(
+      radioGroups.map((group) => {
+        const labelId = group.getAttribute("aria-labelledby");
+        const label = labelId
+          ? target.querySelector<HTMLElement>(`[id="${labelId}"]`)
+          : null;
+        return { tagName: label?.tagName, text: label?.textContent };
+      }),
+    ).toEqual([
+      { tagName: "DIV", text: "아이콘" },
+      { tagName: "DIV", text: "색상" },
+    ]);
   });
 
   it("contains focus across modal views and restores the opener", async () => {
