@@ -1033,7 +1033,11 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
             prelaunch_runtime_kind,
         );
     let watcher_tmux_name = inflight_tmux_name.clone();
-    let watcher_output_path = inflight_output_path.clone();
+    let watcher_output_path = prelaunch_watcher_output_path(
+        inflight_tmux_name.as_deref(),
+        inflight_output_path.as_deref(),
+        prelaunch_runtime_kind,
+    );
 
     let mut inflight_state = InflightTurnState::new(
         provider.clone(),

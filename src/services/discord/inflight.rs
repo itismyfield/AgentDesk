@@ -54,6 +54,8 @@ pub(in crate::services::discord) use store::InflightDeliveryRewindReason;
 use store::inflight_provider_dir;
 pub(in crate::services::discord) use store::inflight_state_path;
 pub(crate) use store::lock_inflight_state_path;
+#[cfg(all(test, unix))]
+use store::second_fd_cannot_take_lock_nonblocking;
 
 // #3715 / #3835: the rebind-origin dead-watcher/orphan-lock helpers PLUS the
 // staleness predicates and orphan-lock / rebind-origin reap helpers live in this

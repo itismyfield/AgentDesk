@@ -13,6 +13,9 @@
 
 use super::*;
 
+#[path = "save_store/create_monotonic_observer.rs"]
+mod create_monotonic_observer;
+
 #[path = "save_store/delivery_rewind.rs"]
 mod delivery_rewind;
 #[path = "save_store/identity_gate.rs"]
@@ -851,6 +854,25 @@ mod tests {
     }
 }
 
+fn is_synthetic_create_state(state: &InflightTurnState) -> bool {
+    let rebind = state.rebind_origin
+        && state.request_owner_user_id == 0
+        && state.user_msg_id == 0
+        && state.current_msg_id == 0
+        && matches!(
+            state.turn_source,
+            TurnSource::MonitorTriggered | TurnSource::ExternalAdopted
+        );
+    let watcher = state.turn_source == TurnSource::ExternalInput
+        && state.request_owner_user_id == 0
+        && state.user_msg_id == 0
+        && state.effective_relay_owner_kind() == RelayOwnerKind::Watcher;
+    let tui_direct = state.turn_source == TurnSource::ExternalInput
+        && state.request_owner_user_id
+            == crate::services::discord::tui_prompt_relay::TUI_DIRECT_SYNTHETIC_OWNER_USER_ID;
+    rebind || watcher || tui_direct
+}
+
 pub(in crate::services::discord) fn save_inflight_state_create_new(
     state: &InflightTurnState,
 ) -> Result<(), CreateNewInflightError> {
@@ -905,8 +927,15 @@ fn save_inflight_state_create_new_in_root(
         Ok(mut file) => {
             file.write_all(json.as_bytes())
                 .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
+            #[cfg(not(test))]
             file.sync_all()
                 .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
+            #[cfg(test)]
+            create_monotonic_observer::test_seams::sync_result(&file)
+                .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
+            if !is_synthetic_create_state(&updated) {
+                create_monotonic_observer::observe_successful_real_create(&updated);
+            }
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -994,5 +1023,8 @@ fn save_inflight_state_if_absent_in_root(
     bump_save_generation_for_write(&path, &mut updated);
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)?;
+    if !is_synthetic_create_state(&updated) {
+        create_monotonic_observer::observe_successful_real_create(&updated);
+    }
     Ok(true)
 }
