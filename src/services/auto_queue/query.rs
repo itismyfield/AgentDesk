@@ -242,12 +242,14 @@ pub(super) async fn group_has_dispatched_entries_pg(
     run_id: &str,
     thread_group: i64,
 ) -> Result<bool, String> {
-    let count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::BIGINT
-         FROM auto_queue_entries
-         WHERE run_id = $1
-           AND COALESCE(thread_group, 0) = $2
-           AND status = 'dispatched'",
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM auto_queue_entries
+             WHERE run_id = $1
+               AND COALESCE(thread_group, 0) = $2
+               AND status = 'dispatched'
+         )",
     )
     .bind(run_id)
     .bind(thread_group)
@@ -256,5 +258,5 @@ pub(super) async fn group_has_dispatched_entries_pg(
     .map_err(|error| {
         format!("count dispatched postgres auto-queue entries for {run_id}:{thread_group}: {error}")
     })?;
-    Ok(count > 0)
+    Ok(exists)
 }
