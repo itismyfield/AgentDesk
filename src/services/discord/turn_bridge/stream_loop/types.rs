@@ -297,7 +297,8 @@ pub(in crate::services::discord::turn_bridge) struct StreamLoopState<'a> {
     pub(in crate::services::discord::turn_bridge) accumulated_cache_read_tokens: &'a mut u64,
     pub(in crate::services::discord::turn_bridge) accumulated_output_tokens: &'a mut u64,
     pub(in crate::services::discord::turn_bridge) spin_idx: &'a mut usize,
-    pub(in crate::services::discord::turn_bridge) restart_followup_pending: &'a mut bool,
+    pub(in crate::services::discord::turn_bridge) restart_followup_pending:
+        &'a mut Option<RestartAttempt>,
     pub(in crate::services::discord::turn_bridge) any_tool_used: &'a mut bool,
     pub(in crate::services::discord::turn_bridge) has_post_tool_text: &'a mut bool,
     pub(in crate::services::discord::turn_bridge) tmux_handed_off: &'a mut bool,

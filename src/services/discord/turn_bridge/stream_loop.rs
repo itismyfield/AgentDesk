@@ -67,7 +67,7 @@ pub(super) async fn run_stream_loop(
     #[rustfmt::skip]
     let (mut accumulated_cache_create_tokens, mut accumulated_cache_read_tokens, mut accumulated_output_tokens) = (*state.accumulated_cache_create_tokens, *state.accumulated_cache_read_tokens, *state.accumulated_output_tokens);
     #[rustfmt::skip]
-    let (mut spin_idx, mut restart_followup_pending, mut any_tool_used) = (*state.spin_idx, *state.restart_followup_pending, *state.any_tool_used);
+    let (mut spin_idx, mut restart_followup_pending, mut any_tool_used) = (*state.spin_idx, state.restart_followup_pending.clone(), *state.any_tool_used);
     #[rustfmt::skip]
     let (mut has_post_tool_text, mut tmux_handed_off, mut watcher_owns_assistant_relay) = (*state.has_post_tool_text, *state.tmux_handed_off, *state.watcher_owns_assistant_relay);
     let mut watcher_relay_available_for_turn = *state.watcher_relay_available_for_turn;

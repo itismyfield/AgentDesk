@@ -717,11 +717,10 @@ pub(super) async fn run_completion_postlude(
         });
     }
 
-    // Clear restart report BEFORE clearing inflight state (which removes
-    // the cancel token) to prevent the flush loop from processing the
-    // report in the gap between cancel token removal and report deletion.
-    if completion_r3.permits_channel_effects() && restart_followup_pending {
-        clear_restart_report(&provider, channel_id.get());
+    if completion_r3.permits_channel_effects()
+        && let Some(attempt) = restart_followup_pending.as_ref()
+    {
+        clear_restart_report(&provider, channel_id.get(), attempt);
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::info!(
             "  [{ts}] ✓ Cleared restart report for channel {} (turn completed normally)",

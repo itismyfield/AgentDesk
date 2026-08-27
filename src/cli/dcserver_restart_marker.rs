@@ -70,7 +70,15 @@ pub(crate) fn create_quick_restart_marker(
     runtime_root: &Path,
     version: &str,
 ) -> Result<QuickRestartMarker, RestartMarkerCreateError> {
-    create_quick_restart_marker_inner(runtime_root, version, |file, body| {
+    create_quick_restart_marker_for_attempt(runtime_root, version, uuid::Uuid::new_v4().to_string())
+}
+
+pub(crate) fn create_quick_restart_marker_for_attempt(
+    runtime_root: &Path,
+    version: &str,
+    nonce: String,
+) -> Result<QuickRestartMarker, RestartMarkerCreateError> {
+    create_quick_restart_marker_inner(runtime_root, version, nonce, |file, body| {
         file.write_all(body.as_bytes())?;
         file.flush()
     })
@@ -79,12 +87,12 @@ pub(crate) fn create_quick_restart_marker(
 fn create_quick_restart_marker_inner(
     runtime_root: &Path,
     version: &str,
+    nonce: String,
     write_staging: impl FnOnce(&mut fs::File, &str) -> io::Result<()>,
 ) -> Result<QuickRestartMarker, RestartMarkerCreateError> {
     let path = runtime_root.join("restart_pending");
     let staging_path =
         runtime_root.join(format!(".restart_pending.publish.{}", uuid::Uuid::new_v4()));
-    let nonce = uuid::Uuid::new_v4();
     let body = format!(
         "nonce={nonce}\nsource={QUICK_RESTART_SOURCE}\nscope={QUICK_RESTART_SCOPE}\nversion={version}\nrequested_at={}\n",
         chrono::Utc::now().to_rfc3339()
@@ -183,10 +191,15 @@ mod tests {
         let existing = "nonce=owner-nonce\nsource=deploy-release\nscope=release\n";
         fs::write(&path, existing).unwrap();
 
-        let result = create_quick_restart_marker_inner(root.path(), "9.9.9", |file, body| {
-            file.write_all(&body.as_bytes()[..body.len() / 2])?;
-            Err(io::Error::other("injected staging write failure"))
-        });
+        let result = create_quick_restart_marker_inner(
+            root.path(),
+            "9.9.9",
+            uuid::Uuid::new_v4().to_string(),
+            |file, body| {
+                file.write_all(&body.as_bytes()[..body.len() / 2])?;
+                Err(io::Error::other("injected staging write failure"))
+            },
+        );
 
         assert!(matches!(result, Err(RestartMarkerCreateError::Io(_))));
         assert_eq!(fs::read_to_string(path).unwrap(), existing);
@@ -206,10 +219,15 @@ mod tests {
         let existing = "nonce=owner-nonce\nsource=deploy-release\nscope=release\n";
         fs::write(&path, existing).unwrap();
 
-        let result = create_quick_restart_marker_inner(root.path(), "9.9.9", |file, body| {
-            file.write_all(body.as_bytes())?;
-            file.flush()
-        });
+        let result = create_quick_restart_marker_inner(
+            root.path(),
+            "9.9.9",
+            uuid::Uuid::new_v4().to_string(),
+            |file, body| {
+                file.write_all(body.as_bytes())?;
+                file.flush()
+            },
+        );
 
         assert!(matches!(
             result,

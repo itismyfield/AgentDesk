@@ -64,7 +64,7 @@ pub(super) async fn handle_stream_tool_message(
         state.pending_long_running_open_after_state_save.take();
     let mut pending_long_running_retarget_after_state_save =
         state.pending_long_running_retarget_after_state_save.take();
-    let mut restart_followup_pending = *state.restart_followup_pending;
+    let mut restart_followup_pending = (*state.restart_followup_pending).clone();
     let mut last_edit_text = std::mem::take(state.last_edit_text);
     let mut full_response = std::mem::take(state.full_response);
     let response_sent_offset = &mut *state.response_sent_offset;
@@ -281,7 +281,7 @@ pub(super) async fn handle_stream_tool_message(
                     is_error: false,
                 },
             );
-            let restart_bridge_authorized = if !restart_followup_pending
+            let restart_bridge_authorized = if restart_followup_pending.is_none()
                 && is_dcserver_restart_command(&input)
             {
                 let authority = fence_restart_visible_mutation(StreamToolAuthorityContext {
@@ -304,31 +304,23 @@ pub(super) async fn handle_stream_tool_message(
                 false
             };
             if restart_bridge_authorized {
-                let mut report = RestartCompletionReport::new(
-                    provider.clone(),
-                    channel_id.get(),
-                    "pending",
-                    format!(
-                        "dcserver restart requested by `{}`; 새 프로세스가 후속 보고를 이어받을 예정입니다.",
-                        request_owner_name
-                    ),
+                let context = RestartReportContext {
+                    provider: provider.clone(),
+                    channel_id: channel_id.get(),
+                    current_msg_id: optional_durable_current_msg_id_from_detached(*current_msg_id),
+                };
+                // Reporting is best-effort and does not gate the restart handoff.
+                restart_followup_pending = announce_restart(&context).ok();
+                inflight_state.set_restart_mode(
+                    crate::services::discord::InflightRestartMode::DrainRestart,
                 );
-                report.current_msg_id =
-                    optional_durable_current_msg_id_from_detached(*current_msg_id);
-                report.channel_name = adk_session_name.clone();
-                if save_restart_report(&report).is_ok() {
-                    restart_followup_pending = true;
-                    inflight_state.set_restart_mode(
-                        crate::services::discord::InflightRestartMode::DrainRestart,
-                    );
-                    let handoff_text = "♻️ dcserver 재시작 중...\n\n재시작 후 현재 turn은 자동 새 턴으로 이어가지 않고, 상태만 다시 확인합니다.";
-                    if edit_bound_current_message(
-                        gateway.as_ref(), channel_id, *current_msg_id, inflight_state, handoff_text,
-                    ).await {
-                        last_edit_text = handoff_text.to_string();
-                    }
-                    state_dirty = true;
+                let handoff_text = "♻️ dcserver 재시작 중...\n\n재시작 후 현재 turn은 자동 새 턴으로 이어가지 않고, 상태만 다시 확인합니다.";
+                if edit_bound_current_message(
+                    gateway.as_ref(), channel_id, *current_msg_id, inflight_state, handoff_text,
+                ).await {
+                    last_edit_text = handoff_text.to_string();
                 }
+                state_dirty = true;
             }
             if !full_response.is_empty() {
                 // #3608: paragraph separator via the shared

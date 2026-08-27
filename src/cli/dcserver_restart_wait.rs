@@ -2,8 +2,10 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use super::dcserver_restart_marker::create_quick_restart_marker;
 use super::dcserver_restart_marker::{
-    QuickRestartMarker, RestartMarkerCreateError, create_quick_restart_marker,
+    QuickRestartMarker, RestartMarkerCreateError, create_quick_restart_marker_for_attempt,
 };
 #[cfg(test)]
 use super::restart_terminal_proof::TerminalProof;
@@ -13,13 +15,30 @@ const DEFERRED_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WaitTermination {
+pub(super) enum WaitTermination {
     AlreadyOwned,
     CreateFailed,
     Persisted,
     Cancelled,
     ProcessGoneWithoutProof,
     TimeoutWithoutProof,
+}
+
+impl WaitTermination {
+    pub(super) fn into_result(self) -> Result<(), String> {
+        match self {
+            Self::Persisted => Ok(()),
+            Self::AlreadyOwned => Err("restart is already owned by another request".to_string()),
+            Self::CreateFailed => Err("failed to create restart marker".to_string()),
+            Self::Cancelled => Err("dcserver cancelled this restart".to_string()),
+            Self::ProcessGoneWithoutProof => {
+                Err("dcserver exited without proof for this restart".to_string())
+            }
+            Self::TimeoutWithoutProof => {
+                Err("restart timed out without terminal proof".to_string())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,16 +50,23 @@ enum QuickRestartRun {
 impl QuickRestartRun {
     fn outcome(self) -> QuickRestartOutcome {
         match self {
-            Self::Handled(_) => QuickRestartOutcome::Handled,
+            Self::Handled(termination) => QuickRestartOutcome::Handled(termination),
             Self::NoRuntimeRoot => QuickRestartOutcome::NoRuntimeRoot,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum QuickRestartOutcome {
-    Handled,
+pub(crate) enum QuickRestartOutcome {
+    Handled(WaitTermination),
     NoRuntimeRoot,
+}
+
+impl QuickRestartOutcome {
+    #[cfg(test)]
+    pub(crate) fn is_persisted(self) -> bool {
+        matches!(self, Self::Handled(WaitTermination::Persisted))
+    }
 }
 
 trait QuickRestartEffects {
@@ -182,13 +208,15 @@ fn wait_for_created_marker(
 fn run_quick_restart(
     root: Option<&Path>,
     version: &str,
+    attempt: &str,
     effects: &impl QuickRestartEffects,
+    after_marker_acquired: impl FnOnce(&QuickRestartMarker),
 ) -> QuickRestartRun {
     let Some(root) = root else {
         return QuickRestartRun::NoRuntimeRoot;
     };
 
-    let marker = match create_quick_restart_marker(root, version) {
+    let marker = match create_quick_restart_marker_for_attempt(root, version, attempt.to_string()) {
         Ok(marker) => marker,
         Err(RestartMarkerCreateError::AlreadyOwned(owner)) => {
             effects.stderr(format!(
@@ -205,15 +233,18 @@ fn run_quick_restart(
         }
     };
 
+    after_marker_acquired(&marker);
     QuickRestartRun::Handled(wait_for_created_marker(root, &marker, effects))
 }
 
 pub(super) fn run_quick_restart_with_production_effects(
     root: Option<&Path>,
     version: &str,
+    attempt: &str,
+    after_marker_acquired: impl FnOnce(&QuickRestartMarker),
 ) -> QuickRestartOutcome {
     let effects = ProductionEffects::new();
-    run_quick_restart(root, version, &effects).outcome()
+    run_quick_restart(root, version, attempt, &effects, after_marker_acquired).outcome()
 }
 
 #[cfg(test)]
@@ -304,9 +335,23 @@ mod tests {
     }
 
     #[test]
+    fn s5b_only_persisted_maps_to_success() {
+        assert_eq!(WaitTermination::Persisted.into_result(), Ok(()));
+        for termination in [
+            WaitTermination::AlreadyOwned,
+            WaitTermination::CreateFailed,
+            WaitTermination::Cancelled,
+            WaitTermination::ProcessGoneWithoutProof,
+            WaitTermination::TimeoutWithoutProof,
+        ] {
+            assert!(termination.into_result().is_err(), "{termination:?}");
+        }
+    }
+
+    #[test]
     fn s5b_no_runtime_root_uses_standard_fallback_without_direct_kill() {
         let recorder = Recorder::default();
-        let result = run_quick_restart(None, "test", &recorder);
+        let result = run_quick_restart(None, "test", "attempt", &recorder, |_| {});
         assert_eq!(result, QuickRestartRun::NoRuntimeRoot);
         assert_eq!(result.outcome(), QuickRestartOutcome::NoRuntimeRoot);
         assert!(recorder.stdout.borrow().is_empty());
@@ -319,11 +364,15 @@ mod tests {
         let existing = "nonce=owner-nonce\nsource=deploy-release\nscope=release\n";
         fs::write(root.path().join("restart_pending"), existing).unwrap();
         let recorder = Recorder::default();
-        let result = run_quick_restart(Some(root.path()), "test", &recorder);
+        let callback_called = Cell::new(false);
+        let result = run_quick_restart(Some(root.path()), "test", "attempt", &recorder, |_| {
+            callback_called.set(true)
+        });
         assert_eq!(
             result,
             QuickRestartRun::Handled(WaitTermination::AlreadyOwned)
         );
+        assert!(!callback_called.get());
         assert_eq!(
             fs::read_to_string(root.path().join("restart_pending")).unwrap(),
             existing
@@ -340,11 +389,16 @@ mod tests {
     fn s5b_create_io_failure_is_handled_without_direct_kill() {
         let root_file = tempfile::NamedTempFile::new().unwrap();
         let recorder = Recorder::default();
-        let result = run_quick_restart(Some(root_file.path()), "test", &recorder);
+        let callback_called = Cell::new(false);
+        let result =
+            run_quick_restart(Some(root_file.path()), "test", "attempt", &recorder, |_| {
+                callback_called.set(true)
+            });
         assert_eq!(
             result,
             QuickRestartRun::Handled(WaitTermination::CreateFailed)
         );
+        assert!(!callback_called.get());
         assert!(recorder.stderr.borrow()[0].starts_with("   ⚠ Failed to write restart marker "));
     }
 
