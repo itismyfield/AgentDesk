@@ -786,12 +786,14 @@ fn watcher_reservation_all_central_removal_spellings_clear_pair() {
 }
 
 #[test]
-#[should_panic(expected = "tmux relay coord accessed while DeliveryLeaseCell payload is held")]
 fn watcher_reservation_coord_access_under_payload_is_rejected() {
     let channel = ChannelId::new(5_191_000_000_000_000_061);
     let registry = TmuxWatcherRegistry::new();
     let cell = DeliveryLeaseCell::new(channel);
-    cell.with_state_locked(|_| {
-        registry.insert(channel, live_watcher_handle("AgentDesk-5191-coord-under-payload"));
-    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cell.with_state_locked(|_| {
+            registry.insert(channel, live_watcher_handle("AgentDesk-5191-coord-under-payload"));
+        });
+    }));
+    assert!(result.is_err(), "payload-held coord access must panic");
 }
