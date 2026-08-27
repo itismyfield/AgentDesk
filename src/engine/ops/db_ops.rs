@@ -513,23 +513,222 @@ fn scan_double_quoted_identifier(sql: &str, start: usize) -> Option<(&str, Strin
     None
 }
 
-fn is_quoted_identifier_alias(sql: &str, quote_start: usize) -> bool {
-    previous_sql_word(sql, quote_start).is_some_and(|word| word.eq_ignore_ascii_case("as"))
+/// True when `identifier_start` is an alias for a completed select-list expression.
+///
+/// Handles `AS alias`, implicit `expr alias`, and aliases after punctuation-
+/// terminated expressions (`count(*) rowid`, `"value" "rowid"`). Skips comments
+/// when inspecting the preceding token so `ORDER BY -- x\n rowid` still maps to
+/// `ctid`.
+fn is_identifier_alias(sql: &str, identifier_start: usize) -> bool {
+    match previous_sql_token(sql, identifier_start) {
+        Some(SqlPrecedingToken::As) => true,
+        Some(SqlPrecedingToken::ClauseKeyword) => false,
+        // Completed expressions: identifiers, value keywords (NULL/END/TRUE/…),
+        // or punctuation that closes an expression (')', quoted id, etc.).
+        Some(SqlPrecedingToken::ExpressionComplete) => true,
+        None => false,
+    }
 }
 
-fn previous_sql_word(sql: &str, before: usize) -> Option<&str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlPrecedingToken {
+    As,
+    ClauseKeyword,
+    ExpressionComplete,
+}
+
+fn previous_sql_token(sql: &str, before: usize) -> Option<SqlPrecedingToken> {
+    let end = skip_ws_and_comments_backward(sql, before.min(sql.len()))?;
     let bytes = sql.as_bytes();
-    let mut end = before.min(bytes.len());
-    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
-        end -= 1;
+    let last = bytes[end - 1];
+
+    // Expression completed by punctuation: count(*) alias, "col" alias, 'x' alias.
+    if matches!(last, b')' | b']' | b'"' | b'\'' | b'`') {
+        return Some(SqlPrecedingToken::ExpressionComplete);
+    }
+
+    if !(last.is_ascii_alphanumeric() || last == b'_') {
+        return None;
     }
 
     let mut start = end;
-    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
-        start -= 1;
+    while start > 0 {
+        let b = bytes[start - 1];
+        if b.is_ascii_alphanumeric() || b == b'_' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    let word = &sql[start..end];
+    if word.eq_ignore_ascii_case("as") {
+        return Some(SqlPrecedingToken::As);
+    }
+    if is_sql_clause_keyword(word) {
+        return Some(SqlPrecedingToken::ClauseKeyword);
+    }
+    // Includes value-completing keywords (NULL, END, TRUE, FALSE) and identifiers.
+    Some(SqlPrecedingToken::ExpressionComplete)
+}
+
+/// Forward scan up to `target` to safely find the end index of the preceding
+/// non-comment, non-whitespace region, correctly skipping string literals.
+fn skip_ws_and_comments_backward(sql: &str, target: usize) -> Option<usize> {
+    let mut idx = 0;
+    let bytes = sql.as_bytes();
+    let mut last_valid_end = None;
+
+    while idx < target {
+        if bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+            continue;
+        }
+
+        if sql[idx..].starts_with("--") {
+            let line_end = sql[idx..]
+                .find('\n')
+                .map(|p| idx + p + 1)
+                .unwrap_or(sql.len());
+            idx = line_end;
+            continue;
+        }
+
+        if sql[idx..].starts_with("/*") {
+            let block_end = sql[idx..]
+                .find("*/")
+                .map(|p| idx + p + 2)
+                .unwrap_or(sql.len());
+            idx = block_end;
+            continue;
+        }
+
+        if bytes[idx] == b'\'' {
+            let mut end_idx = idx + 1;
+            while end_idx < sql.len() {
+                if bytes[end_idx] == b'\'' {
+                    end_idx += 1;
+                    if end_idx < sql.len() && bytes[end_idx] == b'\'' {
+                        end_idx += 1; // escaped quote
+                    } else {
+                        break;
+                    }
+                } else {
+                    end_idx += 1;
+                }
+            }
+            last_valid_end = Some(end_idx.min(target));
+            idx = end_idx;
+            continue;
+        }
+
+        if bytes[idx] == b'"' {
+            if let Some((_, _, next_idx)) = scan_double_quoted_identifier(sql, idx) {
+                last_valid_end = Some(next_idx.min(target));
+                idx = next_idx;
+            } else {
+                idx += 1;
+                last_valid_end = Some(idx.min(target));
+            }
+            continue;
+        }
+
+        if let Some(delimiter) = dollar_quote_delimiter(sql, idx) {
+            let end_search_start = idx + delimiter.len();
+            if let Some(end_rel) = sql[end_search_start..].find(&delimiter) {
+                let end_idx = end_search_start + end_rel + delimiter.len();
+                last_valid_end = Some(end_idx.min(target));
+                idx = end_idx;
+            } else {
+                idx = sql.len();
+                last_valid_end = Some(idx.min(target));
+            }
+            continue;
+        }
+
+        if bytes[idx].is_ascii_alphabetic() || bytes[idx] == b'_' {
+            let mut end_idx = idx + 1;
+            while end_idx < sql.len()
+                && (bytes[end_idx].is_ascii_alphanumeric()
+                    || bytes[end_idx] == b'_'
+                    || bytes[end_idx] == b'.')
+            {
+                end_idx += 1;
+            }
+            last_valid_end = Some(end_idx.min(target));
+            idx = end_idx;
+            continue;
+        }
+
+        let char_len = sql[idx..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        idx += char_len;
+        last_valid_end = Some(idx.min(target));
     }
 
-    (start < end).then_some(&sql[start..end])
+    last_valid_end
+}
+
+fn is_sql_clause_keyword(word: &str) -> bool {
+    // Keywords that introduce / bind a following expression (not complete a
+    // select-list expression that can take an implicit alias).
+    // Intentionally excludes NULL/TRUE/FALSE/END which complete expressions.
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "select"
+            | "from"
+            | "where"
+            | "and"
+            | "or"
+            | "on"
+            | "set"
+            | "by"
+            | "having"
+            | "group"
+            | "order"
+            | "limit"
+            | "offset"
+            | "returning"
+            | "into"
+            | "values"
+            | "in"
+            | "not"
+            | "is"
+            | "when"
+            | "then"
+            | "else"
+            | "like"
+            | "ilike"
+            | "between"
+            | "asc"
+            | "desc"
+            | "outer"
+            | "inner"
+            | "join"
+            | "left"
+            | "right"
+            | "full"
+            | "cross"
+            | "natural"
+            | "using"
+            | "union"
+            | "intersect"
+            | "except"
+            | "exists"
+            | "any"
+            | "all"
+            | "some"
+            | "cast"
+            | "extract"
+            | "substring"
+            | "trim"
+            | "case"
+            | "distinct"
+            | "over"
+            | "partition"
+            | "window"
+            | "filter"
+            | "with"
+            | "as" // handled separately but safe
+    )
 }
 
 fn translate_sqlite_rowid(sql: &str) -> String {
@@ -558,9 +757,7 @@ fn translate_sqlite_rowid(sql: &str) -> String {
                 }
                 if bytes[idx] == b'"' {
                     if let Some((raw, ident, next_idx)) = scan_double_quoted_identifier(sql, idx) {
-                        if ident.eq_ignore_ascii_case("rowid")
-                            && !is_quoted_identifier_alias(sql, idx)
-                        {
+                        if ident.eq_ignore_ascii_case("rowid") && !is_identifier_alias(sql, idx) {
                             result.push_str("ctid");
                         } else {
                             result.push_str(raw);
@@ -603,7 +800,11 @@ fn translate_sqlite_rowid(sql: &str) -> String {
 
                     let token = &sql[start..idx];
                     if token.eq_ignore_ascii_case("rowid") {
-                        result.push_str("ctid");
+                        if !is_identifier_alias(sql, start) {
+                            result.push_str("ctid");
+                        } else {
+                            result.push_str(token);
+                        }
                         continue;
                     }
 
@@ -1460,6 +1661,93 @@ mod tests {
 
         pool.close().await;
         test_db.drop().await;
+    }
+
+    #[test]
+    fn test_translate_sqlite_rowid_aliases() {
+        // Unquoted aliases with AS
+        assert_eq!(
+            translate_sqlite_rowid("SELECT rowid AS rowid FROM t"),
+            "SELECT ctid AS rowid FROM t"
+        );
+        assert_eq!(
+            translate_sqlite_rowid("SELECT rowid as ROWID FROM t"),
+            "SELECT ctid as ROWID FROM t"
+        );
+        assert_eq!(
+            translate_sqlite_rowid("SELECT t.rowid AS rowid FROM t"),
+            "SELECT t.ctid AS rowid FROM t"
+        );
+
+        // Unquoted aliases without AS
+        assert_eq!(
+            translate_sqlite_rowid("SELECT rowid rowid FROM t"),
+            "SELECT ctid rowid FROM t"
+        );
+        assert_eq!(
+            translate_sqlite_rowid("SELECT t.rowid rowid FROM t"),
+            "SELECT t.ctid rowid FROM t"
+        );
+        assert_eq!(
+            translate_sqlite_rowid("SELECT a rowid FROM t"),
+            "SELECT a rowid FROM t"
+        );
+
+        // Quoted aliases
+        assert_eq!(
+            translate_sqlite_rowid("SELECT rowid AS \"rowid\" FROM t"),
+            "SELECT ctid AS \"rowid\" FROM t"
+        );
+        assert_eq!(
+            translate_sqlite_rowid("SELECT rowid \"rowid\" FROM t"),
+            "SELECT ctid \"rowid\" FROM t"
+        );
+
+        // No aliases
+        assert_eq!(
+            translate_sqlite_rowid("SELECT rowid FROM t"),
+            "SELECT ctid FROM t"
+        );
+        assert_eq!(
+            translate_sqlite_rowid("SELECT rowid, my_rowid FROM t"),
+            "SELECT ctid, my_rowid FROM t"
+        );
+        assert_eq!(
+            translate_sqlite_rowid("SELECT a, rowid FROM t"),
+            "SELECT a, ctid FROM t"
+        );
+
+        // Alias after punctuation-terminated expression
+        assert_eq!(
+            translate_sqlite_rowid("SELECT count(*) rowid FROM t"),
+            "SELECT count(*) rowid FROM t"
+        );
+        assert_eq!(
+            translate_sqlite_rowid("SELECT \"value\" \"rowid\" FROM t"),
+            "SELECT \"value\" \"rowid\" FROM t"
+        );
+
+        // Value-completing keywords may take an implicit alias
+        assert_eq!(
+            translate_sqlite_rowid("SELECT NULL rowid FROM t"),
+            "SELECT NULL rowid FROM t"
+        );
+        assert_eq!(
+            translate_sqlite_rowid("SELECT CASE WHEN x THEN 1 END rowid FROM t"),
+            "SELECT CASE WHEN x THEN 1 END rowid FROM t"
+        );
+
+        // Line comments must not poison alias detection for real rowid refs
+        assert_eq!(
+            translate_sqlite_rowid("ORDER BY -- stable\n rowid DESC"),
+            "ORDER BY -- stable\n ctid DESC"
+        );
+
+        // Double dashes inside a string literal should not be treated as a line comment
+        assert_eq!(
+            translate_sqlite_rowid("SELECT '--', \n rowid FROM t"),
+            "SELECT '--', \n ctid FROM t"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
