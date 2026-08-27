@@ -1061,5 +1061,8 @@ fn save_inflight_state_if_absent_in_root(
     bump_save_generation_for_write(&path, &mut updated);
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
     atomic_write(&path, &json)?;
+    if !is_synthetic_create_state(&updated) {
+        create_monotonic_observer::observe_successful_real_create(&updated);
+    }
     Ok(true)
 }

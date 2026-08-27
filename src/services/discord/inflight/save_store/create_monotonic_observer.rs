@@ -7,17 +7,15 @@
 //! that stamp and the exact window still matches. This avoids the wrapper
 //! `.generation` mtime as a coordinate frame.
 //!
-//! The witness is process-local, keyed by `(provider, channel)`, and does not
-//! cover process restarts, multiple dcserver processes,
-//! synthetic/manual rebind creation, pathless ClaudeTui births, or later RMW
-//! saves. A replacement file
-//! whose length is at least the stamped length and whose exact proof window is
-//! identical is a deterministic alias; the observer may report it because no
-//! stronger incarnation proof is available at this boundary.
+//! Process-local `(provider, channel)` witnesses do not cover restarts,
+//! multiple processes, synthetic/manual rebind or pathless births, later RMW
+//! saves, or path switches. Same-path replacement preserving the proof window
+//! and stamped length remains an indistinguishable deterministic alias.
 
 use super::*;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
+use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
 const COORDINATE_WINDOW_LEN: u64 = 64;
@@ -26,6 +24,7 @@ type WitnessKey = (ProviderKind, u64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CoordinateWitness {
+    path: PathBuf,
     turn_start_offset: u64,
     len_at_stamp: u64,
     prior_window: [u8; COORDINATE_WINDOW_LEN as usize],
@@ -45,7 +44,8 @@ fn read_coordinate_witness(path: &Path, turn_start_offset: u64) -> Option<Coordi
     }
     #[cfg(test)]
     test_seams::before_anchor_io();
-    let mut file = fs::File::open(path).ok()?;
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut file = fs::File::open(&path).ok()?;
     let len_at_stamp = file.metadata().ok()?.len();
     if len_at_stamp < turn_start_offset {
         return None;
@@ -55,6 +55,7 @@ fn read_coordinate_witness(path: &Path, turn_start_offset: u64) -> Option<Coordi
         .ok()?;
     file.read_exact(&mut prior_window).ok()?;
     Some(CoordinateWitness {
+        path,
         turn_start_offset,
         len_at_stamp,
         prior_window,
@@ -63,7 +64,8 @@ fn read_coordinate_witness(path: &Path, turn_start_offset: u64) -> Option<Coordi
 
 fn coordinate_proof_matches(path: &Path, previous: &CoordinateWitness) -> bool {
     read_coordinate_witness(path, previous.turn_start_offset).is_some_and(|current| {
-        current.len_at_stamp >= previous.len_at_stamp
+        current.path == previous.path
+            && current.len_at_stamp >= previous.len_at_stamp
             && current.prior_window == previous.prior_window
     })
 }
@@ -193,6 +195,7 @@ pub(super) mod test_seams {
         let slot = witnesses.entry((provider, channel_id)).or_default();
         slot.revision = slot.revision.wrapping_add(1);
         slot.witness = Some(CoordinateWitness {
+            path: PathBuf::from("interleaved-test-witness"),
             turn_start_offset,
             len_at_stamp: turn_start_offset,
             prior_window: [byte; COORDINATE_WINDOW_LEN as usize],
@@ -267,48 +270,34 @@ mod tests {
     }
 
     #[test]
-    fn changed_exact_window_suppresses_lower_coordinate_alert() {
+    fn path_switch_suppresses_alert_and_installs_new_witness() {
         let _serial = TEST_SERIAL
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::TempDir::new().expect("temp");
-        let output = temp.path().join("turn.jsonl");
-        write_bytes(&output, &vec![b'a'; 512]);
+        let first = temp.path().join("rollout.jsonl");
+        let second = temp.path().join("wrapper.jsonl");
+        write_bytes(&first, &vec![b'a'; 512]);
+        write_bytes(&second, &vec![b'a'; 512]);
         let channel_id = 54_900_002;
         test_seams::clear_key(ProviderKind::Codex, channel_id);
-        observe_successful_real_create(&state(channel_id, &output, 256));
-
-        let mut replacement = vec![b'a'; 512];
-        replacement[192] = b'b';
-        write_bytes(&output, &replacement);
+        observe_successful_real_create(&state(channel_id, &first, 256));
         let (_, events) = invariant_test_capture::capture(|| {
-            observe_successful_real_create(&state(channel_id, &output, 128));
+            observe_successful_real_create(&state(channel_id, &second, 128));
         });
         assert!(events.is_empty());
-    }
-
-    #[test]
-    fn same_exact_window_is_the_documented_deterministic_alias() {
-        let _serial = TEST_SERIAL
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let temp = tempfile::TempDir::new().expect("temp");
-        let output = temp.path().join("turn.jsonl");
-        let bytes = vec![b'a'; 512];
-        write_bytes(&output, &bytes);
-        let channel_id = 54_900_003;
-        test_seams::clear_key(ProviderKind::Codex, channel_id);
-        observe_successful_real_create(&state(channel_id, &output, 256));
-
-        let longer_alias = vec![b'a'; 1024];
-        write_bytes(&output, &longer_alias);
-        let (_, events) = invariant_test_capture::capture(|| {
-            observe_successful_real_create(&state(channel_id, &output, 128));
+        assert_eq!(
+            test_seams::witness_offset(ProviderKind::Codex, channel_id),
+            Some(128)
+        );
+        write_bytes(&second, &vec![b'a'; 1024]);
+        let (_, alias) = invariant_test_capture::capture(|| {
+            observe_successful_real_create(&state(channel_id, &second, 64));
         });
         assert_eq!(
-            events.len(),
+            alias.len(),
             1,
-            "an exact-window alias is indistinguishable"
+            "same-path exact-window alias remains indistinguishable"
         );
     }
 

@@ -148,7 +148,7 @@ fn prelaunch_inflight_runtime_seed_from_paths(
         };
         return (
             Some(tmux_name.to_string()),
-            Some(path),
+            session_exists.then_some(path),
             Some(input_fifo_path),
             end,
         );
@@ -163,7 +163,7 @@ fn prelaunch_inflight_runtime_seed_from_paths(
         .unwrap_or(0);
     (
         Some(tmux_name.to_string()),
-        (!is_claude_tui).then_some(output_path),
+        (!is_claude_tui && session_exists).then_some(output_path),
         Some(input_fifo_path),
         session_exists.then_some(last_offset).unwrap_or(0),
     )
@@ -927,7 +927,12 @@ mod thread_role_inheritance_tests {
             (Some(file.path().display().to_string().as_str()), 10),
             "a live session must keep the wrapper end offset, not restart from 0"
         );
-        assert_eq!(seed(false).3, 0, "no session means nothing was relayed yet");
+        let dead = seed(false);
+        assert_eq!(
+            (dead.1, dead.3),
+            (None, 0),
+            "a dead session must not attribute the stale wrapper path to a new birth"
+        );
     }
 
     #[test]

@@ -2985,10 +2985,9 @@ services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_patch_reports_malformed_json_as_io_error
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_patch_reports_non_not_found_read_failure_as_io_error
 services::discord::inflight::save_store::create_monotonic_observer::tests::anchor_io_does_not_hold_witness_mutex
-services::discord::inflight::save_store::create_monotonic_observer::tests::changed_exact_window_suppresses_lower_coordinate_alert
 services::discord::inflight::save_store::create_monotonic_observer::tests::exact_continuous_window_reports_lower_real_create_as_warn
+services::discord::inflight::save_store::create_monotonic_observer::tests::path_switch_suppresses_alert_and_installs_new_witness
 services::discord::inflight::save_store::create_monotonic_observer::tests::revision_barrier_keeps_newer_interleaved_witness
-services::discord::inflight::save_store::create_monotonic_observer::tests::same_exact_window_is_the_documented_deterministic_alias
 services::discord::inflight::save_store::create_monotonic_observer::tests::unreadable_anchor_preserves_last_proven_witness
 services::discord::inflight::save_store::identity_gate::bridge_entry::tests::placeholder_clear_effect_reports_only_the_bridge_winner
 services::discord::inflight::save_store::identity_gate::claude_e_stamp::tests::claude_e_stamp_preserves_concurrent_progress_and_adopts_exact_persisted_row
@@ -3037,9 +3036,9 @@ services::discord::inflight::save_store::tests::matches_identity_save_preserves_
 services::discord::inflight::save_store::tests::non_restart_identity_refresh_save_still_persists_cleaned_api_friction_text
 services::discord::inflight::save_store::tests::output_restamp_save_declines_when_another_turn_owns_the_row
 services::discord::inflight::save_store::tests::output_restamp_save_persists_new_output_path_when_identity_matches
-services::discord::inflight::save_store::tests::real_create_tests::create_new_inputs_separate_observed_real_from_checked_synthetic_births
 services::discord::inflight::save_store::tests::real_create_tests::failed_sync_does_not_stamp_real_create_witness
 services::discord::inflight::save_store::tests::real_create_tests::real_create_observes_while_sidecar_flock_is_held
+services::discord::inflight::save_store::tests::real_create_tests::real_if_absent_advances_witness_but_rebind_synthetic_does_not
 services::discord::inflight::save_store::tests::real_create_tests::typed_real_create_api_records_successful_turn_births
 services::discord::inflight::save_store::tests::restart_full_response_patch_declines_when_cleaning_changes_relayed_prefix
 services::discord::inflight::save_store::tests::restart_full_response_patch_saves_when_cleaning_keeps_relayed_prefix

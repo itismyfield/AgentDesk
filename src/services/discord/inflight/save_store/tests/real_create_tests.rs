@@ -51,28 +51,6 @@ fn typed_real_create_api_records_successful_turn_births() {
         }],
     );
 }
-#[test]
-fn create_new_inputs_separate_observed_real_from_checked_synthetic_births() {
-    let real = real_state(54_900_009, Path::new("/tmp/real.jsonl"), 0);
-    assert!(SyntheticInflightCreate::new(&real).is_err());
-
-    let mut synthetic = real.clone();
-    synthetic.request_owner_user_id = 0;
-    synthetic.user_msg_id = 0;
-    synthetic.current_msg_id = 0;
-    synthetic.rebind_origin = true;
-    synthetic.turn_source = TurnSource::MonitorTriggered;
-    assert!(SyntheticInflightCreate::new(&synthetic).is_ok());
-
-    let store = include_str!("../../save_store.rs");
-    assert_eq!(
-        store
-            .matches(concat!("save_inflight_state_create_new_", "in_root("))
-            .count(),
-        4,
-        "save_store keeps three typed/test wrappers and one raw O_EXCL definition",
-    );
-}
 #[cfg(unix)]
 #[test]
 fn real_create_observes_while_sidecar_flock_is_held() {
@@ -121,4 +99,28 @@ fn failed_sync_does_not_stamp_real_create_witness() {
         None,
         "failed durability sync must not publish a process witness"
     );
+}
+
+#[test]
+fn real_if_absent_advances_witness_but_rebind_synthetic_does_not() {
+    let temp = tempfile::TempDir::new().expect("runtime root");
+    let output = temp.path().join("turn.jsonl");
+    std::fs::write(&output, vec![b'a'; 512]).expect("write output");
+    let witness =
+        |id| create_monotonic_observer::test_seams::witness_offset(ProviderKind::Codex, id);
+    let real = real_state(54_900_010, &output, 256);
+    create_monotonic_observer::test_seams::clear_key(ProviderKind::Codex, real.channel_id);
+    assert!(SyntheticInflightCreate::new(&real).is_err());
+    assert!(save_inflight_state_if_absent_in_root(temp.path(), &real).unwrap());
+    assert_eq!(witness(real.channel_id), Some(256));
+    let mut synthetic = real_state(54_900_011, &output, 128);
+    synthetic.request_owner_user_id = 0;
+    synthetic.user_msg_id = 0;
+    synthetic.current_msg_id = 0;
+    synthetic.rebind_origin = true;
+    synthetic.turn_source = TurnSource::MonitorTriggered;
+    create_monotonic_observer::test_seams::clear_key(ProviderKind::Codex, synthetic.channel_id);
+    assert!(SyntheticInflightCreate::new(&synthetic).is_ok());
+    assert!(save_inflight_state_if_absent_in_root(temp.path(), &synthetic).unwrap());
+    assert_eq!(witness(synthetic.channel_id), None);
 }
