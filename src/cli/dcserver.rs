@@ -555,6 +555,7 @@ pub fn parse_restart_dcserver_report_context(
                 provider,
                 channel_id,
                 current_msg_id,
+                channel_name: None,
             }))
         }
     }

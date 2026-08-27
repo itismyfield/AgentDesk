@@ -4264,9 +4264,9 @@ services::discord::response_sanitizer::subagent_notification_card::tests::detect
 services::discord::response_sanitizer::subagent_notification_card::tests::detects_provider_reuse_user_prefixed_subagent_notifications_3777
 services::discord::response_sanitizer::subagent_notification_card::tests::human_mid_body_quote_is_not_sanitized
 services::discord::response_sanitizer::tests::strips_echoed_memory_recall_ownership_block
-services::discord::restart_report::tests::exact_report_fences_proofs_and_retry_contracts
-services::discord::restart_report::tests::legacy_corrupt_announce_and_send_claim_are_non_wedging
-services::discord::restart_report::tests::production_path_joins_claim_to_fresh_durable_marker_attempt
+services::discord::restart_report::tests::exact_fencing_nonce_and_acceptance_survive_a_b_c_overlap
+services::discord::restart_report::tests::pending_awaiting_and_corrupt_reports_are_conservative
+services::discord::restart_report::tests::production_path_preserves_attempt_and_fresh_bridge_channel
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_preserves_fresh_bootstrap_without_worktree_hint
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_reused_thread_still_updates_divergent_fallback
 services::discord::router::dispatch_trigger::tests::dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches

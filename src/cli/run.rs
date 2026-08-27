@@ -799,6 +799,7 @@ fn build_restart_report_context(
                 provider,
                 channel_id,
                 current_msg_id,
+                channel_name: None,
             }))
         }
     }

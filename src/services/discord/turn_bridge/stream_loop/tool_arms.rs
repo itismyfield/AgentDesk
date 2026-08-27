@@ -304,11 +304,12 @@ pub(super) async fn handle_stream_tool_message(
                 false
             };
             if restart_bridge_authorized {
-                let context = RestartReportContext {
-                    provider: provider.clone(),
-                    channel_id: channel_id.get(),
-                    current_msg_id: optional_durable_current_msg_id_from_detached(*current_msg_id),
-                };
+                let context = RestartReportContext::from_bridge(
+                    provider.clone(),
+                    channel_id.get(),
+                    optional_durable_current_msg_id_from_detached(*current_msg_id),
+                    adk_session_name.clone(),
+                );
                 // Reporting is best-effort and does not gate the restart handoff.
                 restart_followup_pending = announce_restart(&context).ok();
                 inflight_state.set_restart_mode(
