@@ -21,8 +21,8 @@ use crate::db::scheduled_messages::{
 };
 use crate::error::{AppError, AppResult, ErrorCode};
 
-mod snapshot_capture;
 mod provider_targets;
+mod snapshot_capture;
 
 #[cfg(test)]
 mod postgres_tests;
@@ -164,11 +164,8 @@ async fn validate_create(
             "deliveryKind must be 'push' or 'agent'",
         ));
     }
-    let validated_provider_targets = provider_targets::prepare_create(
-        body.provider_targets.as_ref(),
-        content,
-        &delivery_kind,
-    )?;
+    let validated_provider_targets =
+        provider_targets::prepare_create(body.provider_targets.as_ref(), content, &delivery_kind)?;
     let on_agent_failure = body
         .on_agent_failure
         .as_deref()
@@ -318,7 +315,9 @@ async fn validate_create(
             .dedupe_key
             .clone()
             .filter(|value| !value.trim().is_empty()),
-        provider_targets: validated_provider_targets.as_ref().map(|targets| targets.stored.clone()),
+        provider_targets: validated_provider_targets
+            .as_ref()
+            .map(|targets| targets.stored.clone()),
         provider_target_summary: validated_provider_targets.map(|targets| targets.summary),
         context_strategy,
         context_snapshot_id: None,

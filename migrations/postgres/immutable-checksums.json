@@ -568,7 +568,7 @@
     },
     {
       "path": "migrations/postgres/0111_scheduled_external_delivery_outbox.sql",
-      "sha256": "f7ad326201e0be4386e38f334d31be3d8a81441588683c7da0f6c2e5a3ad431c",
+      "sha256": "c0bf950cd57e79b84abf686e51bf43a23703485f9ce463f2a8e4195a30b5ab3c",
       "version": 111
     }
   ],

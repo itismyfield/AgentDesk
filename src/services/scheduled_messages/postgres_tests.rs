@@ -317,14 +317,16 @@ async fn postgres_scheduled_push_atomically_fans_out_to_discord_and_kakao() {
     assert!(terminal.provider_targets.is_none());
     assert!(terminal.provider_target_summary.is_some());
 
-    let discord_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM message_outbox WHERE source = $1",
-    )
-    .bind(OUTBOX_SOURCE)
-    .fetch_one(&pool)
-    .await
-    .expect("count Discord handoffs");
-    assert_eq!(discord_count, 1, "replayed claims must not duplicate Discord");
+    let discord_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE source = $1")
+            .bind(OUTBOX_SOURCE)
+            .fetch_one(&pool)
+            .await
+            .expect("count Discord handoffs");
+    assert_eq!(
+        discord_count, 1,
+        "replayed claims must not duplicate Discord"
+    );
 
     let external = sqlx::query(
         "SELECT audience, requested_count, status
@@ -334,10 +336,20 @@ async fn postgres_scheduled_push_atomically_fans_out_to_discord_and_kakao() {
     .fetch_all(&pool)
     .await
     .expect("load external handoffs");
-    assert_eq!(external.len(), 2, "friends and self are independent deliveries");
-    assert_eq!(external[0].try_get::<String, _>("audience").unwrap(), "friends");
+    assert_eq!(
+        external.len(),
+        2,
+        "friends and self are independent deliveries"
+    );
+    assert_eq!(
+        external[0].try_get::<String, _>("audience").unwrap(),
+        "friends"
+    );
     assert_eq!(external[0].try_get::<i16, _>("requested_count").unwrap(), 1);
-    assert_eq!(external[1].try_get::<String, _>("audience").unwrap(), "self");
+    assert_eq!(
+        external[1].try_get::<String, _>("audience").unwrap(),
+        "self"
+    );
     for row in external {
         assert_eq!(row.try_get::<String, _>("status").unwrap(), "pending");
     }

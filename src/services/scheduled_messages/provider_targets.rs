@@ -218,8 +218,12 @@ mod tests {
         });
         assert!(serde_json::from_value::<ScheduledProviderTargetsBody>(unknown).is_err());
         assert!(
-            validate_resolved(&body(&["friend"], false, true), &"가".repeat(201), "default")
-                .is_err()
+            validate_resolved(
+                &body(&["friend"], false, true),
+                &"가".repeat(201),
+                "default"
+            )
+            .is_err()
         );
     }
 

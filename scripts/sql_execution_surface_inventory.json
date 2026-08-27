@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "cd33d959e3adea6c33aa5f52303fd2105c15c5eb",
+  "measured_at_sha": "cf540bd2f550a22165e7a8107b86d7c3a1616c20",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1026,7 +1026,7 @@
       "api": "migration.file",
       "symbol": "file",
       "classification": "STATIC_FILE",
-      "fingerprint": "sha256:f6d5c72d008df07ef6be0b7323676c8e7bb4b919d142c9945ededb183c5938cd"
+      "fingerprint": "sha256:c7b4eb46860f27e65b19a937de221afe4992e0d462503f83c9b55dcdd9a7aef0"
     },
     {
       "root": "migrations/postgres",
@@ -1044,7 +1044,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:6797e4bb24e31f277e671a283701631130e59405b46650258a9699c89f99f194"
+      "fingerprint": "sha256:b57c82a4eff0208379ca9fcda4cb920bfc1a0c26735c34713363d2bd49bf8ce7"
     },
     {
       "root": "policies",
@@ -11538,15 +11538,6 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:166c27e708f823868acd5201345685c84bd98834661ec26d92518e7c889a30fc"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/scheduled_messages/postgres_tests.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
       "fingerprint": "sha256:1e9e2ff30694f2226f375dd85c79e85d96608d2c3a18ae5f4f1beb5c305c3a0a"
     },
     {
@@ -11557,6 +11548,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:290faf940ffd1da1ee9e1b7d262e172b822eb83b7b4f21dced3067e295017a1b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/scheduled_messages/postgres_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:603c79c0bc944b023a3efd55e99575e3500d596ea7afe901442a277a63e8c8f0"
     },
     {
       "root": "src",
@@ -30861,7 +30861,7 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:4a42f37e2c31208b75193106ffd9559b9e9ee2e53ae6787f4534bc3396ba5fe1"
+      "fingerprint": "sha256:5447eece20537b22f11140d6871c644ceb9e83f8c8446ca0e46eddc8e18ace51"
     },
     {
       "root": "src",

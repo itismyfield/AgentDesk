@@ -47,11 +47,13 @@ pub(super) async fn render_deliveries(
                 );
                 object.insert(
                     "externalDeliveries".to_string(),
-                    json!(external_deliveries
-                        .iter()
-                        .filter(|external| external.scheduled_delivery_id == delivery.id)
-                        .map(|external| external.to_api_json())
-                        .collect::<Vec<_>>()),
+                    json!(
+                        external_deliveries
+                            .iter()
+                            .filter(|external| external.scheduled_delivery_id == delivery.id)
+                            .map(|external| external.to_api_json())
+                            .collect::<Vec<_>>()
+                    ),
                 );
             }
             rendered

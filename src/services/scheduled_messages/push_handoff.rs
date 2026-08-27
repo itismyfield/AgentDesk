@@ -9,9 +9,9 @@ use crate::services::message_outbox::{
     OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx,
 };
 
+use super::OUTBOX_SOURCE;
 use super::external_delivery::{ExternalHandoffError, enqueue_for_message_tx};
 use super::timing::compute_resume;
-use super::OUTBOX_SOURCE;
 
 const DEFAULT_EXTERNAL_DELIVERY_WINDOW_HOURS: i64 = 24;
 
@@ -50,14 +50,9 @@ pub(super) async fn commit(
     let deliver_before = external_delivery_deadline(message.expires_at, next, now);
 
     let mut tx = pool.begin().await.map_err(transient)?;
-    if !db::lock_active_delivery_tx(
-        &mut tx,
-        &message.id,
-        &fire.delivery_id,
-        &fire.claim_token,
-    )
-    .await
-    .map_err(transient)?
+    if !db::lock_active_delivery_tx(&mut tx, &message.id, &fire.delivery_id, &fire.claim_token)
+        .await
+        .map_err(transient)?
     {
         return Ok(PushHandoffOutcome::Canceled);
     }
@@ -87,15 +82,10 @@ pub(super) async fn commit(
         );
     }
 
-    let external_count = enqueue_for_message_tx(
-        &mut tx,
-        message,
-        &fire.delivery_id,
-        deliver_before,
-        now,
-    )
-    .await
-    .map_err(map_external_error)?;
+    let external_count =
+        enqueue_for_message_tx(&mut tx, message, &fire.delivery_id, deliver_before, now)
+            .await
+            .map_err(map_external_error)?;
     if discord_outbox_id.is_none() && external_count == 0 {
         return Err(PushHandoffError::Invalid("no usable delivery target"));
     }
@@ -158,7 +148,10 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 8, 27, 0, 0, 0).unwrap();
         let next = now + Duration::minutes(10);
         let expiry = now + Duration::hours(1);
-        assert_eq!(external_delivery_deadline(Some(expiry), Some(next), now), next);
+        assert_eq!(
+            external_delivery_deadline(Some(expiry), Some(next), now),
+            next
+        );
         assert_eq!(
             external_delivery_deadline(None, None, now),
             now + Duration::hours(24)

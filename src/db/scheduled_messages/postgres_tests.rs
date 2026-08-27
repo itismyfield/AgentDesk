@@ -113,14 +113,9 @@ async fn postgres_external_handoff_scrubs_targets_and_terminal_payload() {
     let outbox_id = Uuid::new_v4();
     let mut tx = pool.begin().await.expect("begin external handoff");
     assert!(
-        lock_active_delivery_tx(
-            &mut tx,
-            &message.id,
-            &fire.delivery_id,
-            &fire.claim_token,
-        )
-        .await
-        .expect("lock active external delivery")
+        lock_active_delivery_tx(&mut tx, &message.id, &fire.delivery_id, &fire.claim_token,)
+            .await
+            .expect("lock active external delivery")
     );
     assert!(
         enqueue_external_delivery_tx(
@@ -166,17 +161,11 @@ async fn postgres_external_handoff_scrubs_targets_and_terminal_payload() {
     assert!(terminal.provider_targets.is_none());
     assert!(terminal.provider_target_summary.is_some());
 
-    let claim = claim_external_deliveries_pg(
-        &pool,
-        "external-provider-worker",
-        10,
-        60,
-        Utc::now(),
-    )
-    .await
-    .expect("claim external delivery")
-    .pop()
-    .expect("external delivery is claimable");
+    let claim = claim_external_deliveries_pg(&pool, "external-provider-worker", 10, 60, Utc::now())
+        .await
+        .expect("claim external delivery")
+        .pop()
+        .expect("external delivery is claimable");
     assert_eq!(claim.id, outbox_id);
     assert!(
         mark_external_dispatch_started_pg(&pool, claim.id, claim.claim_token, 60)
@@ -196,13 +185,12 @@ async fn postgres_external_handoff_scrubs_targets_and_terminal_payload() {
         .await
         .expect("finish ambiguous external delivery")
     );
-    let stored_payload: Option<JsonValue> = sqlx::query_scalar(
-        "SELECT payload FROM scheduled_external_delivery_outbox WHERE id = $1",
-    )
-    .bind(outbox_id)
-    .fetch_one(&pool)
-    .await
-    .expect("load scrubbed external payload");
+    let stored_payload: Option<JsonValue> =
+        sqlx::query_scalar("SELECT payload FROM scheduled_external_delivery_outbox WHERE id = $1")
+            .bind(outbox_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load scrubbed external payload");
     assert!(stored_payload.is_none());
 
     pool.close().await;

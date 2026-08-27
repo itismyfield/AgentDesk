@@ -25,10 +25,9 @@ pub use agent::{
 };
 pub use external_delivery::{
     ClaimedExternalDelivery, ExternalDeliveryRow, NewExternalDelivery,
-    claim_external_deliveries_pg, enqueue_external_delivery_tx,
-    finish_external_delivery_pg, list_external_deliveries_pg,
-    mark_external_dispatch_started_pg, recover_external_delivery_leases_pg,
-    retry_external_delivery_pg,
+    claim_external_deliveries_pg, enqueue_external_delivery_tx, finish_external_delivery_pg,
+    list_external_deliveries_pg, mark_external_dispatch_started_pg,
+    recover_external_delivery_leases_pg, retry_external_delivery_pg,
 };
 pub use outbox::outbox_statuses_for_deliveries_pg;
 pub use writes::{insert_scheduled_message_pg, insert_scheduled_message_tx};

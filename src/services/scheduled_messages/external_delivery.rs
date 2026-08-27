@@ -158,13 +158,8 @@ async fn process_claim(pool: &sqlx::PgPool, claim: ClaimedExternalDelivery) {
         retry_pre_dispatch(pool, &claim, kakao_error_code(&error)).await;
         return;
     }
-    match db::mark_external_dispatch_started_pg(
-        pool,
-        claim.id,
-        claim.claim_token,
-        CLAIM_LEASE_SECS,
-    )
-    .await
+    match db::mark_external_dispatch_started_pg(pool, claim.id, claim.claim_token, CLAIM_LEASE_SECS)
+        .await
     {
         Ok(true) => {}
         Ok(false) => return,

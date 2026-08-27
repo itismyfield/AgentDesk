@@ -32,6 +32,10 @@ ALTER TABLE scheduled_messages
         delivery_kind <> 'push'
         OR target_channel_id IS NOT NULL
         OR provider_targets IS NOT NULL
+        OR (
+            provider_target_summary IS NOT NULL
+            AND status IN ('sent', 'failed', 'canceled', 'expired')
+        )
     );
 
 COMMENT ON COLUMN scheduled_messages.provider_targets IS

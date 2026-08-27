@@ -26,12 +26,13 @@ pub(super) fn prepare_create(
             "providerTargets is only valid for push delivery",
         ));
     }
-    let body: ScheduledProviderTargetsBody = serde_json::from_value(value.clone()).map_err(|error| {
-        app_error(
-            StatusCode::BAD_REQUEST,
-            format!("providerTargets must be a valid object: {error}"),
-        )
-    })?;
+    let body: ScheduledProviderTargetsBody =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            app_error(
+                StatusCode::BAD_REQUEST,
+                format!("providerTargets must be a valid object: {error}"),
+            )
+        })?;
     validate_for_process(&body, content)
         .map(Some)
         .map_err(map_provider_error)
