@@ -9,16 +9,7 @@ use super::settings::{
     resolve_memory_settings,
 };
 use crate::services::provider::ProviderKind;
-
-/// Expand `~` or `~/` prefix to the user's home directory.
-fn expand_tilde(path: &str) -> String {
-    if path == "~" || path.starts_with("~/") {
-        if let Some(expanded) = crate::runtime_layout::expand_user_path(path) {
-            return expanded.to_string_lossy().into_owned();
-        }
-    }
-    path.to_string()
-}
+use crate::utils::format::expand_tilde_string as expand_tilde;
 
 fn load_role_map_json() -> Option<serde_json::Value> {
     let path = role_map_path()?;
