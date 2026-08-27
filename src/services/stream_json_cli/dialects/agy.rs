@@ -33,7 +33,6 @@ pub fn execute(request: ProviderTurnRequest, sender: Sender<StreamMessage>) -> R
     let prepared = prepare(&request)?;
     run_prepared(prepared, sender, request.cancel)
 }
-
 pub(crate) fn build_argv(request: &ProviderTurnRequest) -> Result<Vec<String>, String> {
     let composed = compose_envelope(
         request.system_prompt.as_deref().unwrap_or(""),
@@ -191,4 +190,3 @@ mod tests {
         assert!(args.contains(&"--print-timeout".to_string()));
     }
 }
-
