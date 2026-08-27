@@ -145,11 +145,22 @@ function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardI
   // `runHasBlockingPhaseGate`).
   beginPhaseGateGraceWindow(runId);
 
-  var remainingCount = remainingRunnableEntryCount(runId, null);
-
   var effectiveDonePhase = (donePhase !== null && donePhase !== undefined) ? donePhase : -1;
+
+  var remainingStatsRows = agentdesk.db.query(
+    "SELECT " +
+    "  COUNT(*) as total_remaining, " +
+    "  SUM(CASE WHEN COALESCE(batch_phase, 0) = ? THEN 1 ELSE 0 END) as phase_remaining, " +
+    "  SUM(CASE WHEN COALESCE(thread_group, 0) = ? THEN 1 ELSE 0 END) as group_remaining " +
+    "FROM auto_queue_entries " +
+    "WHERE run_id = ? AND status IN ('pending', 'dispatched')",
+    [effectiveDonePhase, doneGroup || 0, runId]
+  );
+
+  var remainingCount = remainingStatsRows.length > 0 ? (remainingStatsRows[0].total_remaining || 0) : 0;
+
   if (effectiveDonePhase >= 0) {
-    var currentPhaseDone = remainingRunnableEntryCount(runId, donePhase) === 0;
+    var currentPhaseDone = remainingStatsRows.length > 0 ? (remainingStatsRows[0].phase_remaining || 0) === 0 : true;
     if (currentPhaseDone) {
       var nextPhaseRows = agentdesk.db.query(
         "SELECT MIN(batch_phase) as next_phase FROM auto_queue_entries " +
@@ -189,11 +200,7 @@ function continueRunAfterEntry(runId, agentId, doneGroup, donePhase, anchorCardI
     return;
   }
 
-  var groupRemaining = agentdesk.db.query(
-    "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND COALESCE(thread_group, 0) = ? AND status IN ('pending', 'dispatched')",
-    [runId, doneGroup || 0]
-  );
-  var groupDone = groupRemaining.length > 0 && groupRemaining[0].cnt === 0;
+  var groupDone = remainingStatsRows.length > 0 ? (remainingStatsRows[0].group_remaining || 0) === 0 : true;
 
   var tCfg = agentdesk.pipeline.getConfig();
   var tKickoff = agentdesk.pipeline.kickoffState(tCfg);
