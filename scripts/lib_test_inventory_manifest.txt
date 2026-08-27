@@ -2912,7 +2912,6 @@ services::discord::inflight::model::turn_source_tests::status_panel_generation_r
 services::discord::inflight::model::turn_source_tests::watcher_owner_channel_id_defaults_absent_legacy_rows_to_none
 services::discord::inflight::model::turn_source_tests::watcher_owner_channel_id_round_trips_when_present
 services::discord::inflight::model::turn_source_tests::wire_strings_are_stable_audit_labels
-services::discord::inflight::orphan_lock_reap_tests::reaps_only_old_orphan_json_lock_files
 services::discord::inflight::orphan_relay_reclaim::tests::delivered_marker_serde_back_compat
 services::discord::inflight::orphan_relay_reclaim::tests::downgrade_preserves_updated_at_so_row_stays_ownerless_droppable
 services::discord::inflight::orphan_relay_reclaim::tests::locked_downgrade_aborts_on_identity_mismatch
@@ -2988,7 +2987,7 @@ services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_patch_reports_malformed_json_as_io_error
 services::discord::inflight::save_store::bridge_entry_guard_tests::bridge_entry_patch_reports_non_not_found_read_failure_as_io_error
 services::discord::inflight::save_store::create_monotonic_observer::tests::create_paths_observe_real_but_exclude_all_synthetic_shapes
-services::discord::inflight::save_store::create_monotonic_observer::tests::observer_runs_after_sync_while_sidecar_flock_is_held
+services::discord::inflight::save_store::create_monotonic_observer::tests::observer_runs_after_sync_while_sidecar_lock_is_held
 services::discord::inflight::save_store::create_monotonic_observer::tests::path_switch_is_silent_and_same_path_alias_warns
 services::discord::inflight::save_store::create_monotonic_observer::tests::same_path_lower_start_warns
 services::discord::inflight::save_store::create_monotonic_observer::tests::unobservable_births_do_not_allocate_and_evidenced_slots_are_bounded
@@ -3030,12 +3029,15 @@ services::discord::inflight::save_store::identity_gate::tests::identity_refresh_
 services::discord::inflight::save_store::identity_gate::tests::output_restamp_advances_stale_offset_but_rejects_different_turn
 services::discord::inflight::save_store::identity_gate::tests::readopted_marker_lands_on_restart_preserved_row_and_never_resurrects
 services::discord::inflight::save_store::identity_gate::tests::rebind_adoption_save_adopts_zero_id_orphan_but_refuses_live_synthetic_shapes
+services::discord::inflight::save_store::tests::create_new_atomic_write_failure_leaves_no_final_row_and_retry_succeeds
+services::discord::inflight::save_store::tests::create_new_existence_probe_error_fails_closed_without_writing
 services::discord::inflight::save_store::tests::existing_claude_transcript_adoption_rebase_save_persists_eof_coordinates_and_runtime
 services::discord::inflight::save_store::tests::id0_offsetless_anchor_row_never_matches_for_reuse_or_bind
 services::discord::inflight::save_store::tests::id0_offsetless_identity_refresh_save_fails_closed
 services::discord::inflight::save_store::tests::id0_with_turn_start_offset_identity_refresh_save_succeeds_when_durable_matches
 services::discord::inflight::save_store::tests::identity_unchanged_save_skips_after_adoption_changes_only_output_path
 services::discord::inflight::save_store::tests::identity_unchanged_save_skips_after_adoption_rebased_turn_start_offset
+services::discord::inflight::save_store::tests::if_absent_and_create_new_cannot_both_claim_absent_or_overwrite_the_winner
 services::discord::inflight::save_store::tests::matches_identity_save_preserves_adopted_output_and_commits_completion
 services::discord::inflight::save_store::tests::non_restart_identity_refresh_save_still_persists_cleaned_api_friction_text
 services::discord::inflight::save_store::tests::output_restamp_save_declines_when_another_turn_owns_the_row
@@ -3043,6 +3045,7 @@ services::discord::inflight::save_store::tests::output_restamp_save_persists_new
 services::discord::inflight::save_store::tests::restart_full_response_patch_declines_when_cleaning_changes_relayed_prefix
 services::discord::inflight::save_store::tests::restart_full_response_patch_saves_when_cleaning_keeps_relayed_prefix
 services::discord::inflight::save_store::tests::restart_full_response_patch_strips_api_friction_after_guarded_save_declines
+services::discord::inflight::save_store::tests::sidecar_guard_drop_releases_lock_for_next_caller
 services::discord::inflight::stall_recovery_tests::abandon_request_deletes_without_enqueue_for_non_finalizable_rows
 services::discord::inflight::stall_recovery_tests::abandon_request_enqueues_record_and_deletes_row
 services::discord::inflight::stall_recovery_tests::abandon_request_preserves_recovery_owned_and_newer_owner_rows

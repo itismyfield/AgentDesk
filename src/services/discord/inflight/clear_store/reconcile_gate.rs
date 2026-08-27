@@ -3,7 +3,7 @@
 //! Reconcile callers must not unlink a row whose `born_generation` matches this
 //! process's generation. The root-explicit helpers below keep the decisive read,
 //! generation check, identity
-//! check, and unlink inside one inflight sidecar flock critical section.
+//! check, and unlink inside one inflight sidecar advisory lock critical section.
 
 use super::*;
 
@@ -183,7 +183,7 @@ pub(in crate::services::discord) fn clear_rebind_origin_for_reconcile(
 /// §7.2-1's refusal payload, describing the row the refusal PROTECTED.
 ///
 /// `born_generation` is the fence's own — the row it re-read inside the sidecar
-/// flock. Every field taken from the caller's snapshot carries a `snapshot_`
+/// advisory lock. Every field taken from the caller's snapshot carries a `snapshot_`
 /// prefix instead of standing in for the protected row: that snapshot is ~91ms
 /// old in the dominant refusal shape (#5462 S1b measured that window in the
 /// accident), so its `born_generation` reads `current - 1` and its turn identity

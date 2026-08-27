@@ -421,7 +421,7 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// NOTE (#4370/#4810): this marker is written through the NARROW adoption patch
     /// `mark_readopted_from_inflight_if_identity_unchanged`
     /// (`inflight/save_store/identity_gate.rs`), not the broad identity-refresh
-    /// save. The patch re-reads under the sidecar flock, pins the turn identity,
+    /// save. The patch re-reads under the sidecar advisory lock, pins the turn identity,
     /// flips this additive bit, and atomically consumes any planned-restart marker
     /// so replacement-process authority is durable before runtime handoff. Test
     /// `readopted_marker_lands_on_restart_preserved_row_and_never_resurrects` pins

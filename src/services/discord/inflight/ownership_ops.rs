@@ -21,7 +21,7 @@ use super::{
 // orphaned (the #3099/#3100/#3105/#3107 panel-lifecycle race family).
 //
 // These helpers centralize that read-modify-write behind intentful operations
-// that hold the same `lock_inflight_state_path` sidecar flock across the whole
+// that hold the same `lock_inflight_state_path` sidecar advisory lock across the whole
 // compare-and-set, exactly like `save_inflight_state_if_absent`. Callers no
 // longer touch the field directly; they declare *what* they own and *under
 // which precondition*, and the store enforces it atomically.
@@ -52,7 +52,7 @@ pub(in crate::services::discord) struct StatusPanelBindGuard {
     /// panels.
     pub require_current_status_message_id: Option<u64>,
     /// #3805 P2: bump `status_panel_generation` from the on-disk row inside the
-    /// bind flock. Callers must use this instead of precomputing
+    /// bind advisory lock. Callers must use this instead of precomputing
     /// `local_generation + 1` outside the lock.
     pub bump_status_panel_generation: bool,
 }
@@ -66,7 +66,7 @@ pub(in crate::services::discord) enum StatusPanelBindOutcome {
     AlreadyBound,
     /// The row exists but a DIFFERENT real panel id is already set and
     /// `skip_if_panel_already_set` was requested — left untouched. Carries the
-    /// row's currently-owned (real) panel id as observed under the same flock,
+    /// row's currently-owned (real) panel id as observed under the same advisory lock,
     /// so the caller can adopt the row's actual panel without a second
     /// (racy) re-read of the inflight row.
     SkippedPanelAlreadySet(u64),
@@ -95,7 +95,7 @@ impl StatusPanelBindOutcome {
 }
 
 /// Intentful "this turn now owns status panel `msg_id`" write. Performs the
-/// guard check and the field set atomically under the inflight sidecar flock,
+/// guard check and the field set atomically under the inflight sidecar advisory lock,
 /// so it is consistent with `save_inflight_state` / `save_inflight_state_if_absent`.
 pub(in crate::services::discord) fn bind_status_panel(
     provider: &ProviderKind,
@@ -122,7 +122,7 @@ pub(super) fn bind_status_panel_in_root(
     {
         return StatusPanelBindOutcome::IoError;
     }
-    // Hold the sidecar flock across load → guard → set so a concurrent
+    // Hold the sidecar advisory lock across load → guard → set so a concurrent
     // writer cannot land between the guard check and the write.
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return StatusPanelBindOutcome::IoError;
