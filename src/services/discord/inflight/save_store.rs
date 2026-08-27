@@ -797,6 +797,216 @@ mod tests {
     }
 
     #[test]
+    fn sidecar_guard_drop_releases_lock_for_next_caller() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let path = inflight_state_path(temp.path(), &ProviderKind::Codex, 44_153_007);
+        let guard = lock_inflight_state_path(&path).expect("first guard");
+        assert!(matches!(
+            second_handle_try_lock(&path),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+
+        drop(guard);
+        assert!(
+            path.with_extension("json.lock").exists(),
+            "releasing a guard must not unlink the canonical sidecar"
+        );
+
+        let next_guard = lock_inflight_state_path(&path).expect("lock after guard drop");
+        drop(next_guard);
+    }
+
+    #[test]
+    fn create_new_atomic_write_failure_leaves_no_final_row_and_retry_succeeds() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let state = id0_offsetless_state(44_153_009);
+        let path = inflight_state_path(temp.path(), &ProviderKind::Codex, state.channel_id);
+
+        let result = save_inflight_state_create_new_in_root_with_write(
+            temp.path(),
+            &state,
+            |final_path, data| {
+                let tmp = final_path.with_extension("json.injected-pre-rename.tmp");
+                std::fs::write(&tmp, data).map_err(|error| error.to_string())?;
+                Err("injected failure before final rename".to_string())
+            },
+        );
+        assert!(matches!(result, Err(CreateNewInflightError::Internal(_))));
+        assert!(
+            !path.exists(),
+            "a pre-rename atomic-write failure must not publish the final row"
+        );
+
+        save_inflight_state_create_new_in_root(temp.path(), &state)
+            .expect("retry create-new after pre-rename failure");
+        let persisted: InflightTurnState = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("read retried inflight row"),
+        )
+        .expect("parse retried inflight row");
+        assert_eq!(persisted.channel_id, state.channel_id);
+        assert_eq!(persisted.user_msg_id, state.user_msg_id);
+    }
+
+    #[test]
+    fn create_new_existence_probe_error_fails_closed_without_writing() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let create_new = id0_offsetless_state(44_153_010);
+        let create_new_path =
+            inflight_state_path(temp.path(), &ProviderKind::Codex, create_new.channel_id);
+        let create_new_write_called = std::cell::Cell::new(false);
+
+        let create_new_result = save_inflight_state_create_new_in_root_with_io(
+            temp.path(),
+            &create_new,
+            |_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            |_, _| {
+                create_new_write_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(matches!(
+            create_new_result,
+            Err(CreateNewInflightError::Internal(_))
+        ));
+        assert!(
+            !create_new_write_called.get(),
+            "create-new metadata failure must not reach the writer"
+        );
+        assert!(
+            !create_new_path.exists(),
+            "create-new metadata failure must not publish a final row"
+        );
+
+        let if_absent = id0_offsetless_state(44_153_011);
+        let if_absent_path =
+            inflight_state_path(temp.path(), &ProviderKind::Codex, if_absent.channel_id);
+        let if_absent_write_called = std::cell::Cell::new(false);
+        let if_absent_result = save_inflight_state_if_absent_in_root_with_io(
+            temp.path(),
+            &if_absent,
+            |_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            |_, _| {
+                if_absent_write_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(if_absent_result.is_err());
+        assert!(
+            !if_absent_write_called.get(),
+            "if-absent metadata failure must not reach the writer"
+        );
+        assert!(
+            !if_absent_path.exists(),
+            "if-absent metadata failure must not publish a final row"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let occupied = id0_offsetless_state(44_153_012);
+            let occupied_path =
+                inflight_state_path(temp.path(), &ProviderKind::Codex, occupied.channel_id);
+            let dangling_target = temp.path().join("missing-inflight-target.json");
+            symlink(&dangling_target, &occupied_path).expect("create dangling final-name symlink");
+
+            let create_new_result = save_inflight_state_create_new_in_root(temp.path(), &occupied);
+            assert!(matches!(
+                create_new_result,
+                Err(CreateNewInflightError::AlreadyExists)
+            ));
+            assert_eq!(
+                std::fs::read_link(&occupied_path).expect("create-new preserved dangling symlink"),
+                dangling_target
+            );
+
+            assert!(
+                !save_inflight_state_if_absent_in_root(temp.path(), &occupied)
+                    .expect("if-absent sees occupied final name")
+            );
+            assert_eq!(
+                std::fs::read_link(&occupied_path).expect("if-absent preserved dangling symlink"),
+                dangling_target
+            );
+        }
+    }
+
+    #[test]
+    fn if_absent_and_create_new_cannot_both_claim_absent_or_overwrite_the_winner() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let root = temp.path().to_path_buf();
+        let channel_id = 44_153_008;
+        let conditional = id0_offsetless_state(channel_id);
+        let mut create_new = conditional.clone();
+        create_new.user_msg_id = 77_108;
+        create_new.current_msg_id = 77_208;
+        let path = inflight_state_path(&root, &ProviderKind::Codex, channel_id);
+        let guard = lock_inflight_state_path(&path).expect("hold canonical sidecar");
+        let (conditional_tx, conditional_rx) = std::sync::mpsc::channel();
+
+        let conditional_root = root.clone();
+        let conditional_thread = std::thread::spawn(move || {
+            let result = save_inflight_state_if_absent_in_root(&conditional_root, &conditional);
+            conditional_tx
+                .send(result)
+                .expect("report conditional result");
+        });
+        let (create_new_tx, create_new_rx) = std::sync::mpsc::channel();
+        let create_new_root = root.clone();
+        let create_new_thread = std::thread::spawn(move || {
+            let result = save_inflight_state_create_new_in_root(&create_new_root, &create_new);
+            create_new_tx
+                .send(result)
+                .expect("report create-new result");
+        });
+
+        assert!(matches!(
+            second_handle_try_lock(&path),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        assert!(
+            conditional_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        assert!(
+            create_new_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        drop(guard);
+
+        let conditional_wrote = conditional_rx
+            .recv()
+            .expect("conditional result")
+            .expect("conditional save");
+        let create_new_wrote = match create_new_rx.recv().expect("create-new result") {
+            Ok(()) => true,
+            Err(CreateNewInflightError::AlreadyExists) => false,
+            Err(CreateNewInflightError::Internal(error)) => {
+                panic!("create-new save failed: {error}")
+            }
+        };
+        conditional_thread.join().expect("conditional thread");
+        create_new_thread.join().expect("create-new thread");
+        assert_ne!(conditional_wrote, create_new_wrote);
+
+        let persisted: InflightTurnState =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read persisted inflight"))
+                .expect("parse persisted inflight");
+        assert_eq!(
+            persisted.user_msg_id,
+            if conditional_wrote { 0 } else { 77_108 }
+        );
+        assert_eq!(
+            persisted.current_msg_id,
+            if conditional_wrote { 77_000 } else { 77_208 }
+        );
+    }
+
+    #[test]
     fn matches_identity_save_preserves_adopted_output_and_commits_completion() {
         let temp = tempfile::TempDir::new().expect("runtime root");
         let provider = ProviderKind::Codex;
@@ -885,11 +1095,44 @@ pub(in crate::services::discord) fn save_inflight_state_create_new(
 }
 
 /// Test-visible inner form of `save_inflight_state_create_new`. Takes an
-/// explicit root so unit tests can exercise the O_CREAT|O_EXCL semantics
-/// without tripping over `AGENTDESK_ROOT_DIR` env-var races.
+/// explicit root so unit tests can exercise create-new semantics without
+/// tripping over `AGENTDESK_ROOT_DIR` env-var races.
 fn save_inflight_state_create_new_in_root(
     root: &Path,
     state: &InflightTurnState,
+) -> Result<(), CreateNewInflightError> {
+    save_inflight_state_create_new_in_root_with_write(root, state, create_new_atomic_write)
+}
+
+fn save_inflight_state_create_new_in_root_with_write(
+    root: &Path,
+    state: &InflightTurnState,
+    write: impl FnOnce(&Path, &str) -> Result<(), String>,
+) -> Result<(), CreateNewInflightError> {
+    save_inflight_state_create_new_in_root_with_io(
+        root,
+        state,
+        |path| fs::symlink_metadata(path),
+        write,
+    )
+}
+
+fn final_name_is_occupied_with_metadata(
+    path: &Path,
+    metadata: impl FnOnce(&Path) -> std::io::Result<fs::Metadata>,
+) -> std::io::Result<bool> {
+    match metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn save_inflight_state_create_new_in_root_with_io(
+    root: &Path,
+    state: &InflightTurnState,
+    metadata: impl FnOnce(&Path) -> std::io::Result<fs::Metadata>,
+    write: impl FnOnce(&Path, &str) -> Result<(), String>,
 ) -> Result<(), CreateNewInflightError> {
     let Some(provider) = state.provider_kind() else {
         return Err(CreateNewInflightError::Internal(format!(
@@ -901,7 +1144,15 @@ fn save_inflight_state_create_new_in_root(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
     }
+    // This stable sidecar lock is the create-new CAS authority. Every
+    // cooperating writer takes it, so the exact final-path existence check and
+    // the atomic temp+sync+rename publication below are one serialized action.
     let _lock = lock_inflight_state_path(&path).map_err(CreateNewInflightError::Internal)?;
+    match final_name_is_occupied_with_metadata(&path, metadata) {
+        Ok(true) => return Err(CreateNewInflightError::AlreadyExists),
+        Ok(false) => {}
+        Err(error) => return Err(CreateNewInflightError::Internal(error.to_string())),
+    }
     let mut updated = state.clone();
     updated.ensure_finalizer_turn_id();
     validate_inflight_state_for_save(
@@ -915,34 +1166,32 @@ fn save_inflight_state_create_new_in_root(
     let json = serde_json::to_string_pretty(&updated)
         .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
 
-    // `OpenOptions::create_new(true)` is the canonical atomic check-and-
-    // create primitive on POSIX (O_CREAT | O_EXCL). No reliance on a
-    // preceding `load_inflight_state` — the kernel itself serializes this.
-    use std::io::Write;
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut file) => {
-            file.write_all(json.as_bytes())
-                .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
-            #[cfg(not(test))]
-            file.sync_all()
-                .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
-            #[cfg(test)]
-            create_monotonic_observer::test_seams::sync_result(&file)
-                .map_err(|e| CreateNewInflightError::Internal(e.to_string()))?;
-            if !is_synthetic_create_state(&updated) {
-                create_monotonic_observer::observe_successful_real_create(&updated);
-            }
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err(CreateNewInflightError::AlreadyExists)
-        }
-        Err(e) => Err(CreateNewInflightError::Internal(e.to_string())),
+    // The sidecar lock, not an O_EXCL open of the final JSON path, is the
+    // compare-and-set authority. Publish through the shared durable writer so
+    // a write/sync failure or crash before rename cannot leave an empty or
+    // partial final row that permanently converts retries into AlreadyExists.
+    write(&path, &json).map_err(CreateNewInflightError::Internal)?;
+    if !is_synthetic_create_state(&updated) {
+        create_monotonic_observer::observe_successful_real_create(&updated);
     }
+    Ok(())
+}
+
+fn create_new_atomic_write(path: &Path, data: &str) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        // Preserve the existing observer-order failure witness without replacing
+        // the production writer: the one-shot seam aborts this production call
+        // before `atomic_write` can publish the final path.
+        let lock_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.with_extension("json.lock"))
+            .map_err(|error| error.to_string())?;
+        create_monotonic_observer::test_seams::sync_result(&lock_file)
+            .map_err(|error| error.to_string())?;
+    }
+    atomic_write(path, data)
 }
 
 #[cfg(test)]
@@ -980,9 +1229,9 @@ pub(super) fn save_inflight_state_in_root(
 /// `load(...).is_some()` preflight + unconditional save: a concurrent intake
 /// could create a REAL inflight in the gap, and the synthetic `user_msg_id = 0`
 /// save would clobber it (lost turn). This closes the window by doing the check
-/// AND write under the same `lock_inflight_state_path` flock the other save/clear
-/// paths serialize on, so the synthetic row is written only when there is
-/// genuinely no inflight at the moment of the atomic write.
+/// AND write under the same `lock_inflight_state_path` sidecar lock the other
+/// save/clear paths serialize on, so the synthetic row is written only when
+/// there is genuinely no inflight at the moment of the atomic write.
 pub(in crate::services::discord) fn save_inflight_state_if_absent(
     state: &InflightTurnState,
 ) -> Result<bool, String> {
@@ -996,6 +1245,20 @@ fn save_inflight_state_if_absent_in_root(
     root: &Path,
     state: &InflightTurnState,
 ) -> Result<bool, String> {
+    save_inflight_state_if_absent_in_root_with_io(
+        root,
+        state,
+        |path| fs::symlink_metadata(path),
+        atomic_write,
+    )
+}
+
+fn save_inflight_state_if_absent_in_root_with_io(
+    root: &Path,
+    state: &InflightTurnState,
+    metadata: impl FnOnce(&Path) -> std::io::Result<fs::Metadata>,
+    write: impl FnOnce(&Path, &str) -> Result<(), String>,
+) -> Result<bool, String> {
     let Some(provider) = state.provider_kind() else {
         return Err(format!("Unknown provider '{}'", state.provider));
     };
@@ -1003,12 +1266,12 @@ fn save_inflight_state_if_absent_in_root(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    // Hold the sidecar flock across the existence check AND the write so a
-    // concurrent intake `save_inflight_state_in_root` (which takes the same
-    // lock) cannot land a real inflight in the gap. `path.exists()` under the
-    // lock is the compare; `atomic_write` is the set.
+    // Hold the sidecar lock across the namespace occupancy check AND the
+    // write so a concurrent intake cannot land a real inflight in the gap.
+    // `symlink_metadata` treats any final-name entry, including a dangling
+    // symlink, as occupied; only NotFound permits publication.
     let _lock = lock_inflight_state_path(&path)?;
-    if path.exists() {
+    if final_name_is_occupied_with_metadata(&path, metadata).map_err(|error| error.to_string())? {
         return Ok(false);
     }
     let mut updated = state.clone();
@@ -1022,7 +1285,7 @@ fn save_inflight_state_if_absent_in_root(
     updated.updated_at = now_string();
     bump_save_generation_for_write(&path, &mut updated);
     let json = serde_json::to_string_pretty(&updated).map_err(|e| e.to_string())?;
-    atomic_write(&path, &json)?;
+    write(&path, &json)?;
     if !is_synthetic_create_state(&updated) {
         create_monotonic_observer::observe_successful_real_create(&updated);
     }

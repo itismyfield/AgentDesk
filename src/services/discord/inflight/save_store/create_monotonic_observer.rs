@@ -366,9 +366,8 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn observer_runs_after_sync_while_sidecar_flock_is_held() {
+    fn observer_runs_after_sync_while_sidecar_lock_is_held() {
         let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::tempdir().unwrap();
         let output = temp.path().join("turn.jsonl");
@@ -379,7 +378,10 @@ mod tests {
         let fired = hook_fired.clone();
         test_seams::set_io_hook(move || {
             fired.store(true, std::sync::atomic::Ordering::SeqCst);
-            assert!(second_fd_cannot_take_lock_nonblocking(&row));
+            assert!(matches!(
+                second_handle_try_lock(&row),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
         });
         save_inflight_state_create_new_in_root(temp.path(), &real).unwrap();
         test_seams::clear_io_hook();

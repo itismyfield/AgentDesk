@@ -28,8 +28,9 @@ pub(in crate::services::discord) enum DestructiveCancelCommitOutcome {
     },
     RowMissing,
     RowMalformed,
-    /// Lock setup or syscall failure. Lock contention blocks because the flock
-    /// uses `LOCK_EX` without `LOCK_NB` or a timeout; it does not return this.
+    /// Lock setup or advisory-lock failure. Contention blocks because
+    /// `lock_inflight_state_path` uses blocking `std::fs::File::lock`; it does
+    /// not return this outcome.
     LockUnavailable,
     IoError,
 }
@@ -49,7 +50,7 @@ pub(in crate::services::discord) struct CommitError {
     pub message: String,
 }
 
-/// Verifies the inflight row under its sidecar flock and then runs a callback.
+/// Verifies the inflight row under its sidecar advisory lock and then runs a callback.
 ///
 /// A `Committed*` outcome means only that the row matched the identity plus
 /// `save_generation` pin at that instant and the callback returned typed evidence.
@@ -60,7 +61,7 @@ pub(in crate::services::discord) struct CommitError {
 /// `updated_at` is checked as supplemental diagnostics, but its one-second local
 /// timestamp resolution means it is not an independent fencing dimension.
 ///
-/// Excluded writers: every resurrection that already completed a flock-held
+/// Excluded writers: every resurrection that already completed a lock-held
 /// persist (the three watcher persists, both creation APIs, and the legacy
 /// rebind-origin backfill). Those writers advance `save_generation`; a different
 /// turn changes the identity, so either change aborts with `PinMismatch`.
@@ -75,24 +76,24 @@ pub(in crate::services::discord) struct CommitError {
 ///   may receive a `Committed*` outcome; downstream registry CAS and the finalizer's
 ///   exact-key ledger prevent duplicate finalization, not duplicate commit claims;
 /// - the cancel `Arc` and the #5071 T3-A1 spawn-nonce pin are both captured
-///   outside the flock and may name a replaced watcher incarnation; the registry
+///   outside the advisory lock and may name a replaced watcher incarnation; the registry
 ///   CAS fails closed with nothing cancelled whenever one of those captured
 ///   VALUES stops equalling the live row, but a value comparison cannot see a row
 ///   that was replaced and then re-admitted with every pinned value restored
 ///   (`tmux_watcher_registry::WatcherIdentityFence` declares that limit). Either
 ///   way a `Committed*` outcome was already returned;
-/// - sidecar flock authority is host-local and does not fence another node's
+/// - sidecar advisory lock authority is host-local and does not fence another node's
 ///   watcher, inflight row, or mailbox authority;
 /// - the age/lifecycle-qualified stale-row sweep in `reconcile.rs` removes rows
-///   without taking this sidecar flock.
+///   without taking this sidecar advisory lock.
 ///
 /// # Safety
 ///
 /// The callback must not acquire the watcher-registry mutex. This is a caller
 /// contract rather than a type-level guarantee: violating it can create an ABBA
-/// deadlock with a registry holder waiting for the sidecar flock, causing a
+/// deadlock with a registry holder waiting for the sidecar advisory lock, causing a
 /// permanent hang rather than a recoverable commit failure. E2 may prepare and
-/// fsync a temporary intent before this call, but while the flock is held its
+/// fsync a temporary intent before this call, but while the advisory lock is held its
 /// callback may only rename that prepared file; directory fsync belongs after
 /// this function returns and before destruction proceeds.
 pub(in crate::services::discord) fn commit_destructive_cancel_locked(
@@ -123,7 +124,7 @@ fn commit_destructive_cancel_locked_at_path(
     expected_save_generation: u64,
     on_verified: impl FnOnce(&InflightTurnState) -> Result<CommitEvidence, CommitError>,
 ) -> DestructiveCancelCommitOutcome {
-    let Ok(_flock) = lock_inflight_state_path(path) else {
+    let Ok(_lock) = lock_inflight_state_path(path) else {
         return DestructiveCancelCommitOutcome::LockUnavailable;
     };
     let content = match std::fs::read_to_string(path) {
