@@ -137,7 +137,10 @@ fn provider_exec_registry_conformance_invariant() {
         crate::config::AgentChannel::from("ch-normalized"),
     );
     assert!(normalized_channels.contains_key("codex"));
-    assert_eq!(normalized_channels.keys().collect::<Vec<_>>(), vec!["codex"]);
+    assert_eq!(
+        normalized_channels.keys().collect::<Vec<_>>(),
+        vec!["codex"]
+    );
 
     let catalog = public_provider_catalog();
     assert_eq!(

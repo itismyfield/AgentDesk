@@ -171,13 +171,14 @@ mod tests {
     fn feed_template_uses_a_bounded_first_line_title() {
         let mut message = text_message(&format!("{}\n본문", "가".repeat(80)));
         message.image_url = Some("https://cdn.example.com/image.jpg".to_string());
-        let value: serde_json::Value = serde_json::from_str(&default_template(
-            &message,
-            "https://example.com/messages",
-        ))
-        .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&default_template(&message, "https://example.com/messages"))
+                .unwrap();
         assert_eq!(value["object_type"], "feed");
-        assert_eq!(value["content"]["title"].as_str().unwrap().chars().count(), 50);
+        assert_eq!(
+            value["content"]["title"].as_str().unwrap().chars().count(),
+            50
+        );
     }
 
     #[test]

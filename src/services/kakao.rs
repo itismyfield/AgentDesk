@@ -18,8 +18,7 @@ use super::kakao_message::{
 };
 
 const TOKEN_URL: &str = "https://kauth.kakao.com/oauth/token";
-const FRIEND_SEND_URL: &str =
-    "https://kapi.kakao.com/v1/api/talk/friends/message/default/send";
+const FRIEND_SEND_URL: &str = "https://kapi.kakao.com/v1/api/talk/friends/message/default/send";
 const SELF_SEND_URL: &str = "https://kapi.kakao.com/v2/api/talk/memo/default/send";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(60);
@@ -155,6 +154,12 @@ impl KakaoClient {
 
     pub fn account_id(&self) -> &str {
         &self.environment.account_id
+    }
+
+    /// Refresh or validate credentials before a caller crosses its durable
+    /// provider-dispatch fence. No token material is returned to the caller.
+    pub async fn prepare(&self) -> Result<(), KakaoError> {
+        self.access_token(false).await.map(drop)
     }
 
     pub async fn send_to_friends(
@@ -355,9 +360,9 @@ fn configured_accounts(raw: Option<&str>) -> Result<BTreeSet<String>, KakaoError
 fn validate_account_id(account_id: &str) -> Result<(), KakaoError> {
     if account_id.is_empty()
         || account_id.len() > 32
-        || !account_id.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
-        })
+        || !account_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
     {
         return Err(KakaoError::InvalidConfiguration(
             "Kakao account ids must use lowercase letters, digits, or hyphens",
@@ -370,7 +375,10 @@ fn account_env_prefix(account_id: &str) -> String {
     if account_id == "default" {
         "KAKAO".to_string()
     } else {
-        format!("KAKAO_{}", account_id.replace('-', "_").to_ascii_uppercase())
+        format!(
+            "KAKAO_{}",
+            account_id.replace('-', "_").to_ascii_uppercase()
+        )
     }
 }
 

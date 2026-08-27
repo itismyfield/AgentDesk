@@ -360,14 +360,11 @@ fn find_agent_channel_for_provider<'a>(
     agent: &'a crate::config::AgentDef,
     provider: &ProviderKind,
 ) -> Option<(&'static str, &'a AgentChannel)> {
-    agent
-        .channels
-        .iter()
-        .find_map(|(provider_key, channel)| {
-            let provider_key = crate::services::provider::intern_provider_id(provider_key)?;
-            (binding_provider(agent, provider_key, channel).as_ref() == Some(provider))
-                .then_some((provider_key, channel))
-        })
+    agent.channels.iter().find_map(|(provider_key, channel)| {
+        let provider_key = crate::services::provider::intern_provider_id(provider_key)?;
+        (binding_provider(agent, provider_key, channel).as_ref() == Some(provider))
+            .then_some((provider_key, channel))
+    })
 }
 
 pub(super) fn resolve_dm_default_agent(provider: &ProviderKind) -> Option<ResolvedDmDefaultAgent> {
