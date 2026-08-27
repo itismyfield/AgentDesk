@@ -94,6 +94,7 @@ pub(super) fn run_bot_build_shared_data(
         codex_goals_reset_channels: restored_codex_goals_reset_channels,
     } = restored;
     let process_generation = runtime_store::allocate_process_generation();
+    let tmux_relay_coords = Arc::new(dashmap::DashMap::new());
     Arc::new(SharedData {
         core: Mutex::new(CoreState {
             sessions: HashMap::new(),
@@ -104,8 +105,10 @@ pub(super) fn run_bot_build_shared_data(
         settings: tokio::sync::RwLock::new(bot_settings),
         api_timestamps: dashmap::DashMap::new(),
         skills_cache: tokio::sync::RwLock::new(initial_skills),
-        tmux_watchers: crate::services::discord::TmuxWatcherRegistry::new(),
-        tmux_relay_coords: dashmap::DashMap::new(),
+        tmux_watchers: crate::services::discord::TmuxWatcherRegistry::new_with_coords(Arc::clone(
+            &tmux_relay_coords,
+        )),
+        tmux_relay_coords,
         // #3038 S4: wrapped verbatim at the first-member position
         // (evaluation-order preserved).
         ui: PlaceholderState {
