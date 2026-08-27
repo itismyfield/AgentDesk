@@ -8,6 +8,8 @@ import * as api from "../../api";
 import { DEPT_BLANK, DEPT_COLORS } from "./constants";
 import EmojiPicker from "./EmojiPicker";
 import type { Translator } from "./types";
+import { useFocusTrap } from "../common/overlay/useFocusTrap";
+import { useReturnFocus } from "../common/overlay/useReturnFocus";
 import {
   SurfaceActionButton,
   SurfaceNotice,
@@ -97,7 +99,8 @@ export default function DepartmentFormModal({
   const form = watch();
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const overlayRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useFocusTrap(true);
+  useReturnFocus(true);
   const colorButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   // sort_order 기반 다음 순번 계산
