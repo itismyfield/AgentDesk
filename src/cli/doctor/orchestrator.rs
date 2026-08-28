@@ -3129,7 +3129,7 @@ fn check_mailbox_consistency(snapshot: &HealthSnapshot) -> Vec<Check> {
             };
             Check::fail(
                 finding.id,
-                CheckGroup::Core,
+                CheckGroup::ProviderRuntime,
                 "Turn Mailbox Consistency",
                 finding.detail,
                 if finding.live_work_present {
@@ -4382,10 +4382,36 @@ pub fn cmd_doctor(options: DoctorOptions) -> Result<(), String> {
 #[cfg(test)]
 mod profile_filter_tests {
     use super::{
-        Check, CheckGroup, DoctorOptions, build_json_report, check_group_from_report,
-        checksum_mismatch_evidence, doctor_profile_includes_check, format_checksum_mismatches,
+        Check, CheckGroup, DoctorOptions, HealthSnapshot, build_json_report,
+        check_group_from_report, check_mailbox_consistency, checksum_mismatch_evidence,
+        doctor_profile_includes_check, format_checksum_mismatches,
     };
     use crate::cli::doctor::contract::{DoctorProfile, RunContext};
+    use serde_json::json;
+
+    #[test]
+    fn mailbox_consistency_findings_use_provider_runtime_group() {
+        let snapshot = HealthSnapshot {
+            base: "http://localhost:8787".to_string(),
+            body: Some(json!({
+                "mailboxes": [{
+                    "channel_id": 42,
+                    "has_cancel_token": true,
+                    "queue_depth": 0,
+                    "tmux_present": false,
+                    "process_present": false,
+                    "active_dispatch_present": false
+                }]
+            })),
+            error: None,
+        };
+
+        let checks = check_mailbox_consistency(&snapshot);
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].group, CheckGroup::ProviderRuntime);
+        assert_eq!(checks[0].subsystem, "provider_runtime");
+    }
 
     #[test]
     fn quick_profile_keeps_dispatch_outbox_checks() {
