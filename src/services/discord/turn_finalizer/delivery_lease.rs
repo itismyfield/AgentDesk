@@ -290,14 +290,20 @@ mod tests {
     #[test]
     fn commit_on_unleased_is_noop() {
         let c = cell();
-        assert!(!c.commit(LeaseHolder::Bridge, turn(), 0, 1, LeaseOutcome::Delivered));
+        assert!(!c.commit(
+            LeaseHolder::Bridge { attempt_id: 1 },
+            turn(),
+            0,
+            1,
+            LeaseOutcome::Delivered
+        ));
         assert!(matches!(c.read(), LeaseSnapshot::Unleased));
     }
 
     #[test]
     fn release_compare_and_release_noop_on_holder_mismatch() {
         let c = cell();
-        let owner = LeaseHolder::Bridge;
+        let owner = LeaseHolder::Bridge { attempt_id: 1 };
         let stale = LeaseHolder::Watcher { instance_id: 99 };
         assert!(c.try_acquire(turn(), owner, 0, 8, 1_000));
         // A stale actor cannot release the live lease.
@@ -323,28 +329,17 @@ mod tests {
 
     #[test]
     fn stale_turn_commit_and_release_are_noops_after_reacquire() {
-        // #3041 §2 hazard, closed: turn A is acquired then reclaimed; turn B
-        // reacquires the SAME channel with the SAME holder KIND. A stale
-        // commit OR release carrying turn A's key must be a NO-OP and must
-        // NOT touch turn B's live lease. (Holder kind alone would match —
-        // only the stored turn identity distinguishes the two.)
         let c = cell();
         let holder = LeaseHolder::Sink; // same holder kind across both turns
         let turn_a = key(ChannelId::new(42), 100, 0);
         let turn_b = key(ChannelId::new(42), 200, 0);
-
-        // Turn A acquires, then its deadline elapses and it is reclaimed.
         assert!(c.try_acquire(turn_a.clone(), holder, 0, 5, 10));
         assert!(c.reclaim_if_expired(10));
         assert!(matches!(c.read(), LeaseSnapshot::Unleased));
 
-        // Turn B reacquires the freed cell (same channel, same holder kind).
         assert!(c.try_acquire(turn_b.clone(), holder, 5, 11, 1_000));
-
-        // Stale commit from turn A: identity mismatch → no-op, B untouched.
         assert!(!c.commit(holder, turn_a.clone(), 5, 11, LeaseOutcome::Delivered));
         assert!(!c.commit(holder, turn_a.clone(), 0, 5, LeaseOutcome::Delivered));
-        // Stale release from turn A: identity mismatch → no-op, B untouched.
         assert!(!c.release(holder, turn_a.clone(), 0, 5));
         match c.read() {
             LeaseSnapshot::Leased {
@@ -356,7 +351,6 @@ mod tests {
             other => panic!("turn B lease must survive stale A ops, got {other:?}"),
         }
 
-        // Turn B's own commit/release with its real key still work.
         assert!(c.commit(holder, turn_b.clone(), 5, 11, LeaseOutcome::Delivered));
         assert!(!c.release(holder, turn_a, 5, 11)); // stale release post-commit: no-op
         assert!(c.release(holder, turn_b, 5, 11));
@@ -365,24 +359,12 @@ mod tests {
 
     #[test]
     fn same_turn_stale_range_release_is_noop_after_reacquire() {
-        // #3041 codex R2: the SAME turn is reclaimed and reacquires a
-        // DIFFERENT byte range (e.g. a continuation chunk). A stale release
-        // carrying the OLD range — same holder AND same turn — must be a
-        // NO-OP and must NOT release the live newer-range lease. Only the
-        // correct range releases it (release is now range-scoped, symmetric
-        // with commit).
         let c = cell();
         let holder = LeaseHolder::Sink;
         let t = key(ChannelId::new(7), 300, 0);
-
-        // Acquire range [0,5), let the deadline elapse, reclaim.
         assert!(c.try_acquire(t.clone(), holder, 0, 5, 10));
         assert!(c.reclaim_if_expired(10));
-        // Same turn reacquires a continuation range [5, 12).
         assert!(c.try_acquire(t.clone(), holder, 5, 12, 1_000));
-
-        // Stale release with the OLD range [0,5): holder+turn match but the
-        // range does not → NO-OP, live [5,12) lease survives.
         assert!(!c.release(holder, t.clone(), 0, 5));
         match c.read() {
             LeaseSnapshot::Leased { start, end, .. } => assert_eq!((start, end), (5, 12)),
@@ -390,9 +372,25 @@ mod tests {
                 panic!("newer-range lease must survive stale-range release, got {other:?}")
             }
         }
-        // The correct range releases it.
         assert!(c.release(holder, t, 5, 12));
         assert!(matches!(c.read(), LeaseSnapshot::Unleased));
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn same_key_range_stale_bridge_attempt_cannot_touch_successor() {
+        let c = cell(); let t = key(ChannelId::new(7), 400, 0);
+        let stale = LeaseHolder::Bridge { attempt_id: 41 }; let successor = LeaseHolder::Bridge { attempt_id: 42 };
+        assert!(c.try_acquire(t.clone(), stale, 0, 12, 10)); assert!(c.reclaim_if_expired(10));
+        assert!(c.try_acquire(t.clone(), successor, 0, 12, 1_000));
+        assert!(!c.renew(stale, t.clone(), 2_000)); assert!(!c.commit(stale, t.clone(), 0, 12, LeaseOutcome::Delivered));
+        assert!(!c.release(stale, t.clone(), 0, 12));
+        match c.read() {
+            LeaseSnapshot::Leased { holder, key, start, end, .. } => { assert_eq!(holder, successor); assert_eq!(key, t); assert_eq!((start, end), (0, 12)); }
+            other => panic!("successor lease must survive stale bridge attempt, got {other:?}"),
+        }
+        assert!(c.renew(successor, t.clone(), 2_000)); assert!(c.commit(successor, t.clone(), 0, 12, LeaseOutcome::Delivered));
+        assert!(c.release(successor, t, 0, 12)); assert!(matches!(c.read(), LeaseSnapshot::Unleased));
     }
 
     #[test]
@@ -463,7 +461,7 @@ mod tests {
     #[test]
     fn deadline_reclaim_never_touches_committed() {
         let c = cell();
-        let h = LeaseHolder::Bridge;
+        let h = LeaseHolder::Bridge { attempt_id: 1 };
         assert!(c.try_acquire(turn(), h, 0, 3, 10));
         assert!(c.commit(h, turn(), 0, 3, LeaseOutcome::Delivered));
         // A Committed lease awaits an explicit release; deadline reclaim is a

@@ -213,97 +213,30 @@ fn unfence_runtimes(runtimes: &[Arc<SharedData>]) {
     }
 }
 
-fn restart_path_nonce(path: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(path).ok().and_then(|request| {
-        request
-            .lines()
-            .find_map(|line| line.strip_prefix("nonce="))
-            .map(str::to_owned)
-    })
-}
-
 pub(super) fn restart_file_nonce(root: &std::path::Path, name: &str) -> Option<String> {
-    restart_path_nonce(&root.join(name))
+    crate::cli::restart_terminal_proof::file_nonce(&root.join(name))
 }
 
-fn restart_file_matches(root: &std::path::Path, name: &str, nonce: &str) -> bool {
-    restart_file_nonce(root, name).as_deref() == Some(nonce)
-}
+pub(super) use crate::cli::restart_terminal_proof::TerminalProof;
 
-/// #5254 §2-3: a nonce is a pathname component under D11, so it is validated
-/// rather than trusted. Whole-string, never line-anchored — a `grep -Eqx`-shaped
-/// gate succeeds on any one matching line, so it admits both `x\n../escape` and
-/// `x\nescape`: the clean `x` line alone satisfies it and the rest smuggles.
-fn nonce_is_path_safe(nonce: &str) -> bool {
-    !nonce.is_empty()
-        && nonce != "."
-        && nonce != ".."
-        && nonce.len() <= 128
-        && nonce
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
-
-/// #5254 D11-1: the per-request immutable name of a restart artifact. `None` is
-/// the fail-closed disposition of a nonce that fails the charset gate: no
-/// caller ever builds a path out of an unvalidated string.
 pub(super) fn restart_request_artifact_path(
     root: &std::path::Path,
     name: &str,
     nonce: &str,
 ) -> Option<std::path::PathBuf> {
-    nonce_is_path_safe(nonce).then(|| root.join(format!("{name}.{nonce}")))
+    crate::cli::restart_terminal_proof::request_artifact_path(root, name, nonce)
 }
 
-/// #5254 D11-3 as corrected by ERRATUM R3-E5: the terminal read is three-valued
-/// and only the per-request identity name carries green authority.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum TerminalProof {
-    /// The identity artifact exists and its body nonce agrees. I2c/I3 back it.
-    Proven,
-    /// Only the fixed-name index carries this nonce. NOT a durability proof: a
-    /// pre-I2c publisher both retracts such a proof after its post-rename
-    /// re-check [E1] and survives publishing it under supersession [E2]. It
-    /// still beats `Absent`, which resolves nothing by itself: this module has
-    /// no timer, so an `Absent` read keeps polling until the marker disappears
-    /// (`Cancelled`), is replaced by another nonce (`Superseded`), or a terminal
-    /// artifact for this nonce appears. The timeout belongs to the shell gate.
-    LegacyIndexOnly,
-    Absent,
-}
-
-/// Three-valued, identity-first read of one restart artifact family.
 pub(super) fn restart_artifact_proof(
     root: &std::path::Path,
     name: &str,
     nonce: &str,
 ) -> TerminalProof {
-    let Some(identity) = restart_request_artifact_path(root, name, nonce) else {
-        // ERRATUM §E5.4: an unsafe nonce yields `Absent`, not a fallback read.
-        // The index is not a promotion path, so there is nothing to fall back
-        // to and no route by which an unvalidated nonce becomes evidence. The
-        // label is §E5.4's other half: §E5.8 4-R leaves diagnostics as the only
-        // residual risk of a non-authoritative index, and a silent `Absent` here
-        // leaves an operator watching a fence with nothing naming why.
-        tracing::warn!(
-            root = %root.display(),
-            name = name,
-            "restart-nonce-unsafe: refusing to read a terminal artifact for an unvalidated nonce"
-        );
-        return TerminalProof::Absent;
-    };
-    if restart_path_nonce(&identity).as_deref() == Some(nonce) {
-        return TerminalProof::Proven;
-    }
-    if restart_file_matches(root, name, nonce) {
-        return TerminalProof::LegacyIndexOnly;
-    }
-    TerminalProof::Absent
+    crate::cli::restart_terminal_proof::artifact_proof(root, name, nonce)
 }
 
-/// ERRATUM §E5.2 `terminal_proof(root, nonce)`.
 pub(super) fn terminal_proof(root: &std::path::Path, nonce: &str) -> TerminalProof {
-    restart_artifact_proof(root, "restart_persisted", nonce)
+    crate::cli::restart_terminal_proof::persisted_proof(root, nonce)
 }
 
 /// #5254 D1 + D11-1: stage-then-link, twice. The body lands in a dot-prefixed

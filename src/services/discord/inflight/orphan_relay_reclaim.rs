@@ -23,11 +23,10 @@
 //!
 //! WHERE THE NO-DOUBLE-RELAY GUARANTEE LIVES — the SEND-POINT committed re-gate,
 //! NOT this in-lock shape re-check. The real `SessionBoundRelay` TUI-direct
-//! terminal route (`session_relay_sink.rs:1066-1124`, `advance_after_confirmed_post`
-//! at :1116) advances ONLY the shared `relay_coord.confirmed_end_offset`
+//! terminal route (`SessionRelaySink::advance_after_confirmed_post`) advances ONLY the shared `relay_coord.confirmed_end_offset`
 //! watermark and writes NOTHING to the inflight row (no
 //! `current_msg_id`/`response_sent_offset`/`full_response`/`terminal_delivery_committed`).
-//! So a delivered-but-unmirrored row STAYS orphan-shaped under the flock and the
+//! So a delivered-but-unmirrored row STAYS orphan-shaped under the advisory lock and the
 //! downgrade PROCEEDS — that is expected and correct. Single delivery is then
 //! guaranteed because EVERY re-delivery path re-reads `effective_committed_offset`
 //! FRESH and `idle_relay_range_action` returns `AdvanceCommitted` (whole body
@@ -40,7 +39,7 @@
 //! row-MUTATING in-window commits — the watcher terminal-commit route
 //! (`commit_watcher_terminal_delivery_locked`) sets
 //! `terminal_delivery_committed`/`full_response`/`response_sent_offset` ON the
-//! row, so a watcher commit landing between the candidate scan and this flock is
+//! row, so a watcher commit landing between the candidate scan and this advisory lock is
 //! detected (shape no longer matches → abort) — plus a fresh turn B that
 //! replaced the orphan (identity guard) and a pinned restart/rebind lifecycle.
 
@@ -125,13 +124,13 @@ pub(in crate::services::discord) enum OrphanRelayReclaimOutcome {
     IoError,
 }
 
-/// #3960: single-flock read-modify-write that downgrades an orphaned
+/// #3960: single-lock read-modify-write that downgrades an orphaned
 /// `SessionBoundRelay` TUI-direct row's relay owner to `None`. Acquires the
-/// sidecar flock ONCE, reloads the on-disk row, re-checks the caller's identity
+/// sidecar advisory lock ONCE, reloads the on-disk row, re-checks the caller's identity
 /// AND the orphan shape against the freshly reloaded row, then flips the owner
 /// and persists via [`persist_under_lock`] — never re-entering
 /// [`super::save_inflight_state`] (which would re-acquire the same non-reentrant
-/// flock and self-deadlock).
+/// advisory lock and self-deadlock).
 ///
 /// The in-lock orphan re-check catches a ROW-MUTATING in-window commit (the
 /// watcher terminal-commit route writes `terminal_delivery_committed` etc. to the
@@ -192,7 +191,7 @@ pub(super) fn downgrade_orphaned_session_bound_relay_owner_locked_in_root(
     // ROW-MUTATING in-window commit — the watcher terminal-commit route sets
     // `terminal_delivery_committed`/`full_response`/`response_sent_offset` on the
     // row, so a watcher commit landing between the caller's candidate scan and
-    // this flock leaves the row non-quiescent → abort. It does NOT catch the
+    // this advisory lock leaves the row non-quiescent → abort. It does NOT catch the
     // watermark-only NewMessage commit (which leaves the row orphan-shaped); that
     // row IS downgraded, and the send-point committed re-gate guarantees single
     // delivery. See this module's header.
@@ -233,17 +232,17 @@ pub(in crate::services::discord) enum MarkDeliveredOutcome {
     IoError,
 }
 
-/// #3976: single-flock read-modify-write that stamps the durable
+/// #3976: single-lock read-modify-write that stamps the durable
 /// `session_bound_delivered` marker on a `SessionBoundRelay` TUI-direct row AFTER
-/// a genuinely confirmed terminal delivery. Acquires the sidecar flock ONCE,
+/// a genuinely confirmed terminal delivery. Acquires the sidecar advisory lock ONCE,
 /// reloads the on-disk row, re-checks the caller's identity against the freshly
 /// reloaded row, then sets the flag and persists via [`persist_under_lock`] —
 /// never re-entering [`super::save_inflight_state`] (which would re-acquire the
-/// same non-reentrant flock and self-deadlock).
+/// same non-reentrant advisory lock and self-deadlock).
 ///
 /// The identity re-gate is the SAFETY boundary: the confirmed-POST path already
 /// matched the frame identity to the inflight it loaded UNLOCKED, but a fresh
-/// turn B could have replaced the row between that load and this flock. Re-gating
+/// turn B could have replaced the row between that load and this advisory lock. Re-gating
 /// under the lock guarantees the marker only ever lands on the SAME turn whose
 /// delivery was confirmed — never on a replacement turn. Idempotent: a row that
 /// already carries the marker returns `Marked` without a redundant write.
@@ -477,7 +476,7 @@ mod tests {
         let identity = InflightTurnIdentity::from_state(&candidate);
 
         // ... then the WATCHER terminal-commit route mutated the row (sets the
-        // row's terminal fields) before the downgrade acquired the flock.
+        // row's terminal fields) before the downgrade acquired the advisory lock.
         let mut committed = candidate.clone();
         committed.terminal_delivery_committed = true;
         committed.current_msg_id = 9300;
@@ -509,9 +508,9 @@ mod tests {
 
     /// #3960 — a WATERMARK-ONLY NewMessage commit in the window does NOT abort the
     /// downgrade, and that is correct. The real `SessionBoundRelay` TUI-direct
-    /// terminal route (`session_relay_sink.rs:1066-1124`) advances ONLY the shared
+    /// terminal route (`SessionRelaySink::advance_after_confirmed_post`) advances ONLY the shared
     /// `confirmed_end_offset` watermark and writes NOTHING to the inflight row, so
-    /// a delivered-but-unmirrored row STAYS orphan-shaped under the flock and the
+    /// a delivered-but-unmirrored row STAYS orphan-shaped under the advisory lock and the
     /// in-lock shape re-check CANNOT see the delivery → the downgrade PROCEEDS.
     /// No double-relay results: single delivery is then guaranteed by the
     /// send-point committed re-gate (asserted in

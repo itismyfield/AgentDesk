@@ -63,7 +63,7 @@ pub(in crate::services::discord) enum InflightEpisodeLockError {
     Io,
 }
 
-/// Keeps the canonical inflight flock held while a synchronous watcher claim
+/// Keeps the canonical inflight advisory lock held while a synchronous watcher claim
 /// and spawn handoff is performed for the exact adopted episode.
 pub(in crate::services::discord) struct LockedInflightEpisode {
     _lock: super::store::InflightStateFileLock,
@@ -107,7 +107,7 @@ impl LockedInflightEpisode {
     }
 }
 
-/// Atomically adopt one exact episode and retain the same canonical flock.
+/// Atomically adopt one exact episode and retain the same canonical advisory lock.
 /// No reader or replacement writer can observe the adoption without ordering
 /// after the full watcher handoff protected by the returned guard.
 pub(in crate::services::discord) fn adopt_and_lock_inflight_episode(

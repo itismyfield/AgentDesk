@@ -131,8 +131,15 @@ fn admit_codex_terminal_range_in_root(
     if file_len < end || !marker_matches(tmux, &canonical, session, start) {
         return Err(GuardedSaveOutcome::IdentityMismatch);
     }
-    let cold =
-        start == 0 && fresh.output_path.as_deref() == Some(tmux_runtime_paths(tmux).0.as_str());
+    // A dead prelaunch session deliberately persists no wrapper path. At the
+    // first raw range (`start == 0`), allow that representation only after the
+    // exact row/frame nonce and marker path/session/start checks above; retain
+    // the legacy wrapper-path form for live seeds.
+    let cold = start == 0
+        && fresh
+            .output_path
+            .as_deref()
+            .is_none_or(|path| path == tmux_runtime_paths(tmux).0);
     let warm = fresh
         .output_path
         .as_deref()
@@ -491,7 +498,12 @@ mod tests {
         let _dedupe = dedupe::TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        for (index, start, binding_at_end) in [(0, 0, false), (1, 3, false), (2, 3, true)] {
+        for (index, start, binding_at_end, pathless_cold) in [
+            (0, 0, false, true),
+            (1, 0, false, false),
+            (2, 3, false, false),
+            (3, 3, true, false),
+        ] {
             dedupe::reset_state_for_tests();
             let tmux = format!("AgentDesk-codex-range-5264-{index}");
             let rollout = temp.path().join(format!("rollout-{index}.jsonl"));
@@ -503,7 +515,7 @@ mod tests {
             local.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
             local.turn_nonce = Some("turn-nonce".into());
             (local.turn_start_offset, local.last_offset) = (Some(start), start);
-            local.output_path = Some(tmux_runtime_paths(&tmux).0);
+            local.output_path = (!pathless_cold).then(|| tmux_runtime_paths(&tmux).0);
             let mut binding = dedupe::TuiRuntimeBinding {
                 runtime_kind: RuntimeHandoffKind::CodexTui,
                 output_path: rollout.display().to_string(),
@@ -516,6 +528,17 @@ mod tests {
             if start > 0 {
                 dedupe::register_tmux_runtime_binding(&tmux, binding.clone());
                 local.output_path = Some(binding.output_path.clone());
+            } else if pathless_cold {
+                assert_eq!(
+                    local.output_path, None,
+                    "cold dead-session seed is pathless"
+                );
+            } else {
+                assert_eq!(
+                    local.output_path.as_deref(),
+                    Some(tmux_runtime_paths(&tmux).0.as_str()),
+                    "cold live-session seed retains the legacy wrapper path",
+                );
             }
             save_inflight_state_in_root(&root, &local).unwrap();
             let expected = InflightTurnIdentity::from_state(&local);
