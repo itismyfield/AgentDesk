@@ -15,6 +15,18 @@ use super::timing::compute_resume;
 
 const DEFAULT_EXTERNAL_DELIVERY_WINDOW_HOURS: i64 = 24;
 
+fn render_discord_content(content: &str, user_ids: &[String]) -> String {
+    if user_ids.is_empty() {
+        return content.to_string();
+    }
+    let mentions = user_ids
+        .iter()
+        .map(|user_id| format!("<@{user_id}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{mentions}\n{content}")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PushHandoffOutcome {
     Committed,
@@ -59,6 +71,8 @@ pub(super) async fn commit(
 
     let mut discord_outbox_id = None;
     if let Some(channel_id) = message.target_channel_id.as_deref() {
+        let discord_content =
+            render_discord_content(&message.content, &message.discord_mention_user_ids);
         let target = format!("channel:{channel_id}");
         let reason_code = format!(
             "scheduled_message:v1:{}:{}",
@@ -70,7 +84,7 @@ pub(super) async fn commit(
                 &mut tx,
                 OutboxMessage {
                     target: &target,
-                    content: &message.content,
+                    content: &discord_content,
                     bot: &message.bot,
                     source: OUTBOX_SOURCE,
                     reason_code: Some(&reason_code),
@@ -142,6 +156,19 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+
+    #[test]
+    fn mentions_render_only_for_the_discord_handoff_body() {
+        let user_ids = vec![
+            "1469509284508340276".to_string(),
+            "1469961339920453675".to_string(),
+        ];
+        assert_eq!(
+            render_discord_content("Kakao keeps this exact body", &user_ids),
+            "<@1469509284508340276> <@1469961339920453675>\nKakao keeps this exact body"
+        );
+        assert_eq!(render_discord_content("plain", &[]), "plain");
+    }
 
     #[test]
     fn deadline_prefers_expiry_or_next_recurrence_over_default_window() {

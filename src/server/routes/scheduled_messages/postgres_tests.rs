@@ -64,6 +64,7 @@ async fn postgres_scheduled_message_create_persists_trimmed_explicit_bot() {
     let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
     let body = CreateScheduledMessageBody {
         content: "trim explicit bot before persistence".to_string(),
+        discord_mention_user_ids: None,
         title: None,
         target_channel_id: Some("123456789".to_string()),
         bot: Some(" notify ".to_string()),
@@ -106,6 +107,7 @@ async fn postgres_scheduled_push_rejects_agent_id_before_foreign_key_insert() {
     let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
     let body = CreateScheduledMessageBody {
         content: "push must not persist an unused agent association".to_string(),
+        discord_mention_user_ids: None,
         title: None,
         target_channel_id: Some("123456789".to_string()),
         bot: None,
@@ -155,6 +157,7 @@ async fn postgres_scheduled_push_patch_distinguishes_values_from_null_clears() {
         &pool,
         &db::NewScheduledMessage {
             content: "ordinary push patch definition".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: None,
             target_channel_id: Some("123456789".to_string()),
             bot: "notify".to_string(),

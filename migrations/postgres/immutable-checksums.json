@@ -570,6 +570,11 @@
       "path": "migrations/postgres/0111_scheduled_external_delivery_outbox.sql",
       "sha256": "c0bf950cd57e79b84abf686e51bf43a23703485f9ce463f2a8e4195a30b5ab3c",
       "version": 111
+    },
+    {
+      "path": "migrations/postgres/0112_scheduled_discord_mentions.sql",
+      "sha256": "a08656fbd8e76df831ccdfb07ea335c3d2982836994f9be310df3c70d55de1af",
+      "version": 112
     }
   ],
   "version": 1

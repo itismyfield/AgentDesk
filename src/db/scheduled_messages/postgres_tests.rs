@@ -34,6 +34,7 @@ async fn insert_due_message(pool: &PgPool, delivery_kind: &str) -> ScheduledMess
         pool,
         &NewScheduledMessage {
             content: "scheduled test message".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: None,
             target_channel_id: (delivery_kind == KIND_PUSH).then(|| "123456789".to_string()),
             bot: "announce".to_string(),
@@ -78,6 +79,7 @@ async fn postgres_external_handoff_scrubs_targets_and_terminal_payload() {
         &pool,
         &NewScheduledMessage {
             content: "scheduled Kakao message".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: None,
             target_channel_id: None,
             bot: "notify".to_string(),
@@ -724,6 +726,7 @@ async fn postgres_running_agent_poll_rotates_before_renewed_rows() {
             &pool,
             &NewScheduledMessage {
                 content: format!("scheduled poll {label}"),
+                discord_mention_user_ids: Vec::new(),
                 title: None,
                 target_channel_id: Some("123456789".to_string()),
                 bot: "announce".to_string(),
@@ -1418,6 +1421,7 @@ async fn postgres_cancel_reports_committed_agent_handoff_not_intent() {
         &pool,
         &NewScheduledMessage {
             content: "already launched agent delivery".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: None,
             target_channel_id: None,
             bot: "notify".to_string(),

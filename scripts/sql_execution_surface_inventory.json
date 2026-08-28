@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "cf540bd2f550a22165e7a8107b86d7c3a1616c20",
+  "measured_at_sha": "39ff097379bb10b2e670e01e811417c8433cfe84",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1044,7 +1044,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:b57c82a4eff0208379ca9fcda4cb920bfc1a0c26735c34713363d2bd49bf8ce7"
+      "fingerprint": "sha256:0d1e77c736c10d5792a924e400dadbd2c5cc2ae499cb4d60ee1e2bf0d9153408"
     },
     {
       "root": "policies",
@@ -11610,7 +11610,7 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "UNRESOLVED",
-      "fingerprint": "sha256:06182c0fa644e659e6efcb5a4c27d9a13f769f83ace9005a6aaddbb8b13a6e3f"
+      "fingerprint": "sha256:ca9d06ef37fd2ef7d0d185a6ecdd8f22e49307921c2b1c10519a9629e7e0090e"
     },
     {
       "root": "src",
@@ -30852,6 +30852,15 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
+      "fingerprint": "sha256:17b08e132b3d65b2b57063fd07f7c1c032952fa852954ce8830e6a6ccdb95e40"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/scheduled_messages/postgres_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
       "fingerprint": "sha256:3613c3c009e799be897bc6ca2414100936571361457952fc7ac68966bc916bd2"
     },
     {
@@ -30943,6 +30952,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:ddc783d6a5fa69a66e881701cd8083036e3e290bfc5c66c3c43ee58b3d10d57c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/scheduled_messages/postgres_tests.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ecd86ec31dca0ae7ac5e0012886377923d71690da6678b1d7f08d12b8d342039"
     },
     {
       "root": "src",

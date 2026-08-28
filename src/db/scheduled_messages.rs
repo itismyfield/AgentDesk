@@ -9,11 +9,13 @@
 //! (message, fire slot) via `uq_smdel_fire_slot` and `FOR UPDATE SKIP LOCKED`.
 
 use chrono::{DateTime, Utc};
-use serde_json::{Value as JsonValue, json};
+use serde_json::Value as JsonValue;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 
 mod agent;
+mod api_json;
+mod discord_mentions;
 mod external_delivery;
 mod outbox;
 mod writes;
@@ -23,6 +25,8 @@ pub use agent::{
     record_delivery_agent_turn_intent_pg, recover_expired_leases_pg,
     release_agent_delivery_to_poller_pg,
 };
+use discord_mentions::declare_discord_mention_consumer_v1_tx;
+pub use discord_mentions::discord_mentions_rollout_ready_pg;
 pub use external_delivery::{
     ClaimedExternalDelivery, ExternalDeliveryFinish, ExternalDeliveryRow, NewExternalDelivery,
     claim_external_deliveries_pg, enqueue_external_delivery_tx, finish_external_delivery_pg,
@@ -48,7 +52,7 @@ pub const DELIVERY_INTERRUPTED: &str = "interrupted";
 pub const KIND_PUSH: &str = "push";
 pub const KIND_AGENT: &str = "agent";
 
-const DEFINITION_COLUMNS: &str = "id, content, title, target_channel_id, bot, delivery_kind, \
+const DEFINITION_COLUMNS: &str = "id, content, discord_mention_user_ids, title, target_channel_id, bot, delivery_kind, \
      agent_id, agent_instruction, on_agent_failure, scheduled_at, schedule, timezone, \
      expires_at, status, in_flight_delivery_id, fire_count, last_fired_at, last_error, \
      source, created_by, dedupe_key, provider_targets, provider_target_summary, \
@@ -66,6 +70,9 @@ pub const ON_CONTEXT_FAILURE_FRESH: &str = "fresh";
 pub struct ScheduledMessageRow {
     pub id: String,
     pub content: String,
+    /// Discord-only user IDs rendered before the canonical content. External
+    /// providers always receive the unchanged `content` value.
+    pub discord_mention_user_ids: Vec<String>,
     pub title: Option<String>,
     pub target_channel_id: Option<String>,
     pub bot: String,
@@ -98,40 +105,6 @@ pub struct ScheduledMessageRow {
     pub updated_at: DateTime<Utc>,
 }
 
-impl ScheduledMessageRow {
-    pub fn to_api_json(&self) -> JsonValue {
-        json!({
-            "id": self.id,
-            "content": self.content,
-            "title": self.title,
-            "targetChannelId": self.target_channel_id,
-            "bot": self.bot,
-            "deliveryKind": self.delivery_kind,
-            "agentId": self.agent_id,
-            "agentInstruction": self.agent_instruction,
-            "onAgentFailure": self.on_agent_failure,
-            "scheduledAt": self.scheduled_at.to_rfc3339(),
-            "schedule": self.schedule,
-            "timezone": self.timezone,
-            "expiresAt": self.expires_at.map(|v| v.to_rfc3339()),
-            "status": self.status,
-            "inFlightDeliveryId": self.in_flight_delivery_id,
-            "fireCount": self.fire_count,
-            "lastFiredAt": self.last_fired_at.map(|v| v.to_rfc3339()),
-            "lastError": self.last_error,
-            "source": self.source,
-            "createdBy": self.created_by,
-            "dedupeKey": self.dedupe_key,
-            "providerTargets": self.provider_target_summary,
-            "contextStrategy": self.context_strategy,
-            "contextSnapshotId": self.context_snapshot_id,
-            "onContextFailure": self.on_context_failure,
-            "createdAt": self.created_at.to_rfc3339(),
-            "updatedAt": self.updated_at.to_rfc3339(),
-        })
-    }
-}
-
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DeliveryRow {
     pub id: String,
@@ -150,27 +123,6 @@ pub struct DeliveryRow {
     pub created_at: DateTime<Utc>,
 }
 
-impl DeliveryRow {
-    pub fn to_api_json(&self) -> JsonValue {
-        json!({
-            "id": self.id,
-            "scheduledMessageId": self.scheduled_message_id,
-            "fireScheduledAt": self.fire_scheduled_at.to_rfc3339(),
-            "deliveryKind": self.delivery_kind,
-            "status": self.status,
-            "claimOwner": self.claim_owner,
-            "outboxId": self.outbox_id,
-            "turnId": self.turn_id,
-            "fallbackOutboxId": self.fallback_outbox_id,
-            "retryCount": self.retry_count,
-            "error": self.error,
-            "startedAt": self.started_at.to_rfc3339(),
-            "finishedAt": self.finished_at.map(|v| v.to_rfc3339()),
-            "createdAt": self.created_at.to_rfc3339(),
-        })
-    }
-}
-
 /// A definition claimed for firing together with its delivery slot row.
 #[derive(Clone)]
 pub struct ClaimedFire {
@@ -184,6 +136,7 @@ pub struct ClaimedFire {
 #[derive(Clone)]
 pub struct NewScheduledMessage {
     pub content: String,
+    pub discord_mention_user_ids: Vec<String>,
     pub title: Option<String>,
     pub target_channel_id: Option<String>,
     pub bot: String,
@@ -211,6 +164,7 @@ pub struct NewScheduledMessage {
 #[derive(Clone, Default)]
 pub struct ScheduledMessagePatch {
     pub content: Option<String>,
+    pub discord_mention_user_ids: Option<Vec<String>>,
     pub title: Option<Option<String>>,
     pub target_channel_id: Option<Option<String>>,
     pub bot: Option<String>,
@@ -319,6 +273,11 @@ pub async fn update_scheduled_message_pg(
     );
     if let Some(content) = &patch.content {
         builder.push(", content = ").push_bind(content);
+    }
+    if let Some(user_ids) = &patch.discord_mention_user_ids {
+        builder
+            .push(", discord_mention_user_ids = ")
+            .push_bind(user_ids);
     }
     if let Some(title) = &patch.title {
         builder.push(", title = ").push_bind(title);
@@ -548,6 +507,7 @@ async fn arm_delivery_slot_tx(
     lease_secs: i64,
     now: DateTime<Utc>,
 ) -> Result<Option<ClaimedFire>, sqlx::Error> {
+    declare_discord_mention_consumer_v1_tx(tx).await?;
     let delivery_id = format!("smdel_{}", Uuid::new_v4());
     let claim_token = format!("smclaim_{}", Uuid::new_v4());
     let armed = sqlx::query(

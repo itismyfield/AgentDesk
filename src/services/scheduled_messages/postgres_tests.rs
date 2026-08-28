@@ -52,6 +52,7 @@ async fn insert_agent_message(
         pool,
         &db::NewScheduledMessage {
             content: format!("scheduled agent payload for {agent_id}"),
+            discord_mention_user_ids: Vec::new(),
             title: None,
             target_channel_id: Some("123456789".to_string()),
             bot: "announce".to_string(),
@@ -98,6 +99,7 @@ async fn insert_due_push_message(pool: &PgPool) -> ScheduledMessageRow {
         pool,
         &db::NewScheduledMessage {
             content: "guarded push payload".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: None,
             target_channel_id: Some("123456789".to_string()),
             bot: "notify".to_string(),
@@ -266,7 +268,11 @@ async fn postgres_scheduled_push_atomically_fans_out_to_discord_and_kakao() {
     let message = db::insert_scheduled_message_pg(
         &pool,
         &db::NewScheduledMessage {
-            content: "fan out this reminder".to_string(),
+            content: "Kakao keeps this exact body".to_string(),
+            discord_mention_user_ids: vec![
+                "1469509284508340276".to_string(),
+                "1469961339920453675".to_string(),
+            ],
             title: None,
             target_channel_id: Some("123456789".to_string()),
             bot: "notify".to_string(),
@@ -327,6 +333,16 @@ async fn postgres_scheduled_push_atomically_fans_out_to_discord_and_kakao() {
         discord_count, 1,
         "replayed claims must not duplicate Discord"
     );
+    let discord_content: String =
+        sqlx::query_scalar("SELECT content FROM message_outbox WHERE source = $1")
+            .bind(OUTBOX_SOURCE)
+            .fetch_one(&pool)
+            .await
+            .expect("load Discord mention handoff");
+    assert_eq!(
+        discord_content,
+        "<@1469509284508340276> <@1469961339920453675>\nKakao keeps this exact body"
+    );
 
     let external = sqlx::query(
         "SELECT audience, requested_count, status
@@ -353,6 +369,21 @@ async fn postgres_scheduled_push_atomically_fans_out_to_discord_and_kakao() {
     for row in external {
         assert_eq!(row.try_get::<String, _>("status").unwrap(), "pending");
     }
+    let kakao_contents: Vec<String> = sqlx::query_scalar(
+        "SELECT payload #>> '{message,text}'
+         FROM scheduled_external_delivery_outbox
+         ORDER BY audience",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("load canonical Kakao contents");
+    assert_eq!(
+        kakao_contents,
+        vec![
+            "Kakao keeps this exact body".to_string(),
+            "Kakao keeps this exact body".to_string(),
+        ]
+    );
 
     pool.close().await;
     pg_db.drop().await;
@@ -533,6 +564,7 @@ async fn postgres_trigger_now_retry_preserves_recurring_anchor() {
         &pool,
         &db::NewScheduledMessage {
             content: "trigger-now cadence payload".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: None,
             target_channel_id: Some("123456789".to_string()),
             bot: "announce".to_string(),
@@ -620,6 +652,7 @@ async fn postgres_resume_anchor_compat_migration_preserves_active_trigger_now_an
         &pool,
         &db::NewScheduledMessage {
             content: "legacy trigger-now cadence payload".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: None,
             target_channel_id: Some("123456789".to_string()),
             bot: "announce".to_string(),
@@ -788,6 +821,7 @@ async fn postgres_agent_trigger_now_retry_preserves_recurring_anchor_through_pol
         &pool,
         &db::NewScheduledMessage {
             content: "agent trigger-now cadence payload".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: None,
             target_channel_id: Some("123456789".to_string()),
             bot: "announce".to_string(),

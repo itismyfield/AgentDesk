@@ -118,6 +118,8 @@ src/
 │   │   └── tests.rs
 │   ├── scheduled_messages/
 │   │   ├── agent.rs
+│   │   ├── api_json.rs
+│   │   ├── discord_mentions.rs
 │   │   ├── external_delivery.rs
 │   │   ├── outbox.rs
 │   │   ├── postgres_tests.rs
@@ -275,6 +277,7 @@ src/
 │   │   │   └── responses.rs
 │   │   ├── scheduled_messages/
 │   │   │   ├── delivery_render.rs
+│   │   │   ├── discord_mentions.rs
 │   │   │   ├── postgres_tests.rs
 │   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
