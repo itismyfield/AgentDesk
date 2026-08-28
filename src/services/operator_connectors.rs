@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 pub const OBSIDIAN_AGENT_PROMPTS_CONNECTOR: &str = "obsidian_agent_prompts";
 pub const OBSIDIAN_SKILL_ROOT_CONNECTOR: &str = "obsidian_skill_root";
+pub const KAKAO_SCHEDULED_DELIVERY_CONNECTOR: &str = "kakao_scheduled_delivery";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +114,7 @@ pub fn optional_connector_statuses() -> Vec<OptionalConnectorStatus> {
     vec![
         obsidian_agent_prompts_status(),
         obsidian_skill_root_status(),
+        kakao_scheduled_delivery_status(),
     ]
 }
 
@@ -168,6 +170,97 @@ fn obsidian_skill_root_status() -> OptionalConnectorStatus {
         )];
     }
     status
+}
+
+fn kakao_scheduled_delivery_status() -> OptionalConnectorStatus {
+    use crate::services::kakao::{KakaoClient, KakaoError};
+
+    const ENABLED_ENV: &str = "AGENTDESK_KAKAO_ENABLED";
+    const CAPABILITIES: &[&str] = &["kakao_friend_message", "kakao_self_message"];
+
+    match KakaoClient::from_process(None) {
+        Ok(client) => OptionalConnectorStatus {
+            id: KAKAO_SCHEDULED_DELIVERY_CONNECTOR,
+            name: "Kakao default-account delivery",
+            state: OptionalConnectorState::Ready,
+            optional: true,
+            env_var: ENABLED_ENV,
+            source: Some(format!("account={}", client.account_id())),
+            reason: None,
+            detail: format!("state=ready account={}", client.account_id()),
+            setup_actions: Vec::new(),
+            capabilities: CAPABILITIES.to_vec(),
+        },
+        Err(KakaoError::Disabled) => OptionalConnectorStatus {
+            id: KAKAO_SCHEDULED_DELIVERY_CONNECTOR,
+            name: "Kakao default-account delivery",
+            state: OptionalConnectorState::Skipped,
+            optional: true,
+            env_var: ENABLED_ENV,
+            source: None,
+            reason: Some("disabled"),
+            detail: "state=skipped reason=disabled; scheduled Kakao delivery is opt-in"
+                .to_string(),
+            setup_actions: vec![
+                "Set AGENTDESK_KAKAO_ENABLED=true after configuring Kakao credentials."
+                    .to_string(),
+            ],
+            capabilities: CAPABILITIES.to_vec(),
+        },
+        Err(KakaoError::MissingCredentials) => OptionalConnectorStatus {
+            id: KAKAO_SCHEDULED_DELIVERY_CONNECTOR,
+            name: "Kakao default-account delivery",
+            state: OptionalConnectorState::MissingConfig,
+            optional: true,
+            env_var: ENABLED_ENV,
+            source: None,
+            reason: Some("missing_credentials"),
+            detail: "state=missing_config reason=missing_credentials".to_string(),
+            setup_actions: vec![
+                "Set KAKAO_REST_API_KEY and KAKAO_REFRESH_TOKEN (recommended), or provide a short-lived KAKAO_ACCESS_TOKEN."
+                    .to_string(),
+                "Restart AgentDesk after changing Kakao environment variables.".to_string(),
+            ],
+            capabilities: CAPABILITIES.to_vec(),
+        },
+        Err(error) => OptionalConnectorStatus {
+            id: KAKAO_SCHEDULED_DELIVERY_CONNECTOR,
+            name: "Kakao default-account delivery",
+            state: OptionalConnectorState::InvalidConfig,
+            optional: true,
+            env_var: ENABLED_ENV,
+            source: None,
+            reason: Some(kakao_configuration_reason(&error)),
+            detail: format!(
+                "state=invalid_config reason={}",
+                kakao_configuration_reason(&error)
+            ),
+            setup_actions: vec![
+                "Check AGENTDESK_KAKAO_ACCOUNTS, AGENTDESK_KAKAO_DEFAULT_ACCOUNT, and AGENTDESK_KAKAO_LANDING_URL."
+                    .to_string(),
+                "Restart AgentDesk after correcting Kakao configuration.".to_string(),
+            ],
+            capabilities: CAPABILITIES.to_vec(),
+        },
+    }
+}
+
+fn kakao_configuration_reason(error: &crate::services::kakao::KakaoError) -> &'static str {
+    use crate::services::kakao::KakaoError;
+
+    match error {
+        KakaoError::InvalidConfiguration(_) => "invalid_configuration",
+        KakaoError::UnknownAccount => "unknown_account",
+        KakaoError::TransportInitialization => "transport_initialization",
+        KakaoError::ReauthorizationRequired => "reauthorization_required",
+        KakaoError::ConsentRequired => "consent_required",
+        KakaoError::InvalidMessage(_) => "invalid_message",
+        KakaoError::InvalidRecipients => "invalid_recipients",
+        KakaoError::ProviderRejected(_) | KakaoError::ProviderResult(_) => "provider_rejected",
+        KakaoError::DeliveryUnknown => "delivery_unknown",
+        KakaoError::Disabled => "disabled",
+        KakaoError::MissingCredentials => "missing_credentials",
+    }
 }
 
 struct ConnectorDirSpec {
@@ -294,8 +387,8 @@ fn operator_home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OptionalConnectorState, OptionalConnectorSummary, optional_connector_status_by_id,
-        optional_connector_statuses,
+        KAKAO_SCHEDULED_DELIVERY_CONNECTOR, OptionalConnectorState, OptionalConnectorSummary,
+        optional_connector_status_by_id, optional_connector_statuses,
     };
     fn with_connector_env<F>(f: F)
     where
@@ -311,6 +404,19 @@ mod tests {
         let saved_agents_src = std::env::var_os("AGENTDESK_OBSIDIAN_AGENTS_SRC");
         let saved_skill_root = std::env::var_os("AGENTDESK_OBSIDIAN_SKILL_ROOT");
         let saved_runtime_root = std::env::var_os("AGENTDESK_ROOT_DIR");
+        let kakao_env = [
+            "AGENTDESK_KAKAO_ENABLED",
+            "AGENTDESK_KAKAO_ACCOUNTS",
+            "AGENTDESK_KAKAO_DEFAULT_ACCOUNT",
+            "AGENTDESK_KAKAO_LANDING_URL",
+            "KAKAO_REST_API_KEY",
+            "KAKAO_ACCESS_TOKEN",
+            "KAKAO_REFRESH_TOKEN",
+        ];
+        let saved_kakao = kakao_env.map(|name| std::env::var_os(name));
+        for name in kakao_env {
+            unsafe { std::env::remove_var(name) };
+        }
 
         f();
 
@@ -321,6 +427,9 @@ mod tests {
         restore_env("AGENTDESK_OBSIDIAN_AGENTS_SRC", saved_agents_src);
         restore_env("AGENTDESK_OBSIDIAN_SKILL_ROOT", saved_skill_root);
         restore_env("AGENTDESK_ROOT_DIR", saved_runtime_root);
+        for (name, value) in kakao_env.into_iter().zip(saved_kakao) {
+            restore_env(name, value);
+        }
     }
 
     fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
@@ -335,6 +444,9 @@ mod tests {
         let status = optional_connector_status_by_id("obsidian_skill_root")
             .expect("known connector should resolve");
         assert_eq!(status.id, "obsidian_skill_root");
+        let kakao = optional_connector_status_by_id("kakao_self_message")
+            .expect("Kakao capability should resolve");
+        assert_eq!(kakao.id, KAKAO_SCHEDULED_DELIVERY_CONNECTOR);
     }
 
     #[test]
@@ -373,10 +485,12 @@ mod tests {
             assert!(
                 statuses
                     .iter()
+                    .filter(|status| status.id != KAKAO_SCHEDULED_DELIVERY_CONNECTOR)
                     .all(|status| status.state == OptionalConnectorState::MissingConfig)
             );
             let summary = OptionalConnectorSummary::from_statuses(&statuses);
-            assert_eq!(summary.missing_config, statuses.len());
+            assert_eq!(summary.missing_config, statuses.len() - 1);
+            assert_eq!(summary.skipped, 1);
             assert_eq!(summary.invalid, 0);
         });
     }
@@ -434,14 +548,20 @@ mod tests {
             assert!(
                 statuses
                     .iter()
+                    .filter(|status| status.id != KAKAO_SCHEDULED_DELIVERY_CONNECTOR)
                     .all(|status| status.state == OptionalConnectorState::Ready)
             );
-            assert!(statuses.iter().all(|status| {
-                status
-                    .source
-                    .as_deref()
-                    .is_some_and(|source| source.contains("ObsidianVault"))
-            }));
+            assert!(
+                statuses
+                    .iter()
+                    .filter(|status| status.id != KAKAO_SCHEDULED_DELIVERY_CONNECTOR)
+                    .all(|status| {
+                        status
+                            .source
+                            .as_deref()
+                            .is_some_and(|source| source.contains("ObsidianVault"))
+                    })
+            );
         });
     }
 
@@ -470,6 +590,37 @@ mod tests {
             assert_eq!(prompts.state, OptionalConnectorState::Ready);
             assert_eq!(skills.state, OptionalConnectorState::InvalidConfig);
             assert_eq!(skills.reason, Some("missing_skill_files"));
+        });
+    }
+
+    #[test]
+    fn kakao_connector_is_disabled_by_default_without_exposing_secrets() {
+        with_connector_env(|| {
+            let status = optional_connector_status_by_id("kakao_friend_message").unwrap();
+            assert_eq!(status.state, OptionalConnectorState::Skipped);
+            assert_eq!(status.reason, Some("disabled"));
+            assert_eq!(status.env_var, "AGENTDESK_KAKAO_ENABLED");
+            assert!(status.source.is_none());
+        });
+    }
+
+    #[test]
+    fn kakao_connector_reports_ready_account_without_token_material() {
+        with_connector_env(|| {
+            unsafe {
+                std::env::set_var("AGENTDESK_KAKAO_ENABLED", "true");
+                std::env::set_var(
+                    "AGENTDESK_KAKAO_LANDING_URL",
+                    "https://example.com/messages",
+                );
+                std::env::set_var("KAKAO_REST_API_KEY", "secret-rest-key");
+                std::env::set_var("KAKAO_ACCESS_TOKEN", "secret-access-token");
+            }
+
+            let status = optional_connector_status_by_id("kakao_self_message").unwrap();
+            assert_eq!(status.state, OptionalConnectorState::Ready);
+            assert_eq!(status.source.as_deref(), Some("account=default"));
+            assert!(!format!("{status:?}").contains("secret"));
         });
     }
 }
