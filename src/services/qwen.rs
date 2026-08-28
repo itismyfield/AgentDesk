@@ -40,9 +40,9 @@ use crate::services::tmux_diagnostics::{
 const QWEN_CANCELLED_MESSAGE: &str = "Qwen request cancelled";
 const QWEN_SESSION_DEAD_MESSAGE: &str = "Qwen stream ended without a terminal result";
 pub(crate) const QWEN_STREAM_POLL_TIMEOUT: Duration = Duration::from_secs(5);
-// Allow up to 60 s for the first token: covers cold start, model loading, and upstream rate-limit
-// backoffs that happen before the session produces any meaningful output.
-pub(crate) const QWEN_STREAM_STARTUP_WATCHDOG: Duration = Duration::from_secs(60);
+// Allow up to 240 s for the first token: NVIDIA-backed large-context requests and upstream
+// rate-limit backoffs can legitimately exceed the normal interactive response budget.
+pub(crate) const QWEN_STREAM_STARTUP_WATCHDOG: Duration = Duration::from_secs(240);
 // Allow up to 120 s of silence after progress has been seen: covers long-running tool calls
 // (e.g. cargo build, test suites) where the model is waiting for a tool result between turns.
 pub(crate) const QWEN_STREAM_IDLE_WATCHDOG: Duration = Duration::from_secs(120);
@@ -2190,7 +2190,23 @@ fn render_qwen_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod qwen_provider_lifecycle_tests {
-    use super::should_preserve_live_reused_provider_session;
+    use std::time::Duration;
+
+    use super::{
+        QWEN_STREAM_STARTUP_WATCHDOG, QwenStreamWatchdog,
+        should_preserve_live_reused_provider_session,
+    };
+
+    #[test]
+    fn default_startup_watchdog_allows_four_minutes_before_retry() {
+        let watchdog = QwenStreamWatchdog::default();
+
+        assert_eq!(QWEN_STREAM_STARTUP_WATCHDOG, Duration::from_secs(240));
+        assert_eq!(
+            watchdog.startup_retry_message(),
+            "Qwen stream produced no output for 240 seconds before first progress"
+        );
+    }
 
     #[test]
     fn live_reused_provider_session_is_preserved_when_wrapper_io_is_missing() {
