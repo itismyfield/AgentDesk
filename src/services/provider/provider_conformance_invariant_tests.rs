@@ -141,7 +141,6 @@ fn provider_exec_registry_conformance_invariant() {
         normalized_channels.keys().collect::<Vec<_>>(),
         vec!["codex"]
     );
-
     let catalog = public_provider_catalog();
     assert_eq!(
         catalog
