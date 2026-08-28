@@ -669,7 +669,7 @@ pub(in crate::services::discord::inflight) fn persist_recovery_output_path_if_ma
 }
 
 /// #4370: stamp the `readopted_from_inflight` marker onto the persisted row for a
-/// turn this process re-adopted from inflight, under the sidecar flock and pinned
+/// turn this process re-adopted from inflight, under the sidecar advisory lock and pinned
 /// to the re-adopted turn's identity. Returns a [`GuardedSaveOutcome`]:
 ///
 ///   - `Saved`            — the marker is now set (or was already set → still

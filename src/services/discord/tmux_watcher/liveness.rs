@@ -471,6 +471,16 @@ pub(super) fn watcher_output_progressed_recently(output_path: &str) -> bool {
 ///
 /// Returns true when a fresh inflight was written (so the caller emits the
 /// one-shot incident log).
+pub(in crate::services::discord) fn build_watcher_reacquire_inflight_state(
+    mut state: crate::services::discord::inflight::InflightTurnState,
+) -> crate::services::discord::inflight::InflightTurnState {
+    state.request_owner_user_id = 0;
+    state.user_msg_id = 0;
+    state.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+    state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+    state
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn reacquire_watcher_inflight_for_active_stream(
     provider: &ProviderKind,
@@ -514,8 +524,7 @@ pub(super) fn reacquire_watcher_inflight_for_active_stream(
         None,
         start_offset,
     );
-    state.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
-    state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
+    state = build_watcher_reacquire_inflight_state(state);
     if let Some(panel) = status_panel_msg_id {
         state.status_message_id = Some(panel.get());
     }

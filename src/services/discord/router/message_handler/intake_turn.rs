@@ -1918,7 +1918,11 @@ pub(super) async fn handle_text_message(
             prelaunch_runtime_kind,
         );
     let watcher_tmux_name = inflight_tmux_name.clone();
-    let watcher_output_path = inflight_output_path.clone();
+    let watcher_output_path = prelaunch_watcher_output_path(
+        inflight_tmux_name.as_deref(),
+        inflight_output_path.as_deref(),
+        prelaunch_runtime_kind,
+    );
     #[cfg(unix)]
     let mut recapture_offset_after_busy_wait = false;
     // #2416: compute claude_tui busy-followup diagnostic with a wait+retry step.

@@ -63,7 +63,7 @@ mod state_extractors;
 // in this root module (shared with `rebind_runtime` + external callers); the entry
 // point is re-exported below so external call sites stay byte-identical.
 #[path = "recovery_engine/manual_rebind/mod.rs"]
-mod manual_rebind;
+pub(in crate::services::discord) mod manual_rebind;
 #[path = "recovery_engine/manual_rebind_output_path.rs"]
 mod manual_rebind_output_path;
 #[path = "recovery_engine/manual_rebind_override.rs"]

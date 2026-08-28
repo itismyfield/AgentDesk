@@ -1048,7 +1048,7 @@ pub(crate) struct SharedData {
     /// entry is preserved across watcher-handle replacements so an outgoing
     /// watcher and an incoming watcher share the same emission-slot atomic
     /// and confirmed-offset watermark. See `TmuxRelayCoord`.
-    pub(super) tmux_relay_coords: dashmap::DashMap<ChannelId, Arc<TmuxRelayCoord>>,
+    pub(super) tmux_relay_coords: Arc<dashmap::DashMap<ChannelId, Arc<TmuxRelayCoord>>>,
     /// #3038 cluster F — live-placeholder/status-panel state: cleanup tombstones,
     /// edit controller, live-event feed, and live-event/status-panel gates.
     /// Field docs live on `shared_state::PlaceholderState`; call sites use `shared.ui.*`.
@@ -1224,6 +1224,7 @@ impl SharedData {
     /// (outgoing and incoming) for the channel, so they coordinate relay
     /// emission without duplicate-sending the same tmux range.
     pub(super) fn tmux_relay_coord(&self, channel_id: ChannelId) -> Arc<TmuxRelayCoord> {
+        delivery_lease_cell::assert_payload_not_held();
         self.tmux_relay_coords
             .entry(channel_id)
             .or_insert_with(|| Arc::new(TmuxRelayCoord::new(channel_id)))
@@ -1378,6 +1379,7 @@ fn make_shared_data_for_tests_with_storage_and_intake_capabilities(
         runtime_bootstrap::intake_delivery_capability::SettlementCapabilityCache,
     >,
 ) -> Arc<SharedData> {
+    let tmux_relay_coords = Arc::new(dashmap::DashMap::new());
     Arc::new(SharedData {
         core: tokio::sync::Mutex::new(CoreState {
             sessions: std::collections::HashMap::new(),
@@ -1388,8 +1390,8 @@ fn make_shared_data_for_tests_with_storage_and_intake_capabilities(
         settings: tokio::sync::RwLock::new(DiscordBotSettings::default()),
         api_timestamps: dashmap::DashMap::new(),
         skills_cache: tokio::sync::RwLock::new(Vec::new()),
-        tmux_watchers: TmuxWatcherRegistry::new(),
-        tmux_relay_coords: dashmap::DashMap::new(),
+        tmux_watchers: TmuxWatcherRegistry::new_with_coords(Arc::clone(&tmux_relay_coords)),
+        tmux_relay_coords,
         ui: PlaceholderState {
             placeholder_cleanup: Arc::new(
                 placeholder_cleanup::PlaceholderCleanupRegistry::default(),
@@ -3927,7 +3929,7 @@ mod queued_placeholder_cluster_characterization_tests {
                 LeaseOutcome::Unknown,
             ] {
                 let cell = DeliveryLeaseCell::new(ChannelId::new(7));
-                let holder = LeaseHolder::Bridge;
+                let holder = LeaseHolder::Bridge { attempt_id: 1 };
                 assert!(cell.try_acquire(turn(), holder, 100, 200, 1_000));
                 assert!(
                     cell.commit(holder, turn(), 100, 200, outcome),

@@ -52,6 +52,18 @@ pub(crate) use self::test_barriers::{
     install_post_adoption_claim_barrier,
 };
 
+pub(in crate::services::discord) fn build_external_adopted_inflight_state(
+    mut state: super::inflight::InflightTurnState,
+) -> super::inflight::InflightTurnState {
+    state.request_owner_user_id = 0;
+    state.user_msg_id = 0;
+    state.current_msg_id = 0;
+    state.rebind_origin = true;
+    state.turn_source = super::inflight::TurnSource::ExternalAdopted;
+    state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
+    state
+}
+
 #[allow(clippy::large_enum_variant)]
 enum PendingRebindInflightRollback {
     RestoreExistingAdoption {
@@ -691,7 +703,7 @@ async fn rebind_inflight_for_channel_inner(
         if session_id_for_state.is_some() {
             state.session_id = session_id_for_state.clone();
         }
-        state.rebind_origin = true;
+        state = build_external_adopted_inflight_state(state);
         // #2161 Part 2 / #2285 adoption: this synthetic inflight is born when
         // `POST /api/inflight/rebind` adopts a tmux session the operator
         // launched outside AgentDesk (e.g. `tmux new -s <expected>` + run
@@ -700,7 +712,6 @@ async fn rebind_inflight_for_channel_inner(
         // "AgentDesk-discovered" sessions. The session-bound relay (epic
         // #2285 E1–E5) routes both identically — this is pure audit
         // metadata.
-        state.turn_source = super::inflight::TurnSource::ExternalAdopted;
         // #3582: bind the relay to the watcher we respawn below. The
         // STALL-WATCHDOG force-clean -> respawn path reaches this birth site with
         // `existing_inflight = None` (force-clean deleted the row first); without
@@ -709,7 +720,6 @@ async fn rebind_inflight_for_channel_inner(
         // bridge-owned path even though the watcher owns the live tmux relay. The
         // monitor-auto-turn birth site (`tmux.rs`) already stamps Watcher the same
         // way; `rebind_origin` and `relay_owner_kind` are independent flags.
-        state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
         // #3581: stamp the bounded-preservation fields so an unadopted,
         // never-progressed rebind-origin row can be reaped after a deadline (or
         // a boot-time generation mismatch) instead of becoming a permanent

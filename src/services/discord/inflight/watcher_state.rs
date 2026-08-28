@@ -9,7 +9,7 @@ use super::{
     lock_inflight_state_path, normalize_response_sent_offset, persist_under_lock,
 };
 
-/// #3558: the watcher-owned streaming fields a single-flock RMW patches onto the
+/// #3558: the watcher-owned streaming fields a single-lock RMW patches onto the
 /// persisted row. Plain value struct (moved into the helper). `last_offset` is
 /// deliberately ABSENT — the streaming caller does not own the relay watermark
 /// and the helper preserves whatever the in-lock disk reload carries (this is
@@ -46,12 +46,12 @@ pub(in crate::services::discord) enum WatcherProgressOutcome {
     IoError,
 }
 
-/// #3558: single-flock read-modify-write for the tmux streaming-progress
-/// caller. Acquires the sidecar flock ONCE, reloads the on-disk row, re-checks
+/// #3558: single-lock read-modify-write for the tmux streaming-progress
+/// caller. Acquires the sidecar advisory lock ONCE, reloads the on-disk row, re-checks
 /// the caller's identity/session guards against the freshly reloaded row, then
 /// patches ONLY the watcher-owned streaming fields and persists via
 /// [`persist_under_lock`] — never re-entering [`super::save_inflight_state`] (which
-/// would re-acquire the same non-reentrant flock and self-deadlock).
+/// would re-acquire the same non-reentrant advisory lock and self-deadlock).
 ///
 /// `last_offset` is preserved verbatim from the in-lock reload, so a concurrent
 /// owner-gated `refresh_inflight_last_offset_*` advance can no longer be
@@ -173,11 +173,11 @@ pub(in crate::services::discord) enum WatcherTerminalCommitOutcome {
     IoError,
 }
 
-/// #3558: single-flock read-modify-write for the watcher terminal-commit caller
+/// #3558: single-lock read-modify-write for the watcher terminal-commit caller
 /// (`commit_decisions::mark_watcher_terminal_delivery_committed`). Replaces the
 /// old unlocked `load_inflight_state` → mutate → `save_inflight_state` (which
 /// re-wrote a stale `last_offset`/`response_sent_offset`, racing a concurrent
-/// owner advance). Holds the flock across reload → identity guard → patch →
+/// owner advance). Holds the advisory lock across reload → identity guard → patch →
 /// `persist_under_lock`. The commit owns the watermark, so it writes
 /// `last_offset`/`response_sent_offset` but `max`-serializes both against the
 /// in-lock reload (forward writes are unchanged; only a backward commit is
@@ -262,7 +262,7 @@ pub(super) fn commit_watcher_terminal_delivery_locked_in_root(
 }
 
 /// #3558 (codex review follow-up): the watcher-owned relay-success watermark a
-/// single-flock RMW patches onto the persisted row. Unlike the terminal-commit
+/// single-lock RMW patches onto the persisted row. Unlike the terminal-commit
 /// patch this does NOT carry `last_offset` / `response_sent_offset` /
 /// `full_response` and does NOT set `terminal_delivery_committed` — those are
 /// preserved verbatim from the in-lock disk reload. The two
@@ -285,13 +285,13 @@ pub(in crate::services::discord) enum WatcherRelayWatermarkOutcome {
     IoError,
 }
 
-/// #3558 (codex review follow-up): single-flock read-modify-write for the
+/// #3558 (codex review follow-up): single-lock read-modify-write for the
 /// watcher's session-bound-relay-success watermark. Replaces the old unlocked
 /// `load_inflight_state` → mutate → `save_inflight_state` at
 /// `tmux_watcher.rs` (the two terminal-relay-success sites). Holds the sidecar
-/// flock across reload → identity guard → patch → [`persist_under_lock`], never
+/// advisory lock across reload → identity guard → patch → [`persist_under_lock`], never
 /// re-entering [`super::save_inflight_state`] (which would re-acquire the same
-/// non-reentrant flock and self-deadlock). ONLY `last_watcher_relayed_*` is
+/// non-reentrant advisory lock and self-deadlock). ONLY `last_watcher_relayed_*` is
 /// patched; `last_offset` / `response_sent_offset` / `full_response` are
 /// preserved verbatim from the in-lock reload so a concurrent owner-gated
 /// `refresh_inflight_last_offset_*` advance can no longer be clobbered backward
