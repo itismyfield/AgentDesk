@@ -144,7 +144,7 @@ pub(crate) fn classify_degraded_reason(raw: &str) -> ClassifiedReason {
             summary: format!(
                 "{count} resident OpenCode warm server(s) show suspicious active-session evidence"
             ),
-            next_step: "inspect opencode.warm_servers[] in /api/health/detail; this is evidence-only, no repair runs in P0".to_string(),
+            next_step: "inspect opencode.warm_servers[] in /api/health/detail; this is evidence-only, no automatic repair is performed".to_string(),
         },
         ["opencode_warm_server", "stopped_resident", count] => ClassifiedReason {
             raw: raw.to_string(),
