@@ -276,7 +276,7 @@ fn no_range_pseudo_range_lease_closes_concurrent_dedup_gap() {
     let expected = super::fresh_send::pseudo_range(4096, body);
     assert!(lease.try_acquire(
         key.clone(),
-        LeaseHolder::Bridge,
+        LeaseHolder::Bridge { attempt_id: 1 },
         expected.0,
         expected.1,
         lease_now_ms().saturating_add(TURN_OUTPUT_LEASE_TTL_MS),
@@ -299,7 +299,12 @@ fn no_range_pseudo_range_lease_closes_concurrent_dedup_gap() {
     assert!(!delivery_record::recent_fresh_send_content_matches(
         &provider, channel, tmux, body
     ));
-    assert!(lease.release(LeaseHolder::Bridge, key, expected.0, expected.1));
+    assert!(lease.release(
+        LeaseHolder::Bridge { attempt_id: 1 },
+        key,
+        expected.0,
+        expected.1
+    ));
 }
 
 #[test]

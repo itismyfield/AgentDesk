@@ -161,8 +161,8 @@ impl toc::PostHeartbeatGuard for BridgePostHeartbeatGuard {}
 
 /// #3089 A5: bridge short-replace via the turn-output controller, behaviourally
 /// equal to the legacy site-5 `replace_message_with_outcome` arm (mod.rs
-/// 6160-6245) — SAME transport, SAME per-channel cell as `LeaseHolder::Bridge`
-/// acquired/committed/advanced/released ONCE (no double-acquire: the legacy
+/// 6160-6245) — SAME transport, SAME per-channel cell as a `LeaseHolder::Bridge { .. }`
+/// attempt acquired/committed/advanced/released ONCE (no double-acquire: the legacy
 /// acquire is skipped via `bridge_terminal_lease_range`), SAME #3041 P1-2 / #3151
 /// heartbeat.
 ///
@@ -235,7 +235,7 @@ pub(super) async fn deliver_short_replace_via_controller(
     start: u64,
     end: u64,
 ) -> toc::DeliveryOutcome {
-    let holder = LeaseHolder::Bridge;
+    let holder = super::terminal_delivery::next_bridge_lease_holder();
     // Self-heal like the legacy acquire (terminal_delivery.rs:516): reclaim an
     // EXPIRED prior holder before the controller's acquire (a stale dead lease
     // must not make this acquire lose and B2-skip a deliverable range).
@@ -373,7 +373,7 @@ pub(super) async fn deliver_long_chunks_via_controller(
     start: u64,
     end: u64,
 ) -> toc::DeliveryOutcome {
-    let holder = LeaseHolder::Bridge;
+    let holder = super::terminal_delivery::next_bridge_lease_holder();
     cell.reclaim_if_expired(lease_now_ms());
     let heartbeat = BridgePostHeartbeat { cell: cell.clone() };
     let advance = |range: (u64, u64)| -> bool {
@@ -998,6 +998,25 @@ fn emit_bridge_replace_cleanup(
 
 #[cfg(test)]
 mod tests {
+    // Source-level wiring invariant: each controller path must mint its holder at
+    // the acquisition site. Replacing either exact call with a constant makes this red.
+    #[test]
+    fn controller_bridge_acquire_sites_mint_fresh_attempts() {
+        let source = include_str!("terminal_controller_cutover.rs");
+        let (_, after_short) = source
+            .split_once("pub(super) async fn deliver_short_replace_via_controller(")
+            .expect("short-replace controller function");
+        let (short_body, after_long) = after_short
+            .split_once("pub(super) async fn deliver_long_chunks_via_controller(")
+            .expect("long-chunks controller function");
+        let (long_body, _) = after_long
+            .split_once("/// #3998 S1-d: borrowed long-chunk locals")
+            .expect("long-chunks controller boundary");
+        let mint = "let holder = super::terminal_delivery::next_bridge_lease_holder();";
+        assert_eq!(short_body.matches(mint).count(), 1);
+        assert_eq!(long_body.matches(mint).count(), 1);
+    }
+
     // #3089 A5: the bridge short-replace cutover. These drive the REAL controller
     // (`deliver_short_replace_via_controller`) + the pure write-back
     // (`apply_bridge_short_replace_outcome`) + the pure gate/predicate helpers
@@ -1886,7 +1905,7 @@ mod tests {
         async fn bridge_short_replace_heartbeat_before_commit() {
             use crate::services::discord::{DELIVERY_LEASE_HEARTBEAT_MS, DeliveryLeaseHeartbeat};
             let cell = Arc::new(DeliveryLeaseCell::new(ch()));
-            let holder = LeaseHolder::Bridge;
+            let holder = LeaseHolder::Bridge { attempt_id: 1 };
             let short = lease_now_ms().saturating_add(100);
             assert!(cell.try_acquire(lease_key(), holder, START, END, short));
             let hb = DeliveryLeaseHeartbeat::spawn(cell.clone(), holder, lease_key());
