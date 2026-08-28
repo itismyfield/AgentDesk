@@ -50,13 +50,11 @@ jobs:
       # (`check_fast`, which compiles the `relay_state_contract_refs` blocks)
       # even for doc-only contract changes (#4268).
       relay_contract: ${{ steps.filter.outputs.relay_contract }}
-      # True when a Rust-compile change touches paths OUTSIDE the relay
-      # stabilization surface, i.e. it actually needs cross-OS verification.
-      # Relay-only PRs (src/services/discord/**, tests/e2e/**) leave this
-      # false so the ~22min PR-time Windows lane is skipped; the nightly
-      # workflow still exercises the full macOS/Windows matrix within 24h.
-      # NOTE: this gates ONLY the advisory Windows lane. Required ubuntu
-      # Rust/PG/dashboard mirrors still verify every matching PR.
+      # True when a Rust-compile change touches a source surface that needs
+      # native Windows verification. Most relay-only PRs leave this false, but
+      # the cross-platform inflight lock primitive is an explicit exception.
+      # The stable required-context mirror permits unrelated-path skips and
+      # fails closed when this output is true but the Windows lane does not pass.
       cross_os_rust: ${{ steps.filter.outputs.cross_os_rust }}
     steps:
       - uses: actions/checkout@v4
@@ -307,15 +305,13 @@ jobs:
               # (src/services/routines/loader.rs); a routine asset change
               # can fail the test on any OS.
               - 'routines/**'
-            # cross_os_rust mirrors `rust_compile` MINUS the relay
-            # stabilization surface. When false, the only compile-affecting
-            # changes are confined to `src/services/discord/**` and/or
-            # `tests/e2e/**`, which the nightly macOS/Windows matrix already
-            # exercises daily — so the advisory PR-time Windows lane is
-            # skipped to keep relay-only PRs fast. Any compile input outside
-            # that surface (a different crate path, Cargo/toolchain/build.rs,
-            # this CI file) flips it true and the Windows lane runs. Keep the
-            # positive list in sync with `rust_compile`.
+            # cross_os_rust selects compile-affecting surfaces that require
+            # native Windows verification. Most relay-only changes remain out
+            # of this positive list and rely on the nightly matrix, but owners
+            # of cross-platform primitives may be listed explicitly below.
+            # When selected, the stable required-context mirror makes this
+            # PR-time Windows lane fail closed. Keep the broad positive list in
+            # sync with `rust_compile` and document every relay exception.
             cross_os_rust:
               - 'src/*'
               - 'src/cli/**'
@@ -343,6 +339,11 @@ jobs:
               - 'src/services/cluster/**'
               - 'src/services/codex_tui/**'
               - 'src/services/dispatches/**'
+              # The inflight sidecar primitive uses the cross-platform
+              # std::fs::File advisory-lock API. Changes to its owners must
+              # compile all targets in the required native Windows lane.
+              - 'src/services/discord/inflight/store.rs'
+              - 'src/services/discord/inflight/save_store.rs'
               - 'src/services/git/**'
               - 'src/services/maintenance/**'
               - 'src/services/memory/**'
@@ -450,20 +451,17 @@ jobs:
         shell: bash
         run: sccache --show-stats || true
 
-  # Cross-OS Rust compile lane. Gated on the narrower rust_compile filter so
-  # docs-only, dashboard-only, JS-policy-only, script-only, workflow-metadata-
-  # only, and Node-package-only PRs skip Windows compilation. Nightly retains
-  # the full macOS/Windows test matrix, so cross-OS Rust drift cannot land
-  # silently.
+  # Cross-OS Rust compile lane. The required-context mirror below makes this
+  # conditionally required when `cross_os_rust` is true; unrelated paths may
+  # skip it. Nightly retains the broader macOS/Windows test matrix.
   check_fast_cross_os:
-    # Keep this advisory job name stable: the infrastructure-failure classifier
-    # identifies its non-blocking diagnostics by this exact context string.
+    # Keep this job name stable: the infrastructure-failure classifier and
+    # the required-context mirror identify it by this exact context string.
     name: Fast check + non-PG tests (${{ matrix.os }})
     needs: changes
-    # Advisory (non-required) cross-OS lane. Run only when a Rust-compile
-    # change reaches OUTSIDE the relay stabilization surface (cross_os_rust);
-    # relay-only PRs (src/services/discord/**, tests/e2e/**) skip it and rely
-    # on the nightly full macOS/Windows matrix.
+    # Run only when `cross_os_rust` selects a native Windows source surface.
+    # Most relay-only PRs still skip it, while the inflight lock primitive is
+    # explicitly selected and enforced through the required-context mirror.
     if: needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'
     runs-on: ${{ matrix.os }}
     env:

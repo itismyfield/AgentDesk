@@ -1306,6 +1306,7 @@ mod tests {
     fn voice_handoff_shared_for_tests_with_pg_pool(
         pg_pool: Option<sqlx::PgPool>,
     ) -> Arc<SharedData> {
+        let tmux_relay_coords = Arc::new(dashmap::DashMap::new());
         Arc::new(super::super::SharedData {
             core: tokio::sync::Mutex::new(super::super::CoreState {
                 sessions: std::collections::HashMap::new(),
@@ -1316,8 +1317,10 @@ mod tests {
             settings: tokio::sync::RwLock::new(super::super::DiscordBotSettings::default()),
             api_timestamps: dashmap::DashMap::new(),
             skills_cache: tokio::sync::RwLock::new(Vec::new()),
-            tmux_watchers: super::super::TmuxWatcherRegistry::new(),
-            tmux_relay_coords: dashmap::DashMap::new(),
+            tmux_watchers: super::super::TmuxWatcherRegistry::new_with_coords(Arc::clone(
+                &tmux_relay_coords,
+            )),
+            tmux_relay_coords,
             // #3038 S4: wrapped verbatim at the first-member position
             // (evaluation-order preserved).
             ui: super::super::PlaceholderState {

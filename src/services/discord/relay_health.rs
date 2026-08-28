@@ -481,10 +481,10 @@ impl RelayHealthSnapshot {
     /// `relay_recovery::unread_tail_is_proven_drained` gives — `None` is produced
     /// when the row carries no `output_path` (`seed_runtime` leaves it absent for
     /// a remote profile, a provider with no managed-tmux backend, an unavailable
-    /// tmux binary, an absent tmux session name, a Claude-TUI prelaunch, and
-    /// non-unix: the four conjuncts of `provider_isolation::seed_runtime`'s
-    /// guard, then the Claude-TUI prelaunch seeding it delegates to
-    /// (`prelaunch_inflight_runtime_seed_from_paths`) and its non-unix arm), when
+    /// tmux binary, an absent tmux session name, or non-unix (the four guarded
+    /// inputs plus the non-unix arm of `provider_isolation::seed_runtime`). A
+    /// resolved but dead session and a Claude-TUI prelaunch also omit the durable
+    /// path in `prelaunch_inflight_runtime_seed_from_paths`. It is also `None` when
     /// `std::fs::metadata` on that path failed, or when the row's tmux session
     /// and the watcher binding's disagree so the frontier is not attributable to
     /// the row.

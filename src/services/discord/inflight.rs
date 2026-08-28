@@ -35,8 +35,8 @@ impl InflightTurnState {
 mod episode_guard;
 mod store;
 
-// #3479: the FS path layout + flock guard moved to `store.rs`. `inflight_state_path`
-// / `lock_inflight_state_path` are re-exported at the module-tree visibility so
+// #3479: the FS path layout + advisory-lock guard moved to `store.rs`.
+// `inflight_state_path` / `lock_inflight_state_path` are re-exported at the module-tree visibility so
 // root call sites and `super::*` references in sibling child modules (e.g.
 // `budget`) resolve unchanged; `inflight_provider_dir` stays inflight-private
 // (root callers only) and is brought in via a plain import. `InflightStateFileLock`
@@ -54,11 +54,13 @@ pub(in crate::services::discord) use store::InflightDeliveryRewindReason;
 use store::inflight_provider_dir;
 pub(in crate::services::discord) use store::inflight_state_path;
 pub(crate) use store::lock_inflight_state_path;
+#[cfg(test)]
+use store::second_handle_try_lock;
 
-// #3715 / #3835: the rebind-origin dead-watcher/orphan-lock helpers PLUS the
-// staleness predicates and orphan-lock / rebind-origin reap helpers live in this
-// capped sibling so this hot state parent stays below the frozen production-LoC
-// baseline without changing call-site names.
+// #3715 / #3835: the rebind-origin dead-watcher helpers, staleness predicates,
+// and stale data-row cleanup live in this capped sibling. Canonical lock sidecars
+// are never reaped; keeping their path-to-inode identity stable is part of the
+// advisory-lock contract.
 mod rebind_reap;
 // Facade re-exports: keep every reap/staleness symbol still referenced by
 // discord-module / inflight-core lib code at its original `pub(super)` visibility
@@ -67,9 +69,8 @@ pub(super) use self::rebind_reap::{
     DEAD_WATCHER_PROVEN_DEAD_SECS, INFLIGHT_STALENESS_THRESHOLD_SECS, RebindReapOutcome,
     emit_reap_abandoned_rebind_origin, inflight_state_is_stale,
     ownerless_external_input_inflight_is_stale, parse_started_at_unix, parse_updated_at_unix,
-    reap_abandoned_rebind_origin_locked, reap_orphan_inflight_locks,
-    rebind_origin_deadline_secs_env, should_reap_abandoned_rebind_origin,
-    sweep_reap_dead_watcher_rebind_origin,
+    reap_abandoned_rebind_origin_locked, rebind_origin_deadline_secs_env,
+    should_reap_abandoned_rebind_origin, sweep_reap_dead_watcher_rebind_origin,
 };
 // Parent-internal helper (private in the parent before the move): re-imported so
 // inflight-core resolves it unchanged, WITHOUT widening it to the discord module.
@@ -79,10 +80,10 @@ use self::rebind_reap::{reap_abandoned_rebind_origin_locked_in_root, rebind_orig
 // `super::*` unchanged without emitting unused-import warnings in the lib build.
 #[cfg(test)]
 use self::rebind_reap::{
-    ORPHAN_LOCK_REAP_MIN_AGE_SECS, REBIND_ORIGIN_DEADLINE_SECS_DEFAULT, WatcherLiveness,
+    REBIND_ORIGIN_DEADLINE_SECS_DEFAULT, WatcherLiveness,
     ownerless_external_input_inflight_is_stale_at, proven_dead_from_signals,
     reap_dead_watcher_rebind_origin_locked, reap_dead_watcher_rebind_origin_locked_in_root,
-    reap_orphan_inflight_locks_in_root, should_reap_dead_watcher_rebind_origin,
+    should_reap_dead_watcher_rebind_origin,
 };
 mod removal;
 pub(crate) use self::removal::invalidate_stale_generation;
@@ -522,7 +523,7 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
     };
     // #3860 — set restart_mode via a per-row lock-RMW instead of blind-saving
     // the unlocked snapshot. `load_inflight_states_from_root` reads each row
-    // WITHOUT holding its flock; the old code then `save`d that stale whole-row
+    // WITHOUT holding its advisory lock; the old code then `save`d that stale whole-row
     // snapshot back under the lock. A draining watcher that advanced the
     // delivery frontier (`response_sent_offset` / `last_offset`) on disk in the
     // gap therefore had its progress overwritten (frontier regression) → the
@@ -530,7 +531,7 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
     // i.e. a duplicate Discord send (the issue's live sub-2000-char repro).
     // The enumeration is reused only to discover the live rows (its stale-row
     // GC side effects are preserved); the mutation re-reads the FRESH on-disk
-    // row under the flock and sets ONLY restart_mode / restart_generation,
+    // row under the advisory lock and sets ONLY restart_mode / restart_generation,
     // never the frontier, so it can no longer regress a concurrent writer.
     let states = load_inflight_states_from_root(&root, provider);
     let mut updated = 0usize;
@@ -549,7 +550,7 @@ pub(super) fn mark_all_inflight_states_restart_mode_checked(
     Ok(updated)
 }
 
-/// #3860 — RMW the restart-mode marker on one inflight row under its flock.
+/// #3860 — RMW the restart-mode marker on one inflight row under its advisory lock.
 ///
 /// Re-reads the CURRENT on-disk state (so a delivery frontier that a concurrent
 /// draining watcher advanced between the unlocked enumeration and this write is
@@ -1923,7 +1924,7 @@ mod stall_recovery_tests {
         // #3805 P2 (PR-D): overlapping same-identity re-anchor frames must not
         // both overwrite the row with caller-computed `seed + 1`. The old panel
         // id is the CAS compare, and the generation bump is computed from the
-        // row while the flock is held.
+        // row while the advisory lock is held.
         let (_lock, temp, _env_reset) = status_panel_test_root();
         let mut state = seed_status_panel_state(
             temp.path(),
@@ -4555,82 +4556,6 @@ mod stall_recovery_tests {
 }
 
 #[cfg(test)]
-mod orphan_lock_reap_tests {
-    //! #3641: orphan `.json.lock` sidecars are not seen by the `.json` row scans.
-    use super::{ORPHAN_LOCK_REAP_MIN_AGE_SECS, reap_orphan_inflight_locks_in_root};
-    use crate::services::provider::ProviderKind;
-    use filetime::{FileTime, set_file_mtime};
-    use std::path::Path;
-    use tempfile::TempDir;
-
-    fn write_file_with_age(path: &Path, now_unix: i64, age_secs: i64) {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(path, b"lock").unwrap();
-        set_file_mtime(
-            path,
-            FileTime::from_unix_time(now_unix.saturating_sub(age_secs), 0),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn reaps_only_old_orphan_json_lock_files() {
-        let temp = TempDir::new().unwrap();
-        let now_unix = 1_800_000_000;
-        let old_age = ORPHAN_LOCK_REAP_MIN_AGE_SECS + 10;
-        let recent_age = ORPHAN_LOCK_REAP_MIN_AGE_SECS - 10;
-        let provider_dir = temp.path().join(ProviderKind::Codex.as_str());
-
-        let old_orphan_lock = provider_dir.join("101.json.lock");
-        write_file_with_age(&old_orphan_lock, now_unix, old_age);
-
-        let matched_json = provider_dir.join("202.json");
-        let matched_lock = provider_dir.join("202.json.lock");
-        std::fs::write(&matched_json, b"{}").unwrap();
-        write_file_with_age(&matched_lock, now_unix, old_age);
-
-        let recent_orphan_lock = provider_dir.join("303.json.lock");
-        write_file_with_age(&recent_orphan_lock, now_unix, recent_age);
-
-        let quarantine_marker = provider_dir.join("404.json.rebind-stall-123");
-        write_file_with_age(&quarantine_marker, now_unix, old_age);
-
-        let non_json_lock = provider_dir.join("505.lock");
-        write_file_with_age(&non_json_lock, now_unix, old_age);
-
-        let removed = reap_orphan_inflight_locks_in_root(temp.path(), now_unix);
-
-        assert_eq!(removed, 1, "only the old orphan .json.lock is reaped");
-        assert!(
-            !old_orphan_lock.exists(),
-            "old orphan lock with no matching .json must be removed"
-        );
-        assert!(
-            matched_json.exists(),
-            "matching .json state row must never be touched"
-        );
-        assert!(
-            matched_lock.exists(),
-            "lock with matching .json state row must be kept even when old"
-        );
-        assert!(
-            recent_orphan_lock.exists(),
-            "recent orphan lock must stay below the age floor"
-        );
-        assert!(
-            quarantine_marker.exists(),
-            "quarantine marker must not match the .json.lock sweep"
-        );
-        assert!(
-            non_json_lock.exists(),
-            "non-.json.lock files are out of scope"
-        );
-    }
-}
-
-#[cfg(test)]
 mod wave_a_cleanup_tests {
     //! #2437 (#2427 C wire) — unit tests for the boot-time generation
     //! bulk invalidate. The B wire shares `clear_inflight_state_if_matches`
@@ -5852,7 +5777,7 @@ mod recovery_relay_attempts_tests {
     /// watcher. The marker conceptually observed the row at rso=10; the watcher
     /// then advanced the durable delivery frontier to rso=40 before the marker
     /// wrote. The RMW marker must re-read the FRESH frontier (40) under the
-    /// flock and never rewind it to 10 — otherwise the replacement watcher
+    /// advisory lock and never rewind it to 10 — otherwise the replacement watcher
     /// re-relays `full_response[10..40]`, a duplicate Discord send.
     #[test]
     fn restart_marker_rmw_preserves_concurrently_advanced_frontier_3860() {

@@ -34,7 +34,7 @@ use super::{GuardedSaveOutcome, InflightTurnIdentity, InflightTurnState};
 use crate::services::provider::ProviderKind;
 
 /// Strong-identity-guarded read-modify-write skeleton shared by the two
-/// anchor-repost mutators. Mirrors `budget::bump_*`: hold the sidecar flock
+/// anchor-repost mutators. Mirrors `budget::bump_*`: hold the sidecar advisory lock
 /// across read AND write so a concurrent clear/save cannot interleave, refuse a
 /// row that no longer matches `expected` (a newer turn / fresh rebind), and
 /// preserve every other field verbatim — only `mutate` and the metadata stamps
