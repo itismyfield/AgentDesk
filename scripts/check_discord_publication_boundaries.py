@@ -9,6 +9,7 @@ symbol to be linked to the row entry or an explicit cross-file path.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -20,9 +21,7 @@ DEFAULT_MANIFEST = Path("scripts/discord_publication_boundaries.json")
 DIRECT_OPERATIONS = ["send_message", "send_files", "edit_message", "create_message"]
 _OPS = "|".join(DIRECT_OPERATIONS)
 DIRECT_SEND = re.compile(
-    rf"\.\s*(?P<method>{_OPS})\s*\("
-    rf"|(?:(?:\b[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)|(?:<[^>{{}};]+>))"
-    rf"\s*::\s*(?P<ufcs>{_OPS})\s*\("
+    rf"\.\s*(?P<method>{_OPS})\s*\(|::\s*(?P<ufcs>{_OPS})\s*\("
 )
 FUNCTION = re.compile(
     r"\b(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?"
@@ -80,6 +79,7 @@ CANONICAL_SCOPE_FILES = (
     "src/services/discord/turn_bridge/two_message_panel.rs",
     "src/services/message_outbox.rs",
 )
+CANONICAL_ROWS_SHA256 = "abba8076462ead2c475926754cd5e924c3f2df0661d99020b15929ccfbf7a2b9"
 CANONICAL_PATH_IDS = (
     "outbound-v3-dm", "format-long-rollback", "format-replace-rollback",
     "controller-transport", "controller-fresh-send", "task-card-post",
@@ -172,6 +172,19 @@ def _lexical_stream(text: str) -> str:
                     i += 1
             else:
                 i += 1
+    clean = "".join(out)
+    # Definitions are syntax templates, not executed operations or row evidence.
+    for match in list(re.finditer(r"\bmacro_rules\s*!\s*[A-Za-z_]\w*\s*([({[])", clean)):
+        pairs, stack = {"(": ")", "{": "}", "[": "]"}, []
+        for cursor in range(match.end() - 1, len(clean)):
+            char = clean[cursor]
+            if char in pairs: stack.append(pairs[char])
+            elif stack and char == stack[-1]:
+                stack.pop()
+                if not stack:
+                    for offset in range(match.start(), cursor + 1):
+                        if out[offset] != "\n": out[offset] = " "
+                    break
     return "".join(out)
 
 
@@ -251,25 +264,20 @@ def _body_for(repo_root: Path, rel: str, entry: str, cache: dict[str, list[Funct
 
 
 def _spawn_call_contains(body: FunctionBody, api: str, target: str) -> bool:
-    """Return true when target occurs inside an actual api(...) argument list."""
-    target_pattern = _claim_pattern(target)
+    """Require every target occurrence to be inside an actual api(...) argument."""
+    ranges: list[tuple[int, int]] = []
     for api_match in _claim_pattern(api).finditer(body.text):
         cursor = api_match.end()
-        while cursor < len(body.text) and body.text[cursor].isspace():
-            cursor += 1
-        if cursor >= len(body.text) or body.text[cursor] != "(":
-            continue
+        while cursor < len(body.text) and body.text[cursor].isspace(): cursor += 1
+        if cursor >= len(body.text) or body.text[cursor] != "(": continue
         depth = 0
         for end in range(cursor, len(body.text)):
-            if body.text[end] == "(":
-                depth += 1
+            if body.text[end] == "(": depth += 1
             elif body.text[end] == ")":
                 depth -= 1
-                if depth == 0:
-                    if target_pattern.search(body.text, cursor + 1, end):
-                        return True
-                    break
-    return False
+                if depth == 0: ranges.append((cursor + 1, end)); break
+    targets = list(_claim_pattern(target).finditer(body.text))
+    return bool(targets) and all(any(start <= item.start() < end for start, end in ranges) for item in targets)
 
 
 def _validate_graph(rows: list[dict[str, object]], by_id: dict[str, dict[str, object]]) -> None:
@@ -324,8 +332,9 @@ def load_and_validate(path: Path, repo_root: Path, *, enforce_canonical: bool = 
         raise ManifestError("closure scope_files must equal the independently pinned canonical 29-file list")
     rows = payload["rows"]
     if type(rows) is not list or not rows: raise ManifestError("manifest rows must be a non-empty array")
-    if enforce_canonical and (len(rows) != 30 or tuple(row.get("path_id") if type(row) is dict else None for row in rows) != CANONICAL_PATH_IDS):
-        raise ManifestError("manifest rows must equal the independently pinned canonical 30-row path_id list")
+    rows_digest = hashlib.sha256(json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if enforce_canonical and (len(rows) != 30 or tuple(row.get("path_id") if type(row) is dict else None for row in rows) != CANONICAL_PATH_IDS or rows_digest != CANONICAL_ROWS_SHA256):
+        raise ManifestError("manifest rows must equal the independently pinned canonical 30-row contract")
 
     row_keys = {"path_id", "file", "entry_symbol", "transport_symbols", "contract_paths", "executor", "authorities", "timeout_retry", "failure_classes", "settlement_symbols", "post_success", "multi_op", "success_then_settlement", "direct_send_count", "authority_order_after"}
     by_id: dict[str, dict[str, object]] = {}

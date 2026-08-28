@@ -93,6 +93,12 @@ class ManifestContract(unittest.TestCase):
             json.dump(data, manifest); manifest.flush()
             with self.assertRaisesRegex(checker.ManifestError, "canonical 29-file"):
                 checker.load_and_validate(Path(manifest.name), REPO_ROOT)
+        data = json.loads((REPO_ROOT / "scripts/discord_publication_boundaries.json").read_text())
+        data["rows"][-1] = {**data["rows"][0], "path_id": data["rows"][-1]["path_id"]}
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as manifest:
+            json.dump(data, manifest); manifest.flush()
+            with self.assertRaisesRegex(checker.ManifestError, "canonical 30-row contract"):
+                checker.load_and_validate(Path(manifest.name), REPO_ROOT)
 
     def test_checked_in_ufcs_sites_have_real_owners(self) -> None:
         found = checker.discover_direct_sends(REPO_ROOT, set(checker.CANONICAL_SCOPE_FILES))
@@ -105,12 +111,13 @@ async fn method() { gateway\n . send_message ( ); }
 async fn macro_call() { wrap!(gateway.edit_message()); }
 async fn trait_ufcs() { TurnGateway::edit_message(gateway); }
 async fn qualified() { <G as TurnGateway>::send_files(gateway); }
+async fn nested_generic() { <Wrapper<u8> as TurnGateway>::create_message(gateway); }
 """
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); path = root / "src/fixture.rs"; path.parent.mkdir()
             path.write_text(source)
             found = checker.discover_direct_sends(root, {"src/fixture.rs"})
-        self.assertEqual(found, {("src/fixture.rs", name): 1 for name in ("method", "macro_call", "trait_ufcs", "qualified")})
+        self.assertEqual(found, {("src/fixture.rs", name): 1 for name in ("method", "macro_call", "trait_ufcs", "qualified", "nested_generic")})
 
     def test_comments_strings_raw_strings_and_fake_fn_do_not_count_or_reassign(self) -> None:
         source = r'''
@@ -119,6 +126,7 @@ async fn real() {
   let a = "fn fake2() { gateway.edit_message(); }";
   let b = r#"gateway.create_message(); fn fake3() {"#;
   /* nested /* gateway.send_files(); */ fn fake4() { */
+  macro_rules! never_called { () => { gateway.create_message(); } }
   gateway.send_message();
 }
 '''
@@ -224,6 +232,8 @@ async fn real() {
         self.reject([row(executor=unlinked)], "inside spawn call", **{"src/spawn.rs": "fn launch(){ tokio::spawn(async move { publish(); }); }"})
         outside = copy.deepcopy(executor); outside["spawn"]["target_symbol"] = "after"
         self.reject([row(executor=outside)], "inside spawn call", **{"src/spawn.rs": "fn launch(){ tokio::spawn(async move {}); after(); }"})
+        decoy = "fn launch(){ if false { tokio::spawn(async move { publish(); }); } publish(); }"
+        self.reject([row(executor=executor)], "inside spawn call", **{"src/spawn.rs": decoy})
         mismatch = copy.deepcopy(executor); mismatch["spawn"]["spawn_api"] = "task_supervisor::spawn_observed"
         self.reject([row(executor=mismatch)], "does not match", **{"src/spawn.rs": "fn launch(){ task_supervisor::spawn_observed(async move { publish(); }); }"})
 
