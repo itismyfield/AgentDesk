@@ -449,15 +449,20 @@ pub(super) fn advance_tmux_relay_confirmed_end(
     );
 }
 
-/// #3041 P1-2: per-channel global counter that mints a unique `instance_id` for
-/// each bridge delivery-lease attempt. `LeaseHolder::Bridge` has no `instance_id`
-/// field today (only the watcher's holder kind carries one), so the bridge holder
-/// identity is `(Bridge, turn, range)`. The counter is retained as future-proofing
-/// / observability anchor but does not enter the lease key; the turn+range identity
-/// already distinguishes sequential bridge attempts (each turn re-keys on its own
-/// pinned `TurnKey`).
+/// Process-local identity source for bridge publication attempts.
 static BRIDGE_DELIVERY_LEASE_SEQ: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
+
+/// Mint a unique bridge-attempt holder within this process. `fetch_add` is an
+/// atomic RMW, so `Relaxed` is sufficient for uniqueness; the lease-cell mutex
+/// publishes the holder with the rest of the lease state. Resetting the sequence
+/// on process restart is safe because [`crate::services::discord::DeliveryLeaseCell`]
+/// is also process-local. A `u64` wrap is the only theoretical collision.
+pub(super) fn next_bridge_lease_holder() -> crate::services::discord::LeaseHolder {
+    crate::services::discord::LeaseHolder::Bridge {
+        attempt_id: BRIDGE_DELIVERY_LEASE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    }
+}
 
 /// #3041 P1-2: RAII-ish guard that routes the BRIDGE's terminal delivery through
 /// the SAME per-channel [`crate::services::discord::DeliveryLeaseCell`] the
@@ -662,8 +667,7 @@ impl BridgeDeliveryLease {
         if end <= start {
             return BridgeLeaseAcquire::NoRange;
         }
-        let _seq = BRIDGE_DELIVERY_LEASE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let holder = crate::services::discord::LeaseHolder::Bridge;
+        let holder = next_bridge_lease_holder();
         let cell = shared.delivery_lease(channel_id);
         // SELF-HEALING acquire (mirrors the watcher B3): reclaim the lease IFF it
         // is EXPIRED (a dead holder that acquired but died before commit/release).
@@ -722,8 +726,9 @@ impl BridgeDeliveryLease {
     /// `Delivered` commit — advance `confirmed_end_offset` to the leased `end` via
     /// `advance_tmux_relay_confirmed_end`. Then release. This is the B6 gate: the
     /// confirmed-end advance happens IFF the Delivered lease commit succeeds. Returns
-    /// `true` iff the commit succeeded (debug invariant: the bridge must be able to
-    /// commit its own freshly-acquired lease).
+    /// `true` iff the commit succeeded. `false` is legitimate when this attempt was
+    /// reclaimed and a successor acquired the same key and range; in that case the
+    /// successor remains authoritative and the frontier is not advanced.
     pub(super) fn commit_and_advance(
         mut self,
         shared: &SharedData,
@@ -733,10 +738,6 @@ impl BridgeDeliveryLease {
     ) -> bool {
         // STOP the heartbeat BEFORE the commit so the renew loop cannot race it.
         let committed = self.commit_lease(outcome);
-        debug_assert!(
-            committed,
-            "bridge must be able to commit its own freshly-acquired delivery lease"
-        );
         if committed && outcome == crate::services::discord::LeaseOutcome::Delivered {
             // B6: the ONLY confirmed_end advance on the bridge terminal path now
             // flows through this successful lease commit.
@@ -1561,6 +1562,7 @@ mod tests {
 
         use super::super::{
             BridgeDeliveryLease, BridgeLeaseAcquire, bridge_delivery_lease_key_for_inflight,
+            next_bridge_lease_holder,
         };
         use crate::services::discord::inflight::InflightTurnState;
         use crate::services::provider::ProviderKind;
@@ -1573,6 +1575,69 @@ mod tests {
 
         fn turn(user_msg_id: u64) -> DeliveryLeaseKey {
             DeliveryLeaseKey::from_turn_key(TurnKey::new(channel(), user_msg_id, 1))
+        }
+
+        #[test]
+        fn bridge_lease_holder_attempts_are_unique() {
+            assert_ne!(next_bridge_lease_holder(), next_bridge_lease_holder());
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn production_reacquire_rejects_stale_same_key_range_attempt() {
+            let shared = make_shared_data_for_tests();
+            let ch = channel();
+            let key = turn(14);
+            let stale = match BridgeDeliveryLease::acquire(&shared, ch, key.clone(), 0, Some(64)) {
+                BridgeLeaseAcquire::Held(lease) => lease,
+                _ => panic!("first production acquire must hold the lease"),
+            };
+            let stale_holder = stale.holder;
+            let cell = shared.delivery_lease(ch);
+            assert!(
+                cell.reclaim_if_expired(
+                    lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS + 1),
+                )
+            );
+
+            let successor =
+                match BridgeDeliveryLease::acquire(&shared, ch, key.clone(), 0, Some(64)) {
+                    BridgeLeaseAcquire::Held(lease) => lease,
+                    _ => panic!("successor production acquire must hold the reclaimed range"),
+                };
+            let successor_holder = successor.holder;
+            assert_ne!(stale_holder, successor_holder);
+            // The reclaimed guard can drop late; its stale compare-and-release
+            // must be a deterministic no-op against the live successor.
+            drop(stale);
+
+            assert!(!cell.renew(stale_holder, key.clone(), u64::MAX));
+            assert!(!cell.commit(stale_holder, key.clone(), 0, 64, LeaseOutcome::Delivered,));
+            assert!(!cell.release(stale_holder, key.clone(), 0, 64));
+            match cell.read() {
+                LeaseSnapshot::Leased {
+                    holder,
+                    key: live_key,
+                    start,
+                    end,
+                    ..
+                } => {
+                    assert_eq!(holder, successor_holder);
+                    assert_eq!(live_key, key);
+                    assert_eq!((start, end), (0, 64));
+                }
+                other => panic!("successor lease must survive stale production attempt: {other:?}"),
+            }
+
+            assert!(cell.renew(successor_holder, key.clone(), u64::MAX));
+            assert!(cell.commit(
+                successor_holder,
+                key.clone(),
+                0,
+                64,
+                LeaseOutcome::Delivered,
+            ));
+            assert!(cell.release(successor_holder, key, 0, 64));
+            assert!(matches!(cell.read(), LeaseSnapshot::Unleased));
         }
 
         #[tokio::test(start_paused = true)]
@@ -1590,7 +1655,7 @@ mod tests {
             assert!(matches!(
                 shared.delivery_lease(ch).read(),
                 LeaseSnapshot::Leased {
-                    holder: LeaseHolder::Bridge,
+                    holder: LeaseHolder::Bridge { .. },
                     ..
                 }
             ));
@@ -1981,13 +2046,11 @@ mod tests {
         // `confirmed_end_offset` actually advanced. This pins the underlying
         // coupling the bool gate depends on: in a RECLAIMED / identity-mismatch
         // state the bridge's own `DeliveryLeaseCell::commit` returns `false` AND
-        // `confirmed_end_offset` does NOT advance. (The full `commit_and_advance`
-        // wrapper carries a `debug_assert!(committed)` — it deliberately panics on
-        // a false commit in debug/test builds because the bridge committing its OWN
-        // fresh lease is an invariant — so the false-commit path is exercised at the
-        // `cell.commit` boundary the wrapper delegates to. Were the durable frontier
-        // recorded here, its END (= range.1) would sit AHEAD of the un-advanced
-        // `confirmed_end_offset`, the exact M4 violation the bool gate prevents.)
+        // `confirmed_end_offset` does NOT advance. The false-commit path is exercised
+        // directly at the `cell.commit` boundary so this test can install the exact
+        // successor holder explicitly. Were the durable frontier recorded here, its
+        // END (= range.1) would sit AHEAD of the un-advanced `confirmed_end_offset`,
+        // the exact M4 violation the bool gate prevents.
         #[tokio::test(start_paused = true)]
         async fn reclaimed_lease_commit_is_false_and_never_advances_offset() {
             let shared = make_shared_data_for_tests();
@@ -2020,11 +2083,11 @@ mod tests {
                 lease_now_ms().saturating_add(DELIVERY_LEASE_DEADLINE_MS),
             ));
 
-            // The original bridge's commit (same identity `commit_and_advance`
-            // delegates to) now hits a DIFFERENT holder → identity mismatch →
+            // A synthetic stale bridge attempt (the same identity comparison
+            // `commit_and_advance` delegates to) now hits a DIFFERENT holder →
             // `false`. This is the commit==false branch the mod.rs bool gate guards.
             let committed = cell.commit(
-                LeaseHolder::Bridge,
+                LeaseHolder::Bridge { attempt_id: 90 },
                 turn(90),
                 0,
                 64,

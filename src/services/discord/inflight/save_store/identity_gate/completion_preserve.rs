@@ -12,7 +12,7 @@ use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
 /// tmux_session_name)` identity (+ `turn_start_offset` when known) matches. Gone
 /// (`Missing`) or replaced by a newer turn / restart-rebind marker
 /// (`IdentityMismatch`) → no-op; holder FAILED + didn't clear → still present &
-/// matching → refresh (`Saved`). Same flock + atomic_write primitives as the
+/// matching → refresh (`Saved`). Same advisory lock + atomic_write primitives as the
 /// rest of the module (Windows-safe).
 pub(in crate::services::discord) fn save_inflight_state_if_matches_identity<
     T: GuardedStampTarget,
@@ -52,7 +52,7 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_matches_ide
             return GuardedSaveOutcome::IoError;
         }
     }
-    // Hold the sidecar flock across the read AND the write so a concurrent
+    // Hold the sidecar advisory lock across the read AND the write so a concurrent
     // holder `clear_inflight_state` (which takes the same lock) cannot land its
     // remove between our identity check and our write.
     let Ok(_lock) = lock_inflight_state_path(&path) else {

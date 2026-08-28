@@ -53,6 +53,7 @@ src/
 │   ├── mod.rs
 │   ├── monitoring.rs
 │   ├── query.rs
+│   ├── restart_terminal_proof.rs
 │   ├── run.rs
 │   └── utils.rs
 ├── compat/
@@ -606,6 +607,7 @@ src/
 │   │   │   │   │   ├── stamp_merge.rs
 │   │   │   │   │   └── stream_loop_patch.rs
 │   │   │   │   ├── bridge_entry_guard_tests.rs
+│   │   │   │   ├── create_monotonic_observer.rs
 │   │   │   │   ├── delivery_rewind.rs
 │   │   │   │   ├── identity_gate.rs
 │   │   │   │   ├── post_loop_identity_guard_tests.rs
@@ -965,7 +967,8 @@ src/
 │   │   │   ├── mod.rs
 │   │   │   ├── store.rs
 │   │   │   ├── sweep.rs
-│   │   │   └── tombstone.rs
+│   │   │   ├── tombstone.rs
+│   │   │   └── warning_tests.rs
 │   │   ├── tui_direct_pending_start/
 │   │   │   └── watcher_cancel.rs
 │   │   ├── tui_prompt_relay/

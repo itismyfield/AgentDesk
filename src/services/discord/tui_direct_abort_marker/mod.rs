@@ -271,7 +271,7 @@ fn tombstone_zero_id_carveout_is_recent(marker: &AbortedAnchorMarker, t: &Commit
 fn commit_tombstone_matches_marker(marker: &AbortedAnchorMarker, t: &CommitTombstone) -> bool {
     t.tmux_session_name == marker.tmux_session_name
         && tombstone_zero_id_carveout_is_recent(marker, t)
-        && commit_identity_covers_marker(
+        && commit_identity_covers_marker_with_warning(
             marker,
             t.committed_user_msg_id,
             &t.committed_started_at,
@@ -349,94 +349,45 @@ fn commit_identity_covers_marker(
     committed_started_at: &str,
     committed_turn_start_offset: Option<u64>,
     terminal_evidence_offset: TerminalEvidenceOffsetProof,
-) -> bool {
+) -> Result<(), &'static str> {
     match marker.origin {
-        MarkerOrigin::Abort => {
-            marker.matches_foreign_identity(committed_user_msg_id, committed_started_at)
-        }
+        MarkerOrigin::Abort => marker
+            .matches_foreign_identity(committed_user_msg_id, committed_started_at)
+            .then_some(())
+            .ok_or("abort_identity_mismatch"),
         MarkerOrigin::DeferredClaim => {
-            let Some(boundary) = marker.foreign_started_at.as_deref() else {
-                warn_deferred_claim_commit_rejected(
-                    marker,
-                    committed_user_msg_id,
-                    committed_started_at,
-                    committed_turn_start_offset,
-                    terminal_evidence_offset,
-                    "missing_marker_started_at_boundary",
-                );
-                return false;
-            };
+            let boundary = marker
+                .foreign_started_at
+                .as_deref()
+                .ok_or("missing_marker_started_at_boundary")?;
             let zero_id_commit_for_real_marker =
                 is_zero_id_commit_for_real_deferred_claim_marker(marker, committed_user_msg_id);
             if marker.foreign_user_msg_id != Some(committed_user_msg_id)
                 && !zero_id_commit_for_real_marker
             {
-                warn_deferred_claim_commit_rejected(
-                    marker,
-                    committed_user_msg_id,
-                    committed_started_at,
-                    committed_turn_start_offset,
-                    terminal_evidence_offset,
-                    "user_msg_id_mismatch",
-                );
-                return false;
+                return Err("user_msg_id_mismatch");
             }
-            let identity_matches = match committed_started_at_cmp(committed_started_at, boundary) {
+            match committed_started_at_cmp(committed_started_at, boundary) {
                 Some(std::cmp::Ordering::Greater) if zero_id_commit_for_real_marker => {
-                    warn_deferred_claim_commit_rejected(
-                        marker,
-                        committed_user_msg_id,
-                        committed_started_at,
-                        committed_turn_start_offset,
-                        terminal_evidence_offset,
-                        "zero_id_real_pin_started_at_boundary_mismatch",
-                    );
-                    false
+                    return Err("zero_id_real_pin_started_at_boundary_mismatch");
                 }
-                Some(std::cmp::Ordering::Greater) => true,
+                Some(std::cmp::Ordering::Greater) => {}
                 Some(std::cmp::Ordering::Less) => {
-                    warn_deferred_claim_commit_rejected(
-                        marker,
-                        committed_user_msg_id,
-                        committed_started_at,
-                        committed_turn_start_offset,
-                        terminal_evidence_offset,
-                        "committed_started_at_before_marker_boundary",
-                    );
-                    false
+                    return Err("committed_started_at_before_marker_boundary");
                 }
-                None => {
-                    warn_deferred_claim_commit_rejected(
-                        marker,
-                        committed_user_msg_id,
-                        committed_started_at,
-                        committed_turn_start_offset,
-                        terminal_evidence_offset,
-                        "started_at_parse_failed",
-                    );
-                    false
-                }
+                None => return Err("started_at_parse_failed"),
                 Some(std::cmp::Ordering::Equal) => {
                     if zero_id_commit_for_real_marker {
                         // TUI-direct/recovery can commit a real-id pin as
                         // id-0. Since id-0 is not an identity, accept it only
                         // when the committed turn boundary is exactly this
                         // marker's recorded own boundary.
-                        let covered = matches!(
+                        if !matches!(
                             (committed_turn_start_offset, marker.foreign_turn_start_offset),
                             (Some(committed), Some(boundary)) if committed == boundary
-                        );
-                        if !covered {
-                            warn_deferred_claim_commit_rejected(
-                                marker,
-                                committed_user_msg_id,
-                                committed_started_at,
-                                committed_turn_start_offset,
-                                terminal_evidence_offset,
-                                "zero_id_real_pin_turn_start_offset_mismatch",
-                            );
+                        ) {
+                            return Err("zero_id_real_pin_turn_start_offset_mismatch");
                         }
-                        covered
                     } else if committed_user_msg_id == 0 || marker.foreign_user_msg_id == Some(0) {
                         // `user_msg_id == 0` is not unique at `started_at`'s
                         // one-second resolution. Same-timestamp id-0 covers must
@@ -444,35 +395,19 @@ fn commit_identity_covers_marker(
                         // marker's own turn; legacy evidence without offsets
                         // fails closed. Non-zero user ids retain the existing
                         // same-id + timestamp >= boundary rule.
-                        let covered = matches!(
+                        if !matches!(
                             (committed_turn_start_offset, marker.foreign_turn_start_offset),
                             (Some(committed), Some(boundary)) if committed >= boundary
-                        );
-                        if !covered {
-                            warn_deferred_claim_commit_rejected(
-                                marker,
-                                committed_user_msg_id,
-                                committed_started_at,
-                                committed_turn_start_offset,
-                                terminal_evidence_offset,
+                        ) {
+                            return Err(
                                 "id0_same_timestamp_turn_start_offset_not_at_or_after_boundary",
                             );
                         }
-                        covered
-                    } else {
-                        true
                     }
                 }
-            };
-            let covered = identity_matches
-                && terminal_evidence_offset_covers_deferred_claim(
-                    marker,
-                    committed_user_msg_id,
-                    committed_started_at,
-                    committed_turn_start_offset,
-                    terminal_evidence_offset,
-                );
-            if covered && zero_id_commit_for_real_marker {
+            }
+            terminal_evidence_offset_covers_deferred_claim(marker, terminal_evidence_offset)?;
+            if zero_id_commit_for_real_marker {
                 tracing::debug!(
                     provider = %marker.provider,
                     channel_id = marker.channel_id,
@@ -489,48 +424,60 @@ fn commit_identity_covers_marker(
                     "tui_direct_abort_marker: DeferredClaim zero-id terminal commit accepted by boundary evidence"
                 );
             }
-            covered
+            Ok(())
         }
     }
 }
 
 fn terminal_evidence_offset_covers_deferred_claim(
     marker: &AbortedAnchorMarker,
+    terminal_evidence_offset: TerminalEvidenceOffsetProof,
+) -> Result<(), &'static str> {
+    let Some(boundary) = marker.foreign_turn_start_offset else {
+        return Ok(()); // legacy marker without an own-start offset keeps r2 behavior.
+    };
+    match terminal_evidence_offset {
+        TerminalEvidenceOffsetProof::Legacy => Ok(()),
+        TerminalEvidenceOffsetProof::Recorded(Some(evidence_offset))
+            if evidence_offset >= boundary =>
+        {
+            Ok(())
+        }
+        TerminalEvidenceOffsetProof::Recorded(Some(_)) => {
+            Err("terminal_evidence_offset_before_marker_turn_start_offset")
+        }
+        TerminalEvidenceOffsetProof::Recorded(None) => {
+            Err("terminal_evidence_offset_missing_on_new_record")
+        }
+    }
+}
+
+fn commit_identity_covers_marker_with_warning(
+    marker: &AbortedAnchorMarker,
     committed_user_msg_id: u64,
     committed_started_at: &str,
     committed_turn_start_offset: Option<u64>,
     terminal_evidence_offset: TerminalEvidenceOffsetProof,
 ) -> bool {
-    let Some(boundary) = marker.foreign_turn_start_offset else {
-        return true; // legacy marker without an own-start offset keeps r2 behavior.
-    };
-    match terminal_evidence_offset {
-        TerminalEvidenceOffsetProof::Legacy => true,
-        TerminalEvidenceOffsetProof::Recorded(Some(evidence_offset))
-            if evidence_offset >= boundary =>
-        {
-            true
-        }
-        TerminalEvidenceOffsetProof::Recorded(Some(_)) => {
-            warn_deferred_claim_commit_rejected(
-                marker,
-                committed_user_msg_id,
-                committed_started_at,
-                committed_turn_start_offset,
-                terminal_evidence_offset,
-                "terminal_evidence_offset_before_marker_turn_start_offset",
-            );
-            false
-        }
-        TerminalEvidenceOffsetProof::Recorded(None) => {
-            warn_deferred_claim_commit_rejected(
-                marker,
-                committed_user_msg_id,
-                committed_started_at,
-                committed_turn_start_offset,
-                terminal_evidence_offset,
-                "terminal_evidence_offset_missing_on_new_record",
-            );
+    match commit_identity_covers_marker(
+        marker,
+        committed_user_msg_id,
+        committed_started_at,
+        committed_turn_start_offset,
+        terminal_evidence_offset,
+    ) {
+        Ok(()) => true,
+        Err(reason) => {
+            if marker.origin == MarkerOrigin::DeferredClaim {
+                warn_deferred_claim_commit_rejected(
+                    marker,
+                    committed_user_msg_id,
+                    committed_started_at,
+                    committed_turn_start_offset,
+                    terminal_evidence_offset,
+                    reason,
+                );
+            }
             false
         }
     }
@@ -577,6 +524,7 @@ fn deferred_claim_live_inflight_is_pinned(
             inflight_turn_start_offset,
             TerminalEvidenceOffsetProof::Legacy,
         )
+        .is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -687,7 +635,7 @@ fn terminal_commit_covers_marker_with_offsets(
 ) -> bool {
     marker.anchor_message_id != 0
         && now_ms >= marker.aborted_at_ms
-        && commit_identity_covers_marker(
+        && commit_identity_covers_marker_with_warning(
             marker,
             committed_user_msg_id,
             committed_started_at,
@@ -835,6 +783,9 @@ pub(super) fn shared_reaction_applier(shared: Arc<SharedData>) -> ReactionApplie
 fn now_ms() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
+
+#[cfg(test)]
+mod warning_tests;
 
 #[cfg(test)]
 mod tests {

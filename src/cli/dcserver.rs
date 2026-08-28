@@ -575,27 +575,6 @@ pub fn handle_restart_dcserver(
             "ℹ no restart follow-up target configured; pass --report-channel-id/--report-provider or set AGENTDESK_REPORT_* to send a Discord completion message"
         );
     }
-    let write_restart_report = |status: &str, summary: String| {
-        let Some(context) = report_context.as_ref() else {
-            return;
-        };
-        let mut report = RestartCompletionReport::new(
-            context.provider.clone(),
-            context.channel_id,
-            status,
-            summary,
-        );
-        if let Some(existing) = load_restart_report(&context.provider, context.channel_id) {
-            report.current_msg_id = existing.current_msg_id;
-        }
-        if report.current_msg_id.is_none() {
-            report.current_msg_id = context.current_msg_id;
-        }
-        if let Err(e) = save_restart_report(&report) {
-            eprintln!("⚠ failed to save restart follow-up report: {e}");
-        }
-    };
-
     let settings_display = instance_agentdesk_config_path()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "agentdesk.yaml".to_string());
@@ -668,26 +647,20 @@ pub fn handle_restart_dcserver(
         return;
     }
 
+    // The supervisor fallback is reachable only when there is no runtime root;
+    // restart reports use that same root, so there is no report store to update here.
+    if report_context.is_some() {
+        eprintln!("ℹ restart follow-up report unavailable: no runtime root/report store");
+    }
+
     let launchd_label = current_dcserver_launchd_label();
     if is_launchd_job_loaded(&launchd_label) {
         println!("   launchd service detected: {}", launchd_label);
         match restart_launchd_dcserver_and_verify(&launchd_label, READY_TIMEOUT) {
             Ok(()) => {
-                let current_release = current_release_link_path()
-                    .as_deref()
-                    .and_then(read_release_link_target)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "(unknown)".to_string());
                 println!(
                     "✅ Discord bot restarted via launchd '{}' and passed ready check",
                     launchd_label
-                );
-                write_restart_report(
-                    "ok",
-                    format!(
-                        "launchd restart 완료, ready check 통과\n- current release: `{}`",
-                        current_release
-                    ),
                 );
                 return;
             }
@@ -701,35 +674,13 @@ pub fn handle_restart_dcserver(
                                 "✅ Rolled back to {} and dcserver passed ready check",
                                 restored.display()
                             );
-                            write_restart_report(
-                                "rolled_back",
-                                format!(
-                                    "launchd restart는 실패했지만 rollback 후 복구됨\n- restored release: `{}`\n- reason: `{}`",
-                                    restored.display(),
-                                    e
-                                ),
-                            );
                         }
                         Err(rollback_err) => {
                             eprintln!("❌ Rollback failed: {rollback_err}");
-                            write_restart_report(
-                                "failed",
-                                format!(
-                                    "launchd restart 실패 후 rollback도 실패\n- restart error: `{}`\n- rollback error: `{}`",
-                                    e, rollback_err
-                                ),
-                            );
                         }
                     }
                 } else {
                     eprintln!("⚠ no previous release link available for rollback");
-                    write_restart_report(
-                        "failed",
-                        format!(
-                            "launchd restart 실패, rollback target 없음\n- restart error: `{}`",
-                            e
-                        ),
-                    );
                 }
                 return;
             }
@@ -747,24 +698,10 @@ pub fn handle_restart_dcserver(
                     "✅ Discord bot restarted via systemd '{}' and passed ready check",
                     SYSTEMD_SERVICE_NAME
                 );
-                write_restart_report(
-                    "ok",
-                    format!(
-                        "systemd restart 완료, ready check 통과\n- service: `{}`",
-                        SYSTEMD_SERVICE_NAME
-                    ),
-                );
             }
             Err(e) => {
                 eprintln!("❌ systemd restart verification failed: {e}");
                 eprintln!("   Hint: check logs with 'journalctl --user -u {SYSTEMD_SERVICE_NAME}'");
-                write_restart_report(
-                    "failed",
-                    format!(
-                        "systemd restart 실패\n- service: `{}`\n- error: `{}`",
-                        SYSTEMD_SERVICE_NAME, e
-                    ),
-                );
             }
         }
         return;
@@ -779,25 +716,11 @@ pub fn handle_restart_dcserver(
                     "✅ Discord bot restarted via Windows service '{}' and passed ready check",
                     WINDOWS_SERVICE_NAME
                 );
-                write_restart_report(
-                    "ok",
-                    format!(
-                        "Windows service restart 완료, ready check 통과\n- service: `{}`",
-                        WINDOWS_SERVICE_NAME
-                    ),
-                );
             }
             Err(e) => {
                 eprintln!("❌ Windows service restart failed: {e}");
                 eprintln!(
                     "   Hint: check with 'nssm status {WINDOWS_SERVICE_NAME}' or 'sc query {WINDOWS_SERVICE_NAME}'"
-                );
-                write_restart_report(
-                    "failed",
-                    format!(
-                        "Windows service restart 실패\n- service: `{}`\n- error: `{}`",
-                        WINDOWS_SERVICE_NAME, e
-                    ),
                 );
             }
         }
@@ -812,11 +735,6 @@ pub fn handle_restart_dcserver(
     // Write a launcher script to avoid token exposure in ps aux
     let Some(runtime_root) = agentdesk_runtime_root() else {
         eprintln!("Error: Cannot determine runtime root");
-        write_restart_report(
-            "failed",
-            "runtime root를 결정할 수 없어서 tmux fallback restart를 시작하지 못했습니다."
-                .to_string(),
-        );
         return;
     };
     let scripts_dir = runtime_root.join("scripts");
@@ -840,10 +758,6 @@ pub fn handle_restart_dcserver(
                 Ok(p) => p.display().to_string(),
                 Err(e) => {
                     eprintln!("Error: Cannot determine executable path: {e}");
-                    write_restart_report(
-                        "failed",
-                        format!("실행 바이너리 경로를 결정할 수 없습니다: {e}"),
-                    );
                     return;
                 }
             }
@@ -875,7 +789,6 @@ pub fn handle_restart_dcserver(
     );
     if let Err(e) = std::fs::write(&launcher_path, &script) {
         eprintln!("Error: Failed to write launcher script: {e}");
-        write_restart_report("failed", format!("launcher script 쓰기 실패: {e}"));
         return;
     }
     #[cfg(unix)]
@@ -885,7 +798,6 @@ pub fn handle_restart_dcserver(
             std::fs::set_permissions(&launcher_path, std::fs::Permissions::from_mode(0o700))
         {
             eprintln!("Error: Failed to set script permissions: {e}");
-            write_restart_report("failed", format!("launcher script 권한 설정 실패: {e}"));
             return;
         }
     }
@@ -919,25 +831,11 @@ pub fn handle_restart_dcserver(
                             "✅ Discord bot started in tmux session '{}' and passed ready check",
                             tmux_session
                         );
-                        write_restart_report(
-                            "ok",
-                            format!(
-                                "tmux fallback restart 완료, ready check 통과\n- session: `{}`",
-                                tmux_session
-                            ),
-                        );
                     }
                     Err(e) => {
                         eprintln!(
                             "⚠ tmux session '{}' started but ready check failed: {}",
                             tmux_session, e
-                        );
-                        write_restart_report(
-                            "failed",
-                            format!(
-                                "tmux fallback restart는 됐지만 ready check 실패\n- session: `{}`\n- error: `{}`",
-                                tmux_session, e
-                            ),
                         );
                     }
                 }
@@ -946,26 +844,14 @@ pub fn handle_restart_dcserver(
                     "❌ tmux session '{}' failed to start. Check with: tmux a -t {}",
                     tmux_session, tmux_session
                 );
-                write_restart_report(
-                    "failed",
-                    format!("tmux fallback restart 실패\n- session: `{}`", tmux_session),
-                );
             }
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             eprintln!("❌ tmux new-session failed: {}", stderr.trim());
-            write_restart_report(
-                "failed",
-                format!("tmux fallback restart 실패\n- stderr: `{}`", stderr.trim()),
-            );
         }
         Err(e) => {
             eprintln!("❌ Failed to start tmux session: {}", e);
-            write_restart_report(
-                "failed",
-                format!("tmux fallback restart spawn 실패\n- error: `{}`", e),
-            );
         }
     }
 }

@@ -178,6 +178,15 @@ def workflow_paths(root: Path = REPO_ROOT) -> tuple[Path, ...]:
     )
 
 
+def paths_filter_definitions(workflow: str) -> dict[str, list[str]]:
+    parsed = yaml.safe_load(workflow)
+    steps = parsed["jobs"]["changes"]["steps"]
+    filter_step = next(
+        step for step in steps if step.get("uses") == "dorny/paths-filter@v3"
+    )
+    return yaml.safe_load(filter_step["with"]["filters"])
+
+
 def just_recipe_commands(justfile: str, recipe_name: str) -> tuple[str, ...]:
     marker = re.compile(rf"^{re.escape(recipe_name)}:[ \t]*.*$", re.MULTILINE)
     match = marker.search(justfile)
@@ -353,6 +362,56 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotRegex(job, r"(?m)^\s*cargo test\b")
         self.assertNotIn("- name: cargo test", job)
         self.assertNotIn("Discord thread-create cross-process lock", job)
+
+    def test_inflight_lock_primitive_triggers_required_native_windows_lane(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        jobs = yaml.safe_load(workflow)["jobs"]
+        cross_os = jobs["check_fast_cross_os"]
+        mirror = jobs["check_fast_cross_os_required_context"]
+        owner_paths = (
+            "src/services/discord/inflight/store.rs",
+            "src/services/discord/inflight/save_store.rs",
+        )
+
+        cross_os_paths = paths_filter_definitions(workflow)["cross_os_rust"]
+        for owner_path in owner_paths:
+            self.assertEqual(cross_os_paths.count(owner_path), 1)
+        self.assertNotIn("src/services/discord/**", cross_os_paths)
+
+        for owner_path in owner_paths:
+            with self.subTest(missing_owner=owner_path):
+                commented = replace_last(
+                    workflow,
+                    f"              - '{owner_path}'",
+                    f"              # - '{owner_path}'",
+                )
+                self.assertNotIn(
+                    owner_path,
+                    paths_filter_definitions(commented)["cross_os_rust"],
+                )
+        self.assertEqual(
+            cross_os["if"],
+            "needs.changes.outputs.rust_compile == 'true' && "
+            "needs.changes.outputs.cross_os_rust == 'true'",
+        )
+        self.assertEqual(cross_os["strategy"]["matrix"]["os"], ["windows-latest"])
+        self.assertEqual(mirror["needs"], ["changes", "check_fast_cross_os"])
+        self.assertEqual(mirror["if"], "always()")
+        mirror_step = next(
+            step
+            for step in mirror["steps"]
+            if step.get("run") == "./scripts/required-check-mirror.sh"
+        )
+        self.assertEqual(
+            mirror_step["env"],
+            {
+                "CHANGED_PATHS_RESULT": "${{ needs.changes.result }}",
+                "FILTER_NAME": "cross_os_rust",
+                "FILTER_OUTPUT": "${{ needs.changes.outputs.cross_os_rust }}",
+                "UPSTREAM_JOB_NAME": "check_fast_cross_os",
+                "UPSTREAM_RESULT": "${{ needs.check_fast_cross_os.result }}",
+            },
+        )
 
     def test_macos_pr_lane_runs_single_message_panel_tests(self) -> None:
         workflow = MACOS_TRUSTED_WORKFLOW.read_text(encoding="utf-8")

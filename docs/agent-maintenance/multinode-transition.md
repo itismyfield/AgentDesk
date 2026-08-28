@@ -1617,12 +1617,14 @@ redeploy leaves the old values live in the plist.
   token-built Http fallback on standby nodes) are byte-identical and stay
   process-local. No new multinode ownership, singleton, or lease assumption
   is introduced.
-- #3641 (boot-time orphan inflight `.lock` sweep): `inflight.rs` now removes
-  old `discord_inflight/{provider}/*.json.lock` sidecars only when the matching
-  `.json` inflight row is absent and the lock mtime is past the conservative
-  age floor. This is worker-local filesystem hygiene for advisory-lock sidecars:
-  it does not touch live `.json` rows, durable queues, leases, leader/standby
-  ownership, or cross-node routing semantics.
+- #3641 (canonical inflight lock-sidecar lifetime): the boot-time orphan-lock
+  reaper was removed. `discord_inflight/{provider}/*.json.lock` sidecars MUST
+  never be unlinked: unlinking an open inode L1 lets a new canonical-path inode
+  L2 admit another writer and splits advisory-lock mutual exclusion. Stale JSON
+  data-row GC and abandoned rebind-origin cleanup remain; permanent zero-byte
+  directory entries per used provider/channel are the intentional worker-local
+  tradeoff. This changes no durable queue, lease, leader/standby ownership, or
+  cross-node routing authority.
 - Active-session audit: `active_session_audit` adds read-only health diagnostics
   plus optional local repair-path metadata for stale running-session rows. It
   does not move Discord gateway startup, worker ownership, durable queue claims,
