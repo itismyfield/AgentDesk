@@ -17,6 +17,44 @@ use super::SharedData;
 /// adoption preserves it. NOTE: this mtime signal is the #1270 wrapper-identity
 /// consumer ONLY. The status-panel session-instance key (#3087) reads the
 /// dedicated `.spawn_nonce` marker content instead.
+pub(in crate::services::discord) fn read_source_epoch_witness(
+    session: &str,
+) -> crate::services::cluster::stream_relay::SourceWitness {
+    use crate::services::cluster::stream_relay::{GenerationSourceIdentity, SourceWitness};
+    let generation = crate::services::tmux_common::resolve_session_temp_path(session, "generation")
+        .and_then(|path| std::fs::File::open(path).ok())
+        .and_then(|file| {
+            let metadata = file.metadata().ok()?;
+            let mtime_ns = metadata
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|value| i64::try_from(value.as_nanos()).ok())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                Some(GenerationSourceIdentity::Unix {
+                    mtime_ns,
+                    dev: metadata.dev(),
+                    ino: metadata.ino(),
+                })
+            }
+            #[cfg(not(unix))]
+            {
+                Some(GenerationSourceIdentity::Unsupported { mtime_ns })
+            }
+        });
+    let spawn_nonce_hash = read_spawn_nonce(session).map(|nonce| {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(nonce.as_bytes()).into()
+    });
+    SourceWitness {
+        generation,
+        spawn_nonce_hash,
+    }
+}
+
 pub(in crate::services::discord) fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
     let Some(path) =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "generation")
@@ -1445,6 +1483,32 @@ mod tests {
         std::fs::create_dir(&combined_tmp).expect("block combined nonce temp path");
         let combined_kind = stamp_spawn_markers(&combined_session).unwrap_err().kind();
         assert_eq!(combined_kind, direct_kind);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generation_failure_nonce_success_changes_source_witness() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_root, _env) = isolated_runtime_root();
+        let session = unique_session("epoch-generation-failure");
+        let before = read_source_epoch_witness(&session);
+        let sessions_dir =
+            std::path::PathBuf::from(crate::services::tmux_common::agentdesk_temp_dir());
+        let blocked = sessions_dir.clone();
+        let _permission_hook = set_generation_before_create_hook(Arc::new(move || {
+            std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }));
+        let restored = sessions_dir.clone();
+        let _hook = set_spawn_after_generation_hook(Arc::new(move || {
+            std::fs::set_permissions(&restored, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }));
+        stamp_spawn_markers(&session).expect("nonce succeeds after generation failure");
+        std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let after = read_source_epoch_witness(&session);
+        assert_ne!(after, before);
+        assert!(after.generation.is_none());
+        assert!(after.spawn_nonce_hash.is_some());
     }
 
     #[cfg(unix)]

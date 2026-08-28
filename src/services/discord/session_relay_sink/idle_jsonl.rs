@@ -332,13 +332,85 @@ pub(super) fn idle_relay_range_action(
     }
 }
 
-pub(super) fn read_jsonl_range(path: &str, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
-    let mut file = File::open(path)?;
+#[derive(Debug)]
+pub(super) struct OpenedJsonlRange {
+    pub payload: Vec<u8>,
+    pub file_identity: crate::services::cluster::stream_relay::SourceFileIdentity,
+    start: u64,
+    end: u64,
+}
+
+impl OpenedJsonlRange {
+    pub(super) fn suffix(&self, path: &str, from: u64) -> std::io::Result<Self> {
+        if from != self.start {
+            return read_jsonl_range(path, from, self.end);
+        }
+        Ok(Self {
+            payload: self.payload.clone(),
+            file_identity: self.file_identity,
+            start: self.start,
+            end: self.end,
+        })
+    }
+}
+
+pub(super) fn read_jsonl_range(
+    path: &str,
+    start: u64,
+    end: u64,
+) -> std::io::Result<OpenedJsonlRange> {
+    read_jsonl_range_from_file(File::open(path)?, start, end)
+}
+
+fn read_jsonl_range_from_file(
+    mut file: File,
+    start: u64,
+    end: u64,
+) -> std::io::Result<OpenedJsonlRange> {
+    let file_identity =
+        crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&file);
     file.seek(SeekFrom::Start(start))?;
     let mut payload = Vec::new();
     file.take(end.saturating_sub(start))
         .read_to_end(&mut payload)?;
-    Ok(payload)
+    Ok(OpenedJsonlRange {
+        payload,
+        file_identity,
+        start,
+        end,
+    })
+}
+
+#[cfg(all(test, unix))]
+mod source_identity_tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn suffix_reopens_replacement_path_and_returns_its_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.jsonl");
+        let replacement = dir.path().join("replacement.jsonl");
+        std::fs::write(&path, b"old-suffix").unwrap();
+        let opened = read_jsonl_range(path.to_str().unwrap(), 0, 10).unwrap();
+        std::fs::write(&replacement, b"new-tail__").unwrap();
+        let replacement_metadata = std::fs::metadata(&replacement).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        let suffix = opened.suffix(path.to_str().unwrap(), 4).unwrap();
+        assert_eq!(suffix.payload, b"tail__");
+        assert_eq!(
+            suffix.file_identity,
+            crate::services::cluster::stream_relay::SourceFileIdentity::Unix {
+                dev: replacement_metadata.dev(),
+                ino: replacement_metadata.ino(),
+            }
+        );
+        assert_eq!(
+            opened.suffix(path.to_str().unwrap(), 0).unwrap().payload,
+            b"old-suffix"
+        );
+    }
 }
 
 pub(super) fn idle_jsonl_payload_contains_user_event(payload: &[u8]) -> bool {

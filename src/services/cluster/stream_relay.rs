@@ -76,6 +76,71 @@ pub const DEFAULT_RELAY_BUFFER: usize = 1024;
 /// times out → reconciles, never a false ACK).
 pub const TERMINAL_OUTCOME_RING_CAPACITY: usize = 64;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SourceEpoch(u64);
+
+impl SourceEpoch {
+    pub const fn from_observation(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GenerationSourceIdentity {
+    #[cfg(unix)]
+    Unix {
+        mtime_ns: i64,
+        dev: u64,
+        ino: u64,
+    },
+    Unsupported {
+        mtime_ns: i64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SourceWitness {
+    pub generation: Option<GenerationSourceIdentity>,
+    pub spawn_nonce_hash: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SourceFileIdentity {
+    #[cfg(unix)]
+    Unix {
+        dev: u64,
+        ino: u64,
+    },
+    Unavailable,
+}
+
+impl SourceFileIdentity {
+    pub fn from_open_file(file: &std::fs::File) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            file.metadata()
+                .map(|metadata| Self::Unix {
+                    dev: metadata.dev(),
+                    ino: metadata.ino(),
+                })
+                .unwrap_or(Self::Unavailable)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = file;
+            Self::Unavailable
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceStamp {
+    pub epoch: SourceEpoch,
+    pub file: SourceFileIdentity,
+    pub witness: SourceWitness,
+}
+
 /// An opaque stream frame emitted by a provider. Carries enough metadata for
 /// the sink to route + format without re-reading the rollout file.
 ///
@@ -136,6 +201,7 @@ pub struct StreamFrame {
     /// Wrapper generation captured with `relay_range`. A queued range from a
     /// replaced wrapper must never commit against the replacement transcript.
     pub relay_generation_mtime_ns: Option<i64>,
+    pub relay_source_stamp: Option<SourceStamp>,
 }
 
 /// Per-session counters. Exposed via the supervisor for diagnostics.
@@ -429,6 +495,26 @@ impl RelayProducer {
             None,
             Some((start, end)),
             Some(generation_mtime_ns),
+            None,
+        )
+        .is_alive()
+    }
+
+    pub fn try_send_frame_for_range_with_source(
+        &self,
+        payload: String,
+        start: u64,
+        end: u64,
+        generation_mtime_ns: i64,
+        relay_source_stamp: Option<SourceStamp>,
+    ) -> bool {
+        self.enqueue(
+            payload,
+            None,
+            None,
+            Some((start, end)),
+            Some(generation_mtime_ns),
+            relay_source_stamp,
         )
         .is_alive()
     }
@@ -440,6 +526,7 @@ impl RelayProducer {
         identity: Option<RelayTurnIdentity>,
         range: Option<(u64, u64)>,
         relay_generation_mtime_ns: Option<i64>,
+        relay_source_stamp: Option<SourceStamp>,
     ) -> RelaySendOutcome {
         try_send_frame_inner(
             &self.matched,
@@ -452,6 +539,7 @@ impl RelayProducer {
             identity,
             range,
             relay_generation_mtime_ns,
+            relay_source_stamp,
         )
     }
 
@@ -464,7 +552,7 @@ impl RelayProducer {
         payload: String,
         frame_identity: Option<RelayTurnIdentity>,
     ) -> RelaySendOutcome {
-        self.enqueue(payload, None, frame_identity, None, None)
+        self.enqueue(payload, None, frame_identity, None, None, None)
     }
 
     pub fn try_send_frame_with_sequence_identity_and_generation(
@@ -479,6 +567,24 @@ impl RelayProducer {
             frame_identity,
             None,
             (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
+            None,
+        )
+    }
+
+    pub fn try_send_frame_with_source(
+        &self,
+        payload: String,
+        frame_identity: Option<RelayTurnIdentity>,
+        relay_generation_mtime_ns: i64,
+        relay_source_stamp: Option<SourceStamp>,
+    ) -> RelaySendOutcome {
+        self.enqueue(
+            payload,
+            None,
+            frame_identity,
+            None,
+            (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
+            relay_source_stamp,
         )
     }
 
@@ -492,7 +598,7 @@ impl RelayProducer {
         payload: String,
         terminal: TerminalCommitFence,
     ) -> RelaySendOutcome {
-        self.enqueue(payload, Some(terminal), None, None, None)
+        self.enqueue(payload, Some(terminal), None, None, None, None)
     }
 
     pub fn try_send_terminal_frame_with_sequence_and_generation(
@@ -507,6 +613,24 @@ impl RelayProducer {
             None,
             None,
             (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
+            None,
+        )
+    }
+
+    pub fn try_send_terminal_frame_with_source(
+        &self,
+        payload: String,
+        terminal: TerminalCommitFence,
+        relay_generation_mtime_ns: i64,
+        relay_source_stamp: Option<SourceStamp>,
+    ) -> RelaySendOutcome {
+        self.enqueue(
+            payload,
+            Some(terminal),
+            None,
+            None,
+            (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
+            relay_source_stamp,
         )
     }
 }
@@ -647,6 +771,7 @@ fn try_send_frame_inner(
     frame_identity: Option<RelayTurnIdentity>,
     relay_range: Option<(u64, u64)>,
     relay_generation_mtime_ns: Option<i64>,
+    relay_source_stamp: Option<SourceStamp>,
 ) -> RelaySendOutcome {
     if shutdown.load(Ordering::Acquire) {
         return RelaySendOutcome::closed();
@@ -674,6 +799,7 @@ fn try_send_frame_inner(
         turn_start_offset: frame_identity.turn_start_offset,
         relay_range,
         relay_generation_mtime_ns,
+        relay_source_stamp,
     };
     metrics.frames_received.fetch_add(1, Ordering::AcqRel);
     match queue.push_drop_oldest(frame) {
@@ -733,6 +859,7 @@ impl StreamRelayHandle {
             &self.metrics,
             &self.sequence,
             payload,
+            None,
             None,
             None,
             None,
@@ -1127,8 +1254,35 @@ mod tests {
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].relay_range, Some((640, 1_024)));
         assert_eq!(delivered[0].relay_generation_mtime_ns, Some(77));
+        assert_eq!(delivered[0].relay_source_stamp, None);
         assert_eq!(delivered[0].terminal_consumed_end, None);
         assert_eq!(delivered[0].turn_start_offset, None);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn observe_stamp_is_additive_and_never_suppresses_transport() {
+        let sink = Arc::new(CapturingSink::default());
+        let handle = spawn_stream_relay(matched_for("c-observe"), sink.clone());
+        let producer = handle.producer();
+        let stamp = SourceStamp {
+            epoch: SourceEpoch::from_observation(3),
+            file: SourceFileIdentity::Unavailable,
+            witness: SourceWitness {
+                generation: None,
+                spawn_nonce_hash: Some([3; 32]),
+            },
+        };
+        assert!(
+            producer
+                .try_send_frame_with_source("observe".into(), None, 0, Some(stamp))
+                .is_alive()
+        );
+        flush_pending().await;
+        let delivered = sink.delivered();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].payload, "observe");
+        assert_eq!(delivered[0].relay_source_stamp, Some(stamp));
         handle.shutdown().await;
     }
 

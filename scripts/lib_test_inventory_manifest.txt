@@ -179,6 +179,7 @@ config::runtime_hook_registry_config_tests::intake_delivery_settlement_defaults_
 config::runtime_hook_registry_config_tests::intake_delivery_sweep_cutoffs_clamp_before_chrono_conversion
 config::runtime_hook_registry_config_tests::intake_delivery_sweep_initial_delay_stays_within_boot_grace_contract
 config::runtime_hook_registry_config_tests::intake_delivery_sweep_lock_timeout_stays_within_short_retry_contract
+config::runtime_hook_registry_config_tests::publication_permit_modes_are_additive_and_default_legacy
 config::runtime_hook_registry_config_tests::relay_authority_dial_defaults_dormant_and_round_trips_each_knob_alone
 config::runtime_hook_registry_config_tests::relay_verdict_source_defaults_structural_and_round_trips
 config::secret_bearing_config_file_tests::load_from_path_hardens_secret_file_before_semantic_validation_error
@@ -1839,6 +1840,7 @@ services::cluster::stream_relay::tests::backpressure_eviction_outcome_carries_vi
 services::cluster::stream_relay::tests::confirmed_fresh_outcome_records_exact_terminal_resolution_not_sink_error
 services::cluster::stream_relay::tests::delivers_every_frame_in_order
 services::cluster::stream_relay::tests::frames_carry_full_binding_snapshot_without_reparsing_session_name
+services::cluster::stream_relay::tests::observe_stamp_is_additive_and_never_suppresses_transport
 services::cluster::stream_relay::tests::per_sequence_terminal_outcome_is_independent_of_higher_sequences
 services::cluster::stream_relay::tests::permanent_sink_error_is_not_misclassified_as_confirmed_fresh
 services::cluster::stream_relay::tests::queued_frames_keep_their_binding_across_rebinds
@@ -2310,6 +2312,7 @@ services::discord::completion_footer_metadata::tests::visible_completed_footer_n
 services::discord::delivery_lease_cell::publication_coordinate_tests::only_positive_coordinate_exposes_frontier_range
 services::discord::delivery_lease_cell::publication_coordinate_tests::positive_byte_range_requires_strictly_positive_width
 services::discord::delivery_lease_cell::publication_coordinate_tests::sink_epoch_is_typed_apart_from_publication_permit
+services::discord::delivery_lease_cell::publication_coordinate_tests::source_epoch_adopts_once_and_bumps_only_on_witness_change
 services::discord::delivery_lease_key::tests::id_zero_without_inflight_uses_observed_range_start_4277
 services::discord::delivery_lease_key::tests::watcher_and_idle_tail_cannot_acquire_same_fallback_turn_concurrently_4277
 services::discord::destructive_cancel_gate::destructive_cancel_capture::tests::fresh_heartbeat_without_capture_progress_does_not_block_rebind
@@ -4632,6 +4635,7 @@ services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliv
 services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof
 services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_propagates_injected_transport_error
 services::discord::session_relay_sink::delivery_outcome_classify::tests::genuinely_uncommitted_short_replace_outcomes_stay_retriable
+services::discord::session_relay_sink::idle_jsonl::source_identity_tests::suffix_reopens_replacement_path_and_returns_its_identity
 services::discord::session_relay_sink::idle_jsonl::tests::deferred_active_range_ignores_user_prefix_and_relays_uncommitted_tail
 services::discord::session_relay_sink::idle_jsonl::tests::idle_jsonl_missing_dedup_shared_retries_without_send_or_consume
 services::discord::session_relay_sink::idle_jsonl::tests::idle_jsonl_shared_dedup_sends_range_once_then_skips_committed_retry
@@ -5143,6 +5147,7 @@ services::discord::tmux::tmux_session_files::tests::adoption_never_stamps_a_fres
 services::discord::tmux::tmux_session_files::tests::adoption_recovers_an_absent_marker_with_nonzero_identity
 services::discord::tmux::tmux_session_files::tests::committed_frontier_gated_on_same_generation
 services::discord::tmux::tmux_session_files::tests::every_spawn_site_uses_the_combined_marker_gate
+services::discord::tmux::tmux_session_files::tests::generation_failure_nonce_success_changes_source_witness
 services::discord::tmux::tmux_session_files::tests::generation_write_failure_emits_exactly_one_warn_and_still_writes_nonce
 services::discord::tmux::tmux_session_files::tests::orphan_sweep_multidot_marker_uses_canonical_source_authority_key_5264
 services::discord::tmux::tmux_session_files::tests::respawn_inside_one_filesystem_tick_bumps_the_generation_key_5437
@@ -5292,6 +5297,7 @@ services::discord::tmux::tmux_watcher::single_message_footer::tests::single_mess
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_terminal_footer_strips_panel_block
 services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_single_message_completion_footer_emits_background_agent_pending_payload
 services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_single_message_completion_footer_producer_threads_sniffed_background_agent_pending
+services::discord::tmux::tmux_watcher::source_epoch_read::tests::same_fd_identity_mode_resample_and_mixed_utf8_policy
 services::discord::tmux::tmux_watcher::stall_exit::tests::pinned_exit_preserves_newer_inflight_and_mailbox_on_identity_mismatch
 services::discord::tmux::tmux_watcher::stall_exit::tests::pinned_exit_releases_matching_turn_through_finalizer
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_common_edit_and_initial_send_share_guarded_payload

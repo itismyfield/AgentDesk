@@ -21,6 +21,7 @@ pub(super) struct Utf8ChunkDecoder {
 pub(super) struct DecodedUtf8Chunk {
     pub(super) start_offset: Option<u64>,
     pub(super) text: String,
+    pub(super) mixed_read_provenance: bool,
 }
 
 impl Utf8ChunkDecoder {
@@ -29,8 +30,10 @@ impl Utf8ChunkDecoder {
             return DecodedUtf8Chunk {
                 start_offset: None,
                 text: String::new(),
+                mixed_read_provenance: false,
             };
         }
+        let had_pending = !self.pending.is_empty();
         if self.pending.is_empty() {
             self.pending_start_offset = Some(chunk_start_offset);
         }
@@ -44,6 +47,7 @@ impl Utf8ChunkDecoder {
                 self.pending_start_offset = None;
                 DecodedUtf8Chunk {
                     start_offset: Some(start_offset),
+                    mixed_read_provenance: had_pending && !text.is_empty(),
                     text,
                 }
             }
@@ -53,6 +57,7 @@ impl Utf8ChunkDecoder {
                     return DecodedUtf8Chunk {
                         start_offset: None,
                         text: String::new(),
+                        mixed_read_provenance: false,
                     };
                 }
                 let text = std::str::from_utf8(&self.pending[..valid_up_to])
@@ -62,6 +67,7 @@ impl Utf8ChunkDecoder {
                 self.pending_start_offset = Some(start_offset.saturating_add(valid_up_to as u64));
                 DecodedUtf8Chunk {
                     start_offset: Some(start_offset),
+                    mixed_read_provenance: had_pending && !text.is_empty(),
                     text,
                 }
             }
@@ -71,6 +77,7 @@ impl Utf8ChunkDecoder {
                 self.pending_start_offset = None;
                 DecodedUtf8Chunk {
                     start_offset: Some(start_offset),
+                    mixed_read_provenance: had_pending && !text.is_empty(),
                     text,
                 }
             }

@@ -4,7 +4,6 @@ use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
 use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::task_notification_delivery::merge_context;
-use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
@@ -214,6 +213,8 @@ pub(super) async fn collect_turn_stream_until_terminal(
 
     // #1216: process any prior multi-turn leftover before the new disk read.
     let decoded_data = utf8_decoder.decode(&data, data_start_offset);
+    let initial_source_authority =
+        authority_for_decoded_text(source_authority, decoded_data.mixed_read_provenance);
     // #3041 P1-3 B1: defer forwarding until after parsing so a result-bearing
     // chunk carries its terminal commit fence; only seed the buffer start here.
     let initial_buffer_was_empty = all_data.is_empty();
@@ -468,7 +469,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
             &producer_registry,
             &mut cached_relay_producer,
             fence,
-            source_authority.generation_mtime_ns,
+            initial_source_authority,
         ),
         None => forward_chunk_to_supervisor_relay_for_turn(
             &tmux_session_name,
@@ -476,7 +477,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
             &producer_registry,
             &mut cached_relay_producer,
             turn_identity_for_panel.as_ref(),
-            source_authority.generation_mtime_ns,
+            initial_source_authority,
         ),
     };
     let supervisor_turn_state = apply_initial_supervisor_relay_forward(
@@ -651,22 +652,21 @@ pub(super) async fn collect_turn_stream_until_terminal(
                 tokio::task::spawn_blocking({
                     let path = output_path.clone();
                     let offset = current_offset;
-                    move || -> Result<(Vec<u8>, u64), String> {
-                        let mut file =
-                            std::fs::File::open(&path).map_err(|e| format!("open: {}", e))?;
-                        file.seek(SeekFrom::Start(offset))
-                            .map_err(|e| format!("seek: {}", e))?;
-                        let mut buf = vec![0u8; 16384];
-                        let n = file.read(&mut buf).map_err(|e| format!("read: {}", e))?;
-                        buf.truncate(n);
-                        Ok((buf, offset + n as u64))
-                    }
+                    move || read_watcher_source_chunk(&path, offset)
                 }),
             )
             .await;
 
             match read_more {
-                Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
+                Ok(Ok(Ok((chunk, off, file_identity)))) if !chunk.is_empty() => {
+                    let chunk_source_authority = source_authority_for_read(
+                        source_authority,
+                        &tmux_session_name,
+                        crate::services::discord::delivery_lease_cell::source_epoch_observer::marker_if_enabled(
+                            &tmux_session_name,
+                        ),
+                        file_identity,
+                    );
                     current_offset = off;
                     maybe_refresh_watcher_activity_heartbeat(
                         shared.pg_pool.as_ref(),
@@ -679,6 +679,10 @@ pub(super) async fn collect_turn_stream_until_terminal(
                     ready_for_input_tracker.record_output();
                     let chunk_start_offset = current_offset.saturating_sub(chunk.len() as u64);
                     let decoded_chunk = utf8_decoder.decode(&chunk, chunk_start_offset);
+                    let chunk_source_authority = authority_for_decoded_text(
+                        chunk_source_authority,
+                        decoded_chunk.mixed_read_provenance,
+                    );
                     // #3041 P1-3 (Part a, B1): DEFER the forward until AFTER the
                     // parse so the RESULT-bearing streaming chunk rides a TERMINAL
                     // frame carrying the commit fence. Set only the buffer START
@@ -741,7 +745,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             &producer_registry,
                             &mut cached_relay_producer,
                             fence,
-                            source_authority.generation_mtime_ns,
+                            chunk_source_authority,
                         ),
                         None => forward_chunk_to_supervisor_relay_for_turn(
                             &tmux_session_name,
@@ -749,7 +753,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             &producer_registry,
                             &mut cached_relay_producer,
                             turn_identity_for_panel.as_ref(),
-                            source_authority.generation_mtime_ns,
+                            chunk_source_authority,
                         ),
                     };
                     apply_streaming_supervisor_relay_forward(
@@ -854,7 +858,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             .await;
                     }
                 }
-                Ok(Ok(Ok((_, off)))) => {
+                Ok(Ok(Ok((_, off, _)))) => {
                     current_offset = off;
                     if should_probe_tmux_liveness(
                         last_liveness_probe_at.elapsed(),

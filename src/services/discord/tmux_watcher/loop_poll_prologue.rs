@@ -1,6 +1,4 @@
 use super::*;
-use std::io::{Read, Seek, SeekFrom};
-
 use crate::services::discord::session_relay_sink::journal::watcher as journal_watcher;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
@@ -9,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 pub(super) struct WatcherSourceAuthority {
     pub(super) generation_mtime_ns: i64,
     pub(super) reset_incarnation: u64,
+    pub(super) source_stamp: Option<crate::services::cluster::stream_relay::SourceStamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,33 +292,25 @@ pub(super) async fn poll_watcher_output_or_continue(
         commit_poll_state!();
         return PollOutcome::ContinueWatcherLoop;
     };
-    // Bind the bytes about to be read to the wrapper generation observed before
-    // opening the JSONL. A rotation after this snapshot makes the old authority
-    // stale; it can never relabel already-buffered bytes as the new incarnation.
+    let source_witness =
+        crate::services::discord::delivery_lease_cell::source_epoch_observer::marker_if_enabled(
+            tmux_session_name,
+        );
     let source_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
 
-    // Try to read new data from output file
     let read_result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         tokio::task::spawn_blocking({
             let path = output_path.to_string();
             let offset = current_offset;
-            move || -> Result<(Vec<u8>, u64), String> {
-                let mut file = std::fs::File::open(&path).map_err(|e| format!("open: {}", e))?;
-                file.seek(SeekFrom::Start(offset))
-                    .map_err(|e| format!("seek: {}", e))?;
-                let mut buf = vec![0u8; 16384];
-                let n = file.read(&mut buf).map_err(|e| format!("read: {}", e))?;
-                buf.truncate(n);
-                Ok((buf, offset + n as u64))
-            }
+            move || read_watcher_source_chunk(&path, offset)
         }),
     )
     .await;
     drop(source_frontier_mutation);
 
-    let (data, new_offset) = match read_result {
-        Ok(Ok(Ok((data, off)))) => (data, off),
+    let (data, new_offset, source_file_identity) = match read_result {
+        Ok(Ok(Ok((data, off, identity)))) => (data, off, identity),
         _ => {
             match tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),
@@ -367,6 +358,14 @@ pub(super) async fn poll_watcher_output_or_continue(
             }
         }
     };
+
+    let source_stamp = source_witness.map(|marker| {
+        crate::services::discord::delivery_lease_cell::source_epoch_observer::source_stamp(
+            tmux_session_name,
+            marker,
+            source_file_identity,
+        )
+    });
 
     let bytes_available = data.len().saturating_add(all_data.len());
     let poll_decision = if bytes_available == 0 {
@@ -676,6 +675,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         source_authority: WatcherSourceAuthority {
             generation_mtime_ns: source_generation_mtime_ns,
             reset_incarnation: source_frontier_token.reset_incarnation,
+            source_stamp,
         },
     }
 }

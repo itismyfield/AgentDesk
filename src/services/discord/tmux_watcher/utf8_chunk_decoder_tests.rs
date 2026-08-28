@@ -15,10 +15,12 @@ fn utf8_decoder_buffers_split_multibyte_scalar_at_chunk_start() {
     let first = decoder.decode(&bytes[..1], 20);
     assert_eq!(first.start_offset, None);
     assert!(first.text.is_empty());
+    assert!(!first.mixed_read_provenance);
 
     let second = decoder.decode(&bytes[1..], 21);
     assert_eq!(second.start_offset, Some(20));
     assert_eq!(second.text, payload);
+    assert!(second.mixed_read_provenance);
     assert!(!second.text.contains('\u{FFFD}'));
 }
 

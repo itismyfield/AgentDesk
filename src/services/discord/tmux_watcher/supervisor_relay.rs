@@ -292,6 +292,30 @@ pub(super) fn carry_session_bound_ack_for_turn(
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct SupervisorFrameSourceAuthority {
+    generation_mtime_ns: i64,
+    source_stamp: Option<crate::services::cluster::stream_relay::SourceStamp>,
+}
+
+impl From<i64> for SupervisorFrameSourceAuthority {
+    fn from(generation_mtime_ns: i64) -> Self {
+        Self {
+            generation_mtime_ns,
+            source_stamp: None,
+        }
+    }
+}
+
+impl From<super::loop_poll_prologue::WatcherSourceAuthority> for SupervisorFrameSourceAuthority {
+    fn from(authority: super::loop_poll_prologue::WatcherSourceAuthority) -> Self {
+        Self {
+            generation_mtime_ns: authority.generation_mtime_ns,
+            source_stamp: authority.source_stamp,
+        }
+    }
+}
+
 pub(super) fn forward_chunk_to_supervisor_relay(
     tmux_session_name: &str,
     chunk: &str,
@@ -299,7 +323,7 @@ pub(super) fn forward_chunk_to_supervisor_relay(
         crate::services::cluster::relay_producer_registry::RelayProducerRegistry,
     >,
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
-    source_generation_mtime_ns: i64,
+    source_authority: impl Into<SupervisorFrameSourceAuthority> + Copy,
 ) -> SupervisorRelayForward {
     forward_chunk_to_supervisor_relay_inner(
         tmux_session_name,
@@ -308,7 +332,7 @@ pub(super) fn forward_chunk_to_supervisor_relay(
         cached_producer,
         None,
         None,
-        Some(source_generation_mtime_ns),
+        Some(source_authority.into()),
     )
 }
 
@@ -320,7 +344,7 @@ pub(super) fn forward_chunk_to_supervisor_relay_for_turn(
     >,
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
     turn_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
-    source_generation_mtime_ns: i64,
+    source_authority: impl Into<SupervisorFrameSourceAuthority> + Copy,
 ) -> SupervisorRelayForward {
     let frame_identity = relay_turn_identity_for_session(turn_identity, tmux_session_name);
     forward_chunk_to_supervisor_relay_inner(
@@ -330,7 +354,7 @@ pub(super) fn forward_chunk_to_supervisor_relay_for_turn(
         cached_producer,
         None,
         frame_identity,
-        Some(source_generation_mtime_ns),
+        Some(source_authority.into()),
     )
 }
 
@@ -349,7 +373,7 @@ pub(super) fn forward_terminal_chunk_to_supervisor_relay(
     >,
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
     terminal: crate::services::cluster::stream_relay::TerminalCommitFence,
-    source_generation_mtime_ns: i64,
+    source_authority: impl Into<SupervisorFrameSourceAuthority> + Copy,
 ) -> SupervisorRelayForward {
     forward_chunk_to_supervisor_relay_inner(
         tmux_session_name,
@@ -358,7 +382,7 @@ pub(super) fn forward_terminal_chunk_to_supervisor_relay(
         cached_producer,
         Some(terminal),
         None,
-        Some(source_generation_mtime_ns),
+        Some(source_authority.into()),
     )
 }
 
@@ -386,7 +410,7 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
     >,
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
     terminal: crate::services::cluster::stream_relay::TerminalCommitFence,
-    source_generation_mtime_ns: i64,
+    source_authority: impl Into<SupervisorFrameSourceAuthority> + Copy,
 ) -> SupervisorRelayForward {
     let (terminal_part, tail_part) =
         split_decoded_chunk_at_terminal_boundary(decoded, leftover_len);
@@ -396,7 +420,7 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
         registry,
         cached_producer,
         terminal,
-        source_generation_mtime_ns,
+        source_authority,
     );
     if tail_part.is_empty() {
         return terminal_forward;
@@ -427,7 +451,7 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
         tail_part,
         registry,
         cached_producer,
-        source_generation_mtime_ns,
+        source_authority,
     );
     let mirrored = terminal_forward.mirrored && tail_forward.mirrored;
     let ack_target = terminal_forward.ack_target;
@@ -499,7 +523,7 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
     cached_producer: &mut Option<crate::services::cluster::stream_relay::RelayProducer>,
     terminal: Option<crate::services::cluster::stream_relay::TerminalCommitFence>,
     frame_identity: Option<RelayTurnIdentity>,
-    source_generation_mtime_ns: Option<i64>,
+    source_authority: Option<SupervisorFrameSourceAuthority>,
 ) -> SupervisorRelayForward {
     if chunk.is_empty() {
         return SupervisorRelayForward::mirrored_without_ack();
@@ -522,15 +546,17 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
     // target is produced (the `outcome.sequence.map` below yields `None`).
     let ack_turn_start_offset = terminal.as_ref().and_then(|fence| fence.turn_start_offset);
     let outcome = match terminal {
-        Some(fence) => producer.try_send_terminal_frame_with_sequence_and_generation(
+        Some(fence) => producer.try_send_terminal_frame_with_source(
             payload,
             fence,
-            source_generation_mtime_ns.unwrap_or(0),
+            source_authority.map_or(0, |authority| authority.generation_mtime_ns),
+            source_authority.and_then(|authority| authority.source_stamp),
         ),
-        None => producer.try_send_frame_with_sequence_identity_and_generation(
+        None => producer.try_send_frame_with_source(
             payload,
             frame_identity,
-            source_generation_mtime_ns.unwrap_or(0),
+            source_authority.map_or(0, |authority| authority.generation_mtime_ns),
+            source_authority.and_then(|authority| authority.source_stamp),
         ),
     };
     if !outcome.is_alive() {

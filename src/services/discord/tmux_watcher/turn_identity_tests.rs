@@ -1097,6 +1097,7 @@ async fn live_long_chunk_delivery_fingerprint_uses_raw_body_4081() {
                     session,
                 ),
             reset_incarnation: shared.relay_frontier_token(channel_id).reset_incarnation,
+            source_stamp: None,
         },
         0,
         raw_body.len() as u64,

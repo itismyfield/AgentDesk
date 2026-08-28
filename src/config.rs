@@ -1728,6 +1728,25 @@ fn is_legacy_execution_identity_mode(mode: &ExecutionIdentityMode) -> bool {
     *mode == ExecutionIdentityMode::Legacy
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationPermitMode {
+    #[default]
+    Legacy,
+    Observe,
+    Enforce,
+}
+
+impl PublicationPermitMode {
+    pub const fn records_publication_observations(self) -> bool {
+        matches!(self, Self::Observe | Self::Enforce)
+    }
+}
+
+fn is_legacy_publication_permit_mode(mode: &PublicationPermitMode) -> bool {
+    *mode == PublicationPermitMode::Legacy
+}
+
 /// Which verdict the relay health surface treats as authoritative — #5071 T4-B6
 /// (4987 §5.1).
 ///
@@ -1868,6 +1887,8 @@ pub struct RuntimeSettingsConfig {
     pub intake_delivery_settlement: IntakeDeliverySettlementStage,
     #[serde(default, skip_serializing_if = "is_legacy_execution_identity_mode")]
     pub execution_identity_mode: ExecutionIdentityMode,
+    #[serde(default, skip_serializing_if = "is_legacy_publication_permit_mode")]
+    pub publication_permit_mode: PublicationPermitMode,
     #[serde(default, skip_serializing_if = "is_structural_relay_verdict_source")]
     pub relay_verdict_source: RelayVerdictSource,
     /// #5464 T5 S1: rollout stage for the AC2-R relay-authority warrant.
@@ -2059,6 +2080,7 @@ impl RuntimeSettingsConfig {
             && self.delivery_journal_internal_channel_ids.is_empty()
             && self.intake_delivery_settlement == IntakeDeliverySettlementStage::Off
             && self.execution_identity_mode == ExecutionIdentityMode::Legacy
+            && self.publication_permit_mode == PublicationPermitMode::Legacy
             && self.relay_verdict_source == RelayVerdictSource::Structural
             && self.relay_authority_mode == RelayAuthorityMode::Legacy
             && self.relay_authority_cohort_percent == 0
@@ -2328,6 +2350,33 @@ mod runtime_hook_registry_config_tests {
                 )
                 .expect("reparse runtime"),
                 parsed
+            );
+        }
+    }
+
+    #[test]
+    fn publication_permit_modes_are_additive_and_default_legacy() {
+        let default = RuntimeSettingsConfig::default();
+        assert_eq!(
+            default.publication_permit_mode,
+            PublicationPermitMode::Legacy
+        );
+        assert!(
+            !serde_yaml::to_string(&default)
+                .unwrap()
+                .contains("publication_permit_mode")
+        );
+        for (name, mode) in [
+            ("legacy", PublicationPermitMode::Legacy),
+            ("observe", PublicationPermitMode::Observe),
+            ("enforce", PublicationPermitMode::Enforce),
+        ] {
+            let parsed: RuntimeSettingsConfig =
+                serde_yaml::from_str(&format!("publication_permit_mode: {name}")).unwrap();
+            assert_eq!(parsed.publication_permit_mode, mode);
+            assert_eq!(
+                mode.records_publication_observations(),
+                mode != PublicationPermitMode::Legacy
             );
         }
     }

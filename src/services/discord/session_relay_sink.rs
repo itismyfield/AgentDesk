@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use serenity::model::id::{ChannelId, MessageId};
 
+use super::delivery_lease_cell::source_epoch_observer;
 use super::formatting::{self, ReplaceLongMessageOutcome};
 use super::health::HealthRegistry;
 use super::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
@@ -1266,6 +1267,7 @@ async fn run_idle_jsonl_relay_loop(
                 pending_ends.remove(&session_name);
                 session_init_seen.remove(&session_name);
             }
+            let source_marker = source_epoch_observer::marker_if_enabled(&session_name);
             let current_generation_signature =
                 super::tmux::read_generation_file_mtime_ns(&session_name);
             if idle_jsonl_clear_session_init_on_generation_signature_change(
@@ -1393,25 +1395,26 @@ async fn run_idle_jsonl_relay_loop(
             let was_deferred = pending_ends.contains_key(&session_name);
             let pending_end = pending_ends.remove(&session_name).unwrap_or(len).max(len);
             let end = pending_end.min(start.saturating_add(IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK));
-            let Ok(payload) = read_jsonl_range(&relay_source.path, start, end) else {
+            let Ok(opened_range) = read_jsonl_range(&relay_source.path, start, end) else {
                 continue;
             };
+            let payload = &opened_range.payload;
             if payload.is_empty() {
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                 continue;
             }
-            if idle_jsonl_payload_contains_schedule_wakeup_setup(&payload) {
+            if idle_jsonl_payload_contains_schedule_wakeup_setup(payload) {
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                 continue;
             }
-            if !was_deferred && idle_jsonl_payload_contains_user_event(&payload) {
+            if !was_deferred && idle_jsonl_payload_contains_user_event(payload) {
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Clear);
                 continue;
             }
             let session_has_init =
-                idle_jsonl_session_has_init(&mut session_init_seen, &session_name, &payload);
+                idle_jsonl_session_has_init(&mut session_init_seen, &session_name, payload);
             let action = idle_relay_range_action(
-                &payload,
+                payload,
                 start,
                 end,
                 committed,
@@ -1430,22 +1433,25 @@ async fn run_idle_jsonl_relay_loop(
                     let Some(producer) = producers.get_producer(&session_name) else {
                         continue;
                     };
-                    let suffix = if from == start {
-                        payload.clone()
-                    } else {
-                        match read_jsonl_range(&relay_source.path, from, end) {
-                            Ok(suffix) => suffix,
-                            Err(_) => continue,
-                        }
+                    let Ok(suffix) = opened_range.suffix(&relay_source.path, from) else {
+                        continue;
                     };
-                    if suffix.is_empty() {
+                    if suffix.payload.is_empty() {
                         continue;
                     }
-                    if producer.try_send_frame_for_range(
-                        String::from_utf8_lossy(&suffix).into_owned(),
+                    let source_stamp = source_marker.map(|marker| {
+                        source_epoch_observer::source_stamp(
+                            &session_name,
+                            marker,
+                            suffix.file_identity,
+                        )
+                    });
+                    if producer.try_send_frame_for_range_with_source(
+                        String::from_utf8_lossy(&suffix.payload).into_owned(),
                         from,
                         end,
                         current_generation_signature,
+                        source_stamp,
                     ) {
                         pending_ends.insert(session_name.clone(), end);
                     }
@@ -1543,6 +1549,7 @@ mod tests {
             turn_start_offset: None,
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_source_stamp: None,
         }
     }
 
@@ -1601,6 +1608,7 @@ mod tests {
             turn_start_offset,
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_source_stamp: None,
         }
     }
 
