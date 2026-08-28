@@ -1154,7 +1154,14 @@ mod tests {
             assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
         });
         assert_eq!(loader.script_refs().unwrap(), vec!["inventory-routine.js"]);
-        assert!(loader.state.failed_scripts.lock().unwrap_or_else(recover_poisoned_lock).is_empty());
+        assert!(
+            loader
+                .state
+                .failed_scripts
+                .lock()
+                .unwrap_or_else(recover_poisoned_lock)
+                .is_empty()
+        );
         assert!(
             logs.contains("excluded Node-only worktree inventory helper from QuickJS discovery"),
             "logs={logs}"
@@ -1169,7 +1176,10 @@ mod tests {
 
         let loader = RoutineScriptLoader::new().unwrap();
         let replacement_path = path.clone();
-        *loader.source_read_hook.lock().unwrap_or_else(recover_poisoned_lock) = Some(Arc::new(move |candidate| {
+        *loader
+            .source_read_hook
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock) = Some(Arc::new(move |candidate| {
             if candidate == replacement_path {
                 std::fs::write(
                     candidate,
@@ -1254,7 +1264,14 @@ mod tests {
                 .unwrap(),
             0
         );
-        assert!(loader.state.failed_scripts.lock().unwrap_or_else(recover_poisoned_lock).is_empty());
+        assert!(
+            loader
+                .state
+                .failed_scripts
+                .lock()
+                .unwrap_or_else(recover_poisoned_lock)
+                .is_empty()
+        );
         assert!(loader.script_refs().unwrap().is_empty());
     }
 
@@ -1438,7 +1455,15 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
-        assert_eq!(loader.state.failed_scripts.lock().unwrap_or_else(recover_poisoned_lock).len(), 1);
+        assert_eq!(
+            loader
+                .state
+                .failed_scripts
+                .lock()
+                .unwrap_or_else(recover_poisoned_lock)
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1490,7 +1515,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
-        assert!(loader.state.failed_scripts.lock().unwrap_or_else(recover_poisoned_lock).is_empty());
+        assert!(
+            loader
+                .state
+                .failed_scripts
+                .lock()
+                .unwrap_or_else(recover_poisoned_lock)
+                .is_empty()
+        );
         assert_eq!(
             loader.get_script("recoverable.js").unwrap().unwrap().name,
             "Recovered"
@@ -1740,7 +1772,14 @@ mod tests {
 
         std::fs::remove_file(&retained).unwrap();
         assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
-        assert!(loader.state.failed_scripts.lock().unwrap_or_else(recover_poisoned_lock).is_empty());
+        assert!(
+            loader
+                .state
+                .failed_scripts
+                .lock()
+                .unwrap_or_else(recover_poisoned_lock)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1756,7 +1795,10 @@ mod tests {
         let loader = RoutineScriptLoader::new().unwrap();
         let read_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_attempts = Arc::clone(&read_attempts);
-        *loader.source_reader.lock().unwrap_or_else(recover_poisoned_lock) = Some(Arc::new(move |_| {
+        *loader
+            .source_reader
+            .lock()
+            .unwrap_or_else(recover_poisoned_lock) = Some(Arc::new(move |_| {
             observed_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
