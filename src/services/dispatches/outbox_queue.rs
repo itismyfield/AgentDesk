@@ -285,7 +285,14 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                 )
                 .await;
                 if done.is_ok() && action == "notify" {
-                    mark_dispatch_dispatched_pg(pool, &dispatch_id).await.ok();
+                    if let Err(error) = mark_dispatch_dispatched_pg(pool, &dispatch_id).await {
+                        tracing::error!(
+                            outbox_id = id,
+                            dispatch_id = %dispatch_id,
+                            %error,
+                            "[dispatch-outbox] post-notify bookkeeping: failed to mark dispatch as dispatched (it may already be dispatched)"
+                        );
+                    }
                 }
             }
             Err(err) => {
