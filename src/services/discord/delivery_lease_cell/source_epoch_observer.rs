@@ -83,11 +83,15 @@ pub(in crate::services::discord) fn source_stamp(
     session: &str,
     marker: SourceWitness,
     file: SourceFileIdentity,
-) -> SourceStamp {
-    SOURCE_EPOCHS
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .observe(session, marker, file)
+) -> Option<SourceStamp> {
+    (file != SourceFileIdentity::Unavailable
+        && (marker.generation.is_some() || marker.spawn_nonce_hash.is_some()))
+    .then(|| {
+        SOURCE_EPOCHS
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .observe(session, marker, file)
+    })
 }
 
 #[cfg(test)]
@@ -97,15 +101,16 @@ pub(super) fn assert_bounded_cache_eviction() {
         generation: None,
         spawn_nonce_hash: Some([nonce; 32]),
     };
-    cache.observe("evicted", witness(1), SourceFileIdentity::Unavailable);
-    let before_eviction = cache.observe("evicted", witness(2), SourceFileIdentity::Unavailable);
+    let file = SourceFileIdentity::Unavailable;
+    cache.observe("evicted", witness(1), file);
+    let before_eviction = cache.observe("evicted", witness(2), file);
     assert_eq!(before_eviction.epoch, SourceEpoch::from_observation(1));
     for index in 0..SOURCE_EPOCH_CAPACITY {
         let session = format!("session-{index:04}");
-        cache.observe(&session, witness(1), SourceFileIdentity::Unavailable);
+        cache.observe(&session, witness(1), file);
     }
     assert_eq!(cache.observations.len(), SOURCE_EPOCH_CAPACITY);
-    let after_eviction = cache.observe("evicted", witness(2), SourceFileIdentity::Unavailable);
+    let after_eviction = cache.observe("evicted", witness(2), file);
     assert_eq!(after_eviction.epoch, SourceEpoch::from_observation(0));
     assert_eq!(cache.observations.len(), SOURCE_EPOCH_CAPACITY);
 }

@@ -1439,7 +1439,7 @@ async fn run_idle_jsonl_relay_loop(
                     if suffix.payload.is_empty() {
                         continue;
                     }
-                    let source_stamp = source_marker.map(|marker| {
+                    let source_stamp = source_marker.and_then(|marker| {
                         source_epoch_observer::source_stamp(
                             &session_name,
                             marker,
@@ -2973,6 +2973,7 @@ mod tests {
             frame_turn_start_offset: turn_start_offset,
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_source_stamp: None,
         }
     }
 
@@ -4502,43 +4503,46 @@ mod tests {
         );
     }
 
-    // #3041 P1-3 (Part a, B1): the RESULT-bearing terminal frame's commit fence
-    // (consumed_end + identity) is copied onto the emitted `SessionRelayDelivery`,
-    // so `deliver_response` advances the authority from frame data — not an inflight
-    // file read. A non-terminal frame's delivery (none here) would carry None/0.
     #[test]
+    #[rustfmt::skip]
     fn parser_propagates_terminal_frame_commit_fence_onto_delivery() {
+        use crate::services::cluster::stream_relay::{SourceEpoch, SourceFileIdentity, SourceStamp, SourceWitness};
         let binding = matched("46");
+        let stamp = |epoch| SourceStamp {
+            epoch: SourceEpoch::from_observation(epoch),
+            file: SourceFileIdentity::Unavailable,
+            witness: SourceWitness { generation: None, spawn_nonce_hash: Some([epoch as u8; 32]) },
+        };
+        let first_payload = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"first \"}]}}\n";
+        let terminal_payload = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"second\"}]}}\n",
+            "{\"type\":\"result\",\"result\":\"first second\"}\n"
+        );
         let mut parser = SessionRelayParser::default();
-        // A non-terminal text frame: accumulates, emits nothing.
-        let assistant = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"final answer\"}]}}\n";
-        assert!(
-            parser
-                .ingest_frame(&frame(&binding, assistant, 1))
-                .is_empty()
-        );
-        // The result-bearing TERMINAL frame carries the commit fence.
-        let result = "{\"type\":\"result\",\"result\":\"final answer\"}\n";
-        let deliveries = parser.ingest_frame(&terminal_frame(
-            &binding,
-            result,
-            2,
-            512,
-            77,
-            "2026-06-04T00:00:00Z",
-        ));
-        assert_eq!(deliveries.len(), 1);
-        assert_eq!(deliveries[0].response_text, "final answer");
-        assert_eq!(
-            deliveries[0].terminal_consumed_end,
-            Some(512),
-            "the delivery must carry the terminal frame's consumed_end"
-        );
-        assert_eq!(deliveries[0].frame_turn_user_msg_id, 77);
-        assert_eq!(deliveries[0].frame_turn_started_at, "2026-06-04T00:00:00Z");
-        // #3041 P1-3 (codex P1-3 issue 2): the delivery also carries the frame's
-        // pinned turn_start_offset for the sink's identity gate.
-        assert_eq!(deliveries[0].frame_turn_start_offset, Some(0));
+        let split = first_payload.len() - 2;
+        let mut partial = frame(&binding, &first_payload[..split], 0); partial.relay_source_stamp = Some(stamp(1));
+        assert!(parser.ingest_frame(&partial).is_empty());
+        let split_terminal_payload = format!("{}{}", &first_payload[split..], terminal_payload);
+        let mut split_terminal = terminal_frame(&binding, &split_terminal_payload, 1, 512, 77, "2026-06-04T00:00:00Z"); split_terminal.relay_source_stamp = Some(stamp(2));
+        assert_eq!(parser.ingest_frame(&split_terminal)[0].relay_source_stamp, None);
+        for (first_stamp, terminal_stamp, expected) in [
+            (Some(stamp(1)), Some(stamp(2)), None), (Some(stamp(1)), None, None),
+            (None, Some(stamp(1)), None), (Some(stamp(1)), Some(stamp(1)), Some(stamp(1))),
+        ] {
+            parser.reset_turn();
+            let mut first = frame(&binding, first_payload, 1); first.relay_source_stamp = first_stamp;
+            assert!(parser.ingest_frame(&first).is_empty());
+            let metadata = frame(&binding, "{\"type\":\"system\",\"subtype\":\"init\"}\n", 2);
+            assert!(parser.ingest_frame(&metadata).is_empty());
+            let mut terminal = terminal_frame(&binding, terminal_payload, 3, 512, 77, "2026-06-04T00:00:00Z");
+            terminal.relay_source_stamp = terminal_stamp;
+            let deliveries = parser.ingest_frame(&terminal);
+            assert_eq!(deliveries.len(), 1);
+            let delivery = &deliveries[0];
+            assert_eq!((delivery.response_text.as_str(), delivery.relay_source_stamp), ("first second", expected));
+            assert_eq!((delivery.terminal_consumed_end, delivery.frame_turn_user_msg_id, delivery.frame_turn_started_at.as_str(), delivery.frame_turn_start_offset),
+                       (Some(512), 77, "2026-06-04T00:00:00Z", Some(0)));
+        }
     }
 
     #[test]
@@ -4548,6 +4552,14 @@ mod tests {
         let assistant = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old generation answer\"}]}}\n";
         let mut old_frame = frame(&binding, assistant, 1);
         old_frame.relay_generation_mtime_ns = Some(101);
+        old_frame.relay_source_stamp = Some(crate::services::cluster::stream_relay::SourceStamp {
+            epoch: crate::services::cluster::stream_relay::SourceEpoch::from_observation(1),
+            file: crate::services::cluster::stream_relay::SourceFileIdentity::Unavailable,
+            witness: crate::services::cluster::stream_relay::SourceWitness {
+                generation: None,
+                spawn_nonce_hash: Some([1; 32]),
+            },
+        });
         assert!(parser.ingest_frame(&old_frame).is_empty());
 
         let result = "{\"type\":\"result\",\"result\":\"new generation result\"}\n";
@@ -4580,6 +4592,7 @@ mod tests {
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].response_text, "replacement answer");
         assert_eq!(deliveries[0].relay_generation_mtime_ns, Some(202));
+        assert_eq!(deliveries[0].relay_source_stamp, None);
     }
 
     // #3041 P1-3 (codex P1-3 issue 1 — multi-turn-chunk close): after the watcher
@@ -4890,6 +4903,7 @@ mod tests {
             frame_turn_start_offset: None,
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_source_stamp: None,
         }
     }
 

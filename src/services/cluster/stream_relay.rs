@@ -75,11 +75,7 @@ pub const DEFAULT_RELAY_BUFFER: usize = 1024;
 /// (treated by the watcher as "not yet resolved" → it keeps waiting / eventually
 /// times out → reconciles, never a false ACK).
 pub const TERMINAL_OUTCOME_RING_CAPACITY: usize = 64;
-
-/// Observer telemetry only: this ordinal follows observation completion within one process.
-/// Bounded cache eviction may restart it at zero. Marker/payload-FD and generation/nonce
-/// samples can each be hybrid across replacement. It is not production enforcement or
-/// durable/cross-process authority and must not authorize or suppress delivery.
+/// Observer-only process-local order; may reset, be a hybrid, and never authorizes delivery.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SourceEpoch(u64);
 
@@ -138,7 +134,6 @@ impl SourceFileIdentity {
     }
 }
 
-/// A record-only source observation carrying the non-authoritative [`SourceEpoch`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceStamp {
     pub epoch: SourceEpoch,

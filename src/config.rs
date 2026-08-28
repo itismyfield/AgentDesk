@@ -2356,29 +2356,15 @@ mod runtime_hook_registry_config_tests {
     }
 
     #[test]
+    #[rustfmt::skip]
     fn publication_permit_modes_are_additive_and_default_legacy() {
         let default = RuntimeSettingsConfig::default();
-        assert_eq!(
-            default.publication_permit_mode,
-            PublicationPermitMode::Legacy
-        );
-        assert!(
-            !serde_yaml::to_string(&default)
-                .unwrap()
-                .contains("publication_permit_mode")
-        );
-        for (name, mode) in [
-            ("legacy", PublicationPermitMode::Legacy),
-            ("observe", PublicationPermitMode::Observe),
-            ("enforce", PublicationPermitMode::Enforce),
-        ] {
-            let parsed: RuntimeSettingsConfig =
-                serde_yaml::from_str(&format!("publication_permit_mode: {name}")).unwrap();
+        assert_eq!(default.publication_permit_mode, PublicationPermitMode::Legacy);
+        assert!(!serde_yaml::to_string(&default).unwrap().contains("publication_permit_mode"));
+        for (name, mode) in [("legacy", PublicationPermitMode::Legacy), ("observe", PublicationPermitMode::Observe), ("enforce", PublicationPermitMode::Enforce)] {
+            let parsed: RuntimeSettingsConfig = serde_yaml::from_str(&format!("publication_permit_mode: {name}")).unwrap();
             assert_eq!(parsed.publication_permit_mode, mode);
-            assert_eq!(
-                mode.records_publication_observations(),
-                mode != PublicationPermitMode::Legacy
-            );
+            assert_eq!(mode.records_publication_observations(), mode != PublicationPermitMode::Legacy);
         }
     }
 

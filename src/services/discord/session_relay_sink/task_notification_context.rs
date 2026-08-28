@@ -814,6 +814,7 @@ mod tests {
             frame_turn_start_offset: Some(4055),
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_source_stamp: None,
         };
         let transport = OrderedTransport {
             fail: AtomicBool::new(false),

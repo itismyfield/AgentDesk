@@ -359,7 +359,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         }
     };
 
-    let source_stamp = source_witness.map(|marker| {
+    let source_stamp = source_witness.and_then(|marker| {
         crate::services::discord::delivery_lease_cell::source_epoch_observer::source_stamp(
             tmux_session_name,
             marker,

@@ -145,36 +145,22 @@ mod publication_coordinate_tests {
 
     #[cfg(unix)]
     #[test]
+    #[rustfmt::skip]
     fn source_epoch_adopts_once_and_bumps_only_on_witness_change() {
-        use crate::services::cluster::stream_relay::{
-            GenerationSourceIdentity, SourceFileIdentity, SourceWitness,
-        };
+        use crate::services::cluster::stream_relay::{GenerationSourceIdentity, SourceFileIdentity, SourceWitness};
         let session = format!("epoch-observer-{}", uuid::Uuid::new_v4().simple());
-        let stamp = |generation_ino, nonce, file_dev, file_ino| {
-            super::source_epoch_observer::source_stamp(
-                &session,
-                SourceWitness {
-                    generation: Some(GenerationSourceIdentity::Unix {
-                        mtime_ns: 10,
-                        dev: 1,
-                        ino: generation_ino,
-                    }),
-                    spawn_nonce_hash: Some([nonce; 32]),
-                },
-                SourceFileIdentity::Unix {
-                    dev: file_dev,
-                    ino: file_ino,
-                },
-            )
-        };
-        let adopted = stamp(11, 1, 2, 99);
-        assert_eq!(stamp(11, 1, 2, 99).epoch, adopted.epoch);
-        let payload_file_changed = stamp(11, 1, 3, 100);
-        assert!(payload_file_changed.epoch > adopted.epoch);
-        let generation_changed = stamp(12, 1, 3, 100);
-        assert!(generation_changed.epoch > payload_file_changed.epoch);
-        let nonce_changed = stamp(12, 2, 3, 100);
-        assert!(nonce_changed.epoch > generation_changed.epoch);
+        let stamp = |generation_ino, nonce, file_dev, file_ino| super::source_epoch_observer::source_stamp(
+            &session,
+            SourceWitness { generation: Some(GenerationSourceIdentity::Unix { mtime_ns: 10, dev: 1, ino: generation_ino }), spawn_nonce_hash: Some([nonce; 32]) },
+            SourceFileIdentity::Unix { dev: file_dev, ino: file_ino },
+        ).expect("complete Unix source identity is stamp-eligible");
+        let empty = SourceWitness { generation: None, spawn_nonce_hash: None };
+        assert!(super::source_epoch_observer::source_stamp(&session, empty, SourceFileIdentity::Unix { dev: 2, ino: 99 }).is_none());
+        assert!(super::source_epoch_observer::source_stamp(&session, SourceWitness { spawn_nonce_hash: Some([1; 32]), ..empty }, SourceFileIdentity::Unavailable).is_none());
+        let adopted = stamp(11, 1, 2, 99); assert_eq!(stamp(11, 1, 2, 99).epoch, adopted.epoch);
+        let payload_file_changed = stamp(11, 1, 3, 100); assert!(payload_file_changed.epoch > adopted.epoch);
+        let generation_changed = stamp(12, 1, 3, 100); assert!(generation_changed.epoch > payload_file_changed.epoch);
+        let nonce_changed = stamp(12, 2, 3, 100); assert!(nonce_changed.epoch > generation_changed.epoch);
         super::source_epoch_observer::assert_bounded_cache_eviction();
     }
 
