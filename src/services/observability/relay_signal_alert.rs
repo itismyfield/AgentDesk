@@ -412,5 +412,9 @@ mod tests {
                 "status `{expected}` must be monitored; present: {statuses:?}"
             );
         }
+        assert!(
+            !statuses.contains(&"turn_start_offset_monotonic"),
+            "the alias-prone WARN-only birth observer remains queryable in observability_events but must not enter the threshold-1 operator paging table"
+        );
     }
 }

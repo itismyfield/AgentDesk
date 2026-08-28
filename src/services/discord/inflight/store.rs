@@ -1,7 +1,7 @@
 //! Inflight sidecar filesystem + advisory-lock seam (#3479 extraction).
 //!
 //! The low-level path layout (`inflight_provider_dir` / `inflight_state_path`)
-//! and the `flock(2)`-backed [`InflightStateFileLock`] guard
+//! and the cross-platform [`InflightStateFileLock`] guard
 //! (`lock_inflight_state_path`) used by every read/modify/write helper in the
 //! parent module. Behaviour-preserving move out of `inflight.rs`; the parent
 //! re-exports the cross-module items so existing call sites resolve unchanged.
@@ -36,17 +36,14 @@ pub(in crate::services::discord) fn inflight_state_path(
 }
 
 pub(crate) struct InflightStateFileLock {
-    _file: fs::File,
+    file: fs::File,
 }
 
 impl Drop for InflightStateFileLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            // Best effort unlock; closing the fd would release it anyway.
-            let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
-        }
+        // Ignore explicit-unlock failure: closing the handle immediately after
+        // this remains the advisory lock's release fallback.
+        let _ = self.file.unlock();
     }
 }
 
@@ -54,6 +51,29 @@ fn inflight_state_lock_path(path: &Path) -> PathBuf {
     path.with_extension("json.lock")
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) fn second_handle_try_lock(
+    path: &Path,
+) -> Result<(), std::fs::TryLockError> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(inflight_state_lock_path(path))
+        .map_err(std::fs::TryLockError::Error)?;
+    file.try_lock()
+}
+
+/// Acquires the canonical `<channel>.json.lock` sidecar as a blocking exclusive
+/// advisory file lock. Every cooperating AgentDesk process opens this stable
+/// pathname through [`lock_inflight_state_path`]; the JSON row itself remains
+/// unlocked. The sidecar is never unlinked, even when no JSON row exists, so an
+/// open handle can never become a detached old inode while a new canonical inode
+/// admits another writer. Handle close (including process exit) releases the
+/// lock; network-filesystem behavior and non-cooperating writers are outside the
+/// contract. `second_handle_try_lock` pins contention between two independent
+/// opens in one process; native Windows CI compiles that same witness, but it is
+/// not a separate-process integration test.
 pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
     let lock_path = inflight_state_lock_path(path);
     if let Some(parent) = lock_path.parent() {
@@ -65,15 +85,8 @@ pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileL
         .create(true)
         .open(&lock_path)
         .map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-    }
-    Ok(InflightStateFileLock { _file: file })
+    file.lock().map_err(|e| e.to_string())?;
+    Ok(InflightStateFileLock { file })
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +340,7 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
 }
 
 /// Reads + deserializes the inflight row at `path` while the caller holds the
-/// sidecar flock. Returns `None` on a missing/malformed file (same lenient
+/// sidecar lock. Returns `None` on a missing/malformed file (same lenient
 /// posture as `load_inflight_state`).
 pub(super) fn load_inflight_state_unlocked(path: &Path) -> Option<InflightTurnState> {
     let data = fs::read_to_string(path).ok()?;
@@ -387,7 +400,7 @@ pub(super) fn persist_under_lock_with_snapshot(
 }
 
 /// Complete a successful restart readoption while the caller owns the canonical
-/// sidecar flock. The readoption bit is idempotent, but an outgoing-process
+/// sidecar lock. The readoption bit is idempotent, but an outgoing-process
 /// restart marker is always consumed before the row can be cleared normally.
 pub(super) fn persist_readopted_under_lock(
     root: &Path,

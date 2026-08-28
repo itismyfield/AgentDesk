@@ -25,10 +25,10 @@
 # LF-terminated source; the two agree exactly for this repo's LF-only files.
 
 [hotfile_ratchet]
-# #4175: 3589 -> 3123 raw by moving the TUI-direct abort marker tombstone,
-# drain, and sweep production paths into child modules. Inline tests stay in
-# mod.rs, so raw LoC remains high while the production root drops 1304 -> 838.
-"src/services/discord/tui_direct_abort_marker/mod.rs" = 3123
+# #4175 moved tombstone, drain, and sweep production into child modules.
+# #5491: pure claim classification plus child WARN tests shrink the root
+# 3123 -> 3074 raw; lock in the 49-line reduction.
+"src/services/discord/tui_direct_abort_marker/mod.rs" = 3074
 # #3558: 10086 -> 10088 (+2), reviewable admission — both
 # `persist_watcher_stream_progress` streaming call sites thread the captured
 # `turn_identity_for_panel.as_ref()` into the new single-flock offset-TOCTOU RMW

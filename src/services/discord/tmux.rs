@@ -1201,6 +1201,18 @@ fn advance_buffer_start_offset(start_offset: u64, before_len: usize, after_len: 
     start_offset.saturating_add(before_len.saturating_sub(after_len) as u64)
 }
 
+pub(in crate::services::discord) fn build_monitor_triggered_inflight_state(
+    mut state: super::inflight::InflightTurnState,
+) -> super::inflight::InflightTurnState {
+    state.request_owner_user_id = 0;
+    state.user_msg_id = 0;
+    state.current_msg_id = 0;
+    state.rebind_origin = true;
+    state.turn_source = super::inflight::TurnSource::MonitorTriggered;
+    state.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
+    state
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn ensure_monitor_auto_turn_inflight(
     shared: &SharedData,
@@ -1237,17 +1249,15 @@ async fn ensure_monitor_auto_turn_inflight(
         .await
         .active_turn_nonce;
     synthetic.turn_start_offset = Some(turn_start_offset);
-    synthetic.rebind_origin = true;
+    synthetic = build_monitor_triggered_inflight_state(synthetic);
     // #2285 audit trail: monitor pattern fired this turn without an
     // originating Discord message. The session-bound relay does NOT branch
     // on this — recorded for diagnostics only.
-    synthetic.turn_source = super::inflight::TurnSource::MonitorTriggered;
     // status-panel-v2: make this watcher-owned so the panel-eligibility
     // predicate (watcher_inflight_is_panel_eligible_for_session) recognises the
     // synthetic monitor/self-paced-loop turn and the watcher can create/update/
     // clean up a live status panel for it. The shared external-input predicate
     // (lease + ⏳ anchor lifecycle, #3164/#3174) stays untouched.
-    synthetic.set_relay_owner_kind(super::inflight::RelayOwnerKind::Watcher);
 
     match super::inflight::save_inflight_state_create_new(&synthetic) {
         Ok(()) => {

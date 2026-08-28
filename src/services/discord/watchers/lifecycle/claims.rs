@@ -497,6 +497,24 @@ pub(crate) fn claim_watcher(
                 .get(&requested_tmux)
                 .map(|entry| WatcherClaimIncarnation::from_handle(existing_channel_id, &entry))
                 .expect("registry lock keeps the selected incumbent installed");
+            let reservation_matches = watchers.watcher_reservation_matches(
+                &requested_tmux,
+                existing_channel_id,
+                &incarnation.cancel,
+            );
+            record_watcher_invariant(
+                reservation_matches,
+                Some(provider),
+                existing_channel_id,
+                "watcher_reservation_matches_reused_incumbent",
+                "src/services/discord/watchers/lifecycle/claims.rs:claim_watcher",
+                "reused watcher handle, paired record, owner cell, and cancel identity must agree",
+                serde_json::json!({
+                    "source": source,
+                    "requested_channel_id": channel_id.get(),
+                    "tmux_session_name": requested_tmux,
+                }),
+            );
             return WatcherClaimOutcome::new(
                 WatcherClaimAction::ReuseExisting,
                 existing_channel_id,

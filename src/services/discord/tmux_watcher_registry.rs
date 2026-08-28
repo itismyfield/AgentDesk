@@ -181,6 +181,19 @@ impl IdentityFencedRegistry<'_> {
 /// live session converge before a second relay can spawn. A channel index is
 /// retained for existing routing and diagnostics callers that ask "does this
 /// Discord channel currently have watcher coverage?".
+#[derive(Clone)]
+pub(in crate::services::discord) struct ReservationRecord {
+    pub(in crate::services::discord) owner_channel_id: ChannelId,
+    pub(in crate::services::discord) cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub(in crate::services::discord) cell: Arc<DeliveryLeaseCell>,
+}
+
+struct UnpairedWatcher {
+    owner_channel_id: ChannelId,
+    handle: TmuxWatcherHandle,
+    reservation: Option<ReservationRecord>,
+}
+
 pub(in crate::services) struct TmuxWatcherRegistry {
     pub(in crate::services::discord) by_tmux_session: dashmap::DashMap<String, TmuxWatcherHandle>,
     tmux_session_by_channel: dashmap::DashMap<ChannelId, String>,
@@ -199,6 +212,8 @@ pub(in crate::services) struct TmuxWatcherRegistry {
     /// always wins on lookup, and a real watcher claim for the session clears
     /// the restored entry so it can never shadow live truth.
     restored_owner_by_tmux_session: dashmap::DashMap<String, ChannelId>,
+    reservation_by_tmux_session: dashmap::DashMap<String, ReservationRecord>,
+    tmux_relay_coords: Arc<dashmap::DashMap<ChannelId, Arc<TmuxRelayCoord>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,12 +256,140 @@ pub(in crate::services::discord) struct TmuxWatcherBinding {
 #[rustfmt::skip]
 impl TmuxWatcherRegistry {
     pub(in crate::services::discord) fn new() -> Self {
+        Self::new_with_coords(Arc::new(dashmap::DashMap::new()))
+    }
+
+    pub(in crate::services::discord) fn new_with_coords(
+        tmux_relay_coords: Arc<dashmap::DashMap<ChannelId, Arc<TmuxRelayCoord>>>,
+    ) -> Self {
         Self {
             by_tmux_session: dashmap::DashMap::new(),
             tmux_session_by_channel: dashmap::DashMap::new(),
             owner_channel_by_tmux_session: dashmap::DashMap::new(),
             restored_owner_by_tmux_session: dashmap::DashMap::new(),
+            reservation_by_tmux_session: dashmap::DashMap::new(),
+            tmux_relay_coords,
         }
+    }
+
+    fn resolve_delivery_cell(&self, channel_id: ChannelId) -> Arc<DeliveryLeaseCell> {
+        crate::services::discord::delivery_lease_cell::assert_payload_not_held();
+        let coord = {
+            let entry = self
+                .tmux_relay_coords
+                .entry(channel_id)
+                .or_insert_with(|| Arc::new(TmuxRelayCoord::new(channel_id)));
+            Arc::clone(entry.value())
+        };
+        Arc::clone(&coord.delivery_lease)
+    }
+
+    pub(in crate::services::discord) fn watcher_reservation_matches(
+        &self,
+        tmux_session_name: &str,
+        owner_channel_id: ChannelId,
+        expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> bool {
+        let record = self
+            .reservation_by_tmux_session
+            .get(tmux_session_name)
+            .map(|entry| entry.value().clone());
+        let Some(record) = record else { return false; };
+        record.owner_channel_id == owner_channel_id
+            && Arc::ptr_eq(&record.cancel, expected_cancel)
+            && record.cell.watcher_reservation_matches(expected_cancel)
+    }
+
+    #[cfg(test)]
+    pub(in crate::services::discord) fn relay_coords_share_identity_for_test(
+        &self,
+        coords: &Arc<dashmap::DashMap<ChannelId, Arc<TmuxRelayCoord>>>,
+    ) -> bool {
+        Arc::ptr_eq(&self.tmux_relay_coords, coords)
+    }
+
+    #[cfg(test)]
+    pub(in crate::services::discord) fn paired_reservation_matches_for_test(
+        &self,
+        tmux_session_name: &str,
+        owner_channel_id: ChannelId,
+        expected_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> bool {
+        self.watcher_reservation_matches(
+            tmux_session_name,
+            owner_channel_id,
+            expected_cancel,
+        )
+    }
+
+    #[cfg(test)]
+    pub(in crate::services::discord) fn replace_paired_cancel_for_test(
+        &self,
+        tmux_session_name: &str,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let _guard = lock_tmux_watcher_registry();
+        self.reservation_by_tmux_session
+            .get_mut(tmux_session_name)
+            .expect("paired reservation")
+            .cancel = cancel;
+    }
+
+    #[cfg(test)]
+    pub(in crate::services::discord) fn remove_pair_without_payload_for_test(
+        &self,
+        tmux_session_name: &str,
+    ) -> Option<ReservationRecord> {
+        let guard = lock_tmux_watcher_registry();
+        self.unpair_locked(&guard, tmux_session_name)?.reservation
+    }
+
+    #[cfg(test)]
+    pub(in crate::services::discord) fn clear_reservation_for_test(
+        &self,
+        record: ReservationRecord,
+    ) -> bool {
+        let guard = lock_tmux_watcher_registry();
+        record
+            .cell
+            .clear_watcher_reservation(&guard, &record.cancel)
+    }
+
+    fn clear_reservation(&self, guard: &TmuxWatcherRegistryGuard, record: ReservationRecord) {
+        record.cell.clear_watcher_reservation(guard, &record.cancel);
+    }
+
+    fn unpair_locked(
+        &self,
+        _guard: &TmuxWatcherRegistryGuard,
+        tmux_session_name: &str,
+    ) -> Option<UnpairedWatcher> {
+        // Preflight the full row before the first mutation. An inconsistent row
+        // is an explicit conflict (`None`) and remains untouched.
+        let owner_channel_id = self
+            .owner_channel_by_tmux_session
+            .get(tmux_session_name)
+            .map(|entry| *entry.value())?;
+        let channel_matches = self
+            .tmux_session_by_channel
+            .get(&owner_channel_id)
+            .is_some_and(|entry| entry.value().as_str() == tmux_session_name);
+        if !channel_matches
+            || !self.by_tmux_session.contains_key(tmux_session_name)
+            || !self.reservation_by_tmux_session.contains_key(tmux_session_name)
+        {
+            return None;
+        }
+
+        let (_, handle) = self.by_tmux_session.remove(tmux_session_name)?;
+        let (_, reservation) = self.reservation_by_tmux_session.remove(tmux_session_name)?;
+        self.owner_channel_by_tmux_session.remove(tmux_session_name);
+        self.tmux_session_by_channel.remove(&owner_channel_id);
+        Some(UnpairedWatcher {
+            owner_channel_id,
+            handle,
+            reservation: Some(reservation),
+        })
     }
 
     pub(in crate::services::discord) fn len(&self) -> usize {
@@ -281,35 +424,56 @@ impl TmuxWatcherRegistry {
 
     pub(in crate::services::discord) fn insert_locked(
         &self,
-        _guard: &TmuxWatcherRegistryGuard,
+        guard: &TmuxWatcherRegistryGuard,
         channel_id: ChannelId,
         handle: TmuxWatcherHandle,
     ) -> Option<TmuxWatcherHandle> {
-        if let Some((_, old_tmux_session_name)) = self.tmux_session_by_channel.remove(&channel_id) {
-            self.owner_channel_by_tmux_session
-                .remove(&old_tmux_session_name);
-            self.by_tmux_session.remove(&old_tmux_session_name);
-        }
-
+        // Pre-resolve every coordinate and clone every identity before mutation.
         let tmux_session_name = handle.tmux_session_name.clone();
-        if let Some((_, old_owner_channel_id)) = self
+        let cancel = Arc::clone(&handle.cancel);
+        let cell = self.resolve_delivery_cell(channel_id);
+        let channel_session_key = tmux_session_name.clone();
+        let owner_session_key = tmux_session_name.clone();
+        let handle_session_key = tmux_session_name.clone();
+        let reservation_session_key = tmux_session_name.clone();
+        let new_record = ReservationRecord {
+            owner_channel_id: channel_id,
+            cancel: Arc::clone(&cancel),
+            cell: Arc::clone(&cell),
+        };
+        let old_channel_session = self
+            .tmux_session_by_channel
+            .get(&channel_id)
+            .map(|entry| entry.clone());
+        let old_session_owner = self
             .owner_channel_by_tmux_session
-            .remove(&tmux_session_name)
-        {
-            self.tmux_session_by_channel.remove(&old_owner_channel_id);
+            .get(&tmux_session_name)
+            .map(|entry| *entry.value());
+
+        // All DashMap guards above have dropped before any payload lock is taken.
+        let mut channel_displaced = old_channel_session
+            .as_deref()
+            .and_then(|session| self.unpair_locked(guard, session));
+        let same_row = old_channel_session.as_deref() == Some(tmux_session_name.as_str());
+        let mut session_displaced = (!same_row && old_session_owner.is_some())
+            .then(|| self.unpair_locked(guard, &tmux_session_name))
+            .flatten();
+        for old in [&mut channel_displaced, &mut session_displaced] {
+            if let Some(record) = old.as_mut().and_then(|old| old.reservation.take()) {
+                self.clear_reservation(guard, record);
+            }
         }
 
-        // #3105: a live watcher handle is now the authoritative owner for this
-        // session — drop any restored owner-only binding so it can never shadow
-        // or contradict live truth.
-        self.restored_owner_by_tmux_session
-            .remove(&tmux_session_name);
-
-        self.tmux_session_by_channel
-            .insert(channel_id, tmux_session_name.clone());
-        self.owner_channel_by_tmux_session
-            .insert(tmux_session_name.clone(), channel_id);
-        self.by_tmux_session.insert(tmux_session_name, handle)
+        self.restored_owner_by_tmux_session.remove(&tmux_session_name);
+        self.tmux_session_by_channel.insert(channel_id, channel_session_key);
+        self.owner_channel_by_tmux_session.insert(owner_session_key, channel_id);
+        self.by_tmux_session.insert(handle_session_key, handle);
+        self.reservation_by_tmux_session
+            .insert(reservation_session_key, new_record);
+        cell.install_watcher_reservation(guard, cancel);
+        session_displaced
+            .or(channel_displaced)
+            .map(|old| old.handle)
     }
 
     pub(in crate::services::discord) fn remove(&self, channel_id: &ChannelId) -> Option<(ChannelId, TmuxWatcherHandle)> {
@@ -319,29 +483,27 @@ impl TmuxWatcherRegistry {
 
     pub(in crate::services::discord) fn remove_locked(
         &self,
-        _guard: &TmuxWatcherRegistryGuard,
+        guard: &TmuxWatcherRegistryGuard,
         channel_id: &ChannelId,
     ) -> Option<(ChannelId, TmuxWatcherHandle)> {
-        let (_, tmux_session_name) = self.tmux_session_by_channel.remove(channel_id)?;
-        self.owner_channel_by_tmux_session
-            .remove(&tmux_session_name);
-        self.by_tmux_session
-            .remove(&tmux_session_name)
-            .map(|(_, handle)| (*channel_id, handle))
+        let tmux_session_name = self.tmux_session_by_channel.get(channel_id).map(|entry| entry.clone())?;
+        let mut removed = self.unpair_locked(guard, &tmux_session_name)?;
+        if let Some(record) = removed.reservation.take() {
+            self.clear_reservation(guard, record);
+        }
+        Some((removed.owner_channel_id, removed.handle))
     }
 
     pub(in crate::services::discord) fn remove_tmux_session_locked(
         &self,
-        _guard: &TmuxWatcherRegistryGuard,
+        guard: &TmuxWatcherRegistryGuard,
         tmux_session_name: &str,
     ) -> Option<(ChannelId, TmuxWatcherHandle)> {
-        let (_, owner_channel_id) = self
-            .owner_channel_by_tmux_session
-            .remove(tmux_session_name)?;
-        self.tmux_session_by_channel.remove(&owner_channel_id);
-        self.by_tmux_session
-            .remove(tmux_session_name)
-            .map(|(_, handle)| (owner_channel_id, handle))
+        let mut removed = self.unpair_locked(guard, tmux_session_name)?;
+        if let Some(record) = removed.reservation.take() {
+            self.clear_reservation(guard, record);
+        }
+        Some((removed.owner_channel_id, removed.handle))
     }
 
     pub(in crate::services::discord) fn remove_tmux_session_if_current(
@@ -395,10 +557,14 @@ impl TmuxWatcherRegistry {
         }
         // #5071 relay-tail S4 r2 (P1-1): the removal runs INSIDE the delivery
         // conjunct's critical section, not after a bool it returned.
-        commit_under_delivery_fence(delivery, || {
-            self.remove_tmux_session_locked(guard, tmux_session_name)
+        let mut removed = commit_under_delivery_fence(delivery, || {
+            self.unpair_locked(guard, tmux_session_name)
         })
-        .flatten()
+        .flatten()?;
+        if let Some(record) = removed.reservation.take() {
+            self.clear_reservation(guard, record);
+        }
+        Some((removed.owner_channel_id, removed.handle))
     }
 
     pub(in crate::services::discord) fn cancel_and_remove_channel_if_current(
@@ -470,16 +636,22 @@ impl TmuxWatcherRegistry {
         // INSIDE the delivery conjunct's critical section, not after a bool it
         // returned — the whole destruction is what has to be atomic against a
         // racing acquire, not just the map mutation.
-        commit_under_delivery_fence(delivery, || {
-            let Some((_, handle)) = self.remove_locked(guard, channel_id) else {
-                return false;
-            };
-            handle
-                .cancel
-                .store(true, std::sync::atomic::Ordering::Relaxed);
-            true
+        let removed = commit_under_delivery_fence(delivery, || {
+            let removed = self.unpair_locked(guard, &tmux_session_name);
+            if let Some(removed) = &removed {
+                removed
+                    .handle
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            removed
         })
-        .unwrap_or(false)
+        .flatten();
+        let Some(mut removed) = removed else { return false; };
+        if let Some(record) = removed.reservation.take() {
+            self.clear_reservation(guard, record);
+        }
+        true
     }
 
     /// Bind an identity fence to the next CAS removal. The returned view is
