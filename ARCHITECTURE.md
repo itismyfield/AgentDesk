@@ -1337,6 +1337,8 @@ src/
 │   │   ├── memento_throttle.rs
 │   │   ├── mod.rs
 │   │   └── runtime_state.rs
+│   ├── message_outbox/
+│   │   └── identity.rs
 │   ├── observability/
 │   │   ├── emit.rs
 │   │   ├── events.rs
