@@ -175,6 +175,7 @@ mod publication_coordinate_tests {
         assert!(generation_changed.epoch > payload_file_changed.epoch);
         let nonce_changed = stamp(12, 2, 3, 100);
         assert!(nonce_changed.epoch > generation_changed.epoch);
+        super::source_epoch_observer::assert_bounded_cache_eviction();
     }
 
     #[test]

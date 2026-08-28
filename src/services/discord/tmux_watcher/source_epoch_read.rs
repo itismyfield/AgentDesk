@@ -39,6 +39,17 @@ pub(super) fn authority_for_decoded_text(
     }
 }
 
+pub(super) fn merged_source_stamp(
+    aggregate: Option<Option<crate::services::cluster::stream_relay::SourceStamp>>,
+    contribution: Option<crate::services::cluster::stream_relay::SourceStamp>,
+) -> Option<crate::services::cluster::stream_relay::SourceStamp> {
+    match (aggregate, contribution) {
+        (Some(Some(aggregate)), Some(contribution)) if aggregate == contribution => Some(aggregate),
+        (None, contribution) => contribution,
+        _ => None,
+    }
+}
+
 pub(super) fn source_authority_for_read(
     base: WatcherSourceAuthority,
     session_name: &str,

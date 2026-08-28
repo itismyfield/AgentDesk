@@ -1734,6 +1734,7 @@ pub enum PublicationPermitMode {
     #[default]
     Legacy,
     Observe,
+    /// Reserved rollout name; currently records and carries telemetry only.
     Enforce,
 }
 

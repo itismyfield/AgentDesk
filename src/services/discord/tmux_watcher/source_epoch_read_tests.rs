@@ -40,7 +40,8 @@ fn same_fd_identity_mode_resample_and_mixed_utf8_policy() {
     assert_eq!(replacement_bytes, b"new-bytes");
     assert_ne!(replacement_identity, old_identity);
     let observed = source_authority_for_read(base, &session, Some(marker), old_identity);
-    assert_eq!(observed.source_stamp.unwrap().file, old_identity);
+    let first = observed.source_stamp;
+    assert_eq!(first.unwrap().file, old_identity);
     let legacy = source_authority_for_read(observed, &session, None, replacement_identity);
     assert_eq!(
         (
@@ -52,7 +53,12 @@ fn same_fd_identity_mode_resample_and_mixed_utf8_policy() {
     );
     let replacement =
         source_authority_for_read(legacy, &session, Some(marker), replacement_identity);
-    assert_eq!(replacement.source_stamp.unwrap().file, replacement_identity);
+    let different = replacement.source_stamp;
+    assert_eq!(different.unwrap().file, replacement_identity);
+    assert_eq!(merged_source_stamp(Some(first), first), first);
+    assert_eq!(merged_source_stamp(Some(first), different), None);
+    assert_eq!(merged_source_stamp(Some(first), None), None);
+    assert_eq!(merged_source_stamp(Some(None), first), None);
     let mixed = authority_for_decoded_text(replacement, true);
     assert_eq!(mixed.source_stamp, None);
     assert_eq!(
@@ -60,11 +66,12 @@ fn same_fd_identity_mode_resample_and_mixed_utf8_policy() {
         (77, 9)
     );
     let collector = include_str!("turn_stream_collector.rs");
-    assert_eq!(collector.matches("authority_for_decoded_text(").count(), 2);
-    assert_eq!(collector.matches("marker_if_enabled(").count(), 1);
+    assert!(collector.contains("unwrap_or(Some(None))"));
+    assert!(collector.contains("if !restored_response_seed.is_empty()"));
     let idle = include_str!("../session_relay_sink.rs");
     let independent = "let source_marker = source_epoch_observer::marker_if_enabled(&session_name);\n            let current_generation_signature =\n                super::tmux::read_generation_file_mtime_ns(&session_name);";
     assert!(idle.contains(independent));
     assert!(!idle.contains("marker_and_generation_signature"));
     assert!(!include_str!("../session_relay_sink/turn_parser.rs").contains("relay_source_stamp"));
+    assert!(collector.contains("source_stamp: aggregate_source_stamp.flatten()"));
 }

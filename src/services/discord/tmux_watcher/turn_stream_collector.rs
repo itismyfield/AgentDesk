@@ -211,13 +211,13 @@ pub(super) async fn collect_turn_stream_until_terminal(
         }};
     }
 
-    // #1216: process any prior multi-turn leftover before the new disk read.
+    let initial_buffer_was_empty = all_data.is_empty();
     let decoded_data = utf8_decoder.decode(&data, data_start_offset);
     let initial_source_authority =
         authority_for_decoded_text(source_authority, decoded_data.mixed_read_provenance);
-    // #3041 P1-3 B1: defer forwarding until after parsing so a result-bearing
-    // chunk carries its terminal commit fence; only seed the buffer start here.
-    let initial_buffer_was_empty = all_data.is_empty();
+    let mut aggregate_source_stamp = initial_buffer_was_empty
+        .then(|| (!decoded_data.text.is_empty()).then_some(initial_source_authority.source_stamp))
+        .unwrap_or(Some(None));
     if initial_buffer_was_empty {
         all_data_start_offset = decoded_data.start_offset.unwrap_or(data_start_offset);
     }
@@ -270,6 +270,9 @@ pub(super) async fn collect_turn_stream_until_terminal(
     }
     let stream_seed = seed_disposition.stream_seed;
     let restored_response_seed = stream_seed.full_response.clone();
+    if !restored_response_seed.is_empty() {
+        aggregate_source_stamp = Some(None);
+    }
     let restored_assistant_text_seen = !restored_response_seed.trim().is_empty();
     // #3041 P1-3 B1: restored assistant text was not mirrored into StreamRelay,
     // so reset it after the deferred initial forward and keep watcher ownership.
@@ -683,10 +686,13 @@ pub(super) async fn collect_turn_stream_until_terminal(
                         chunk_source_authority,
                         decoded_chunk.mixed_read_provenance,
                     );
-                    // #3041 P1-3 (Part a, B1): DEFER the forward until AFTER the
-                    // parse so the RESULT-bearing streaming chunk rides a TERMINAL
-                    // frame carrying the commit fence. Set only the buffer START
-                    // offset here (independent of the forward).
+                    if !decoded_chunk.text.is_empty() {
+                        aggregate_source_stamp = Some(merged_source_stamp(
+                            aggregate_source_stamp,
+                            chunk_source_authority.source_stamp,
+                        ));
+                    }
+                    // Defer forwarding until parsing attaches the terminal fence.
                     let chunk_buffer_was_empty = all_data.is_empty();
                     if chunk_buffer_was_empty {
                         all_data_start_offset =
@@ -970,11 +976,10 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             }
                             crate::services::provider::ReadyForInputIdleState::PostWorkIdleTimeout => {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
-                                let stall_inflight_snapshot =
-                                    crate::services::discord::inflight::load_inflight_state(
-                                        &watcher_provider,
-                                        channel_id.get(),
-                                    );
+                                let stall_inflight_snapshot = crate::services::discord::inflight::load_inflight_state(
+                                    &watcher_provider,
+                                    channel_id.get(),
+                                );
                                 let dispatch_id = resolve_dispatched_thread_dispatch_from_db(
                                     shared.pg_pool.as_ref(),
                                     watcher_thread_channel_id.unwrap_or_else(|| channel_id.get()),
@@ -984,8 +989,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                                         .as_ref()
                                         .and_then(|state| state.dispatch_id.clone())
                                 });
-                                ready_for_input_stall_inflight_snapshot =
-                                    stall_inflight_snapshot;
+                                ready_for_input_stall_inflight_snapshot = stall_inflight_snapshot;
                                 if let Some(dispatch_id) = dispatch_id {
                                     ready_for_input_stall_dispatch_id = Some(dispatch_id);
                                     ready_for_input_failure_notice = Some(format!(
@@ -1107,6 +1111,10 @@ pub(super) async fn collect_turn_stream_until_terminal(
     }
 
     commit_collect_state!();
+    let source_authority = WatcherSourceAuthority {
+        source_stamp: aggregate_source_stamp.flatten(),
+        ..source_authority
+    };
     return CollectOutcome::Fallthrough(CollectedTurnStream {
         turn_data_start_offset,
         source_authority,
