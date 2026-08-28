@@ -378,10 +378,27 @@ class PrAnalyzerScratchPathTests(unittest.TestCase):
         self.assertTrue(is_scratch_file_path("scratch-check.sql"))
         self.assertTrue(is_scratch_file_path("test_cli.rs"))
         self.assertTrue(is_scratch_file_path("verify.sh"))
+        self.assertTrue(is_scratch_file_path("cargo_out.txt"))
+        self.assertTrue(is_scratch_file_path("npm_output.log"))
+        self.assertTrue(is_scratch_file_path("bun_output.txt"))
+        self.assertTrue(is_scratch_file_path("test.log"))
 
     def test_checked_in_scripts_and_migrations_are_not_scratch(self):
         self.assertFalse(is_scratch_file_path("scripts/deploy-release.sh"))
         self.assertFalse(is_scratch_file_path("migrations/postgres/001_init.sql"))
+
+    def test_nested_scratch_files_are_flagged(self):
+        self.assertTrue(is_scratch_file_path(".github/pr-body.md"))
+        self.assertTrue(is_scratch_file_path("src/patch.diff"))
+        self.assertTrue(is_scratch_file_path("docs/plan.md"))
+        self.assertTrue(is_scratch_file_path("src/scratch.js"))
+        self.assertTrue(is_scratch_file_path("policies/scratchpad.py"))
+        self.assertTrue(is_scratch_file_path("scripts/test_scratch.sh"))
+
+    def test_nested_test_files_are_not_scratch(self):
+        self.assertFalse(is_scratch_file_path("scripts/test.sh"))
+        self.assertFalse(is_scratch_file_path("tests/test.py"))
+        self.assertFalse(is_scratch_file_path("src/test_cli.rs"))
 
 
 class CiScriptScratchGuardTests(unittest.TestCase):
