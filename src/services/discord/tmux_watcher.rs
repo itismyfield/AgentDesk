@@ -164,9 +164,6 @@ mod terminal_relay_plan;
 #[path = "tmux_watcher/terminal_commit_epilogue.rs"]
 mod terminal_commit_epilogue;
 
-#[path = "tmux_watcher/source_epoch_read.rs"]
-mod source_epoch_read;
-
 #[path = "tmux_watcher/turn_stream_collector.rs"]
 mod turn_stream_collector;
 
@@ -188,7 +185,6 @@ use self::post_stream_exit::*;
 use self::pre_emit_guard::*;
 use self::session_bound_ack::*;
 use self::single_message_footer::*;
-use self::source_epoch_read::*;
 use self::stall_exit::*;
 use self::streaming_status_tick::*;
 use self::supervisor_relay::*;

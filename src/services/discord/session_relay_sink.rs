@@ -4522,9 +4522,25 @@ mod tests {
         let split = first_payload.len() - 2;
         let mut partial = frame(&binding, &first_payload[..split], 0); partial.relay_source_stamp = Some(stamp(1));
         assert!(parser.ingest_frame(&partial).is_empty());
-        let split_terminal_payload = format!("{}{}", &first_payload[split..], terminal_payload);
+        let next_assistant = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"next\"}]}}\n";
+        let split_terminal_payload = format!("{}{}{}", &first_payload[split..], terminal_payload, next_assistant);
         let mut split_terminal = terminal_frame(&binding, &split_terminal_payload, 1, 512, 77, "2026-06-04T00:00:00Z"); split_terminal.relay_source_stamp = Some(stamp(2));
         assert_eq!(parser.ingest_frame(&split_terminal)[0].relay_source_stamp, None);
+        let mut next_terminal = terminal_frame(&binding, "{\"type\":\"result\",\"result\":\"next\"}\n", 2, 640, 78, "2026-06-04T00:00:01Z"); next_terminal.relay_source_stamp = Some(stamp(2)); assert_eq!(parser.ingest_frame(&next_terminal)[0].relay_source_stamp, Some(stamp(2)));
+
+        let mut parser = SessionRelayParser::default();
+        let tail_split = next_assistant.len() - 2; let first_with_tail = format!("{}{}", terminal_payload, &next_assistant[..tail_split]);
+        let mut first_terminal = terminal_frame(&binding, &first_with_tail, 3, 768, 79, "2026-06-04T00:00:02Z"); first_terminal.relay_source_stamp = Some(stamp(1));
+        assert_eq!(parser.ingest_frame(&first_terminal)[0].relay_source_stamp, Some(stamp(1)));
+        let tail_completion = format!("{}{{\"type\":\"result\",\"result\":\"next\"}}\n", &next_assistant[tail_split..]);
+        let mut mixed_tail_terminal = terminal_frame(&binding, &tail_completion, 4, 896, 80, "2026-06-04T00:00:03Z"); mixed_tail_terminal.relay_source_stamp = Some(stamp(2));
+        assert_eq!(parser.ingest_frame(&mixed_tail_terminal)[0].relay_source_stamp, None);
+
+        let mut parser = SessionRelayParser::default();
+        let mut stale = frame(&binding, &first_payload[..split], 5); stale.relay_source_stamp = Some(stamp(1)); stale.relay_generation_mtime_ns = Some(101);
+        assert!(parser.ingest_frame(&stale).is_empty());
+        let mut fresh = terminal_frame(&binding, terminal_payload, 6, 1024, 81, "2026-06-04T00:00:04Z"); fresh.relay_source_stamp = Some(stamp(2)); fresh.relay_generation_mtime_ns = Some(202);
+        assert_eq!(parser.ingest_frame(&fresh)[0].relay_source_stamp, Some(stamp(2)));
         for (first_stamp, terminal_stamp, expected) in [
             (Some(stamp(1)), Some(stamp(2)), None), (Some(stamp(1)), None, None),
             (None, Some(stamp(1)), None), (Some(stamp(1)), Some(stamp(1)), Some(stamp(1))),

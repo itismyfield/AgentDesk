@@ -17,44 +17,6 @@ use super::SharedData;
 /// adoption preserves it. NOTE: this mtime signal is the #1270 wrapper-identity
 /// consumer ONLY. The status-panel session-instance key (#3087) reads the
 /// dedicated `.spawn_nonce` marker content instead.
-pub(in crate::services::discord) fn read_source_epoch_witness(
-    session: &str,
-) -> crate::services::cluster::stream_relay::SourceWitness {
-    use crate::services::cluster::stream_relay::{GenerationSourceIdentity, SourceWitness};
-    let generation = crate::services::tmux_common::resolve_session_temp_path(session, "generation")
-        .and_then(|path| std::fs::File::open(path).ok())
-        .and_then(|file| {
-            let metadata = file.metadata().ok()?;
-            let mtime_ns = metadata
-                .modified()
-                .ok()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .and_then(|value| i64::try_from(value.as_nanos()).ok())?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                Some(GenerationSourceIdentity::Unix {
-                    mtime_ns,
-                    dev: metadata.dev(),
-                    ino: metadata.ino(),
-                })
-            }
-            #[cfg(not(unix))]
-            {
-                Some(GenerationSourceIdentity::Unsupported { mtime_ns })
-            }
-        });
-    let spawn_nonce_hash = read_spawn_nonce(session).map(|nonce| {
-        use sha2::{Digest, Sha256};
-        Sha256::digest(nonce.as_bytes()).into()
-    });
-    SourceWitness {
-        generation,
-        spawn_nonce_hash,
-    }
-}
-
 pub(in crate::services::discord) fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
     let Some(path) =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "generation")
@@ -1488,6 +1450,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn generation_failure_nonce_success_changes_source_witness() {
+        use super::super::delivery_lease_cell::source_epoch_observer::read_source_epoch_witness;
         use std::os::unix::fs::PermissionsExt;
 
         let (_root, _env) = isolated_runtime_root();

@@ -1,5 +1,71 @@
 use super::StreamFrame;
 
+/// Observer-only process-local order; may reset, be a hybrid, and never authorizes delivery.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SourceEpoch(u64);
+
+impl SourceEpoch {
+    pub const fn from_observation(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GenerationSourceIdentity {
+    #[cfg(unix)]
+    Unix {
+        mtime_ns: i64,
+        dev: u64,
+        ino: u64,
+    },
+    Unsupported {
+        mtime_ns: i64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SourceWitness {
+    pub generation: Option<GenerationSourceIdentity>,
+    pub spawn_nonce_hash: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SourceFileIdentity {
+    #[cfg(unix)]
+    Unix {
+        dev: u64,
+        ino: u64,
+    },
+    Unavailable,
+}
+
+impl SourceFileIdentity {
+    pub fn from_open_file(file: &std::fs::File) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            file.metadata()
+                .map(|metadata| Self::Unix {
+                    dev: metadata.dev(),
+                    ino: metadata.ino(),
+                })
+                .unwrap_or(Self::Unavailable)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = file;
+            Self::Unavailable
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceStamp {
+    pub epoch: SourceEpoch,
+    pub file: SourceFileIdentity,
+    pub witness: SourceWitness,
+}
+
 /// The turn identity stamped on a relayed frame. Terminal frames use this as the
 /// commit-fence identity gate; non-terminal frames may also carry it so producer
 /// backpressure can attribute an evicted frame to the affected turn.
@@ -33,5 +99,60 @@ impl RelayDroppedFrame {
                 turn_start_offset: frame.turn_start_offset,
             },
         }
+    }
+}
+
+impl super::RelayProducer {
+    pub fn try_send_frame_for_range_with_source(
+        &self,
+        payload: String,
+        start: u64,
+        end: u64,
+        generation_mtime_ns: i64,
+        relay_source_stamp: Option<SourceStamp>,
+    ) -> bool {
+        self.enqueue(
+            payload,
+            None,
+            None,
+            Some((start, end)),
+            Some(generation_mtime_ns),
+            relay_source_stamp,
+        )
+        .is_alive()
+    }
+
+    pub fn try_send_frame_with_source(
+        &self,
+        payload: String,
+        frame_identity: Option<RelayTurnIdentity>,
+        relay_generation_mtime_ns: i64,
+        relay_source_stamp: Option<SourceStamp>,
+    ) -> super::RelaySendOutcome {
+        self.enqueue(
+            payload,
+            None,
+            frame_identity,
+            None,
+            (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
+            relay_source_stamp,
+        )
+    }
+
+    pub fn try_send_terminal_frame_with_source(
+        &self,
+        payload: String,
+        terminal: super::TerminalCommitFence,
+        relay_generation_mtime_ns: i64,
+        relay_source_stamp: Option<SourceStamp>,
+    ) -> super::RelaySendOutcome {
+        self.enqueue(
+            payload,
+            Some(terminal),
+            None,
+            None,
+            (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
+            relay_source_stamp,
+        )
     }
 }

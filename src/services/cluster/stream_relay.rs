@@ -56,7 +56,7 @@ use super::session_matcher::MatchedChannel;
 
 mod identity;
 mod terminal_resolution;
-pub use identity::{RelayDroppedFrame, RelayTurnIdentity};
+pub use identity::*;
 pub use terminal_resolution::{DeliveryOutcome, RelaySinkOutcome};
 
 /// Default size of the producer → relay queue. Generous enough to absorb a
@@ -75,71 +75,6 @@ pub const DEFAULT_RELAY_BUFFER: usize = 1024;
 /// (treated by the watcher as "not yet resolved" → it keeps waiting / eventually
 /// times out → reconciles, never a false ACK).
 pub const TERMINAL_OUTCOME_RING_CAPACITY: usize = 64;
-/// Observer-only process-local order; may reset, be a hybrid, and never authorizes delivery.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SourceEpoch(u64);
-
-impl SourceEpoch {
-    pub const fn from_observation(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum GenerationSourceIdentity {
-    #[cfg(unix)]
-    Unix {
-        mtime_ns: i64,
-        dev: u64,
-        ino: u64,
-    },
-    Unsupported {
-        mtime_ns: i64,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct SourceWitness {
-    pub generation: Option<GenerationSourceIdentity>,
-    pub spawn_nonce_hash: Option<[u8; 32]>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SourceFileIdentity {
-    #[cfg(unix)]
-    Unix {
-        dev: u64,
-        ino: u64,
-    },
-    Unavailable,
-}
-
-impl SourceFileIdentity {
-    pub fn from_open_file(file: &std::fs::File) -> Self {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            file.metadata()
-                .map(|metadata| Self::Unix {
-                    dev: metadata.dev(),
-                    ino: metadata.ino(),
-                })
-                .unwrap_or(Self::Unavailable)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = file;
-            Self::Unavailable
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SourceStamp {
-    pub epoch: SourceEpoch,
-    pub file: SourceFileIdentity,
-    pub witness: SourceWitness,
-}
 
 /// An opaque stream frame emitted by a provider. Carries enough metadata for
 /// the sink to route + format without re-reading the rollout file.
@@ -500,25 +435,6 @@ impl RelayProducer {
         .is_alive()
     }
 
-    pub fn try_send_frame_for_range_with_source(
-        &self,
-        payload: String,
-        start: u64,
-        end: u64,
-        generation_mtime_ns: i64,
-        relay_source_stamp: Option<SourceStamp>,
-    ) -> bool {
-        self.enqueue(
-            payload,
-            None,
-            None,
-            Some((start, end)),
-            Some(generation_mtime_ns),
-            relay_source_stamp,
-        )
-        .is_alive()
-    }
-
     fn enqueue(
         &self,
         payload: String,
@@ -571,23 +487,6 @@ impl RelayProducer {
         )
     }
 
-    pub fn try_send_frame_with_source(
-        &self,
-        payload: String,
-        frame_identity: Option<RelayTurnIdentity>,
-        relay_generation_mtime_ns: i64,
-        relay_source_stamp: Option<SourceStamp>,
-    ) -> RelaySendOutcome {
-        self.enqueue(
-            payload,
-            None,
-            frame_identity,
-            None,
-            (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
-            relay_source_stamp,
-        )
-    }
-
     /// #3041 P1-3 (Part a, B1): forward the RESULT-bearing chunk as a terminal
     /// frame carrying the commit fence (`terminal.consumed_end` + the pinned turn
     /// identity). The frame both triggers the sink's terminal delivery AND is the
@@ -614,23 +513,6 @@ impl RelayProducer {
             None,
             (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
             None,
-        )
-    }
-
-    pub fn try_send_terminal_frame_with_source(
-        &self,
-        payload: String,
-        terminal: TerminalCommitFence,
-        relay_generation_mtime_ns: i64,
-        relay_source_stamp: Option<SourceStamp>,
-    ) -> RelaySendOutcome {
-        self.enqueue(
-            payload,
-            Some(terminal),
-            None,
-            None,
-            (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
-            relay_source_stamp,
         )
     }
 }

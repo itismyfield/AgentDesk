@@ -522,6 +522,8 @@ src/
 │   │   │   ├── text_commands.rs
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── voice.rs
+│   │   ├── delivery_lease_cell/
+│   │   │   └── source_epoch_observer.rs
 │   │   ├── footer_view_reconciler/
 │   │   │   ├── mod.rs
 │   │   │   └── registry.rs

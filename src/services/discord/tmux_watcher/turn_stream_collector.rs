@@ -215,9 +215,6 @@ pub(super) async fn collect_turn_stream_until_terminal(
     let decoded_data = utf8_decoder.decode(&data, data_start_offset);
     let initial_source_authority =
         authority_for_decoded_text(source_authority, decoded_data.mixed_read_provenance);
-    let mut aggregate_source_stamp = initial_buffer_was_empty
-        .then(|| (!decoded_data.text.is_empty()).then_some(initial_source_authority.source_stamp))
-        .unwrap_or(Some(None));
     if initial_buffer_was_empty {
         all_data_start_offset = decoded_data.start_offset.unwrap_or(data_start_offset);
     }
@@ -270,9 +267,6 @@ pub(super) async fn collect_turn_stream_until_terminal(
     }
     let stream_seed = seed_disposition.stream_seed;
     let restored_response_seed = stream_seed.full_response.clone();
-    if !restored_response_seed.is_empty() {
-        aggregate_source_stamp = Some(None);
-    }
     let restored_assistant_text_seen = !restored_response_seed.trim().is_empty();
     // #3041 P1-3 B1: restored assistant text was not mirrored into StreamRelay,
     // so reset it after the deferred initial forward and keep watcher ownership.
@@ -686,12 +680,6 @@ pub(super) async fn collect_turn_stream_until_terminal(
                         chunk_source_authority,
                         decoded_chunk.mixed_read_provenance,
                     );
-                    if !decoded_chunk.text.is_empty() {
-                        aggregate_source_stamp = Some(merged_source_stamp(
-                            aggregate_source_stamp,
-                            chunk_source_authority.source_stamp,
-                        ));
-                    }
                     // Defer forwarding until parsing attaches the terminal fence.
                     let chunk_buffer_was_empty = all_data.is_empty();
                     if chunk_buffer_was_empty {
@@ -1112,7 +1100,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
 
     commit_collect_state!();
     let source_authority = WatcherSourceAuthority {
-        source_stamp: aggregate_source_stamp.flatten(),
+        source_stamp: None,
         ..source_authority
     };
     return CollectOutcome::Fallthrough(CollectedTurnStream {
