@@ -157,11 +157,19 @@ _launchd_service_target() {
 
 _launchd_job_state() {
   local label="$1"
-  local target
+  local target output state
   target="$(_launchd_service_target "$label")" || return 0
-  launchctl print "$target" 2>/dev/null \
+  if ! output="$(launchctl print "$target" 2>/dev/null)"; then
+    # `launchctl print` exits non-zero when the job is unloaded. Treat that
+    # state as stopped explicitly; returning an empty string makes restart
+    # drain callers wait for an acknowledgement that no process can publish.
+    printf '%s\n' "not running"
+    return 0
+  fi
+  state="$(printf '%s\n' "$output" \
     | sed -n 's/^[[:space:]]*state = //p' \
-    | head -n 1
+    | head -n 1)"
+  printf '%s\n' "${state:-unknown}"
 }
 
 _kickstart_launchd_job_if_needed() {

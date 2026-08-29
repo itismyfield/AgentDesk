@@ -363,10 +363,48 @@ async fn load_unique_legacy_candidate_for_update(
     match rows.len() {
         0 => Ok(None),
         1 => rows.into_iter().next().map(decode_evidence).transpose(),
-        _ => Err(conflict(
-            SessionIdentityConflictKind::AmbiguousLegacy,
-            "multiple legacy session rows claim the canonical Discord identity",
-        )),
+        _ => {
+            // Host-qualified legacy locators can leave one live row beside one
+            // or more disconnected shells after a gateway moves machines. A
+            // unique operational row is safe to promote; multiple operational
+            // rows (or only disconnected rows) remain deliberately fail-closed.
+            let operational_ids: Vec<i64> = sqlx::query_scalar(
+                "SELECT id
+                 FROM sessions
+                 WHERE identity_kind IS NULL
+                   AND discord_token_hash IS NULL
+                   AND provider = $1
+                   AND channel_id = $2
+                   AND agentdesk_legacy_discord_locator_is_ordinary(session_key, $1, $3)
+                   AND (
+                       lower(COALESCE(status, '')) NOT IN ('disconnected', 'aborted')
+                       OR active_dispatch_id IS NOT NULL
+                       OR raw_provider_session_id IS NOT NULL
+                       OR claude_session_id IS NOT NULL
+                   )
+                 FOR UPDATE",
+            )
+            .bind(provider)
+            .bind(identity.channel_id)
+            .bind(identity.discord_token_hash)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(database_error)?;
+            if operational_ids.len() == 1 {
+                let survivor_id = operational_ids[0];
+                for row in rows {
+                    let evidence = decode_evidence(row)?;
+                    if evidence.id == survivor_id {
+                        return Ok(Some(evidence));
+                    }
+                }
+                return Err(database_error(sqlx::Error::RowNotFound));
+            }
+            Err(conflict(
+                SessionIdentityConflictKind::AmbiguousLegacy,
+                "multiple legacy session rows claim the canonical Discord identity",
+            ))
+        }
     }
 }
 

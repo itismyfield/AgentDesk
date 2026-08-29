@@ -123,7 +123,7 @@ fn refresh_delivery_rewind_state(inflight_state: &mut InflightTurnState) -> bool
     };
     let expected_identity =
         super::super::inflight::InflightTurnIdentity::from_state(inflight_state);
-    let Some(reloaded) =
+    let Some(mut reloaded) =
         super::super::inflight::load_inflight_state(&provider, inflight_state.channel_id)
     else {
         return false;
@@ -131,6 +131,7 @@ fn refresh_delivery_rewind_state(inflight_state: &mut InflightTurnState) -> bool
     if !expected_identity.matches_state(&reloaded) {
         return false;
     }
+    reloaded.preserve_intake_settlement_authority_from(inflight_state);
     *inflight_state = reloaded;
     true
 }
@@ -635,6 +636,35 @@ mod tests {
         );
         assert_eq!(original.full_response, "old turn error text");
         assert_eq!(original.response_sent_offset, 0);
+    }
+
+    #[test]
+    fn same_turn_refresh_preserves_transient_intake_settlement_authority() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempfile::TempDir::new().expect("temp root");
+        let _root = set_runtime_root(temp.path());
+
+        let channel = ChannelId::new(41_100_006);
+        let mut original = inflight("terminal body", 0);
+        original.channel_id = channel.get();
+        original.adopt_intake_outbox(Some(7331));
+        original.bind_intake_delivery_capabilities(
+            crate::services::discord::runtime_bootstrap::intake_delivery_capability::SettlementCapabilities {
+                stamp_dispatched: true,
+                settle_and_sweep: true,
+            },
+        );
+        super::super::super::inflight::save_inflight_state(&original)
+            .expect("persist same-turn state");
+
+        assert!(refresh_delivery_rewind_state(&mut original));
+        assert_eq!(original.intake_outbox_id(), Some(7331));
+        assert!(
+            original.intake_delivery_capabilities().settle_and_sweep,
+            "serde reload must not downgrade the bridge's immutable settlement snapshot"
+        );
     }
 
     #[test]

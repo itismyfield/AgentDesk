@@ -4,7 +4,9 @@
 //! namespace cap once these gained coverage of self-id resolution.
 
 use super::super::gateway_lease_recovery::standby_retry_delay;
+use super::create_gateway_self_fence_restart_request;
 use super::*;
+use crate::services::provider::ProviderKind;
 use serde_json::json;
 
 #[test]
@@ -14,6 +16,25 @@ fn standby_retry_delay_stays_inside_thirty_to_sixty_seconds() {
         assert!(delay >= Duration::from_secs(30));
         assert!(delay <= Duration::from_secs(60));
     }
+}
+
+#[test]
+fn gateway_self_fence_publishes_process_restart_marker() {
+    let root = tempfile::tempdir().expect("restart marker root");
+    let nonce = "gateway-self-fence-test";
+    assert!(
+        create_gateway_self_fence_restart_request(root.path(), &ProviderKind::Codex, nonce)
+            .expect("publish gateway self-fence request")
+    );
+    let marker = std::fs::read_to_string(root.path().join("restart_pending"))
+        .expect("read canonical restart marker");
+    assert!(marker.lines().any(|line| line == format!("nonce={nonce}")));
+    assert!(
+        marker
+            .lines()
+            .any(|line| line == "reason=gateway_lease_self_fence")
+    );
+    assert!(marker.lines().any(|line| line == "provider=codex"));
 }
 
 #[test]
