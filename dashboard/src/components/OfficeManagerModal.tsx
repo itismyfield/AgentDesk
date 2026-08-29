@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { X, Plus, Trash2, UserPlus, UserMinus, Settings2 } from "lucide-react";
 import type { Office, Agent } from "../types";
 import AgentAvatar from "./AgentAvatar";
@@ -69,6 +69,12 @@ export default function OfficeManagerModal({
     (ko: string, en: string) => (isKo ? ko : en),
     [isKo],
   );
+  const titleId = useId();
+  const nameEnId = useId();
+  const nameKoId = useId();
+  const descriptionId = useId();
+  const iconLabelId = useId();
+  const colorLabelId = useId();
 
   const openCreate = () => {
     setEditOffice(null);
@@ -128,7 +134,7 @@ export default function OfficeManagerModal({
         ref={containerRef}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="office-manager-title"
+        aria-labelledby={titleId}
         tabIndex={-1}
         className="mx-4 flex max-h-[84vh] w-full max-w-2xl flex-col rounded-[28px] border"
         style={{
@@ -143,7 +149,7 @@ export default function OfficeManagerModal({
           style={{ borderBottom: "1px solid color-mix(in srgb, var(--th-border) 72%, transparent)" }}
         >
           <h2
-            id="office-manager-title"
+            id={titleId}
             className="text-lg font-bold"
             style={{ color: "var(--th-text-heading)" }}
           >
@@ -257,14 +263,14 @@ export default function OfficeManagerModal({
                 <div className="space-y-4">
                   <div>
                 <label
-                  htmlFor="office-name-en"
+                  htmlFor={nameEnId}
                   className="block text-xs font-medium mb-1"
                   style={{ color: "var(--th-text-secondary)" }}
                 >
                   {tr("이름 (영문)", "Name (EN)")}
                 </label>
                 <input
-                  id="office-name-en"
+                  id={nameEnId}
                   value={draft.name}
                   onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
                   className="w-full px-3 py-2 rounded-lg text-sm"
@@ -278,14 +284,14 @@ export default function OfficeManagerModal({
               </div>
                   <div>
                     <label
-                      htmlFor="office-name-ko"
+                      htmlFor={nameKoId}
                       className="block text-xs font-medium mb-1"
                       style={{ color: "var(--th-text-secondary)" }}
                     >
                       {tr("이름 (한국어)", "Name (KO)")}
                     </label>
                     <input
-                      id="office-name-ko"
+                      id={nameKoId}
                       value={draft.name_ko}
                       onChange={(e) => setDraft((prev) => ({ ...prev, name_ko: e.target.value }))}
                       className="w-full px-3 py-2 rounded-lg text-sm"
@@ -299,12 +305,14 @@ export default function OfficeManagerModal({
                   </div>
                   <div>
                     <label
+                      htmlFor={descriptionId}
                       className="block text-xs font-medium mb-1"
                       style={{ color: "var(--th-text-secondary)" }}
                     >
                       {tr("설명", "Description")}
                     </label>
                     <textarea
+                      id={descriptionId}
                       value={draft.description}
                       onChange={(e) => setDraft((prev) => ({ ...prev, description: e.target.value }))}
                       className="w-full px-3 py-2 rounded-lg text-sm resize-none"
@@ -325,13 +333,14 @@ export default function OfficeManagerModal({
               >
                 <div className="space-y-4">
                   <div>
-                    <label
+                    <div
+                      id={iconLabelId}
                       className="block text-xs font-medium mb-1"
                       style={{ color: "var(--th-text-secondary)" }}
                     >
                       {tr("아이콘", "Icon")}
-                    </label>
-                    <div className="flex gap-1.5 flex-wrap" role="radiogroup" aria-label={tr("아이콘", "Icon")}>
+                    </div>
+                    <div className="flex gap-1.5 flex-wrap" role="radiogroup" aria-labelledby={iconLabelId}>
                       {OFFICE_ICONS.map((ic, idx) => (
                         <button
                           key={ic}
@@ -380,13 +389,14 @@ export default function OfficeManagerModal({
                     </div>
                   </div>
                   <div>
-                    <label
+                    <div
+                      id={colorLabelId}
                       className="block text-xs font-medium mb-1"
                       style={{ color: "var(--th-text-secondary)" }}
                     >
                       {tr("색상", "Color")}
-                    </label>
-                    <div className="flex gap-1.5 flex-wrap" role="radiogroup" aria-label={tr("색상", "Color")}>
+                    </div>
+                    <div className="flex gap-1.5 flex-wrap" role="radiogroup" aria-labelledby={colorLabelId}>
                       {OFFICE_COLORS.map((c, idx) => (
                         <button
                           key={c}
