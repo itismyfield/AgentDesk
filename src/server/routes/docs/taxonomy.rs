@@ -56,7 +56,7 @@ pub(super) fn is_canonical_category(category: &str) -> bool {
 //
 // The hierarchy is:
 //   GET /api/docs                     -> { groups: [{name, description, categories: [names]}] }
-//   GET /api/docs/{group}             -> { group, categories: [{name, description, endpoint_count, canonical_path}] }
+//   GET /api/docs/{group}             -> { group, categories: [{name, description, endpoint_count}] }
 //   GET /api/docs/{group}/{category}  -> { group, category, endpoints: [full endpoint docs] }
 //
 // `CANONICAL_CATEGORIES` (the legacy 7-group contract) is retained so that
