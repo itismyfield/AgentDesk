@@ -51,12 +51,7 @@ pub(super) struct SafeRelativeRefV2(String);
 
 impl SafeRelativeRefV2 {
     pub(super) fn parse(text: &str) -> Result<Self, ValueError> {
-        if text.is_empty()
-            || text.contains(['\\', '\0'])
-            || text.ends_with('/')
-            || has_drive_prefix(text)
-            || text.split('/').any(unsafe_component)
-        {
+        if text.is_empty() || text.ends_with('/') || text.split('/').any(unsafe_component) {
             return Err(ValueError);
         }
         Ok(Self(text.to_owned()))
@@ -67,12 +62,12 @@ impl SafeRelativeRefV2 {
     }
 }
 
-fn has_drive_prefix(text: &str) -> bool {
-    matches!(text.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic())
-}
-
 fn unsafe_component(component: &str) -> bool {
-    if component.is_empty() || matches!(component, "." | "..") || component.ends_with(['.', ' ']) {
+    if component.is_empty()
+        || matches!(component, "." | "..")
+        || component.ends_with(['.', ' '])
+        || component.chars().any(windows_forbidden_character)
+    {
         return true;
     }
     let basename = component.split('.').next().unwrap_or("");
@@ -82,10 +77,20 @@ fn unsafe_component(component: &str) -> bool {
         || reserved_numbered(&upper, "LPT")
 }
 
+fn windows_forbidden_character(character: char) -> bool {
+    matches!(
+        character,
+        '\0'..='\u{1f}' | '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*'
+    )
+}
+
 fn reserved_numbered(value: &str, prefix: &str) -> bool {
-    value
-        .strip_prefix(prefix)
-        .is_some_and(|suffix| matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+    value.strip_prefix(prefix).is_some_and(|suffix| {
+        matches!(
+            suffix,
+            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+        )
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,8 +142,13 @@ mod tests {
             "receipts/한글/result-01.txt",
             "com10/lpt0.txt",
             "console.txt",
+            "unicode/＜＞：＂／＼｜？＊.txt",
+            "unicode/trailing-nbsp\u{a0}",
         ] {
-            assert_eq!(SafeRelativeRefV2::parse(valid).unwrap().as_str(), valid);
+            assert_eq!(
+                SafeRelativeRefV2::parse(valid).unwrap().as_str().as_bytes(),
+                valid.as_bytes()
+            );
         }
     }
 
@@ -175,6 +185,35 @@ mod tests {
                 SafeRelativeRefV2::parse(invalid).is_err(),
                 "accepted {invalid:?}"
             );
+        }
+    }
+
+    #[test]
+    fn safe_relative_reference_rejects_windows_forbidden_characters() {
+        for forbidden in [
+            '<', '>', ':', '"', '|', '?', '*', '\u{1}', '\u{10}', '\u{1f}',
+        ] {
+            for invalid in [
+                format!("bad{forbidden}name"),
+                format!("safe/bad{forbidden}name.ext"),
+            ] {
+                assert!(
+                    SafeRelativeRefV2::parse(&invalid).is_err(),
+                    "accepted {invalid:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn safe_relative_reference_rejects_superscript_reserved_basenames() {
+        for reserved in ["COM¹", "com²", "CoM³", "LPT¹", "lpt²", "LpT³"] {
+            for invalid in [reserved.to_owned(), format!("safe/{reserved}.json")] {
+                assert!(
+                    SafeRelativeRefV2::parse(&invalid).is_err(),
+                    "accepted {invalid:?}"
+                );
+            }
         }
     }
 }
