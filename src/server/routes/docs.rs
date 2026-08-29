@@ -168,6 +168,7 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
                     "name": name,
                     "description": category_description(name),
                     "endpoint_count": count,
+                    "canonical_path": format!("/api/docs/{segment}/{name}"),
                 })
             })
             .collect();
@@ -678,6 +679,24 @@ mod tests {
                 "no dispatches endpoint should be advertised as API-deprecated"
             );
         }
+
+        // When a group and category share a name, the group keeps precedence
+        // on the single-segment route and advertises the category's canonical
+        // child path so callers can still discover its endpoint inventory.
+        let (status, headers, body) = resolve_docs_segment("kanban", false);
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.is_empty());
+        assert_eq!(body["group"], "kanban");
+        assert!(body.get("category").is_none());
+        assert!(body.get("endpoints").is_none());
+
+        let category = body["categories"]
+            .as_array()
+            .expect("group categories array")
+            .iter()
+            .find(|category| category["name"] == "kanban")
+            .expect("kanban group must advertise its colliding kanban category");
+        assert_eq!(category["canonical_path"], "/api/docs/kanban/kanban");
     }
 
     #[test]
