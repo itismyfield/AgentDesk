@@ -110,9 +110,9 @@ mod status_panel_singleton_store;
 // #4891 Task #26 Slice 1: dormant pure proofs; no production caller or authority.
 mod status_panel_transition_v2;
 pub(in crate::services::discord) mod streaming_finalizer;
+mod synthetic_message_id;
 mod task_notification_delivery;
 pub(in crate::services::discord) mod task_supervisor;
-mod synthetic_message_id;
 // #5191 S2c S1a: dormant, pure coordinate validation; no production callers.
 mod terminal_coordinate;
 mod terminal_ui_obligation;
