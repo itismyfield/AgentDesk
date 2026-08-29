@@ -6,7 +6,8 @@ const DISCORD_GATEWAY_LOCK_PREFIX: u64 = 0x0443_0000_0000_0000;
 /// taken the lease, and how often the preferred node retries acquiring it.
 const GATEWAY_PREFERENCE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 use super::gateway_lease_recovery::{
-    gateway_lease_application_name, reap_orphaned_gateway_lease_once,
+    gateway_lease_application_name, reap_orphaned_gateway_lease_once, restart_file_nonce,
+    try_create_restart_marker,
 };
 
 /// #4351: resolved view of `cluster.gateway_preferred_instance_id` for this node.
@@ -414,11 +415,48 @@ pub(super) async fn run_bot_acquire_gateway_lease(
 ///
 /// Does NOT release the advisory lock — the split-brain caller no longer holds
 /// one, and the yield caller unlocks first so the preferred node can take it.
+fn create_gateway_self_fence_restart_request(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    nonce: &str,
+) -> Result<bool, String> {
+    let request = format!(
+        "nonce={nonce}\nreason=gateway_lease_self_fence\nprovider={}\n",
+        provider.as_str()
+    );
+    match try_create_restart_marker(root, nonce, &request) {
+        Ok(true) => Ok(true),
+        Ok(false) if restart_file_nonce(root, "restart_pending").is_some() => Ok(false),
+        Ok(false) => Err("existing restart marker has no valid nonce".to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 async fn self_fence_gateway(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     shard_manager: &Arc<serenity::gateway::ShardManager>,
 ) {
+    // A memory-only restart flag is insufficient in cluster mode: after the
+    // gateway task returns, dcserver intentionally remains alive as a standby,
+    // so launchd never gets an exit to restart. Publish the same durable marker
+    // used by deploy/standby promotion so every provider poller drains its slot
+    // and the final one exits the process.
+    let restart_request_error = match crate::agentdesk_runtime_root() {
+        Some(root) => {
+            let nonce = uuid::Uuid::new_v4().to_string();
+            create_gateway_self_fence_restart_request(&root, provider, &nonce).err()
+        }
+        None => Some("AgentDesk runtime root is unavailable".to_string()),
+    };
+    if let Some(error) = restart_request_error.as_deref() {
+        tracing::error!(
+            provider = provider.as_str(),
+            %error,
+            "GATEWAY-LEASE: failed to publish self-fence restart request"
+        );
+    }
+
     shared
         .bot_connected
         .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -463,6 +501,13 @@ async fn self_fence_gateway(
     }
 
     shard_manager.shutdown_all().await;
+
+    // Without a durable marker the cluster-standby tail would reproduce the
+    // dead-but-healthy zombie. State has already been drained above; fail out
+    // so the service manager can restore a complete runtime.
+    if restart_request_error.is_some() {
+        std::process::exit(1);
+    }
 }
 
 /// Spawn the gateway singleton-lease keepalive loop.

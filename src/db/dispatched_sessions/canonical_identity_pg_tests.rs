@@ -209,6 +209,61 @@ async fn canonical_identity_ambiguous_legacy_rows_are_untouched_pg() {
 }
 
 #[tokio::test]
+async fn canonical_identity_promotes_unique_operational_legacy_row_among_stale_shells_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        eprintln!("skipping canonical identity pg test: postgres unavailable");
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let channel_id = "1480015244062490888";
+    let live_key = "claude/discord_0123456789abcdef/mac-book:AgentDesk-claude-live-survivor";
+    let stale_key = "claude/discord_0123456789abcdef/mac-mini:AgentDesk-claude-live-survivor";
+    sqlx::query(
+        "INSERT INTO sessions (
+             session_key, provider, status, channel_id, raw_provider_session_id
+         ) VALUES ($1, 'claude', 'idle', $3, 'provider-session-current'),
+                  ($2, 'claude', 'disconnected', $3, NULL)",
+    )
+    .bind(live_key)
+    .bind(stale_key)
+    .bind(channel_id)
+    .execute(&pool)
+    .await
+    .expect("seed operational and stale legacy rows");
+
+    let outcome = upsert_hook_session_with_identity_pg(
+        &pool,
+        params(live_key, channel_id),
+        Some(identity(channel_id)),
+    )
+    .await
+    .expect("promote the unique operational legacy row");
+    assert!(!outcome.inserted);
+    assert_eq!(outcome.session_key, live_key);
+
+    let promoted: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT identity_kind, discord_token_hash
+         FROM sessions WHERE session_key = $1",
+    )
+    .bind(live_key)
+    .fetch_one(&pool)
+    .await
+    .expect("load promoted survivor");
+    assert_eq!(promoted.0.as_deref(), Some("discord_channel"));
+    assert_eq!(promoted.1.as_deref(), Some("discord_0123456789abcdef"));
+
+    let stale_identity: Option<String> =
+        sqlx::query_scalar("SELECT identity_kind FROM sessions WHERE session_key = $1")
+            .bind(stale_key)
+            .fetch_one(&pool)
+            .await
+            .expect("load untouched stale shell");
+    assert_eq!(stale_identity, None);
+
+    test_db.drop().await;
+}
+
+#[tokio::test]
 async fn canonical_identity_safe_legacy_promotion_pg() {
     let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
         eprintln!("skipping canonical identity pg test: postgres unavailable");
