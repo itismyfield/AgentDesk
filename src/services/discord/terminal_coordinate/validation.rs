@@ -2,6 +2,7 @@ use super::{
     CanonicalC, SourceRange, TerminalCoordinate, TerminalCoordinateCandidate, TurnIdentity,
 };
 
+#[allow(dead_code)] // #5191 S2c S1a: dormant typed validation failures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum TerminalCoordinateError {
     MissingCanonicalC,
@@ -16,6 +17,7 @@ pub(in crate::services::discord) enum TerminalCoordinateError {
     MissingExternalTurnStartOffset,
 }
 
+#[allow(dead_code)] // #5191 S2c S1a: pure dormant validator; caller0 is pinned by tests.
 pub(in crate::services::discord) fn validate_terminal_coordinate_candidate(
     candidate: TerminalCoordinateCandidate<'_>,
 ) -> Result<TerminalCoordinate<'_>, TerminalCoordinateError> {

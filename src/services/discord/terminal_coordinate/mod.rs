@@ -1,20 +1,16 @@
-#![allow(dead_code)] // #5191 S2c S1a: dormant until a later authority slice wires callers.
-
 mod validation;
 
 #[cfg(test)]
 mod tests;
 
+#[allow(dead_code)] // #5191 S2c S1a: dormant coordinate value; production callers land later.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(in crate::services::discord) struct CanonicalC(u64);
 
+#[allow(dead_code)] // #5191 S2c S1a: dormant constructor/accessor surface.
 impl CanonicalC {
     pub(in crate::services::discord) const fn new(value: u64) -> Option<Self> {
-        if value == 0 {
-            None
-        } else {
-            Some(Self(value))
-        }
+        if value == 0 { None } else { Some(Self(value)) }
     }
 
     pub(in crate::services::discord) const fn get(self) -> u64 {
@@ -23,12 +19,14 @@ impl CanonicalC {
 }
 
 /// Optional observation-only provenance. It has no lease, progress, or frontier authority.
+#[allow(dead_code)] // #5191 S2c S1a: dormant provenance descriptor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(in crate::services::discord) struct SourceRange {
     start: u64,
     end: u64,
 }
 
+#[allow(dead_code)] // #5191 S2c S1a: dormant provenance constructor/accessors.
 impl SourceRange {
     pub(in crate::services::discord) const fn new(start: u64, end: u64) -> Option<Self> {
         if start < end {
@@ -48,6 +46,7 @@ impl SourceRange {
 }
 
 /// Closed identity vocabulary only; this slice adds no production conversion.
+#[allow(dead_code)] // #5191 S2c S1a: dormant route vocabulary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(in crate::services::discord) enum RouteFamily {
     Watcher,
@@ -55,6 +54,7 @@ pub(in crate::services::discord) enum RouteFamily {
     SessionSink,
 }
 
+#[allow(dead_code)] // #5191 S2c S1a: dormant input boundary for later sibling callers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) struct TerminalCoordinateCandidate<'a> {
     canonical_c: Option<u64>,
@@ -66,6 +66,31 @@ pub(in crate::services::discord) struct TerminalCoordinateCandidate<'a> {
     route_family: RouteFamily,
 }
 
+#[allow(dead_code)] // #5191 S2c S1a: explicit API, no hidden defaults or fabrication.
+impl<'a> TerminalCoordinateCandidate<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::services::discord) const fn new(
+        canonical_c: Option<u64>,
+        source_range: Option<(u64, u64)>,
+        reset_identity: Option<&'a str>,
+        turn_user_message_id: Option<u64>,
+        turn_started_at: Option<&'a str>,
+        turn_start_offset: Option<u64>,
+        route_family: RouteFamily,
+    ) -> Self {
+        Self {
+            canonical_c,
+            source_range,
+            reset_identity,
+            turn_user_message_id,
+            turn_started_at,
+            turn_start_offset,
+            route_family,
+        }
+    }
+}
+
+#[allow(dead_code)] // #5191 S2c S1a: dormant typed turn identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(in crate::services::discord) enum TurnIdentity<'a> {
     Message {
@@ -79,6 +104,7 @@ pub(in crate::services::discord) enum TurnIdentity<'a> {
     },
 }
 
+#[allow(dead_code)] // #5191 S2c S1a: dormant validated coordinate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(in crate::services::discord) struct TerminalCoordinate<'a> {
     canonical_c: CanonicalC,
@@ -88,6 +114,7 @@ pub(in crate::services::discord) struct TerminalCoordinate<'a> {
     route_family: RouteFamily,
 }
 
+#[allow(dead_code)] // #5191 S2c S1a: dormant sibling-readable identity surface.
 impl<'a> TerminalCoordinate<'a> {
     pub(in crate::services::discord) const fn canonical_c(self) -> CanonicalC {
         self.canonical_c
@@ -97,11 +124,19 @@ impl<'a> TerminalCoordinate<'a> {
         self.source_range
     }
 
+    pub(in crate::services::discord) const fn reset_identity(self) -> &'a str {
+        self.reset_identity
+    }
+
     pub(in crate::services::discord) const fn turn_identity(self) -> TurnIdentity<'a> {
         self.turn_identity
+    }
+
+    pub(in crate::services::discord) const fn route_family(self) -> RouteFamily {
+        self.route_family
     }
 }
 
 pub(in crate::services::discord) use validation::{
-    validate_terminal_coordinate_candidate, TerminalCoordinateError,
+    TerminalCoordinateError, validate_terminal_coordinate_candidate,
 };
