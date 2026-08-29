@@ -10,7 +10,11 @@ pub(in crate::services::discord) struct CanonicalC(u64);
 
 impl CanonicalC {
     pub(in crate::services::discord) const fn new(value: u64) -> Option<Self> {
-        if value == 0 { None } else { Some(Self(value)) }
+        if value == 0 {
+            None
+        } else {
+            Some(Self(value))
+        }
     }
 
     pub(in crate::services::discord) const fn get(self) -> u64 {
@@ -18,8 +22,8 @@ impl CanonicalC {
     }
 }
 
-/// Observation-only provenance. It has no lease, progress, or frontier authority.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Optional observation-only provenance. It has no lease, progress, or frontier authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(in crate::services::discord) struct SourceRange {
     start: u64,
     end: u64,
@@ -58,16 +62,29 @@ pub(in crate::services::discord) struct TerminalCoordinateCandidate<'a> {
     reset_identity: Option<&'a str>,
     turn_user_message_id: Option<u64>,
     turn_started_at: Option<&'a str>,
+    turn_start_offset: Option<u64>,
     route_family: RouteFamily,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(in crate::services::discord) enum TurnIdentity<'a> {
+    Message {
+        user_message_id: u64,
+        started_at: &'a str,
+        start_offset: Option<u64>,
+    },
+    External {
+        started_at: &'a str,
+        start_offset: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(in crate::services::discord) struct TerminalCoordinate<'a> {
     canonical_c: CanonicalC,
-    source_start: u64,
+    source_range: Option<SourceRange>,
     reset_identity: &'a str,
-    turn_user_message_id: u64,
-    turn_started_at: &'a str,
+    turn_identity: TurnIdentity<'a>,
     route_family: RouteFamily,
 }
 
@@ -76,11 +93,15 @@ impl<'a> TerminalCoordinate<'a> {
         self.canonical_c
     }
 
-    pub(in crate::services::discord) const fn source_start(self) -> u64 {
-        self.source_start
+    pub(in crate::services::discord) const fn source_range(self) -> Option<SourceRange> {
+        self.source_range
+    }
+
+    pub(in crate::services::discord) const fn turn_identity(self) -> TurnIdentity<'a> {
+        self.turn_identity
     }
 }
 
 pub(in crate::services::discord) use validation::{
-    TerminalCoordinateError, validate_terminal_coordinate_candidate,
+    validate_terminal_coordinate_candidate, TerminalCoordinateError,
 };
