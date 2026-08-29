@@ -2,6 +2,8 @@ use super::{ChannelId, DeliveryLeaseKey};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+#[cfg(test)]
+mod exact_lease;
 #[cfg(unix)]
 pub(super) mod source_epoch_observer;
 
@@ -225,15 +227,17 @@ enum LeaseState {
     /// The lease key is the FULL `(DeliveryLeaseKey, [start,end))` identity
     /// (#3041 §2): `commit`/`release` verify it so a stale commit or release
     /// from an OLDER turn (or the same turn with a different range) cannot act
-    /// on a reacquired NEWER lease. `reclaim_if_expired` is intentionally
-    /// deadline-only (identity-agnostic) — it force-returns an expired lease
-    /// regardless of holder/key so a dead holder cannot strand the cell.
+    /// on a reacquired NEWER lease. Production `reclaim_if_expired` is
+    /// intentionally deadline-only (identity-agnostic), while the test-only exact
+    /// substrate rejects that legacy path and reclaims only its full owned identity.
     Leased {
         holder: LeaseHolder,
         key: DeliveryLeaseKey,
         deadline_ms: u64,
         start: u64,
         end: u64,
+        #[cfg(test)]
+        exact_token: Option<exact_lease::token::LeaseToken>,
     },
     /// Committed with a three-way outcome; carries the same `(holder, key,
     /// range)` identity forward so a stale release is rejected. Awaits a
@@ -244,6 +248,8 @@ enum LeaseState {
         start: u64,
         end: u64,
         outcome: LeaseOutcome,
+        #[cfg(test)]
+        exact_token: Option<exact_lease::token::LeaseToken>,
     },
 }
 
@@ -586,6 +592,7 @@ impl DeliveryLeaseCell {
                 deadline_ms,
                 start,
                 end,
+                ..
             } => LeaseSnapshot::Leased {
                 holder: *holder,
                 key: key.clone(),
@@ -599,6 +606,7 @@ impl DeliveryLeaseCell {
                 start,
                 end,
                 outcome,
+                ..
             } => LeaseSnapshot::Committed {
                 holder: *holder,
                 key: key.clone(),
@@ -714,6 +722,8 @@ impl DeliveryLeaseCell {
             deadline_ms,
             start,
             end,
+            #[cfg(test)]
+            exact_token: None,
         };
         true
     }
@@ -746,6 +756,8 @@ impl DeliveryLeaseCell {
                 key: cur_key,
                 start: cur_start,
                 end: cur_end,
+                #[cfg(test)]
+                    exact_token: None,
                 ..
             } if *cur_holder == holder
                 && cur_key == &key
@@ -758,6 +770,8 @@ impl DeliveryLeaseCell {
                     start,
                     end,
                     outcome,
+                    #[cfg(test)]
+                    exact_token: None,
                 };
                 self.state_tag.store(TAG_COMMITTED, Ordering::Release);
                 true
@@ -795,6 +809,8 @@ impl DeliveryLeaseCell {
                 key: cur_key,
                 start: cur_start,
                 end: cur_end,
+                #[cfg(test)]
+                    exact_token: None,
                 ..
             }
             | LeaseState::Committed {
@@ -802,9 +818,20 @@ impl DeliveryLeaseCell {
                 key: cur_key,
                 start: cur_start,
                 end: cur_end,
+                #[cfg(test)]
+                    exact_token: None,
                 ..
             } => *cur == holder && cur_key == &key && *cur_start == start && *cur_end == end,
             LeaseState::Unleased => false,
+            #[cfg(test)]
+            LeaseState::Leased {
+                exact_token: Some(_),
+                ..
+            }
+            | LeaseState::Committed {
+                exact_token: Some(_),
+                ..
+            } => false,
         };
         if !matches {
             return false;
@@ -849,6 +876,8 @@ impl DeliveryLeaseCell {
             holder: cur_holder,
             key: cur_key,
             deadline_ms,
+            #[cfg(test)]
+                exact_token: None,
             ..
         } = &mut guard.lease
         {
@@ -871,12 +900,17 @@ impl DeliveryLeaseCell {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _payload_lock_marker = PayloadLockMarker::enter();
-        if let LeaseState::Leased { deadline_ms, .. } = &guard.lease {
-            if now_ms >= *deadline_ms {
-                guard.lease = LeaseState::Unleased;
-                self.state_tag.store(TAG_UNLEASED, Ordering::Release);
-                return true;
-            }
+        if let LeaseState::Leased {
+            deadline_ms,
+            #[cfg(test)]
+                exact_token: None,
+            ..
+        } = &guard.lease
+            && now_ms >= *deadline_ms
+        {
+            guard.lease = LeaseState::Unleased;
+            self.state_tag.store(TAG_UNLEASED, Ordering::Release);
+            return true;
         }
         false
     }
