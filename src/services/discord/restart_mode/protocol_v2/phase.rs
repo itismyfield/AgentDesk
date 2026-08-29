@@ -1,6 +1,7 @@
 use super::{disposition::DecodeDisposition, values::*};
 
 mod codec;
+mod reducer;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PhaseIdentityV2 {

@@ -4288,6 +4288,10 @@ services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::
 services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::malformed_and_unknown_versions_classify_without_panicking_or_losing_raw
 services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::provider_and_channel_require_canonical_lower_utf8_hex
 services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::unknown_fields_invalid_values_and_reencoding_preserve_exact_raw
+services::discord::restart_mode::protocol_v2::phase::reducer::high_risk_recovery::nonaccepted_dispositions_propagate_exactly_and_reducer_is_total
+services::discord::restart_mode::protocol_v2::phase::reducer::high_risk_recovery::phase_order_repeats_and_post_receipt_conflict_without_over_suppression
+services::discord::restart_mode::protocol_v2::phase::reducer::high_risk_recovery::positive_prefixes_reach_all_four_states_and_keep_last_original_raw
+services::discord::restart_mode::protocol_v2::phase::reducer::high_risk_recovery::sequence_hash_and_identity_conflicts_keep_the_first_offending_raw
 services::discord::restart_mode::protocol_v2::values::high_risk_recovery::canonical_uuid_forms_only
 services::discord::restart_mode::protocol_v2::values::high_risk_recovery::identities_preserve_exact_unicode_and_reject_empty_or_nul
 services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_accepts_nested_portable_components
