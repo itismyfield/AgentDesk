@@ -6931,6 +6931,15 @@ services::health_diagnostics::tests::dispatch_outbox_stats_json_contract_keeps_f
 services::health_diagnostics::tests::every_health_path_database_await_is_bracketed
 services::issue_announcements::tests::renders_active_card_with_agent_and_timestamp
 services::issue_announcements::tests::renders_completed_card_for_pr_merge
+services::kakao::tests::account_ids_map_to_stable_non_colliding_environment_prefixes
+services::kakao::tests::configured_accounts_are_bounded_and_deduplicated
+services::kakao::tests::feature_is_disabled_by_default_and_parses_explicit_values
+services::kakao::tests::friend_response_must_partition_the_requested_recipients
+services::kakao::tests::recipients_require_one_to_five_unique_printable_ids
+services::kakao_message::tests::feed_template_uses_a_bounded_first_line_title
+services::kakao_message::tests::message_text_is_trimmed_for_validation_but_not_rewritten
+services::kakao_message::tests::text_template_contains_only_the_configured_public_link
+services::kakao_message::tests::validation_rejects_private_or_credentialed_urls
 services::long_turn_watchdog::tests::alert_cooldown_exceeds_scan_cadence_by_default
 services::long_turn_watchdog::tests::alert_message_contains_actionable_context
 services::long_turn_watchdog::tests::cluster_threshold_triggers_at_three
