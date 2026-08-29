@@ -664,6 +664,7 @@ engine::ops::db_ops::tests::prepare_policy_sql_for_pg_rewrites_insert_or_replace
 engine::ops::db_ops::tests::prepare_policy_sql_for_pg_rewrites_quoted_rowid_expressions
 engine::ops::db_ops::tests::prepare_policy_sql_for_pg_rewrites_rowid_tokens
 engine::ops::db_ops::tests::prepare_policy_sql_for_pg_skips_dollar_quoted_literals_for_rowid
+engine::ops::db_ops::tests::test_translate_sqlite_rowid_aliases
 engine::ops::exec_ops::bridge_deadline_tests::clamp_is_noop_without_armed_deadline
 engine::ops::exec_ops::bridge_deadline_tests::clamp_returns_error_after_deadline_elapses
 engine::ops::exec_ops::bridge_deadline_tests::clamp_shortens_to_remaining_budget_when_armed
