@@ -1,5 +1,11 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
+> Last refreshed: 2026-08-29 (manual: #5191 Task #72 S1 corrective r1 — dormant acquisition-backed publication authority; production routing and transport behavior unchanged).
+>
+> The dormant `publication_attempt` substrate now issues held authority only as
+> the unique result of a successful `DeliveryLeaseCell::try_acquire`, owns the
+> acquired RAII guard by value, and reuses `PositiveByteRange`.
+>
 > Last refreshed: 2026-08-08 (against #5071 T1 S5b).
 >
 > — **on unix**, the recovery / fresh-send / orphan family joined the shadow
