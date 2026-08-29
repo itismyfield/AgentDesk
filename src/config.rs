@@ -6,6 +6,9 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+mod agent_channels;
+pub use agent_channels::AgentChannels;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -432,51 +435,6 @@ pub struct McpServerAuthConfig {
 #[serde(rename_all = "lowercase")]
 pub enum McpServerAuthType {
     Bearer,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct AgentChannels {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claude: Option<AgentChannel>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex: Option<AgentChannel>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gemini: Option<AgentChannel>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub opencode: Option<AgentChannel>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub qwen: Option<AgentChannel>,
-}
-
-impl AgentChannels {
-    pub fn is_empty(&self) -> bool {
-        self.claude
-            .as_ref()
-            .and_then(AgentChannel::target)
-            .is_none()
-            && self.codex.as_ref().and_then(AgentChannel::target).is_none()
-            && self
-                .gemini
-                .as_ref()
-                .and_then(AgentChannel::target)
-                .is_none()
-            && self
-                .opencode
-                .as_ref()
-                .and_then(AgentChannel::target)
-                .is_none()
-            && self.qwen.as_ref().and_then(AgentChannel::target).is_none()
-    }
-
-    pub fn iter(&self) -> [(&'static str, Option<&AgentChannel>); 5] {
-        [
-            ("claude", self.claude.as_ref()),
-            ("codex", self.codex.as_ref()),
-            ("gemini", self.gemini.as_ref()),
-            ("opencode", self.opencode.as_ref()),
-            ("qwen", self.qwen.as_ref()),
-        ]
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

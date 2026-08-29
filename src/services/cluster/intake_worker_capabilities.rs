@@ -10,6 +10,7 @@ static ACTIVE_INTAKE_WORKER_PROVIDERS: LazyLock<RwLock<BTreeSet<String>>> =
     LazyLock::new(|| RwLock::new(BTreeSet::new()));
 
 const PRESERVE_ON_CANCEL_V1: &str = "preserve_on_cancel_v1";
+const SCHEDULED_MESSAGE_DISCORD_MENTION_CONSUMER_V1: &str = "discord_mention_consumer_v1";
 
 /// Providers whose `run_bot` on this node is actively trying to take the Discord
 /// gateway lease (#4351). Advertised so a non-preferred holder can tell "the
@@ -108,6 +109,18 @@ pub(super) fn capabilities_with_runtime_state(base: &Value) -> Value {
         "discord_gateway".to_string(),
         json!({ "waiting_providers": gateway_waiters }),
     );
+    let scheduled_messages = capabilities
+        .entry("scheduled_messages".to_string())
+        .or_insert_with(|| json!({}));
+    if !scheduled_messages.is_object() {
+        *scheduled_messages = json!({});
+    }
+    if let Some(features) = scheduled_messages.as_object_mut() {
+        features.insert(
+            SCHEDULED_MESSAGE_DISCORD_MENTION_CONSUMER_V1.to_string(),
+            Value::Bool(true),
+        );
+    }
     Value::Object(capabilities)
 }
 
@@ -211,6 +224,10 @@ mod tests {
                 .pointer("/intake_worker/features/0")
                 .and_then(Value::as_str),
             Some(PRESERVE_ON_CANCEL_V1)
+        );
+        assert_eq!(
+            capabilities.pointer("/scheduled_messages/discord_mention_consumer_v1"),
+            Some(&Value::Bool(true))
         );
     }
 }

@@ -33,6 +33,7 @@ import {
   getMeetingIssueProgress,
   getMeetingIssueProgressText,
 } from "./meetingIssueProgress";
+import { catalogLabel, useProviderCatalog } from "../api/providers";
 import {
   FIXED_PARTICIPANTS_STORAGE_KEY,
   MEETING_PROVIDERS,
@@ -85,6 +86,16 @@ export default function MeetingMinutesView({
   initialChannelId,
 }: Props) {
   const { t, locale } = useI18n();
+  const providerCatalog = useProviderCatalog();
+  const meetingProviders = providerCatalog.catalogReady
+    ? providerCatalog.meetingIds
+    : [...MEETING_PROVIDERS];
+  const meetingProviderLabels = Object.fromEntries(
+    meetingProviders.map((id) => [
+      id,
+      catalogLabel(providerCatalog.entries, id),
+    ]),
+  );
   const [detailMeeting, setDetailMeeting] = useState<RoundTableMeeting | null>(
     null,
   );
@@ -215,7 +226,7 @@ export default function MeetingMinutesView({
   const selectedChannel =
     meetingChannels.find((channel) => channel.channel_id === channelId) ?? null;
   const availableExperts = selectedChannel?.available_experts ?? [];
-  const reviewerOptions = MEETING_PROVIDERS.filter(
+  const reviewerOptions = meetingProviders.filter(
     (provider) =>
       provider !== primaryProvider &&
       provider !== selectedChannel?.owner_provider,
@@ -252,11 +263,7 @@ export default function MeetingMinutesView({
       if (reviewerProvider) setReviewerProvider("");
       return;
     }
-    if (
-      !reviewerOptions.includes(
-        reviewerProvider as (typeof MEETING_PROVIDERS)[number],
-      )
-    ) {
+    if (!reviewerOptions.includes(reviewerProvider)) {
       setReviewerProvider(reviewerOptions[0]);
     }
   }, [
@@ -531,6 +538,8 @@ export default function MeetingMinutesView({
           primaryProvider={primaryProvider}
           reviewerProvider={reviewerProvider}
           reviewerOptions={reviewerOptions}
+          meetingProviders={meetingProviders}
+          providerLabels={meetingProviderLabels}
           expertQuery={expertQuery}
           filteredExperts={filteredExperts}
           fixedParticipants={fixedParticipants}

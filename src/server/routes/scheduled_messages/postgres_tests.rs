@@ -64,6 +64,7 @@ async fn postgres_scheduled_message_create_persists_trimmed_explicit_bot() {
     let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
     let body = CreateScheduledMessageBody {
         content: "trim explicit bot before persistence".to_string(),
+        discord_mention_user_ids: None,
         title: None,
         target_channel_id: Some("123456789".to_string()),
         bot: Some(" notify ".to_string()),
@@ -78,6 +79,7 @@ async fn postgres_scheduled_message_create_persists_trimmed_explicit_bot() {
         source: Some("postgres_test".to_string()),
         created_by: Some("postgres_test".to_string()),
         dedupe_key: None,
+        provider_targets: None,
         context_strategy: None,
         on_context_failure: None,
     };
@@ -105,6 +107,7 @@ async fn postgres_scheduled_push_rejects_agent_id_before_foreign_key_insert() {
     let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
     let body = CreateScheduledMessageBody {
         content: "push must not persist an unused agent association".to_string(),
+        discord_mention_user_ids: None,
         title: None,
         target_channel_id: Some("123456789".to_string()),
         bot: None,
@@ -119,6 +122,7 @@ async fn postgres_scheduled_push_rejects_agent_id_before_foreign_key_insert() {
         source: Some("postgres_test".to_string()),
         created_by: Some("postgres_test".to_string()),
         dedupe_key: None,
+        provider_targets: None,
         context_strategy: None,
         on_context_failure: None,
     };
@@ -153,6 +157,7 @@ async fn postgres_scheduled_push_patch_distinguishes_values_from_null_clears() {
         &pool,
         &db::NewScheduledMessage {
             content: "ordinary push patch definition".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: None,
             target_channel_id: Some("123456789".to_string()),
             bot: "notify".to_string(),
@@ -167,6 +172,8 @@ async fn postgres_scheduled_push_patch_distinguishes_values_from_null_clears() {
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            provider_targets: None,
+            provider_target_summary: None,
             context_strategy: "fresh".to_string(),
             context_snapshot_id: None,
             on_context_failure: "fail".to_string(),
@@ -253,6 +260,7 @@ async fn postgres_scheduled_message_explicit_target_still_requires_agent_primary
         db::KIND_AGENT,
         Some("987654321"),
         Some("scheduled-agent-without-primary"),
+        false,
     )
     .await
     .expect_err("an explicit delivery target must not bypass the owner-channel requirement");
@@ -290,6 +298,7 @@ async fn postgres_scheduled_message_rejects_invalid_agent_primary_channel() {
         db::KIND_AGENT,
         None,
         Some("scheduled-agent-invalid-primary"),
+        false,
     )
     .await
     .expect_err("an invalid owner channel must fail before fire time");

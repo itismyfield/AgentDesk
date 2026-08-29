@@ -90,20 +90,14 @@ pub(crate) fn ensure_agent_setup_config(
         ));
     };
 
-    let mut channels = AgentChannels::default();
-    match input.provider.as_str() {
-        "claude" => channels.claude = Some(channel),
-        "codex" => channels.codex = Some(channel),
-        "gemini" => channels.gemini = Some(channel),
-        "opencode" => channels.opencode = Some(channel),
-        "qwen" => channels.qwen = Some(channel),
-        _ => {
-            return AgentSetupConfigMutation::Conflict(format!(
-                "unsupported provider '{}'",
-                input.provider
-            ));
-        }
+    if ProviderKind::from_str(&input.provider).is_none() {
+        return AgentSetupConfigMutation::Conflict(format!(
+            "unsupported provider '{}'",
+            input.provider
+        ));
     }
+    let mut channels = AgentChannels::default();
+    channels.insert(&input.provider, channel);
 
     let mut next_agents = config.agents.clone();
     next_agents.push(AgentDef {
@@ -147,14 +141,7 @@ fn agent_setup_config_matches(agent: &AgentDef, input: &AgentSetupConfigInput) -
     if agent.provider != input.provider {
         return false;
     }
-    let channel = match input.provider.as_str() {
-        "claude" => agent.channels.claude.as_ref(),
-        "codex" => agent.channels.codex.as_ref(),
-        "gemini" => agent.channels.gemini.as_ref(),
-        "opencode" => agent.channels.opencode.as_ref(),
-        "qwen" => agent.channels.qwen.as_ref(),
-        _ => None,
-    };
+    let channel = agent.channels.get(&input.provider);
     let Some(channel) = channel else {
         return false;
     };
@@ -278,8 +265,9 @@ fn find_channel_binding<'a>(
     let mut best: Option<(&crate::config::AgentDef, &'static str, &AgentChannel, u8)> = None;
 
     for agent in &config.agents {
-        for (provider_key, maybe_channel) in agent.channels.iter() {
-            let Some(channel) = maybe_channel else {
+        for (provider_key, channel) in agent.channels.iter() {
+            let Some(provider_key) = crate::services::provider::intern_provider_id(provider_key)
+            else {
                 continue;
             };
             let Some(score) = match_channel(channel, channel_id, channel_name) else {
@@ -364,15 +352,11 @@ fn find_agent_channel_for_provider<'a>(
     agent: &'a crate::config::AgentDef,
     provider: &ProviderKind,
 ) -> Option<(&'static str, &'a AgentChannel)> {
-    agent
-        .channels
-        .iter()
-        .into_iter()
-        .find_map(|(provider_key, maybe_channel)| {
-            let channel = maybe_channel?;
-            (binding_provider(agent, provider_key, channel).as_ref() == Some(provider))
-                .then_some((provider_key, channel))
-        })
+    agent.channels.iter().find_map(|(provider_key, channel)| {
+        let provider_key = crate::services::provider::intern_provider_id(provider_key)?;
+        (binding_provider(agent, provider_key, channel).as_ref() == Some(provider))
+            .then_some((provider_key, channel))
+    })
 }
 
 pub(super) fn resolve_dm_default_agent(provider: &ProviderKind) -> Option<ResolvedDmDefaultAgent> {
@@ -719,9 +703,6 @@ pub(super) fn collect_agent_bot_names() -> HashSet<String> {
     for agent in &config.agents {
         agent_ids.insert(agent.id.trim().to_ascii_lowercase());
         for (provider_key, channel) in agent.channels.iter() {
-            let Some(channel) = channel else {
-                continue;
-            };
             if channel.target().is_some() {
                 provider_keys.insert(provider_key.to_ascii_lowercase());
             }
@@ -883,8 +864,9 @@ pub(super) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding
 
     let mut bindings = BTreeMap::<u64, RegisteredChannelBinding>::new();
     for agent in &config.agents {
-        for (provider_key, maybe_channel) in agent.channels.iter() {
-            let Some(channel) = maybe_channel else {
+        for (provider_key, channel) in agent.channels.iter() {
+            let Some(provider_key) = crate::services::provider::intern_provider_id(provider_key)
+            else {
                 continue;
             };
             let Some(channel_id) = channel
@@ -923,10 +905,7 @@ pub(crate) fn resolve_channel_alias(alias: &str) -> Option<u64> {
 
     let config = load_agentdesk_config()?;
     for agent in &config.agents {
-        for (_provider_key, maybe_channel) in agent.channels.iter() {
-            let Some(channel) = maybe_channel else {
-                continue;
-            };
+        for (_provider_key, channel) in agent.channels.iter() {
             if !channel.aliases().iter().any(|candidate| candidate == alias) {
                 continue;
             }
@@ -949,10 +928,7 @@ pub(crate) fn configured_workspaces() -> Vec<String> {
     let mut seen = HashSet::new();
     let mut workspaces = Vec::new();
     for agent in &config.agents {
-        for (_provider_key, maybe_channel) in agent.channels.iter() {
-            let Some(channel) = maybe_channel else {
-                continue;
-            };
+        for (_provider_key, channel) in agent.channels.iter() {
             let Some(workspace) = channel
                 .workspace()
                 .map(|value| expand_tilde(&value))

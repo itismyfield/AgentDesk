@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::services::provider::ProviderCatalogEntry;
+
 use super::registry::{MigrationState, ProviderCliChannel, ProviderCliMigrationState, SmokeResult};
 
 /// Top-level diagnostics snapshot for all providers.
@@ -84,6 +86,7 @@ pub struct MigrationDiagnostics {
 /// Response body for `GET /api/provider-cli`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderCliStatusResponse {
+    pub catalog: Vec<ProviderCatalogEntry>,
     pub providers: Vec<ProviderDiagnostics>,
     pub migrations: Vec<MigrationDiagnostics>,
     pub generated_at: DateTime<Utc>,

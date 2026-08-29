@@ -44,6 +44,8 @@ pub(crate) mod hang_forensics;
 pub mod health_active_session_audit;
 pub mod health_diagnostics;
 pub mod issue_announcements;
+pub mod kakao;
+pub mod kakao_message;
 pub mod kanban;
 pub mod kanban_cards;
 pub mod long_turn_watchdog;

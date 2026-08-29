@@ -1200,26 +1200,18 @@ fn compare_comparable_agents(left: &ComparableAgent, right: &ComparableAgent) ->
 
 impl ComparableAgent {
     fn from_yaml(agent: &AgentDef) -> Self {
-        let discord_channel_cc = agent
-            .channels
-            .claude
-            .as_ref()
-            .and_then(AgentChannel::target);
-        let discord_channel_cdx = agent.channels.codex.as_ref().and_then(AgentChannel::target);
-        let provider_primary = match agent.provider.as_str() {
-            "gemini" => agent
-                .channels
-                .gemini
-                .as_ref()
-                .and_then(AgentChannel::target),
-            "opencode" => agent
-                .channels
-                .opencode
-                .as_ref()
-                .and_then(AgentChannel::target),
-            "qwen" => agent.channels.qwen.as_ref().and_then(AgentChannel::target),
-            _ => None,
-        };
+        let discord_channel_cc = agent.channels.get("claude").and_then(AgentChannel::target);
+        let discord_channel_cdx = agent.channels.get("codex").and_then(AgentChannel::target);
+        let provider_primary =
+            match crate::services::provider::ProviderKind::from_str(&agent.provider) {
+                Some(crate::services::provider::ProviderKind::Claude)
+                | Some(crate::services::provider::ProviderKind::Codex)
+                | None => None,
+                Some(_) => agent
+                    .channels
+                    .get(&agent.provider)
+                    .and_then(AgentChannel::target),
+            };
 
         Self {
             id: agent.id.clone(),
@@ -1329,12 +1321,14 @@ mod db_agent_drift_tests {
             sensitivity_mode: None,
             voice: Default::default(),
             provider: provider.to_string(),
-            channels: AgentChannels {
-                claude: Some(AgentChannel::from("claude-channel")),
-                codex: Some(AgentChannel::from("codex-channel")),
-                gemini: (provider == "gemini").then(|| AgentChannel::from(provider_channel)),
-                opencode: (provider == "opencode").then(|| AgentChannel::from(provider_channel)),
-                qwen: (provider == "qwen").then(|| AgentChannel::from(provider_channel)),
+            channels: {
+                let mut channels = AgentChannels::new()
+                    .with("claude", AgentChannel::from("claude-channel"))
+                    .with("codex", AgentChannel::from("codex-channel"));
+                if !matches!(provider, "claude" | "codex") {
+                    channels.insert(provider, AgentChannel::from(provider_channel));
+                }
+                channels
             },
             keywords: Vec::new(),
             department: None,
@@ -1470,23 +1464,26 @@ mod voice_alias_precheck_tests {
 
     fn make_agent(id: &str, name: &str, channel_name: Option<&str>) -> AgentDef {
         let mut channels = AgentChannels::default();
-        channels.codex = Some(AgentChannel::Detailed(AgentChannelConfig {
-            id: Some("9999".to_string()),
-            name: channel_name.map(str::to_string),
-            aliases: Vec::new(),
-            prompt_file: None,
-            workspace: None,
-            provider: Some("codex".to_string()),
-            tui_hosting: None,
-            runtime: None,
-            model: None,
-            reasoning_effort: None,
-            peer_agents: None,
-            quality_feedback_injection: None,
-            dispatch_profile: None,
-            isolate_override: None,
-            cache_ttl_minutes: None,
-        }));
+        channels.insert(
+            "codex",
+            AgentChannel::Detailed(AgentChannelConfig {
+                id: Some("9999".to_string()),
+                name: channel_name.map(str::to_string),
+                aliases: Vec::new(),
+                prompt_file: None,
+                workspace: None,
+                provider: Some("codex".to_string()),
+                tui_hosting: None,
+                runtime: None,
+                model: None,
+                reasoning_effort: None,
+                peer_agents: None,
+                quality_feedback_injection: None,
+                dispatch_profile: None,
+                isolate_override: None,
+                cache_ttl_minutes: None,
+            }),
+        );
         AgentDef {
             id: id.to_string(),
             name: name.to_string(),

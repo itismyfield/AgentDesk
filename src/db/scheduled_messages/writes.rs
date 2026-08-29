@@ -29,16 +29,18 @@ pub async fn insert_scheduled_message_tx(
     let id = format!("smsg_{}", Uuid::new_v4());
     sqlx::query_as::<_, ScheduledMessageRow>(&format!(
         "INSERT INTO scheduled_messages
-            (id, content, title, target_channel_id, bot, delivery_kind, agent_id,
+            (id, content, discord_mention_user_ids, title, target_channel_id, bot, delivery_kind, agent_id,
              agent_instruction, on_agent_failure, scheduled_at, schedule, timezone,
-             expires_at, source, created_by, dedupe_key, context_strategy,
-             context_snapshot_id, on_context_failure)
+             expires_at, source, created_by, dedupe_key, provider_targets,
+             provider_target_summary, context_strategy, context_snapshot_id,
+             on_context_failure)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                 $17, $18, $19)
+                 $17, $18, $19, $20, $21, $22)
          RETURNING {DEFINITION_COLUMNS}"
     ))
     .bind(&id)
     .bind(&new.content)
+    .bind(&new.discord_mention_user_ids)
     .bind(&new.title)
     .bind(&new.target_channel_id)
     .bind(&new.bot)
@@ -53,6 +55,8 @@ pub async fn insert_scheduled_message_tx(
     .bind(&new.source)
     .bind(&new.created_by)
     .bind(&new.dedupe_key)
+    .bind(&new.provider_targets)
+    .bind(&new.provider_target_summary)
     .bind(&new.context_strategy)
     .bind(&new.context_snapshot_id)
     .bind(&new.on_context_failure)

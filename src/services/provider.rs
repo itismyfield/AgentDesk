@@ -12,8 +12,8 @@ mod registry;
 pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 use cancel_watchdog::{current_unix_millis, enforce_watchdog_deadline};
 pub use registry::{
-    derived_counterpart_ids, frozen_first_counterpart_id, intern_provider_id, provider_registry,
-    supported_provider_ids,
+    ProviderCatalogEntry, derived_counterpart_ids, frozen_first_counterpart_id, intern_provider_id,
+    provider_registry, public_provider_catalog, supported_provider_ids,
 };
 
 /// Tmux session name prefix — always "AgentDesk".
@@ -64,6 +64,16 @@ pub enum ProviderExecutionAdapter {
 }
 
 impl ProviderExecutionAdapter {
+    pub const fn execution_surface(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::OpenCode => "opencode_http",
+            Self::Qwen => "managed_tmux_wrapper",
+        }
+    }
+
     pub const fn provider_id(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -185,6 +195,10 @@ pub struct ProviderRegistryEntry {
     pub readiness_adapter: ProviderReadinessAdapter,
     pub default_behavior: ProviderDefaultBehavior,
     pub default_context_window: u64,
+    pub context_window_known: bool,
+    pub supports_restricted_tool_policy: bool,
+    pub supports_tui_hosting: bool,
+    pub system_prompt_transport: &'static str,
     pub managed_tmux_backend: bool,
     pub managed_tmux_wrapper_subcommand: Option<&'static str>,
     pub auth: ProviderAuthSpec,

@@ -2,6 +2,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
+import { catalogLabel, useProviderCatalog } from "../../api/providers";
 import type { Department } from "../../types";
 import { localeName, useI18n } from "../../i18n";
 import EmojiPicker from "./EmojiPicker";
@@ -19,7 +20,7 @@ const agentFormSchema = z.object({
   name_ja: z.string(),
   name_zh: z.string(),
   department_id: z.string(),
-  cli_provider: z.enum(["claude", "codex", "gemini", "qwen", "opencode", "copilot", "antigravity", "api"]),
+  cli_provider: z.string().trim().min(1, "required"),
   avatar_emoji: z.string().trim().min(1, "required"),
   sprite_number: z.number().nullable(),
   personality: z.string(),
@@ -66,6 +67,7 @@ export default function AgentFormModal({
   });
   const formValues = watch();
   const spriteNum = formValues.sprite_number ?? 0;
+  const providerCatalog = useProviderCatalog(formValues.cli_provider);
 
   // ESC 키로 닫기
   useEffect(() => {
@@ -88,7 +90,10 @@ export default function AgentFormModal({
     color: "var(--th-text-primary)",
   };
   const handleSave = handleSubmit(async (values) => {
-    await onSave(values);
+    await onSave({
+      ...values,
+      cli_provider: values.cli_provider as FormData["cli_provider"],
+    });
   });
 
   return (
@@ -304,7 +309,7 @@ export default function AgentFormModal({
                 />
               </div>
             )}
-            <div className="grid grid-cols-[72px_1fr] gap-2">
+            <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 md:grid-cols-[72px_minmax(0,1fr)_minmax(0,1fr)]">
               <div>
                 <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                   {tr("이모지", "Emoji")}
@@ -337,6 +342,33 @@ export default function AgentFormModal({
                     </option>
                   ))}
                 </select>
+              </div>
+              <div className="col-span-2 md:col-span-1">
+                <label htmlFor="agent-provider" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                  {tr("메인 Provider", "Main Provider")}
+                </label>
+                <select
+                  id="agent-provider"
+                  {...register("cli_provider")}
+                  disabled={providerCatalog.loading}
+                  className={`${inputCls} cursor-pointer`}
+                  style={inputStyle}
+                >
+                  {providerCatalog.selectableIds.map((provider) => (
+                    <option key={provider} value={provider}>
+                      {catalogLabel(providerCatalog.entries, provider)}
+                    </option>
+                  ))}
+                </select>
+                {providerCatalog.loading ? (
+                  <span className="mt-1 block text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                    {tr("프로바이더 목록을 불러오는 중...", "Loading providers...")}
+                  </span>
+                ) : providerCatalog.error ? (
+                  <span className="mt-1 block text-[11px]" style={{ color: "var(--th-accent-danger)" }}>
+                    {tr("카탈로그를 못 불러 로컬 목록을 씁니다.", "Catalog unavailable; using local list.")}
+                  </span>
+                ) : null}
               </div>
             </div>
             </div>

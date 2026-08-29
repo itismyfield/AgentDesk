@@ -151,7 +151,7 @@ function ConnectorRow({
 
       <div className="mt-3 grid gap-2 text-[12px] leading-5" style={{ color: "var(--th-text-muted)" }}>
         <FieldLine label={tr("환경변수", "Env var")} value={connector.env_var} />
-        <FieldLine label={tr("경로", "Path")} value={connector.source ?? tr("미확인", "Unavailable")} />
+        <FieldLine label={tr("소스", "Source")} value={connector.source ?? tr("미확인", "Unavailable")} />
         {connector.reason ? <FieldLine label={tr("사유", "Reason")} value={connector.reason} /> : null}
       </div>
 

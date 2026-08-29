@@ -17,6 +17,9 @@ use std::sync::Arc;
 
 pub(crate) mod context_snapshot;
 mod evidence;
+mod external_delivery;
+pub(crate) mod provider_targets;
+mod push_handoff;
 mod timing;
 
 #[cfg(test)]
@@ -127,6 +130,10 @@ async fn tick_once(
         did_work = true;
     }
 
+    if external_delivery::tick(pool, claim_owner).await {
+        did_work = true;
+    }
+
     did_work
 }
 
@@ -179,97 +186,22 @@ pub async fn fire_claimed(
 }
 
 async fn fire_push(pool: &PgPool, fire: &ClaimedFire, now: DateTime<Utc>) {
-    let message = &fire.message;
-    let Some(channel_id) = message.target_channel_id.as_deref() else {
-        // chk_smsg_push_target_required makes this unreachable; degrade safely.
-        finish_terminal_failure(pool, fire, "push delivery has no target channel").await;
-        return;
-    };
-    let target = format!("channel:{channel_id}");
-    // reason_code carries the fire-slot identity so the outbox dedupe key is
-    // per-slot: a crashed node re-firing the same slot is suppressed, while
-    // the next recurrence (different slot) passes.
-    let reason_code = format!(
-        "scheduled_message:v1:{}:{}",
-        message.id,
-        fire.fire_scheduled_at.timestamp_micros()
-    );
-    match commit_push_handoff(
-        pool,
-        fire,
-        OutboxMessage {
-            target: &target,
-            content: &message.content,
-            bot: &message.bot,
-            source: OUTBOX_SOURCE,
-            reason_code: Some(&reason_code),
-            session_key: None,
-        },
-        now,
-    )
-    .await
-    {
-        Ok(true) => {}
-        Ok(false) => tracing::info!(
-            id = message.id,
+    match push_handoff::commit(pool, fire, now).await {
+        Ok(push_handoff::PushHandoffOutcome::Committed) => {}
+        Ok(push_handoff::PushHandoffOutcome::Canceled) => tracing::info!(
+            id = fire.message.id,
             delivery_id = fire.delivery_id,
             "[smsg] push handoff skipped after claim cancellation"
         ),
-        Err(error) => {
+        Err(push_handoff::PushHandoffError::Invalid(error)) => {
+            finish_terminal_failure(pool, fire, error).await;
+        }
+        Err(push_handoff::PushHandoffError::Transient(error)) => {
             let error = format!("outbox enqueue failed: {error}");
-            tracing::warn!(id = message.id, "[smsg] {error}");
+            tracing::warn!(id = fire.message.id, "[smsg] {error}");
             interrupt_for_retry(pool, fire, &error).await;
         }
     }
-}
-
-async fn commit_push_handoff(
-    pool: &PgPool,
-    fire: &ClaimedFire,
-    message: OutboxMessage<'_>,
-    now: DateTime<Utc>,
-) -> anyhow::Result<bool> {
-    let mut tx = pool.begin().await?;
-    if !db::lock_active_delivery_tx(
-        &mut tx,
-        &fire.message.id,
-        &fire.delivery_id,
-        &fire.claim_token,
-    )
-    .await?
-    {
-        return Ok(false);
-    }
-    let outbox_id =
-        enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx(&mut tx, message).await?;
-    let (next, forced_terminal) = compute_resume(
-        fire.message.schedule.as_deref(),
-        &fire.message.timezone,
-        fire.message.scheduled_at,
-        fire.message.expires_at,
-        now,
-    );
-    let terminal_status = forced_terminal.unwrap_or(db::STATUS_SENT);
-    let next = forced_terminal.is_none().then_some(next).flatten();
-    let transitioned = db::finish_locked_delivery_and_finalize_parent_tx(
-        &mut tx,
-        &fire.delivery_id,
-        &fire.claim_token,
-        db::DELIVERY_SENT,
-        None,
-        Some(outbox_id),
-        None,
-        &fire.message.id,
-        true,
-        terminal_status,
-        next,
-    )
-    .await?;
-    if !transitioned {
-        return Ok(false);
-    }
-    tx.commit().await?;
-    Ok(true)
 }
 
 async fn fire_agent(pool: &PgPool, health_registry: Option<&HealthRegistry>, fire: &ClaimedFire) {
@@ -1241,6 +1173,7 @@ mod tests {
         let message = ScheduledMessageRow {
             id: "smsg_test".to_string(),
             content: "내일 배포 예정".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: Some("배포 공지".to_string()),
             target_channel_id: Some("123".to_string()),
             bot: "announce".to_string(),
@@ -1260,6 +1193,8 @@ mod tests {
             source: "api".to_string(),
             created_by: None,
             dedupe_key: None,
+            provider_targets: None,
+            provider_target_summary: None,
             context_strategy: "fresh".to_string(),
             context_snapshot_id: None,
             on_context_failure: "fail".to_string(),
