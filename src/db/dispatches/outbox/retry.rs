@@ -20,7 +20,9 @@ pub(crate) async fn schedule_outbox_retry_pg(
                 retry_count = $2,
                 next_attempt_at = NOW() + ($3::bigint * INTERVAL '1 second'),
                 claimed_at = NULL,
-                claim_owner = NULL
+                claim_owner = NULL,
+                wait_reason = NULL,
+                wait_started_at = NULL
           WHERE id = $4
             AND claim_owner = $5
             AND claimed_at = $6",

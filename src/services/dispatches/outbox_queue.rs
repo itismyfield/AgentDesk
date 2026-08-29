@@ -261,7 +261,12 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                     })
             }
             other => {
-                tracing::warn!("[dispatch-outbox] Unknown action: {other}");
+                tracing::warn!(
+                    outbox_id = id,
+                    dispatch_id = %dispatch_id,
+                    action = %other,
+                    "[dispatch-outbox] unknown action"
+                );
                 Err(format!("unknown action: {other}"))
             }
         };
@@ -280,13 +285,25 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                 )
                 .await;
                 if done.is_ok() && action == "notify" {
-                    mark_dispatch_dispatched_pg(pool, &dispatch_id).await.ok();
+                    if let Err(error) = mark_dispatch_dispatched_pg(pool, &dispatch_id).await {
+                        tracing::error!(
+                            outbox_id = id,
+                            dispatch_id = %dispatch_id,
+                            %error,
+                            "[dispatch-outbox] post-notify bookkeeping: failed to mark dispatch as dispatched (it may already be dispatched)"
+                        );
+                    }
                 }
             }
             Err(err) => {
                 if is_transient_slot_busy_error(&err) {
                     tracing::info!(
-                        "[dispatch-outbox] Slot busy for entry {id} (dispatch={dispatch_id}, action={action}); retrying in {SLOT_BUSY_RETRY_SECS}s without consuming retry budget"
+                        outbox_id = id,
+                        dispatch_id = %dispatch_id,
+                        action = %action,
+                        error = %err,
+                        backoff_secs = SLOT_BUSY_RETRY_SECS,
+                        "[dispatch-outbox] slot busy, retrying without consuming retry budget"
                     );
                     let _ = schedule_outbox_retry_pg(
                         pool,
@@ -304,7 +321,11 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                 if new_count > MAX_RETRY_COUNT {
                     // Permanent failure — exhausted all 4 retries (1m → 5m → 15m → 1h)
                     tracing::error!(
-                        "[dispatch-outbox] Permanent failure for entry {id} (dispatch={dispatch_id}, action={action}): {err}"
+                        outbox_id = id,
+                        dispatch_id = %dispatch_id,
+                        action = %action,
+                        error = %err,
+                        "[dispatch-outbox] permanent failure"
                     );
                     let delivery_result = DispatchNotifyDeliveryResult::permanent_failure(
                         &dispatch_id,
@@ -328,8 +349,14 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
                     let backoff_idx = (new_count - 1) as usize;
                     let backoff_secs = RETRY_BACKOFF_SECS.get(backoff_idx).copied().unwrap_or(3600);
                     tracing::warn!(
-                        "[dispatch-outbox] Retry {new_count}/{MAX_RETRY_COUNT} for entry {id} (dispatch={dispatch_id}, action={action}) \
-                         in {backoff_secs}s: {err}",
+                        outbox_id = id,
+                        dispatch_id = %dispatch_id,
+                        action = %action,
+                        retry = new_count,
+                        max_retries = MAX_RETRY_COUNT,
+                        backoff_secs = backoff_secs,
+                        error = %err,
+                        "[dispatch-outbox] retry scheduled"
                     );
                     let _ = schedule_outbox_retry_pg(
                         pool,
