@@ -12,6 +12,7 @@ import contextlib
 import importlib.util
 import io
 import locale
+import os
 import subprocess
 import sys
 import tempfile
@@ -964,8 +965,50 @@ mod after_string_brace {
 
     def test_sequential_git_merges_preserve_manifest_union(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            fixture_root = Path(tmp)
+            root = fixture_root / "repo"
+            root.mkdir()
+            missing_gpg = fixture_root / "missing-gpg"
+            hostile_global = fixture_root / "hostile.gitconfig"
+            hostile_global.write_text(
+                "[core]\n\tautocrlf = true\n"
+                "[commit]\n\tgpgSign = true\n",
+                encoding="utf-8",
+            )
+            inherited_git_env = dict(os.environ)
+            inherited_git_env.update({
+                "GIT_CONFIG_GLOBAL": str(hostile_global),
+                "GIT_CONFIG_SYSTEM": str(hostile_global),
+                "GIT_CONFIG_COUNT": "3",
+                "GIT_CONFIG_KEY_0": "core.autocrlf",
+                "GIT_CONFIG_VALUE_0": "true",
+                "GIT_CONFIG_KEY_1": "commit.gpgSign",
+                "GIT_CONFIG_VALUE_1": "true",
+                "GIT_CONFIG_KEY_2": "gpg.program",
+                "GIT_CONFIG_VALUE_2": str(missing_gpg),
+            })
+            git_env = {
+                key: value for key, value in inherited_git_env.items()
+                if key != "GIT_CONFIG" and not key.startswith("GIT_CONFIG_")
+            }
+            git_env.update({
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+            })
+            self.assertEqual(
+                {
+                    key: value for key, value in git_env.items()
+                    if key == "GIT_CONFIG" or key.startswith("GIT_CONFIG_")
+                },
+                {
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_GLOBAL": os.devnull,
+                },
+            )
             (root / "src").mkdir()
+            (root / ".gitattributes").write_text(
+                "scripts/** text eol=lf\n", encoding="utf-8"
+            )
             (root / "Cargo.toml").write_text(
                 '[package]\nname = "fixture"\n\n[lib]\npath = "src/lib.rs"\n',
                 encoding="utf-8",
@@ -986,7 +1029,7 @@ mod after_string_brace {
             def git(*args: str) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
                     ["git", *args], cwd=root, check=True,
-                    capture_output=True, text=True,
+                    capture_output=True, text=True, env=git_env,
                 )
 
             def regenerate() -> None:
@@ -996,12 +1039,37 @@ mod after_string_brace {
                         "--write-lib-inventory-manifest",
                     ]), 0)
 
+            for key in ("core.autocrlf", "commit.gpgSign"):
+                hostile = subprocess.run(
+                    ["git", "config", "--get", key], cwd=root,
+                    check=True, capture_output=True, text=True,
+                    env=inherited_git_env,
+                )
+                self.assertEqual(hostile.stdout.strip(), "true")
+
             git("init", "-q", "-b", "main")
             git("config", "user.name", "Inventory Contract")
             git("config", "user.email", "inventory@example.invalid")
+            git("config", "commit.gpgSign", "false")
+            git("config", "core.autocrlf", "false")
+            git("config", "core.eol", "lf")
+            self.assertEqual(
+                git("config", "--local", "--get", "commit.gpgSign")
+                .stdout.strip(),
+                "false",
+            )
+            self.assertEqual(
+                git("config", "--local", "--get", "core.autocrlf")
+                .stdout.strip(),
+                "false",
+            )
             regenerate()
             git("add", ".")
             git("commit", "-q", "-m", "base inventory")
+            self.assertEqual(
+                git("show", "HEAD:.gitattributes").stdout,
+                "scripts/** text eol=lf\n",
+            )
 
             git("switch", "-q", "-c", "branch-a")
             alpha = root / "src/alpha.rs"
@@ -1048,6 +1116,16 @@ mod after_string_brace {
             manifest_raw = (
                 root / integrity.LIB_INVENTORY_MANIFEST_REL
             ).read_bytes()
+            manifest_rel = integrity.LIB_INVENTORY_MANIFEST_REL.as_posix()
+            self.assertEqual(
+                git("check-attr", "text", "eol", "--", manifest_rel)
+                .stdout.splitlines(),
+                [
+                    f"{manifest_rel}: text: set",
+                    f"{manifest_rel}: eol: lf",
+                ],
+            )
+            self.assertNotIn(b"\r", manifest_raw)
             cargo_result = subprocess.CompletedProcess(
                 [], 0,
                 stdout="".join(
