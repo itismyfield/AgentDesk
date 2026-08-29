@@ -207,6 +207,11 @@ pub(in crate::services::discord) enum LeaseOutcome {
     Unknown,
 }
 
+/// Opaque identity of one concrete lease acquisition. Unlike key/range identity,
+/// this changes on every reclaim/reacquire and therefore closes same-value ABA.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::services::discord) struct LeaseToken(u64);
+
 /// The lease state machine value, owned behind the cell's mutex. The `AtomicU8`
 /// tag below is the single-winner CAS gate for acquire; this payload is only
 /// ever mutated by that winner (or by a deadline reclaim), and every mutation
@@ -231,16 +236,17 @@ enum LeaseState {
     Leased {
         holder: LeaseHolder,
         key: DeliveryLeaseKey,
+        token: LeaseToken,
         deadline_ms: u64,
         start: u64,
         end: u64,
     },
-    /// Committed with a three-way outcome; carries the same `(holder, key,
-    /// range)` identity forward so a stale release is rejected. Awaits a
-    /// `release` to return to `Unleased`.
+    /// Committed with a three-way outcome; carries the same exact acquisition
+    /// identity forward so a stale release is rejected. Awaits a release.
     Committed {
         holder: LeaseHolder,
         key: DeliveryLeaseKey,
+        token: LeaseToken,
         start: u64,
         end: u64,
         outcome: LeaseOutcome,
@@ -289,6 +295,8 @@ pub(in crate::services::discord) struct DeliveryLeaseCell {
     /// single-winner gate; it is flipped under the payload mutex, NOT lock-free
     /// for readers — `read()` takes the mutex.
     state_tag: std::sync::atomic::AtomicU8,
+    /// Monotonic acquisition identity; zero is never issued.
+    next_token: std::sync::atomic::AtomicU64,
     /// Rich lease payload. Mutated by the CAS winner or a deadline reclaim, and
     /// read by `read()` — all under this one mutex (the coherence invariant).
     payload: std::sync::Mutex<DeliveryLeasePayload>,
@@ -515,6 +523,7 @@ impl DeliveryLeaseCell {
         Self {
             channel_id,
             state_tag: std::sync::atomic::AtomicU8::new(TAG_UNLEASED),
+            next_token: std::sync::atomic::AtomicU64::new(1),
             payload: std::sync::Mutex::new(DeliveryLeasePayload {
                 lease: LeaseState::Unleased,
                 watcher_reservation: None,
@@ -586,6 +595,7 @@ impl DeliveryLeaseCell {
                 deadline_ms,
                 start,
                 end,
+                ..
             } => LeaseSnapshot::Leased {
                 holder: *holder,
                 key: key.clone(),
@@ -599,6 +609,7 @@ impl DeliveryLeaseCell {
                 start,
                 end,
                 outcome,
+                ..
             } => LeaseSnapshot::Committed {
                 holder: *holder,
                 key: key.clone(),
@@ -708,14 +719,45 @@ impl DeliveryLeaseCell {
         {
             return false;
         }
+        let token = LeaseToken(self.next_token.fetch_add(1, Ordering::AcqRel));
         guard.lease = LeaseState::Leased {
             holder,
             key,
+            token,
             deadline_ms,
             start,
             end,
         };
         true
+    }
+
+    /// Sink-only exact acquisition. The returned token is bound to this concrete
+    /// cell acquisition and must accompany every sink renew/commit/release.
+    pub(in crate::services::discord) fn try_acquire_sink_exact(
+        &self,
+        key: DeliveryLeaseKey,
+        coordinate: u64,
+        deadline_ms: u64,
+    ) -> Option<LeaseToken> {
+        use std::sync::atomic::Ordering;
+        let mut guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = PayloadLockMarker::enter();
+        self.state_tag
+            .compare_exchange(TAG_UNLEASED, TAG_LEASED, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let token = LeaseToken(self.next_token.fetch_add(1, Ordering::AcqRel));
+        guard.lease = LeaseState::Leased {
+            holder: LeaseHolder::Sink,
+            key,
+            token,
+            deadline_ms,
+            start: coordinate,
+            end: coordinate,
+        };
+        Some(token)
     }
 
     /// Commit the lease three-way (#3041 §3). Verifies the FULL `(holder, key,
@@ -744,6 +786,7 @@ impl DeliveryLeaseCell {
             LeaseState::Leased {
                 holder: cur_holder,
                 key: cur_key,
+                token,
                 start: cur_start,
                 end: cur_end,
                 ..
@@ -752,9 +795,11 @@ impl DeliveryLeaseCell {
                 && *cur_start == start
                 && *cur_end == end =>
             {
+                let token = *token;
                 guard.lease = LeaseState::Committed {
                     holder,
                     key,
+                    token,
                     start,
                     end,
                     outcome,
@@ -765,6 +810,39 @@ impl DeliveryLeaseCell {
             // Identity mismatch (holder / stale turn / range) or not Leased.
             _ => false,
         }
+    }
+
+    pub(in crate::services::discord) fn commit_sink_exact(
+        &self,
+        key: &DeliveryLeaseKey,
+        coordinate: u64,
+        token: LeaseToken,
+        outcome: LeaseOutcome,
+    ) -> bool {
+        use std::sync::atomic::Ordering;
+        let mut guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = PayloadLockMarker::enter();
+        let matches = matches!(
+            &guard.lease,
+            LeaseState::Leased { holder: LeaseHolder::Sink, key: current, token: current_token, start, end, .. }
+                if current == key && *current_token == token && *start == coordinate && *end == coordinate
+        );
+        if !matches {
+            return false;
+        }
+        guard.lease = LeaseState::Committed {
+            holder: LeaseHolder::Sink,
+            key: key.clone(),
+            token,
+            start: coordinate,
+            end: coordinate,
+            outcome,
+        };
+        self.state_tag.store(TAG_COMMITTED, Ordering::Release);
+        true
     }
 
     /// Compare-and-release: return the cell to `Unleased` ONLY if the FULL
@@ -812,6 +890,83 @@ impl DeliveryLeaseCell {
         guard.lease = LeaseState::Unleased;
         self.state_tag.store(TAG_UNLEASED, Ordering::Release);
         true
+    }
+
+    pub(in crate::services::discord) fn release_sink_exact(
+        &self,
+        key: &DeliveryLeaseKey,
+        coordinate: u64,
+        token: LeaseToken,
+    ) -> bool {
+        use std::sync::atomic::Ordering;
+        let mut guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = PayloadLockMarker::enter();
+        let matches = match &guard.lease {
+            LeaseState::Leased { holder: LeaseHolder::Sink, key: current, token: current_token, start, end, .. }
+            | LeaseState::Committed { holder: LeaseHolder::Sink, key: current, token: current_token, start, end, .. } => {
+                current == key && *current_token == token && *start == coordinate && *end == coordinate
+            }
+            _ => false,
+        };
+        if !matches {
+            return false;
+        }
+        guard.lease = LeaseState::Unleased;
+        self.state_tag.store(TAG_UNLEASED, Ordering::Release);
+        true
+    }
+
+    pub(in crate::services::discord) fn sink_exact_matches(
+        &self,
+        key: &DeliveryLeaseKey,
+        coordinate: u64,
+        token: LeaseToken,
+    ) -> bool {
+        let guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = PayloadLockMarker::enter();
+        matches!(
+            &guard.lease,
+            LeaseState::Leased { holder: LeaseHolder::Sink, key: current, token: current_token, start, end, .. }
+            | LeaseState::Committed { holder: LeaseHolder::Sink, key: current, token: current_token, start, end, .. }
+                if current == key && *current_token == token && *start == coordinate && *end == coordinate
+        )
+    }
+
+    pub(in crate::services::discord) fn renew_sink_exact(
+        &self,
+        key: &DeliveryLeaseKey,
+        coordinate: u64,
+        token: LeaseToken,
+        new_deadline_ms: u64,
+    ) -> bool {
+        let mut guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = PayloadLockMarker::enter();
+        if let LeaseState::Leased {
+            holder: LeaseHolder::Sink,
+            key: current,
+            token: current_token,
+            start,
+            end,
+            deadline_ms,
+        } = &mut guard.lease
+            && current == key
+            && *current_token == token
+            && *start == coordinate
+            && *end == coordinate
+        {
+            *deadline_ms = new_deadline_ms;
+            return true;
+        }
+        false
     }
 
     /// #3041 P1-1 (§3, codex R2 Issue-1): HEARTBEAT renew. While the holder's

@@ -353,7 +353,7 @@ impl super::SessionBoundDiscordRelaySink {
         task_card_message_id: Option<MessageId>,
         task_response_claim: Option<ResponseDeliveryClaim>,
         trace: &super::SessionRelayTraceContext,
-        sink_lease_guard: Option<&super::SinkDeliveryLeaseGuard>,
+        sink_lease_guard: Option<&super::delivery_frontier::SinkDeliveryLeaseGuard>,
         sink_delivery_ctx: super::delivery_frontier::SinkDeliveryCtx<'_>,
     ) -> Result<super::SessionRelayDeliveryOutcome, RelaySinkError> {
         let channel = ChannelId::new(channel_id);
@@ -809,6 +809,8 @@ mod tests {
             task_notification_kind: Some(TaskNotificationKind::Background),
             task_notification_context: Some(context.clone()),
             terminal_consumed_end: None,
+            terminal_source_range: None,
+            terminal_reset_incarnation: None,
             frame_turn_user_msg_id: 0,
             frame_turn_started_at: "2026-07-11T01:37:00Z".to_string(),
             frame_turn_start_offset: Some(4055),

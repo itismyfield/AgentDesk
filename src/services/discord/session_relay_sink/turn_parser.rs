@@ -138,6 +138,8 @@ impl SessionRelayParser {
                     task_notification_kind,
                     task_notification_context,
                     terminal_consumed_end: frame.terminal_consumed_end,
+                    terminal_source_range: frame.terminal_source_range,
+                    terminal_reset_incarnation: frame.terminal_reset_incarnation,
                     frame_turn_user_msg_id: frame.turn_user_msg_id,
                     frame_turn_started_at: frame.turn_started_at.clone(),
                     frame_turn_start_offset: frame.turn_start_offset,
@@ -213,6 +215,8 @@ pub(in crate::services::discord) struct SessionRelayDelivery {
     pub(super) task_notification_context:
         Option<super::super::task_notification_delivery::TaskNotificationContext>,
     pub(super) terminal_consumed_end: Option<u64>,
+    pub(super) terminal_source_range: Option<(u64, u64)>,
+    pub(super) terminal_reset_incarnation: Option<u64>,
     pub(super) frame_turn_user_msg_id: u64,
     pub(super) frame_turn_started_at: String,
     pub(super) frame_turn_start_offset: Option<u64>,

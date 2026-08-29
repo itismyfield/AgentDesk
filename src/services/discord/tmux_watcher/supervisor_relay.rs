@@ -632,6 +632,7 @@ pub(super) fn watcher_terminal_commit_fence(
     consumed_end: u64,
     pinned_identity: Option<&crate::services::discord::inflight::InflightTurnIdentity>,
     tmux_session_name: &str,
+    reset_incarnation: u64,
 ) -> Option<crate::services::cluster::stream_relay::TerminalCommitFence> {
     if !found_result || consumed_end <= turn_data_start_offset {
         return None;
@@ -654,6 +655,8 @@ pub(super) fn watcher_terminal_commit_fence(
     Some(
         crate::services::cluster::stream_relay::TerminalCommitFence {
             consumed_end,
+            source_range: (turn_data_start_offset, consumed_end),
+            reset_incarnation,
             turn_user_msg_id: identity.user_msg_id,
             turn_started_at: identity.started_at.clone(),
             // A fence ALWAYS carries a real `turn_start_offset` (guaranteed above)

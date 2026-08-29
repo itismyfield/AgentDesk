@@ -61,6 +61,7 @@ use self::idle_jsonl::{
     prune_idle_jsonl_session_state, read_jsonl_range,
 };
 use self::task_notification_context::ensure_card_and_route;
+use self::delivery_frontier::SinkDeliveryLeaseGuard;
 use self::terminal_handoff::SessionRelayDeliveryOutcome;
 use self::turn_parser::{SessionRelayDelivery, SessionRelayParser};
 use super::task_notification_delivery::{ResponseDeliveryClaim, ResponseDeliveryClaimOutcome};
@@ -290,93 +291,6 @@ impl Drop for SessionBoundExternalInputLeaseGuard {
     }
 }
 
-/// #3151: RAII in-flight sink-delivery marker on the per-channel
-/// [`super::DeliveryLeaseCell`], acquired as [`super::LeaseHolder::Sink`] for the SAME
-/// `(channel, turn, [start,end))` the watcher's §3.2 reconciliation computes, BEFORE the
-/// POST; a [`super::DeliveryLeaseHeartbeat`] renews the deadline so the watcher reads
-/// `Leased{Sink, fresh}` and WAITS instead of re-sending (slow-sink dup). RECLAIMABLE: a
-/// crashed sink stops renewing → the watcher reclaims within ~one deadline (no black-hole).
-/// CLEAR ordering (SUCCESS): advance committed FIRST (`advance_after_confirmed_post`) THEN
-/// [`Self::commit`] → watcher reads `committed >= end` → Skip. EVERY exit Drop RELEASES
-/// (full-identity → stale no-ops); a never-committed failure leaves `Unleased`, committed
-/// NOT advanced → watcher SendFull.
-struct SinkDeliveryLeaseGuard {
-    cell: Arc<super::DeliveryLeaseCell>,
-    key: super::DeliveryLeaseKey,
-    start: u64,
-    end: u64,
-    /// The in-flight heartbeat; aborted on Drop (mirrors the watcher's RAII).
-    _heartbeat: super::DeliveryLeaseHeartbeat,
-}
-
-impl SinkDeliveryLeaseGuard {
-    /// Self-heal a dead PRIOR holder, then CAS-acquire as `LeaseHolder::Sink` for
-    /// `(turn, [start,end))`. `Some` (spawning the heartbeat) only when the acquire wins;
-    /// `None` means another holder owns the range and the caller must return NotDelivered
-    /// without reaching transport.
-    fn acquire(
-        cell: &Arc<super::DeliveryLeaseCell>,
-        key: super::DeliveryLeaseKey,
-        start: u64,
-        end: u64,
-    ) -> Option<Self> {
-        // Mirror the watcher's self-healing acquire (tmux_watcher.rs:8594): reclaim an
-        // EXPIRED prior holder so a stale dead lease can't lose this acquire.
-        cell.reclaim_if_expired(super::lease_now_ms());
-        let acquired = cell.try_acquire(
-            key.clone(),
-            super::LeaseHolder::Sink,
-            start,
-            end,
-            super::lease_now_ms().saturating_add(super::DELIVERY_LEASE_DEADLINE_MS),
-        );
-        if !acquired {
-            return None;
-        }
-        let heartbeat = super::DeliveryLeaseHeartbeat::spawn(
-            cell.clone(),
-            super::LeaseHolder::Sink,
-            key.clone(),
-        );
-        Some(Self {
-            cell: cell.clone(),
-            key,
-            start,
-            end,
-            _heartbeat: heartbeat,
-        })
-    }
-
-    /// Terminal-decision commit, AFTER the advance was attempted: `outcome` reflects
-    /// whether it ACTUALLY happened — `Delivered` only when the offset advanced (so the
-    /// watcher reads `committed >= end` → Skip), else `NotDelivered` (offset `< end` →
-    /// the watcher re-sends → SendFull, no black-hole). Full-identity compare-and-X →
-    /// a stale older-turn clear no-ops. Drop still releases.
-    fn commit(&self, outcome: super::LeaseOutcome) {
-        self.cell.commit(
-            super::LeaseHolder::Sink,
-            self.key.clone(),
-            self.start,
-            self.end,
-            outcome,
-        );
-    }
-}
-
-impl Drop for SinkDeliveryLeaseGuard {
-    fn drop(&mut self) {
-        // Release on EVERY exit. `release` is valid from `Leased` (failure) and `Committed`
-        // (success) and full-identity-gated, so it clears ONLY our marker — a newer turn
-        // that re-leased this cell survives. (`_heartbeat` Drop aborts the renew task.)
-        self.cell.release(
-            super::LeaseHolder::Sink,
-            self.key.clone(),
-            self.start,
-            self.end,
-        );
-    }
-}
-
 /// #3089 A2b: adapts the sink's `DeliveryLeaseHeartbeat` to [`toc::PostHeartbeat`]. Holds the
 /// `Arc` (the controller drives the lease behind a borrowed `&cell`) and spawns the SAME
 /// `DeliveryLeaseHeartbeat::spawn` the legacy guard used (#3151 — identical renew); the guard
@@ -407,28 +321,16 @@ fn session_bound_should_send_new_chunks_for_placeholder(response_text: &str) -> 
     super::formatting::needs_multiple_messages(response_text)
 }
 
-/// Pick the one ordered coordinate used by every terminal sink path. Strict
-/// commit-fenced frames take precedence; inflight-less idle/catch-up frames use
-/// their carried range; legacy no-range frames still return a degenerate
-/// zero-width coordinate so no terminal POST can bypass the shared lease.
+/// Select the authority coordinate for a terminal or idle delivery. A terminal
+/// is always the single point `(C,C)`; its source evidence never selects a lease.
 fn sink_delivery_lease_coordinate(delivery: &SessionRelayDelivery) -> ((u64, u64), Option<u64>) {
-    if let (Some(start), Some(end)) = (
-        delivery.frame_turn_start_offset,
-        delivery.terminal_consumed_end,
-    ) && end > start
-    {
-        return ((start, end), Some(start));
+    if let Some(authority) = delivery_frontier::validate_terminal_delivery(delivery) {
+        return ((authority.consumed, authority.consumed), None);
     }
-    if let Some((start, end)) = delivery.relay_range
-        && end > start
-    {
-        return ((start, end), Some(start));
-    }
-
-    // A terminal delivery without an ordered byte range must still serialize on
-    // the channel cell. The zero-width coordinate and absent fallback retain the
-    // legacy degenerate id-0 key instead of allowing a lease-free POST.
-    ((0, 0), None)
+    delivery
+        .relay_range
+        .filter(|(start, end)| start < end)
+        .map_or(((0, 0), None), |range| (range, Some(range.0)))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -706,6 +608,14 @@ impl SessionBoundDiscordRelaySink {
         &self,
         delivery: SessionRelayDelivery,
     ) -> Result<SessionRelayDeliveryOutcome, RelaySinkError> {
+        // Terminal authority is fail-closed and validated before any lease guard,
+        // registry lookup, journal admission, or transport side effect. C is the
+        // sole positive delivery coordinate; the source range is provenance only.
+        if delivery.relay_range.is_none()
+            && delivery_frontier::validate_terminal_delivery(&delivery).is_none()
+        {
+            return Ok(SessionRelayDeliveryOutcome::NotDelivered);
+        }
         #[cfg(test)]
         let gateway: Option<&dyn super::gateway::TurnGateway> = self.test_gateway.as_deref();
         #[cfg(not(test))]
@@ -795,32 +705,21 @@ impl SessionBoundDiscordRelaySink {
             relay_format::session_bound_relay_bodies(&shared, &provider, &delivery);
         let channel = ChannelId::new(channel_id);
 
-        let cutover_range = match (
-            delivery.frame_turn_start_offset,
-            delivery.terminal_consumed_end,
-        ) {
-            (Some(start), Some(end)) if end > start => Some((start, end)),
-            _ => None,
-        };
+        let cutover_range = delivery_frontier::validate_terminal_delivery(&delivery)
+            .map(|authority| (authority.consumed, authority.consumed));
         // Task-context delivery may confirm a card and then promote the response
         // route from PlaceholderEdit to NewMessage. Keep that entire operation on
         // the outer lease so both the card transport and the final answer remain
         // guarded even though the route mutates inside `ensure_card_and_route`.
+        // PR-B keeps every terminal path on the same exact tokenized outer lease.
+        // The controller still uses the legacy key/range acquire API, so the final
+        // constant conjunct disables it until it accepts an already-acquired guard.
         let cutover_short_replace = delivery.task_notification_context.is_none()
             && cutover_range.is_some()
             && !relay_text.is_empty()
             && matches!(route, SessionBoundTerminalDeliveryRoute::PlaceholderEdit(_))
             && !session_bound_should_send_new_chunks_for_placeholder(&relay_text)
-            && {
-                #[cfg(test)]
-                {
-                    !self.test_force_legacy_replace
-                }
-                #[cfg(not(test))]
-                {
-                    true
-                }
-            };
+            && false;
         let (lease_range, lease_fallback_start) = sink_delivery_lease_coordinate(&delivery);
         let sink_lease_key = delivery_lease_key_for_frame(
             channel,
@@ -849,7 +748,6 @@ impl SessionBoundDiscordRelaySink {
             let Some(guard) = SinkDeliveryLeaseGuard::acquire(
                 &cell,
                 sink_lease_key.clone(),
-                lease_range.0,
                 lease_range.1,
             ) else {
                 tracing::debug!(
@@ -1024,18 +922,19 @@ impl SessionBoundDiscordRelaySink {
                     true,
                     Some("long response sent as ordered chunks"),
                 );
+                journal::settle_exact(
+                    self.journal,
+                    &mut direct_journal_attempt,
+                    chunk_anchor_receipt,
+                    delivery_frontier::SinkDeliveryProofResult::Persisted,
+                    sink_lease_guard.as_ref(),
+                );
                 let proof = delivery_frontier::finish_sink_delivery(
                     sink_delivery_ctx,
                     message_ids.last().map(|message_id| message_id.get()),
                     &raw_response_text,
                     sink_lease_guard.as_ref(),
                     "src/services/discord/session_relay_sink.rs:sink_long_chunks_advance",
-                );
-                journal::settle(
-                    self.journal,
-                    &mut direct_journal_attempt,
-                    chunk_anchor_receipt,
-                    proof,
                 );
                 return Ok(SessionRelayDeliveryOutcome::from_proof(proof));
             }
@@ -1097,18 +996,19 @@ impl SessionBoundDiscordRelaySink {
                         &relay_text,
                     )
                     .0;
+                    journal::settle_exact(
+                        self.journal,
+                        &mut direct_journal_attempt,
+                        edit_anchor_receipt.take(),
+                        delivery_frontier::SinkDeliveryProofResult::Persisted,
+                        sink_lease_guard.as_ref(),
+                    );
                     let proof = delivery_frontier::finish_sink_delivery(
                         sink_delivery_ctx,
                         Some(anchor.get()),
                         &raw_response_text,
                         sink_lease_guard.as_ref(),
                         "src/services/discord/session_relay_sink.rs:sink_legacy_short_edit_advance",
-                    );
-                    journal::settle(
-                        self.journal,
-                        &mut direct_journal_attempt,
-                        edit_anchor_receipt.take(),
-                        proof,
                     );
                     Ok(SessionRelayDeliveryOutcome::from_proof(proof))
                 }
@@ -1150,18 +1050,19 @@ impl SessionBoundDiscordRelaySink {
                         true,
                         Some("fallback after edit failure"),
                     );
+                    journal::settle_exact(
+                        self.journal,
+                        &mut direct_journal_attempt,
+                        edit_anchor_receipt.take(),
+                        delivery_frontier::SinkDeliveryProofResult::Persisted,
+                        sink_lease_guard.as_ref(),
+                    );
                     let proof = delivery_frontier::finish_sink_delivery(
                         sink_delivery_ctx,
                         replacement_anchor.map(|anchor| anchor.get()),
                         &raw_response_text,
                         sink_lease_guard.as_ref(),
                         "src/services/discord/session_relay_sink.rs:sink_legacy_short_fallback_advance",
-                    );
-                    journal::settle(
-                        self.journal,
-                        &mut direct_journal_attempt,
-                        edit_anchor_receipt.take(),
-                        proof,
                     );
                     Ok(SessionRelayDeliveryOutcome::from_proof(proof))
                 }
@@ -1544,6 +1445,8 @@ mod tests {
             payload: payload.to_string(),
             sequence,
             terminal_consumed_end: None,
+            terminal_source_range: None,
+            terminal_reset_incarnation: None,
             turn_user_msg_id: 0,
             turn_started_at: String::new(),
             turn_start_offset: None,
@@ -1603,6 +1506,8 @@ mod tests {
             payload: payload.to_string(),
             sequence,
             terminal_consumed_end: Some(consumed_end),
+            terminal_source_range: turn_start_offset.map(|start| (start, consumed_end)),
+            terminal_reset_incarnation: Some(0),
             turn_user_msg_id,
             turn_started_at: turn_started_at.to_string(),
             turn_start_offset,
@@ -2968,6 +2873,8 @@ mod tests {
             task_notification_kind: None,
             task_notification_context: None,
             terminal_consumed_end: consumed_end,
+            terminal_source_range: consumed_end.zip(turn_start_offset).map(|(end, start)| (start, end)),
+            terminal_reset_incarnation: Some(0),
             frame_turn_user_msg_id: turn_user_msg_id,
             frame_turn_started_at: turn_started_at.to_string(),
             frame_turn_start_offset: turn_start_offset,
@@ -3702,7 +3609,7 @@ mod tests {
                     (0, 256),
                 );
                 let cell = shared.delivery_lease(channel);
-                let lease_guard = SinkDeliveryLeaseGuard::acquire(&cell, lease_key, 0, 256)
+                let lease_guard = SinkDeliveryLeaseGuard::acquire(&cell, lease_key, 256)
                     .expect("production sink lease");
 
                 // Deterministic slow-POST race: transport has landed, then the
@@ -3912,11 +3819,17 @@ mod tests {
     }
 
     #[test]
-    fn terminal_lease_coordinate_prefers_fence_then_idle_range_then_degenerate() {
-        let fenced = delivery_with_fence_offset("fenced", Some(256), 0, "", Some(64));
+    fn terminal_lease_uses_canonical_positive_consumed_coordinate() {
+        let fenced = delivery_with_fence_offset(
+            "fenced",
+            Some(256),
+            0,
+            "2026-08-29T00:00:00Z",
+            Some(64),
+        );
         assert_eq!(
             sink_delivery_lease_coordinate(&fenced),
-            ((64, 256), Some(64))
+            ((256, 256), None)
         );
 
         let mut ranged = delivery_with_fence_offset("ranged", None, 0, "", None);
@@ -3928,6 +3841,48 @@ mod tests {
 
         let degenerate = delivery_with_fence_offset("degenerate", None, 0, "", None);
         assert_eq!(sink_delivery_lease_coordinate(&degenerate), ((0, 0), None));
+    }
+
+    #[test]
+    fn zero_consumed_terminal_is_refused_before_lease_or_transport() {
+        let delivery = delivery_with_fence_offset(
+            "zero-c",
+            Some(0),
+            7,
+            "2026-08-29T00:00:00Z",
+            Some(1),
+        );
+        assert!(delivery_frontier::validate_terminal_delivery(&delivery).is_none());
+    }
+
+    #[test]
+    fn zero_width_or_reversed_source_range_is_refused_before_lease_or_transport() {
+        let mut delivery = delivery_with_fence_offset(
+            "bad-source",
+            Some(9),
+            7,
+            "2026-08-29T00:00:00Z",
+            Some(1),
+        );
+        delivery.terminal_source_range = Some((4, 4));
+        assert!(delivery_frontier::validate_terminal_delivery(&delivery).is_none());
+        delivery.terminal_source_range = Some((5, 4));
+        assert!(delivery_frontier::validate_terminal_delivery(&delivery).is_none());
+    }
+
+    #[test]
+    fn source_provenance_changes_telemetry_without_changing_delivery_decision() {
+        let mut left = delivery_with_fence_offset(
+            "telemetry",
+            Some(11),
+            7,
+            "2026-08-29T00:00:00Z",
+            Some(1),
+        );
+        let mut right = left.clone();
+        left.terminal_source_range = Some((1, 10));
+        right.terminal_source_range = Some((2, 9));
+        assert_eq!(sink_delivery_lease_coordinate(&left), sink_delivery_lease_coordinate(&right));
     }
 
     // #3089 A2b (review-fix M2): an EMPTY body diverges between the controller and
@@ -4914,6 +4869,8 @@ mod tests {
             task_notification_kind: None,
             task_notification_context: None,
             terminal_consumed_end: None,
+            terminal_source_range: None,
+            terminal_reset_incarnation: None,
             frame_turn_user_msg_id: 0,
             frame_turn_started_at: "2026-06-04T00:00:00Z".to_string(),
             frame_turn_start_offset: None,
@@ -5197,7 +5154,7 @@ mod tests {
     /// semantics directly on a real per-channel `DeliveryLeaseCell` — the exact
     /// cell the watcher gate reads.
     mod inflight_sink_marker {
-        use super::super::SinkDeliveryLeaseGuard;
+        use super::super::delivery_frontier::SinkDeliveryLeaseGuard;
         use crate::services::discord::turn_finalizer::TurnKey;
         use crate::services::discord::{
             DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot,
@@ -5221,13 +5178,13 @@ mod tests {
             let cell = Arc::new(DeliveryLeaseCell::new(ch));
             let turn = lease_key(ch);
             let guard =
-                SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END).expect("acquire wins");
+                SinkDeliveryLeaseGuard::acquire(&cell, turn, END).expect("acquire wins");
             match cell.read() {
                 LeaseSnapshot::Leased {
                     holder, start, end, ..
                 } => {
                     assert_eq!(holder, LeaseHolder::Sink);
-                    assert_eq!((start, end), (START, END));
+                    assert_eq!((start, end), (END, END));
                 }
                 other => panic!("expected Leased{{Sink}}, got {other:?}"),
             }
@@ -5244,7 +5201,7 @@ mod tests {
             let turn = lease_key(ch);
             {
                 let guard =
-                    SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END).expect("acquire wins");
+                    SinkDeliveryLeaseGuard::acquire(&cell, turn, END).expect("acquire wins");
                 guard.commit(LeaseOutcome::Delivered);
                 match cell.read() {
                     LeaseSnapshot::Committed {
@@ -5256,10 +5213,11 @@ mod tests {
                     other => panic!("expected Committed{{Sink}}, got {other:?}"),
                 }
             }
-            // Guard dropped without an explicit release call — Drop released it.
+            // An explicitly disarmed success retains its committed marker; normal
+            // production releases during terminal reconciliation.
             assert!(
                 matches!(cell.read(), LeaseSnapshot::Unleased),
-                "Drop releases the committed marker back to Unleased"
+                "armed Drop releases the committed marker back to Unleased"
             );
         }
 
@@ -5275,7 +5233,7 @@ mod tests {
             let turn = lease_key(ch);
             {
                 let guard =
-                    SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END).expect("acquire wins");
+                    SinkDeliveryLeaseGuard::acquire(&cell, turn, END).expect("acquire wins");
                 guard.commit(LeaseOutcome::NotDelivered);
                 match cell.read() {
                     LeaseSnapshot::Committed {
@@ -5307,7 +5265,7 @@ mod tests {
             let turn = lease_key(ch);
             {
                 let _guard =
-                    SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END).expect("acquire wins");
+                    SinkDeliveryLeaseGuard::acquire(&cell, turn, END).expect("acquire wins");
                 // No commit() — simulate the Err/`?` path.
             }
             assert!(
@@ -5336,7 +5294,7 @@ mod tests {
             ));
             // The sink's acquire loses → None; the caller must not POST.
             assert!(
-                SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END).is_none(),
+                SinkDeliveryLeaseGuard::acquire(&cell, turn, END).is_none(),
                 "the sink acquire must lose to the watcher's existing lease"
             );
             // The watcher's lease is intact (still Leased by the watcher).
@@ -5364,7 +5322,7 @@ mod tests {
                 now.saturating_sub(1),
             ));
             // The sink's acquire reclaims the expired holder first, then wins.
-            let guard = SinkDeliveryLeaseGuard::acquire(&cell, turn, START, END)
+            let guard = SinkDeliveryLeaseGuard::acquire(&cell, turn, END)
                 .expect("acquire wins after self-healing the expired holder");
             match cell.read() {
                 LeaseSnapshot::Leased { holder, .. } => assert_eq!(holder, LeaseHolder::Sink),

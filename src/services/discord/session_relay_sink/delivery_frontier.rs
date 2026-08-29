@@ -2,14 +2,112 @@ use std::sync::Arc;
 
 use poise::serenity_prelude::ChannelId;
 
-use super::{SessionRelayDelivery, SinkDeliveryLeaseGuard};
+use super::SessionRelayDelivery;
 use crate::services::discord::tmux::WatcherDeliveryTarget;
 use crate::services::discord::tmux::tmux_watcher::terminal_long_chunks::{
     WatcherDeliveryIdentity, WatcherDeliveryMutation, begin_watcher_delivery_mutation,
     watcher_delivery_identity,
 };
-use crate::services::discord::{DeliveryLeaseKey, LeaseOutcome, SharedData};
+use crate::services::discord::{DeliveryLeaseKey, LeaseOutcome, LeaseToken, SharedData};
 use crate::services::provider::ProviderKind;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TerminalDeliveryAuthority {
+    pub(super) consumed: u64,
+    pub(super) source_range: (u64, u64),
+    pub(super) reset_incarnation: u64,
+}
+
+pub(super) fn validate_terminal_delivery(
+    delivery: &SessionRelayDelivery,
+) -> Option<TerminalDeliveryAuthority> {
+    let consumed = delivery.terminal_consumed_end?;
+    let source_range = delivery.terminal_source_range?;
+    let reset_incarnation = delivery.terminal_reset_incarnation?;
+    (consumed > 0
+        && source_range.0 < source_range.1
+        && delivery.frame_turn_start_offset.is_some()
+        && !delivery.frame_turn_started_at.trim().is_empty())
+    .then_some(TerminalDeliveryAuthority {
+        consumed,
+        source_range,
+        reset_incarnation,
+    })
+}
+
+/// Owns one exact acquired sink lease on one pinned cell. Drop can only release
+/// this token; it never re-looks up a channel/generation cell.
+pub(super) struct SinkDeliveryLeaseGuard {
+    cell: Arc<crate::services::discord::DeliveryLeaseCell>,
+    key: DeliveryLeaseKey,
+    coordinate: u64,
+    token: LeaseToken,
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl SinkDeliveryLeaseGuard {
+    pub(super) fn acquire(
+        cell: &Arc<crate::services::discord::DeliveryLeaseCell>,
+        key: DeliveryLeaseKey,
+        coordinate: u64,
+    ) -> Option<Self> {
+        cell.reclaim_if_expired(crate::services::discord::lease_now_ms());
+        let token = cell.try_acquire_sink_exact(
+            key.clone(),
+            coordinate,
+            crate::services::discord::lease_now_ms()
+                .saturating_add(crate::services::discord::DELIVERY_LEASE_DEADLINE_MS),
+        )?;
+        let heartbeat_cell = cell.clone();
+        let heartbeat_key = key.clone();
+        let heartbeat = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+                crate::services::discord::DELIVERY_LEASE_HEARTBEAT_MS,
+            ));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if !heartbeat_cell.renew_sink_exact(
+                    &heartbeat_key,
+                    coordinate,
+                    token,
+                    crate::services::discord::lease_now_ms().saturating_add(
+                        crate::services::discord::DELIVERY_LEASE_DEADLINE_MS,
+                    ),
+                ) {
+                    break;
+                }
+            }
+        });
+        Some(Self {
+            cell: cell.clone(),
+            key,
+            coordinate,
+            token,
+            heartbeat: Some(heartbeat),
+        })
+    }
+
+    pub(super) fn commit(&self, outcome: LeaseOutcome) -> bool {
+        self.cell.commit_sink_exact(&self.key, self.coordinate, self.token, outcome)
+    }
+
+    pub(super) fn matches_exact(&self) -> bool {
+        self.cell
+            .sink_exact_matches(&self.key, self.coordinate, self.token)
+    }
+
+}
+
+impl Drop for SinkDeliveryLeaseGuard {
+    fn drop(&mut self) {
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.abort();
+        }
+        self.cell
+            .release_sink_exact(&self.key, self.coordinate, self.token);
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct SinkDeliveryAuthority {
@@ -64,10 +162,16 @@ pub(super) fn capture_sink_delivery_authority(
     lease_key: &DeliveryLeaseKey,
     range: (u64, u64),
 ) -> SinkDeliveryAuthority {
+    let reset_incarnation = delivery
+        .terminal_reset_incarnation
+        .unwrap_or_else(|| shared.relay_frontier_token(channel).reset_incarnation);
+    let range = validate_terminal_delivery(delivery)
+        .map(|authority| (authority.source_range.0, authority.consumed))
+        .unwrap_or(range);
     SinkDeliveryAuthority {
         identity: watcher_delivery_identity(
             delivery.relay_generation_mtime_ns.unwrap_or(0),
-            shared.relay_frontier_token(channel).reset_incarnation,
+            reset_incarnation,
             Some(lease_key),
         ),
         range,
@@ -91,20 +195,17 @@ fn current_inflight_matches(
 
 pub(super) fn begin_sink_delivery_mutation(
     ctx: SinkDeliveryCtx<'_>,
-    context: &'static str,
+    _context: &'static str,
 ) -> Option<WatcherDeliveryMutation> {
     if ctx.delivery.relay_range.is_none() {
         ctx.inflight_matches()?;
     }
-    let mutation = begin_watcher_delivery_mutation(
+    begin_watcher_delivery_mutation(
         ctx.shared,
         ctx.channel,
         &ctx.delivery.session_name,
         ctx.authority.identity,
-    )?;
-    mutation
-        .advance(ctx.target(), ctx.authority.range.1, context)
-        .then_some(mutation)
+    )
 }
 
 pub(super) fn persist_sink_delivery(
@@ -113,7 +214,11 @@ pub(super) fn persist_sink_delivery(
     terminal_anchor_msg_id: Option<u64>,
     raw_body: &str,
 ) -> SinkDeliveryProofResult {
-    if !mutation.persist(
+    if !mutation.advance(
+        ctx.target(),
+        ctx.authority.range.1,
+        "src/services/discord/session_relay_sink/delivery_frontier.rs:publish_after_receipt",
+    ) || !mutation.persist(
         ctx.target(),
         ctx.authority.range,
         terminal_anchor_msg_id,

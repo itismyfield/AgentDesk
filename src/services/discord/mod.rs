@@ -177,7 +177,7 @@ pub(in crate::services::discord) use tmux_watcher_registry::{
 
 pub(in crate::services::discord) use delivery_lease_cell::{
     DELIVERY_LEASE_DEADLINE_MS, DELIVERY_LEASE_HEARTBEAT_MS, DeliveryLeaseCell,
-    DeliveryLeaseHeartbeat, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
+    DeliveryLeaseHeartbeat, LeaseHolder, LeaseOutcome, LeaseSnapshot, LeaseToken, lease_now_ms,
 };
 pub(crate) use meeting_orchestrator as meeting;
 #[allow(unused_imports)]

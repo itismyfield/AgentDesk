@@ -852,6 +852,8 @@ async fn split_terminal_forward_signals_trailing_turn_and_keeps_terminal_ack() {
     let combined = format!("{turn_a}{turn_b}");
     let fence = TerminalCommitFence {
         consumed_end: 240,
+        source_range: (100, 240),
+        reset_incarnation: 0,
         turn_user_msg_id: 0,
         turn_started_at: "12:00:00".to_string(),
         // A's pinned identity — the SAME offset the watcher carry helper keys on.
@@ -1504,7 +1506,7 @@ fn watcher_terminal_commit_fence_only_for_a_real_terminal_chunk() {
         turn_start_offset: Some(64),
     };
     // Real terminal chunk: found_result, end > start, identity for this session.
-    let fence = watcher_terminal_commit_fence(true, 0, 256, Some(&identity), session)
+    let fence = watcher_terminal_commit_fence(true, 0, 256, Some(&identity), session, 0)
         .expect("a real terminal chunk must carry a commit fence");
     assert_eq!(fence.consumed_end, 256);
     assert_eq!(fence.turn_user_msg_id, 0);
@@ -1513,13 +1515,13 @@ fn watcher_terminal_commit_fence_only_for_a_real_terminal_chunk() {
     // turn_start_offset so the sink can disambiguate same-second turns.
     assert_eq!(fence.turn_start_offset, Some(64));
     // Not the result chunk → no fence.
-    assert!(watcher_terminal_commit_fence(false, 0, 256, Some(&identity), session).is_none());
+    assert!(watcher_terminal_commit_fence(false, 0, 256, Some(&identity), session, 0).is_none());
     // Zero range (end == start) → no fence.
-    assert!(watcher_terminal_commit_fence(true, 256, 256, Some(&identity), session).is_none());
+    assert!(watcher_terminal_commit_fence(true, 256, 256, Some(&identity), session, 0).is_none());
     // Inverted range → no fence.
-    assert!(watcher_terminal_commit_fence(true, 300, 256, Some(&identity), session).is_none());
+    assert!(watcher_terminal_commit_fence(true, 300, 256, Some(&identity), session, 0).is_none());
     // No pinned identity → no fence (sink would have nothing to identity-gate).
-    assert!(watcher_terminal_commit_fence(true, 0, 256, None, session).is_none());
+    assert!(watcher_terminal_commit_fence(true, 0, 256, None, session, 0).is_none());
     // Cross-session snapshot → no fence (never seed a wrong-turn fence).
     let other_identity = InflightTurnIdentity {
         user_msg_id: 0,
@@ -1527,7 +1529,7 @@ fn watcher_terminal_commit_fence_only_for_a_real_terminal_chunk() {
         tmux_session_name: Some("AgentDesk-claude-99".to_string()),
         turn_start_offset: Some(64),
     };
-    assert!(watcher_terminal_commit_fence(true, 0, 256, Some(&other_identity), session).is_none());
+    assert!(watcher_terminal_commit_fence(true, 0, 256, Some(&other_identity), session, 0).is_none());
 
     // #3041 P1-3 (codex P1-3 issue 2 R4): a fence MUST carry a real
     // turn_start_offset. If the pinned identity's offset is None, the producer
@@ -1541,7 +1543,7 @@ fn watcher_terminal_commit_fence_only_for_a_real_terminal_chunk() {
         turn_start_offset: None,
     };
     assert!(
-        watcher_terminal_commit_fence(true, 0, 256, Some(&no_offset_identity), session).is_none(),
+        watcher_terminal_commit_fence(true, 0, 256, Some(&no_offset_identity), session, 0).is_none(),
         "a turn with no known turn_start_offset must NOT emit a fence (strict-offset guarantee)"
     );
 }

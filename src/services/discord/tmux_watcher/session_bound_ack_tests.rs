@@ -159,6 +159,8 @@ async fn fenced_zero_delivery_resolves_exact_not_delivered_without_timeout_4909(
         PURE_SUBAGENT_ZERO_DELIVERY_PAYLOAD.to_string(),
         TerminalCommitFence {
             consumed_end: 256,
+            source_range: (64, 256),
+            reset_incarnation: 0,
             turn_user_msg_id: 49_090,
             turn_started_at: "2026-07-27T00:00:00Z".to_string(),
             turn_start_offset: Some(64),

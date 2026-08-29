@@ -452,6 +452,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
         terminal_event_consumed_offset(current_offset, &all_data),
         turn_identity_for_panel.as_ref(),
         &tmux_session_name,
+        initial_source_authority.reset_incarnation,
     );
     let data_mirrored_to_session_relay = match initial_terminal_fence {
         // #3041 P1-3 (codex P1-3 issue 1): a single physical chunk may carry
@@ -726,6 +727,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                         terminal_event_consumed_offset(current_offset, &all_data),
                         turn_identity_for_panel.as_ref(),
                         &tmux_session_name,
+                        chunk_source_authority.reset_incarnation,
                     );
                     let chunk_forwarded_to_session_relay = match streaming_terminal_fence {
                         // #3041 P1-3 (codex P1-3 issue 1): split a result+next-turn

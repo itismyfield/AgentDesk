@@ -106,6 +106,11 @@ pub struct StreamFrame {
     /// CONFIRMED terminal Discord delivery — identity-gated against the channel's
     /// current inflight so a delayed/wrong-turn frame can never advance.
     pub terminal_consumed_end: Option<u64>,
+    /// Source byte evidence for the terminal frame. Observation/provenance only:
+    /// delivery authority is exclusively `terminal_consumed_end`.
+    pub terminal_source_range: Option<(u64, u64)>,
+    /// Source reset identity captured by the watcher with the terminal frame.
+    pub terminal_reset_incarnation: Option<u64>,
     /// #3041 P1-3 (Part a, B1): turn identity of the inflight the producer
     /// pinned when it forwarded the terminal frame (`user_msg_id`). Paired with
     /// `turn_started_at` it is the IDENTITY GATE: the sink advances the offset
@@ -633,6 +638,8 @@ impl RelayFrameQueue {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalCommitFence {
     pub consumed_end: u64,
+    pub source_range: (u64, u64),
+    pub reset_incarnation: u64,
     pub turn_user_msg_id: u64,
     pub turn_started_at: String,
     /// #3041 P1-3 (codex P1-3 issue 2): the turn's `turn_start_offset` — added to
@@ -659,23 +666,28 @@ fn try_send_frame_inner(
         return RelaySendOutcome::closed();
     }
     let seq = sequence.fetch_add(1, Ordering::AcqRel);
-    let (terminal_consumed_end, frame_identity) = match terminal {
-        Some(fence) => (
-            Some(fence.consumed_end),
-            RelayTurnIdentity {
-                turn_user_msg_id: fence.turn_user_msg_id,
-                turn_started_at: fence.turn_started_at,
-                turn_start_offset: fence.turn_start_offset,
-            },
-        ),
-        None => (None, frame_identity.unwrap_or_default()),
-    };
+    let (terminal_consumed_end, terminal_source_range, terminal_reset_incarnation, frame_identity) =
+        match terminal {
+            Some(fence) => (
+                Some(fence.consumed_end),
+                Some(fence.source_range),
+                Some(fence.reset_incarnation),
+                RelayTurnIdentity {
+                    turn_user_msg_id: fence.turn_user_msg_id,
+                    turn_started_at: fence.turn_started_at,
+                    turn_start_offset: fence.turn_start_offset,
+                },
+            ),
+            None => (None, None, None, frame_identity.unwrap_or_default()),
+        };
     let frame = StreamFrame {
         session_name: matched.expected_session_name.clone(),
         binding: matched.clone(),
         payload,
         sequence: seq,
         terminal_consumed_end,
+        terminal_source_range,
+        terminal_reset_incarnation,
         turn_user_msg_id: frame_identity.turn_user_msg_id,
         turn_started_at: frame_identity.turn_started_at,
         turn_start_offset: frame_identity.turn_start_offset,
@@ -1184,6 +1196,8 @@ mod tests {
             "result-bearing".into(),
             TerminalCommitFence {
                 consumed_end: 512,
+                source_range: (64, 512),
+                reset_incarnation: 7,
                 turn_user_msg_id: 77,
                 turn_started_at: "2026-06-04T00:00:00Z".to_string(),
                 turn_start_offset: Some(64),
@@ -1205,6 +1219,8 @@ mod tests {
         // Terminal frame carries the consumed_end + pinned identity.
         assert_eq!(delivered[1].payload, "result-bearing");
         assert_eq!(delivered[1].terminal_consumed_end, Some(512));
+        assert_eq!(delivered[1].terminal_source_range, Some((64, 512)));
+        assert_eq!(delivered[1].terminal_reset_incarnation, Some(7));
         assert_eq!(delivered[1].turn_user_msg_id, 77);
         assert_eq!(delivered[1].turn_started_at, "2026-06-04T00:00:00Z");
         assert_eq!(delivered[1].turn_start_offset, Some(64));

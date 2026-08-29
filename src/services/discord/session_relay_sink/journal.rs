@@ -298,9 +298,25 @@ pub(super) fn settle(
     receipt: Option<DiscordTransportReceipt>,
     proof: SinkDeliveryProofResult,
 ) -> Vec<JournalEvent> {
+    settle_exact(observer, attempt, receipt, proof, None)
+}
+
+/// Exact terminal settlement checks the acquired lease identity before consuming
+/// the journal attempt. A mismatch is a typed non-commit: no lease/frontier state
+/// is changed, and the attempt remains available for reconciliation.
+pub(super) fn settle_exact(
+    observer: &JournalObserver,
+    attempt: &mut Option<AttemptObservation>,
+    receipt: Option<DiscordTransportReceipt>,
+    proof: SinkDeliveryProofResult,
+    guard: Option<&super::delivery_frontier::SinkDeliveryLeaseGuard>,
+) -> Vec<JournalEvent> {
     let Some(receipt) = receipt else {
         return Vec::new();
     };
+    if guard.is_some_and(|guard| !guard.matches_exact()) {
+        return Vec::new();
+    }
     let Some(attempt) = attempt.take() else {
         return Vec::new();
     };
@@ -329,18 +345,19 @@ impl TuiObligationKey {
             .map(|handle| handle.pause_epoch.load(Ordering::Acquire))
             .unwrap_or(0);
         let generation = delivery.relay_generation_mtime_ns.unwrap_or(0);
-        let reset_incarnation = shared
-            .relay_frontier_token(poise::serenity_prelude::ChannelId::new(delivery.channel_id))
-            .reset_incarnation;
-        let start = delivery
-            .relay_range
-            .map(|range| range.0)
-            .or(delivery.frame_turn_start_offset)
+        let reset_incarnation = delivery.terminal_reset_incarnation.unwrap_or_else(|| {
+            shared
+                .relay_frontier_token(poise::serenity_prelude::ChannelId::new(delivery.channel_id))
+                .reset_incarnation
+        });
+        let terminal = super::delivery_frontier::validate_terminal_delivery(delivery);
+        let start = terminal
+            .map(|authority| authority.consumed)
+            .or_else(|| delivery.relay_range.map(|range| range.0))
             .unwrap_or(0);
-        let end = delivery
-            .relay_range
-            .map(|range| range.1)
-            .or(delivery.terminal_consumed_end)
+        let end = terminal
+            .map(|authority| authority.consumed)
+            .or_else(|| delivery.relay_range.map(|range| range.1))
             .unwrap_or(start);
         // execution_id is derived from the watcher pause epoch plus durable source/turn
         // coordinates. The same inputs are node-independent; a restart that loses or
