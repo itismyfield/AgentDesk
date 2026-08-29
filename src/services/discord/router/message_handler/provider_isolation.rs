@@ -14,7 +14,7 @@ pub(super) fn metadata_parent_channel_id(
 #[derive(Debug, Clone)]
 pub(super) struct ResolvedThreadRoleBinding {
     pub(super) role_binding: Option<settings::RoleBinding>,
-    inherited_parent: Option<(ChannelId, Option<String>)>,
+    inherited_parent: Option<ChannelId>,
 }
 impl ResolvedThreadRoleBinding {
     pub(super) fn direct(role_binding: Option<settings::RoleBinding>) -> Self {
@@ -25,10 +25,7 @@ impl ResolvedThreadRoleBinding {
     }
 
     pub(super) fn memory_channel_id(&self, channel_id: ChannelId) -> ChannelId {
-        self.inherited_parent
-            .as_ref()
-            .map(|(parent_id, _)| *parent_id)
-            .unwrap_or(channel_id)
+        self.inherited_parent.unwrap_or(channel_id)
     }
 }
 fn inheritable_thread_parent(
@@ -53,7 +50,7 @@ pub(super) fn resolve_thread_role_binding(
     let inherited =
         inheritable_thread_parent(thread_parent).and_then(|(parent_id, parent_name)| {
             settings::resolve_role_binding(*parent_id, parent_name.as_deref())
-                .map(|binding| (binding, (*parent_id, parent_name.clone())))
+                .map(|binding| (binding, *parent_id))
         });
     ResolvedThreadRoleBinding {
         role_binding: inherited.as_ref().map(|(binding, _)| binding.clone()),
