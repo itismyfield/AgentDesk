@@ -1,4 +1,9 @@
-use serde::{Deserialize, Serialize, de::IgnoredAny};
+use std::{fmt, marker::PhantomData};
+
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{IgnoredAny, MapAccess, Visitor, value::MapAccessDeserializer},
+};
 use sha2::{Digest, Sha256};
 
 use super::*;
@@ -6,6 +11,42 @@ use super::*;
 const EPOCH: u32 = 2;
 const SCHEMA: u32 = 1;
 const HASH_DOMAIN: &[u8] = b"agentdesk/restart-v2/phase-event/schema-1";
+
+#[derive(Serialize)]
+#[serde(transparent)]
+struct MapOnly<T>(T);
+
+struct MapOnlyVisitor<T>(PhantomData<T>);
+
+impl<'de, T> Visitor<'de> for MapOnlyVisitor<T>
+where
+    T: Deserialize<'de>,
+{
+    type Value = MapOnly<T>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a map")
+    }
+
+    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        T::deserialize(MapAccessDeserializer::new(map)).map(MapOnly)
+    }
+}
+
+impl<'de, T> Deserialize<'de> for MapOnly<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(MapOnlyVisitor(PhantomData))
+    }
+}
 
 #[derive(Deserialize)]
 struct EpochProbe {
@@ -37,7 +78,7 @@ struct WireEvent {
     sequence: u64,
     previous_hash: RequiredPreviousHash,
     event_hash: String,
-    kind: WireKind,
+    kind: MapOnly<WireKind>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -99,7 +140,7 @@ struct WirePreimage<'a> {
     nonce: &'a str,
     sequence: u64,
     previous_hash: &'a RequiredPreviousHash,
-    kind: &'a WireKind,
+    kind: &'a MapOnly<WireKind>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,19 +150,19 @@ pub(super) fn decode(raw: &[u8]) -> PhaseEventDispositionV2 {
     if serde_json::from_slice::<IgnoredAny>(raw).is_err() {
         return poison(raw, PhasePoisonV2::MalformedJson);
     }
-    let Ok(EpochProbe { epoch }) = serde_json::from_slice(raw) else {
+    let Ok(MapOnly(EpochProbe { epoch })) = serde_json::from_slice(raw) else {
         return poison(raw, PhasePoisonV2::InvalidCurrentRecord);
     };
     if epoch != u64::from(EPOCH) {
         return DecodeDisposition::Unsupported { raw: raw.into() };
     }
-    let Ok(SchemaProbe { schema }) = serde_json::from_slice(raw) else {
+    let Ok(MapOnly(SchemaProbe { schema })) = serde_json::from_slice(raw) else {
         return poison(raw, PhasePoisonV2::InvalidCurrentRecord);
     };
     if schema != u64::from(SCHEMA) {
         return DecodeDisposition::Unsupported { raw: raw.into() };
     }
-    let Ok(wire) = serde_json::from_slice(raw) else {
+    let Ok(MapOnly(wire)) = serde_json::from_slice(raw) else {
         return poison(raw, PhasePoisonV2::InvalidCurrentRecord);
     };
     let Ok(event) = into_domain(wire) else {
@@ -176,7 +217,7 @@ fn into_domain(wire: WireEvent) -> Result<PhaseEventV2, PhaseCodecError> {
             RequiredPreviousHash::Hash(text) => Some(parse_digest(&text)?),
         },
         event_hash: parse_digest(&wire.event_hash)?,
-        kind: match wire.kind {
+        kind: match wire.kind.0 {
             WireKind::Empty(EmptyWireKind {
                 phase: EmptyWirePhase::Bound,
             }) => PhaseKindV2::Bound,
@@ -231,7 +272,7 @@ fn into_wire(event: &PhaseEventV2) -> WireEvent {
             Some(hash) => RequiredPreviousHash::Hash(hex::encode(hash.0)),
         },
         event_hash: hex::encode(event.event_hash.0),
-        kind: match &event.kind {
+        kind: MapOnly(match &event.kind {
             PhaseKindV2::Bound => WireKind::Empty(EmptyWireKind {
                 phase: EmptyWirePhase::Bound,
             }),
@@ -250,7 +291,7 @@ fn into_wire(event: &PhaseEventV2) -> WireEvent {
                 phase: ReceiptWirePhase::Receipt,
                 receipt: durable_receipt.as_str().to_owned(),
             }),
-        },
+        }),
     }
 }
 
@@ -450,6 +491,15 @@ mod high_risk_recovery {
             let invalid = source.replacen(from, to, 1);
             assert_poison(invalid.as_bytes(), PhasePoisonV2::InvalidCurrentRecord);
         }
+        for kind in [
+            r#"["bound"]"#,
+            r#"["started"]"#,
+            r#"["terminal","completed","proofs/x"]"#,
+            r#"["receipt","r"]"#,
+        ] {
+            let invalid = GOLDEN_BOUND.replace(r#"{"phase":"bound"}"#, kind);
+            assert_poison(invalid.as_bytes(), PhasePoisonV2::InvalidCurrentRecord);
+        }
         assert_poison(
             GOLDEN_BOUND.replace(HASH, &"0".repeat(64)).as_bytes(),
             PhasePoisonV2::InvalidEventHash,
@@ -466,6 +516,8 @@ mod high_risk_recovery {
         for raw in [
             "null",
             "{}",
+            "[2]",
+            "[3]",
             r#"{"epoch":2,"epoch":2}"#,
             r#"{"epoch":"2"}"#,
             r#"{"epoch":2}"#,
