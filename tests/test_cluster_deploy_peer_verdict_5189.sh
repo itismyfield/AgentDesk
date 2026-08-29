@@ -370,57 +370,67 @@ fi
 # scan, the port choice, the tab framing, the trailing body field -- has never
 # been executed by a test. Here ssh is replaced with local execution (the probe
 # hands ssh one `bash -lc <quoted>` string, so running that string locally is the
-# same command the peer would run) and /api/health is served by real HTTP
-# servers, which is what makes the port axis observable at all.
+# same command the peer would run). A process-scoped sitecustomize replaces only
+# urllib.request.urlopen: the production probe still constructs the URL, parses
+# and reserializes the response, and emits its real fields, but no listener,
+# socket, or server process is involved. The interceptor records the exact URL
+# and refuses every URL the case did not register, so a wrong port fails closed.
 if ! command -v python3 >/dev/null 2>&1; then
-    printf 'NOTE: python3 absent -- 3e executed-probe cases SKIPPED (structural pins above still ran)\n' >&2
+    fail_test "python3 is required to execute the production peer probe"
 else
-    STUB_SERVER_PIDS=""
-    trap 'kill $STUB_SERVER_PIDS 2>/dev/null || true; rm -rf "$TMP_ROOT"' EXIT
+    HEALTH_FIXTURE_DIR="$TMP_ROOT/health-urlopen-fixture"
+    HEALTH_FIXTURE_REQUEST_LOG="$TMP_ROOT/health-requests.log"
+    HEALTH_FIXTURE_READY_BODY="$TMP_ROOT/health-ready.json"
+    HEALTH_FIXTURE_NOT_READY_BODY="$TMP_ROOT/health-not-ready.json"
+    HEALTH_FIXTURE_EMPTY_BODY="$TMP_ROOT/health-empty.json"
+    mkdir -p "$HEALTH_FIXTURE_DIR"
+    printf '%s' "$STANDBY_READY_BODY" >"$HEALTH_FIXTURE_READY_BODY"
+    printf '%s' "$OK_TRUE_NOT_READY_BODY" >"$HEALTH_FIXTURE_NOT_READY_BODY"
+    : >"$HEALTH_FIXTURE_EMPTY_BODY"
 
-    cat >"$TMP_ROOT/serve.py" <<'PY'
-import http.server
-import sys
-
-body = open(sys.argv[1], "rb").read()
-
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path != "/api/health":
-            self.send_error(404)
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
+    cat >"$HEALTH_FIXTURE_DIR/sitecustomize.py" <<'PY'
+import io
+import os
+import urllib.request
 
 
-server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-print(server.server_port, flush=True)
-server.serve_forever()
+request_log = os.environ.get("AGENTDESK_TEST_HEALTH_REQUEST_LOG", "")
+responses = {}
+for url_name, body_name in (
+    ("AGENTDESK_TEST_HEALTH_READY_URL", "AGENTDESK_TEST_HEALTH_READY_BODY"),
+    ("AGENTDESK_TEST_HEALTH_NOT_READY_URL", "AGENTDESK_TEST_HEALTH_NOT_READY_BODY"),
+    ("AGENTDESK_TEST_HEALTH_EMPTY_URL", "AGENTDESK_TEST_HEALTH_EMPTY_BODY"),
+):
+    url = os.environ.get(url_name, "")
+    body_path = os.environ.get(body_name, "")
+    if url:
+        responses[url] = body_path
+
+
+def hermetic_urlopen(request, *args, **kwargs):
+    request_url = getattr(request, "full_url", str(request))
+    if request_log:
+        with open(request_log, "a", encoding="utf-8") as handle:
+            handle.write(f"{request_url}\n")
+    body_path = responses.get(request_url)
+    if not body_path:
+        raise RuntimeError(f"unregistered hermetic health URL: {request_url}")
+    with open(body_path, "rb") as handle:
+        return io.BytesIO(handle.read())
+
+
+urllib.request.urlopen = hermetic_urlopen
 PY
 
-    start_health_stub() {
-        # (body_string, name) -> echoes the bound port. Port 0 lets the kernel
-        # pick, so these cases never race a hardcoded port.
-        local body="$1" name="$2"
-        local port_file="$TMP_ROOT/$name.port" waited=0 port=""
-        printf '%s' "$body" >"$TMP_ROOT/$name.json"
-        python3 "$TMP_ROOT/serve.py" "$TMP_ROOT/$name.json" >"$port_file" 2>/dev/null &
-        STUB_SERVER_PIDS="$STUB_SERVER_PIDS $!"
-        while [ "$waited" -lt 100 ]; do
-            port="$(head -1 "$port_file" 2>/dev/null || true)"
-            [ -z "$port" ] || break
-            sleep 0.1
-            waited=$((waited + 1))
-        done
-        printf '%s' "$port"
-    }
+    # These are URL identities, not listening ports. Keeping them fixed makes the
+    # exact request an assertion rather than an incidental kernel allocation.
+    READY_PORT=45181
+    NOT_READY_PORT=45182
+    EMPTY_BODY_PORT=45183
+    UNREGISTERED_PORT=45184
+    HEALTH_FIXTURE_READY_URL="http://127.0.0.1:${READY_PORT}/api/health"
+    HEALTH_FIXTURE_NOT_READY_URL="http://127.0.0.1:${NOT_READY_PORT}/api/health"
+    HEALTH_FIXTURE_EMPTY_URL="http://127.0.0.1:${EMPTY_BODY_PORT}/api/health"
 
     write_peer_log() {
         # (port, path) -- a peer transcript shaped like the real one: the health
@@ -433,81 +443,136 @@ PY
         } >"$2"
     }
 
-    READY_PORT="$(start_health_stub "$STANDBY_READY_BODY" ready)"
-    NOT_READY_PORT="$(start_health_stub "$OK_TRUE_NOT_READY_BODY" notready)"
-    if [ -z "$READY_PORT" ] || [ -z "$NOT_READY_PORT" ]; then
-        fail_test "the local /api/health stub servers did not report a bound port"
-    else
-        printf '{"repo_head":"target-head"}' >"$TMP_ROOT/release-source.json"
-        write_peer_log "$READY_PORT" "$TMP_ROOT/peer-ready.log"
-        write_peer_log "$NOT_READY_PORT" "$TMP_ROOT/peer-notready.log"
-        {
-            printf '%s\n' '▸ Promoting release binary...'
-            printf '%s\n' '═══ Deploy Complete ═══'
-        } >"$TMP_ROOT/peer-noport.log"
+    assert_single_health_request() {
+        # (expected_url, case_name) -- exactly one request, to the logged port.
+        local expected_url="$1" case_name="$2" observed=""
+        if [ -f "$HEALTH_FIXTURE_REQUEST_LOG" ]; then
+            observed="$(<"$HEALTH_FIXTURE_REQUEST_LOG")"
+        fi
+        if [ "$observed" != "$expected_url" ]; then
+            fail_test "$case_name must request exactly $expected_url; observed: ${observed:-<no request>}"
+        fi
+    }
 
-        # The real probe, and the real wait loop calling it.
-        eval "$(extract_function _probe_peer_deploy_state)"
-        # shellcheck disable=SC2034  # Read by the production probe loaded through eval.
-        DEPLOY_SSH_CONNECT_TIMEOUT=10
-        # shellcheck disable=SC2329  # Invoked indirectly by the production probe.
-        ssh() {
-            # The probe ends its argument list with `bash -lc <%q-quoted script>`.
-            # Run that script here instead of on a peer. `-c` rather than `-lc`:
-            # a login shell would print profile output into the tab-delimited
-            # channel this test is checking.
-            local cmd="${*: -1}"
-            cmd="${cmd#bash -lc }"
+    printf '{"repo_head":"target-head"}' >"$TMP_ROOT/release-source.json"
+    write_peer_log "$READY_PORT" "$TMP_ROOT/peer-ready.log"
+    write_peer_log "$NOT_READY_PORT" "$TMP_ROOT/peer-notready.log"
+    write_peer_log "$EMPTY_BODY_PORT" "$TMP_ROOT/peer-empty-body.log"
+    write_peer_log "$UNREGISTERED_PORT" "$TMP_ROOT/peer-wrong-port.log"
+    {
+        printf '%s\n' '▸ Promoting release binary...'
+        printf '%s\n' '═══ Deploy Complete ═══'
+    } >"$TMP_ROOT/peer-noport.log"
+
+    # The real probe, and the real wait loop calling it.
+    eval "$(extract_function _probe_peer_deploy_state)"
+    # shellcheck disable=SC2034  # Read by the production probe loaded through eval.
+    DEPLOY_SSH_CONNECT_TIMEOUT=10
+    # shellcheck disable=SC2329  # Invoked indirectly by the production probe.
+    ssh() {
+        # The probe ends its argument list with `bash -lc <%q-quoted script>`.
+        # Run that script here instead of on a peer. `-c` rather than `-lc`:
+        # a login shell would print profile output into the tab-delimited
+        # channel this test is checking. The exported fixture scope belongs only
+        # to this subshell and therefore only to the embedded production Python.
+        local cmd="${*: -1}"
+        cmd="${cmd#bash -lc }"
+        (
+            export PYTHONPATH="$HEALTH_FIXTURE_DIR${PYTHONPATH:+:$PYTHONPATH}"
+            export PYTHONNOUSERSITE=1
+            export AGENTDESK_TEST_HEALTH_REQUEST_LOG="$HEALTH_FIXTURE_REQUEST_LOG"
+            export AGENTDESK_TEST_HEALTH_READY_URL="$HEALTH_FIXTURE_READY_URL"
+            export AGENTDESK_TEST_HEALTH_READY_BODY="$HEALTH_FIXTURE_READY_BODY"
+            export AGENTDESK_TEST_HEALTH_NOT_READY_URL="$HEALTH_FIXTURE_NOT_READY_URL"
+            export AGENTDESK_TEST_HEALTH_NOT_READY_BODY="$HEALTH_FIXTURE_NOT_READY_BODY"
+            export AGENTDESK_TEST_HEALTH_EMPTY_URL="$HEALTH_FIXTURE_EMPTY_URL"
+            export AGENTDESK_TEST_HEALTH_EMPTY_BODY="$HEALTH_FIXTURE_EMPTY_BODY"
             eval "bash -c $cmd"
-        }
+        )
+    }
 
-        run_probed_verdict() {
-            # (log_path, pre_read_port) -> rc on line 1, output after.
-            local rc=0 out
-            out="$(_wait_for_peer_deploy_verdict \
-                peer-stub "$1" "$TMP_ROOT/release-source.json" "$2" target-head 2>&1)" || rc=$?
-            printf '%s\n' "$rc" "$out"
-        }
+    run_probed_verdict() {
+        # (log_path, pre_read_port) -> rc on line 1, output after.
+        local rc=0 out
+        out="$(_wait_for_peer_deploy_verdict \
+            peer-stub "$1" "$TMP_ROOT/release-source.json" "$2" target-head 2>&1)" || rc=$?
+        printf '%s\n' "$rc" "$out"
+    }
 
-        # (a) The log names the port the target deploy health-checked, and the
-        # pre-read names a DIFFERENT one. Green -- and green through the real
-        # probe, which is what makes the emptied-body mutation
-        # (`fields.append("")`) fail here rather than pass unnoticed.
-        bound_verdict="$(run_probed_verdict "$TMP_ROOT/peer-ready.log" "$NOT_READY_PORT")"
-        bound_rc="${bound_verdict%%$'\n'*}"
-        bound_out="${bound_verdict#*$'\n'}"
-        if [ "$bound_rc" -ne 0 ]; then
-            fail_test "the production probe must carry back the body from the port the deploy log names; got rc=$bound_rc: $bound_out"
-        elif ! grep -q 'deploy verified' <<<"$bound_out"; then
-            fail_test "a peer whose logged port serves a ready body must be verified; got: $bound_out"
-        fi
+    # (a) The log names the port the target deploy health-checked, and the
+    # pre-read names a DIFFERENT one. Green -- and green through the real
+    # probe, which is what makes the emptied-body mutation
+    # (`fields.append("")`) fail here rather than pass unnoticed.
+    : >"$HEALTH_FIXTURE_REQUEST_LOG"
+    bound_verdict="$(run_probed_verdict "$TMP_ROOT/peer-ready.log" "$NOT_READY_PORT")"
+    bound_rc="${bound_verdict%%$'\n'*}"
+    bound_out="${bound_verdict#*$'\n'}"
+    assert_single_health_request "$HEALTH_FIXTURE_READY_URL" "the ready-body production probe"
+    if [ "$bound_rc" -ne 0 ]; then
+        fail_test "the production probe must carry back the body from the port the deploy log names; got rc=$bound_rc: $bound_out"
+    elif ! grep -q 'deploy verified' <<<"$bound_out"; then
+        fail_test "a peer whose logged port serves a ready body must be verified; got: $bound_out"
+    fi
 
-        # (b) The discriminating case, and the P1 shape itself: a ready body IS
-        # reachable, on the pre-read port -- but the deploy under judgement
-        # health-checked the other one, and that one is not ready. The old
-        # composite went GREEN here off a body belonging to no observed deploy.
-        # The not-ready body also reports ok=true, so neither the pre-read port
-        # nor `ok` can rescue it.
-        unbound_verdict="$(run_probed_verdict "$TMP_ROOT/peer-notready.log" "$READY_PORT")"
-        unbound_rc="${unbound_verdict%%$'\n'*}"
-        unbound_out="${unbound_verdict#*$'\n'}"
-        if [ "$unbound_rc" -eq 0 ]; then
-            fail_test "a ready body on the PRE-READ port must not verify a deploy that health-checked a different port; got: $unbound_out"
-        elif ! grep -q "port=$NOT_READY_PORT" <<<"$unbound_out"; then
-            fail_test "the verdict must report the port it actually requested (the logged one, $NOT_READY_PORT); got: $unbound_out"
-        fi
+    # (b) The discriminating case, and the P1 shape itself: a ready body IS
+    # registered on the pre-read port -- but the deploy under judgement
+    # health-checked the other one, and that one is not ready. The old composite
+    # went GREEN here off a body belonging to no observed deploy. The not-ready
+    # body also reports ok=true, so neither the pre-read port nor `ok` can rescue
+    # it.
+    : >"$HEALTH_FIXTURE_REQUEST_LOG"
+    unbound_verdict="$(run_probed_verdict "$TMP_ROOT/peer-notready.log" "$READY_PORT")"
+    unbound_rc="${unbound_verdict%%$'\n'*}"
+    unbound_out="${unbound_verdict#*$'\n'}"
+    assert_single_health_request "$HEALTH_FIXTURE_NOT_READY_URL" "the not-ready-body production probe"
+    if [ "$unbound_rc" -eq 0 ]; then
+        fail_test "a ready body on the PRE-READ port must not verify a deploy that health-checked a different port; got: $unbound_out"
+    elif ! grep -q "port=$NOT_READY_PORT" <<<"$unbound_out"; then
+        fail_test "the verdict must report the port it actually requested (the logged one, $NOT_READY_PORT); got: $unbound_out"
+    fi
 
-        # (c) No port in the log at all: fail closed. A ready body is reachable
-        # on the pre-read port, so this is exactly the input a reintroduced
-        # fallback would turn green.
-        noport_verdict="$(run_probed_verdict "$TMP_ROOT/peer-noport.log" "$READY_PORT")"
-        noport_rc="${noport_verdict%%$'\n'*}"
-        noport_out="${noport_verdict#*$'\n'}"
-        if [ "$noport_rc" -eq 0 ]; then
-            fail_test "a deploy log naming no health port must fail closed, not fall back to the pre-read port; got: $noport_out"
-        elif ! grep -q 'health port not named in the peer deploy log' <<<"$noport_out"; then
-            fail_test "an unbindable health port must be named as the reason; got: $noport_out"
-        fi
+    # (c) A logged port without a registered response is never allowed to escape
+    # the hermetic transport boundary. It must report the exact attempted URL and
+    # fail closed even though the pre-read port has a ready body.
+    : >"$HEALTH_FIXTURE_REQUEST_LOG"
+    wrong_port_verdict="$(run_probed_verdict "$TMP_ROOT/peer-wrong-port.log" "$READY_PORT")"
+    wrong_port_rc="${wrong_port_verdict%%$'\n'*}"
+    wrong_port_out="${wrong_port_verdict#*$'\n'}"
+    assert_single_health_request "http://127.0.0.1:${UNREGISTERED_PORT}/api/health" "the unregistered-port production probe"
+    if [ "$wrong_port_rc" -eq 0 ]; then
+        fail_test "an unregistered logged health port must fail closed; got: $wrong_port_out"
+    elif ! grep -q "request failed:.*port=$UNREGISTERED_PORT" <<<"$wrong_port_out"; then
+        fail_test "an unregistered logged port must report the refused request; got: $wrong_port_out"
+    fi
+
+    # (d) A response with no body is not JSON and must leave the transported body
+    # empty. `ok` therefore cannot be invented and the real readiness predicate
+    # must stay red.
+    : >"$HEALTH_FIXTURE_REQUEST_LOG"
+    empty_body_verdict="$(run_probed_verdict "$TMP_ROOT/peer-empty-body.log" "$READY_PORT")"
+    empty_body_rc="${empty_body_verdict%%$'\n'*}"
+    empty_body_out="${empty_body_verdict#*$'\n'}"
+    assert_single_health_request "$HEALTH_FIXTURE_EMPTY_URL" "the empty-body production probe"
+    if [ "$empty_body_rc" -eq 0 ]; then
+        fail_test "a health response with no body must fail closed; got: $empty_body_out"
+    elif ! grep -q "request failed:.*port=$EMPTY_BODY_PORT" <<<"$empty_body_out"; then
+        fail_test "an empty health body must report the failed parse on its logged port; got: $empty_body_out"
+    fi
+
+    # (e) No port in the log at all: fail closed without attempting any URL. A
+    # ready body is registered on the pre-read port, so this is exactly the input
+    # a reintroduced fallback would turn green.
+    : >"$HEALTH_FIXTURE_REQUEST_LOG"
+    noport_verdict="$(run_probed_verdict "$TMP_ROOT/peer-noport.log" "$READY_PORT")"
+    noport_rc="${noport_verdict%%$'\n'*}"
+    noport_out="${noport_verdict#*$'\n'}"
+    if [ -s "$HEALTH_FIXTURE_REQUEST_LOG" ]; then
+        fail_test "a deploy log naming no health port must not attempt a request; observed: $(<"$HEALTH_FIXTURE_REQUEST_LOG")"
+    fi
+    if [ "$noport_rc" -eq 0 ]; then
+        fail_test "a deploy log naming no health port must fail closed, not fall back to the pre-read port; got: $noport_out"
+    elif ! grep -q 'health port not named in the peer deploy log' <<<"$noport_out"; then
+        fail_test "an unbindable health port must be named as the reason; got: $noport_out"
     fi
 fi
 
