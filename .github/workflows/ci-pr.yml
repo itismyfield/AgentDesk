@@ -377,7 +377,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: ".nvmrc"
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
 
@@ -434,7 +434,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version-file: ".nvmrc"
 
       - name: Policy JS unit tests
         run: npm run test:policies
