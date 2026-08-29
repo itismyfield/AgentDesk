@@ -265,7 +265,7 @@
 | `DELETE` | `/api/scheduled-messages/{id}` | `scheduled_messages::cancel_scheduled_message` | `src/server/routes/scheduled_messages.rs:834` | `src/server/routes/domains/ops.rs:276` |
 | `GET` | `/api/scheduled-messages/{id}` | `scheduled_messages::get_scheduled_message` | `src/server/routes/scheduled_messages.rs:518` | `src/server/routes/domains/ops.rs:276` |
 | `PATCH` | `/api/scheduled-messages/{id}` | `scheduled_messages::patch_scheduled_message` | `src/server/routes/scheduled_messages.rs:562` | `src/server/routes/domains/ops.rs:276` |
-| `GET` | `/api/scheduled-messages/{id}/deliveries` | `scheduled_messages::list_scheduled_message_deliveries` | `src/server/routes/scheduled_messages.rs:961` | `src/server/routes/domains/ops.rs:286` |
+| `GET` | `/api/scheduled-messages/{id}/deliveries` | `scheduled_messages::list_scheduled_message_deliveries` | `src/server/routes/scheduled_messages.rs:960` | `src/server/routes/domains/ops.rs:286` |
 | `POST` | `/api/scheduled-messages/{id}/trigger-now` | `scheduled_messages::trigger_scheduled_message_now` | `src/server/routes/scheduled_messages.rs:873` | `src/server/routes/domains/ops.rs:282` |
 | `GET` | `/api/session-termination-events` | `termination_events::list_termination_events` | `src/server/routes/termination_events.rs:23` | `src/server/routes/domains/ops.rs:226` |
 | `GET` | `/api/sessions` | `agents_crud::list_sessions` | `src/server/routes/agents_crud.rs:1213` | `src/server/routes/domains/agents.rs:49` |
