@@ -74,6 +74,16 @@ for fn in \
   fi
 done
 
+echo "== Test 1b: unloaded launchd jobs are reported as not running =="
+real_launchd_domain=$(declare -f _launchd_domain)
+real_launchctl=$(declare -f launchctl 2>/dev/null || true)
+_launchd_domain() { printf '%s\n' "gui/501"; }
+launchctl() { return 113; }
+assert_eq "unloaded launchd job state" "not running" "$(_launchd_job_state test.label)"
+unset -f launchctl _launchd_domain
+[ -n "$real_launchctl" ] && eval "$real_launchctl"
+eval "$real_launchd_domain"
+
 echo "== Test 2: assert_restart_helpers_loaded passes when helpers present =="
 if assert_restart_helpers_loaded >/dev/null 2>&1; then
   pass "assert_restart_helpers_loaded returns 0"
