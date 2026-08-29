@@ -2,6 +2,8 @@ use super::{ChannelId, DeliveryLeaseKey};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+#[cfg(test)]
+mod exact_lease;
 #[cfg(unix)]
 pub(super) mod source_epoch_observer;
 
@@ -234,6 +236,8 @@ enum LeaseState {
         deadline_ms: u64,
         start: u64,
         end: u64,
+        #[cfg(test)]
+        exact_token: Option<exact_lease::token::LeaseToken>,
     },
     /// Committed with a three-way outcome; carries the same `(holder, key,
     /// range)` identity forward so a stale release is rejected. Awaits a
@@ -244,6 +248,8 @@ enum LeaseState {
         start: u64,
         end: u64,
         outcome: LeaseOutcome,
+        #[cfg(test)]
+        exact_token: Option<exact_lease::token::LeaseToken>,
     },
 }
 
@@ -586,6 +592,7 @@ impl DeliveryLeaseCell {
                 deadline_ms,
                 start,
                 end,
+                ..
             } => LeaseSnapshot::Leased {
                 holder: *holder,
                 key: key.clone(),
@@ -599,6 +606,7 @@ impl DeliveryLeaseCell {
                 start,
                 end,
                 outcome,
+                ..
             } => LeaseSnapshot::Committed {
                 holder: *holder,
                 key: key.clone(),
@@ -714,6 +722,8 @@ impl DeliveryLeaseCell {
             deadline_ms,
             start,
             end,
+            #[cfg(test)]
+            exact_token: None,
         };
         true
     }
@@ -752,12 +762,19 @@ impl DeliveryLeaseCell {
                 && *cur_start == start
                 && *cur_end == end =>
             {
+                #[cfg(test)]
+                let exact_token = match &guard.lease {
+                    LeaseState::Leased { exact_token, .. } => *exact_token,
+                    LeaseState::Unleased | LeaseState::Committed { .. } => None,
+                };
                 guard.lease = LeaseState::Committed {
                     holder,
                     key,
                     start,
                     end,
                     outcome,
+                    #[cfg(test)]
+                    exact_token,
                 };
                 self.state_tag.store(TAG_COMMITTED, Ordering::Release);
                 true
