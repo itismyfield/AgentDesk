@@ -126,6 +126,7 @@ cli::doctor::mailbox::tests::doctor_evidence_carries_both_frontier_witnesses_and
 cli::doctor::mailbox::tests::doctor_evidence_reports_missing_provenance_as_null
 cli::doctor::mailbox::tests::frontier_provenance_changes_no_doctor_verdict
 cli::doctor::orchestrator::profile_filter_tests::json_report_exposes_portable_readiness_sections
+cli::doctor::orchestrator::profile_filter_tests::mailbox_consistency_findings_use_provider_runtime_group
 cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_detail_includes_applied_and_resolved_hashes
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_dispatch_outbox_checks
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_portable_optional_state_checks
