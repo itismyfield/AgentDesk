@@ -4284,6 +4284,10 @@ services::discord::response_sanitizer::subagent_notification_card::tests::detect
 services::discord::response_sanitizer::subagent_notification_card::tests::human_mid_body_quote_is_not_sanitized
 services::discord::response_sanitizer::tests::strips_echoed_memory_recall_ownership_block
 services::discord::restart_mode::protocol_v2::disposition::high_risk_recovery::every_disposition_owns_exact_original_bytes
+services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::all_phase_kinds_round_trip_to_golden_canonical_wire
+services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::malformed_and_unknown_versions_classify_without_panicking_or_losing_raw
+services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::provider_and_channel_require_canonical_lower_utf8_hex
+services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::unknown_fields_invalid_values_and_reencoding_preserve_exact_raw
 services::discord::restart_mode::protocol_v2::values::high_risk_recovery::canonical_uuid_forms_only
 services::discord::restart_mode::protocol_v2::values::high_risk_recovery::identities_preserve_exact_unicode_and_reject_empty_or_nul
 services::discord::restart_mode::protocol_v2::values::high_risk_recovery::safe_relative_reference_accepts_nested_portable_components
