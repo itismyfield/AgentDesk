@@ -382,8 +382,8 @@ fn env_value_present(key: &str) -> bool {
 }
 
 fn expanded_auth_path(raw: &str) -> Option<PathBuf> {
-    if let Some(rest) = raw.strip_prefix("~/") {
-        return dirs::home_dir().map(|home| home.join(rest));
+    if raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\") {
+        return crate::runtime_layout::expand_user_path(raw);
     }
     Some(PathBuf::from(raw))
 }
