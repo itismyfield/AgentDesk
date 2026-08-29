@@ -250,6 +250,10 @@ fn collect_rust_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>
 }
 
 fn raw_string_start(characters: &[char], index: usize) -> Option<(usize, usize)> {
+    if index > 0 && (characters[index - 1].is_ascii_alphanumeric() || characters[index - 1] == '_')
+    {
+        return None;
+    }
     let mut cursor = index;
     if matches!(characters.get(cursor), Some('b' | 'c')) {
         cursor += 1;
@@ -265,7 +269,7 @@ fn raw_string_start(characters: &[char], index: usize) -> Option<(usize, usize)>
     (characters.get(cursor) == Some(&'"')).then_some((cursor - hash_start, cursor + 1))
 }
 
-fn rust_identifiers(source: &str) -> Vec<String> {
+fn rust_code_tokens(source: &str) -> Vec<String> {
     #[derive(Clone, Copy)]
     enum State {
         Code,
@@ -277,7 +281,7 @@ fn rust_identifiers(source: &str) -> Vec<String> {
 
     let characters: Vec<char> = source.chars().collect();
     let mut state = State::Code;
-    let mut identifiers = Vec::new();
+    let mut tokens = Vec::new();
     let mut index = 0;
     while index < characters.len() {
         if matches!(state, State::Code) {
@@ -308,9 +312,13 @@ fn rust_identifiers(source: &str) -> Vec<String> {
                 {
                     index += 1;
                 }
-                identifiers.push(characters[start..index].iter().collect());
+                tokens.push(characters[start..index].iter().collect());
             }
-            State::Code => index += 1,
+            State::Code if characters[index].is_whitespace() => index += 1,
+            State::Code => {
+                tokens.push(characters[index].to_string());
+                index += 1;
+            }
             State::LineComment if characters[index] == '\n' => {
                 state = State::Code;
                 index += 1;
@@ -341,8 +349,9 @@ fn rust_identifiers(source: &str) -> Vec<String> {
             State::String => index += 1,
             State::RawString(hashes)
                 if characters[index] == '"'
-                    && characters.get(index + 1..index + 1 + hashes)
-                        == Some(vec!['#'; hashes].as_slice()) =>
+                    && characters
+                        .get(index + 1..index + 1 + hashes)
+                        .is_some_and(|suffix| suffix.iter().all(|character| *character == '#')) =>
             {
                 state = State::Code;
                 index += hashes + 1;
@@ -350,34 +359,111 @@ fn rust_identifiers(source: &str) -> Vec<String> {
             State::RawString(_) => index += 1,
         }
     }
-    identifiers
+    tokens
+}
+
+const DORMANT_API: [&str; 8] = [
+    "CanonicalC",
+    "SourceRange",
+    "RouteFamily",
+    "TurnIdentity",
+    "TerminalCoordinate",
+    "TerminalCoordinateCandidate",
+    "TerminalCoordinateError",
+    "validate_terminal_coordinate_candidate",
+];
+
+fn sibling_api_violations(relative_path: &std::path::Path, source: &str) -> Vec<String> {
+    let tokens = rust_code_tokens(source);
+    let mut violations = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token == "terminal_coordinate" {
+            let previous = index
+                .checked_sub(1)
+                .and_then(|previous| tokens.get(previous));
+            let allowed_parent_declaration = relative_path == std::path::Path::new("mod.rs")
+                && previous.map(String::as_str) == Some("mod")
+                && tokens.get(index + 1).map(String::as_str) == Some(";");
+            if !allowed_parent_declaration {
+                violations.push("terminal_coordinate".to_owned());
+            }
+        }
+        if DORMANT_API.contains(&token.as_str()) {
+            violations.push(token.clone());
+        }
+    }
+    violations.sort();
+    violations.dedup();
+    violations
 }
 
 #[test]
-fn identifier_census_ignores_comments_and_string_literals() {
+fn caller_census_ignores_comments_and_normal_raw_strings() {
     let source = r####"
-        // TerminalCoordinateCandidate
-        /* validate_terminal_coordinate_candidate */
+        // use super::terminal_coordinate::CanonicalC;
+        /* TurnIdentity::External { started_at: "x", start_offset: 0 } */
         const NORMAL: &str = "TerminalCoordinateCandidate";
         const RAW: &str = r###"validate_terminal_coordinate_candidate \" nested"###;
-        TerminalCoordinateCandidate::new
     "####;
-    assert_eq!(
-        rust_identifiers(source)
-            .into_iter()
-            .filter(|identifier| {
-                matches!(
-                    identifier.as_str(),
-                    "TerminalCoordinateCandidate" | "validate_terminal_coordinate_candidate"
-                )
-            })
-            .collect::<Vec<_>>(),
-        ["TerminalCoordinateCandidate"]
+    assert!(sibling_api_violations(std::path::Path::new("fixture.rs"), source).is_empty());
+    assert!(
+        sibling_api_violations(std::path::Path::new("mod.rs"), "mod terminal_coordinate;")
+            .is_empty()
     );
 }
 
 #[test]
-fn validator_and_candidate_have_no_sibling_production_use() {
+fn caller_census_rejects_every_sibling_visible_api_family() {
+    let cases = [
+        "CanonicalC::new(1);",
+        "SourceRange::new(0, 1);",
+        "RouteFamily::Watcher;",
+        "TurnIdentity::External { started_at: \"t\", start_offset: 0 };",
+        "let _: Option<TerminalCoordinate> = None;",
+        "TerminalCoordinateCandidate::new(None, None, None, None, None, None, RouteFamily::Bridge);",
+        "let _: Option<TerminalCoordinateError> = None;",
+        "validate_terminal_coordinate_candidate(candidate);",
+        "use super::terminal_coordinate;",
+        "super::terminal_coordinate::CanonicalC::new(1);",
+    ];
+    for source in cases {
+        assert!(
+            !sibling_api_violations(std::path::Path::new("sibling.rs"), source).is_empty(),
+            "caller census missed sibling use: {source}"
+        );
+    }
+}
+
+#[test]
+fn dormant_dead_code_allows_do_not_cover_whole_impls() {
+    let module = include_str!("mod.rs");
+    let lines: Vec<_> = module.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        if !line.trim_start().starts_with("impl") {
+            continue;
+        }
+        let mut previous = index;
+        while previous > 0 {
+            previous -= 1;
+            let candidate = lines[previous].trim();
+            if candidate.is_empty() || candidate.starts_with("//") {
+                continue;
+            }
+            if candidate.starts_with("#[") {
+                assert!(
+                    !candidate.contains("allow(dead_code)"),
+                    "impl-wide dead_code allow makes future methods implicitly dormant"
+                );
+                continue;
+            }
+            break;
+        }
+    }
+    assert!(!module.contains("#[allow(dead_code)] impl"));
+}
+
+#[test]
+fn terminal_coordinate_has_no_sibling_production_use() {
     let discord_root =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services/discord");
     let coordinate_root = discord_root.join("terminal_coordinate");
@@ -390,19 +476,17 @@ fn validator_and_candidate_have_no_sibling_production_use() {
             continue;
         }
         let source = std::fs::read_to_string(&path).expect("read Discord Rust source");
-        let identifiers = rust_identifiers(&source);
-        for forbidden in [
-            "validate_terminal_coordinate_candidate",
-            "TerminalCoordinateCandidate",
-        ] {
-            if identifiers.iter().any(|identifier| identifier == forbidden) {
-                violations.push(format!(
-                    "{} uses {forbidden}",
-                    path.strip_prefix(&discord_root)
-                        .expect("Discord-relative source path")
-                        .display()
-                ));
-            }
+        for symbol in sibling_api_violations(
+            path.strip_prefix(&discord_root)
+                .expect("Discord-relative source path"),
+            &source,
+        ) {
+            violations.push(format!(
+                "{} uses {symbol}",
+                path.strip_prefix(&discord_root)
+                    .expect("Discord-relative source path")
+                    .display()
+            ));
         }
     }
 

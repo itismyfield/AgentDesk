@@ -7,12 +7,13 @@ mod tests;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(in crate::services::discord) struct CanonicalC(u64);
 
-#[allow(dead_code)] // #5191 S2c S1a: dormant constructor/accessor surface.
 impl CanonicalC {
+    #[allow(dead_code)] // #5191 S2c S1a: dormant constructor; production callers land later.
     pub(in crate::services::discord) const fn new(value: u64) -> Option<Self> {
         if value == 0 { None } else { Some(Self(value)) }
     }
 
+    #[allow(dead_code)] // #5191 S2c S1a: dormant accessor; production callers land later.
     pub(in crate::services::discord) const fn get(self) -> u64 {
         self.0
     }
@@ -26,8 +27,8 @@ pub(in crate::services::discord) struct SourceRange {
     end: u64,
 }
 
-#[allow(dead_code)] // #5191 S2c S1a: dormant provenance constructor/accessors.
 impl SourceRange {
+    #[allow(dead_code)] // #5191 S2c S1a: dormant constructor; production callers land later.
     pub(in crate::services::discord) const fn new(start: u64, end: u64) -> Option<Self> {
         if start < end {
             Some(Self { start, end })
@@ -36,10 +37,12 @@ impl SourceRange {
         }
     }
 
+    #[allow(dead_code)] // #5191 S2c S1a: dormant accessor; production callers land later.
     pub(in crate::services::discord) const fn start(self) -> u64 {
         self.start
     }
 
+    #[allow(dead_code)] // #5191 S2c S1a: dormant accessor; production callers land later.
     pub(in crate::services::discord) const fn end(self) -> u64 {
         self.end
     }
@@ -66,8 +69,8 @@ pub(in crate::services::discord) struct TerminalCoordinateCandidate<'a> {
     route_family: RouteFamily,
 }
 
-#[allow(dead_code)] // #5191 S2c S1a: explicit API, no hidden defaults or fabrication.
 impl<'a> TerminalCoordinateCandidate<'a> {
+    #[allow(dead_code)] // #5191 S2c S1a: explicit dormant API, no hidden defaults or fabrication.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::services::discord) const fn new(
         canonical_c: Option<u64>,
@@ -114,24 +117,28 @@ pub(in crate::services::discord) struct TerminalCoordinate<'a> {
     route_family: RouteFamily,
 }
 
-#[allow(dead_code)] // #5191 S2c S1a: dormant sibling-readable identity surface.
 impl<'a> TerminalCoordinate<'a> {
+    #[allow(dead_code)] // #5191 S2c S1a: dormant accessor; production callers land later.
     pub(in crate::services::discord) const fn canonical_c(self) -> CanonicalC {
         self.canonical_c
     }
 
+    #[allow(dead_code)] // #5191 S2c S1a: dormant accessor; production callers land later.
     pub(in crate::services::discord) const fn source_range(self) -> Option<SourceRange> {
         self.source_range
     }
 
+    #[allow(dead_code)] // #5191 S2c S1a: dormant accessor; production callers land later.
     pub(in crate::services::discord) const fn reset_identity(self) -> &'a str {
         self.reset_identity
     }
 
+    #[allow(dead_code)] // #5191 S2c S1a: dormant accessor; production callers land later.
     pub(in crate::services::discord) const fn turn_identity(self) -> TurnIdentity<'a> {
         self.turn_identity
     }
 
+    #[allow(dead_code)] // #5191 S2c S1a: dormant accessor; production callers land later.
     pub(in crate::services::discord) const fn route_family(self) -> RouteFamily {
         self.route_family
     }
