@@ -420,8 +420,7 @@ mod scrub_worktree_keys_from_json_tests {
     #[test]
     fn removes_matching_keys_and_returns_serialized_json() {
         let raw = r#"{"keep": 1, "remove1": 2, "remove2": 3}"#;
-        let result =
-            scrub_worktree_keys_from_json(Some(raw), &["remove1", "remove2", "missing"]);
+        let result = scrub_worktree_keys_from_json(Some(raw), &["remove1", "remove2", "missing"]);
 
         let parsed: serde_json::Value =
             serde_json::from_str(&result.expect("should return modified json")).unwrap();
