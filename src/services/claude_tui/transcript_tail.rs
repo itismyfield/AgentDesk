@@ -1,6 +1,13 @@
 use std::io::BufRead;
+#[cfg(unix)]
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
+
+#[cfg(unix)]
+use crate::services::agent_protocol::{
+    ClaudeTuiSourceEvidence, ClaudeTuiSourceWitness, ClaudeTuiSourceWitnessKind,
+};
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::session_backend::{StreamLineState, process_stream_line};
@@ -226,6 +233,135 @@ pub fn replay_transcript_file(
     })
 }
 
+/// Unix-only transcript source whose identity and bytes come from one open FD.
+/// The path is canonicalized before opening, then the opened file's real
+/// `(dev, ino)` is retained. Callers move this object through boundary scan,
+/// byte consumption, and witness capture; they never validate then reopen.
+#[cfg(unix)]
+pub(crate) struct VerifiedClaudeTranscript {
+    file: std::fs::File,
+    canonical_path: PathBuf,
+    device: u64,
+    inode: u64,
+    producer_generation: i64,
+}
+
+#[cfg(unix)]
+impl VerifiedClaudeTranscript {
+    pub(crate) fn open(path: &Path, producer_generation: i64) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt;
+
+        let canonical_path = std::fs::canonicalize(path)
+            .map_err(|error| format!("canonicalize transcript {}: {error}", path.display()))?;
+        let file = std::fs::File::open(&canonical_path)
+            .map_err(|error| format!("open transcript {}: {error}", canonical_path.display()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("inspect transcript fd: {error}"))?;
+        if !metadata.is_file() || metadata.dev() == 0 || metadata.ino() == 0 {
+            return Err("transcript fd has no real Unix file identity".to_string());
+        }
+        Ok(Self {
+            file,
+            canonical_path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            producer_generation,
+        })
+    }
+
+    pub(crate) fn try_clone_file(&self) -> Result<std::fs::File, String> {
+        self.file
+            .try_clone()
+            .map_err(|error| format!("clone verified transcript fd: {error}"))
+    }
+
+    pub(crate) fn len(&self) -> u64 {
+        self.file.metadata().map(|metadata| metadata.len()).unwrap_or(0)
+    }
+
+    pub(crate) fn boundary_at_or_after(
+        &self,
+        turn_started_at: DateTime<Utc>,
+    ) -> Result<Option<u64>, String> {
+        let mut file = self.try_clone_file()?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| format!("seek transcript fd: {error}"))?;
+        let mut reader = std::io::BufReader::new(file);
+        let mut line = String::new();
+        let mut offset = 0u64;
+        loop {
+            line.clear();
+            let line_start_offset = offset;
+            let read = reader
+                .read_line(&mut line)
+                .map_err(|error| format!("read transcript line: {error}"))?;
+            if read == 0 {
+                return Ok(None);
+            }
+            offset = offset.saturating_add(read as u64);
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                if !line.ends_with('\n') {
+                    return Ok(None);
+                }
+                continue;
+            };
+            if let Some(timestamp) = claude_transcript_line_timestamp(&json)
+                && timestamp >= turn_started_at
+            {
+                return Ok(Some(line_start_offset));
+            }
+        }
+    }
+
+    pub(crate) fn delayed_evidence(
+        &self,
+        offset: u64,
+    ) -> Result<ClaudeTuiSourceEvidence, String> {
+        let mut file = self.try_clone_file()?;
+        let len = file
+            .metadata()
+            .map_err(|error| format!("inspect transcript fd: {error}"))?
+            .len();
+        if len < offset {
+            return Err("late transcript boundary is not yet present on verified fd".to_string());
+        }
+        const WINDOW: u64 = 64;
+        let start = offset.saturating_sub(WINDOW);
+        let mut prior_bytes = vec![0; usize::try_from(offset - start).unwrap_or(64)];
+        file.seek(SeekFrom::Start(start))
+            .map_err(|error| format!("seek transcript witness: {error}"))?;
+        file.read_exact(&mut prior_bytes)
+            .map_err(|error| format!("read transcript witness: {error}"))?;
+        Ok(ClaudeTuiSourceEvidence {
+            canonical_path: self.canonical_path.display().to_string(),
+            producer_generation: self.producer_generation,
+            device: self.device,
+            inode: self.inode,
+            offset,
+            witness: ClaudeTuiSourceWitness {
+                kind: ClaudeTuiSourceWitnessKind::DelayedPromptBoundary,
+                prior_bytes,
+            },
+        })
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn claude_transcript_timestamp_at_or_after_verified(
+    source: &VerifiedClaudeTranscript,
+    turn_started_at: DateTime<Utc>,
+) -> Result<Option<u64>, String> {
+    source.boundary_at_or_after(turn_started_at)
+}
+
+/// Pathname reader retained for idle/synthetic observers that do not request
+/// delayed evidence authority. Prompt-submit evidence must use the verified-FD
+/// variant above and must not call this helper.
 pub(crate) fn claude_transcript_timestamp_at_or_after(
     transcript_path: &Path,
     turn_started_at: DateTime<Utc>,
@@ -337,6 +473,57 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use std::sync::mpsc;
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_fd_survives_path_replacement_and_new_open_has_real_new_identity() {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("transcript.jsonl");
+        std::fs::write(&path, b"old transcript bytes\n").unwrap();
+        let source = VerifiedClaudeTranscript::open(&path, 7).unwrap();
+        let old_metadata = source.file.metadata().unwrap();
+        let old_identity = (old_metadata.dev(), old_metadata.ino());
+
+        let displaced = temp.path().join("old.jsonl");
+        std::fs::rename(&path, &displaced).unwrap();
+        std::fs::write(&path, b"new transcript bytes\n").unwrap();
+        let replacement = VerifiedClaudeTranscript::open(&path, 8).unwrap();
+        let replacement_metadata = replacement.file.metadata().unwrap();
+        let replacement_identity = (replacement_metadata.dev(), replacement_metadata.ino());
+        assert_ne!(old_identity, replacement_identity);
+        assert_ne!(old_identity, (0, 0));
+        assert_ne!(replacement_identity, (0, 0));
+
+        let mut old_fd = source.try_clone_file().unwrap();
+        old_fd.seek(SeekFrom::Start(0)).unwrap();
+        let mut old_bytes = String::new();
+        old_fd.read_to_string(&mut old_bytes).unwrap();
+        assert_eq!(old_bytes, "old transcript bytes\n");
+        let old_evidence = source.delayed_evidence(4).unwrap();
+        assert_eq!((old_evidence.device, old_evidence.inode), old_identity);
+        assert_eq!(old_evidence.witness.prior_bytes, b"old ");
+        let new_evidence = replacement.delayed_evidence(4).unwrap();
+        assert_eq!(
+            (new_evidence.device, new_evidence.inode),
+            replacement_identity
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delayed_evidence_late_offset_is_permanent_miss_without_synthetic_cursor() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"short\n").unwrap();
+        let source = VerifiedClaudeTranscript::open(file.path(), 9).unwrap();
+        assert!(source.delayed_evidence(99).is_err());
+        let evidence = source.delayed_evidence(0).unwrap();
+        assert_ne!((evidence.device, evidence.inode), (0, 0));
+        assert_eq!(evidence.offset, 0);
+        assert!(evidence.witness.prior_bytes.is_empty());
+    }
 
     #[test]
     fn encode_project_path_matches_claude_project_directory_shape() {

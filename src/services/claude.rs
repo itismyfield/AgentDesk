@@ -34,7 +34,7 @@ use crate::services::session_backend::{
     insert_process_session_and_mark_active_turn, mark_process_session_active_turn,
     observe_stream_context, parse_assistant_extra_tool_uses, parse_stream_message_with_state,
     process_session_available_for_followup, process_session_pid, process_session_probe,
-    read_output_file_until_result, read_output_file_until_result_with_harvest,
+    read_open_output_file_until_result_with_harvest, read_output_file_until_result,
     remove_process_session, send_process_session_input, terminate_process_handle,
 };
 mod active_usage;
@@ -1668,23 +1668,40 @@ fn claude_tui_fresh_turn_start_offset(transcript_path: &std::path::Path) -> u64 
 }
 
 #[cfg(unix)]
+pub(crate) fn claude_tui_producer_generation(tmux_session_name: &str) -> i64 {
+    let Some(path) = crate::services::tmux_common::resolve_session_temp_path(
+        tmux_session_name,
+        "generation",
+    ) else {
+        return 0;
+    };
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
 pub(crate) fn claude_tui_turn_start_offset_after_timestamp(
-    transcript_path: &std::path::Path,
+    source: Option<&crate::services::claude_tui::transcript_tail::VerifiedClaudeTranscript>,
     turn_started_at: chrono::DateTime<chrono::Utc>,
     fallback_offset: u64,
 ) -> u64 {
-    match crate::services::claude_tui::transcript_tail::claude_transcript_timestamp_at_or_after(
-        transcript_path,
+    let Some(source) = source else {
+        return fallback_offset;
+    };
+    match crate::services::claude_tui::transcript_tail::claude_transcript_timestamp_at_or_after_verified(
+        source,
         turn_started_at,
     ) {
         Ok(Some(offset)) => offset,
         Ok(None) => fallback_offset,
         Err(error) => {
             debug_log(&format!(
-                "Claude TUI transcript timestamp scan failed for {}: {}; falling back to offset {}",
-                transcript_path.display(),
-                error,
-                fallback_offset
+                "Claude TUI verified-fd timestamp scan failed: {}; falling back to offset {}",
+                error, fallback_offset
             ));
             fallback_offset
         }
@@ -1856,6 +1873,7 @@ fn run_claude_tui_fresh_turn_and_finalize(
     // leave stale JSONL on disk even when the launch is intentionally fresh.
     let fresh_turn_start_offset = claude_tui_fresh_turn_start_offset(transcript_path);
     let fresh_turn_result = run_claude_tui_fresh_turn_with_ready_retry(
+        transcript_path,
         transcript_path_string,
         fresh_turn_start_offset,
         sender.clone(),
@@ -1864,7 +1882,7 @@ fn run_claude_tui_fresh_turn_and_finalize(
         resolved_session_id,
         prompt,
     );
-    let (read_result, harvest, turn_read_start_offset) = match fresh_turn_result {
+    let (read_result, harvest, turn_read_start_offset, source_evidence) = match fresh_turn_result {
         Ok(result) => result,
         Err(error) => {
             crate::services::termination_audit::record_termination_for_tmux(
@@ -1912,6 +1930,7 @@ fn run_claude_tui_fresh_turn_and_finalize(
         transcript_path_string,
         tmux_session_name,
         transcript_path,
+        source_evidence,
     );
     let transcript_len = std::fs::metadata(transcript_path)
         .map(|meta| meta.len())
@@ -2043,6 +2062,7 @@ fn prepare_and_create_claude_tui_session(
 /// producer-exit log can report real values instead of a hardcoded `lines=0`.
 #[cfg(unix)]
 fn run_claude_tui_fresh_turn_with_ready_retry(
+    transcript_path: &std::path::Path,
     transcript_path_string: &str,
     fresh_turn_start_offset: u64,
     sender: Sender<StreamMessage>,
@@ -2050,7 +2070,15 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
     tmux_session_name: &str,
     resolved_session_id: &str,
     prompt: &str,
-) -> Result<(ReadOutputResult, ReadHarvestStats, u64), String> {
+) -> Result<
+    (
+        ReadOutputResult,
+        ReadHarvestStats,
+        u64,
+        Option<crate::services::agent_protocol::ClaudeTuiSourceEvidence>,
+    ),
+    String,
+> {
     for attempt in 1..=CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS {
         let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
         let turn_started_at = chrono::Utc::now();
@@ -2061,13 +2089,18 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
         ) {
             Ok(()) => {
                 let hook_events_after = chrono::Utc::now();
+                let source = crate::services::claude_tui::transcript_tail::VerifiedClaudeTranscript::open(
+                    transcript_path,
+                    claude_tui_producer_generation(tmux_session_name),
+                )?;
                 let start_offset = claude_tui_turn_start_offset_after_timestamp(
-                    std::path::Path::new(transcript_path_string),
+                    Some(&source),
                     turn_started_at,
                     fresh_turn_start_offset,
                 );
                 return read_claude_tui_transcript_until_done(
                     transcript_path_string,
+                    source,
                     start_offset,
                     sender.clone(),
                     cancel_token.clone(),
@@ -2076,7 +2109,9 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
                     hook_rx,
                     hook_events_after,
                 )
-                .map(|(read_result, harvest)| (read_result, harvest, start_offset));
+                .map(|(read_result, harvest, evidence)| {
+                    (read_result, harvest, start_offset, evidence)
+                });
             }
             Err(error) if should_retry_claude_tui_fresh_prompt_ready(&error, attempt) => {
                 let backoff = claude_tui_fresh_prompt_ready_backoff(attempt);
@@ -2138,6 +2173,7 @@ pub(crate) fn emit_claude_tui_watcher_handoff(
     transcript_path_string: &str,
     tmux_session_name: &str,
     transcript_path: &std::path::Path,
+    source_evidence: Option<crate::services::agent_protocol::ClaudeTuiSourceEvidence>,
 ) {
     let last_offset = std::fs::metadata(transcript_path)
         .map(|meta| meta.len())
@@ -2159,6 +2195,7 @@ pub(crate) fn emit_claude_tui_watcher_handoff(
             transcript_path: transcript_path_string.to_string(),
             tmux_session_name: tmux_session_name.to_string(),
             last_offset,
+            source_evidence,
         },
     });
 }
@@ -2167,6 +2204,7 @@ pub(crate) fn emit_claude_tui_watcher_handoff(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn read_claude_tui_transcript_until_done(
     transcript_path: &str,
+    source: crate::services::claude_tui::transcript_tail::VerifiedClaudeTranscript,
     start_offset: u64,
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
@@ -2174,7 +2212,14 @@ pub(crate) fn read_claude_tui_transcript_until_done(
     session_id: &str,
     hook_rx: tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
     hook_events_after: chrono::DateTime<chrono::Utc>,
-) -> Result<(ReadOutputResult, ReadHarvestStats), String> {
+) -> Result<
+    (
+        ReadOutputResult,
+        ReadHarvestStats,
+        Option<crate::services::agent_protocol::ClaudeTuiSourceEvidence>,
+    ),
+    String,
+> {
     let stop_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_seen_for_probe = stop_seen.clone();
     let hook_rx = std::sync::Arc::new(std::sync::Mutex::new(hook_rx));
@@ -2203,10 +2248,12 @@ pub(crate) fn read_claude_tui_transcript_until_done(
         tmux_session_name,
     )? {
         // No transcript read happened — nothing was harvested (#3281).
-        return Ok((early_result, ReadHarvestStats::default()));
+        return Ok((early_result, ReadHarvestStats::default(), None));
     }
-    let result = read_output_file_until_result_with_harvest(
+    let opened_file = source.try_clone_file()?;
+    let result = read_open_output_file_until_result_with_harvest(
         transcript_path,
+        Some(opened_file),
         start_offset,
         sender,
         cancel_token,
@@ -2214,7 +2261,15 @@ pub(crate) fn read_claude_tui_transcript_until_done(
     )
     .map_err(|failure| failure.error);
     log_claude_tui_hook_relay_failures(&expected_session_id_for_result);
-    result
+    result.map(|(read_result, harvest)| {
+        // Capture after byte consumption through the same verified FD. If the
+        // exact boundary was appended too late or generation was unavailable,
+        // evidence is permanently missed; transport completion is unchanged.
+        let evidence = (source.len() >= start_offset)
+            .then(|| source.delayed_evidence(start_offset).ok())
+            .flatten();
+        (read_result, harvest, evidence)
+    })
 }
 
 #[cfg(unix)]
@@ -3419,7 +3474,13 @@ mod local_tmux_lifecycle_tests {
         let transcript_path = temp.path().display().to_string();
         let (sender, receiver) = std::sync::mpsc::channel();
 
-        emit_claude_tui_watcher_handoff(&sender, &transcript_path, "claude-tui-test", temp.path());
+        emit_claude_tui_watcher_handoff(
+            &sender,
+            &transcript_path,
+            "claude-tui-test",
+            temp.path(),
+            None,
+        );
 
         let message = receiver.recv().unwrap();
         match message {
@@ -3429,11 +3490,13 @@ mod local_tmux_lifecycle_tests {
                         transcript_path: actual_path,
                         tmux_session_name,
                         last_offset,
+                        source_evidence,
                     },
             } => {
                 assert_eq!(actual_path, transcript_path);
                 assert_eq!(tmux_session_name, "claude-tui-test");
                 assert_eq!(last_offset, std::fs::metadata(temp.path()).unwrap().len());
+                assert_eq!(source_evidence, None);
             }
             other => panic!("expected RuntimeReady ClaudeTui, got {other:?}"),
         }
@@ -3595,8 +3658,13 @@ mod local_tmux_lifecycle_tests {
         let second_turn_started_at = chrono::DateTime::parse_from_rfc3339("2026-05-28T00:01:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let start_offset = claude_tui_turn_start_offset_after_timestamp(
+        let source = crate::services::claude_tui::transcript_tail::VerifiedClaudeTranscript::open(
             transcript_path.path(),
+            1,
+        )
+        .unwrap();
+        let start_offset = claude_tui_turn_start_offset_after_timestamp(
+            Some(&source),
             second_turn_started_at,
             0,
         );

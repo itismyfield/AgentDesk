@@ -67,6 +67,33 @@ fn proof_matches(path: &Path, previous: &CoordinateWitness) -> bool {
     })
 }
 
+/// Observe an actually-durable delayed Claude witness. Runtime stamping calls
+/// this only for the write-once `None -> Some` transition; idempotent restamps
+/// and typed conflicts never double-install. The delayed kind remains distinct
+/// from the pathname-based real-birth observer above.
+pub(in crate::services::discord::inflight) fn observe_delayed_evidence_install(
+    state: &InflightTurnState,
+) {
+    let Some(evidence) = state.claude_tui_source_evidence.as_ref() else {
+        return;
+    };
+    debug_assert_eq!(
+        evidence.witness.kind,
+        crate::services::agent_protocol::ClaudeTuiSourceWitnessKind::DelayedPromptBoundary
+    );
+    tracing::debug!(
+        channel_id = state.channel_id,
+        generation = evidence.producer_generation,
+        device = evidence.device,
+        inode = evidence.inode,
+        offset = evidence.offset,
+        witness_kind = ?evidence.witness.kind,
+        "installed durable delayed ClaudeTUI source observer"
+    );
+    #[cfg(test)]
+    test_seams::record_delayed_install();
+}
+
 pub(super) fn observe_successful_real_create(state: &InflightTurnState) {
     let Some(provider) = state.provider_kind() else {
         return;
@@ -135,6 +162,19 @@ pub(super) mod test_seams {
     thread_local! {
         static SYNC_ERROR: RefCell<Option<std::io::ErrorKind>> = const { RefCell::new(None) };
         static IO_HOOK: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+        static DELAYED_INSTALLS: RefCell<usize> = const { RefCell::new(0) };
+    }
+
+    pub(in crate::services::discord::inflight) fn record_delayed_install() {
+        DELAYED_INSTALLS.with(|count| *count.borrow_mut() += 1);
+    }
+
+    pub(in crate::services::discord::inflight) fn reset_delayed_installs() {
+        DELAYED_INSTALLS.with(|count| *count.borrow_mut() = 0);
+    }
+
+    pub(in crate::services::discord::inflight) fn delayed_installs() -> usize {
+        DELAYED_INSTALLS.with(|count| *count.borrow())
     }
 
     pub(in crate::services::discord::inflight) fn sync_result(

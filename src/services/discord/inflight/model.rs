@@ -6,7 +6,7 @@
 use std::num::NonZeroU64;
 
 use super::*;
-use crate::services::agent_protocol::TaskNotificationKind;
+use crate::services::agent_protocol::{ClaudeTuiSourceEvidence, TaskNotificationKind};
 
 mod identity;
 mod serde_adapters;
@@ -210,6 +210,12 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Stable start offset for the current turn's output JSONL slice.
     #[serde(default)]
     pub turn_start_offset: Option<u64>,
+    /// Observe-only delayed ClaudeTUI prompt-boundary proof. This is additive,
+    /// write-once runtime metadata and is not part of turn identity, delivery
+    /// authority, retry policy, or transport admission. Legacy/recovery rows
+    /// deserialize `None` and continue ordinary handoff.
+    #[serde(default)]
+    pub claude_tui_source_evidence: Option<ClaudeTuiSourceEvidence>,
     pub full_response: String,
     pub response_sent_offset: usize,
     /// True once the terminal assistant response has been committed to the
@@ -529,6 +535,51 @@ pub(in crate::services::discord) struct InflightTurnState {
 mod turn_source_tests {
     use super::{InflightTurnState, RelayOwnerKind, TurnSource};
     use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn claude_source_evidence_defaults_none_and_round_trips_exact_kind_identity() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            54_900_200,
+            None,
+            7,
+            8,
+            9,
+            "evidence serde".into(),
+            None,
+            Some("AgentDesk-claude-serde".into()),
+            Some("/projects/turn.jsonl".into()),
+            None,
+            128,
+        );
+        let mut legacy = serde_json::to_value(&state).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("claude_tui_source_evidence");
+        let restored: InflightTurnState = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored.claude_tui_source_evidence, None);
+
+        state.claude_tui_source_evidence = Some(
+            crate::services::agent_protocol::ClaudeTuiSourceEvidence {
+                canonical_path: "/projects/turn.jsonl".into(),
+                producer_generation: 77,
+                device: 3,
+                inode: 5,
+                offset: 64,
+                witness: crate::services::agent_protocol::ClaudeTuiSourceWitness {
+                    kind: crate::services::agent_protocol::ClaudeTuiSourceWitnessKind::DelayedPromptBoundary,
+                    prior_bytes: vec![1, 2, 3],
+                },
+            },
+        );
+        let encoded = serde_json::to_value(&state).unwrap();
+        let restored: InflightTurnState = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            restored.claude_tui_source_evidence,
+            state.claude_tui_source_evidence
+        );
+    }
 
     #[test]
     fn default_is_managed_for_legacy_rows() {
@@ -1018,6 +1069,7 @@ impl InflightTurnState {
             base_commit: None,
             last_offset,
             turn_start_offset: Some(last_offset),
+            claude_tui_source_evidence: None,
             full_response: String::new(),
             response_sent_offset: 0,
             terminal_delivery_committed: false,

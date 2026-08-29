@@ -14,7 +14,7 @@
 use super::*;
 
 #[path = "save_store/create_monotonic_observer.rs"]
-mod create_monotonic_observer;
+pub(in crate::services::discord::inflight) mod create_monotonic_observer;
 
 #[path = "save_store/delivery_rewind.rs"]
 mod delivery_rewind;

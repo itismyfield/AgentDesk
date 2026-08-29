@@ -613,6 +613,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             tmux_session_name,
                             session_id: None,
                             last_offset,
+                            source_evidence: None,
                             done,
                         },
                         WatcherRuntimeHandoffState {
@@ -634,6 +635,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                     transcript_path,
                     tmux_session_name,
                     last_offset,
+                    source_evidence,
                 } => {
                     guarded_save_outcome = Some(handle_watcher_runtime_handoff(
                         WatcherRuntimeHandoffContext {
@@ -646,6 +648,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             tmux_session_name,
                             session_id: None,
                             last_offset,
+                            source_evidence,
                             done,
                         },
                         WatcherRuntimeHandoffState {
@@ -680,6 +683,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                             tmux_session_name,
                             session_id: thread_id,
                             last_offset,
+                            source_evidence: None,
                             done,
                         },
                         WatcherRuntimeHandoffState {

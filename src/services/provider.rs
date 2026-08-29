@@ -1585,6 +1585,7 @@ pub fn poll_output_file_until_result<
     EmitDeferredError,
 >(
     output_path: &str,
+    opened_file: Option<std::fs::File>,
     start_offset: u64,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     state: &mut State,
@@ -1639,8 +1640,11 @@ where
         emit_output_offset(start_offset);
     }
 
-    let mut file = std::fs::File::open(output_path)
-        .map_err(|e| format!("Failed to open output file: {}", e))?;
+    let mut file = match opened_file {
+        Some(file) => file,
+        None => std::fs::File::open(output_path)
+            .map_err(|e| format!("Failed to open output file: {}", e))?,
+    };
     file.seek(SeekFrom::Start(start_offset))
         .map_err(|e| format!("Failed to seek output file: {}", e))?;
 
@@ -2357,6 +2361,7 @@ mod poll_output_file_tests {
 
         let result = poll_output_file_until_result(
             missing_path.to_str().unwrap(),
+            None,
             12,
             None,
             &mut state,
@@ -2391,6 +2396,7 @@ mod poll_output_file_tests {
         let mut offsets = Vec::new();
         let result = poll_output_file_until_result(
             output_path.to_str().unwrap(),
+            None,
             start_offset,
             None,
             &mut state,
@@ -2433,6 +2439,7 @@ mod poll_output_file_tests {
         let mut offsets = Vec::new();
         let result = poll_output_file_until_result(
             output_path.to_str().unwrap(),
+            None,
             0,
             Some(cancel_token),
             &mut state,

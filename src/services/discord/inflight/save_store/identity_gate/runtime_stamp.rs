@@ -11,6 +11,56 @@ pub(in crate::services::discord) struct CodexRange {
     pub(in crate::services::discord) session_id: String,
     pub(in crate::services::discord) source: ExactJsonlSourceIdentity,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum ClaudeEvidenceAdmission {
+    NotRequested,
+    Installed,
+    Idempotent,
+    RejectedConflict,
+    RejectedBinding,
+}
+
+fn evidence_binding_matches(
+    state: &InflightTurnState,
+    evidence: &crate::services::agent_protocol::ClaudeTuiSourceEvidence,
+) -> bool {
+    state.runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
+        && state.output_path.as_deref() == Some(evidence.canonical_path.as_str())
+        && evidence.producer_generation != 0
+        && evidence.device != 0
+        && evidence.inode != 0
+        && state.last_offset >= evidence.offset
+}
+
+fn admit_claude_evidence(
+    durable: &mut InflightTurnState,
+    requested: &InflightTurnState,
+) -> ClaudeEvidenceAdmission {
+    let Some(candidate) = requested.claude_tui_source_evidence.as_ref() else {
+        return ClaudeEvidenceAdmission::NotRequested;
+    };
+    if !evidence_binding_matches(durable, candidate) {
+        return ClaudeEvidenceAdmission::RejectedBinding;
+    }
+    match durable.claude_tui_source_evidence.as_ref() {
+        None => {
+            durable.claude_tui_source_evidence = Some(candidate.clone());
+            ClaudeEvidenceAdmission::Installed
+        }
+        Some(existing) if existing == candidate => ClaudeEvidenceAdmission::Idempotent,
+        Some(existing)
+            if existing.producer_generation == candidate.producer_generation
+                && existing.canonical_path == candidate.canonical_path
+                && existing.device == candidate.device
+                && existing.inode == candidate.inode
+                && candidate.offset < existing.offset =>
+        {
+            ClaudeEvidenceAdmission::RejectedConflict
+        }
+        Some(_) => ClaudeEvidenceAdmission::RejectedConflict,
+    }
+}
+
 fn nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
@@ -431,6 +481,19 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
         on_disk.watcher_owns_live_relay = requested.watcher_owns_live_relay;
         on_disk.relay_owner_kind = requested.relay_owner_kind;
     }
+    let evidence_admission = admit_claude_evidence(&mut on_disk, &requested);
+    if matches!(
+        evidence_admission,
+        ClaudeEvidenceAdmission::RejectedBinding | ClaudeEvidenceAdmission::RejectedConflict
+    ) {
+        tracing::warn!(
+            provider = %provider.as_str(),
+            channel_id = requested.channel_id,
+            caller,
+            admission = ?evidence_admission,
+            "ClaudeTUI delayed evidence rejected observe-only; runtime handoff continues"
+        );
+    }
     match persist_under_lock_with_snapshot(
         root,
         &path,
@@ -438,6 +501,11 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
         "src/services/discord/inflight.rs:stamp_runtime_handoff_if_matches_identity_in_root",
     ) {
         Ok(Some(persisted)) => {
+            if evidence_admission == ClaudeEvidenceAdmission::Installed {
+                super::super::create_monotonic_observer::observe_delayed_evidence_install(
+                    &persisted,
+                );
+            }
             state.adopt_persisted(persisted);
             GuardedSaveOutcome::Saved
         }
@@ -579,6 +647,192 @@ mod tests {
             assert!(matches!(latch.revalidated_source(&local), Err(())));
         }
     }
+    fn delayed_evidence(
+        path: &str,
+        generation: i64,
+        device: u64,
+        inode: u64,
+        offset: u64,
+    ) -> crate::services::agent_protocol::ClaudeTuiSourceEvidence {
+        crate::services::agent_protocol::ClaudeTuiSourceEvidence {
+            canonical_path: path.into(),
+            producer_generation: generation,
+            device,
+            inode,
+            offset,
+            witness: crate::services::agent_protocol::ClaudeTuiSourceWitness {
+                kind: crate::services::agent_protocol::ClaudeTuiSourceWitnessKind::DelayedPromptBoundary,
+                prior_bytes: vec![b'x'; usize::try_from(offset.min(64)).unwrap()],
+            },
+        }
+    }
+
+    #[test]
+    fn delayed_evidence_is_write_once_idempotent_and_conflict_is_observe_only() {
+        let root = tempfile::tempdir().unwrap();
+        super::super::create_monotonic_observer::test_seams::reset_delayed_installs();
+        let provider = ProviderKind::Claude;
+        let channel = 54_900_100;
+        let canonical = "/projects/claude-turn.jsonl";
+        let seed = runtime_seed(provider.clone(), channel, None);
+        save_inflight_state_in_root(root.path(), &seed).unwrap();
+        let expected = InflightTurnIdentity::from_state(&seed);
+
+        let mut first = seed.clone();
+        first.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        first.tmux_session_name = Some("AgentDesk-claude-evidence".into());
+        first.output_path = Some(canonical.into());
+        first.last_offset = 256;
+        first.claude_tui_source_evidence = Some(delayed_evidence(canonical, 11, 7, 9, 128));
+        assert_eq!(
+            stamp_runtime_handoff_if_matches_identity_in_root(
+                root.path(),
+                &first,
+                &expected,
+                "test::delayed_install",
+            ),
+            GuardedSaveOutcome::Saved
+        );
+        let installed = load(root.path(), &provider, channel);
+        let installed_expected = InflightTurnIdentity::from_state(&installed);
+        assert_eq!(
+            installed.claude_tui_source_evidence,
+            first.claude_tui_source_evidence
+        );
+        assert_eq!(
+            super::super::create_monotonic_observer::test_seams::delayed_installs(),
+            1
+        );
+
+        let same = installed.clone();
+        assert_eq!(
+            stamp_runtime_handoff_if_matches_identity_in_root(
+                root.path(),
+                &same,
+                &installed_expected,
+                "test::delayed_idempotent",
+            ),
+            GuardedSaveOutcome::Saved
+        );
+        assert_eq!(
+            super::super::create_monotonic_observer::test_seams::delayed_installs(),
+            1,
+            "idempotent restamp must not install a second observer"
+        );
+        let after_idempotent = load(root.path(), &provider, channel);
+        let after_idempotent_expected = InflightTurnIdentity::from_state(&after_idempotent);
+        let mut conflict = after_idempotent.clone();
+        conflict.last_offset = 300;
+        conflict.claude_tui_source_evidence = Some(delayed_evidence(canonical, 11, 7, 9, 64));
+        assert_eq!(
+            stamp_runtime_handoff_if_matches_identity_in_root(
+                root.path(),
+                &conflict,
+                &after_idempotent_expected,
+                "test::delayed_conflict",
+            ),
+            GuardedSaveOutcome::Saved,
+            "evidence rejection cannot suppress ordinary runtime handoff"
+        );
+        let persisted = load(root.path(), &provider, channel);
+        assert_eq!(persisted.last_offset, 300);
+        assert_eq!(
+            persisted.claude_tui_source_evidence,
+            installed.claude_tui_source_evidence,
+            "conflicting evidence must not overwrite the durable witness"
+        );
+        assert_eq!(
+            super::super::create_monotonic_observer::test_seams::delayed_installs(),
+            1,
+            "typed conflict must not install a second observer"
+        );
+    }
+
+    #[test]
+    fn delayed_evidence_binding_mismatch_and_none_recovery_do_not_deny_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let provider = ProviderKind::Claude;
+        let channel = 54_900_101;
+        let seed = runtime_seed(provider.clone(), channel, None);
+        save_inflight_state_in_root(root.path(), &seed).unwrap();
+        let expected = InflightTurnIdentity::from_state(&seed);
+        let mut handoff = seed.clone();
+        handoff.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        handoff.tmux_session_name = Some("AgentDesk-claude-none-recovery".into());
+        handoff.output_path = Some("/projects/current.jsonl".into());
+        handoff.last_offset = 400;
+        handoff.claude_tui_source_evidence = Some(delayed_evidence(
+            "/projects/replaced.jsonl",
+            22,
+            8,
+            10,
+            320,
+        ));
+        assert_eq!(
+            stamp_runtime_handoff_if_matches_identity_in_root(
+                root.path(),
+                &handoff,
+                &expected,
+                "test::mismatch_observe_only",
+            ),
+            GuardedSaveOutcome::Saved
+        );
+        let persisted = load(root.path(), &provider, channel);
+        assert_eq!(persisted.output_path, handoff.output_path);
+        assert_eq!(persisted.claude_tui_source_evidence, None);
+
+        let persisted_expected = InflightTurnIdentity::from_state(&persisted);
+        let mut recovery = persisted.clone();
+        recovery.last_offset = 450;
+        recovery.claude_tui_source_evidence = None;
+        assert_eq!(
+            stamp_runtime_handoff_if_matches_identity_in_root(
+                root.path(),
+                &recovery,
+                &persisted_expected,
+                "test::generic_recovery_none",
+            ),
+            GuardedSaveOutcome::Saved
+        );
+        assert_eq!(load(root.path(), &provider, channel).last_offset, 450);
+    }
+
+    #[test]
+    fn delayed_monotonicity_is_scoped_to_exact_generation_and_fd_identity() {
+        let existing = delayed_evidence("/projects/a.jsonl", 1, 3, 4, 200);
+        let mut durable = runtime_seed(ProviderKind::Claude, 54_900_102, None);
+        durable.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        durable.output_path = Some(existing.canonical_path.clone());
+        durable.last_offset = 300;
+        durable.claude_tui_source_evidence = Some(existing.clone());
+
+        let mut stale = durable.clone();
+        stale.claude_tui_source_evidence = Some(delayed_evidence(
+            "/projects/a.jsonl",
+            1,
+            3,
+            4,
+            100,
+        ));
+        assert_eq!(
+            admit_claude_evidence(&mut durable.clone(), &stale),
+            ClaudeEvidenceAdmission::RejectedConflict
+        );
+
+        let successor = delayed_evidence("/projects/a.jsonl", 2, 3, 5, 100);
+        let mut successor_turn = runtime_seed(ProviderKind::Claude, 54_900_103, None);
+        successor_turn.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        successor_turn.output_path = Some(successor.canonical_path.clone());
+        successor_turn.last_offset = 100;
+        let mut successor_request = successor_turn.clone();
+        successor_request.claude_tui_source_evidence = Some(successor);
+        assert_eq!(
+            admit_claude_evidence(&mut successor_turn, &successor_request),
+            ClaudeEvidenceAdmission::Installed,
+            "a successor generation has no cross-generation monotonic predecessor"
+        );
+    }
+
     #[test]
     fn runtime_first_stamp_supports_process_claude_tui_and_codex_tui() {
         for (index, provider, runtime_kind, session_name) in [

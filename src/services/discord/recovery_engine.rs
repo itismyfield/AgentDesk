@@ -364,6 +364,7 @@ fn runtime_handoff_for_recovery(
             transcript_path: output_path,
             tmux_session_name,
             last_offset,
+            source_evidence: None,
         },
         RuntimeHandoffKind::CodexTui => RuntimeHandoff::CodexTui {
             rollout_path: output_path,

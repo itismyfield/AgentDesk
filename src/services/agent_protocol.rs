@@ -110,6 +110,36 @@ impl RuntimeHandoffKind {
     }
 }
 
+/// Observe-only source proof captured from the same opened Claude transcript
+/// descriptor that supplied the turn bytes. This is deliberately independent
+/// of stream-relay `SourceStamp`: relay provenance is telemetry, not authority
+/// for delayed prompt-boundary evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeTuiSourceEvidence {
+    pub canonical_path: String,
+    pub producer_generation: i64,
+    pub device: u64,
+    pub inode: u64,
+    pub offset: u64,
+    pub witness: ClaudeTuiSourceWitness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeTuiSourceWitness {
+    pub kind: ClaudeTuiSourceWitnessKind,
+    /// Up to 64 exact bytes immediately preceding `offset`, read through the
+    /// verified descriptor. Empty at a real offset zero is valid; `(dev, ino)`
+    /// is never synthesized to compensate for an unsupported platform.
+    pub prior_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeTuiSourceWitnessKind {
+    RealTurnBirth,
+    DelayedPromptBoundary,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeHandoff {
     LegacyTmuxWrapper {
@@ -122,6 +152,9 @@ pub enum RuntimeHandoff {
         transcript_path: String,
         tmux_session_name: String,
         last_offset: u64,
+        /// `None` means unsupported/unobservable, not denied. Generic
+        /// recovery and non-Unix handoffs intentionally use this shape.
+        source_evidence: Option<ClaudeTuiSourceEvidence>,
     },
     CodexTui {
         rollout_path: String,

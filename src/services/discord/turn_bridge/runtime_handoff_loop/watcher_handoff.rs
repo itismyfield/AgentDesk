@@ -12,6 +12,8 @@ pub(super) struct WatcherRuntimeHandoffContext<'a> {
     pub(super) tmux_session_name: String,
     pub(super) session_id: Option<String>,
     pub(super) last_offset: u64,
+    pub(super) source_evidence:
+        Option<crate::services::agent_protocol::ClaudeTuiSourceEvidence>,
     pub(super) done: bool,
 }
 
@@ -57,6 +59,7 @@ pub(super) fn handle_watcher_runtime_handoff(
     let tmux_session_name = ctx.tmux_session_name;
     let session_id = ctx.session_id;
     let last_offset = ctx.last_offset;
+    let source_evidence = ctx.source_evidence;
     let done = ctx.done;
     let inflight_state = state.inflight_state;
     let tmux_last_offset = state.tmux_last_offset;
@@ -94,6 +97,9 @@ pub(super) fn handle_watcher_runtime_handoff(
     }
     inflight_state.input_fifo_path = fifo_path;
     inflight_state.last_offset = last_offset;
+    if matches!(runtime_kind, RuntimeHandoffKind::ClaudeTui) {
+        inflight_state.claude_tui_source_evidence = source_evidence;
+    }
     *state_dirty |= inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
     #[cfg(unix)]
     let relay_http_available = shared_owned.serenity_http_or_token_fallback().is_some();

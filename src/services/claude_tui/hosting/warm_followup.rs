@@ -2,8 +2,9 @@ use std::sync::mpsc::Sender;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::claude::{
-    ClaudeFollowupResult, classify_followup_result, claude_tui_turn_start_offset_after_timestamp,
-    debug_log, emit_claude_tui_watcher_handoff, emit_followup_restart_suppressed_notice,
+    ClaudeFollowupResult, classify_followup_result, claude_tui_producer_generation,
+    claude_tui_turn_start_offset_after_timestamp, debug_log, emit_claude_tui_watcher_handoff,
+    emit_followup_restart_suppressed_notice,
     fresh_claude_tui_session_resolution, log_producer_exit, read_claude_tui_transcript_until_done,
     read_output_result_kind, tui_delivered_zero_harvest,
 };
@@ -476,13 +477,21 @@ fn run_claude_tui_warm_followup_submit_and_stream(
         return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(error));
     }
     let hook_events_after = chrono::Utc::now();
-    let start_offset = claude_tui_turn_start_offset_after_timestamp(
+    let source = match crate::services::claude_tui::transcript_tail::VerifiedClaudeTranscript::open(
         &transcript_path,
+        claude_tui_producer_generation(tmux_session_name),
+    ) {
+        Ok(source) => source,
+        Err(error) => return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(error)),
+    };
+    let start_offset = claude_tui_turn_start_offset_after_timestamp(
+        Some(&source),
         turn_started_at,
         fallback_start_offset,
     );
-    let (read_result, harvest) = match read_claude_tui_transcript_until_done(
+    let (read_result, harvest, source_evidence) = match read_claude_tui_transcript_until_done(
         &transcript_path_string,
+        source,
         start_offset,
         sender.clone(),
         cancel_token.clone(),
@@ -533,6 +542,7 @@ fn run_claude_tui_warm_followup_submit_and_stream(
                 &transcript_path_string,
                 tmux_session_name,
                 &transcript_path,
+                source_evidence,
             );
             let transcript_len = std::fs::metadata(&transcript_path)
                 .map(|meta| meta.len())

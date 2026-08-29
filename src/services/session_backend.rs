@@ -809,6 +809,28 @@ pub fn read_output_file_until_result_with_harvest(
     cancel_token: Option<Arc<CancelToken>>,
     probe: SessionProbe,
 ) -> Result<(ReadOutputResult, ReadHarvestStats), ReadOutputFailure> {
+    read_open_output_file_until_result_with_harvest(
+        output_path,
+        None,
+        start_offset,
+        sender,
+        cancel_token,
+        probe,
+    )
+}
+
+/// Variant used by ClaudeTUI delayed evidence. Supplying `opened_file` keeps the
+/// byte consumer on the already-verified descriptor. Generic providers retain
+/// the pathname-open behavior by passing `None` through the wrapper above.
+#[allow(clippy::too_many_arguments)]
+pub fn read_open_output_file_until_result_with_harvest(
+    output_path: &str,
+    opened_file: Option<std::fs::File>,
+    start_offset: u64,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    probe: SessionProbe,
+) -> Result<(ReadOutputResult, ReadHarvestStats), ReadOutputFailure> {
     let mut state = StreamLineState::new();
     let SessionProbe {
         is_alive,
@@ -823,6 +845,7 @@ pub fn read_output_file_until_result_with_harvest(
 
     let result = crate::services::provider::poll_output_file_until_result(
         output_path,
+        opened_file,
         start_offset,
         cancel_token,
         &mut state,

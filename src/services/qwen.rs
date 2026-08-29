@@ -629,6 +629,7 @@ fn qwen_read_output_file_until_result_tracked(
 
     let result = crate::services::provider::poll_output_file_until_result(
         output_path,
+        None,
         start_offset,
         cancel_token,
         &mut state,
