@@ -77,6 +77,12 @@ pub(super) fn discord_restart_reports_root() -> Option<PathBuf> {
     runtime_root().map(|root| root.join("discord_restart_reports"))
 }
 
+/// Shadow-only versioned restart-attempt records. The disjoint root prevents
+/// legacy channel-keyed restart reports from replacing an attempt authority.
+pub(super) fn discord_restart_attempts_root() -> Option<PathBuf> {
+    runtime_root().map(|root| root.join("discord_restart_attempts"))
+}
+
 /// #4049 S4-a1: durable turn-view reaction state. The reconciler stores the
 /// bot token hash that added a lifecycle reaction so cold terminal/clear
 /// notifications after restart remove with the same Discord @me identity.

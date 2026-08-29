@@ -75,6 +75,9 @@ mod standby_relay;
 mod recovery_engine;
 mod recovery_paths;
 mod restart_mode;
+// #5575 P1: shadow-only durable restart-attempt contract; no production caller
+// treats these records as authority before the later activation slice.
+pub(crate) mod restart_protocol;
 // #1074: session identity parsing SSoT (legacy + namespaced session_key forms).
 pub(crate) mod restart_report;
 mod role_map;
