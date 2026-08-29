@@ -4980,6 +4980,7 @@ services::discord::streaming_finalizer::tests::abnormal_process_exit_without_ass
 services::discord::streaming_finalizer::tests::non_work_dispatch_is_left_to_own_completion_flow
 services::discord::streaming_finalizer::tests::normal_final_output_plans_streaming_finalization_and_context
 services::discord::streaming_finalizer::tests::unknown_dispatch_type_preserves_state_for_reconcile
+services::discord::synthetic_headless_message_id::tests::predicate_preserves_floor_boundary
 services::discord::task_notification_delivery::gateway::tests::authoritative_card_post_4xx_maps_to_permanent_transport_failure
 services::discord::task_notification_delivery::response_chunks::tests::discord_history_status_policy_keeps_auth_permanent_and_retryable_statuses_transient
 services::discord::task_notification_delivery::response_chunks::tests::nonce_retry_ttl_is_strict_at_boundary
@@ -5055,6 +5056,12 @@ services::discord::task_supervisor::tests::panic_payload_summary_handles_common_
 services::discord::task_supervisor::tests::spawn_observed_contains_child_panic
 services::discord::task_supervisor::tests::task_guard_leaves_a_replacement_watcher_entry_in_place
 services::discord::task_supervisor::tests::task_guard_removes_the_registry_entry_it_still_owns
+services::discord::terminal_coordinate::tests::absent_provenance_remains_valid_and_does_not_change_c_identity
+services::discord::terminal_coordinate::tests::canonical_c_is_positive_and_hashes_only_c
+services::discord::terminal_coordinate::tests::external_identity_is_id_zero_and_requires_offset_in_identity
+services::discord::terminal_coordinate::tests::message_identity_preserves_exact_fields_and_optional_offset
+services::discord::terminal_coordinate::tests::optional_source_range_is_strict_and_ends_at_c
+services::discord::terminal_coordinate::tests::route_family_is_exhaustive_and_constructor_materializes_every_input
 services::discord::terminal_ui_obligation::tests::obligation_store_round_trips_lists_and_clears
 services::discord::terminal_ui_obligation::tests::terminal_ui_claude_tui_without_runtime_output_path_stays_not_ready
 services::discord::terminal_ui_obligation::tests::terminal_ui_obligation_generation_match_requires_nonzero_same_generation

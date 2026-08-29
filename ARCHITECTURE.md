@@ -1278,7 +1278,9 @@ src/
 │   │   ├── status_panel_transition_v2.rs
 │   │   ├── streaming_finalizer.rs
 │   │   ├── subagent_notification_card.rs
+│   │   ├── synthetic_headless_message_id.rs
 │   │   ├── task_supervisor.rs
+│   │   ├── terminal_coordinate.rs
 │   │   ├── terminal_ui_obligation.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
