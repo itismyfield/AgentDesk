@@ -640,7 +640,8 @@ src/
 │   │   │   │   └── production_nonce_tests.rs
 │   │   │   ├── turn_output_controller/
 │   │   │   │   ├── fresh_send.rs
-│   │   │   │   └── fresh_send_tests.rs
+│   │   │   │   ├── fresh_send_tests.rs
+│   │   │   │   └── publication_attempt.rs
 │   │   │   ├── completed_turn_ledger.rs
 │   │   │   ├── confirmation.rs
 │   │   │   ├── decision.rs

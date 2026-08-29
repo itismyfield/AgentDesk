@@ -48,6 +48,7 @@ use super::decision::LengthPolicyDecision;
 mod fresh_send;
 #[cfg(test)]
 mod fresh_send_tests;
+mod publication_attempt;
 
 /// The narrow delivery-lease surface the turn-output controller drives
 /// (acquire → commit → release, plus `read` for the tests). Abstracting the
