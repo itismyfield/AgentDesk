@@ -756,17 +756,14 @@ impl DeliveryLeaseCell {
                 key: cur_key,
                 start: cur_start,
                 end: cur_end,
+                #[cfg(test)]
+                    exact_token: None,
                 ..
             } if *cur_holder == holder
                 && cur_key == &key
                 && *cur_start == start
                 && *cur_end == end =>
             {
-                #[cfg(test)]
-                let exact_token = match &guard.lease {
-                    LeaseState::Leased { exact_token, .. } => *exact_token,
-                    LeaseState::Unleased | LeaseState::Committed { .. } => None,
-                };
                 guard.lease = LeaseState::Committed {
                     holder,
                     key,
@@ -774,7 +771,7 @@ impl DeliveryLeaseCell {
                     end,
                     outcome,
                     #[cfg(test)]
-                    exact_token,
+                    exact_token: None,
                 };
                 self.state_tag.store(TAG_COMMITTED, Ordering::Release);
                 true
@@ -812,6 +809,8 @@ impl DeliveryLeaseCell {
                 key: cur_key,
                 start: cur_start,
                 end: cur_end,
+                #[cfg(test)]
+                    exact_token: None,
                 ..
             }
             | LeaseState::Committed {
@@ -819,9 +818,20 @@ impl DeliveryLeaseCell {
                 key: cur_key,
                 start: cur_start,
                 end: cur_end,
+                #[cfg(test)]
+                    exact_token: None,
                 ..
             } => *cur == holder && cur_key == &key && *cur_start == start && *cur_end == end,
             LeaseState::Unleased => false,
+            #[cfg(test)]
+            LeaseState::Leased {
+                exact_token: Some(_),
+                ..
+            }
+            | LeaseState::Committed {
+                exact_token: Some(_),
+                ..
+            } => false,
         };
         if !matches {
             return false;
@@ -866,6 +876,8 @@ impl DeliveryLeaseCell {
             holder: cur_holder,
             key: cur_key,
             deadline_ms,
+            #[cfg(test)]
+                exact_token: None,
             ..
         } = &mut guard.lease
         {
@@ -888,12 +900,17 @@ impl DeliveryLeaseCell {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _payload_lock_marker = PayloadLockMarker::enter();
-        if let LeaseState::Leased { deadline_ms, .. } = &guard.lease {
-            if now_ms >= *deadline_ms {
-                guard.lease = LeaseState::Unleased;
-                self.state_tag.store(TAG_UNLEASED, Ordering::Release);
-                return true;
-            }
+        if let LeaseState::Leased {
+            deadline_ms,
+            #[cfg(test)]
+                exact_token: None,
+            ..
+        } = &guard.lease
+            && now_ms >= *deadline_ms
+        {
+            guard.lease = LeaseState::Unleased;
+            self.state_tag.store(TAG_UNLEASED, Ordering::Release);
+            return true;
         }
         false
     }

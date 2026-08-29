@@ -50,6 +50,7 @@ pub(super) struct PinnedLeaseCell<State: GuardState> {
     key: DeliveryLeaseKey,
     coordinate: ConsumedCoordinate,
     token: LeaseToken,
+    armed: bool,
     state: PhantomData<State>,
 }
 
@@ -67,6 +68,7 @@ impl PinnedLeaseCell<Acquired> {
                 key,
                 coordinate,
                 token,
+                armed: true,
                 state: PhantomData,
             })
     }
@@ -102,13 +104,24 @@ impl PinnedLeaseCell<Acquired> {
             key: self.key.clone(),
             coordinate: self.coordinate,
             token: self.token,
+            armed: true,
             state: PhantomData,
         };
-        std::mem::forget(self);
+        self.armed = false;
         Ok(committed)
     }
 
-    pub(super) fn release(self) -> Result<PinnedLeaseCell<Released>, Self> {
+    pub(super) fn reclaim_if_expired(&self, now_ms: u64) -> bool {
+        self.cell.reclaim_exact_if_expired(
+            &self.cell,
+            &self.key,
+            self.token,
+            self.coordinate,
+            now_ms,
+        )
+    }
+
+    pub(super) fn release(mut self) -> Result<PinnedLeaseCell<Released>, Self> {
         if !self
             .cell
             .release_exact(&self.cell, &self.key, self.token, self.coordinate)
@@ -120,15 +133,16 @@ impl PinnedLeaseCell<Acquired> {
             key: self.key.clone(),
             coordinate: self.coordinate,
             token: self.token,
+            armed: false,
             state: PhantomData,
         };
-        std::mem::forget(self);
+        self.armed = false;
         Ok(released)
     }
 }
 
 impl PinnedLeaseCell<Committed> {
-    pub(super) fn release(self) -> Result<PinnedLeaseCell<Released>, Self> {
+    pub(super) fn release(mut self) -> Result<PinnedLeaseCell<Released>, Self> {
         if !self
             .cell
             .release_exact(&self.cell, &self.key, self.token, self.coordinate)
@@ -140,16 +154,17 @@ impl PinnedLeaseCell<Committed> {
             key: self.key.clone(),
             coordinate: self.coordinate,
             token: self.token,
+            armed: false,
             state: PhantomData,
         };
-        std::mem::forget(self);
+        self.armed = false;
         Ok(released)
     }
 }
 
 impl<State: GuardState> Drop for PinnedLeaseCell<State> {
     fn drop(&mut self) {
-        if State::RELEASE_ON_DROP {
+        if self.armed && State::RELEASE_ON_DROP {
             let _released = self.release_owned_state();
         }
     }
@@ -263,6 +278,36 @@ impl DeliveryLeaseCell {
             }
         }
         false
+    }
+
+    fn reclaim_exact_if_expired(
+        &self,
+        pinned_cell: &Arc<Self>,
+        key: &DeliveryLeaseKey,
+        token: LeaseToken,
+        coordinate: ConsumedCoordinate,
+        now_ms: u64,
+    ) -> bool {
+        use std::sync::atomic::Ordering;
+        if !std::ptr::eq(self, Arc::as_ptr(pinned_cell)) {
+            return false;
+        }
+        let mut guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = super::PayloadLockMarker::enter();
+        if !matches!(
+            &guard.lease,
+            super::LeaseState::Leased { deadline_ms, .. }
+                if now_ms >= *deadline_ms
+                    && exact_leased_fields_match(&guard.lease, key, token, coordinate.value())
+        ) {
+            return false;
+        }
+        guard.lease = super::LeaseState::Unleased;
+        self.state_tag.store(super::TAG_UNLEASED, Ordering::Release);
+        true
     }
 
     fn commit_exact(
