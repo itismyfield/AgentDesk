@@ -283,7 +283,8 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
 /// GET /api/docs/{group_or_category}
 ///
 /// Preferred behavior (#1063): `group` is one of the 8 top-level group names,
-/// response is `{ group, categories: [{name, description, endpoint_count}] }`.
+/// response is
+/// `{ group, categories: [{name, description, endpoint_count, canonical_path}] }`.
 ///
 /// Backward-compatible fallback: if the segment matches a legacy category name
 /// (e.g. `admin`, `queue`, `dispatches`, `ops`, or a fine-grained sub-category
@@ -697,6 +698,13 @@ mod tests {
             .find(|category| category["name"] == "kanban")
             .expect("kanban group must advertise its colliding kanban category");
         assert_eq!(category["canonical_path"], "/api/docs/kanban/kanban");
+        let reviews = body["categories"]
+            .as_array()
+            .expect("group categories array")
+            .iter()
+            .find(|category| category["name"] == "reviews")
+            .expect("kanban group must advertise its reviews category");
+        assert_eq!(reviews["canonical_path"], "/api/docs/kanban/reviews");
     }
 
     #[test]
