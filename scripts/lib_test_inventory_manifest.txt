@@ -370,6 +370,7 @@ db::dispatched_session_canonical_identity::pg_tests::canonical_identity_namespac
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_namespace_primary_alias_race_has_one_owner_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_namespace_trigger_blocks_old_primary_on_alias_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_old_alias_hook_updates_one_row_without_duplicate_pg
+db::dispatched_session_canonical_identity::pg_tests::canonical_identity_promotes_unique_operational_legacy_row_among_stale_shells_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_provider_token_thread_and_scheduled_dimensions_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_resolver_requires_convergent_exact_alias_and_canonical_evidence_pg
 db::dispatched_session_canonical_identity::pg_tests::canonical_identity_safe_legacy_promotion_pg
@@ -4523,6 +4524,7 @@ services::discord::runtime_bootstrap::bootstrap_tests::wait_for_local_http_bind_
 services::discord::runtime_bootstrap::framework_setup::slash_command_registration_tests::node_command_is_registered
 services::discord::runtime_bootstrap::gateway_lease::tests::configured_self_id_is_trimmed
 services::discord::runtime_bootstrap::gateway_lease::tests::failed_lease_does_not_authorize_worker_or_poller_startup
+services::discord::runtime_bootstrap::gateway_lease::tests::gateway_self_fence_publishes_process_restart_marker
 services::discord::runtime_bootstrap::gateway_lease::tests::never_yields_to_a_preferred_node_that_is_merely_online
 services::discord::runtime_bootstrap::gateway_lease::tests::never_yields_to_an_offline_or_malformed_preferred_node
 services::discord::runtime_bootstrap::gateway_lease::tests::no_preference_configured_keeps_first_come_behavior
@@ -6147,6 +6149,7 @@ services::discord::turn_bridge::retry_state::tests::retry_state_authority_on_rec
 services::discord::turn_bridge::retry_state::tests::retry_state_reclaim_rewind_refuses_watcher_committed_row
 services::discord::turn_bridge::retry_state::tests::retry_state_rmw_error_preserves_local_terminal_error_offset
 services::discord::turn_bridge::retry_state::tests::retry_state_terminal_error_reset_persists_without_debug_panic
+services::discord::turn_bridge::retry_state::tests::same_turn_refresh_preserves_transient_intake_settlement_authority
 services::discord::turn_bridge::retry_state::tests::watcher_relay_error_frame_reclaims_bridge_delivery_frontier
 services::discord::turn_bridge::runtime_handoff_loop::claude_e::tests::process_evidence_body_divergence_is_non_retryable_and_preserves_durable
 services::discord::turn_bridge::runtime_handoff_loop::claude_e::tests::process_evidence_callsite_uses_pre_mutation_baseline_and_adopts_exact_row

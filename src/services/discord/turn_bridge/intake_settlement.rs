@@ -189,12 +189,29 @@ pub(in crate::services::discord) async fn settle_intake_row_at_bridge_exit(
         return;
     };
     let Some(outbox_id) = inflight_state.intake_outbox_id() else {
+        tracing::debug!(
+            source = source.as_str(),
+            channel_id = inflight_state.channel_id,
+            "bridge exit has no intake receipt; settlement is not applicable"
+        );
         return;
     };
     if !caps.settle_and_sweep {
+        tracing::warn!(
+            source = source.as_str(),
+            outbox_id,
+            channel_id = inflight_state.channel_id,
+            "bridge exit retained an intake receipt without settlement capability; row remains open for sweep"
+        );
         return;
     }
     let Some(pool) = shared.pg_pool.as_ref() else {
+        tracing::warn!(
+            source = source.as_str(),
+            outbox_id,
+            channel_id = inflight_state.channel_id,
+            "bridge exit retained settlement authority but PostgreSQL is unavailable; row remains open for sweep"
+        );
         return;
     };
 

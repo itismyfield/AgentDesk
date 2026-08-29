@@ -1102,6 +1102,32 @@ impl InflightTurnState {
         self.intake_delivery_capabilities
     }
 
+    /// Carry bridge-local settlement authority across a same-turn durable
+    /// state refresh. `intake_delivery_capabilities` is intentionally skipped
+    /// by serde, so replacing a live bridge state with a disk reload would
+    /// otherwise silently downgrade an Enforce turn after it had already
+    /// stamped its outbox row as dispatched.
+    pub(in crate::services::discord) fn preserve_intake_settlement_authority_from(
+        &mut self,
+        prior: &Self,
+    ) {
+        if let Some(prior_id) = prior.intake_outbox_id {
+            if self
+                .intake_outbox_id
+                .is_some_and(|loaded_id| loaded_id != prior_id)
+            {
+                tracing::warn!(
+                    prior_outbox_id = prior_id,
+                    loaded_outbox_id = ?self.intake_outbox_id,
+                    channel_id = self.channel_id,
+                    "same-turn inflight refresh carried conflicting intake identity; preserving bridge authority"
+                );
+            }
+            self.intake_outbox_id = Some(prior_id);
+        }
+        self.intake_delivery_capabilities = prior.intake_delivery_capabilities;
+    }
+
     pub fn provider_kind(&self) -> Option<ProviderKind> {
         ProviderKind::from_str(&self.provider)
     }
