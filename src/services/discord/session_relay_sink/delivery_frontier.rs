@@ -339,7 +339,8 @@ mod pr_b_contract_tests {
     #[test]
     fn commit_precedes_frontier_and_frontier_never_precedes_transport_receipt() {
         let source = include_str!("delivery_frontier.rs");
-        assert!(source.find("settle_exact(").is_none());
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert!(production.find("settle_exact(").is_none());
         let sink = include_str!("../session_relay_sink.rs");
         assert!(
             sink.find("journal::settle_exact(").unwrap()
