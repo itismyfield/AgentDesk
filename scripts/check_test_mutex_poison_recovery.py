@@ -139,6 +139,44 @@ def _skip_quoted(text: str, start: int, quote: str) -> int:
     return len(text)
 
 
+def _char_literal_end(text: str, start: int) -> int | None:
+    index = start + 1
+    if index >= len(text):
+        return None
+    if text[index] != "\\":
+        if text[index] in {"'", "\\", "\n", "\r"}:
+            return None
+        index += 1
+    elif index + 1 >= len(text):
+        return None
+    elif text[index + 1] in "nrt\\0'\"":
+        index += 2
+    elif text[index + 1] == "x":
+        digits = text[index + 2 : index + 4]
+        if len(digits) != 2 or any(
+            char not in "0123456789abcdefABCDEF" for char in digits
+        ):
+            return None
+        index += 4
+    elif text.startswith("\\u{", index):
+        index += 3
+        hex_digits = 0
+        while index < len(text) and text[index] != "}":
+            if text[index] in "0123456789abcdefABCDEF":
+                hex_digits += 1
+                if hex_digits > 6:
+                    return None
+            elif text[index] != "_":
+                return None
+            index += 1
+        if not 1 <= hex_digits <= 6 or index >= len(text):
+            return None
+        index += 1
+    else:
+        return None
+    return index + 1 if index < len(text) and text[index] == "'" else None
+
+
 def _raw_string_end(text: str, start: int) -> int | None:
     """Return the end of a Rust raw string beginning at *start*, if any."""
     if text.startswith(("br", "rb"), start):
@@ -224,11 +262,12 @@ def _lex_rust_tokens(text: str) -> list[RustToken]:
         if char == '"':
             index = _skip_quoted(text, index, '"')
             continue
-        # A lifetime (`'static`) is tokenized, while a character literal is
-        # skipped so its contents cannot look like a consumer prefix.
+        # A lifetime (`'static`) is tokenized, while a structurally valid
+        # character literal is skipped so its payload cannot resemble code.
         if char == "'":
-            if index + 2 < len(text) and text[index + 2] == "'":
-                index = _skip_quoted(text, index, "'")
+            char_end = _char_literal_end(text, index)
+            if char_end is not None:
+                index = char_end
                 continue
             tokens.append(RustToken(char, index, index + 1))
             index += 1
@@ -349,7 +388,12 @@ def _forward_consumer(
     if prefix[:3] != (".", "unwrap_or_else", "("):
         return None
     opening = consumer + 2
-    end = pairs.get(opening, len(tokens))
+    end = pairs.get(opening)
+    if end is None:
+        raise LexerMismatch(
+            f"unmatched unwrap_or_else opening delimiter at source offset "
+            f"{tokens[opening].start}"
+        )
     if any(token.text == "into_inner" for token in tokens[opening + 1 : end]):
         return None
     return "unwrap_or_else(..) without into_inner"

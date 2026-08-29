@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -301,6 +302,85 @@ class LexerRegression(GateCase):
         rc, _, error = self.run_gate()
         self.assertEqual(rc, 1)
         self.assertIn("unwrap()", error)
+
+    def test_literal_matrix_masks_fake_sites_without_hiding_real_sites(self) -> None:
+        literals = (
+            r"'\"'", r"'\''", r"'\\'", r"'\x41'", r"'\u{1F_980}'", "'한'",
+            r"b'\"'", r"b'\''", r"b'\\'", r"b'\x41'",
+            r'"fake SHARED_TEST_LOCK.lock().unwrap() \" tail"',
+            r'b"fake SHARED_TEST_LOCK.lock().unwrap() \" tail"',
+            r'r#"fake SHARED_TEST_LOCK.lock().unwrap() "#',
+            r'br##"fake SHARED_TEST_LOCK.lock().unwrap()"##',
+            "'label: loop { break 'label; }", "&'static str",
+        )
+        declarations = "\n".join(
+            f"    let _value_{index} = {literal};"
+            for index, literal in enumerate(literals)
+        )
+        source = RECOVERED.replace("fn case() {", f"fn case() {{\n{declarations}")
+        self.write(source)
+        self.assertEqual(self.run_gate()[0], 0)
+        self.write(source.replace(
+            ".unwrap_or_else(|poison| poison.into_inner())", ".unwrap()"
+        ))
+        rc, _, error = self.run_gate()
+        self.assertEqual(rc, 1)
+        self.assertEqual(error.count("SHARED_TEST_LOCK.lock().unwrap()"), 1)
+
+    def test_valid_literal_matrix_compiles_once_with_rust_2024(self) -> None:
+        source = r'''
+#![allow(dead_code, unused_labels, unused_variables)]
+const CHARS: [char; 6] = ['\"', '\'', '\\', '\x41', '\u{1F_980}', '한'];
+const BYTES: [u8; 4] = [b'\"', b'\'', b'\\', b'\x41'];
+const STRINGS: (&str, &[u8], &str, &[u8]) = ("quote \" slash \\ tail",
+    b"quote \" slash \\ tail", r#"raw " // /*"#, br##"raw " // /*"##);
+fn lifetime<'a>(value: &'a str) -> &'a str { value }
+fn label() { 'outer: loop { break 'outer; } }
+fn comments() { /* ordinary */ /* nested /* inner */ tail */ }
+'''
+        path = self.root / "literal_matrix.rs"
+        path.write_text(source, "utf-8")
+        result = subprocess.run(
+            ["rustc", "--edition=2024", "--crate-type=lib", str(path),
+             "-o", str(self.root / "literal_matrix.rlib")],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_comment_width_sweep_preserves_forward_consumers(self) -> None:
+        consumers = ((".unwrap_or_else(|p| p.into_inner())", 0), (".unwrap()", 1),
+                     ('.unwrap_or_else(|_| panic!("p"))', 1))
+        needle = ".lock()\n            .unwrap_or_else(|poison| poison.into_inner())"
+        for width in (0, 107, 108, 123, 124, 131, 200):
+            for consumer, expected in consumers:
+                with self.subTest(width=width, consumer=consumer):
+                    self.write(RECOVERED.replace(
+                        needle, f".lock()/*{'x' * width}*/{consumer}"
+                    ))
+                    self.assertEqual(self.run_gate()[0], expected)
+        for comment in ("// line\n", "/* block */", "/* outer /* inner */ tail */"):
+            self.write(RECOVERED.replace(needle, f".lock(){comment}.unwrap()"))
+            self.assertEqual(self.run_gate()[0], 1)
+
+    def test_unmatched_unwrap_or_else_is_untrusted(self) -> None:
+        # Intentionally malformed, source-preserving fixtures; not compile-preserving.
+        malformed = RECOVERED.replace(
+            ".unwrap_or_else(|poison| poison.into_inner());",
+            '.unwrap_or_else(|_| panic!("unterminated");',
+        )
+        suffixes = (
+            "",
+            "\nfn later(p: std::sync::PoisonError<()>) { let _ = p.into_inner(); }",
+        )
+        for suffix in suffixes:
+            with self.subTest(later_into_inner=bool(suffix)):
+                self.write(malformed + suffix)
+                rc, _, error = self.run_gate()
+                self.assertEqual(rc, 2)
+                self.assertIn("file scan is untrusted", error)
+                self.assertIn(
+                    "unmatched unwrap_or_else opening delimiter at source offset", error
+                )
 
     def test_lexer_mismatch_is_fail_closed(self) -> None:
         self.write(IF_LET_OK_DISCARD)
