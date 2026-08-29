@@ -10,8 +10,7 @@ static ACTIVE_INTAKE_WORKER_PROVIDERS: LazyLock<RwLock<BTreeSet<String>>> =
     LazyLock::new(|| RwLock::new(BTreeSet::new()));
 
 const PRESERVE_ON_CANCEL_V1: &str = "preserve_on_cancel_v1";
-const SCHEDULED_MESSAGE_DISCORD_MENTION_CONSUMER_V1: &str =
-    "discord_mention_consumer_v1";
+const SCHEDULED_MESSAGE_DISCORD_MENTION_CONSUMER_V1: &str = "discord_mention_consumer_v1";
 
 /// Providers whose `run_bot` on this node is actively trying to take the Discord
 /// gateway lease (#4351). Advertised so a non-preferred holder can tell "the

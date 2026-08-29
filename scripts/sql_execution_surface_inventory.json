@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "39ff097379bb10b2e670e01e811417c8433cfe84",
+  "measured_at_sha": "b82ba487b99cb41724593921af0e6436a8cfe0fc",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1027,6 +1027,15 @@
       "symbol": "file",
       "classification": "STATIC_FILE",
       "fingerprint": "sha256:c7b4eb46860f27e65b19a937de221afe4992e0d462503f83c9b55dcdd9a7aef0"
+    },
+    {
+      "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0112_scheduled_discord_mentions.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:e33e758c6566f1ba5c02ff6f0dfe9b60d217589d369d5f64f4e92a3f8be492b7"
     },
     {
       "root": "migrations/postgres",
@@ -11188,6 +11197,24 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:080d4333beb3bfab09d7dbdce16562d66cebc0da50408f92c7c88fac693c49b4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/scheduled_messages/discord_mentions.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2e8783ef4882d726fb73e04375b9f41601097bd33984308508c179251fd9868c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/scheduled_messages/discord_mentions.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:67a3214cbfffa642f4935d68f5b9616156e6b1e05414cbcd93c81d56c9e91fb2"
     },
     {
       "root": "src",

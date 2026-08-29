@@ -878,8 +878,7 @@ pub async fn trigger_scheduled_message_now(
     if state.health_registry.is_none() {
         match db::get_scheduled_message_pg(pool, &id).await {
             Ok(Some(row))
-                if row.status == db::STATUS_SCHEDULED
-                    && delivery_render::needs_discord(&row) =>
+                if row.status == db::STATUS_SCHEDULED && delivery_render::needs_discord(&row) =>
             {
                 return Err(app_error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -1014,14 +1013,15 @@ mod tests {
         );
         assert!(
             validate_discord_mention_user_ids(
-                &["1469509284508340276".to_string(), "1469509284508340276".to_string()],
+                &[
+                    "1469509284508340276".to_string(),
+                    "1469509284508340276".to_string()
+                ],
                 db::KIND_PUSH,
             )
             .is_err()
         );
-        assert!(
-            validate_discord_mention_user_ids(&["123".to_string()], db::KIND_AGENT).is_err()
-        );
+        assert!(validate_discord_mention_user_ids(&["123".to_string()], db::KIND_AGENT).is_err());
     }
 
     // #4658 F4: a snapshot definition cannot be re-targeted via PATCH (target
