@@ -7,7 +7,7 @@ pub(super) enum DecodeDisposition<T, C, P> {
 }
 
 #[cfg(test)]
-mod tests {
+mod high_risk_recovery {
     use super::*;
 
     #[test]

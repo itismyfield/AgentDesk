@@ -97,7 +97,7 @@ fn reserved_numbered(value: &str, prefix: &str) -> bool {
 pub(super) struct ValueError;
 
 #[cfg(test)]
-mod tests {
+mod high_risk_recovery {
     use super::*;
 
     const R: &str = "123e4567-e89b-12d3-a456-426614174000";
