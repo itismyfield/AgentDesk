@@ -818,6 +818,7 @@ jobs:
       - name: High-risk recovery lane
         run: |
           cargo test --lib high_risk_recovery:: -- --test-threads=1
+          cargo test --lib services::discord::restart_protocol::tests -- --test-threads=1
           cargo test --lib services::discord::recovery_engine::state_extractors::tests -- --test-threads=1
           cargo test --lib services::discord::relay_health::tests -- --test-threads=1
           cargo test --lib services::discord::health::session_enrichment::tests -- --test-threads=1
@@ -1416,7 +1417,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=e32217629c135d5cbd16c8bb81eb58fe53e07cea0def203a5ce6380191f80263
+          expected=f0f0870d38e6ae9da7cce13c7384dc4c280fb93a8efd9172bfa4d1944107d69a
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1523,7 +1524,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=e32217629c135d5cbd16c8bb81eb58fe53e07cea0def203a5ce6380191f80263
+          expected=f0f0870d38e6ae9da7cce13c7384dc4c280fb93a8efd9172bfa4d1944107d69a
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

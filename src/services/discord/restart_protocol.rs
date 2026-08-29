@@ -1,83 +1,85 @@
-//! Dormant P1 contract for durable, versioned restart attempts.
-//!
-//! This module has no production caller and does not grant claim, send, cleanup,
-//! or activation authority. Legacy `RestartCompletionReport` remains separate
-//! compatibility data and is never decoded as an attempt record.
-
-#![allow(dead_code)] // #5575: consumed only by tests until later protocol slices wire adapters.
-
+#![allow(dead_code)]
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
-
-use super::runtime_store::fsync_parent_dir;
-
-pub(crate) const RESTART_PROTOCOL_VERSION: RestartProtocolVersion = RestartProtocolVersion(2);
-const RESTART_PROTOCOL_NAMESPACE: &str = "v2";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) const RESTART_PROTOCOL_VERSION: u32 = 2;
+const NAMESPACE: &str = "v2";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RestartProtocolEpoch {
+    V2,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub(crate) struct RestartProtocolVersion(pub(crate) u32);
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct RestartRequestId(String);
+impl RestartRequestId {
+    pub(crate) fn new(value: &str) -> Result<Self, String> {
+        validate_uuid(value)?;
+        Ok(Self(value.into()))
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub(crate) struct RestartAttemptId(String);
-
 impl RestartAttemptId {
-    pub(crate) fn new_random() -> Self {
+    fn mint() -> Self {
         Self(Uuid::new_v4().to_string())
     }
-
-    pub(crate) fn parse(value: &str) -> Result<Self, String> {
-        let parsed = Uuid::parse_str(value).map_err(|error| error.to_string())?;
-        let canonical = parsed.to_string();
-        if value != canonical {
-            return Err("restart attempt ID is not canonical lowercase UUID text".to_string());
-        }
-        Ok(Self(canonical))
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
 }
-
-impl Serialize for RestartAttemptId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
+fn validate_uuid(value: &str) -> Result<(), String> {
+    if Uuid::parse_str(value)
+        .map_err(|error| error.to_string())?
+        .to_string()
+        != value
     {
-        serializer.serialize_str(self.as_str())
+        return Err("identity is not canonical lowercase UUID text".into());
     }
+    Ok(())
 }
-
-impl<'de> Deserialize<'de> for RestartAttemptId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::parse(&value).map_err(serde::de::Error::custom)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RestartAttemptTarget {
-    pub(crate) provider: String,
-    pub(crate) channel_id: u64,
+    provider: String,
+    channel_id: u64,
 }
-
+impl RestartAttemptTarget {
+    pub(crate) fn new(provider: impl Into<String>, channel_id: u64) -> Result<Self, String> {
+        let value = Self {
+            provider: provider.into(),
+            channel_id,
+        };
+        validate_provider(&value.provider)?;
+        Ok(value)
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct FrozenReportPrincipal {
-    pub(crate) provider: String,
-    pub(crate) token_hash: String,
-    pub(crate) bot_user_id: u64,
+    provider: String,
+    token_hash: String,
+    bot_user_id: u64,
 }
-
+impl FrozenReportPrincipal {
+    pub(crate) fn new(
+        provider: impl Into<String>,
+        token_hash: impl Into<String>,
+        bot_user_id: u64,
+    ) -> Result<Self, String> {
+        let value = Self {
+            provider: provider.into(),
+            token_hash: token_hash.into(),
+            bot_user_id,
+        };
+        validate_provider(&value.provider)?;
+        if value.token_hash.trim().is_empty() || value.bot_user_id == 0 {
+            return Err("frozen report principal is incomplete".into());
+        }
+        Ok(value)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ProcessGenerationAllocationRoute {
+pub(crate) enum AllocationRoute {
     AdvancedWithSyncedRename,
     ParentSyncFailed,
     CounterReadFailed,
@@ -87,705 +89,682 @@ pub(crate) enum ProcessGenerationAllocationRoute {
     PathUnavailable,
     Unwitnessed,
 }
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ProcessGenerationProvenance {
-    pub(crate) generation: u64,
-    pub(crate) allocation_route: ProcessGenerationAllocationRoute,
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProcessAllocation {
+    generation: u64,
+    route: AllocationRoute,
 }
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RestartTerminalProofRef {
-    relative_path: String,
-}
-
-impl RestartTerminalProofRef {
-    pub(crate) fn new(relative_path: impl Into<String>) -> Result<Self, String> {
-        let value = Self {
-            relative_path: relative_path.into(),
-        };
-        validate_relative_ref(&value.relative_path)?;
-        Ok(value)
+impl ProcessAllocation {
+    pub(crate) fn new(generation: u64, route: AllocationRoute) -> Self {
+        Self { generation, route }
     }
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RestartDurableReceiptRef {
-    relative_path: String,
+#[serde(deny_unknown_fields)]
+struct Request {
+    request_id: RestartRequestId,
+    target: RestartAttemptTarget,
+    request_nonce: String,
+    requested_generation: u64,
+    principal: FrozenReportPrincipal,
 }
-
-impl RestartDurableReceiptRef {
-    pub(crate) fn new(relative_path: impl Into<String>) -> Result<Self, String> {
-        let value = Self {
-            relative_path: relative_path.into(),
-        };
-        validate_relative_ref(&value.relative_path)?;
-        Ok(value)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UnboundRestartRequest(Request);
+impl UnboundRestartRequest {
+    pub(crate) fn new(
+        request_id: RestartRequestId,
+        target: RestartAttemptTarget,
+        request_nonce: impl Into<String>,
+        requested_generation: u64,
+        principal: FrozenReportPrincipal,
+    ) -> Result<Self, String> {
+        let request_nonce = request_nonce.into();
+        if request_nonce.trim().is_empty() {
+            return Err("restart request nonce is missing".into());
+        }
+        Ok(Self(Request {
+            request_id,
+            target,
+            request_nonce,
+            requested_generation,
+            principal,
+        }))
     }
 }
-
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Binding {
+    attempt_id: RestartAttemptId,
+    process: ProcessAllocation,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "phase", rename_all = "snake_case")]
+enum Phase {
+    Bound,
+    Running,
+    Terminal {
+        outcome: TerminalOutcome,
+        terminal_proof: SafeRelativeRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        durable_receipt: Option<SafeRelativeRef>,
+    },
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RestartTerminalOutcome {
+pub(crate) enum TerminalOutcome {
     Completed,
     RolledBack,
     Failed,
     Cancelled,
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "phase", rename_all = "snake_case")]
-pub(crate) enum RestartAttemptPhase {
-    Requested,
-    Bound {
-        process: ProcessGenerationProvenance,
-    },
-    Running {
-        process: ProcessGenerationProvenance,
-    },
-    Terminal {
-        process: ProcessGenerationProvenance,
-        outcome: RestartTerminalOutcome,
-        terminal_proof: RestartTerminalProofRef,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        durable_receipt: Option<RestartDurableReceiptRef>,
-    },
-}
-
-impl RestartAttemptPhase {
-    fn ordinal(&self) -> u8 {
-        match self {
-            Self::Requested => 0,
-            Self::Bound { .. } => 1,
-            Self::Running { .. } => 2,
-            Self::Terminal { .. } => 3,
-        }
-    }
-
-    fn process(&self) -> Option<ProcessGenerationProvenance> {
-        match self {
-            Self::Requested => None,
-            Self::Bound { process }
-            | Self::Running { process }
-            | Self::Terminal { process, .. } => Some(*process),
-        }
+#[serde(transparent)]
+pub(crate) struct SafeRelativeRef(String);
+impl SafeRelativeRef {
+    pub(crate) fn new(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        validate_relative_ref(&value)?;
+        Ok(Self(value))
     }
 }
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BoundRestartIdentity {
+    epoch: RestartProtocolEpoch,
+    request_id: RestartRequestId,
+    attempt_id: RestartAttemptId,
+    target: RestartAttemptTarget,
+}
+impl BoundRestartIdentity {
+    pub(crate) fn epoch(&self) -> RestartProtocolEpoch {
+        self.epoch
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct RestartAttemptRecord {
-    pub(crate) schema_version: RestartProtocolVersion,
-    pub(crate) attempt_id: RestartAttemptId,
-    pub(crate) target: RestartAttemptTarget,
-    pub(crate) request_nonce: String,
-    pub(crate) requested_generation: u64,
-    pub(crate) principal: FrozenReportPrincipal,
-    pub(crate) phase: RestartAttemptPhase,
+    schema_version: u32,
+    request: Request,
+    binding: Binding,
+    phase: Phase,
 }
-
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecodedRecord {
+    schema_version: u32,
+    request: Request,
+    binding: Binding,
+    phase: Phase,
+}
 impl RestartAttemptRecord {
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    fn request_id(&self) -> &RestartRequestId {
+        &self.request.request_id
+    }
+    fn attempt_id(&self) -> &RestartAttemptId {
+        &self.binding.attempt_id
+    }
+    fn target(&self) -> &RestartAttemptTarget {
+        &self.request.target
+    }
+    pub(crate) fn bound_identity(&self) -> BoundRestartIdentity {
+        BoundRestartIdentity {
+            epoch: RestartProtocolEpoch::V2,
+            request_id: self.request_id().clone(),
+            attempt_id: self.attempt_id().clone(),
+            target: self.target().clone(),
+        }
+    }
+    pub(crate) fn start_running(&self) -> Result<Self, TransitionError> {
+        self.transition(Phase::Running)
+    }
+    pub(crate) fn finish(
+        &self,
+        outcome: TerminalOutcome,
+        terminal_proof: SafeRelativeRef,
+        durable_receipt: Option<SafeRelativeRef>,
+    ) -> Result<Self, TransitionError> {
+        self.transition(Phase::Terminal {
+            outcome,
+            terminal_proof,
+            durable_receipt,
+        })
+    }
+    fn transition(&self, phase: Phase) -> Result<Self, TransitionError> {
+        if !matches!(
+            (&self.phase, &phase),
+            (Phase::Bound, Phase::Running) | (Phase::Running, Phase::Terminal { .. })
+        ) {
+            return Err(TransitionError::IllegalPhase);
+        }
+        let mut next = self.clone();
+        next.phase = phase;
+        next.validate().map_err(TransitionError::InvalidRecord)?;
+        Ok(next)
+    }
+    fn validate(&self) -> Result<(), String> {
         if self.schema_version != RESTART_PROTOCOL_VERSION {
-            return Err("restart attempt record has unsupported schema version".to_string());
+            return Err("unsupported restart protocol version".into());
         }
-        validate_path_component("provider", &self.target.provider)?;
-        validate_path_component("principal provider", &self.principal.provider)?;
-        if self.request_nonce.trim().is_empty() {
-            return Err("restart request nonce is missing".to_string());
+        validate_uuid(&self.request.request_id.0)?;
+        validate_uuid(&self.binding.attempt_id.0)?;
+        validate_provider(&self.request.target.provider)?;
+        validate_provider(&self.request.principal.provider)?;
+        if self.request.request_nonce.trim().is_empty()
+            || self.request.principal.token_hash.trim().is_empty()
+            || self.request.principal.bot_user_id == 0
+        {
+            return Err("restart authority payload is incomplete".into());
         }
-        if self.principal.token_hash.trim().is_empty() || self.principal.bot_user_id == 0 {
-            return Err("frozen report principal is incomplete".to_string());
-        }
-        match &self.phase {
-            RestartAttemptPhase::Terminal {
-                terminal_proof,
-                durable_receipt,
-                ..
-            } => {
-                validate_relative_ref(&terminal_proof.relative_path)?;
-                if let Some(receipt) = durable_receipt {
-                    validate_relative_ref(&receipt.relative_path)?;
-                }
+        if let Phase::Terminal {
+            terminal_proof,
+            durable_receipt,
+            ..
+        } = &self.phase
+        {
+            validate_relative_ref(&terminal_proof.0)?;
+            if let Some(receipt) = durable_receipt {
+                validate_relative_ref(&receipt.0)?;
             }
-            RestartAttemptPhase::Requested
-            | RestartAttemptPhase::Bound { .. }
-            | RestartAttemptPhase::Running { .. } => {}
         }
         Ok(())
     }
 }
-
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RestartTransitionError {
-    TerminalIsImmutable,
-    NonMonotonic,
-    SkippedPhase,
-    GenerationChanged,
+pub(crate) enum TransitionError {
+    IllegalPhase,
     InvalidRecord(String),
 }
-
-pub(crate) fn reduce_restart_attempt(
-    current: &RestartAttemptRecord,
-    next: RestartAttemptPhase,
-) -> Result<RestartAttemptRecord, RestartTransitionError> {
-    if matches!(current.phase, RestartAttemptPhase::Terminal { .. }) {
-        return Err(RestartTransitionError::TerminalIsImmutable);
-    }
-    let current_ordinal = current.phase.ordinal();
-    let next_ordinal = next.ordinal();
-    if next_ordinal <= current_ordinal {
-        return Err(RestartTransitionError::NonMonotonic);
-    }
-    if next_ordinal != current_ordinal + 1 {
-        return Err(RestartTransitionError::SkippedPhase);
-    }
-    if let (Some(current_process), Some(next_process)) = (current.phase.process(), next.process())
-        && current_process != next_process
-    {
-        return Err(RestartTransitionError::GenerationChanged);
-    }
-    let mut reduced = current.clone();
-    reduced.phase = next;
-    reduced
-        .validate()
-        .map_err(RestartTransitionError::InvalidRecord)?;
-    Ok(reduced)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RestartAttemptDecode {
+pub(crate) enum DecodeResult {
     Current(RestartAttemptRecord),
-    UnsupportedVersion {
-        version: u64,
-        bytes: Vec<u8>,
-    },
-    Corrupt {
-        error: RestartAttemptDecodeError,
-        bytes: Vec<u8>,
-    },
+    Closed { reason: String, bytes: Vec<u8> },
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RestartAttemptDecodeError {
-    MalformedJson,
-    MissingSchemaVersion,
-    InvalidSchemaVersion,
-    InvalidRecord(String),
-}
-
-pub(crate) fn decode_restart_attempt(bytes: &[u8]) -> RestartAttemptDecode {
+pub(crate) fn decode_restart_attempt(bytes: &[u8]) -> DecodeResult {
     let value: serde_json::Value = match serde_json::from_slice(bytes) {
         Ok(value) => value,
-        Err(_) => {
-            return RestartAttemptDecode::Corrupt {
-                error: RestartAttemptDecodeError::MalformedJson,
-                bytes: bytes.to_vec(),
-            };
-        }
+        Err(error) => return closed(error.to_string(), bytes),
     };
-    let Some(version_value) = value.get("schema_version") else {
-        return RestartAttemptDecode::Corrupt {
-            error: RestartAttemptDecodeError::MissingSchemaVersion,
-            bytes: bytes.to_vec(),
-        };
+    let Some(version) = value.get("schema_version").and_then(|value| value.as_u64()) else {
+        return closed("missing or invalid schema_version", bytes);
     };
-    let Some(version) = version_value.as_u64() else {
-        return RestartAttemptDecode::Corrupt {
-            error: RestartAttemptDecodeError::InvalidSchemaVersion,
-            bytes: bytes.to_vec(),
-        };
-    };
-    if version != u64::from(RESTART_PROTOCOL_VERSION.0) {
-        return RestartAttemptDecode::UnsupportedVersion {
-            version,
-            bytes: bytes.to_vec(),
-        };
+    if version != u64::from(RESTART_PROTOCOL_VERSION) {
+        return closed(format!("unsupported version {version}"), bytes);
     }
-    let record: RestartAttemptRecord = match serde_json::from_value(value) {
-        Ok(record) => record,
-        Err(error) => {
-            return RestartAttemptDecode::Corrupt {
-                error: RestartAttemptDecodeError::InvalidRecord(error.to_string()),
-                bytes: bytes.to_vec(),
-            };
-        }
-    };
-    match record.validate() {
-        Ok(()) => RestartAttemptDecode::Current(record),
-        Err(error) => RestartAttemptDecode::Corrupt {
-            error: RestartAttemptDecodeError::InvalidRecord(error),
-            bytes: bytes.to_vec(),
+    match serde_json::from_value::<DecodedRecord>(value).map(|wire| RestartAttemptRecord {
+        schema_version: wire.schema_version,
+        request: wire.request,
+        binding: wire.binding,
+        phase: wire.phase,
+    }) {
+        Ok(record) => match record.validate() {
+            Ok(()) => DecodeResult::Current(record),
+            Err(error) => closed(error, bytes),
         },
+        Err(error) => closed(error.to_string(), bytes),
     }
 }
-
-pub(crate) fn encode_restart_attempt(record: &RestartAttemptRecord) -> Result<Vec<u8>, String> {
+fn closed(reason: impl Into<String>, bytes: &[u8]) -> DecodeResult {
+    DecodeResult::Closed {
+        reason: reason.into(),
+        bytes: bytes.to_vec(),
+    }
+}
+fn encode(record: &RestartAttemptRecord) -> Result<Vec<u8>, String> {
     record.validate()?;
     serde_json::to_vec_pretty(record).map_err(|error| error.to_string())
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RestartAttemptPathIdentity {
-    pub(crate) target: RestartAttemptTarget,
-    pub(crate) attempt_id: RestartAttemptId,
+fn validate_provider(provider: &str) -> Result<(), String> {
+    if provider.is_empty() || provider.len() > 64 || provider.chars().any(char::is_control) {
+        return Err("provider is empty, oversized, or contains control text".into());
+    }
+    Ok(())
 }
-
-pub(crate) fn restart_attempt_path(
-    root: &Path,
-    target: &RestartAttemptTarget,
-    attempt_id: &RestartAttemptId,
-) -> Result<PathBuf, String> {
-    validate_path_component("provider", &target.provider)?;
+fn provider_component(provider: &str) -> Result<String, String> {
+    validate_provider(provider)?;
+    Ok(format!(
+        "p-{}",
+        provider
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+fn decode_provider(component: &str) -> Result<String, String> {
+    let hex = component.strip_prefix("p-").ok_or("provider prefix")?;
+    if hex.is_empty()
+        || hex.len() % 2 != 0
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("provider component is not canonical lowercase hex".into());
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let provider = String::from_utf8(bytes).map_err(|error| error.to_string())?;
+    validate_provider(&provider)?;
+    Ok(provider)
+}
+fn validate_relative_ref(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.contains(['\\', ':'])
+        || value
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err("reference is not a safe canonical relative path".into());
+    }
+    Ok(())
+}
+fn namespace(root: &Path, target: &RestartAttemptTarget) -> Result<PathBuf, String> {
     Ok(root
-        .join(RESTART_PROTOCOL_NAMESPACE)
-        .join(&target.provider)
-        .join(target.channel_id.to_string())
-        .join(format!("{}.json", attempt_id.as_str())))
+        .join(NAMESPACE)
+        .join(provider_component(&target.provider)?)
+        .join(target.channel_id.to_string()))
 }
-
-pub(crate) fn restart_attempt_identity_from_path(
+fn attempt_path(root: &Path, record: &RestartAttemptRecord) -> Result<PathBuf, String> {
+    Ok(namespace(root, record.target())?
+        .join("attempts")
+        .join(format!("{}.json", record.attempt_id().0)))
+}
+fn binding_path(root: &Path, record: &RestartAttemptRecord) -> Result<PathBuf, String> {
+    Ok(namespace(root, record.target())?
+        .join("bindings")
+        .join(format!("{}.json", record.request_id().0)))
+}
+fn identity_from_path(
     root: &Path,
     path: &Path,
-) -> Result<RestartAttemptPathIdentity, String> {
-    let relative = path
+) -> Result<(RestartAttemptTarget, RestartAttemptId), String> {
+    let parts: Vec<_> = path
         .strip_prefix(root)
-        .map_err(|_| "restart attempt path is outside its store root".to_string())?;
-    let components: Vec<_> = relative.components().collect();
+        .map_err(|_| "path outside store")?
+        .components()
+        .collect();
     let [
         Component::Normal(version),
         Component::Normal(provider),
         Component::Normal(channel),
+        Component::Normal(kind),
         Component::Normal(file),
-    ] = components.as_slice()
+    ] = parts.as_slice()
     else {
-        return Err("restart attempt path has an unexpected shape".to_string());
+        return Err("unexpected canonical path shape".into());
     };
-    if version != RESTART_PROTOCOL_NAMESPACE {
-        return Err("restart attempt path has an unsupported namespace".to_string());
+    if *version != std::ffi::OsStr::new(NAMESPACE) || *kind != std::ffi::OsStr::new("attempts") {
+        return Err("invalid canonical namespace".into());
     }
-    let provider = provider
-        .to_str()
-        .ok_or_else(|| "restart attempt provider is not UTF-8".to_string())?;
-    validate_path_component("provider", provider)?;
-    let channel_id = channel
-        .to_str()
-        .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(|| "restart attempt channel is invalid".to_string())?;
-    let file = file
+    let target = RestartAttemptTarget::new(
+        decode_provider(provider.to_str().ok_or("provider UTF-8")?)?,
+        channel
+            .to_str()
+            .and_then(|value| value.parse().ok())
+            .ok_or("invalid channel")?,
+    )?;
+    let attempt = file
         .to_str()
         .and_then(|value| value.strip_suffix(".json"))
-        .ok_or_else(|| "restart attempt filename is invalid".to_string())?;
-    Ok(RestartAttemptPathIdentity {
-        target: RestartAttemptTarget {
-            provider: provider.to_string(),
-            channel_id,
-        },
-        attempt_id: RestartAttemptId::parse(file)?,
-    })
+        .ok_or("invalid filename")?;
+    validate_uuid(attempt)?;
+    Ok((target, RestartAttemptId(attempt.into())))
 }
-
-fn validate_path_component(label: &str, value: &str) -> Result<(), String> {
-    if value.is_empty()
-        || value == "."
-        || value == ".."
-        || value.len() > 64
-        || !value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LoadResult {
+    Authoritative(RestartAttemptRecord),
+    Closed { reason: String, bytes: Vec<u8> },
+    Io(String),
+}
+pub(crate) fn load_restart_attempt_from_canonical_path(root: &Path, path: &Path) -> LoadResult {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => return LoadResult::Io(error.to_string()),
+    };
+    let record = match decode_restart_attempt(&bytes) {
+        DecodeResult::Current(record) => record,
+        DecodeResult::Closed { reason, bytes } => return LoadResult::Closed { reason, bytes },
+    };
+    if identity_from_path(root, path) != Ok((record.target().clone(), record.attempt_id().clone()))
     {
-        return Err(format!("{label} is not a safe path component"));
+        return LoadResult::Closed {
+            reason: "path and payload identities differ".into(),
+            bytes,
+        };
     }
-    Ok(())
-}
-
-fn validate_relative_ref(value: &str) -> Result<(), String> {
-    let path = Path::new(value);
-    if value.is_empty()
-        || path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-    {
-        return Err("durable reference must be a non-empty relative path".to_string());
+    let binding =
+        binding_path(root, &record).and_then(|path| fs::read(path).map_err(|e| e.to_string()));
+    if binding.as_deref() != Ok(bytes.as_slice()) {
+        return LoadResult::Closed {
+            reason: "request binding is absent or disagrees".into(),
+            bytes,
+        };
     }
-    Ok(())
+    LoadResult::Authoritative(record)
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RestartAttemptPublicationStep {
-    PrepareParent,
-    WriteTemp,
-    SyncTemp,
-    PublishCanonical,
-    SyncParent,
+trait PublicationOps {
+    fn create_dir(&mut self, path: &Path) -> std::io::Result<bool>;
+    fn sync_dir(&mut self, path: &Path) -> std::io::Result<()>;
+    fn write_temp(&mut self, path: &Path, bytes: &[u8]) -> std::io::Result<()>;
+    fn sync_temp(&mut self, path: &Path) -> std::io::Result<()>;
+    fn publish_no_replace(&mut self, from: &Path, to: &Path) -> std::io::Result<()>;
+    fn remove_temp(&mut self, path: &Path) -> std::io::Result<()>;
 }
-
-pub(crate) trait RestartAttemptPublicationOps {
-    fn prepare_parent(&mut self, parent: &Path) -> std::io::Result<()>;
-    fn write_temp(&mut self, temp: &Path, bytes: &[u8]) -> std::io::Result<()>;
-    fn sync_temp(&mut self, temp: &Path) -> std::io::Result<()>;
-    fn publish_canonical(&mut self, temp: &Path, canonical: &Path) -> std::io::Result<()>;
-    fn sync_parent(&mut self, canonical: &Path) -> std::io::Result<()>;
-}
-
-struct FilesystemPublicationOps;
-
-impl RestartAttemptPublicationOps for FilesystemPublicationOps {
-    fn prepare_parent(&mut self, parent: &Path) -> std::io::Result<()> {
-        fs::create_dir_all(parent)
+struct FsOps;
+impl PublicationOps for FsOps {
+    fn create_dir(&mut self, path: &Path) -> std::io::Result<bool> {
+        match fs::create_dir(path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
-
-    fn write_temp(&mut self, temp: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    fn sync_dir(&mut self, path: &Path) -> std::io::Result<()> {
+        fs::File::open(path)?.sync_all()
+    }
+    fn write_temp(&mut self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         use std::io::Write;
-        let mut file = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(temp)?;
-        file.write_all(bytes)
+            .open(path)?
+            .write_all(bytes)
     }
-
-    fn sync_temp(&mut self, temp: &Path) -> std::io::Result<()> {
-        fs::OpenOptions::new().read(true).open(temp)?.sync_all()
+    fn sync_temp(&mut self, path: &Path) -> std::io::Result<()> {
+        fs::File::open(path)?.sync_all()
     }
-
-    fn publish_canonical(&mut self, temp: &Path, canonical: &Path) -> std::io::Result<()> {
-        fs::rename(temp, canonical)
+    fn publish_no_replace(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+        fs::hard_link(from, to)
     }
-
-    fn sync_parent(&mut self, canonical: &Path) -> std::io::Result<()> {
-        fsync_parent_dir(canonical)
+    fn remove_temp(&mut self, path: &Path) -> std::io::Result<()> {
+        fs::remove_file(path)
     }
 }
-
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PublishedRestartAttempt {
-    pub(crate) path: PathBuf,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RestartAttemptPublicationError {
+pub(crate) enum PublicationError {
     Invalid(String),
-    Operation {
-        step: RestartAttemptPublicationStep,
-        error: String,
-    },
+    Conflict,
+    Io(String),
 }
-
-pub(crate) fn publish_restart_attempt_in_root_with_ops(
+pub(crate) fn publish_restart_attempt(
     root: &Path,
-    record: &RestartAttemptRecord,
-    ops: &mut impl RestartAttemptPublicationOps,
-) -> Result<PublishedRestartAttempt, RestartAttemptPublicationError> {
-    let bytes = encode_restart_attempt(record).map_err(RestartAttemptPublicationError::Invalid)?;
-    let canonical = restart_attempt_path(root, &record.target, &record.attempt_id)
-        .map_err(RestartAttemptPublicationError::Invalid)?;
-    let parent = canonical
+    request: UnboundRestartRequest,
+    process: ProcessAllocation,
+) -> Result<RestartAttemptRecord, PublicationError> {
+    publish(root, request, process, RestartAttemptId::mint(), &mut FsOps)
+}
+fn publish(
+    root: &Path,
+    request: UnboundRestartRequest,
+    process: ProcessAllocation,
+    attempt_id: RestartAttemptId,
+    ops: &mut impl PublicationOps,
+) -> Result<RestartAttemptRecord, PublicationError> {
+    let record = RestartAttemptRecord {
+        schema_version: RESTART_PROTOCOL_VERSION,
+        request: request.0,
+        binding: Binding {
+            attempt_id,
+            process,
+        },
+        phase: Phase::Bound,
+    };
+    let bytes = encode(&record).map_err(PublicationError::Invalid)?;
+    let attempt = attempt_path(root, &record).map_err(PublicationError::Invalid)?;
+    let binding = binding_path(root, &record).map_err(PublicationError::Invalid)?;
+    for directory in parent_chain(root, &[&attempt, &binding])? {
+        if ops.create_dir(&directory).map_err(io_error)? {
+            ops.sync_dir(directory.parent().ok_or_else(|| {
+                PublicationError::Invalid("created directory lacks parent".into())
+            })?)
+            .map_err(io_error)?;
+        }
+    }
+    let temp = attempt
         .parent()
-        .ok_or_else(|| RestartAttemptPublicationError::Invalid("missing parent".to_string()))?;
-    run_step(RestartAttemptPublicationStep::PrepareParent, || {
-        ops.prepare_parent(parent)
-    })?;
-    let temp = canonical.with_file_name(format!(
-        ".{}.{}.tmp",
-        canonical
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("attempt"),
-        Uuid::new_v4().simple()
-    ));
-    if let Err(error) = run_step(RestartAttemptPublicationStep::WriteTemp, || {
-        ops.write_temp(&temp, &bytes)
-    }) {
-        let _ = fs::remove_file(&temp);
-        return Err(error);
+        .unwrap()
+        .join(format!(".{}.tmp", Uuid::new_v4().simple()));
+    ops.write_temp(&temp, &bytes).map_err(io_error)?;
+    ops.sync_temp(&temp).map_err(io_error)?;
+    ops.publish_no_replace(&temp, &attempt).map_err(io_error)?;
+    if let Err(error) = ops.publish_no_replace(&temp, &binding) {
+        let _ = ops.remove_temp(&temp);
+        return if error.kind() == std::io::ErrorKind::AlreadyExists {
+            Err(PublicationError::Conflict)
+        } else {
+            Err(io_error(error))
+        };
     }
-    if let Err(error) = run_step(RestartAttemptPublicationStep::SyncTemp, || {
-        ops.sync_temp(&temp)
-    }) {
-        let _ = fs::remove_file(&temp);
-        return Err(error);
-    }
-    if let Err(error) = run_step(RestartAttemptPublicationStep::PublishCanonical, || {
-        ops.publish_canonical(&temp, &canonical)
-    }) {
-        let _ = fs::remove_file(&temp);
-        return Err(error);
-    }
-    run_step(RestartAttemptPublicationStep::SyncParent, || {
-        ops.sync_parent(&canonical)
-    })?;
-    // The returned token exists only after directory sync succeeds. This is an
-    // atomic record update contract, not the no-replace claim authority owned by P2.
-    Ok(PublishedRestartAttempt { path: canonical })
+    ops.remove_temp(&temp).map_err(io_error)?;
+    ops.sync_dir(attempt.parent().unwrap()).map_err(io_error)?;
+    ops.sync_dir(binding.parent().unwrap()).map_err(io_error)?;
+    Ok(record)
 }
-
-fn run_step(
-    step: RestartAttemptPublicationStep,
-    operation: impl FnOnce() -> std::io::Result<()>,
-) -> Result<(), RestartAttemptPublicationError> {
-    operation().map_err(|error| RestartAttemptPublicationError::Operation {
-        step,
-        error: error.to_string(),
-    })
+fn parent_chain(root: &Path, paths: &[&Path]) -> Result<Vec<PathBuf>, PublicationError> {
+    let mut result = Vec::new();
+    for path in paths {
+        let mut current = root.to_path_buf();
+        for component in path
+            .parent()
+            .unwrap()
+            .strip_prefix(root)
+            .map_err(|_| PublicationError::Invalid("path escaped root".into()))?
+            .components()
+        {
+            current.push(component);
+            if !result.contains(&current) {
+                result.push(current.clone());
+            }
+        }
+    }
+    Ok(result)
 }
-
+fn io_error(error: std::io::Error) -> PublicationError {
+    PublicationError::Io(error.to_string())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn process() -> ProcessGenerationProvenance {
-        ProcessGenerationProvenance {
-            generation: 42,
-            allocation_route: ProcessGenerationAllocationRoute::AdvancedWithSyncedRename,
-        }
-    }
-
-    fn fixture(attempt_id: RestartAttemptId) -> RestartAttemptRecord {
-        RestartAttemptRecord {
-            schema_version: RESTART_PROTOCOL_VERSION,
-            attempt_id,
-            target: RestartAttemptTarget {
-                provider: "claude".to_string(),
-                channel_id: 123,
-            },
-            request_nonce: "request-nonce".to_string(),
-            requested_generation: 41,
-            principal: FrozenReportPrincipal {
-                provider: "claude".to_string(),
-                token_hash: "frozen-token-hash".to_string(),
-                bot_user_id: 456,
-            },
-            phase: RestartAttemptPhase::Requested,
-        }
-    }
-
-    #[test]
-    fn two_attempts_for_the_same_channel_have_distinct_canonical_paths() {
-        let root = Path::new("store");
-        let first = fixture(RestartAttemptId::new_random());
-        let second = fixture(RestartAttemptId::new_random());
-        let first_path = restart_attempt_path(root, &first.target, &first.attempt_id).unwrap();
-        let second_path = restart_attempt_path(root, &second.target, &second.attempt_id).unwrap();
-        assert_ne!(first_path, second_path);
-        assert!(
-            first_path
-                .to_string_lossy()
-                .contains(first.attempt_id.as_str())
-        );
-        assert!(
-            second_path
-                .to_string_lossy()
-                .contains(second.attempt_id.as_str())
-        );
-    }
-
-    #[test]
-    fn terminal_attempt_cannot_regress_to_pending() {
-        let requested = fixture(RestartAttemptId::new_random());
-        let bound = reduce_restart_attempt(
-            &requested,
-            RestartAttemptPhase::Bound { process: process() },
+    use std::collections::HashSet;
+    fn request(provider: &str) -> UnboundRestartRequest {
+        UnboundRestartRequest::new(
+            RestartRequestId::new("11111111-1111-4111-8111-111111111111").unwrap(),
+            RestartAttemptTarget::new(provider, 123).unwrap(),
+            "nonce",
+            41,
+            FrozenReportPrincipal::new(provider, "hash", 456).unwrap(),
         )
-        .unwrap();
-        let running =
-            reduce_restart_attempt(&bound, RestartAttemptPhase::Running { process: process() })
-                .unwrap();
-        let terminal = reduce_restart_attempt(
-            &running,
-            RestartAttemptPhase::Terminal {
-                process: process(),
-                outcome: RestartTerminalOutcome::Completed,
-                terminal_proof: RestartTerminalProofRef::new("proofs/terminal.json").unwrap(),
-                durable_receipt: Some(
-                    RestartDurableReceiptRef::new("receipts/discord.json").unwrap(),
-                ),
-            },
+        .unwrap()
+    }
+    fn process() -> ProcessAllocation {
+        ProcessAllocation::new(42, AllocationRoute::AdvancedWithSyncedRename)
+    }
+    fn mint(value: &str) -> RestartAttemptId {
+        validate_uuid(value).unwrap();
+        RestartAttemptId(value.into())
+    }
+    fn first(root: &Path) -> RestartAttemptRecord {
+        publish(
+            root,
+            request("claude"),
+            process(),
+            mint("22222222-2222-4222-8222-222222222222"),
+            &mut FsOps,
         )
-        .unwrap();
+        .unwrap()
+    }
+    #[test]
+    fn append_once_request_binding_rejects_second_attempt_and_preserves_first() {
+        let root = tempfile::tempdir().unwrap();
+        let record = first(root.path());
+        let path = attempt_path(root.path(), &record).unwrap();
+        let bytes = fs::read(&path).unwrap();
         assert_eq!(
-            reduce_restart_attempt(&terminal, RestartAttemptPhase::Requested),
-            Err(RestartTransitionError::TerminalIsImmutable)
+            publish(
+                root.path(),
+                request("claude"),
+                process(),
+                mint("33333333-3333-4333-8333-333333333333"),
+                &mut FsOps
+            ),
+            Err(PublicationError::Conflict)
+        );
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    #[test]
+    fn canonical_load_rejects_path_payload_mismatch_and_preserves_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let record = first(root.path());
+        let bytes = encode(&record).unwrap();
+        let wrong = namespace(root.path(), record.target())
+            .unwrap()
+            .join("attempts/33333333-3333-4333-8333-333333333333.json");
+        fs::write(&wrong, &bytes).unwrap();
+        assert!(
+            matches!(load_restart_attempt_from_canonical_path(root.path(), &wrong), LoadResult::Closed { bytes: kept, .. } if kept == bytes)
         );
     }
-
+    #[test]
+    fn same_version_unknown_authority_field_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut value = serde_json::to_value(first(root.path())).unwrap();
+        value["binding"]["caller_attempt_authority"] = serde_json::json!(true);
+        assert!(matches!(
+            decode_restart_attempt(&serde_json::to_vec(&value).unwrap()),
+            DecodeResult::Closed { .. }
+        ));
+    }
     #[test]
     fn future_version_fails_closed_and_preserves_bytes() {
-        let bytes = br#"{"schema_version":999,"attempt_id":"ignored"}"#;
-        assert_eq!(
-            decode_restart_attempt(bytes),
-            RestartAttemptDecode::UnsupportedVersion {
-                version: 999,
-                bytes: bytes.to_vec(),
-            }
+        let bytes = br#"{"schema_version":999,"future":true}"#;
+        assert!(
+            matches!(decode_restart_attempt(bytes), DecodeResult::Closed { bytes: kept, .. } if kept == bytes)
         );
     }
-
     #[test]
-    fn corrupt_or_missing_attempt_identity_is_never_legacy_authority() {
-        for bytes in [
-            br#"{"schema_version":2}"#.as_slice(),
-            br#"{"schema_version":2,"attempt_id":"../escape"}"#.as_slice(),
-            br#"{"schema_version":2,"attempt_id":null}"#.as_slice(),
-        ] {
-            assert!(matches!(
-                decode_restart_attempt(bytes),
-                RestartAttemptDecode::Corrupt {
-                    error: RestartAttemptDecodeError::InvalidRecord(_),
-                    ..
-                }
-            ));
+    fn provider_encoding_is_case_injective_and_avoids_windows_hazards() {
+        assert_ne!(
+            provider_component("con").unwrap().to_ascii_lowercase(),
+            provider_component("CON").unwrap().to_ascii_lowercase()
+        );
+        for provider in ["con", "name. ", "Claude/β"] {
+            let encoded = provider_component(provider).unwrap();
+            assert_eq!(decode_provider(&encoded).unwrap(), provider);
+            assert!(!encoded.ends_with(['.', ' ']));
         }
     }
-
     #[test]
-    fn codec_preserves_generation_allocation_route_and_terminal_references() {
-        let requested = fixture(RestartAttemptId::new_random());
-        let bound = reduce_restart_attempt(
-            &requested,
-            RestartAttemptPhase::Bound { process: process() },
-        )
-        .unwrap();
-        let running =
-            reduce_restart_attempt(&bound, RestartAttemptPhase::Running { process: process() })
-                .unwrap();
-        let terminal = reduce_restart_attempt(
-            &running,
-            RestartAttemptPhase::Terminal {
-                process: process(),
-                outcome: RestartTerminalOutcome::Completed,
-                terminal_proof: RestartTerminalProofRef::new("proofs/terminal.json").unwrap(),
-                durable_receipt: Some(
-                    RestartDurableReceiptRef::new("receipts/discord.json").unwrap(),
-                ),
-            },
-        )
-        .unwrap();
-        let bytes = encode_restart_attempt(&terminal).unwrap();
-        assert_eq!(
-            decode_restart_attempt(&bytes),
-            RestartAttemptDecode::Current(terminal)
-        );
+    fn relative_refs_reject_cross_platform_traversal_hazards() {
+        for bad in [
+            "", "/a", "C:/a", ".", "..", "a/./b", "a/../b", "a//b", "a\\b",
+        ] {
+            assert!(SafeRelativeRef::new(bad).is_err(), "accepted {bad:?}");
+        }
     }
-
     #[test]
-    fn generation_binding_cannot_change_after_the_actual_process_is_bound() {
-        let requested = fixture(RestartAttemptId::new_random());
-        let bound = reduce_restart_attempt(
-            &requested,
-            RestartAttemptPhase::Bound { process: process() },
-        )
-        .unwrap();
-        let preview_instead_of_actual = ProcessGenerationProvenance {
-            generation: bound.requested_generation,
-            allocation_route: ProcessGenerationAllocationRoute::Unwitnessed,
-        };
-        assert_eq!(
-            reduce_restart_attempt(
-                &bound,
-                RestartAttemptPhase::Running {
-                    process: preview_instead_of_actual,
-                },
-            ),
-            Err(RestartTransitionError::GenerationChanged)
-        );
+    fn reducer_is_only_phase_authority_and_terminal_is_immutable() {
+        let root = tempfile::tempdir().unwrap();
+        let bound = first(root.path());
+        let identity = bound.bound_identity();
+        assert_eq!(identity.epoch(), RestartProtocolEpoch::V2);
+        let running = bound.start_running().unwrap();
+        assert_eq!(running.bound_identity(), identity);
+        let terminal = running
+            .finish(
+                TerminalOutcome::Completed,
+                SafeRelativeRef::new("proof/final.json").unwrap(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(terminal.bound_identity(), identity);
+        assert_eq!(terminal.start_running(), Err(TransitionError::IllegalPhase));
     }
-
-    #[test]
-    fn attempt_path_round_trips_identity_and_rejects_unsafe_components() {
-        let root = Path::new("store");
-        let record = fixture(RestartAttemptId::new_random());
-        let path = restart_attempt_path(root, &record.target, &record.attempt_id).unwrap();
-        assert_eq!(
-            restart_attempt_identity_from_path(root, &path).unwrap(),
-            RestartAttemptPathIdentity {
-                target: record.target.clone(),
-                attempt_id: record.attempt_id.clone(),
-            }
-        );
-        let unsafe_target = RestartAttemptTarget {
-            provider: "../claude".to_string(),
-            channel_id: 123,
-        };
-        assert!(restart_attempt_path(root, &unsafe_target, &record.attempt_id).is_err());
-        assert!(
-            restart_attempt_identity_from_path(root, Path::new("elsewhere/v2/x/1/a.json")).is_err()
-        );
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum Event {
+        Create(PathBuf),
+        Sync(PathBuf),
+        Write,
+        SyncFile,
+        Attempt,
+        Binding,
+        Remove,
     }
-
+    #[derive(Default)]
     struct RecordingOps {
-        steps: Vec<RestartAttemptPublicationStep>,
-        fail_parent_sync: bool,
+        events: Vec<Event>,
+        dirs: HashSet<PathBuf>,
+        files: HashSet<PathBuf>,
     }
-
-    impl RestartAttemptPublicationOps for RecordingOps {
-        fn prepare_parent(&mut self, _: &Path) -> std::io::Result<()> {
-            self.steps
-                .push(RestartAttemptPublicationStep::PrepareParent);
+    impl PublicationOps for RecordingOps {
+        fn create_dir(&mut self, path: &Path) -> std::io::Result<bool> {
+            self.events.push(Event::Create(path.into()));
+            Ok(self.dirs.insert(path.into()))
+        }
+        fn sync_dir(&mut self, path: &Path) -> std::io::Result<()> {
+            self.events.push(Event::Sync(path.into()));
             Ok(())
         }
         fn write_temp(&mut self, _: &Path, _: &[u8]) -> std::io::Result<()> {
-            self.steps.push(RestartAttemptPublicationStep::WriteTemp);
+            self.events.push(Event::Write);
             Ok(())
         }
         fn sync_temp(&mut self, _: &Path) -> std::io::Result<()> {
-            self.steps.push(RestartAttemptPublicationStep::SyncTemp);
+            self.events.push(Event::SyncFile);
             Ok(())
         }
-        fn publish_canonical(&mut self, _: &Path, _: &Path) -> std::io::Result<()> {
-            self.steps
-                .push(RestartAttemptPublicationStep::PublishCanonical);
-            Ok(())
-        }
-        fn sync_parent(&mut self, _: &Path) -> std::io::Result<()> {
-            self.steps.push(RestartAttemptPublicationStep::SyncParent);
-            if self.fail_parent_sync {
-                Err(std::io::Error::other("injected parent sync failure"))
-            } else {
+        fn publish_no_replace(&mut self, _: &Path, path: &Path) -> std::io::Result<()> {
+            self.events
+                .push(if path.to_string_lossy().contains("/attempts/") {
+                    Event::Attempt
+                } else {
+                    Event::Binding
+                });
+            if self.files.insert(path.into()) {
                 Ok(())
+            } else {
+                Err(std::io::ErrorKind::AlreadyExists.into())
             }
         }
+        fn remove_temp(&mut self, _: &Path) -> std::io::Result<()> {
+            self.events.push(Event::Remove);
+            Ok(())
+        }
     }
-
     #[test]
-    fn parent_directory_sync_is_required_before_authority_is_returned() {
-        let record = fixture(RestartAttemptId::new_random());
-        let mut ops = RecordingOps {
-            steps: Vec::new(),
-            fail_parent_sync: true,
-        };
-        let result =
-            publish_restart_attempt_in_root_with_ops(Path::new("store"), &record, &mut ops);
-        assert!(matches!(
-            result,
-            Err(RestartAttemptPublicationError::Operation {
-                step: RestartAttemptPublicationStep::SyncParent,
-                ..
-            })
-        ));
-        assert_eq!(
-            ops.steps,
-            vec![
-                RestartAttemptPublicationStep::PrepareParent,
-                RestartAttemptPublicationStep::WriteTemp,
-                RestartAttemptPublicationStep::SyncTemp,
-                RestartAttemptPublicationStep::PublishCanonical,
-                RestartAttemptPublicationStep::SyncParent,
-            ]
-        );
-    }
-
-    #[test]
-    fn legacy_restart_completion_report_cannot_be_attempt_authority() {
-        let legacy = br#"{"version":1,"provider":"claude","channel_id":123,"status":"ok","summary":"done","completed_at":"2026-08-29 00:00:00"}"#;
-        assert_eq!(
-            decode_restart_attempt(legacy),
-            RestartAttemptDecode::Corrupt {
-                error: RestartAttemptDecodeError::MissingSchemaVersion,
-                bytes: legacy.to_vec(),
+    fn first_publication_syncs_every_new_parent_before_authority() {
+        let root = Path::new("store");
+        let mut ops = RecordingOps::default();
+        ops.dirs.insert(root.into());
+        publish(
+            root,
+            request("claude"),
+            process(),
+            mint("22222222-2222-4222-8222-222222222222"),
+            &mut ops,
+        )
+        .unwrap();
+        for (index, event) in ops.events.iter().enumerate() {
+            if let Event::Create(path) = event {
+                assert_eq!(
+                    ops.events[index + 1],
+                    Event::Sync(path.parent().unwrap().into())
+                );
             }
-        );
+        }
+        assert!(matches!(
+            &ops.events[ops.events.len() - 7..],
+            [
+                Event::Write,
+                Event::SyncFile,
+                Event::Attempt,
+                Event::Binding,
+                Event::Remove,
+                Event::Sync(_),
+                Event::Sync(_)
+            ]
+        ));
     }
 }

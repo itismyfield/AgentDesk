@@ -946,7 +946,7 @@ targets = {
     # test steps to this lane. Steps were only added -- none removed,
     # reordered or given a relaxed env -- and the value is recomputed from
     # the workflow with this script's own canonical_yaml, never copied.
-    "job_sha256" => "131ff4835b5b0811ceeb28a2a1b11efbf0d9f1dc6bf7ad87ab62da8d1dcd02bf",
+    "job_sha256" => "4696cd2292ba139b54e60dede19de5d0d33db444bf66cdd559751ff35a4f6a31",
     "require_debug_env" => false,
     "cargo_steps" => {
       "Observe curated lane selections" => {

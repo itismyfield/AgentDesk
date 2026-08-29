@@ -4267,6 +4267,14 @@ services::discord::response_sanitizer::subagent_notification_card::tests::detect
 services::discord::response_sanitizer::subagent_notification_card::tests::detects_provider_reuse_user_prefixed_subagent_notifications_3777
 services::discord::response_sanitizer::subagent_notification_card::tests::human_mid_body_quote_is_not_sanitized
 services::discord::response_sanitizer::tests::strips_echoed_memory_recall_ownership_block
+services::discord::restart_protocol::tests::append_once_request_binding_rejects_second_attempt_and_preserves_first
+services::discord::restart_protocol::tests::canonical_load_rejects_path_payload_mismatch_and_preserves_bytes
+services::discord::restart_protocol::tests::first_publication_syncs_every_new_parent_before_authority
+services::discord::restart_protocol::tests::future_version_fails_closed_and_preserves_bytes
+services::discord::restart_protocol::tests::provider_encoding_is_case_injective_and_avoids_windows_hazards
+services::discord::restart_protocol::tests::reducer_is_only_phase_authority_and_terminal_is_immutable
+services::discord::restart_protocol::tests::relative_refs_reject_cross_platform_traversal_hazards
+services::discord::restart_protocol::tests::same_version_unknown_authority_field_fails_closed
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_preserves_fresh_bootstrap_without_worktree_hint
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_reused_thread_still_updates_divergent_fallback
 services::discord::router::dispatch_trigger::tests::dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches

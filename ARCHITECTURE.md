@@ -1234,6 +1234,7 @@ src/
 │   │   ├── response_sanitizer.rs
 │   │   ├── restart_ctrl.rs
 │   │   ├── restart_mode.rs
+│   │   ├── restart_protocol.rs
 │   │   ├── restart_report.rs
 │   │   ├── role_map.rs
 │   │   ├── role_map_enrichment.rs
