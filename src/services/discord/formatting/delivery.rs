@@ -571,6 +571,50 @@ mod discord_unit_tests {
 
     #[test]
     fn utf16_fit_predicate_and_chunker_agree_on_supplementary_overflow_5177() {
+        let korean_under_limit = "한".repeat(900);
+        assert_eq!(
+            discord_message_units(&korean_under_limit),
+            900,
+            "fixture unit count"
+        );
+        assert!(
+            korean_under_limit.len() > DISCORD_MSG_LIMIT,
+            "fixture must exceed the limit in UTF-8 bytes"
+        );
+        assert!(
+            !needs_multiple_messages(&korean_under_limit),
+            "900 UTF-16 units must remain a single message"
+        );
+
+        // ASCII has equal UTF-8 byte, Unicode scalar, and UTF-16 unit counts, so
+        // these 2000/2001 controls pin only the strict boundary. The Korean and
+        // supplementary witnesses distinguish byte- and scalar-count regressions.
+        let ascii_at_limit = "x".repeat(DISCORD_MSG_LIMIT);
+        let ascii_over_limit = format!("{ascii_at_limit}x");
+        assert!(!needs_multiple_messages(&ascii_at_limit));
+        assert!(needs_multiple_messages(&ascii_over_limit));
+
+        let supplementary_at_limit = "📦".repeat(DISCORD_MSG_LIMIT / 2);
+        assert_eq!(
+            discord_message_units(&supplementary_at_limit),
+            DISCORD_MSG_LIMIT,
+            "supplementary fixture must be exactly 2000 UTF-16 units"
+        );
+        assert!(
+            !needs_multiple_messages(&supplementary_at_limit),
+            "exactly 2000 UTF-16 units must fit"
+        );
+        let supplementary_over_limit = format!("{supplementary_at_limit}x");
+        assert_eq!(
+            discord_message_units(&supplementary_over_limit),
+            DISCORD_MSG_LIMIT + 1,
+            "supplementary fixture must be exactly 2001 UTF-16 units"
+        );
+        assert!(
+            needs_multiple_messages(&supplementary_over_limit),
+            "2001 UTF-16 units must route multi"
+        );
+
         let body = format!("{}{}", "한".repeat(1_965), "📦".repeat(20));
         assert_eq!(discord_message_units(&body), 2_005, "fixture unit count");
         assert!(
