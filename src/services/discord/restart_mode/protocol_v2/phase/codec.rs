@@ -40,8 +40,8 @@ struct WireEvent {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
 enum WireKind {
-    Bound {},
-    Started {},
+    Bound(StrictEmptyWireKind),
+    Started(StrictEmptyWireKind),
     Terminal {
         outcome: TerminalOutcomeV2,
         proof: String,
@@ -50,6 +50,10 @@ enum WireKind {
         receipt: String,
     },
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictEmptyWireKind {}
 
 #[derive(Serialize)]
 struct WirePreimage<'a> {
@@ -141,8 +145,8 @@ fn into_domain(wire: WireEvent) -> Result<PhaseEventV2, PhaseCodecError> {
             .transpose()?,
         event_hash: parse_digest(&wire.event_hash)?,
         kind: match wire.kind {
-            WireKind::Bound {} => PhaseKindV2::Bound,
-            WireKind::Started {} => PhaseKindV2::Started,
+            WireKind::Bound(_) => PhaseKindV2::Bound,
+            WireKind::Started(_) => PhaseKindV2::Started,
             WireKind::Terminal { outcome, proof } => PhaseKindV2::Terminal {
                 outcome,
                 terminal_proof: SafeRelativeRefV2::parse(&proof).map_err(|_| PhaseCodecError)?,
@@ -189,8 +193,8 @@ fn into_wire(event: &PhaseEventV2) -> WireEvent {
         previous_hash: RequiredPreviousHash(event.previous_hash.map(|hash| hex::encode(hash.0))),
         event_hash: hex::encode(event.event_hash.0),
         kind: match &event.kind {
-            PhaseKindV2::Bound => WireKind::Bound {},
-            PhaseKindV2::Started => WireKind::Started {},
+            PhaseKindV2::Bound => WireKind::Bound(StrictEmptyWireKind {}),
+            PhaseKindV2::Started => WireKind::Started(StrictEmptyWireKind {}),
             PhaseKindV2::Terminal {
                 outcome,
                 terminal_proof,
@@ -254,14 +258,13 @@ mod high_risk_recovery {
     const PREIMAGE: &str = r#"{"epoch":2,"schema":1,"request_id":"123e4567-e89b-12d3-a456-426614174000","attempt_id":"123e4567-e89b-12d3-a456-426614174001","provider_hex":"436c617564652fceb2","channel_hex":"7468726561643a303031","nonce":"nonce-1","sequence":0,"previous_hash":null,"kind":{"phase":"bound"}}"#;
 
     fn assert_poison(raw: &[u8], reason: PhasePoisonV2) {
-        let DecodeDisposition::Poison {
-            reason: actual,
-            raw: owned,
-        } = std::panic::catch_unwind(|| decode(raw)).unwrap()
-        else {
-            panic!("not poison")
-        };
-        assert_eq!((actual, &*owned), (reason, raw));
+        match std::panic::catch_unwind(|| decode(raw)).unwrap() {
+            DecodeDisposition::Poison {
+                reason: actual,
+                raw: owned,
+            } => assert_eq!((actual, &*owned), (reason, raw)),
+            other => panic!("expected Poison({reason:?}), got {other:?}"),
+        }
     }
 
     fn assert_unsupported(raw: &[u8]) {
@@ -403,9 +406,10 @@ mod high_risk_recovery {
     #[test]
     fn malformed_and_unknown_versions_classify_without_panicking_or_losing_raw() {
         let deep = format!("{}0{}", "[".repeat(140), "]".repeat(140)).into_bytes();
-        for raw in [b"".as_slice(), b"{", b"\xff", b"{}{}", deep.as_slice()] {
+        for raw in [b"".as_slice(), b"{", b"\xff", b"{}{}"] {
             assert_poison(raw, PhasePoisonV2::MalformedJson);
         }
+        assert_poison(&deep, PhasePoisonV2::InvalidCurrentRecord);
         for raw in [
             "null",
             "{}",
