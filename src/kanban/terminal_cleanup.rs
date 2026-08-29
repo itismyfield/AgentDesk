@@ -366,3 +366,73 @@ fn paths_match(left: &str, right: &str) -> bool {
         (Some(left), Some(right)) if left == right
     )
 }
+
+#[cfg(test)]
+mod scrub_worktree_keys_from_json_tests {
+    use super::scrub_worktree_keys_from_json;
+    use serde_json::json;
+
+    #[test]
+    fn returns_none_for_missing_or_empty_input() {
+        assert_eq!(scrub_worktree_keys_from_json(None, &["key"]), None);
+        assert_eq!(scrub_worktree_keys_from_json(Some(""), &["key"]), None);
+        assert_eq!(scrub_worktree_keys_from_json(Some("   "), &["key"]), None);
+    }
+
+    #[test]
+    fn returns_none_for_malformed_json() {
+        assert_eq!(
+            scrub_worktree_keys_from_json(Some(r#"{"key": "broken""#), &["key"]),
+            None
+        );
+    }
+
+    #[test]
+    fn returns_none_for_non_object_json() {
+        assert_eq!(
+            scrub_worktree_keys_from_json(Some(r#"["key"]"#), &["key"]),
+            None
+        );
+        assert_eq!(
+            scrub_worktree_keys_from_json(Some(r#""string""#), &["key"]),
+            None
+        );
+        assert_eq!(
+            scrub_worktree_keys_from_json(Some(r#"true"#), &["key"]),
+            None
+        );
+        assert_eq!(
+            scrub_worktree_keys_from_json(Some(r#"123"#), &["key"]),
+            None
+        );
+        assert_eq!(
+            scrub_worktree_keys_from_json(Some(r#"null"#), &["key"]),
+            None
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_keys_match() {
+        let raw = r#"{"other_key": "value"}"#;
+        assert_eq!(scrub_worktree_keys_from_json(Some(raw), &["key"]), None);
+    }
+
+    #[test]
+    fn removes_matching_keys_and_returns_serialized_json() {
+        let raw = r#"{"keep": 1, "remove1": 2, "remove2": 3}"#;
+        let result = scrub_worktree_keys_from_json(Some(raw), &["remove1", "remove2", "missing"]);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result.expect("should return modified json")).unwrap();
+        assert_eq!(parsed, json!({"keep": 1}));
+    }
+
+    #[test]
+    fn removes_matching_keys_when_multiple_present_and_returns_empty_object_if_empty() {
+        let raw = r#"{"remove_me": "yes"}"#;
+        let result = scrub_worktree_keys_from_json(Some(raw), &["remove_me"]);
+
+        let parsed: serde_json::Value = serde_json::from_str(&result.unwrap()).unwrap();
+        assert_eq!(parsed, json!({}));
+    }
+}
