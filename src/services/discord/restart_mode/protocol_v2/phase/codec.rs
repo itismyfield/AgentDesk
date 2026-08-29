@@ -18,8 +18,11 @@ struct SchemaProbe {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(transparent)]
-struct RequiredPreviousHash(Option<String>);
+#[serde(untagged)]
+enum RequiredPreviousHash {
+    Null(()),
+    Hash(String),
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -168,11 +171,10 @@ fn into_domain(wire: WireEvent) -> Result<PhaseEventV2, PhaseCodecError> {
             nonce: NonceV2::parse(&wire.nonce).map_err(|_| PhaseCodecError)?,
         },
         sequence: wire.sequence,
-        previous_hash: wire
-            .previous_hash
-            .0
-            .map(|text| parse_digest(&text))
-            .transpose()?,
+        previous_hash: match wire.previous_hash {
+            RequiredPreviousHash::Null(()) => None,
+            RequiredPreviousHash::Hash(text) => Some(parse_digest(&text)?),
+        },
         event_hash: parse_digest(&wire.event_hash)?,
         kind: match wire.kind {
             WireKind::Empty(EmptyWireKind {
@@ -224,7 +226,10 @@ fn into_wire(event: &PhaseEventV2) -> WireEvent {
         channel_hex: hex::encode(event.identity.channel.as_str().as_bytes()),
         nonce: event.identity.nonce.as_str().to_owned(),
         sequence: event.sequence,
-        previous_hash: RequiredPreviousHash(event.previous_hash.map(|hash| hex::encode(hash.0))),
+        previous_hash: match event.previous_hash {
+            None => RequiredPreviousHash::Null(()),
+            Some(hash) => RequiredPreviousHash::Hash(hex::encode(hash.0)),
+        },
         event_hash: hex::encode(event.event_hash.0),
         kind: match &event.kind {
             PhaseKindV2::Bound => WireKind::Empty(EmptyWireKind {
