@@ -382,13 +382,11 @@ fn status_config() -> Result<serde_json::Value, String> {
         .agents
         .iter()
         .map(|agent| {
-            let channel_id = agent.channels.iter().into_iter().find_map(|(_, channel)| {
-                channel.and_then(|channel| {
-                    channel
-                        .channel_id()
-                        .or_else(|| channel.channel_name())
-                        .or_else(|| channel.target())
-                })
+            let channel_id = agent.channels.iter().find_map(|(_, channel)| {
+                channel
+                    .channel_id()
+                    .or_else(|| channel.channel_name())
+                    .or_else(|| channel.target())
             });
             json!({
                 "agent_id": agent.id,
@@ -1319,20 +1317,6 @@ fn tilde_display_path(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn agent_channel_slot_mut<'a>(
-    channels: &'a mut crate::config::AgentChannels,
-    provider: &str,
-) -> Option<&'a mut Option<crate::config::AgentChannel>> {
-    match provider {
-        "claude" => Some(&mut channels.claude),
-        "codex" => Some(&mut channels.codex),
-        "gemini" => Some(&mut channels.gemini),
-        "opencode" => Some(&mut channels.opencode),
-        "qwen" => Some(&mut channels.qwen),
-        _ => None,
-    }
-}
-
 fn channel_config_from_existing(
     current: Option<crate::config::AgentChannel>,
 ) -> crate::config::AgentChannelConfig {
@@ -1547,8 +1531,8 @@ async fn collect_onboarding_conflicts_pg(
             }
 
             if rerun_policy == OnboardingRerunPolicy::ReuseExisting {
-                if let Some(slot) = agent_channel_slot_ref(&agent.channels, provider) {
-                    let channel = channel_config_from_existing(slot.clone());
+                if let Some(existing) = agent.channels.get(provider) {
+                    let channel = channel_config_from_existing(Some(existing.clone()));
                     let existing_channel_id = channel.channel_id();
                     let existing_names = channel.all_names();
                     let same_channel_id =
@@ -1575,10 +1559,10 @@ async fn collect_onboarding_conflicts_pg(
             if agent.id == mapping.role_id {
                 continue;
             }
-            let Some(slot) = agent_channel_slot_ref(&agent.channels, provider) else {
+            let Some(existing) = agent.channels.get(provider) else {
                 continue;
             };
-            let channel = channel_config_from_existing(slot.clone());
+            let channel = channel_config_from_existing(Some(existing.clone()));
             let uses_same_target = channel.channel_id().as_deref()
                 == Some(mapping.channel_id.as_str())
                 || channel.all_names().iter().any(|name| {
@@ -1770,13 +1754,13 @@ fn write_agentdesk_channel_bindings(
         let agent = &mut config.agents[agent_index];
         agent.provider = provider.to_string();
 
-        let Some(slot) = agent_channel_slot_mut(&mut agent.channels, provider) else {
+        if crate::services::provider::ProviderKind::from_str(provider).is_none() {
             return Err(format!(
                 "unsupported provider for onboarding yaml sync: {provider}"
             ));
-        };
+        }
 
-        let mut channel = channel_config_from_existing(slot.clone());
+        let mut channel = channel_config_from_existing(agent.channels.get(provider).cloned());
         if let Some(existing_name) = channel
             .name
             .clone()
@@ -1788,25 +1772,13 @@ fn write_agentdesk_channel_bindings(
         channel.name = Some(mapping.channel_name.clone());
         channel.workspace = Some(workspace);
         channel.provider = Some(provider.to_string());
-        *slot = Some(crate::config::AgentChannel::Detailed(channel));
+        agent
+            .channels
+            .insert(provider, crate::config::AgentChannel::Detailed(channel));
     }
 
     crate::config::save_to_path(&config_path, &config)
         .map_err(|e| format!("Failed to write config {}: {e}", config_path.display()))
-}
-
-fn agent_channel_slot_ref<'a>(
-    channels: &'a crate::config::AgentChannels,
-    provider: &str,
-) -> Option<&'a Option<crate::config::AgentChannel>> {
-    match provider {
-        "claude" => Some(&channels.claude),
-        "codex" => Some(&channels.codex),
-        "gemini" => Some(&channels.gemini),
-        "opencode" => Some(&channels.opencode),
-        "qwen" => Some(&channels.qwen),
-        _ => None,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1903,13 +1875,13 @@ fn verify_onboarding_settings_artifacts(
                 mapping.role_id, primary_provider, agent.provider
             ));
         }
-        let slot = agent_channel_slot_ref(&agent.channels, primary_provider).ok_or_else(|| {
-            format!(
+        if crate::services::provider::ProviderKind::from_str(primary_provider).is_none() {
+            return Err(format!(
                 "unsupported provider '{}' in onboarding verification",
                 primary_provider
-            )
-        })?;
-        let channel = channel_config_from_existing(slot.clone());
+            ));
+        }
+        let channel = channel_config_from_existing(agent.channels.get(primary_provider).cloned());
         if channel.id.as_deref() != Some(mapping.channel_id.as_str()) {
             return Err(format!(
                 "agent '{}' channel id mismatch after onboarding",

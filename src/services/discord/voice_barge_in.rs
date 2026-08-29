@@ -2445,13 +2445,9 @@ mod tests {
                 foreground: crate::config::AgentVoiceForegroundConfig::default(),
             },
             provider: provider.to_string(),
-            channels: crate::config::AgentChannels {
-                claude: Some(crate::config::AgentChannel::from("100")),
-                codex: Some(crate::config::AgentChannel::from("200")),
-                gemini: None,
-                opencode: None,
-                qwen: None,
-            },
+            channels: crate::config::AgentChannels::new()
+                .with("claude", crate::config::AgentChannel::from("100"))
+                .with("codex", crate::config::AgentChannel::from("200")),
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,
