@@ -133,12 +133,13 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "POST",
             "/api/scheduled-messages",
             "messages",
-            "Create a scheduled-message reservation delivered at scheduledAt via direct push or a delivering agent.",
+            "Create a scheduled reservation delivered by Discord, Kakao friends/My Chatroom, or a delivering agent.",
         )
         .with_params([
             ("content", body_param("string", true, "Message body to deliver")),
             ("scheduledAt", body_param("string", true, "RFC3339 fire time; past values require a schedule and are advanced to the next occurrence")),
-            ("targetChannelId", body_param("string", false, "Discord channel id (required for push; agent falls back to its primary channel)")),
+            ("targetChannelId", body_param("string", false, "Discord channel id; push requires this or providerTargets")),
+            ("providerTargets", body_param("object", false, "Confirmed Kakao target: accountId, up to five friendUuids, sendToSelf, and optional public HTTPS imageUrl")),
             ("deliveryKind", body_param("string", false, "push (default) or agent")),
             ("agentId", body_param("string", false, "Delivering agent id (required for agent kind)")),
             ("agentInstruction", body_param("string", false, "Extra instruction injected into the agent turn")),
@@ -151,8 +152,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("dedupeKey", body_param("string", false, "Idempotency key; unique among live reservations")),
         ])
         .with_example(
-            json!({"body": {"content": "standup agenda", "targetChannelId": "123", "scheduledAt": "2026-07-09T09:00:00+09:00"}}),
-            json!({"scheduledMessage": {"id": "smsg_1", "status": "scheduled", "deliveryKind": "push", "scheduledAt": "2026-07-09T00:00:00+00:00"}}),
+            json!({"body": {"content": "standup agenda", "targetChannelId": "123", "providerTargets": {"kakao": {"accountId": "default", "friendUuids": ["kakao-friend-uuid"], "sendToSelf": true, "confirmed": true}}, "scheduledAt": "2026-07-09T09:00:00+09:00"}}),
+            json!({"scheduledMessage": {"id": "smsg_1", "status": "scheduled", "deliveryKind": "push", "targetChannelId": "123", "providerTargets": {"kakao": {"enabled": true, "accountId": "default", "friendCount": 1, "sendToSelf": true, "contentMode": "text"}}, "scheduledAt": "2026-07-09T00:00:00+00:00"}}),
         ),
         ep(
             "GET",
@@ -190,7 +191,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/scheduled-messages/{id}/deliveries",
             "messages",
-            "Fire history for one reservation, enriched with the final message_outbox status of each handoff.",
+            "Fire history enriched with Discord outbox state and count-only external delivery results.",
         )
         .with_params([
             ("id", path_param("Scheduled message id")),

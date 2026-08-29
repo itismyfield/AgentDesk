@@ -408,11 +408,10 @@ fn agent_voice_channel(agent: &crate::config::AgentDef) -> Option<ChannelId> {
 pub(super) fn agent_voice_background_channel(agent: &crate::config::AgentDef) -> Option<ChannelId> {
     let preferred_provider = agent.provider.trim();
     if !preferred_provider.is_empty()
-        && let Some((_, Some(channel))) = agent
+        && let Some((_, channel)) = agent
             .channels
             .iter()
-            .into_iter()
-            .find(|(provider, channel)| *provider == preferred_provider && channel.is_some())
+            .find(|(provider, _channel)| *provider == preferred_provider)
         && let Some(channel_id) = channel
             .channel_id()
             .and_then(|value| value.parse::<u64>().ok())
@@ -420,17 +419,12 @@ pub(super) fn agent_voice_background_channel(agent: &crate::config::AgentDef) ->
         return Some(ChannelId::new(channel_id));
     }
 
-    agent
-        .channels
-        .iter()
-        .into_iter()
-        .filter_map(|(_, channel)| channel)
-        .find_map(|channel| {
-            channel
-                .channel_id()
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(ChannelId::new)
-        })
+    agent.channels.iter().find_map(|(_, channel)| {
+        channel
+            .channel_id()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(ChannelId::new)
+    })
 }
 
 pub(super) fn agent_voice_background_channel_for(
@@ -475,10 +469,7 @@ fn agent_text_channel_matches(agent: &crate::config::AgentDef, channel_id: Chann
     agent
         .channels
         .iter()
-        // AgentChannels::iter returns a fixed array, so into_iter is required.
-        .into_iter()
-        .filter_map(|(_, channel)| channel)
-        .any(|channel| channel.channel_id().as_deref() == Some(channel_id.as_str()))
+        .any(|(_, channel)| channel.channel_id().as_deref() == Some(channel_id.as_str()))
 }
 
 fn normalized_foreground_max_chars(value: usize) -> usize {

@@ -159,9 +159,6 @@ pub fn install_provider_hosting_config(config: &Config) {
     }
     for agent in &config.agents {
         for (channel_kind, channel) in agent.channels.iter() {
-            let Some(channel) = channel else {
-                continue;
-            };
             let Some(channel_id) = channel
                 .channel_id()
                 .and_then(|value| value.parse::<u64>().ok())
@@ -464,26 +461,19 @@ pub fn any_requested_tui_hosting_driver_available(config: &Config) -> bool {
     }
 
     config.agents.iter().any(|agent| {
-        agent
-            .channels
-            .iter()
-            .into_iter()
-            .any(|(channel_kind, channel)| {
-                let Some(channel) = channel else {
-                    return false;
-                };
-                let provider_id = channel
-                    .provider()
-                    .unwrap_or_else(|| channel_kind.to_string())
-                    .trim()
-                    .to_ascii_lowercase();
-                if !channel_effective_tui_request(config, channel, &provider_id) {
-                    return false;
-                }
-                ProviderKind::from_str(&provider_id)
-                    .as_ref()
-                    .is_some_and(provider_tui_hosting_driver_available)
-            })
+        agent.channels.iter().any(|(channel_kind, channel)| {
+            let provider_id = channel
+                .provider()
+                .unwrap_or_else(|| channel_kind.to_string())
+                .trim()
+                .to_ascii_lowercase();
+            if !channel_effective_tui_request(config, channel, &provider_id) {
+                return false;
+            }
+            ProviderKind::from_str(&provider_id)
+                .as_ref()
+                .is_some_and(provider_tui_hosting_driver_available)
+        })
     })
 }
 
@@ -1066,15 +1056,15 @@ mod tests {
             sensitivity_mode: None,
             voice: AgentVoiceConfig::default(),
             provider: "codex".to_string(),
-            channels: AgentChannels {
-                claude: Some(AgentChannel::Detailed(AgentChannelConfig {
+            channels: AgentChannels::new().with(
+                "claude",
+                AgentChannel::Detailed(AgentChannelConfig {
                     id: Some(channel_id.to_string()),
                     provider: Some("claude".to_string()),
                     runtime: runtime.map(str::to_string),
                     ..AgentChannelConfig::default()
-                })),
-                ..AgentChannels::default()
-            },
+                }),
+            ),
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,
@@ -1093,15 +1083,15 @@ mod tests {
             sensitivity_mode: None,
             voice: AgentVoiceConfig::default(),
             provider: "codex".to_string(),
-            channels: AgentChannels {
-                claude: Some(AgentChannel::Detailed(AgentChannelConfig {
+            channels: AgentChannels::new().with(
+                "claude",
+                AgentChannel::Detailed(AgentChannelConfig {
                     id: Some(channel_id.to_string()),
                     provider: Some("claude".to_string()),
                     tui_hosting,
                     ..AgentChannelConfig::default()
-                })),
-                ..AgentChannels::default()
-            },
+                }),
+            ),
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,

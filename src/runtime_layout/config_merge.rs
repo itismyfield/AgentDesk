@@ -236,8 +236,10 @@ fn merge_role_map_channel_id_entry(
     };
 
     let agent = &mut config.agents[agent_index];
-    let slot = channel_slot_mut(&mut agent.channels, &provider_key)?;
-    let channel_changed = apply_channel_update(slot, update, None);
+    if !supports_channel_key(&agent.channels, &provider_key) {
+        return None;
+    }
+    let channel_changed = apply_channel_update(&mut agent.channels, &provider_key, update, None);
     Some((provider_key, agent_changed || channel_changed))
 }
 
@@ -281,10 +283,10 @@ fn merge_role_map_channel_name_entry(
     };
 
     let agent = &mut config.agents[agent_index];
-    let Some(slot) = channel_slot_mut(&mut agent.channels, &provider_key) else {
+    if !supports_channel_key(&agent.channels, &provider_key) {
         return agent_changed;
-    };
-    agent_changed || apply_channel_update(slot, update, None)
+    }
+    agent_changed || apply_channel_update(&mut agent.channels, &provider_key, update, None)
 }
 
 fn ensure_config_agent(
@@ -327,10 +329,7 @@ fn infer_provider_for_role(
     channel_name: Option<&str>,
 ) -> Option<String> {
     let agent = config.agents.iter().find(|agent| agent.id == role_id)?;
-    for (provider_key, maybe_channel) in agent.channels.iter() {
-        let Some(channel) = maybe_channel else {
-            continue;
-        };
+    for (provider_key, channel) in agent.channels.iter() {
         if let Some(channel_id) = channel_id
             && (channel.channel_id().as_deref() == Some(channel_id)
                 || channel.target().as_deref() == Some(channel_id))
@@ -347,26 +346,18 @@ fn infer_provider_for_role(
     normalize_provider_name(&agent.provider)
 }
 
-fn channel_slot_mut<'a>(
-    channels: &'a mut crate::config::AgentChannels,
-    provider: &str,
-) -> Option<&'a mut Option<crate::config::AgentChannel>> {
-    match provider {
-        "claude" => Some(&mut channels.claude),
-        "codex" => Some(&mut channels.codex),
-        "gemini" => Some(&mut channels.gemini),
-        "opencode" => Some(&mut channels.opencode),
-        "qwen" => Some(&mut channels.qwen),
-        _ => None,
-    }
+fn supports_channel_key(channels: &crate::config::AgentChannels, provider: &str) -> bool {
+    crate::services::provider::ProviderKind::from_str(provider).is_some()
+        || channels.contains_key(provider)
 }
 
 fn apply_channel_update(
-    slot: &mut Option<crate::config::AgentChannel>,
+    channels: &mut crate::config::AgentChannels,
+    provider: &str,
     update: AgentChannelUpdate,
     extra_aliases: Option<Vec<String>>,
 ) -> bool {
-    let current = slot.clone();
+    let current = channels.get(provider).cloned();
     let mut config = match current.clone() {
         Some(crate::config::AgentChannel::Detailed(config)) => config,
         Some(crate::config::AgentChannel::Legacy(raw)) => channel_config_from_legacy(raw),
@@ -419,9 +410,9 @@ fn apply_channel_update(
         }
     }
 
-    let next = Some(crate::config::AgentChannel::Detailed(config));
-    if next != current {
-        *slot = next;
+    let next = crate::config::AgentChannel::Detailed(config);
+    if Some(&next) != current.as_ref() {
+        channels.insert(provider, next);
         true
     } else {
         false

@@ -438,9 +438,6 @@ fn agent_voice_aliases(agent: &AgentDef) -> Vec<String> {
     aliases.extend(agent.aliases.iter().cloned());
     aliases.extend(agent.keywords.iter().cloned());
     for (_, channel) in agent.channels.iter() {
-        let Some(channel) = channel else {
-            continue;
-        };
         aliases.extend(channel.aliases());
     }
     aliases
@@ -461,9 +458,6 @@ fn transcript_after_agent_wake_word(agent: &AgentDef, transcript: &str) -> Optio
 
 fn first_explicit_agent_channel(agent: &AgentDef) -> Option<(String, u64)> {
     for (provider, channel) in agent.channels.iter() {
-        let Some(channel) = channel else {
-            continue;
-        };
         let Some(channel_id) = channel
             .channel_id()
             .and_then(|value| value.parse::<u64>().ok())
@@ -562,14 +556,14 @@ mod tests {
             sensitivity_mode: None,
             voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
-            channels: AgentChannels {
-                codex: Some(AgentChannel::Detailed(AgentChannelConfig {
+            channels: AgentChannels::new().with(
+                "codex",
+                AgentChannel::Detailed(AgentChannelConfig {
                     id: Some(channel_id.to_string()),
                     aliases: vec![format!("{id}-alias")],
                     ..AgentChannelConfig::default()
-                })),
-                ..AgentChannels::default()
-            },
+                }),
+            ),
             keywords: Vec::new(),
             department: None,
             avatar_emoji: None,

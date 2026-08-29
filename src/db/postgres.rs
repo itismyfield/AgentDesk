@@ -905,25 +905,17 @@ async fn postgres_agent_exists(pool: &PgPool, agent_id: &str) -> Result<bool, St
 }
 
 async fn upsert_agent_from_config_pg(pool: &PgPool, agent: &AgentDef) -> Result<(), String> {
-    let discord_channel_cc = agent
-        .channels
-        .claude
-        .as_ref()
-        .and_then(AgentChannel::target);
-    let discord_channel_cdx = agent.channels.codex.as_ref().and_then(AgentChannel::target);
-    let provider_primary = match agent.provider.as_str() {
-        "gemini" => agent
+    let discord_channel_cc = agent.channels.get("claude").and_then(AgentChannel::target);
+    let discord_channel_cdx = agent.channels.get("codex").and_then(AgentChannel::target);
+    let provider_primary = match crate::services::provider::ProviderKind::from_str(&agent.provider)
+    {
+        Some(crate::services::provider::ProviderKind::Claude)
+        | Some(crate::services::provider::ProviderKind::Codex)
+        | None => None,
+        Some(_) => agent
             .channels
-            .gemini
-            .as_ref()
+            .get(&agent.provider)
             .and_then(AgentChannel::target),
-        "opencode" => agent
-            .channels
-            .opencode
-            .as_ref()
-            .and_then(AgentChannel::target),
-        "qwen" => agent.channels.qwen.as_ref().and_then(AgentChannel::target),
-        _ => None,
     };
     let discord_channel_id = provider_primary.or_else(|| discord_channel_cc.clone());
     let discord_channel_alt = discord_channel_cdx.clone();
@@ -2347,10 +2339,8 @@ mod tests {
             sensitivity_mode: None,
             voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
-            channels: crate::config::AgentChannels {
-                codex: Some(crate::config::AgentChannel::from("pg-agent-cdx")),
-                ..Default::default()
-            },
+            channels: crate::config::AgentChannels::new()
+                .with("codex", crate::config::AgentChannel::from("pg-agent-cdx")),
             keywords: Vec::new(),
             department: Some("platform".to_string()),
             avatar_emoji: Some(":gear:".to_string()),
@@ -3282,10 +3272,8 @@ mod tests {
             sensitivity_mode: None,
             voice: crate::config::AgentVoiceConfig::default(),
             provider: "codex".to_string(),
-            channels: crate::config::AgentChannels {
-                codex: Some(crate::config::AgentChannel::from("maker-cdx")),
-                ..Default::default()
-            },
+            channels: crate::config::AgentChannels::new()
+                .with("codex", crate::config::AgentChannel::from("maker-cdx")),
             keywords: Vec::new(),
             department: Some("engineering".to_string()),
             avatar_emoji: Some("🛠️".to_string()),
@@ -3421,10 +3409,8 @@ mod tests {
                 sensitivity_mode: None,
                 voice: crate::config::AgentVoiceConfig::default(),
                 provider: "codex".to_string(),
-                channels: crate::config::AgentChannels {
-                    codex: Some(crate::config::AgentChannel::from("maker-cdx")),
-                    ..Default::default()
-                },
+                channels: crate::config::AgentChannels::new()
+                    .with("codex", crate::config::AgentChannel::from("maker-cdx")),
                 keywords: Vec::new(),
                 department: Some("engineering".to_string()),
                 avatar_emoji: None,
@@ -3440,10 +3426,8 @@ mod tests {
                 sensitivity_mode: None,
                 voice: crate::config::AgentVoiceConfig::default(),
                 provider: "codex".to_string(),
-                channels: crate::config::AgentChannels {
-                    codex: Some(crate::config::AgentChannel::from("legacy-cdx")),
-                    ..Default::default()
-                },
+                channels: crate::config::AgentChannels::new()
+                    .with("codex", crate::config::AgentChannel::from("legacy-cdx")),
                 keywords: Vec::new(),
                 department: Some("legacy".to_string()),
                 avatar_emoji: None,

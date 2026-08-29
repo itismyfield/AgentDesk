@@ -60,6 +60,8 @@ src/
 │   ├── legacy_db_paths.rs
 │   ├── legacy_tmp_paths.rs
 │   └── mod.rs
+├── config/
+│   └── agent_channels.rs
 ├── db/
 │   ├── auto_queue/
 │   │   ├── entries/
@@ -116,6 +118,9 @@ src/
 │   │   └── tests.rs
 │   ├── scheduled_messages/
 │   │   ├── agent.rs
+│   │   ├── api_json.rs
+│   │   ├── discord_mentions.rs
+│   │   ├── external_delivery.rs
 │   │   ├── outbox.rs
 │   │   ├── postgres_tests.rs
 │   │   └── writes.rs
@@ -271,7 +276,10 @@ src/
 │   │   │   ├── helpers.rs
 │   │   │   └── responses.rs
 │   │   ├── scheduled_messages/
+│   │   │   ├── delivery_render.rs
+│   │   │   ├── discord_mentions.rs
 │   │   │   ├── postgres_tests.rs
+│   │   │   ├── provider_targets.rs
 │   │   │   └── snapshot_capture.rs
 │   │   ├── tests/
 │   │   │   ├── preflight_harness/
@@ -1420,7 +1428,10 @@ src/
 │   ├── scheduled_messages/
 │   │   ├── context_snapshot.rs
 │   │   ├── evidence.rs
+│   │   ├── external_delivery.rs
 │   │   ├── postgres_tests.rs
+│   │   ├── provider_targets.rs
+│   │   ├── push_handoff.rs
 │   │   └── timing.rs
 │   ├── session_backend/
 │   │   ├── stream_line.rs
@@ -1489,6 +1500,8 @@ src/
 │   ├── health_active_session_audit.rs
 │   ├── health_diagnostics.rs
 │   ├── issue_announcements.rs
+│   ├── kakao.rs
+│   ├── kakao_message.rs
 │   ├── kanban.rs
 │   ├── kanban_cards.rs
 │   ├── long_turn_watchdog.rs
@@ -1628,6 +1641,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | --- | --- |
 | `src/cli/` | Operator-facing CLI commands, direct API shims, migrations, and Discord send helpers. |
 | `src/compat/` | Centralised home for compatibility/legacy/fallback shims (#1076). Each public item carries a `REMOVE_WHEN` comment so retirement is grep-driven. |
+| `src/config/` | Config newtypes extracted from the `config.rs` facade, including the provider-keyed `AgentChannels` map. |
 | `src/db/` | PostgreSQL access layer, migration helpers, and schema authority. |
 | `src/dispatch/` | Dispatch context construction, review metadata, and worktree targeting. |
 | `src/engine/` | QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops. |

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use super::{
     ProviderCompactionAdapter, ProviderKind, intern_provider_id, provider_registry,
-    supported_provider_ids,
+    public_provider_catalog, supported_provider_ids,
 };
 
 const READY_CAPTURE: &str = "Ready for input (type message + Enter)\n> ";
@@ -100,6 +100,68 @@ fn provider_exec_registry_conformance_invariant() {
             Some(provider_id),
             "provider ids should canonicalize through the registry"
         );
+    }
+
+    let channels_yaml = concat!(
+        "claude: ch-cc\n",
+        "codex: ch-cdx\n",
+        "gemini: ch-gm\n",
+        "opencode: ch-oc\n",
+        "qwen: ch-qw\n",
+        "future-cli: ch-future\n",
+    );
+    let channels: crate::config::AgentChannels =
+        serde_yaml::from_str(channels_yaml).expect("provider-keyed channels should deserialize");
+    assert_eq!(
+        channels
+            .get("qwen")
+            .and_then(crate::config::AgentChannel::target)
+            .as_deref(),
+        Some("ch-qw")
+    );
+    assert_eq!(
+        channels
+            .get("future-cli")
+            .and_then(crate::config::AgentChannel::target)
+            .as_deref(),
+        Some("ch-future"),
+        "unknown provider keys must survive rolling upgrades"
+    );
+    let encoded_channels =
+        serde_yaml::to_string(&channels).expect("provider-keyed channels should serialize");
+    assert!(encoded_channels.contains("future-cli: ch-future"));
+
+    let mut normalized_channels = crate::config::AgentChannels::new();
+    normalized_channels.insert(
+        " CoDeX ",
+        crate::config::AgentChannel::from("ch-normalized"),
+    );
+    assert!(normalized_channels.contains_key("codex"));
+    assert_eq!(
+        normalized_channels.keys().collect::<Vec<_>>(),
+        vec!["codex"]
+    );
+    let catalog = public_provider_catalog();
+    assert_eq!(
+        catalog
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        supported_provider_ids()
+    );
+    assert!(
+        catalog
+            .iter()
+            .all(|entry| entry.supports_restricted_tool_policy)
+    );
+    assert!(
+        catalog
+            .iter()
+            .all(|entry| entry.context_window_tokens.is_some())
+    );
+    let encoded_catalog = serde_json::to_string(&catalog).unwrap();
+    for secret_field in ["credential_paths", "env_keys", "auth_check_argv"] {
+        assert!(!encoded_catalog.contains(secret_field));
     }
 
     let expected_counterparts = [

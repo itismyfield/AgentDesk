@@ -1,6 +1,8 @@
 use super::*;
 use chrono::Duration;
+use serde_json::{Value as JsonValue, json};
 use sqlx::Row;
+use uuid::Uuid;
 
 async fn create_test_pool(
     prefix: &str,
@@ -32,6 +34,7 @@ async fn insert_due_message(pool: &PgPool, delivery_kind: &str) -> ScheduledMess
         pool,
         &NewScheduledMessage {
             content: "scheduled test message".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: None,
             target_channel_id: (delivery_kind == KIND_PUSH).then(|| "123456789".to_string()),
             bot: "announce".to_string(),
@@ -46,6 +49,8 @@ async fn insert_due_message(pool: &PgPool, delivery_kind: &str) -> ScheduledMess
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            provider_targets: None,
+            provider_target_summary: None,
             context_strategy: "fresh".to_string(),
             context_snapshot_id: None,
             on_context_failure: "fail".to_string(),
@@ -61,6 +66,139 @@ async fn claim_one(pool: &PgPool, owner: &str, lease_secs: i64) -> ClaimedFire {
         .expect("claim due scheduled message");
     assert_eq!(claims.len(), 1, "exactly one definition should be due");
     claims.pop().expect("claimed fire")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_external_handoff_scrubs_targets_and_terminal_payload() {
+    let (pg_db, pool) = create_test_pool(
+        "agentdesk_smsg_external_handoff",
+        "scheduled external handoff payload scrubbing",
+    )
+    .await;
+    let message = insert_scheduled_message_pg(
+        &pool,
+        &NewScheduledMessage {
+            content: "scheduled Kakao message".to_string(),
+            discord_mention_user_ids: Vec::new(),
+            title: None,
+            target_channel_id: None,
+            bot: "notify".to_string(),
+            delivery_kind: KIND_PUSH.to_string(),
+            agent_id: None,
+            agent_instruction: None,
+            on_agent_failure: "fail".to_string(),
+            scheduled_at: Utc::now() - Duration::seconds(1),
+            schedule: None,
+            timezone: "UTC".to_string(),
+            expires_at: None,
+            source: "postgres_test".to_string(),
+            created_by: Some("postgres_test".to_string()),
+            dedupe_key: None,
+            provider_targets: Some(json!({
+                "kakao": {
+                    "accountId": "default",
+                    "friendUuids": ["private-friend-uuid"],
+                    "sendToSelf": false
+                }
+            })),
+            provider_target_summary: Some(json!({
+                "kakao": {"enabled": true, "friendCount": 1}
+            })),
+            context_strategy: "fresh".to_string(),
+            context_snapshot_id: None,
+            on_context_failure: "fail".to_string(),
+        },
+    )
+    .await
+    .expect("insert provider-targeted scheduled message");
+    let fire = claim_one(&pool, "external-handoff-worker", 60).await;
+    let outbox_id = Uuid::new_v4();
+    let mut tx = pool.begin().await.expect("begin external handoff");
+    assert!(
+        lock_active_delivery_tx(&mut tx, &message.id, &fire.delivery_id, &fire.claim_token,)
+            .await
+            .expect("lock active external delivery")
+    );
+    assert!(
+        enqueue_external_delivery_tx(
+            &mut tx,
+            &NewExternalDelivery {
+                id: outbox_id,
+                scheduled_delivery_id: fire.delivery_id.clone(),
+                provider: "kakao".to_string(),
+                audience: "friends".to_string(),
+                account_id: "default".to_string(),
+                payload: json!({"private": "private-friend-uuid"}),
+                requested_count: 1,
+                deliver_before: Utc::now() + Duration::hours(1),
+                created_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("enqueue external delivery")
+    );
+    assert!(
+        finish_locked_delivery_and_finalize_parent_tx(
+            &mut tx,
+            &fire.delivery_id,
+            &fire.claim_token,
+            DELIVERY_SENT,
+            None,
+            None,
+            None,
+            &message.id,
+            true,
+            STATUS_SENT,
+            None,
+        )
+        .await
+        .expect("finish external handoff")
+    );
+    tx.commit().await.expect("commit external handoff");
+
+    let terminal = get_scheduled_message_pg(&pool, &message.id)
+        .await
+        .expect("load terminal definition")
+        .expect("terminal definition exists");
+    assert!(terminal.provider_targets.is_none());
+    assert!(terminal.provider_target_summary.is_some());
+
+    let claim = claim_external_deliveries_pg(&pool, "external-provider-worker", 10, 60, Utc::now())
+        .await
+        .expect("claim external delivery")
+        .pop()
+        .expect("external delivery is claimable");
+    assert_eq!(claim.id, outbox_id);
+    assert!(
+        mark_external_dispatch_started_pg(&pool, claim.id, claim.claim_token, 60)
+            .await
+            .expect("mark provider dispatch")
+    );
+    assert!(
+        finish_external_delivery_pg(
+            &pool,
+            ExternalDeliveryFinish {
+                id: claim.id,
+                claim_token: claim.claim_token,
+                status: "unknown",
+                successful_count: None,
+                failed_count: None,
+                error_code: Some("delivery_result_unknown"),
+            },
+        )
+        .await
+        .expect("finish ambiguous external delivery")
+    );
+    let stored_payload: Option<JsonValue> =
+        sqlx::query_scalar("SELECT payload FROM scheduled_external_delivery_outbox WHERE id = $1")
+            .bind(outbox_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load scrubbed external payload");
+    assert!(stored_payload.is_none());
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -588,6 +726,7 @@ async fn postgres_running_agent_poll_rotates_before_renewed_rows() {
             &pool,
             &NewScheduledMessage {
                 content: format!("scheduled poll {label}"),
+                discord_mention_user_ids: Vec::new(),
                 title: None,
                 target_channel_id: Some("123456789".to_string()),
                 bot: "announce".to_string(),
@@ -602,6 +741,8 @@ async fn postgres_running_agent_poll_rotates_before_renewed_rows() {
                 source: "postgres_test".to_string(),
                 created_by: Some("postgres_test".to_string()),
                 dedupe_key: None,
+                provider_targets: None,
+                provider_target_summary: None,
                 context_strategy: "fresh".to_string(),
                 context_snapshot_id: None,
                 on_context_failure: "fail".to_string(),
@@ -1280,6 +1421,7 @@ async fn postgres_cancel_reports_committed_agent_handoff_not_intent() {
         &pool,
         &NewScheduledMessage {
             content: "already launched agent delivery".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: None,
             target_channel_id: None,
             bot: "notify".to_string(),
@@ -1294,6 +1436,8 @@ async fn postgres_cancel_reports_committed_agent_handoff_not_intent() {
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            provider_targets: None,
+            provider_target_summary: None,
             context_strategy: "fresh".to_string(),
             context_snapshot_id: None,
             on_context_failure: "fail".to_string(),

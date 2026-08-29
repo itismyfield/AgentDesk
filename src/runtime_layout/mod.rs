@@ -444,13 +444,7 @@ fn memory_backend_from_config(config: crate::config::MemoryConfig) -> MemoryBack
 }
 
 fn normalize_provider_name(value: &str) -> Option<String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "claude" => Some("claude".to_string()),
-        "codex" => Some("codex".to_string()),
-        "gemini" => Some("gemini".to_string()),
-        "qwen" => Some("qwen".to_string()),
-        _ => None,
-    }
+    crate::services::provider::ProviderKind::from_str(value).map(|kind| kind.as_str().to_string())
 }
 
 fn same_canonical_path(a: &Path, b: &Path) -> bool {

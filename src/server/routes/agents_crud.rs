@@ -187,24 +187,24 @@ fn agent_channel_for_provider<'a>(
     agent: &'a crate::config::AgentDef,
     provider: Option<&str>,
 ) -> Option<&'a crate::config::AgentChannel> {
+    // Prefer the requested provider, then the registry's stable provider order.
+    // Unknown keys remain in config for forward-compatible rolling deployments.
+    // They are considered only after every currently supported provider binding.
+    // BTreeMap ordering keeps that final forward-compatible fallback deterministic.
     let provider = provider
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(agent.provider.as_str());
 
-    match provider {
-        "claude" => agent.channels.claude.as_ref(),
-        "codex" => agent.channels.codex.as_ref(),
-        "gemini" => agent.channels.gemini.as_ref(),
-        "opencode" => agent.channels.opencode.as_ref(),
-        "qwen" => agent.channels.qwen.as_ref(),
-        _ => None,
-    }
-    .or_else(|| agent.channels.claude.as_ref())
-    .or_else(|| agent.channels.codex.as_ref())
-    .or_else(|| agent.channels.gemini.as_ref())
-    .or_else(|| agent.channels.opencode.as_ref())
-    .or_else(|| agent.channels.qwen.as_ref())
+    agent
+        .channels
+        .get(provider)
+        .or_else(|| {
+            crate::services::provider::supported_provider_ids()
+                .into_iter()
+                .find_map(|id| agent.channels.get(id))
+        })
+        .or_else(|| agent.channels.first_present().map(|(_, channel)| channel))
 }
 
 fn resolve_configured_path(runtime_root: &FsPath, raw: &str) -> PathBuf {

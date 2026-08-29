@@ -1039,9 +1039,10 @@ fn harness_config(voice_config: &VoiceConfig) -> crate::config::Config {
     agent.name = "AgentDesk".to_string();
     agent.aliases = vec!["에이디케이".to_string(), "agentdesk".to_string()];
     agent.voice.channel_id = Some(SOURCE_CHANNEL_ID.to_string());
-    agent.channels.codex = Some(crate::config::AgentChannel::from(
-        TARGET_CHANNEL_ID.to_string(),
-    ));
+    agent.channels.insert(
+        "codex",
+        crate::config::AgentChannel::from(TARGET_CHANNEL_ID.to_string()),
+    );
     agent.provider = "codex".to_string();
     config.agents = vec![agent];
     config
