@@ -21,8 +21,15 @@ use crate::db::scheduled_messages::{
 };
 use crate::error::{AppError, AppResult, ErrorCode};
 
+mod discord_mentions;
 mod provider_targets;
 mod snapshot_capture;
+
+use discord_mentions::{
+    ensure_rollout_ready as ensure_discord_mentions_rollout_ready,
+    validate_rendered_content_length as validate_discord_rendered_content_length,
+    validate_user_ids as validate_discord_mention_user_ids,
+};
 
 #[cfg(test)]
 mod postgres_tests;
@@ -79,6 +86,8 @@ fn scheduled_message_bot_or_default(bot: Option<&str>) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct CreateScheduledMessageBody {
     pub content: String,
+    #[serde(default)]
+    pub discord_mention_user_ids: Option<Vec<String>>,
     pub title: Option<String>,
     pub target_channel_id: Option<String>,
     pub bot: Option<String>,
@@ -164,6 +173,10 @@ async fn validate_create(
             "deliveryKind must be 'push' or 'agent'",
         ));
     }
+    let discord_mention_user_ids = validate_discord_mention_user_ids(
+        body.discord_mention_user_ids.as_deref().unwrap_or_default(),
+        &delivery_kind,
+    )?;
     let validated_provider_targets =
         provider_targets::prepare_create(body.provider_targets.as_ref(), content, &delivery_kind)?;
     let on_agent_failure = body
@@ -264,6 +277,16 @@ async fn validate_create(
             .clone()
             .filter(|value| !value.trim().is_empty()),
     )?;
+    if !discord_mention_user_ids.is_empty() && target_channel_id.is_none() {
+        return Err(app_error(
+            StatusCode::BAD_REQUEST,
+            "discordMentionUserIds requires targetChannelId",
+        ));
+    }
+    validate_discord_rendered_content_length(content, &discord_mention_user_ids)?;
+    if !discord_mention_user_ids.is_empty() {
+        ensure_discord_mentions_rollout_ready(pool).await?;
+    }
     let agent_id = body
         .agent_id
         .clone()
@@ -291,6 +314,7 @@ async fn validate_create(
 
     Ok(NewScheduledMessage {
         content: content.to_string(),
+        discord_mention_user_ids,
         title: body.title.clone().filter(|value| !value.trim().is_empty()),
         target_channel_id,
         bot: scheduled_message_bot_or_default(body.bot.as_deref()),
@@ -674,6 +698,21 @@ async fn build_patch(
         let content = content.ok_or_else(|| bad_request("content must not be null".to_string()))?;
         patch.content = Some(content);
     }
+    if let Some(value) = body.get("discordMentionUserIds") {
+        let user_ids = if value.is_null() {
+            Vec::new()
+        } else {
+            serde_json::from_value::<Vec<String>>(value.clone()).map_err(|error| {
+                bad_request(format!(
+                    "discordMentionUserIds must be an array or null: {error}"
+                ))
+            })?
+        };
+        patch.discord_mention_user_ids = Some(validate_discord_mention_user_ids(
+            &user_ids,
+            &existing.delivery_kind,
+        )?);
+    }
     patch.title = patch_string(body, "title").map_err(|e| bad_request(e))?;
     patch.target_channel_id =
         match patch_string(body, "targetChannelId").map_err(|e| bad_request(e))? {
@@ -727,6 +766,20 @@ async fn build_patch(
         .clone()
         .unwrap_or_else(|| existing.agent_instruction.clone());
     let has_provider_targets = provider_targets::apply_patch(body, &mut patch, existing)?;
+    let effective_mentions = patch
+        .discord_mention_user_ids
+        .as_deref()
+        .unwrap_or(&existing.discord_mention_user_ids);
+    if !effective_mentions.is_empty() {
+        if effective_target.is_none() {
+            return Err(bad_request(
+                "discordMentionUserIds requires targetChannelId".to_string(),
+            ));
+        }
+        ensure_discord_mentions_rollout_ready(pool).await?;
+    }
+    let effective_content = patch.content.as_deref().unwrap_or(&existing.content);
+    validate_discord_rendered_content_length(effective_content, effective_mentions)?;
     validate_agent_only_fields(
         effective_kind,
         effective_agent.as_deref(),
@@ -824,7 +877,9 @@ pub async fn trigger_scheduled_message_now(
     let pool = pool_or_unavailable(&state)?;
     if state.health_registry.is_none() {
         match db::get_scheduled_message_pg(pool, &id).await {
-            Ok(Some(row)) if row.status == db::STATUS_SCHEDULED && needs_discord(&row) => {
+            Ok(Some(row))
+                if row.status == db::STATUS_SCHEDULED && delivery_render::needs_discord(&row) =>
+            {
                 return Err(app_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Discord runtime is unavailable for scheduled delivery",
@@ -941,14 +996,33 @@ pub async fn list_scheduled_message_deliveries(
 
 mod delivery_render;
 
-fn needs_discord(message: &ScheduledMessageRow) -> bool {
-    message.delivery_kind == db::KIND_AGENT || message.target_channel_id.is_some()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn discord_mentions_are_normalized_and_reject_ambiguous_ids() {
+        assert_eq!(
+            validate_discord_mention_user_ids(
+                &[" 1469509284508340276 ".to_string()],
+                db::KIND_PUSH,
+            )
+            .unwrap(),
+            vec!["1469509284508340276".to_string()]
+        );
+        assert!(
+            validate_discord_mention_user_ids(
+                &[
+                    "1469509284508340276".to_string(),
+                    "1469509284508340276".to_string()
+                ],
+                db::KIND_PUSH,
+            )
+            .is_err()
+        );
+        assert!(validate_discord_mention_user_ids(&["123".to_string()], db::KIND_AGENT).is_err());
+    }
 
     // #4658 F4: a snapshot definition cannot be re-targeted via PATCH (target
     // channel / agent), else the frozen context bleeds into another channel's

@@ -1057,6 +1057,7 @@ server::routes::scheduled_messages::postgres_tests::postgres_scheduled_push_reje
 server::routes::scheduled_messages::postgres_tests::scheduled_message_bot_defaults_to_non_triggering_notify
 server::routes::scheduled_messages::postgres_tests::scheduled_push_rejects_agent_only_fields_but_allows_explicit_clears
 server::routes::scheduled_messages::provider_targets::tests::malformed_or_unknown_provider_target_fields_are_rejected
+server::routes::scheduled_messages::tests::discord_mentions_are_normalized_and_reject_ambiguous_ids
 server::routes::scheduled_messages::tests::patch_realigns_stale_recurring_time
 server::routes::scheduled_messages::tests::patch_rejects_stale_effective_one_shot_time
 server::routes::scheduled_messages::tests::snapshot_patch_retarget_is_rejected_but_fresh_and_other_fields_pass
@@ -7545,6 +7546,7 @@ services::scheduled_messages::provider_targets::tests::schema_is_closed_and_kaka
 services::scheduled_messages::provider_targets::tests::stored_plan_round_trip_revalidates_without_confirmation_field
 services::scheduled_messages::provider_targets::tests::target_requires_confirmation_and_an_audience
 services::scheduled_messages::push_handoff::tests::deadline_prefers_expiry_or_next_recurrence_over_default_window
+services::scheduled_messages::push_handoff::tests::mentions_render_only_for_the_discord_handoff_body
 services::scheduled_messages::tests::agent_prompt_includes_instruction_and_content
 services::scheduled_messages::tests::booting_discord_runtime_errors_defer_without_consuming_retry
 services::scheduled_messages::tests::final_non_system_event_ignores_system_tail_and_honors_recovery

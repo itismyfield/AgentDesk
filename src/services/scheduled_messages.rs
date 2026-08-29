@@ -1173,6 +1173,7 @@ mod tests {
         let message = ScheduledMessageRow {
             id: "smsg_test".to_string(),
             content: "내일 배포 예정".to_string(),
+            discord_mention_user_ids: Vec::new(),
             title: Some("배포 공지".to_string()),
             target_channel_id: Some("123".to_string()),
             bot: "announce".to_string(),

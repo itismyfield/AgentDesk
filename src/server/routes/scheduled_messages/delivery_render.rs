@@ -5,6 +5,10 @@ use sqlx::PgPool;
 
 use crate::db::scheduled_messages as db;
 
+pub(super) fn needs_discord(message: &db::ScheduledMessageRow) -> bool {
+    message.delivery_kind == db::KIND_AGENT || message.target_channel_id.is_some()
+}
+
 pub(super) async fn render_deliveries(
     pool: &PgPool,
     deliveries: Vec<db::DeliveryRow>,
