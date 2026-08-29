@@ -235,8 +235,34 @@ impl DeliveryLeaseCell {
         coordinate: ConsumedCoordinate,
         deadline_ms: u64,
     ) -> bool {
-        self.exact_identity_matches(pinned_cell, key, token, coordinate)
-            && self.renew(LeaseHolder::Sink, key.clone(), deadline_ms)
+        if !std::ptr::eq(self, Arc::as_ptr(pinned_cell)) {
+            return false;
+        }
+        let mut guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = super::PayloadLockMarker::enter();
+        if let super::LeaseState::Leased {
+            holder,
+            key: current_key,
+            deadline_ms: current_deadline,
+            start,
+            end,
+            exact_token,
+        } = &mut guard.lease
+        {
+            if *holder == LeaseHolder::Sink
+                && current_key == key
+                && *exact_token == Some(token)
+                && *start == coordinate.value()
+                && *end == coordinate.value()
+            {
+                *current_deadline = deadline_ms;
+                return true;
+            }
+        }
+        false
     }
 
     fn commit_exact(
@@ -247,14 +273,29 @@ impl DeliveryLeaseCell {
         coordinate: ConsumedCoordinate,
         outcome: LeaseOutcome,
     ) -> bool {
-        self.exact_identity_matches(pinned_cell, key, token, coordinate)
-            && self.commit(
-                LeaseHolder::Sink,
-                key.clone(),
-                coordinate.value(),
-                coordinate.value(),
-                outcome,
-            )
+        use std::sync::atomic::Ordering;
+        if !std::ptr::eq(self, Arc::as_ptr(pinned_cell)) {
+            return false;
+        }
+        let mut guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = super::PayloadLockMarker::enter();
+        if !exact_leased_fields_match(&guard.lease, key, token, coordinate.value()) {
+            return false;
+        }
+        guard.lease = super::LeaseState::Committed {
+            holder: LeaseHolder::Sink,
+            key: key.clone(),
+            start: coordinate.value(),
+            end: coordinate.value(),
+            outcome,
+            exact_token: Some(token),
+        };
+        self.state_tag
+            .store(super::TAG_COMMITTED, Ordering::Release);
+        true
     }
 
     fn release_exact(
@@ -264,17 +305,25 @@ impl DeliveryLeaseCell {
         token: LeaseToken,
         coordinate: ConsumedCoordinate,
     ) -> bool {
-        self.exact_identity_matches(pinned_cell, key, token, coordinate)
-            && self.release(
-                LeaseHolder::Sink,
-                key.clone(),
-                coordinate.value(),
-                coordinate.value(),
-            )
+        use std::sync::atomic::Ordering;
+        if !std::ptr::eq(self, Arc::as_ptr(pinned_cell)) {
+            return false;
+        }
+        let mut guard = self
+            .payload
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _payload_lock_marker = super::PayloadLockMarker::enter();
+        if !exact_state_matches(&guard.lease, key, token, coordinate.value()) {
+            return false;
+        }
+        guard.lease = super::LeaseState::Unleased;
+        self.state_tag.store(super::TAG_UNLEASED, Ordering::Release);
+        true
     }
 }
 
-fn exact_state_matches(
+fn exact_leased_fields_match(
     state: &super::LeaseState,
     expected_key: &DeliveryLeaseKey,
     expected_token: LeaseToken,
@@ -288,14 +337,6 @@ fn exact_state_matches(
             end,
             exact_token,
             ..
-        }
-        | super::LeaseState::Committed {
-            holder,
-            key,
-            start,
-            end,
-            exact_token,
-            ..
         } => {
             *holder == LeaseHolder::Sink
                 && *exact_token == Some(expected_token)
@@ -303,8 +344,31 @@ fn exact_state_matches(
                 && *start == expected_coordinate
                 && *end == expected_coordinate
         }
-        super::LeaseState::Unleased => false,
+        super::LeaseState::Unleased | super::LeaseState::Committed { .. } => false,
     }
+}
+
+fn exact_state_matches(
+    state: &super::LeaseState,
+    expected_key: &DeliveryLeaseKey,
+    expected_token: LeaseToken,
+    expected_coordinate: u64,
+) -> bool {
+    exact_leased_fields_match(state, expected_key, expected_token, expected_coordinate)
+        || matches!(
+            state,
+            super::LeaseState::Committed {
+                holder: LeaseHolder::Sink,
+                key,
+                start,
+                end,
+                exact_token: Some(token),
+                ..
+            } if *token == expected_token
+                && key == expected_key
+                && *start == expected_coordinate
+                && *end == expected_coordinate
+        )
 }
 
 #[cfg(test)]

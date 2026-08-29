@@ -171,6 +171,44 @@ fn concurrent_acquire_has_one_winner() {
 }
 
 #[test]
+fn renew_commit_and_release_hold_one_payload_lock() {
+    let cell = cell(51_965);
+    let key = key(51_965, 14, 15);
+    let acquired = PinnedLeaseCell::acquire(Arc::clone(&cell), key.clone(), coordinate(125), 10)
+        .expect("acquire");
+
+    let before_renew = super::super::payload_lock_entries_for_test();
+    assert!(acquired.renew(20));
+    assert_eq!(
+        super::super::payload_lock_entries_for_test() - before_renew,
+        1,
+        "exact renew must check and mutate under one payload lock"
+    );
+
+    let before_commit = super::super::payload_lock_entries_for_test();
+    let committed = match acquired.commit(LeaseOutcome::Delivered) {
+        Ok(guard) => guard,
+        Err(_) => panic!("matching commit must succeed"),
+    };
+    assert_eq!(
+        super::super::payload_lock_entries_for_test() - before_commit,
+        1,
+        "exact commit must check and mutate under one payload lock"
+    );
+
+    let before_release = super::super::payload_lock_entries_for_test();
+    let _released = match committed.release() {
+        Ok(guard) => guard,
+        Err(_) => panic!("matching release must succeed"),
+    };
+    assert_eq!(
+        super::super::payload_lock_entries_for_test() - before_release,
+        1,
+        "exact release must check and mutate under one payload lock"
+    );
+}
+
+#[test]
 fn committed_drop_releases_only_its_own_exact_state() {
     let cell = cell(51_970);
     let key = key(51_970, 15, 16);
