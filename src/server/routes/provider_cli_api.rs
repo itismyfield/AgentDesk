@@ -74,11 +74,11 @@ pub async fn get_provider_cli_status(
     }
 
     let response = ProviderCliStatusResponse {
+        catalog: crate::services::provider::public_provider_catalog(),
         providers,
         migrations,
         generated_at: Utc::now(),
     };
-
     let value = serde_json::to_value(&response)
         .map_err(|e| AppError::internal(format!("serialize: {e}")))?;
     Ok((StatusCode::OK, Json(value)))
@@ -340,6 +340,8 @@ pub async fn patch_provider_cli(
 }
 
 fn is_supported_provider(provider: &str) -> bool {
+    // Migration support is intentionally narrower than the public catalog.
+    // A selectable provider may not yet support managed channel upgrades.
     ALL_PROVIDERS.contains(&provider)
 }
 

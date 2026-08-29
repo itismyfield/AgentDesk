@@ -21,6 +21,8 @@ interface MeetingStartFormProps {
   primaryProvider: string;
   reviewerProvider: string;
   reviewerOptions: string[];
+  meetingProviders?: readonly string[];
+  providerLabels?: Record<string, string>;
   expertQuery: string;
   filteredExperts: RoundTableMeetingExpertOption[];
   fixedParticipants: string[];
@@ -46,6 +48,8 @@ export default function MeetingStartForm({
   primaryProvider,
   reviewerProvider,
   reviewerOptions,
+  meetingProviders = MEETING_PROVIDERS,
+  providerLabels = PROVIDER_LABELS,
   expertQuery,
   filteredExperts,
   fixedParticipants,
@@ -209,9 +213,9 @@ export default function MeetingStartForm({
                   className="rounded-lg px-3 py-2 text-xs"
                   style={inputStyle}
                 >
-                  {MEETING_PROVIDERS.map((provider) => (
+                  {meetingProviders.map((provider) => (
                     <option key={provider} value={provider}>
-                      {PROVIDER_LABELS[provider] ?? provider.toUpperCase()}
+                      {providerLabels[provider] ?? provider.toUpperCase()}
                     </option>
                   ))}
                 </select>
@@ -233,7 +237,7 @@ export default function MeetingStartForm({
                 >
                   {reviewerOptions.map((provider) => (
                     <option key={provider} value={provider}>
-                      {PROVIDER_LABELS[provider] ?? provider.toUpperCase()}
+                      {providerLabels[provider] ?? provider.toUpperCase()}
                     </option>
                   ))}
                 </select>

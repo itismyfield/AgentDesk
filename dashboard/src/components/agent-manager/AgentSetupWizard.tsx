@@ -1,6 +1,7 @@
 import type { CliProvider } from "../../types";
 import { localeName } from "../../i18n";
 import { summarizeRollback } from "../../api/agentsSetup";
+import { catalogLabel, useProviderCatalog } from "../../api/providers";
 import {
   SurfaceActionButton,
   SurfaceCard,
@@ -9,7 +10,6 @@ import {
   SurfaceSubsection,
 } from "../common/SurfacePrimitives";
 import AgentPromptEditor from "./AgentPromptEditor";
-import { CLI_PROVIDERS } from "./constants";
 import {
   parseSkills,
 } from "./setupWizardHelpers";
@@ -53,6 +53,7 @@ export default function AgentSetupWizard({
     runPreview,
     runConfirm,
   } = useAgentSetupWizardState({ open, mode, sourceAgent, onDone });
+  const providerCatalog = useProviderCatalog(draft.provider);
 
   if (!open) return null;
 
@@ -201,13 +202,25 @@ export default function AgentSetupWizard({
                           providerTouchedRef.current = true;
                           setDraft({ ...draft, provider: event.target.value as CliProvider });
                         }}
+                        disabled={providerCatalog.loading}
                         className={inputClass}
                         style={inputStyle}
                       >
-                        {CLI_PROVIDERS.map((provider) => (
-                          <option key={provider} value={provider}>{provider}</option>
+                        {providerCatalog.selectableIds.map((provider) => (
+                          <option key={provider} value={provider}>
+                            {catalogLabel(providerCatalog.entries, provider)}
+                          </option>
                         ))}
                       </select>
+                      {providerCatalog.loading ? (
+                        <span className="mt-1 block text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+                          {tr("프로바이더 목록을 불러오는 중...", "Loading providers...")}
+                        </span>
+                      ) : providerCatalog.error ? (
+                        <span className="mt-1 block text-[11px]" style={{ color: "var(--th-accent-danger)" }}>
+                          {tr("카탈로그를 못 불러 로컬 목록을 씁니다.", "Catalog unavailable; using local list.")}
+                        </span>
+                      ) : null}
                       {providerAuto && !providerTouchedRef.current && (
                         <span className="mt-1 block text-[11px]" style={{ color: "var(--th-accent-primary)" }}>
                           {tr("자동 추천", "Auto-detected")}: {providerAuto}
