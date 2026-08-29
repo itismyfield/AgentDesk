@@ -2,6 +2,7 @@ use super::{ChannelId, DeliveryLeaseKey};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+#[cfg(unix)]
 pub(super) mod source_epoch_observer;
 
 // ===========================================================================
