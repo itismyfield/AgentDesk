@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import locale
 import subprocess
 import sys
 import tempfile
@@ -619,13 +620,8 @@ mod after_string_brace {
         self.assertEqual(inventory.module_errors, {})
 
     def _comparison(self, static_ids: set[str]):
-        expected = integrity.expected_lib_static_only(sys.platform)
-        assert expected is not None
         return integrity.InventoryComparison(
-            expected,
-            integrity.LIB_INVENTORY_KNOWN_CARGO_ONLY,
-            frozenset(static_ids),
-            frozenset(),
+            frozenset(), frozenset(), frozenset(static_ids), frozenset()
         )
 
     def _write_manifest(self, root: Path, test_ids: set[str], raw: str | None = None) -> Path:
@@ -637,15 +633,26 @@ mod after_string_brace {
         )
         return path
 
-    def _inventory_cli(self, root: Path, comparison) -> tuple[int, str]:
-        output = io.StringIO()
+    def _inventory_cli_streams(self, root: Path, comparison) \
+            -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
         with mock.patch.object(
             integrity, "compare_lib_inventory", return_value=comparison,
-        ), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+        ) as compare, mock.patch.object(
+            integrity, "expected_lib_static_only", return_value=frozenset(),
+        ), mock.patch.object(
+            integrity, "LIB_INVENTORY_KNOWN_CARGO_ONLY", frozenset(),
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             rc = integrity.main([
                 "--repo-root", str(root), "--verify-lib-inventory",
             ])
-        return rc, output.getvalue()
+        if comparison is None:
+            compare.assert_not_called()
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def _inventory_cli(self, root: Path, comparison) -> tuple[int, str]:
+        rc, stdout, stderr = self._inventory_cli_streams(root, comparison)
+        return rc, stdout + stderr
 
     def test_manifest_matches_actual_set(self) -> None:
         baseline = {"module::tests::kept", "module::tests::guard"}
@@ -682,6 +689,108 @@ mod after_string_brace {
             "lib inventory manifest-only (deleted from source): module::tests::deleted",
             rendered,
         )
+
+    def test_same_count_rename_reports_both_sides_in_order(self) -> None:
+        manifest = {"module::tests::kept", "module::tests::old_id"}
+        actual = {"module::tests::kept", "module::tests::new_id"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_manifest(root, manifest)
+            rc, stdout, stderr = self._inventory_cli_streams(
+                root, self._comparison(actual)
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("manifest-only=1 actual-only=1", stdout)
+        self.assertIn("manifest-count=2 actual-count=2 delta=+0", stdout)
+        self.assertEqual(
+            stderr,
+            "lib inventory manifest-only (deleted from source): "
+            "module::tests::old_id\n"
+            "lib inventory actual-only (added in source): "
+            "module::tests::new_id\n",
+        )
+
+    def test_utf8_bom_is_rejected_before_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self._write_manifest(root, {"module::tests::kept"})
+            path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes())
+            rc, stdout, stderr = self._inventory_cli_streams(root, None)
+        self.assertEqual(rc, 2)
+        self.assertEqual(stdout, "")
+        self.assertTrue(stderr.endswith(
+            ": invalid generated-manifest header\n"
+            "lib inventory re-pin: run `python3 "
+            "scripts/check_test_target_integrity.py "
+            "--write-lib-inventory-manifest`, review the manifest diff, "
+            "then rerun --verify-lib-inventory\n"
+        ), stderr)
+
+    def test_non_ascii_ids_use_utf8_byte_order_and_round_trip(self) -> None:
+        ids = {
+            "module::tests::z_case",
+            "module::tests::ß_case",
+            "module::tests::é_case",
+        }
+        rendered = integrity.render_lib_inventory_manifest(ids)
+        rows = rendered.split("[tests]\n", 1)[1].splitlines()
+        self.assertEqual(
+            rows, sorted(ids, key=lambda value: value.encode("utf-8"))
+        )
+        self.assertEqual(
+            integrity.parse_lib_inventory_manifest(rendered), frozenset(ids)
+        )
+        self.assertNotIn("\r", rendered)
+        self.assertTrue(rendered.endswith("\n"))
+        self.assertFalse(rendered.endswith("\n\n"))
+
+    def test_manifest_contract_is_locale_independent(self) -> None:
+        original = locale.setlocale(locale.LC_ALL)
+        proc = subprocess.run(
+            ["locale", "-a"], capture_output=True, text=True, check=True
+        )
+        aliases = ["C", "POSIX", *(
+            name for name in proc.stdout.splitlines()
+            if "utf8" in name.lower().replace("-", "")
+        )]
+        ids = {
+            "module::tests::z_case",
+            "module::tests::ß_case",
+            "module::tests::é_case",
+        }
+        expected_rows = sorted(ids, key=lambda value: value.encode("utf-8"))
+        observed = []
+        try:
+            configured = set()
+            for name in aliases:
+                canonical = locale.setlocale(locale.LC_ALL, name)
+                if canonical in configured:
+                    continue
+                configured.add(canonical)
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    manifest = integrity.render_lib_inventory_manifest(ids)
+                    parsed = integrity.parse_lib_inventory_manifest(manifest)
+                    self._write_manifest(root, ids, raw=manifest)
+                    rc, stdout, stderr = self._inventory_cli_streams(
+                        root, self._comparison(ids)
+                    )
+                observed.append((
+                    manifest,
+                    sorted(parsed, key=lambda value: value.encode("utf-8")),
+                    rc, stdout, stderr,
+                ))
+        finally:
+            locale.setlocale(locale.LC_ALL, original)
+        self.assertTrue(observed)
+        self.assertTrue(all(item == observed[0] for item in observed[1:]))
+        manifest, parsed, rc, stdout, stderr = observed[0]
+        self.assertEqual(
+            manifest.split("[tests]\n", 1)[1].splitlines(), expected_rows
+        )
+        self.assertEqual(parsed, expected_rows)
+        self.assertEqual((rc, stderr), (0, ""))
+        self.assertIn("manifest=match", stdout)
 
     def test_unsorted_manifest_fails_closed(self) -> None:
         raw = "\n".join([
