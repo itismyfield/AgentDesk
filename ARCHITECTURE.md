@@ -895,6 +895,10 @@ src/
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_identity.rs
 │   │   │   └── tests.rs
+│   │   ├── terminal_coordinate/
+│   │   │   ├── mod.rs
+│   │   │   ├── tests.rs
+│   │   │   └── validation.rs
 │   │   ├── tmux/
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
 │   │   ├── tmux_output_stream/
@@ -1273,6 +1277,7 @@ src/
 │   │   ├── status_panel_transition_v2.rs
 │   │   ├── streaming_finalizer.rs
 │   │   ├── subagent_notification_card.rs
+│   │   ├── synthetic_message_id.rs
 │   │   ├── task_supervisor.rs
 │   │   ├── terminal_ui_obligation.rs
 │   │   ├── tmux.rs
