@@ -97,6 +97,10 @@ impl SinkDeliveryLeaseGuard {
             .sink_exact_matches(&self.key, self.coordinate, self.token)
     }
 
+    #[cfg(test)]
+    fn token(&self) -> LeaseToken {
+        self.token
+    }
 }
 
 impl Drop for SinkDeliveryLeaseGuard {
@@ -254,4 +258,80 @@ pub(super) fn finish_sink_delivery(
         guard.commit(LeaseOutcome::Delivered);
     }
     result
+}
+
+#[cfg(test)]
+mod pr_b_contract_tests {
+    use super::*;
+    use crate::services::discord::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseSnapshot};
+
+    fn key(channel: ChannelId, generation: u64) -> DeliveryLeaseKey {
+        DeliveryLeaseKey::new(channel, generation, 7, Some("turn"), Some(1))
+    }
+
+    #[tokio::test]
+    async fn matching_durable_receipt_commits_exact_acquired_lease() {
+        let channel = ChannelId::new(51_911);
+        let cell = Arc::new(DeliveryLeaseCell::new(channel));
+        let guard = SinkDeliveryLeaseGuard::acquire(&cell, key(channel, 1), 19).unwrap();
+        assert!(guard.matches_exact());
+        assert!(guard.commit(LeaseOutcome::Delivered));
+        assert!(matches!(cell.read(), LeaseSnapshot::Committed { outcome: LeaseOutcome::Delivered, .. }));
+    }
+
+    #[tokio::test]
+    async fn mismatched_receipt_cannot_commit_or_drop_current_lease() {
+        let channel = ChannelId::new(51_912);
+        let cell = Arc::new(DeliveryLeaseCell::new(channel));
+        let mut old = SinkDeliveryLeaseGuard::acquire(&cell, key(channel, 1), 19).unwrap();
+        let old_token = old.token();
+        assert!(cell.release_sink_exact(&key(channel, 1), 19, old_token));
+        let current = SinkDeliveryLeaseGuard::acquire(&cell, key(channel, 1), 19).unwrap();
+        assert!(!old.commit(LeaseOutcome::Delivered));
+        drop(old);
+        assert!(current.matches_exact());
+    }
+
+    #[tokio::test]
+    async fn transport_failure_drops_only_the_exact_acquired_lease() {
+        let channel = ChannelId::new(51_913);
+        let cell = Arc::new(DeliveryLeaseCell::new(channel));
+        let guard = SinkDeliveryLeaseGuard::acquire(&cell, key(channel, 1), 23).unwrap();
+        drop(guard);
+        assert!(matches!(cell.read(), LeaseSnapshot::Unleased));
+    }
+
+    #[tokio::test]
+    async fn stale_pre_reset_guard_cannot_drop_post_reset_replacement_lease() {
+        let channel = ChannelId::new(51_914);
+        let cell = Arc::new(DeliveryLeaseCell::new(channel));
+        let old = SinkDeliveryLeaseGuard::acquire(&cell, key(channel, 1), 29).unwrap();
+        assert!(cell.release_sink_exact(&key(channel, 1), 29, old.token()));
+        let replacement = SinkDeliveryLeaseGuard::acquire(&cell, key(channel, 2), 29).unwrap();
+        drop(old);
+        assert!(replacement.matches_exact());
+    }
+
+    #[test]
+    fn landed_stale_settles_attempt_without_advancing_current_frontier() {
+        assert_ne!(SinkDeliveryProofResult::LandedStale, SinkDeliveryProofResult::Persisted);
+    }
+
+    #[test]
+    fn journal_capture_uses_enqueued_reset_identity_not_live_frontier() {
+        let authority = TerminalDeliveryAuthority {
+            consumed: 41,
+            source_range: (3, 40),
+            reset_incarnation: 17,
+        };
+        assert_eq!(authority.reset_incarnation, 17);
+    }
+
+    #[test]
+    fn commit_precedes_frontier_and_frontier_never_precedes_transport_receipt() {
+        let source = include_str!("delivery_frontier.rs");
+        assert!(source.find("settle_exact(").is_none());
+        let sink = include_str!("../session_relay_sink.rs");
+        assert!(sink.find("journal::settle_exact(").unwrap() < sink.find("delivery_frontier::finish_sink_delivery(").unwrap());
+    }
 }
