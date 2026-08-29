@@ -28,6 +28,36 @@ fn rust_sources(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn char_literal_end(source: &str, quote: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut index = quote + 1;
+    if bytes.get(index) == Some(&b'\\') {
+        index += 1;
+        match *bytes.get(index)? {
+            b'x' => index += 3,
+            b'u' if bytes.get(index + 1) == Some(&b'{') => {
+                index += 2;
+                while !matches!(bytes.get(index), None | Some(b'}' | b'\n' | b'\r')) {
+                    index += 1;
+                }
+                if bytes.get(index) != Some(&b'}') {
+                    return None;
+                }
+                index += 1;
+            }
+            b'\n' | b'\r' => return None,
+            _ => index += 1,
+        }
+    } else {
+        let character = source.get(index..)?.chars().next()?;
+        if matches!(character, '\'' | '\n' | '\r') {
+            return None;
+        }
+        index += character.len_utf8();
+    }
+    (bytes.get(index) == Some(&b'\'')).then_some(index + 1)
+}
+
 fn strip_comments_and_strings(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut clean = Vec::with_capacity(bytes.len());
@@ -94,6 +124,23 @@ fn strip_comments_and_strings(source: &str) -> String {
                 }
                 continue;
             }
+        }
+
+        let char_quote = if bytes[index] == b'b' && bytes.get(index + 1) == Some(&b'\'') {
+            Some(index + 1)
+        } else if bytes[index] == b'\'' {
+            Some(index)
+        } else {
+            None
+        };
+        if let Some(quote) = char_quote
+            && let Some(end) = char_literal_end(source, quote)
+        {
+            while index < end {
+                clean.push(b' ');
+                index += 1;
+            }
+            continue;
         }
 
         if bytes[index] == b'b' && bytes.get(index + 1) == Some(&b'"') {
@@ -174,6 +221,11 @@ fn caller_zero_gate_kills_representative_mutations() {
         "let _ = TerminalCoordinateCandidate::new(1, None, 0, identity, route);",
         "let _ = validate_terminal_coordinate(candidate);",
         "use crate::services::discord::terminal_coordinate::TurnIdentity;",
+        "let _ = '\"'; let _ = CanonicalC::new(1);",
+        "let _ = '\\\"'; let _ = RouteFamily::Watcher;",
+        "let _ = b'\"'; let _ = validate_terminal_coordinate(candidate);",
+        "let _ = b'\\\''; let _ = TurnIdentity::started_at;",
+        "let _: &'a str = value; let _ = TerminalCoordinate::canonical_c;",
     ] {
         assert!(
             !forbidden_uses(mutation, false).is_empty(),
