@@ -570,12 +570,12 @@ mod discord_unit_tests {
     use crate::services::discord::DISCORD_MSG_LIMIT;
 
     #[test]
-    fn utf16_fit_predicate_and_chunker_agree_on_supplementary_overflow_5177() {
+    fn utf16_fit_predicate_pins_units_and_ascii_control_5177_5178() {
         let korean_under_limit = "한".repeat(900);
         assert_eq!(
             discord_message_units(&korean_under_limit),
             900,
-            "fixture unit count"
+            "Korean under-limit fixture unit count"
         );
         assert!(
             korean_under_limit.len() > DISCORD_MSG_LIMIT,
@@ -591,8 +591,14 @@ mod discord_unit_tests {
         // supplementary witnesses distinguish byte- and scalar-count regressions.
         let ascii_at_limit = "x".repeat(DISCORD_MSG_LIMIT);
         let ascii_over_limit = format!("{ascii_at_limit}x");
-        assert!(!needs_multiple_messages(&ascii_at_limit));
-        assert!(needs_multiple_messages(&ascii_over_limit));
+        assert!(
+            !needs_multiple_messages(&ascii_at_limit),
+            "ASCII control at 2000 units must fit"
+        );
+        assert!(
+            needs_multiple_messages(&ascii_over_limit),
+            "ASCII control at 2001 units must route multi"
+        );
 
         let supplementary_at_limit = "📦".repeat(DISCORD_MSG_LIMIT / 2);
         assert_eq!(
@@ -616,7 +622,11 @@ mod discord_unit_tests {
         );
 
         let body = format!("{}{}", "한".repeat(1_965), "📦".repeat(20));
-        assert_eq!(discord_message_units(&body), 2_005, "fixture unit count");
+        assert_eq!(
+            discord_message_units(&body),
+            2_005,
+            "mixed over-limit fixture unit count"
+        );
         assert!(
             needs_multiple_messages(&body),
             "2005 units must route multi"
