@@ -110,8 +110,10 @@ mod status_panel_singleton_store;
 // #4891 Task #26 Slice 1: dormant pure proofs; no production caller or authority.
 mod status_panel_transition_v2;
 pub(in crate::services::discord) mod streaming_finalizer;
+mod synthetic_headless_message_id;
 mod task_notification_delivery;
 pub(in crate::services::discord) mod task_supervisor;
+mod terminal_coordinate;
 mod terminal_ui_obligation;
 #[cfg(unix)]
 mod tmux;
@@ -330,19 +332,9 @@ pub(crate) use settings::resolve_role_binding as resolve_channel_role_binding;
 /// Discord message length limit
 pub(super) const DISCORD_MSG_LIMIT: usize = 2000;
 
-/// Lower bound of the synthetic-headless message-id range. Real Discord
-/// snowflake ids never reach this value, so any id at or above it is a
-/// synthetic placeholder (headless recovery / creation-failed fallback).
-/// Centralized here so both `turn_bridge::is_synthetic_headless_message_id`
-/// and the typed `inflight` status-panel ownership ops (#3077) agree on the
-/// boundary without coupling `inflight` to the serenity `MessageId` newtype.
-pub(in crate::services::discord) const SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR: u64 =
-    8_000_000_000_000_000_000;
-
-/// Raw `u64` form of `turn_bridge::is_synthetic_headless_message_id`.
-pub(in crate::services::discord) fn is_synthetic_headless_message_id_raw(value: u64) -> bool {
-    value >= SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR
-}
+pub(in crate::services::discord) use synthetic_headless_message_id::{
+    SYNTHETIC_HEADLESS_MESSAGE_ID_FLOOR, is_synthetic_headless_message_id_raw,
+};
 const UPLOAD_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const UPLOAD_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60); // 1 hour
