@@ -4288,6 +4288,8 @@ services::discord::restart_mode::protocol_v2::values::tests::canonical_uuid_form
 services::discord::restart_mode::protocol_v2::values::tests::identities_preserve_exact_unicode_and_reject_empty_or_nul
 services::discord::restart_mode::protocol_v2::values::tests::safe_relative_reference_accepts_nested_portable_components
 services::discord::restart_mode::protocol_v2::values::tests::safe_relative_reference_rejects_each_unsafe_class
+services::discord::restart_mode::protocol_v2::values::tests::safe_relative_reference_rejects_superscript_reserved_basenames
+services::discord::restart_mode::protocol_v2::values::tests::safe_relative_reference_rejects_windows_forbidden_characters
 services::discord::restart_report::tests::exact_fencing_nonce_and_acceptance_survive_a_b_c_overlap
 services::discord::restart_report::tests::pending_awaiting_and_corrupt_reports_are_conservative
 services::discord::restart_report::tests::production_path_preserves_attempt_and_fresh_bridge_channel
