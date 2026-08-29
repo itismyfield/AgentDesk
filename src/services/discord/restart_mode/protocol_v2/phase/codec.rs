@@ -38,22 +38,52 @@ struct WireEvent {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(untagged)]
 enum WireKind {
-    Bound(StrictEmptyWireKind),
-    Started(StrictEmptyWireKind),
-    Terminal {
-        outcome: TerminalOutcomeV2,
-        proof: String,
-    },
-    Receipt {
-        receipt: String,
-    },
+    Empty(EmptyWireKind),
+    Terminal(TerminalWireKind),
+    Receipt(ReceiptWireKind),
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StrictEmptyWireKind {}
+struct EmptyWireKind {
+    phase: EmptyWirePhase,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EmptyWirePhase {
+    Bound,
+    Started,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalWireKind {
+    phase: TerminalWirePhase,
+    outcome: TerminalOutcomeV2,
+    proof: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TerminalWirePhase {
+    Terminal,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiptWireKind {
+    phase: ReceiptWirePhase,
+    receipt: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReceiptWirePhase {
+    Receipt,
+}
 
 #[derive(Serialize)]
 struct WirePreimage<'a> {
@@ -145,13 +175,17 @@ fn into_domain(wire: WireEvent) -> Result<PhaseEventV2, PhaseCodecError> {
             .transpose()?,
         event_hash: parse_digest(&wire.event_hash)?,
         kind: match wire.kind {
-            WireKind::Bound(_) => PhaseKindV2::Bound,
-            WireKind::Started(_) => PhaseKindV2::Started,
-            WireKind::Terminal { outcome, proof } => PhaseKindV2::Terminal {
+            WireKind::Empty(EmptyWireKind {
+                phase: EmptyWirePhase::Bound,
+            }) => PhaseKindV2::Bound,
+            WireKind::Empty(EmptyWireKind {
+                phase: EmptyWirePhase::Started,
+            }) => PhaseKindV2::Started,
+            WireKind::Terminal(TerminalWireKind { outcome, proof, .. }) => PhaseKindV2::Terminal {
                 outcome,
                 terminal_proof: SafeRelativeRefV2::parse(&proof).map_err(|_| PhaseCodecError)?,
             },
-            WireKind::Receipt { receipt } => PhaseKindV2::Receipt {
+            WireKind::Receipt(ReceiptWireKind { receipt, .. }) => PhaseKindV2::Receipt {
                 durable_receipt: SafeRelativeRefV2::parse(&receipt).map_err(|_| PhaseCodecError)?,
             },
         },
@@ -193,18 +227,24 @@ fn into_wire(event: &PhaseEventV2) -> WireEvent {
         previous_hash: RequiredPreviousHash(event.previous_hash.map(|hash| hex::encode(hash.0))),
         event_hash: hex::encode(event.event_hash.0),
         kind: match &event.kind {
-            PhaseKindV2::Bound => WireKind::Bound(StrictEmptyWireKind {}),
-            PhaseKindV2::Started => WireKind::Started(StrictEmptyWireKind {}),
+            PhaseKindV2::Bound => WireKind::Empty(EmptyWireKind {
+                phase: EmptyWirePhase::Bound,
+            }),
+            PhaseKindV2::Started => WireKind::Empty(EmptyWireKind {
+                phase: EmptyWirePhase::Started,
+            }),
             PhaseKindV2::Terminal {
                 outcome,
                 terminal_proof,
-            } => WireKind::Terminal {
+            } => WireKind::Terminal(TerminalWireKind {
+                phase: TerminalWirePhase::Terminal,
                 outcome: *outcome,
                 proof: terminal_proof.as_str().to_owned(),
-            },
-            PhaseKindV2::Receipt { durable_receipt } => WireKind::Receipt {
+            }),
+            PhaseKindV2::Receipt { durable_receipt } => WireKind::Receipt(ReceiptWireKind {
+                phase: ReceiptWirePhase::Receipt,
                 receipt: durable_receipt.as_str().to_owned(),
-            },
+            }),
         },
     }
 }
@@ -263,7 +303,10 @@ mod high_risk_recovery {
                 reason: actual,
                 raw: owned,
             } => assert_eq!((actual, &*owned), (reason, raw)),
-            other => panic!("expected Poison({reason:?}), got {other:?}"),
+            other => panic!(
+                "expected Poison({reason:?}) for raw {:?}, got {other:?}",
+                String::from_utf8_lossy(raw)
+            ),
         }
     }
 
@@ -380,6 +423,11 @@ mod high_risk_recovery {
                 GOLDEN_BOUND,
                 r#"{"phase":"bound"}"#,
                 r#"{"phase":"bound","extra":1}"#,
+            ),
+            (
+                GOLDEN_BOUND,
+                r#"{"phase":"bound"}"#,
+                r#"{"phase":"bound","phase":"bound"}"#,
             ),
             (
                 &started,
