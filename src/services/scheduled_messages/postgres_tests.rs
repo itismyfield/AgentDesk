@@ -1,5 +1,6 @@
 use super::*;
 use chrono::Duration;
+use serde_json::json;
 use sqlx::Row;
 
 fn at_postgres_precision(value: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
@@ -65,6 +66,8 @@ async fn insert_agent_message(
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            provider_targets: None,
+            provider_target_summary: None,
             context_strategy: "fresh".to_string(),
             context_snapshot_id: None,
             on_context_failure: "fail".to_string(),
@@ -109,6 +112,8 @@ async fn insert_due_push_message(pool: &PgPool) -> ScheduledMessageRow {
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            provider_targets: None,
+            provider_target_summary: None,
             context_strategy: "fresh".to_string(),
             context_snapshot_id: None,
             on_context_failure: "fail".to_string(),
@@ -246,6 +251,108 @@ async fn postgres_scheduled_message_default_notify_reaches_push_outbox() {
         .await
         .expect("load default-notify outbox row");
     assert_eq!(outbox_bot, "notify");
+
+    pool.close().await;
+    pg_db.drop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_scheduled_push_atomically_fans_out_to_discord_and_kakao() {
+    let (pg_db, pool) = create_test_pool(
+        "agentdesk_smsg_provider_fanout",
+        "scheduled push atomic Discord and Kakao fan-out",
+    )
+    .await;
+    let message = db::insert_scheduled_message_pg(
+        &pool,
+        &db::NewScheduledMessage {
+            content: "fan out this reminder".to_string(),
+            title: None,
+            target_channel_id: Some("123456789".to_string()),
+            bot: "notify".to_string(),
+            delivery_kind: db::KIND_PUSH.to_string(),
+            agent_id: None,
+            agent_instruction: None,
+            on_agent_failure: "fail".to_string(),
+            scheduled_at: Utc::now() - Duration::seconds(1),
+            schedule: None,
+            timezone: "UTC".to_string(),
+            expires_at: None,
+            source: "postgres_test".to_string(),
+            created_by: Some("postgres_test".to_string()),
+            dedupe_key: None,
+            provider_targets: Some(json!({
+                "kakao": {
+                    "accountId": "default",
+                    "friendUuids": ["private-friend-uuid"],
+                    "sendToSelf": true
+                }
+            })),
+            provider_target_summary: Some(json!({
+                "kakao": {
+                    "enabled": true,
+                    "accountId": "default",
+                    "friendCount": 1,
+                    "sendToSelf": true,
+                    "contentMode": "text"
+                }
+            })),
+            context_strategy: "fresh".to_string(),
+            context_snapshot_id: None,
+            on_context_failure: "fail".to_string(),
+        },
+    )
+    .await
+    .expect("insert multi-channel scheduled push");
+    let fire = claim_one(&pool, "provider-fanout-worker").await;
+
+    fire_claimed(&pool, None, fire.clone(), Utc::now()).await;
+    fire_claimed(&pool, None, fire, Utc::now()).await;
+
+    let terminal = db::get_scheduled_message_pg(&pool, &message.id)
+        .await
+        .expect("load fan-out parent")
+        .expect("fan-out parent exists");
+    assert_eq!(terminal.status, db::STATUS_SENT);
+    assert!(terminal.provider_targets.is_none());
+    assert!(terminal.provider_target_summary.is_some());
+
+    let discord_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox WHERE source = $1")
+            .bind(OUTBOX_SOURCE)
+            .fetch_one(&pool)
+            .await
+            .expect("count Discord handoffs");
+    assert_eq!(
+        discord_count, 1,
+        "replayed claims must not duplicate Discord"
+    );
+
+    let external = sqlx::query(
+        "SELECT audience, requested_count, status
+         FROM scheduled_external_delivery_outbox
+         ORDER BY audience",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("load external handoffs");
+    assert_eq!(
+        external.len(),
+        2,
+        "friends and self are independent deliveries"
+    );
+    assert_eq!(
+        external[0].try_get::<String, _>("audience").unwrap(),
+        "friends"
+    );
+    assert_eq!(external[0].try_get::<i16, _>("requested_count").unwrap(), 1);
+    assert_eq!(
+        external[1].try_get::<String, _>("audience").unwrap(),
+        "self"
+    );
+    for row in external {
+        assert_eq!(row.try_get::<String, _>("status").unwrap(), "pending");
+    }
 
     pool.close().await;
     pg_db.drop().await;
@@ -440,6 +547,8 @@ async fn postgres_trigger_now_retry_preserves_recurring_anchor() {
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            provider_targets: None,
+            provider_target_summary: None,
             context_strategy: "fresh".to_string(),
             context_snapshot_id: None,
             on_context_failure: "fail".to_string(),
@@ -525,6 +634,8 @@ async fn postgres_resume_anchor_compat_migration_preserves_active_trigger_now_an
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            provider_targets: None,
+            provider_target_summary: None,
             context_strategy: "fresh".to_string(),
             context_snapshot_id: None,
             on_context_failure: "fail".to_string(),
@@ -691,6 +802,8 @@ async fn postgres_agent_trigger_now_retry_preserves_recurring_anchor_through_pol
             source: "postgres_test".to_string(),
             created_by: Some("postgres_test".to_string()),
             dedupe_key: None,
+            provider_targets: None,
+            provider_target_summary: None,
             context_strategy: "fresh".to_string(),
             context_snapshot_id: None,
             on_context_failure: "fail".to_string(),
