@@ -232,12 +232,28 @@ bytewise UTF-8 오름차순이어야 하고, 파일은 UTF-8/LF/최종 LF 형식
 - 매니페스트 자체는 같은 PR에서 갱신할 수 있으므로, 그 갱신을 동반한 삭제·이름
   변경을 이 검사만으로 막는 것은 보장하지 않는다. 반드시 소스 diff와 이름 diff를
   함께 리뷰해야 한다.
+- 정적 스캐너만 실행한 뒤 매니페스트를 재생성하는 절차는 수집 완전성을 보장하지
+  않는다. 스캐너가 회귀해 ID를 덜 수집하면 재생성이 그 축소를 그대로 기록할 수
+  있다. CI의 Cargo `--list` 독립 대조가 `cargo-only` 차이를 잡는 backstop이므로,
+  이 대조를 생략한 재생성 성공만으로 inventory가 완전하다고 판정하면 안 된다.
 
 `--verify-lib-inventory`는 `cargo test --manifest-path Cargo.toml --lib -- --list`를
 실행하므로 전체 lib 크레이트 컴파일이 필요하다. 이를 호출하는 PR `Script checks runner`와
 main `Main script checks` job은 모두 Rust 1.94.1 toolchain, sccache, Cargo dependency
 cache를 먼저 설치한다. 이 wiring을 바꾸면 해당 workflow setup과 이 문서의 재현 명령을
 함께 검토한다.
+
+`scripts/ci-script-checks.sh`는 cargo-free unittest를 먼저 실행하고, Cargo 대조는
+다음 명령으로 정확히 한 번 실행한다.
+
+```sh
+AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
+```
+
+900초는 이 컴파일 포함 검사의 명시적 wall-clock 예산이며, report 플래그는 성공과
+실패 모두에서 실제 소요시간을 CI notice로 남긴다. #5145 close-out 때 특정 runner/cache
+상태에서 관측한 약 446–454초는 예산 산정 맥락일 뿐 현재 속도나 상한을 약속하지 않는다.
+하드웨어, cache hit 여부, dependency 변경에 따라 실제 시간은 달라질 수 있다.
 
 ### Gate ↔ 실제 커맨드
 
