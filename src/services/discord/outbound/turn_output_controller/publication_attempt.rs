@@ -33,7 +33,7 @@ enum HeldCoordinate {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct MarkerlessAttempt {
-    _private: (),
+    coordinate: (u64, u64),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -110,7 +110,7 @@ fn issue_held(
 /// Private controller seam for recovery/standby authority with no lease.
 fn issue_markerless() -> IssuedAttempt {
     IssuedAttempt {
-        attempt: PublicationAttempt::Markerless(MarkerlessAttempt { _private: () }),
+        attempt: PublicationAttempt::Markerless(MarkerlessAttempt { coordinate: (0, 0) }),
         issuer_stamp: CONTROLLER_ISSUER_STAMP,
     }
 }
@@ -180,7 +180,10 @@ mod tests {
         assert_eq!(proof.held_identity(), None);
         assert_eq!(proof.lease_range(), None);
         assert_eq!(proof.frontier_range(), None);
-        assert!(matches!(proof.attempt, PublicationAttempt::Markerless(_)));
+        assert!(matches!(
+            proof.attempt,
+            PublicationAttempt::Markerless(MarkerlessAttempt { coordinate: (0, 0) })
+        ));
     }
 
     #[test]
@@ -222,7 +225,7 @@ mod tests {
     fn logical_verb_rejects_a_proof_not_minted_by_private_issuer() {
         let calls = AtomicUsize::new(0);
         let bypass = IssuedAttempt {
-            attempt: PublicationAttempt::Markerless(MarkerlessAttempt { _private: () }),
+            attempt: PublicationAttempt::Markerless(MarkerlessAttempt { coordinate: (0, 0) }),
             issuer_stamp: 0,
         };
         let rejected = futures::executor::block_on(transport_once(bypass, |_| {
