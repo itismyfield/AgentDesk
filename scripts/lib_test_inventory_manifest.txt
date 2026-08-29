@@ -7672,6 +7672,14 @@ services::stale_turn_reconciler::tests::stale_candidate_cas_rejects_heartbeat_mo
 services::stale_turn_reconciler::tests::tmux_identity_rejects_provider_mismatch_and_spinner_is_busy
 services::stale_turn_reconciler::tests::transport_unknown_warrant_vetoes_the_destructive_apply_and_reachable_releases_it_pg
 services::stale_turn_reconciler::tests::unreadable_inflight_provider_maps_unknown_and_preserves_busy_session_pg
+services::stream_json_cli::codec::tests::agy_codec_does_not_duplicate_aggregate_after_delta
+services::stream_json_cli::codec::tests::grok_messages_codec_emits_init_and_done
+services::stream_json_cli::policy::tests::empty_allowlist_mode_is_error
+services::stream_json_cli::policy::tests::mode_less_vector_is_legacy
+services::stream_json_cli::policy::tests::omitted_mode_and_tools_are_provider_default
+services::stream_json_cli::policy::tests::stream_json_legacy_vector_does_not_become_allowlist
+services::stream_json_cli::session::tests::accepts_uuid
+services::stream_json_cli::session::tests::rejects_non_uuid
 services::task_completion_v1::tests::canonical_round_trip_and_field_permutation
 services::task_completion_v1::tests::duplicate_and_escaped_duplicate_keys_are_rejected
 services::task_completion_v1::tests::escaped_whitespace_ids_are_rejected_before_value_normalization
