@@ -570,7 +570,7 @@ mod discord_unit_tests {
     use crate::services::discord::DISCORD_MSG_LIMIT;
 
     #[test]
-    fn utf16_fit_predicate_pins_units_and_ascii_control_5177_5178() {
+    fn utf16_fit_predicate_pins_units_with_ascii_control_5178() {
         let korean_under_limit = "한".repeat(900);
         assert_eq!(
             discord_message_units(&korean_under_limit),
@@ -620,7 +620,10 @@ mod discord_unit_tests {
             needs_multiple_messages(&supplementary_over_limit),
             "2001 UTF-16 units must route multi"
         );
+    }
 
+    #[test]
+    fn utf16_fit_predicate_and_chunker_agree_on_supplementary_overflow_5177() {
         let body = format!("{}{}", "한".repeat(1_965), "📦".repeat(20));
         assert_eq!(
             discord_message_units(&body),

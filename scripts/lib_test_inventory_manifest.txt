@@ -2372,6 +2372,7 @@ services::discord::footer_view_reconciler::tests::unfinished_background_refresh_
 services::discord::formatting::delivery::attachment_delivery_tests::oversize_operational_alert_attachment_inline_remains_non_turn
 services::discord::formatting::delivery::discord_unit_tests::long_supplementary_fence_info_does_not_discard_body_5177
 services::discord::formatting::delivery::discord_unit_tests::utf16_fit_predicate_and_chunker_agree_on_supplementary_overflow_5177
+services::discord::formatting::delivery::discord_unit_tests::utf16_fit_predicate_pins_units_with_ascii_control_5178
 services::discord::formatting::long_send_rollback::sink_direct_receipt_tests::t7_rollback_receipts_preserve_a_returned_channel_mismatch
 services::discord::formatting::relay_state_contract_refs::contract_symbols_exist
 services::discord::formatting::replace_long_message_tests::completion_footer_anchor_reanchors_to_last_chunk_with_tail_text
