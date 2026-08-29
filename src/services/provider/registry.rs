@@ -1,0 +1,269 @@
+//! Canonical provider registry rows, aliases, and counterpart derivation.
+
+use crate::services::provider_auth::ProviderAuthSpec;
+
+use super::{
+    CODEX_FALLBACK_CONTEXT_WINDOW, ProviderCapabilities, ProviderCompactionAdapter,
+    ProviderDefaultBehavior, ProviderExecutionAdapter, ProviderKind, ProviderReadinessAdapter,
+    ProviderRegistryEntry,
+};
+
+/// Preserve the historical first counterpart while deriving every remaining
+/// counterpart from the registry. Adding a provider then requires one row, not
+/// edits to every existing provider's counterpart list.
+const FROZEN_FIRST_COUNTERPART: &[(&str, &str)] = &[
+    ("claude", "codex"),
+    ("codex", "claude"),
+    ("gemini", "codex"),
+    ("opencode", "codex"),
+    ("qwen", "codex"),
+];
+
+pub fn frozen_first_counterpart_id(provider_id: &str) -> Option<&'static str> {
+    FROZEN_FIRST_COUNTERPART
+        .iter()
+        .find(|(id, _)| *id == provider_id)
+        .map(|(_, first)| *first)
+}
+
+pub fn derived_counterpart_ids(provider_id: &str) -> Vec<&'static str> {
+    let first = frozen_first_counterpart_id(provider_id);
+    let mut rest: Vec<&'static str> = provider_registry()
+        .iter()
+        .map(|entry| entry.id)
+        .filter(|id| *id != provider_id && Some(*id) != first)
+        .collect();
+    rest.sort_unstable();
+    match first {
+        Some(first) => std::iter::once(first).chain(rest).collect(),
+        None => rest,
+    }
+}
+
+const CLAUDE_AUTH_PATHS: &[&str] = &["~/.claude/.credentials.json"];
+const CLAUDE_AUTH_ENV: &[&str] = &["ANTHROPIC_API_KEY"];
+const CLAUDE_AUTH_CHECK: &[&str] = &["claude", "auth", "status"];
+const CODEX_AUTH_PATHS: &[&str] = &["~/.codex/auth.json"];
+const CODEX_AUTH_ENV: &[&str] = &["OPENAI_API_KEY"];
+const CODEX_AUTH_CHECK: &[&str] = &["codex", "auth", "status"];
+const GEMINI_AUTH_PATHS: &[&str] = &["~/.gemini/oauth_creds.json"];
+const GEMINI_AUTH_ENV: &[&str] = &["GEMINI_API_KEY", "GOOGLE_API_KEY"];
+const GEMINI_AUTH_CHECK: &[&str] = &["gemini", "auth", "status"];
+// opencode stores `opencode auth login` credentials in the XDG data dir and
+// accepts per-provider apiKey entries in opencode.json; both are observable
+// credential sources (XDG_DATA_HOME/XDG_CONFIG_HOME overrides handled in
+// provider_auth::detect_opencode_file_auth).
+const OPENCODE_AUTH_PATHS: &[&str] = &[
+    "~/.local/share/opencode/auth.json",
+    "~/.config/opencode/opencode.json",
+];
+const OPENCODE_AUTH_ENV: &[&str] = &[
+    "OPENCODE_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+];
+const OPENCODE_AUTH_CHECK: &[&str] = &["opencode", "auth", "list"];
+// qwen-code resolves credentials from OAuth (oauth_creds.json), the
+// settings.json `env`/`modelProviders` blocks, and .env files
+// (~/.qwen/.env plus project-relative fallbacks).
+const QWEN_AUTH_PATHS: &[&str] = &[
+    "~/.qwen/oauth_creds.json",
+    "~/.qwen/settings.json",
+    "~/.qwen/.env",
+    "./.qwen/.env",
+    "./.env",
+];
+const QWEN_AUTH_ENV: &[&str] = &[
+    "DASHSCOPE_API_KEY",
+    "QWEN_API_KEY",
+    "OPENAI_API_KEY",
+    "BAILIAN_CODING_PLAN_API_KEY",
+];
+
+const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
+    ProviderRegistryEntry {
+        id: "claude",
+        aliases: &[],
+        display_name: "Claude",
+        cli_init_label: "claude (Anthropic)",
+        channel_suffix: Some("-cc"),
+        default_channel_provider: true,
+        capabilities: ProviderCapabilities {
+            binary_name: "claude",
+            supports_structured_output: true,
+            supports_resume: true,
+            supports_tool_stream: true,
+        },
+        execution_adapter: ProviderExecutionAdapter::Claude,
+        compaction_adapter: ProviderCompactionAdapter::ClaudeEnvironment,
+        readiness_adapter: ProviderReadinessAdapter::Claude,
+        default_behavior: ProviderDefaultBehavior {
+            resume_without_reset: true,
+            runtime_model: None,
+            source_label: "Claude provider default",
+        },
+        default_context_window: 1_000_000,
+        managed_tmux_backend: true,
+        managed_tmux_wrapper_subcommand: Some("tmux-wrapper"),
+        auth: ProviderAuthSpec {
+            credential_paths: CLAUDE_AUTH_PATHS,
+            env_keys: CLAUDE_AUTH_ENV,
+            auth_check_argv: Some(CLAUDE_AUTH_CHECK),
+        },
+    },
+    ProviderRegistryEntry {
+        id: "codex",
+        aliases: &[],
+        display_name: "Codex",
+        cli_init_label: "codex (OpenAI)",
+        channel_suffix: Some("-cdx"),
+        default_channel_provider: false,
+        capabilities: ProviderCapabilities {
+            binary_name: "codex",
+            supports_structured_output: true,
+            supports_resume: true,
+            supports_tool_stream: true,
+        },
+        execution_adapter: ProviderExecutionAdapter::Codex,
+        compaction_adapter: ProviderCompactionAdapter::CodexCli,
+        readiness_adapter: ProviderReadinessAdapter::Codex,
+        default_behavior: ProviderDefaultBehavior {
+            resume_without_reset: true,
+            runtime_model: None,
+            source_label: "provider default",
+        },
+        default_context_window: CODEX_FALLBACK_CONTEXT_WINDOW,
+        managed_tmux_backend: true,
+        managed_tmux_wrapper_subcommand: Some("codex-tmux-wrapper"),
+        auth: ProviderAuthSpec {
+            credential_paths: CODEX_AUTH_PATHS,
+            env_keys: CODEX_AUTH_ENV,
+            auth_check_argv: Some(CODEX_AUTH_CHECK),
+        },
+    },
+    ProviderRegistryEntry {
+        id: "gemini",
+        aliases: &[],
+        display_name: "Gemini",
+        cli_init_label: "gemini (Google)",
+        channel_suffix: Some("-gm"),
+        default_channel_provider: false,
+        capabilities: ProviderCapabilities {
+            binary_name: "gemini",
+            supports_structured_output: true,
+            supports_resume: true,
+            supports_tool_stream: true,
+        },
+        execution_adapter: ProviderExecutionAdapter::Gemini,
+        compaction_adapter: ProviderCompactionAdapter::GeminiDisabled,
+        readiness_adapter: ProviderReadinessAdapter::Gemini,
+        default_behavior: ProviderDefaultBehavior {
+            resume_without_reset: true,
+            runtime_model: None,
+            source_label: "provider default",
+        },
+        default_context_window: 1_000_000,
+        managed_tmux_backend: false,
+        managed_tmux_wrapper_subcommand: None,
+        auth: ProviderAuthSpec {
+            credential_paths: GEMINI_AUTH_PATHS,
+            env_keys: GEMINI_AUTH_ENV,
+            auth_check_argv: Some(GEMINI_AUTH_CHECK),
+        },
+    },
+    ProviderRegistryEntry {
+        id: "opencode",
+        aliases: &[],
+        display_name: "OpenCode",
+        cli_init_label: "opencode (OpenCode)",
+        channel_suffix: Some("-oc"),
+        default_channel_provider: false,
+        capabilities: ProviderCapabilities {
+            binary_name: "opencode",
+            supports_structured_output: true,
+            supports_resume: false,
+            supports_tool_stream: true,
+        },
+        execution_adapter: ProviderExecutionAdapter::OpenCode,
+        compaction_adapter: ProviderCompactionAdapter::OpenCodeDisabled,
+        readiness_adapter: ProviderReadinessAdapter::OpenCode,
+        default_behavior: ProviderDefaultBehavior {
+            resume_without_reset: false,
+            runtime_model: None,
+            source_label: "provider default",
+        },
+        default_context_window: 128_000,
+        managed_tmux_backend: false,
+        managed_tmux_wrapper_subcommand: None,
+        auth: ProviderAuthSpec {
+            credential_paths: OPENCODE_AUTH_PATHS,
+            env_keys: OPENCODE_AUTH_ENV,
+            auth_check_argv: Some(OPENCODE_AUTH_CHECK),
+        },
+    },
+    ProviderRegistryEntry {
+        id: "qwen",
+        aliases: &[],
+        display_name: "Qwen Code",
+        cli_init_label: "qwen (Alibaba)",
+        channel_suffix: Some("-qw"),
+        default_channel_provider: false,
+        capabilities: ProviderCapabilities {
+            binary_name: "qwen",
+            supports_structured_output: true,
+            supports_resume: true,
+            supports_tool_stream: true,
+        },
+        execution_adapter: ProviderExecutionAdapter::Qwen,
+        compaction_adapter: ProviderCompactionAdapter::QwenDisabled,
+        readiness_adapter: ProviderReadinessAdapter::Qwen,
+        default_behavior: ProviderDefaultBehavior {
+            resume_without_reset: true,
+            runtime_model: None,
+            source_label: "provider default",
+        },
+        default_context_window: 128_000,
+        managed_tmux_backend: true,
+        managed_tmux_wrapper_subcommand: Some("qwen-tmux-wrapper"),
+        auth: ProviderAuthSpec {
+            credential_paths: QWEN_AUTH_PATHS,
+            env_keys: QWEN_AUTH_ENV,
+            auth_check_argv: None,
+        },
+    },
+];
+
+pub fn provider_registry() -> &'static [ProviderRegistryEntry] {
+    PROVIDER_REGISTRY
+}
+
+pub fn supported_provider_ids() -> Vec<&'static str> {
+    provider_registry().iter().map(|entry| entry.id).collect()
+}
+
+pub fn intern_provider_id(raw: &str) -> Option<&'static str> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    provider_registry()
+        .iter()
+        .find(|entry| entry.matches_id_or_alias(&normalized))
+        .map(|entry| entry.id)
+}
+
+impl ProviderRegistryEntry {
+    pub fn matches_id_or_alias(&self, normalized: &str) -> bool {
+        self.id == normalized || self.aliases.iter().any(|alias| *alias == normalized)
+    }
+
+    pub fn kind(&self) -> Option<ProviderKind> {
+        Some(match self.id {
+            "claude" => ProviderKind::Claude,
+            "codex" => ProviderKind::Codex,
+            "gemini" => ProviderKind::Gemini,
+            "opencode" => ProviderKind::OpenCode,
+            "qwen" => ProviderKind::Qwen,
+            _ => return None,
+        })
+    }
+}
