@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use serenity::model::id::{ChannelId, MessageId};
 
+use super::delivery_lease_cell::source_epoch_observer;
 use super::formatting::{self, ReplaceLongMessageOutcome};
 use super::health::HealthRegistry;
 use super::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
@@ -1266,6 +1267,7 @@ async fn run_idle_jsonl_relay_loop(
                 pending_ends.remove(&session_name);
                 session_init_seen.remove(&session_name);
             }
+            let source_marker = source_epoch_observer::marker_if_enabled(&session_name);
             let current_generation_signature =
                 super::tmux::read_generation_file_mtime_ns(&session_name);
             if idle_jsonl_clear_session_init_on_generation_signature_change(
@@ -1393,25 +1395,26 @@ async fn run_idle_jsonl_relay_loop(
             let was_deferred = pending_ends.contains_key(&session_name);
             let pending_end = pending_ends.remove(&session_name).unwrap_or(len).max(len);
             let end = pending_end.min(start.saturating_add(IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK));
-            let Ok(payload) = read_jsonl_range(&relay_source.path, start, end) else {
+            let Ok(opened_range) = read_jsonl_range(&relay_source.path, start, end) else {
                 continue;
             };
+            let payload = &opened_range.payload;
             if payload.is_empty() {
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                 continue;
             }
-            if idle_jsonl_payload_contains_schedule_wakeup_setup(&payload) {
+            if idle_jsonl_payload_contains_schedule_wakeup_setup(payload) {
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                 continue;
             }
-            if !was_deferred && idle_jsonl_payload_contains_user_event(&payload) {
+            if !was_deferred && idle_jsonl_payload_contains_user_event(payload) {
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Clear);
                 continue;
             }
             let session_has_init =
-                idle_jsonl_session_has_init(&mut session_init_seen, &session_name, &payload);
+                idle_jsonl_session_has_init(&mut session_init_seen, &session_name, payload);
             let action = idle_relay_range_action(
-                &payload,
+                payload,
                 start,
                 end,
                 committed,
@@ -1430,22 +1433,25 @@ async fn run_idle_jsonl_relay_loop(
                     let Some(producer) = producers.get_producer(&session_name) else {
                         continue;
                     };
-                    let suffix = if from == start {
-                        payload.clone()
-                    } else {
-                        match read_jsonl_range(&relay_source.path, from, end) {
-                            Ok(suffix) => suffix,
-                            Err(_) => continue,
-                        }
+                    let Ok(suffix) = opened_range.suffix(&relay_source.path, from) else {
+                        continue;
                     };
-                    if suffix.is_empty() {
+                    if suffix.payload.is_empty() {
                         continue;
                     }
-                    if producer.try_send_frame_for_range(
-                        String::from_utf8_lossy(&suffix).into_owned(),
+                    let source_stamp = source_marker.and_then(|marker| {
+                        source_epoch_observer::source_stamp(
+                            &session_name,
+                            marker,
+                            suffix.file_identity,
+                        )
+                    });
+                    if producer.try_send_frame_for_range_with_source(
+                        String::from_utf8_lossy(&suffix.payload).into_owned(),
                         from,
                         end,
                         current_generation_signature,
+                        source_stamp,
                     ) {
                         pending_ends.insert(session_name.clone(), end);
                     }
@@ -1543,6 +1549,7 @@ mod tests {
             turn_start_offset: None,
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_source_stamp: None,
         }
     }
 
@@ -1601,6 +1608,7 @@ mod tests {
             turn_start_offset,
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_source_stamp: None,
         }
     }
 
@@ -2965,6 +2973,7 @@ mod tests {
             frame_turn_start_offset: turn_start_offset,
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_source_stamp: None,
         }
     }
 
@@ -4494,43 +4503,62 @@ mod tests {
         );
     }
 
-    // #3041 P1-3 (Part a, B1): the RESULT-bearing terminal frame's commit fence
-    // (consumed_end + identity) is copied onto the emitted `SessionRelayDelivery`,
-    // so `deliver_response` advances the authority from frame data — not an inflight
-    // file read. A non-terminal frame's delivery (none here) would carry None/0.
     #[test]
+    #[rustfmt::skip]
     fn parser_propagates_terminal_frame_commit_fence_onto_delivery() {
+        use crate::services::cluster::stream_relay::{SourceEpoch, SourceFileIdentity, SourceStamp, SourceWitness};
         let binding = matched("46");
+        let stamp = |epoch| SourceStamp {
+            epoch: SourceEpoch::from_observation(epoch),
+            file: SourceFileIdentity::Unavailable,
+            witness: SourceWitness { generation: None, spawn_nonce_hash: Some([epoch as u8; 32]) },
+        };
+        let first_payload = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"first \"}]}}\n";
+        let terminal_payload = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"second\"}]}}\n",
+            "{\"type\":\"result\",\"result\":\"first second\"}\n"
+        );
         let mut parser = SessionRelayParser::default();
-        // A non-terminal text frame: accumulates, emits nothing.
-        let assistant = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"final answer\"}]}}\n";
-        assert!(
-            parser
-                .ingest_frame(&frame(&binding, assistant, 1))
-                .is_empty()
-        );
-        // The result-bearing TERMINAL frame carries the commit fence.
-        let result = "{\"type\":\"result\",\"result\":\"final answer\"}\n";
-        let deliveries = parser.ingest_frame(&terminal_frame(
-            &binding,
-            result,
-            2,
-            512,
-            77,
-            "2026-06-04T00:00:00Z",
-        ));
-        assert_eq!(deliveries.len(), 1);
-        assert_eq!(deliveries[0].response_text, "final answer");
-        assert_eq!(
-            deliveries[0].terminal_consumed_end,
-            Some(512),
-            "the delivery must carry the terminal frame's consumed_end"
-        );
-        assert_eq!(deliveries[0].frame_turn_user_msg_id, 77);
-        assert_eq!(deliveries[0].frame_turn_started_at, "2026-06-04T00:00:00Z");
-        // #3041 P1-3 (codex P1-3 issue 2): the delivery also carries the frame's
-        // pinned turn_start_offset for the sink's identity gate.
-        assert_eq!(deliveries[0].frame_turn_start_offset, Some(0));
+        let split = first_payload.len() - 2;
+        let mut partial = frame(&binding, &first_payload[..split], 0); partial.relay_source_stamp = Some(stamp(1));
+        assert!(parser.ingest_frame(&partial).is_empty());
+        let next_assistant = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"next\"}]}}\n";
+        let split_terminal_payload = format!("{}{}{}", &first_payload[split..], terminal_payload, next_assistant);
+        let mut split_terminal = terminal_frame(&binding, &split_terminal_payload, 1, 512, 77, "2026-06-04T00:00:00Z"); split_terminal.relay_source_stamp = Some(stamp(2));
+        assert_eq!(parser.ingest_frame(&split_terminal)[0].relay_source_stamp, None);
+        let mut next_terminal = terminal_frame(&binding, "{\"type\":\"result\",\"result\":\"next\"}\n", 2, 640, 78, "2026-06-04T00:00:01Z"); next_terminal.relay_source_stamp = Some(stamp(2)); assert_eq!(parser.ingest_frame(&next_terminal)[0].relay_source_stamp, Some(stamp(2)));
+
+        let mut parser = SessionRelayParser::default();
+        let tail_split = next_assistant.len() - 2; let first_with_tail = format!("{}{}", terminal_payload, &next_assistant[..tail_split]);
+        let mut first_terminal = terminal_frame(&binding, &first_with_tail, 3, 768, 79, "2026-06-04T00:00:02Z"); first_terminal.relay_source_stamp = Some(stamp(1));
+        assert_eq!(parser.ingest_frame(&first_terminal)[0].relay_source_stamp, Some(stamp(1)));
+        let tail_completion = format!("{}{{\"type\":\"result\",\"result\":\"next\"}}\n", &next_assistant[tail_split..]);
+        let mut mixed_tail_terminal = terminal_frame(&binding, &tail_completion, 4, 896, 80, "2026-06-04T00:00:03Z"); mixed_tail_terminal.relay_source_stamp = Some(stamp(2));
+        assert_eq!(parser.ingest_frame(&mixed_tail_terminal)[0].relay_source_stamp, None);
+
+        let mut parser = SessionRelayParser::default();
+        let mut stale = frame(&binding, &first_payload[..split], 5); stale.relay_source_stamp = Some(stamp(1)); stale.relay_generation_mtime_ns = Some(101);
+        assert!(parser.ingest_frame(&stale).is_empty());
+        let mut fresh = terminal_frame(&binding, terminal_payload, 6, 1024, 81, "2026-06-04T00:00:04Z"); fresh.relay_source_stamp = Some(stamp(2)); fresh.relay_generation_mtime_ns = Some(202);
+        assert_eq!(parser.ingest_frame(&fresh)[0].relay_source_stamp, Some(stamp(2)));
+        for (first_stamp, terminal_stamp, expected) in [
+            (Some(stamp(1)), Some(stamp(2)), None), (Some(stamp(1)), None, None),
+            (None, Some(stamp(1)), None), (Some(stamp(1)), Some(stamp(1)), Some(stamp(1))),
+        ] {
+            parser.reset_turn();
+            let mut first = frame(&binding, first_payload, 1); first.relay_source_stamp = first_stamp;
+            assert!(parser.ingest_frame(&first).is_empty());
+            let metadata = frame(&binding, "{\"type\":\"system\",\"subtype\":\"init\"}\n", 2);
+            assert!(parser.ingest_frame(&metadata).is_empty());
+            let mut terminal = terminal_frame(&binding, terminal_payload, 3, 512, 77, "2026-06-04T00:00:00Z");
+            terminal.relay_source_stamp = terminal_stamp;
+            let deliveries = parser.ingest_frame(&terminal);
+            assert_eq!(deliveries.len(), 1);
+            let delivery = &deliveries[0];
+            assert_eq!((delivery.response_text.as_str(), delivery.relay_source_stamp), ("first second", expected));
+            assert_eq!((delivery.terminal_consumed_end, delivery.frame_turn_user_msg_id, delivery.frame_turn_started_at.as_str(), delivery.frame_turn_start_offset),
+                       (Some(512), 77, "2026-06-04T00:00:00Z", Some(0)));
+        }
     }
 
     #[test]
@@ -4540,6 +4568,14 @@ mod tests {
         let assistant = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"old generation answer\"}]}}\n";
         let mut old_frame = frame(&binding, assistant, 1);
         old_frame.relay_generation_mtime_ns = Some(101);
+        old_frame.relay_source_stamp = Some(crate::services::cluster::stream_relay::SourceStamp {
+            epoch: crate::services::cluster::stream_relay::SourceEpoch::from_observation(1),
+            file: crate::services::cluster::stream_relay::SourceFileIdentity::Unavailable,
+            witness: crate::services::cluster::stream_relay::SourceWitness {
+                generation: None,
+                spawn_nonce_hash: Some([1; 32]),
+            },
+        });
         assert!(parser.ingest_frame(&old_frame).is_empty());
 
         let result = "{\"type\":\"result\",\"result\":\"new generation result\"}\n";
@@ -4572,6 +4608,7 @@ mod tests {
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].response_text, "replacement answer");
         assert_eq!(deliveries[0].relay_generation_mtime_ns, Some(202));
+        assert_eq!(deliveries[0].relay_source_stamp, None);
     }
 
     // #3041 P1-3 (codex P1-3 issue 1 — multi-turn-chunk close): after the watcher
@@ -4882,6 +4919,7 @@ mod tests {
             frame_turn_start_offset: None,
             relay_range: None,
             relay_generation_mtime_ns: None,
+            relay_source_stamp: None,
         }
     }
 

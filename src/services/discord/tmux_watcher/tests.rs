@@ -4397,6 +4397,7 @@ mod watcher_short_replace_controller {
             WatcherSourceAuthority {
                 generation_mtime_ns: crate::services::discord::outbound::delivery_record::current_generation_mtime_ns("AgentDesk-claude-8141"),
                 reset_incarnation: shared.relay_frontier_token(ch()).reset_incarnation,
+                source_stamp: None,
             },
             START,
             END,
@@ -4425,6 +4426,7 @@ mod watcher_short_replace_controller {
             WatcherSourceAuthority {
                 generation_mtime_ns: crate::services::discord::outbound::delivery_record::current_generation_mtime_ns("AgentDesk-claude-8141"),
                 reset_incarnation: shared.relay_frontier_token(ch()).reset_incarnation,
+                source_stamp: None,
             },
             START,
             END,

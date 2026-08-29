@@ -56,7 +56,7 @@ use super::session_matcher::MatchedChannel;
 
 mod identity;
 mod terminal_resolution;
-pub use identity::{RelayDroppedFrame, RelayTurnIdentity};
+pub use identity::*;
 pub use terminal_resolution::{DeliveryOutcome, RelaySinkOutcome};
 
 /// Default size of the producer → relay queue. Generous enough to absorb a
@@ -136,6 +136,7 @@ pub struct StreamFrame {
     /// Wrapper generation captured with `relay_range`. A queued range from a
     /// replaced wrapper must never commit against the replacement transcript.
     pub relay_generation_mtime_ns: Option<i64>,
+    pub relay_source_stamp: Option<SourceStamp>,
 }
 
 /// Per-session counters. Exposed via the supervisor for diagnostics.
@@ -429,6 +430,7 @@ impl RelayProducer {
             None,
             Some((start, end)),
             Some(generation_mtime_ns),
+            None,
         )
         .is_alive()
     }
@@ -440,6 +442,7 @@ impl RelayProducer {
         identity: Option<RelayTurnIdentity>,
         range: Option<(u64, u64)>,
         relay_generation_mtime_ns: Option<i64>,
+        relay_source_stamp: Option<SourceStamp>,
     ) -> RelaySendOutcome {
         try_send_frame_inner(
             &self.matched,
@@ -452,6 +455,7 @@ impl RelayProducer {
             identity,
             range,
             relay_generation_mtime_ns,
+            relay_source_stamp,
         )
     }
 
@@ -464,7 +468,7 @@ impl RelayProducer {
         payload: String,
         frame_identity: Option<RelayTurnIdentity>,
     ) -> RelaySendOutcome {
-        self.enqueue(payload, None, frame_identity, None, None)
+        self.enqueue(payload, None, frame_identity, None, None, None)
     }
 
     pub fn try_send_frame_with_sequence_identity_and_generation(
@@ -479,6 +483,7 @@ impl RelayProducer {
             frame_identity,
             None,
             (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
+            None,
         )
     }
 
@@ -492,7 +497,7 @@ impl RelayProducer {
         payload: String,
         terminal: TerminalCommitFence,
     ) -> RelaySendOutcome {
-        self.enqueue(payload, Some(terminal), None, None, None)
+        self.enqueue(payload, Some(terminal), None, None, None, None)
     }
 
     pub fn try_send_terminal_frame_with_sequence_and_generation(
@@ -507,6 +512,7 @@ impl RelayProducer {
             None,
             None,
             (relay_generation_mtime_ns != 0).then_some(relay_generation_mtime_ns),
+            None,
         )
     }
 }
@@ -647,6 +653,7 @@ fn try_send_frame_inner(
     frame_identity: Option<RelayTurnIdentity>,
     relay_range: Option<(u64, u64)>,
     relay_generation_mtime_ns: Option<i64>,
+    relay_source_stamp: Option<SourceStamp>,
 ) -> RelaySendOutcome {
     if shutdown.load(Ordering::Acquire) {
         return RelaySendOutcome::closed();
@@ -674,6 +681,7 @@ fn try_send_frame_inner(
         turn_start_offset: frame_identity.turn_start_offset,
         relay_range,
         relay_generation_mtime_ns,
+        relay_source_stamp,
     };
     metrics.frames_received.fetch_add(1, Ordering::AcqRel);
     match queue.push_drop_oldest(frame) {
@@ -733,6 +741,7 @@ impl StreamRelayHandle {
             &self.metrics,
             &self.sequence,
             payload,
+            None,
             None,
             None,
             None,
@@ -1127,8 +1136,35 @@ mod tests {
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].relay_range, Some((640, 1_024)));
         assert_eq!(delivered[0].relay_generation_mtime_ns, Some(77));
+        assert_eq!(delivered[0].relay_source_stamp, None);
         assert_eq!(delivered[0].terminal_consumed_end, None);
         assert_eq!(delivered[0].turn_start_offset, None);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn observe_stamp_is_additive_and_never_suppresses_transport() {
+        let sink = Arc::new(CapturingSink::default());
+        let handle = spawn_stream_relay(matched_for("c-observe"), sink.clone());
+        let producer = handle.producer();
+        let stamp = SourceStamp {
+            epoch: SourceEpoch::from_observation(3),
+            file: SourceFileIdentity::Unavailable,
+            witness: SourceWitness {
+                generation: None,
+                spawn_nonce_hash: Some([3; 32]),
+            },
+        };
+        assert!(
+            producer
+                .try_send_frame_with_source("observe".into(), None, 0, Some(stamp))
+                .is_alive()
+        );
+        flush_pending().await;
+        let delivered = sink.delivered();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].payload, "observe");
+        assert_eq!(delivered[0].relay_source_stamp, Some(stamp));
         handle.shutdown().await;
     }
 

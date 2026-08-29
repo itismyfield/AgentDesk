@@ -1449,6 +1449,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn generation_failure_nonce_success_changes_source_witness() {
+        use crate::services::discord::delivery_lease_cell::source_epoch_observer::read_source_epoch_witness;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_root, _env) = isolated_runtime_root();
+        let session = unique_session("epoch-generation-failure");
+        let before = read_source_epoch_witness(&session);
+        let sessions_dir =
+            std::path::PathBuf::from(crate::services::tmux_common::agentdesk_temp_dir());
+        let blocked = sessions_dir.clone();
+        let _permission_hook = set_generation_before_create_hook(Arc::new(move || {
+            std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }));
+        let restored = sessions_dir.clone();
+        let _hook = set_spawn_after_generation_hook(Arc::new(move || {
+            std::fs::set_permissions(&restored, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }));
+        stamp_spawn_markers(&session).expect("nonce succeeds after generation failure");
+        std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let after = read_source_epoch_witness(&session);
+        assert_ne!(after, before);
+        assert!(after.generation.is_none());
+        assert!(after.spawn_nonce_hash.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn generation_write_failure_emits_exactly_one_warn_and_still_writes_nonce() {
         use std::os::unix::fs::PermissionsExt;
 
