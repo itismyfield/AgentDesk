@@ -294,8 +294,8 @@ echo "=== Test-target integrity gate (#5003/#5008) ==="
 # green. The gate consumes workflow and justfile command sites and is enforced
 # here. The unittest run below is the gate's own mutation proof.
 "$PYTHON" scripts/check_test_target_integrity.py --enforce
-"$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
+AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 
 echo "=== PostgreSQL test-lane membership gate (#4979, enforced) ==="
 "$PYTHON" scripts/check_pg_test_lane_membership.py --baseline-ref "$TEST_LANE_BASELINE_REF"

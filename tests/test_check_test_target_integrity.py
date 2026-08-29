@@ -744,6 +744,22 @@ mod after_string_brace {
         self.assertTrue(rendered.endswith("\n"))
         self.assertFalse(rendered.endswith("\n\n"))
 
+    def test_checked_in_manifest_is_canonical_byte_for_byte(self) -> None:
+        path = REPO_ROOT / integrity.LIB_INVENTORY_MANIFEST_REL
+        checked_in = path.read_bytes()
+        with mock.patch.object(integrity.subprocess, "run") as cargo_run:
+            parsed = integrity.load_lib_inventory_manifest(path)
+            rerendered = integrity.render_lib_inventory_manifest(parsed).encode(
+                "utf-8"
+            )
+        cargo_run.assert_not_called()
+        self.assertTrue(parsed)
+        self.assertEqual(
+            rerendered,
+            checked_in,
+            "the checked-in manifest must be its own canonical byte rendering",
+        )
+
     def test_manifest_contract_is_locale_independent(self) -> None:
         original = locale.setlocale(locale.LC_ALL)
         proc = subprocess.run(
@@ -864,14 +880,231 @@ mod after_string_brace {
         self.assertNotIn(b"\r", rendered)
         self.assertIn("entries=3", output.getvalue())
 
-    def test_ci_script_runs_inventory_verifier_as_a_standalone_command(self) -> None:
+    def test_scanner_shrink_regeneration_is_rejected_by_cargo_backstop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "Cargo.toml").write_text(
+                '[package]\nname = "fixture"\n\n[lib]\npath = "src/lib.rs"\n',
+                encoding="utf-8",
+            )
+            lib_root = root / "src/lib.rs"
+            lib_root.write_text(
+                "#[cfg(test)]\nmod tests {\n"
+                "    #[test]\n    fn kept_by_scanner() {}\n"
+                "    #[test]\n    fn dropped_by_regressed_scanner() {}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            complete = integrity.collect_static_tests(lib_root, root)
+            omitted = "tests::dropped_by_regressed_scanner"
+            self.assertIn(omitted, complete.tests)
+
+            shrunken_tests = dict(complete.tests)
+            del shrunken_tests[omitted]
+            shrunken = integrity.StaticTestInventory(
+                shrunken_tests,
+                dict(complete.module_errors),
+                complete.duplicate_tests,
+            )
+            cargo_stdout = "".join(
+                f"{test_id}: test\n"
+                for test_id in sorted(complete.tests)
+            )
+            cargo_result = subprocess.CompletedProcess(
+                [], 0, stdout=cargo_stdout, stderr=""
+            )
+            output = io.StringIO()
+            with mock.patch.object(
+                integrity, "collect_static_tests", return_value=shrunken,
+            ):
+                with contextlib.redirect_stdout(output):
+                    write_rc = integrity.main([
+                        "--repo-root", str(root),
+                        "--write-lib-inventory-manifest",
+                    ])
+                regenerated = integrity.load_lib_inventory_manifest(
+                    root / integrity.LIB_INVENTORY_MANIFEST_REL
+                )
+                with mock.patch.object(
+                    integrity.subprocess, "run", return_value=cargo_result,
+                ) as cargo_run, mock.patch.object(
+                    integrity, "expected_lib_static_only",
+                    return_value=frozenset(),
+                ), mock.patch.object(
+                    integrity, "LIB_INVENTORY_KNOWN_CARGO_ONLY", frozenset(),
+                ), contextlib.redirect_stdout(output), \
+                        contextlib.redirect_stderr(output):
+                    verify_rc = integrity.main([
+                        "--repo-root", str(root),
+                        "--verify-lib-inventory",
+                    ])
+
+        self.assertEqual(write_rc, 0)
+        self.assertEqual(regenerated, frozenset(shrunken_tests))
+        self.assertNotIn(
+            omitted,
+            regenerated,
+            "mutation self-assert: regeneration absorbed scanner undercollection",
+        )
+        self.assertEqual(verify_rc, 1, output.getvalue())
+        self.assertIn("manifest=match", output.getvalue())
+        self.assertIn(
+            "manifest-only=0 actual-only=0 static-only=0 cargo-only=1",
+            output.getvalue(),
+        )
+        self.assertIn(f"lib inventory cargo-only: {omitted}", output.getvalue())
+        cargo_run.assert_called_once()
+        cargo_argv = cargo_run.call_args.args[0]
+        self.assertEqual(cargo_argv, [
+            "cargo", "test", "--manifest-path",
+            str(root.resolve() / "Cargo.toml"),
+            "--lib", "--", "--list",
+        ])
+
+    def test_sequential_git_merges_preserve_manifest_union(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "Cargo.toml").write_text(
+                '[package]\nname = "fixture"\n\n[lib]\npath = "src/lib.rs"\n',
+                encoding="utf-8",
+            )
+            (root / "src/lib.rs").write_text(
+                "mod alpha;\nmod middle;\nmod omega;\n", encoding="utf-8"
+            )
+            for module in ("alpha", "middle", "omega"):
+                cases = "\n".join(
+                    f"    #[test]\n    fn base_{index}() {{}}"
+                    for index in range(6)
+                )
+                (root / f"src/{module}.rs").write_text(
+                    f"#[cfg(test)]\nmod tests {{\n{cases}\n}}\n",
+                    encoding="utf-8",
+                )
+
+            def git(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    ["git", *args], cwd=root, check=True,
+                    capture_output=True, text=True,
+                )
+
+            def regenerate() -> None:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(integrity.main([
+                        "--repo-root", str(root),
+                        "--write-lib-inventory-manifest",
+                    ]), 0)
+
+            git("init", "-q", "-b", "main")
+            git("config", "user.name", "Inventory Contract")
+            git("config", "user.email", "inventory@example.invalid")
+            regenerate()
+            git("add", ".")
+            git("commit", "-q", "-m", "base inventory")
+
+            git("switch", "-q", "-c", "branch-a")
+            alpha = root / "src/alpha.rs"
+            alpha.write_text(
+                alpha.read_text("utf-8")
+                + "#[cfg(test)]\nmod branch_a { #[test] fn added() {} }\n",
+                encoding="utf-8",
+            )
+            regenerate()
+            branch_a_ids = integrity.load_lib_inventory_manifest(
+                root / integrity.LIB_INVENTORY_MANIFEST_REL
+            )
+            self.assertIn("alpha::branch_a::added", branch_a_ids)
+            self.assertNotIn("omega::branch_b::added", branch_a_ids)
+            git("add", ".")
+            git("commit", "-q", "-m", "add alpha test")
+
+            git("switch", "-q", "main")
+            git("switch", "-q", "-c", "branch-b")
+            omega = root / "src/omega.rs"
+            omega.write_text(
+                omega.read_text("utf-8")
+                + "#[cfg(test)]\nmod branch_b { #[test] fn added() {} }\n",
+                encoding="utf-8",
+            )
+            regenerate()
+            branch_b_ids = integrity.load_lib_inventory_manifest(
+                root / integrity.LIB_INVENTORY_MANIFEST_REL
+            )
+            self.assertIn("omega::branch_b::added", branch_b_ids)
+            self.assertNotIn("alpha::branch_a::added", branch_b_ids)
+            git("add", ".")
+            git("commit", "-q", "-m", "add omega test")
+
+            git("switch", "-q", "main")
+            git("merge", "-q", "--no-ff", "--no-edit", "branch-a")
+            git("merge", "-q", "--no-ff", "--no-edit", "branch-b")
+
+            inventory = integrity.collect_static_tests(root / "src/lib.rs", root)
+            static_ids = frozenset(inventory.tests)
+            manifest_ids = integrity.load_lib_inventory_manifest(
+                root / integrity.LIB_INVENTORY_MANIFEST_REL
+            )
+            manifest_raw = (
+                root / integrity.LIB_INVENTORY_MANIFEST_REL
+            ).read_bytes()
+            cargo_result = subprocess.CompletedProcess(
+                [], 0,
+                stdout="".join(
+                    f"{test_id}: test\n" for test_id in sorted(static_ids)
+                ),
+                stderr="",
+            )
+            output = io.StringIO()
+            with mock.patch.object(
+                integrity.subprocess, "run", return_value=cargo_result,
+            ), mock.patch.object(
+                integrity, "expected_lib_static_only", return_value=frozenset(),
+            ), mock.patch.object(
+                integrity, "LIB_INVENTORY_KNOWN_CARGO_ONLY", frozenset(),
+            ), contextlib.redirect_stdout(output), \
+                    contextlib.redirect_stderr(output):
+                verify_rc = integrity.main([
+                    "--repo-root", str(root), "--verify-lib-inventory",
+                ])
+
+            self.assertEqual(git("status", "--porcelain").stdout, "")
+
+        self.assertEqual(manifest_ids, static_ids)
+        self.assertIn("alpha::branch_a::added", manifest_ids)
+        self.assertIn("omega::branch_b::added", manifest_ids)
+        self.assertEqual(
+            integrity.render_lib_inventory_manifest(manifest_ids).encode("utf-8"),
+            manifest_raw,
+        )
+        self.assertEqual(verify_rc, 0, output.getvalue())
+        self.assertIn("manifest=match", output.getvalue())
+
+    def test_ci_script_runs_one_timed_verifier_after_unittests(self) -> None:
+        # This is deliberately source-only: asserting CI wiring must not start
+        # the Cargo-backed verifier from the cargo-free unittest lane.
         lines = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(
             "utf-8"
         ).splitlines()
-        self.assertIn(
-            '"$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory',
-            lines,
+        unittest_line = (
+            '"$PYTHON" -m unittest tests.test_check_test_target_integrity'
         )
+        verifier_line = (
+            'AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 '
+            '"$PYTHON" scripts/check_test_target_integrity.py '
+            '--verify-lib-inventory'
+        )
+        verifier_lines = [
+            line for line in lines
+            if "--verify-lib-inventory" in line
+        ]
+        self.assertEqual(
+            verifier_lines,
+            [verifier_line],
+            "the Cargo verifier must have one exact, timed CI invocation",
+        )
+        self.assertEqual(lines.count(unittest_line), 1)
+        self.assertLess(lines.index(unittest_line), lines.index(verifier_line))
 
 
 class ExecutionEvidenceSummaryContract(unittest.TestCase):
