@@ -179,12 +179,29 @@ def has_template_summary(body):
     return has_non_empty_body_field(body, ["summary"], stop_at_field_labels=False)
 
 def is_scratch_file_path(path):
-    if not path or "/" in path:
+    if not path:
         return False
-    root_scratch_files = {
+    basename = path.split("/")[-1]
+    is_nested = "/" in path
+
+    if path.endswith((".diff", ".patch", ".log")):
+        return True
+
+    global_scratch_files = {
         "pr-body.md",
         "plan.md",
         "plan.txt",
+        "prs.json",
+        "scratch.json",
+        "scratchpad.json",
+        "cargo_out.txt",
+        "npm_output.log",
+        "bun_output.txt",
+    }
+    if basename in global_scratch_files:
+        return True
+
+    root_scratch_files = {
         "scratch.md",
         "scratch.sh",
         "scratch.txt",
@@ -196,12 +213,19 @@ def is_scratch_file_path(path):
         "test_scratch.rs",
         "verify.sh",
     }
-    if path in root_scratch_files:
+
+    if re.match(
+        r"^(?:scratch|scratchpad|test_scratch)(?:[._-].+)?\.(?:md|txt|sh|sql|rs|py|js|json)$",
+        basename,
+    ):
         return True
-    return bool(
-        re.match(r"^(?:scratch|scratchpad|test_scratch)[._-].+\.(?:md|txt|sh|sql|rs)$", path)
-        or re.match(r"^test_[A-Za-z0-9._-]+\.rs$", path)
-    )
+
+    if not is_nested:
+        if basename in root_scratch_files:
+            return True
+        return bool(re.match(r"^test_[A-Za-z0-9._-]+\.(?:rs|py|js|json)$", basename))
+
+    return False
 
 def main():
     repo = _detect_repo()
