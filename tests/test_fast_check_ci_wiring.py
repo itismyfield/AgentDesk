@@ -204,6 +204,18 @@ def just_recipe_commands(justfile: str, recipe_name: str) -> tuple[str, ...]:
 
 
 class FastCheckCiWiringTests(unittest.TestCase):
+    def test_large_file_guard_uses_nul_delimited_tracked_paths(self) -> None:
+        scripts_job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "scripts")
+        guard = scripts_job.split("- name: Large file guard", 1)[1].split(
+            "- name: Install shellcheck", 1
+        )[0]
+
+        self.assertIn("shell: bash", guard)
+        self.assertIn("while IFS= read -r -d '' path; do", guard)
+        self.assertIn("done < <(git ls-files -z)", guard)
+        self.assertNotIn("while IFS= read -r path; do", guard)
+        self.assertNotIn("done < <(git ls-files)\n", guard)
+
     def test_pr_fast_check_is_compile_and_policy_only(self) -> None:
         job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "check_fast")
 
