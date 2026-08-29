@@ -2322,6 +2322,15 @@ services::discord::completion_footer_metadata::tests::metadata_roundtrip_preserv
 services::discord::completion_footer_metadata::tests::ownerless_metadata_uses_inflight_started_at_fallback_4806
 services::discord::completion_footer_metadata::tests::quoted_prefix_lines_never_suppress_or_recover_metadata_4806
 services::discord::completion_footer_metadata::tests::visible_completed_footer_never_becomes_internal_metadata_4860
+services::discord::delivery_lease_cell::exact_lease::tests::channel_authority_is_coupled_before_acquire_mutation
+services::discord::delivery_lease_cell::exact_lease::tests::commit_requires_every_exact_identity_field
+services::discord::delivery_lease_cell::exact_lease::tests::exact_and_legacy_acquire_have_one_concurrent_winner
+services::discord::delivery_lease_cell::exact_lease::tests::legacy_surface_cannot_mutate_exact_state_or_replacement
+services::discord::delivery_lease_cell::exact_lease::tests::ordered_stale_legacy_heartbeat_cannot_renew_replacement
+services::discord::delivery_lease_cell::exact_lease::tests::reclaim_requires_every_exact_identity_field_and_deadline
+services::discord::delivery_lease_cell::exact_lease::tests::release_requires_every_exact_identity_field
+services::discord::delivery_lease_cell::exact_lease::tests::renew_requires_every_exact_identity_field
+services::discord::delivery_lease_cell::exact_lease::tests::transitions_are_single_lock_raii_and_keep_owned_identity
 services::discord::delivery_lease_cell::publication_coordinate_tests::only_positive_coordinate_exposes_frontier_range
 services::discord::delivery_lease_cell::publication_coordinate_tests::positive_byte_range_requires_strictly_positive_width
 services::discord::delivery_lease_cell::publication_coordinate_tests::sink_epoch_is_typed_apart_from_publication_permit
