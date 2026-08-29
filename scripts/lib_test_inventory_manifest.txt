@@ -5297,7 +5297,6 @@ services::discord::tmux::tmux_watcher::single_message_footer::tests::single_mess
 services::discord::tmux::tmux_watcher::single_message_footer::tests::single_message_panel_terminal_footer_strips_panel_block
 services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_single_message_completion_footer_emits_background_agent_pending_payload
 services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_single_message_completion_footer_producer_threads_sniffed_background_agent_pending
-services::discord::tmux::tmux_watcher::utf8_chunk_decoder::source_epoch_read_tests::same_fd_identity_mode_resample_and_mixed_utf8_policy
 services::discord::tmux::tmux_watcher::stall_exit::tests::pinned_exit_preserves_newer_inflight_and_mailbox_on_identity_mismatch
 services::discord::tmux::tmux_watcher::stall_exit::tests::pinned_exit_releases_matching_turn_through_finalizer
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_common_edit_and_initial_send_share_guarded_payload
@@ -5493,6 +5492,7 @@ services::discord::tmux::tmux_watcher::two_message_panel::tests::reanchor_bind_b
 services::discord::tmux::tmux_watcher::two_message_panel::tests::reanchor_gate_rejects_managed_bridge_owned_turn_even_when_watcher_relays
 services::discord::tmux::tmux_watcher::two_message_panel::tests::reanchor_inflight_reload_gate_requires_rollover_and_flag_on
 services::discord::tmux::tmux_watcher::two_message_panel::tests::watcher_orphan_preregistration_is_flag_gated_and_removed_after_persist
+services::discord::tmux::tmux_watcher::utf8_chunk_decoder::source_epoch_read_tests::same_fd_identity_mode_resample_and_mixed_utf8_policy
 services::discord::tmux::tmux_watcher::utf8_chunk_decoder::tests::utf8_decoder_buffers_split_multibyte_scalar_at_chunk_start
 services::discord::tmux::tmux_watcher::utf8_chunk_decoder::tests::utf8_decoder_preserves_jsonl_when_multibyte_scalar_splits_after_prefix
 services::discord::tmux::tui_completion_gate_outcome_tests::busy_observed_still_emits

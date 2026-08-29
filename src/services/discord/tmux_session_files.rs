@@ -1450,7 +1450,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn generation_failure_nonce_success_changes_source_witness() {
-        use super::super::delivery_lease_cell::source_epoch_observer::read_source_epoch_witness;
+        use crate::services::discord::delivery_lease_cell::source_epoch_observer::read_source_epoch_witness;
         use std::os::unix::fs::PermissionsExt;
 
         let (_root, _env) = isolated_runtime_root();
