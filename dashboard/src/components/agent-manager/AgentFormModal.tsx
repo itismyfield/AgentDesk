@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import type { Department } from "../../types";
@@ -66,6 +66,7 @@ export default function AgentFormModal({
   });
   const formValues = watch();
   const spriteNum = formValues.sprite_number ?? 0;
+  const emojiBtnId = useId();
 
   // ESC 키로 닫기
   useEffect(() => {
@@ -145,7 +146,8 @@ export default function AgentFormModal({
               aria-label={tr("스프라이트 번호", "Sprite Number")}
               aria-valuenow={spriteNum || 0}
               aria-valuemin={0}
-              aria-valuetext={spriteNum ? t({ ko: `선택된 스프라이트: ${spriteNum}`, en: `Selected sprite: ${spriteNum}` }) : tr("선택 안됨", "Not selected")}
+              aria-valuemax={40}
+              aria-valuetext={spriteNum ? t({ ko: `선택된 스프라이트: ${spriteNum}`, en: `Selected sprite: ${spriteNum}` }) : t({ ko: `선택된 아이콘: ${formValues.avatar_emoji || "🤖"}`, en: `Selected icon: ${formValues.avatar_emoji || "🤖"}` })}
               tabIndex={0}
               onKeyDown={(e) => {
                 if (e.currentTarget !== e.target) {
@@ -153,7 +155,7 @@ export default function AgentFormModal({
                 }
                 if (e.key === "ArrowUp") {
                   e.preventDefault();
-                  const next = Math.max(1, spriteNum || 0) + 1;
+                  const next = Math.min(40, Math.max(1, spriteNum || 0) + 1);
                   setValue("sprite_number", next, { shouldDirty: true, shouldValidate: true });
                 } else if (e.key === "ArrowDown") {
                   e.preventDefault();
@@ -306,18 +308,13 @@ export default function AgentFormModal({
             )}
             <div className="grid grid-cols-[72px_1fr] gap-2">
               <div>
-                <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
-                  {tr("이모지", "Emoji")}
+                <label htmlFor={emojiBtnId} className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                  {tr("아이콘", "Icon")}
                 </label>
                 <EmojiPicker
+                  id={emojiBtnId}
                   value={formValues.avatar_emoji}
                   onChange={(emoji) => setValue("avatar_emoji", emoji, { shouldDirty: true, shouldValidate: true })}
-                  aria-label={
-                    formValues.avatar_emoji
-                      ? t({ ko: `선택된 이모지: ${formValues.avatar_emoji}, 이모지 변경`, en: `Selected emoji: ${formValues.avatar_emoji}, change emoji` })
-                      : t({ ko: "이모지 선택기 열기", en: "Open emoji picker" })
-                  }
-                  dialogLabel={t({ ko: "이모지 선택", en: "Choose an emoji" })}
                 />
               </div>
               <div>
