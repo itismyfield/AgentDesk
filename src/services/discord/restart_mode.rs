@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+mod protocol_v2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum InflightRestartMode {

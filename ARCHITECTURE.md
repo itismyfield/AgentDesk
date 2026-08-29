@@ -761,6 +761,11 @@ src/
 │   │   │   ├── destructive_warrant.rs
 │   │   │   ├── idle_tmux.rs
 │   │   │   └── tests.rs
+│   │   ├── restart_mode/
+│   │   │   └── protocol_v2/
+│   │   │       ├── disposition.rs
+│   │   │       ├── mod.rs
+│   │   │       └── values.rs
 │   │   ├── router/
 │   │   │   ├── intake_dispatch/
 │   │   │   │   ├── attachment.rs
