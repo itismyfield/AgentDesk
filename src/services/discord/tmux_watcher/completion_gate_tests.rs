@@ -1529,7 +1529,9 @@ fn watcher_terminal_commit_fence_only_for_a_real_terminal_chunk() {
         tmux_session_name: Some("AgentDesk-claude-99".to_string()),
         turn_start_offset: Some(64),
     };
-    assert!(watcher_terminal_commit_fence(true, 0, 256, Some(&other_identity), session, 0).is_none());
+    assert!(
+        watcher_terminal_commit_fence(true, 0, 256, Some(&other_identity), session, 0).is_none()
+    );
 
     // #3041 P1-3 (codex P1-3 issue 2 R4): a fence MUST carry a real
     // turn_start_offset. If the pinned identity's offset is None, the producer
@@ -1543,7 +1545,8 @@ fn watcher_terminal_commit_fence_only_for_a_real_terminal_chunk() {
         turn_start_offset: None,
     };
     assert!(
-        watcher_terminal_commit_fence(true, 0, 256, Some(&no_offset_identity), session, 0).is_none(),
+        watcher_terminal_commit_fence(true, 0, 256, Some(&no_offset_identity), session, 0)
+            .is_none(),
         "a turn with no known turn_start_offset must NOT emit a fence (strict-offset guarantee)"
     );
 }

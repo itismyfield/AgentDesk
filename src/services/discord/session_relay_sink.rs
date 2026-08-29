@@ -50,6 +50,7 @@ mod relay_format;
 mod task_notification_context;
 mod terminal_handoff;
 mod turn_parser;
+use self::delivery_frontier::SinkDeliveryLeaseGuard;
 use self::idle_jsonl::{
     IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdleRelayRangeAction,
     idle_jsonl_apply_active_inflight_gate,
@@ -61,7 +62,6 @@ use self::idle_jsonl::{
     prune_idle_jsonl_session_state, read_jsonl_range,
 };
 use self::task_notification_context::ensure_card_and_route;
-use self::delivery_frontier::SinkDeliveryLeaseGuard;
 use self::terminal_handoff::SessionRelayDeliveryOutcome;
 use self::turn_parser::{SessionRelayDelivery, SessionRelayParser};
 use super::task_notification_delivery::{ResponseDeliveryClaim, ResponseDeliveryClaimOutcome};
@@ -745,11 +745,9 @@ impl SessionBoundDiscordRelaySink {
             None
         } else {
             let cell = shared.delivery_lease(channel);
-            let Some(guard) = SinkDeliveryLeaseGuard::acquire(
-                &cell,
-                sink_lease_key.clone(),
-                lease_range.1,
-            ) else {
+            let Some(guard) =
+                SinkDeliveryLeaseGuard::acquire(&cell, sink_lease_key.clone(), lease_range.1)
+            else {
                 tracing::debug!(
                     provider = provider.as_str(),
                     channel_id,
@@ -2873,7 +2871,9 @@ mod tests {
             task_notification_kind: None,
             task_notification_context: None,
             terminal_consumed_end: consumed_end,
-            terminal_source_range: consumed_end.zip(turn_start_offset).map(|(end, start)| (start, end)),
+            terminal_source_range: consumed_end
+                .zip(turn_start_offset)
+                .map(|(end, start)| (start, end)),
             terminal_reset_incarnation: Some(0),
             frame_turn_user_msg_id: turn_user_msg_id,
             frame_turn_started_at: turn_started_at.to_string(),
@@ -3820,17 +3820,9 @@ mod tests {
 
     #[test]
     fn terminal_lease_uses_canonical_positive_consumed_coordinate() {
-        let fenced = delivery_with_fence_offset(
-            "fenced",
-            Some(256),
-            0,
-            "2026-08-29T00:00:00Z",
-            Some(64),
-        );
-        assert_eq!(
-            sink_delivery_lease_coordinate(&fenced),
-            ((256, 256), None)
-        );
+        let fenced =
+            delivery_with_fence_offset("fenced", Some(256), 0, "2026-08-29T00:00:00Z", Some(64));
+        assert_eq!(sink_delivery_lease_coordinate(&fenced), ((256, 256), None));
 
         let mut ranged = delivery_with_fence_offset("ranged", None, 0, "", None);
         ranged.relay_range = Some((300, 512));
@@ -3845,25 +3837,15 @@ mod tests {
 
     #[test]
     fn zero_consumed_terminal_is_refused_before_lease_or_transport() {
-        let delivery = delivery_with_fence_offset(
-            "zero-c",
-            Some(0),
-            7,
-            "2026-08-29T00:00:00Z",
-            Some(1),
-        );
+        let delivery =
+            delivery_with_fence_offset("zero-c", Some(0), 7, "2026-08-29T00:00:00Z", Some(1));
         assert!(delivery_frontier::validate_terminal_delivery(&delivery).is_none());
     }
 
     #[test]
     fn zero_width_or_reversed_source_range_is_refused_before_lease_or_transport() {
-        let mut delivery = delivery_with_fence_offset(
-            "bad-source",
-            Some(9),
-            7,
-            "2026-08-29T00:00:00Z",
-            Some(1),
-        );
+        let mut delivery =
+            delivery_with_fence_offset("bad-source", Some(9), 7, "2026-08-29T00:00:00Z", Some(1));
         delivery.terminal_source_range = Some((4, 4));
         assert!(delivery_frontier::validate_terminal_delivery(&delivery).is_none());
         delivery.terminal_source_range = Some((5, 4));
@@ -3872,17 +3854,15 @@ mod tests {
 
     #[test]
     fn source_provenance_changes_telemetry_without_changing_delivery_decision() {
-        let mut left = delivery_with_fence_offset(
-            "telemetry",
-            Some(11),
-            7,
-            "2026-08-29T00:00:00Z",
-            Some(1),
-        );
+        let mut left =
+            delivery_with_fence_offset("telemetry", Some(11), 7, "2026-08-29T00:00:00Z", Some(1));
         let mut right = left.clone();
         left.terminal_source_range = Some((1, 10));
         right.terminal_source_range = Some((2, 9));
-        assert_eq!(sink_delivery_lease_coordinate(&left), sink_delivery_lease_coordinate(&right));
+        assert_eq!(
+            sink_delivery_lease_coordinate(&left),
+            sink_delivery_lease_coordinate(&right)
+        );
     }
 
     // #3089 A2b (review-fix M2): an EMPTY body diverges between the controller and
@@ -5177,8 +5157,7 @@ mod tests {
             let ch = ChannelId::new(7301);
             let cell = Arc::new(DeliveryLeaseCell::new(ch));
             let turn = lease_key(ch);
-            let guard =
-                SinkDeliveryLeaseGuard::acquire(&cell, turn, END).expect("acquire wins");
+            let guard = SinkDeliveryLeaseGuard::acquire(&cell, turn, END).expect("acquire wins");
             match cell.read() {
                 LeaseSnapshot::Leased {
                     holder, start, end, ..

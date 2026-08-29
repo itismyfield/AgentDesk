@@ -66,6 +66,24 @@ pub struct SourceStamp {
     pub witness: SourceWitness,
 }
 
+/// #3041 P1-3 (Part a, B1): the commit-fence data the producer rides on the
+/// RESULT-bearing frame. The watcher computes the authoritative consumed-terminal
+/// `end` and pins the delegating turn's identity (from the inflight loaded BEFORE
+/// the relay, matching #3141 pinned-id semantics) so the sink can advance the
+/// offset authority identity-gated on a confirmed delivery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalCommitFence {
+    pub consumed_end: u64,
+    pub source_range: (u64, u64),
+    pub reset_incarnation: u64,
+    pub turn_user_msg_id: u64,
+    pub turn_started_at: String,
+    /// #3041 P1-3 (codex P1-3 issue 2): the turn's `turn_start_offset` — added to
+    /// the sink's identity gate so two consecutive `user_msg_id == 0` turns started
+    /// in the same `now_string` second (identical `started_at`) cannot collide.
+    pub turn_start_offset: Option<u64>,
+}
+
 /// The turn identity stamped on a relayed frame. Terminal frames use this as the
 /// commit-fence identity gate; non-terminal frames may also carry it so producer
 /// backpressure can attribute an evicted frame to the affected turn.
@@ -142,7 +160,7 @@ impl super::RelayProducer {
     pub fn try_send_terminal_frame_with_source(
         &self,
         payload: String,
-        terminal: super::TerminalCommitFence,
+        terminal: TerminalCommitFence,
         relay_generation_mtime_ns: i64,
         relay_source_stamp: Option<SourceStamp>,
     ) -> super::RelaySendOutcome {

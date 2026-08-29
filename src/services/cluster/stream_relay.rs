@@ -630,24 +630,6 @@ impl RelayFrameQueue {
     }
 }
 
-/// #3041 P1-3 (Part a, B1): the commit-fence data the producer rides on the
-/// RESULT-bearing frame. The watcher computes the authoritative consumed-terminal
-/// `end` and pins the delegating turn's identity (from the inflight loaded BEFORE
-/// the relay, matching #3141 pinned-id semantics) so the sink can advance the
-/// offset authority identity-gated on a confirmed delivery.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TerminalCommitFence {
-    pub consumed_end: u64,
-    pub source_range: (u64, u64),
-    pub reset_incarnation: u64,
-    pub turn_user_msg_id: u64,
-    pub turn_started_at: String,
-    /// #3041 P1-3 (codex P1-3 issue 2): the turn's `turn_start_offset` — added to
-    /// the sink's identity gate so two consecutive `user_msg_id == 0` turns started
-    /// in the same `now_string` second (identical `started_at`) cannot collide.
-    pub turn_start_offset: Option<u64>,
-}
-
 #[allow(clippy::too_many_arguments)]
 fn try_send_frame_inner(
     matched: &MatchedChannel,

@@ -71,9 +71,8 @@ impl SinkDeliveryLeaseGuard {
                     &heartbeat_key,
                     coordinate,
                     token,
-                    crate::services::discord::lease_now_ms().saturating_add(
-                        crate::services::discord::DELIVERY_LEASE_DEADLINE_MS,
-                    ),
+                    crate::services::discord::lease_now_ms()
+                        .saturating_add(crate::services::discord::DELIVERY_LEASE_DEADLINE_MS),
                 ) {
                     break;
                 }
@@ -89,7 +88,8 @@ impl SinkDeliveryLeaseGuard {
     }
 
     pub(super) fn commit(&self, outcome: LeaseOutcome) -> bool {
-        self.cell.commit_sink_exact(&self.key, self.coordinate, self.token, outcome)
+        self.cell
+            .commit_sink_exact(&self.key, self.coordinate, self.token, outcome)
     }
 
     pub(super) fn matches_exact(&self) -> bool {
@@ -276,7 +276,13 @@ mod pr_b_contract_tests {
         let guard = SinkDeliveryLeaseGuard::acquire(&cell, key(channel, 1), 19).unwrap();
         assert!(guard.matches_exact());
         assert!(guard.commit(LeaseOutcome::Delivered));
-        assert!(matches!(cell.read(), LeaseSnapshot::Committed { outcome: LeaseOutcome::Delivered, .. }));
+        assert!(matches!(
+            cell.read(),
+            LeaseSnapshot::Committed {
+                outcome: LeaseOutcome::Delivered,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -314,7 +320,10 @@ mod pr_b_contract_tests {
 
     #[test]
     fn landed_stale_settles_attempt_without_advancing_current_frontier() {
-        assert_ne!(SinkDeliveryProofResult::LandedStale, SinkDeliveryProofResult::Persisted);
+        assert_ne!(
+            SinkDeliveryProofResult::LandedStale,
+            SinkDeliveryProofResult::Persisted
+        );
     }
 
     #[test]
@@ -332,6 +341,11 @@ mod pr_b_contract_tests {
         let source = include_str!("delivery_frontier.rs");
         assert!(source.find("settle_exact(").is_none());
         let sink = include_str!("../session_relay_sink.rs");
-        assert!(sink.find("journal::settle_exact(").unwrap() < sink.find("delivery_frontier::finish_sink_delivery(").unwrap());
+        assert!(
+            sink.find("journal::settle_exact(").unwrap()
+                < sink
+                    .find("delivery_frontier::finish_sink_delivery(")
+                    .unwrap()
+        );
     }
 }
