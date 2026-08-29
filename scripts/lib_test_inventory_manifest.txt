@@ -79,6 +79,7 @@ cli::dcserver_restart_wait::tests::s5b_create_io_failure_is_handled_without_dire
 cli::dcserver_restart_wait::tests::s5b_disappeared_pending_is_diagnostic_then_times_out
 cli::dcserver_restart_wait::tests::s5b_legacy_fixed_index_is_not_terminal_proof
 cli::dcserver_restart_wait::tests::s5b_no_runtime_root_uses_standard_fallback_without_direct_kill
+cli::dcserver_restart_wait::tests::s5b_only_persisted_maps_to_success
 cli::dcserver_restart_wait::tests::s5b_persisted_proof_acknowledges_after_marker_disappears
 cli::dcserver_restart_wait::tests::s5b_persisted_proof_acknowledges_with_marker_present
 cli::dcserver_restart_wait::tests::s5b_persisted_proof_published_during_liveness_probe_wins
@@ -4270,6 +4271,9 @@ services::discord::response_sanitizer::subagent_notification_card::tests::detect
 services::discord::response_sanitizer::subagent_notification_card::tests::detects_provider_reuse_user_prefixed_subagent_notifications_3777
 services::discord::response_sanitizer::subagent_notification_card::tests::human_mid_body_quote_is_not_sanitized
 services::discord::response_sanitizer::tests::strips_echoed_memory_recall_ownership_block
+services::discord::restart_report::tests::exact_fencing_nonce_and_acceptance_survive_a_b_c_overlap
+services::discord::restart_report::tests::pending_awaiting_and_corrupt_reports_are_conservative
+services::discord::restart_report::tests::production_path_preserves_attempt_and_fresh_bridge_channel
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_preserves_fresh_bootstrap_without_worktree_hint
 services::discord::router::dispatch_trigger::tests::dispatch_session_path_reused_thread_still_updates_divergent_fallback
 services::discord::router::dispatch_trigger::tests::dispatch_should_recover_session_worktree_only_for_fresh_work_dispatches

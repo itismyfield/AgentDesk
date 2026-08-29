@@ -8,7 +8,7 @@
 //! the new child-module boundary.
 
 use super::terminal_watcher::restart_report_watcher_start;
-use super::*;
+use super::{restart_report::clear_loaded_restart_report, *};
 
 use super::tmux_probe::{tmux_has_session_with_retry, tmux_session_alive_with_retry};
 
@@ -219,8 +219,8 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             channel_id.to_channel(http).await,
             Ok(serenity::model::channel::Channel::Private(_))
         );
-        let restart_report_exists =
-            super::restart_report::load_restart_report(provider, state.channel_id).is_some();
+        let restart_report = super::restart_report::load_restart_report(provider, state.channel_id);
+        let restart_report_exists = restart_report.is_some();
         // #3562: derive the turn identity and agent role so the recovery_fired
         // observability events back-trace to a specific agent/turn. `turn_id`
         // matches the recovered-transcript key (joins turn_started/turn_finished
@@ -597,7 +597,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                 // Only clear recovery bookkeeping if dispatch was completed (or no dispatch).
                 // Preserving state on failure allows the next recovery pass to retry.
                 if dispatch_completed {
-                    super::restart_report::clear_restart_report(provider, state.channel_id);
+                    clear_loaded_restart_report(restart_report.as_ref());
                     finish_recovered_turn_mailbox(
                         shared,
                         provider,
@@ -666,7 +666,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                     "  [{ts}] ↻ restart report exists but tmux session alive for channel {}: clearing report, spawning watcher immediately",
                     state.channel_id
                 );
-                super::restart_report::clear_restart_report(provider, state.channel_id);
+                clear_loaded_restart_report(restart_report.as_ref());
                 // Register session in-memory so handlers can find it.
                 // Derive channel_name from tmux session name if not in inflight state.
                 let effective_channel_name = state.channel_name.clone().or_else(|| {
@@ -864,7 +864,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                         state.channel_id
                     );
                 }
-                super::restart_report::clear_restart_report(provider, state.channel_id);
+                clear_loaded_restart_report(restart_report.as_ref());
             }
         }
 
@@ -1862,7 +1862,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                                 &error,
                             )
                             .await;
-                            super::restart_report::clear_restart_report(provider, state.channel_id);
+                            clear_loaded_restart_report(restart_report.as_ref());
                             super::inflight::clear_inflight_state_for_reconcile(provider, &state);
                         } else {
                             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2102,7 +2102,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
                         &error,
                     )
                     .await;
-                    super::restart_report::clear_restart_report(provider, state.channel_id);
+                    clear_loaded_restart_report(restart_report.as_ref());
                     super::inflight::clear_inflight_state_for_reconcile(provider, &state);
                 } else {
                     let ts = chrono::Local::now().format("%H:%M:%S");

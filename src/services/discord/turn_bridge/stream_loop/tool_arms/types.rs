@@ -85,7 +85,7 @@ pub(in crate::services::discord::turn_bridge::stream_loop) struct StreamToolArmS
     pub(in crate::services::discord::turn_bridge::stream_loop) pending_long_running_retarget_after_state_save:
         &'a mut PendingLongRunningRetargetAfterStateSave,
     pub(in crate::services::discord::turn_bridge::stream_loop) restart_followup_pending:
-        &'a mut bool,
+        &'a mut Option<RestartAttempt>,
     pub(in crate::services::discord::turn_bridge::stream_loop) last_edit_text: &'a mut String,
     pub(in crate::services::discord::turn_bridge::stream_loop) full_response: &'a mut String,
     pub(in crate::services::discord::turn_bridge::stream_loop) response_sent_offset: &'a mut usize,

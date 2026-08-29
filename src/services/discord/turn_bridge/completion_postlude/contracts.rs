@@ -67,7 +67,7 @@ pub(in crate::services::discord::turn_bridge) struct CompletionPostludeState {
     pub(in crate::services::discord::turn_bridge) api_friction_reports:
         Vec<crate::services::api_friction::ApiFrictionReport>,
     pub(in crate::services::discord::turn_bridge) cancelled: bool,
-    pub(in crate::services::discord::turn_bridge) restart_followup_pending: bool,
+    pub(in crate::services::discord::turn_bridge) restart_followup_pending: Option<RestartAttempt>,
     pub(in crate::services::discord::turn_bridge) bridge_skip_holder_owns_inflight: bool,
     pub(in crate::services::discord::turn_bridge) completion_guard: CompletionGuard,
     pub(in crate::services::discord::turn_bridge) inflight_guard: InflightCleanupGuard,

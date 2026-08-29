@@ -43,7 +43,9 @@ mod voice_completion;
 mod watcher_handoff;
 mod watcher_orphan_cleanup;
 use super::gateway::TurnGateway;
-use super::restart_report::{RestartCompletionReport, clear_restart_report, save_restart_report};
+use super::restart_report::{
+    RestartAttempt, RestartReportContext, announce_restart, clear_restart_report,
+};
 use super::turn_view_reconciler::{
     note_intake_turn_cleared_via_shared as tv_clear,
     note_intake_turn_completed_via_shared as tv_done,
@@ -336,7 +338,7 @@ pub(super) fn spawn_turn_bridge(
         let mut accumulated_memory_input_tokens: u64 = bridge.memory_recall_usage.input_tokens;
         let mut accumulated_memory_output_tokens: u64 = bridge.memory_recall_usage.output_tokens;
         let mut spin_idx: usize = 0;
-        let mut restart_followup_pending = false;
+        let mut restart_followup_pending: Option<RestartAttempt> = None;
         let mut any_tool_used = bridge.inflight_state.any_tool_used;
         let mut has_post_tool_text = bridge.inflight_state.has_post_tool_text;
         let mut tmux_handed_off = false;
