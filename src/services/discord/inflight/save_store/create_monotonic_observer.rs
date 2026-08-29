@@ -155,7 +155,7 @@ pub(super) fn observe_successful_real_create(state: &InflightTurnState) {
 }
 
 #[cfg(test)]
-pub(super) mod test_seams {
+pub(in crate::services::discord::inflight) mod test_seams {
     use super::*;
     use std::cell::RefCell;
 

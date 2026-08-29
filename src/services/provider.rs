@@ -1609,11 +1609,12 @@ where
     use std::io::{Read, Seek, SeekFrom};
     use std::time::{Duration, Instant};
 
+    let pinned_open_file = opened_file.is_some();
     let wait_start = Instant::now();
     let mut wait_interval = Duration::from_millis(10);
     let max_wait_interval = Duration::from_millis(500);
     loop {
-        if std::fs::metadata(output_path).is_ok() {
+        if pinned_open_file || std::fs::metadata(output_path).is_ok() {
             break;
         }
         if !is_alive() {
@@ -1667,18 +1668,26 @@ where
                 no_data_count += 1;
                 if no_data_count % 25 == 0 {
                     if !is_alive() {
-                        let file_len = std::fs::metadata(output_path)
-                            .map(|meta| meta.len())
-                            .unwrap_or(current_offset);
+                        let file_len = if pinned_open_file {
+                            file.metadata()
+                        } else {
+                            std::fs::metadata(output_path)
+                        }
+                        .map(|meta| meta.len())
+                        .unwrap_or(current_offset);
                         if file_len > current_offset {
                             continue;
                         }
                         break;
                     }
 
-                    let file_len = std::fs::metadata(output_path)
-                        .map(|meta| meta.len())
-                        .unwrap_or(current_offset);
+                    let file_len = if pinned_open_file {
+                        file.metadata()
+                    } else {
+                        std::fs::metadata(output_path)
+                    }
+                    .map(|meta| meta.len())
+                    .unwrap_or(current_offset);
                     let has_new_bytes = file_len > current_offset;
                     let output_ever_grew = current_offset > start_offset;
                     if !has_new_bytes
