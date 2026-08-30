@@ -47,6 +47,22 @@ readonly MUTATION_COUNT=7
 readonly MODE="${RELAY_AUTHORITY_MUTATION_TEST_MODE:-cargo}"
 readonly FIXTURE_RUNNER="${RELAY_AUTHORITY_MUTATION_FIXTURE_RUNNER:-}"
 
+CARGO_PACKAGE_NAME="$(awk '
+  /^\[package\]$/ { package = 1; next }
+  package && /^\[/ { exit }
+  package && /^[[:space:]]*name[[:space:]]*=/ {
+    value = $0; sub(/^[^"]*"/, "", value); sub(/".*$/, "", value); print value; exit
+  }
+' "$REPO_ROOT/Cargo.toml")"
+if [[ ! "$CARGO_PACKAGE_NAME" =~ ^[[:alnum:]_-]+$ ]]; then
+  printf 'ERROR Cargo.toml has no valid [package].name\n' >&2
+  exit 2
+fi
+readonly CARGO_PACKAGE_NAME
+readonly CARGO_COMPILE_MARKER="Compiling ${CARGO_PACKAGE_NAME} v"
+readonly CARGO_FRESH_MARKER="Fresh ${CARGO_PACKAGE_NAME} v"
+readonly CARGO_BUILD_FAILURE_MARKER="could not compile \`${CARGO_PACKAGE_NAME}\`"
+
 if [[ "$MODE" != "cargo" && "$MODE" != "fixture" ]]; then
   printf 'ERROR invalid RELAY_AUTHORITY_MUTATION_TEST_MODE=%q\n' "$MODE" >&2
   exit 2
@@ -201,9 +217,9 @@ run_target() {
     rc=$?
     set -e
 
-    compile_count="$(grep -Fc 'Compiling agentdesk v' "$log" || true)"
-    if [[ "$compile_count" != "1" ]] || grep -Fq 'Fresh agentdesk v' "$log"; then
-      printf 'ERROR mutation=%s cache-proof=invalid compile_count=%s expected=1 and no Fresh agentdesk\n' "$mutation" "$compile_count" >&2
+    compile_count="$(grep -Fc "$CARGO_COMPILE_MARKER" "$log" || true)"
+    if [[ "$compile_count" != "1" ]] || grep -Fq "$CARGO_FRESH_MARKER" "$log"; then
+      printf 'ERROR mutation=%s cache-proof=invalid compile_count=%s expected=1 and no Fresh %s\n' "$mutation" "$compile_count" "$CARGO_PACKAGE_NAME" >&2
       cat "$log" >&2
       return 96
     fi
@@ -218,7 +234,7 @@ run_target() {
   # above with the same compiling=1 fresh=0 values a real kill produces. Judge on
   # the log of this same single invocation. Do not add a second cargo call: a
   # preceding `cargo check` would make this run Fresh and trip the cache proof.
-  if grep -Fq 'could not compile `agentdesk`' "$log"; then
+  if grep -Fq "$CARGO_BUILD_FAILURE_MARKER" "$log"; then
     printf 'MUTATION_ORACLE mutation=%s compile_ok=no tests_passed=0 tests_failed=0\n' "$mutation"
     printf 'ERROR mutation=%s status=BUILD-BROKEN rc=%d target=%s (mutant did not compile)\n' "$mutation" "$rc" "$target" >&2
     cat "$log" >&2
@@ -307,8 +323,8 @@ run_mutation \
 
 run_mutation \
   M8 "$TERMINAL_HANDOFF" \
-  'Err(error) => return Err(error),' \
-  'Err(_error) => { terminal_not_delivered = true; }' \
+  $'terminal_not_delivered = true;\n                }\n                Err(error) => return Err(error),' \
+  $'terminal_not_delivered = true;\n                }\n                Err(_error) => { terminal_not_delivered = true; }' \
   'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_propagates_injected_transport_error'
 
 run_mutation \
