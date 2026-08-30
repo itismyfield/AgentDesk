@@ -23,11 +23,16 @@ def _run_matrix_filter_cli(*filter_args: str):
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         config = root / "agentdesk.yaml"
-        config.write_text(matrix.yaml.safe_dump({"agents": [
-            {"id": matrix.cell_driver.cell_default_agent(cell), "channels": {
-                matrix.cell_driver.cell_provider(cell): {"id": str(index)}}}
+        agents = [
+            {
+                "id": matrix.cell_driver.cell_default_agent(cell),
+                "channels": {matrix.cell_driver.cell_provider(cell): {"id": str(index)}},
+            }
             for index, cell in enumerate(matrix.DEFAULT_CELLS, 1)
-        ]}))
+        ]
+        config.write_text(
+            matrix.yaml.safe_dump({"agents": agents}), encoding="utf-8"
+        )
         output = root / "matrix"
         proc = subprocess.run(
             [
@@ -38,7 +43,11 @@ def _run_matrix_filter_cli(*filter_args: str):
             cwd=ROOT, capture_output=True, text=True, check=False,
         )
         report_path = output / "matrix.json"
-        report = json.loads(report_path.read_text()) if report_path.exists() else None
+        report = (
+            json.loads(report_path.read_text(encoding="utf-8"))
+            if report_path.exists()
+            else None
+        )
         return proc, report_path.exists(), report
 
 
@@ -46,6 +55,7 @@ class MatrixConfig(unittest.TestCase):
     def test_filter_fail_closed_unknown_matrix(self):
         proc, report_exists, _ = _run_matrix_filter_cli("--filter", "E-999")
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("unknown scenario id(s): E-999", proc.stderr)
         self.assertFalse(report_exists)
 
     def test_filter_fail_closed_orchestrator_only_matrix(self):
@@ -54,7 +64,8 @@ class MatrixConfig(unittest.TestCase):
         self.assertTrue(report_exists)
         self.assertEqual(report["restart_guard_scenarios"], ["E-17"])
         cell_results = [row for row in report["results"] if row["kind"] == "cell"]
-        self.assertTrue(all(row["totals"]["pass"] == 0 for row in cell_results))
+        zero = {"pass": 0, "fail": 0, "skipped": 0}
+        self.assertTrue(all(row["totals"] == zero for row in cell_results))
 
     def test_load_channel_ids_from_agentdesk_yaml_shape(self):
         yaml = """

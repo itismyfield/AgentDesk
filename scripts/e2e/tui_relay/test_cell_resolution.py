@@ -32,7 +32,11 @@ def _run_filter_cli(*filter_args: str):
             cwd=ROOT, capture_output=True, text=True, check=False,
         )
         report_path = output / "report.codex-tui.json"
-        report = json.loads(report_path.read_text()) if report_path.exists() else None
+        report = (
+            json.loads(report_path.read_text(encoding="utf-8"))
+            if report_path.exists()
+            else None
+        )
         return proc, report_path.exists(), report
 
 
@@ -94,6 +98,7 @@ class ScenarioFilter(unittest.TestCase):
     def test_filter_fail_closed_unknown_direct(self):
         proc, report_exists, _ = _run_filter_cli("--filter", "E-999")
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("unknown scenario id(s): E-999", proc.stderr)
         self.assertFalse(report_exists)
 
     def test_filter_fail_closed_partial_id(self):

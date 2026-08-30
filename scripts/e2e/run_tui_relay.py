@@ -905,6 +905,28 @@ def resolve_output_dir(arg: str | None, cell: str) -> Path:
     return path
 
 
+def validate_scenario_filter(raw: str | None, scenarios_dir: Path) -> set[str]:
+    """Parse an exact-id filter and reject ids absent from the global YAML set."""
+    if raw is None:
+        return set()
+    wanted = {token.strip() for token in raw.split(",") if token.strip()}
+    if not wanted:
+        raise ValueError("--filter must contain at least one scenario id")
+
+    known: set[str] = set()
+    for yaml_path in sorted(scenarios_dir.glob("*.yaml")):
+        with yaml_path.open("r", encoding="utf-8") as fp:
+            data = yaml.safe_load(fp)
+        if not isinstance(data, dict):
+            raise ValueError(f"{yaml_path} did not parse to a mapping")
+        if data.get("id") is not None:
+            known.add(str(data["id"]))
+    unknown = sorted(wanted - known)
+    if unknown:
+        raise ValueError("unknown scenario id(s): " + ", ".join(unknown))
+    return wanted
+
+
 def load_scenarios(scenarios_dir: Path, *, cell: str) -> list[dict[str, Any]]:
     scenarios: list[dict[str, Any]] = []
     for yaml_path in sorted(scenarios_dir.glob("*.yaml")):
@@ -4230,18 +4252,22 @@ def coverage_class_violations(results: list[dict[str, Any]]) -> list[dict[str, A
 def main() -> int:
     args = parse_args()
     cell = args.cell
+    scenarios_dir = Path(args.scenarios)
+    if not scenarios_dir.is_dir():
+        print(f"[e2e] scenarios dir not found: {scenarios_dir}", file=sys.stderr)
+        return 2
+    try:
+        wanted = validate_scenario_filter(args.filter, scenarios_dir)
+    except ValueError as error:
+        print(f"[e2e] invalid --filter: {error}", file=sys.stderr)
+        return 2
     handoff_to = args.handoff_to_agent or cell_default_agent(cell)
     output_dir = resolve_output_dir(args.output, cell)
     run_id = output_dir.name
     print(f"[e2e] cell={cell} run_id={run_id} output={output_dir}")
 
-    scenarios_dir = Path(args.scenarios)
-    if not scenarios_dir.is_dir():
-        print(f"[e2e] scenarios dir not found: {scenarios_dir}", file=sys.stderr)
-        return 2
     scenarios = load_scenarios(scenarios_dir, cell=cell)
-    if args.filter:
-        wanted = {tok.strip() for tok in args.filter.split(",") if tok.strip()}
+    if wanted:
         scenarios = [s for s in scenarios if str(s.get("id")) in wanted]
     print(f"[e2e] {len(scenarios)} scenarios applicable to {cell}")
     if not scenarios:
