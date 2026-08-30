@@ -339,7 +339,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )])
         .with_example(
             json!({"path": {"group": "kanban"}}),
-            json!({"group": "kanban", "categories": [{"name": "kanban", "endpoint_count": 24}, {"name": "reviews", "endpoint_count": 8}]}),
+            json!({"group": "kanban", "categories": [{"name": "kanban", "endpoint_count": 24, "canonical_path": "/api/docs/kanban/kanban"}, {"name": "reviews", "endpoint_count": 8, "canonical_path": "/api/docs/kanban/reviews"}]}),
         ),
         ep(
             "GET",
@@ -756,6 +756,30 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docs_group_example_advertises_canonical_paths() {
+        let response = &endpoints()
+            .into_iter()
+            .find(|endpoint| endpoint.path == "/api/docs/{group}")
+            .expect("group docs endpoint")
+            .example
+            .expect("group docs example")
+            .response;
+
+        for (name, canonical_path) in [
+            ("kanban", "/api/docs/kanban/kanban"),
+            ("reviews", "/api/docs/kanban/reviews"),
+        ] {
+            let category = response["categories"]
+                .as_array()
+                .expect("group categories array")
+                .iter()
+                .find(|category| category["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name} category"));
+            assert_eq!(category["canonical_path"], canonical_path);
+        }
+    }
 
     #[test]
     fn add_run_entry_docs_use_canonical_thread_group_contract() {

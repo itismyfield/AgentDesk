@@ -283,7 +283,7 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
 /// GET /api/docs/{group_or_category}
 ///
 /// Preferred behavior (#1063): `group` is one of the 8 top-level group names,
-/// response is `{ group, categories: [{name, description, endpoint_count}] }`.
+/// response is `{ group, categories: [{name, description, endpoint_count, canonical_path}] }`.
 ///
 /// Backward-compatible fallback: if the segment matches a legacy category name
 /// (e.g. `admin`, `queue`, `dispatches`, `ops`, or a fine-grained sub-category
