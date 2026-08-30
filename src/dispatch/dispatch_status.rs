@@ -1156,11 +1156,13 @@ async fn card_needs_review_dispatch_pg(pool: &PgPool, card_id: &str) -> Result<b
     }
 
     let has_blocking_dispatch = sqlx::query_scalar::<_, bool>(
-        "SELECT COUNT(*) > 0
-         FROM task_dispatches
-         WHERE kanban_card_id = $1
-           AND dispatch_type IN ('review', 'review-decision', 'implementation', 'rework')
-           AND status IN ('pending', 'dispatched')",
+        "SELECT EXISTS(
+             SELECT 1
+             FROM task_dispatches
+             WHERE kanban_card_id = $1
+               AND dispatch_type IN ('review', 'review-decision', 'implementation', 'rework')
+               AND status IN ('pending', 'dispatched')
+         )",
     )
     .bind(card_id)
     .fetch_one(pool)
