@@ -366,14 +366,13 @@ mod high_risk_recovery {
             (final_fact.unwrap(), prior, first_fd.unwrap())
         };
 
-        let reject = |suffix: &str, successful: &[&[u8]], failed: &[u8]| {
+        let reject = |suffix: &str, successful: &[&[u8]], failed: &[u8], expected_errno: i32| {
             TRACE.with(|trace| trace.borrow_mut().clear());
             let error = open_runtime_root(&relative.join(suffix)).unwrap_err();
             let FsErrorKind::Io(io) = error.kind() else {
                 panic!("hostile path was not an open failure: {error:?}");
             };
-            assert_eq!(io.operation(), FsOperation::Open);
-            assert_ne!(io.raw_errno(), 0);
+            assert_eq!((io.operation(), io.raw_errno()), (FsOperation::Open, expected_errno));
             let trace = TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()));
             assert_eq!(trace.len(), successful.len() * 2 + 1);
             let prior = successful_prefix(&trace[..successful.len() * 2], successful).1;
@@ -387,15 +386,16 @@ mod high_risk_recovery {
             assert_eq!(open.result_fd, -1);
             assert_eq!(open.errno, Some(io.raw_errno()));
             assert_eq!((open.f_getfd_result, open.f_getfd_errno), (-1, None));
+            assert_closed(prior);
         };
         let root_prefix = [b".".as_slice(), temp_name];
         let nested_prefix = [root_prefix[0], temp_name, b"nested"];
-        reject("missing/leaf", &root_prefix, b"missing");
-        reject("nested/missing", &nested_prefix, b"missing");
-        reject("root-link/nested", &root_prefix, b"root-link");
-        reject("nested/final-link", &nested_prefix, b"final-link");
-        reject("file/leaf", &root_prefix, b"file");
-        reject("nested/file", &nested_prefix, b"file");
+        reject("missing/leaf", &root_prefix, b"missing", libc::ENOENT);
+        reject("nested/missing", &nested_prefix, b"missing", libc::ENOENT);
+        reject("root-link/nested", &root_prefix, b"root-link", libc::ELOOP);
+        reject("nested/final-link", &nested_prefix, b"final-link", libc::ELOOP);
+        reject("file/leaf", &root_prefix, b"file", libc::ENOTDIR);
+        reject("nested/file", &nested_prefix, b"file", libc::ENOTDIR);
 
         TRACE.with(|trace| trace.borrow_mut().clear());
         let root = open_runtime_root(relative).unwrap();
