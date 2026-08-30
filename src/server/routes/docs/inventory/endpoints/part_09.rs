@@ -152,6 +152,20 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({"ok": true, "profile_id": "codex-alt", "home": "~/.adk/profiles/codex/codex-alt"}),
         ),
         ep(
+            "DELETE",
+            "/api/provider-auth-profiles/{provider}/{profile_id}",
+            "providers",
+            "Unlink an unused extra account from the catalog. The managed credential home is retained and can be connected again later.",
+        )
+        .with_params([
+            ("provider", path_param("Provider id")),
+            ("profile_id", path_param("Named extra account id")),
+        ])
+        .with_example(
+            json!({"path": {"provider": "codex", "profile_id": "codex-alt"}}),
+            json!({"ok": true, "provider": "codex", "profile_id": "codex-alt", "credentials_retained": true}),
+        ),
+        ep(
             "PATCH",
             "/api/channels/{id}",
             "discord",

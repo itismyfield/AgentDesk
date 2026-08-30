@@ -86,6 +86,7 @@ export default function SettingsView({
   const [providerAuthError, setProviderAuthError] = useState<string | null>(null);
   const [pendingProviderLogin, setPendingProviderLogin] = useState<PendingProviderLogin | null>(null);
   const [startingProviderId, setStartingProviderId] = useState<string | null>(null);
+  const [removingProviderAccountKey, setRemovingProviderAccountKey] = useState<string | null>(null);
 
   const [activePanel, setActivePanel] = useState<SettingsPanel>(() => readStoredSettingsPanel());
   const [activeRuntimeCategoryId, setActiveRuntimeCategoryId] = useState<string>(() => readStoredRuntimeCategory());
@@ -207,6 +208,29 @@ export default function SettingsView({
       ));
     }
   }, [loadProviderAuthProfiles, notify, pendingProviderLogin, tr]);
+
+  const handleRemoveProviderAccount = useCallback(async (providerId: string, profileId: string) => {
+    const key = `${providerId}:${profileId}`;
+    const confirmed = window.confirm(tr(
+      `“${profileId}” 계정 연결을 해제할까요? 저장된 자격 증명 폴더는 유지됩니다.`,
+      `Unlink “${profileId}”? Its saved credential directory will be kept.`,
+    ));
+    if (!confirmed) return;
+    setRemovingProviderAccountKey(key);
+    setProviderAuthError(null);
+    try {
+      await api.removeProviderAuthProfile(providerId, profileId);
+      notify("extra 계정 연결을 해제했습니다. 자격 증명은 유지됩니다.", "Extra account unlinked; credentials were kept.", "success");
+      await loadProviderAuthProfiles();
+    } catch (error) {
+      setProviderAuthError(error instanceof Error ? error.message : tr(
+        "연결 해제에 실패했습니다. 먼저 연결된 에이전트/채널을 기본 계정으로 바꾸세요.",
+        "Unlink failed. First move bound agents/channels back to the default account.",
+      ));
+    } finally {
+      setRemovingProviderAccountKey(null);
+    }
+  }, [loadProviderAuthProfiles, notify, tr]);
 
   useEffect(() => {
     setCompanyName(settings.companyName);
@@ -667,7 +691,7 @@ export default function SettingsView({
         handleConfigSave, handleDangerousConfigConfirm, handlePanelChange,
         handleRcChange, handleRcReset, handleRcSave, handleSave, handleVoiceSave,
         inputStyle, isKo, isRowVisible, loadVoiceConfig, matchingKeysInActivePanel,
-        handleAddProviderAccount, handleCompleteProviderLogin, loadOperatorConnectors,
+        handleAddProviderAccount, handleCompleteProviderLogin, handleRemoveProviderAccount, loadOperatorConnectors,
         loadProviderAuthProfiles, onboardingMetas, openOnboarding, operatorConnectors,
         operatorConnectorsError, operatorConnectorsLoading, panelQuery, panelQueryNormalized,
         pendingProviderLogin, providerAuthError, providerAuthLoading, providerAuthProviders,
@@ -678,7 +702,7 @@ export default function SettingsView({
         secondaryActionStyle, selectedPipelineAgentId, selectedPipelineRepo,
         setActiveRuntimeCategoryId, setPanelQuery, setPendingDangerousConfigSave,
         setSelectedPipelineAgentId, setSelectedPipelineRepo, setShowOnboarding,
-        showOnboarding, startingProviderId, subtleButtonClass, subtleButtonStyle, tr,
+        showOnboarding, startingProviderId, removingProviderAccountKey, subtleButtonClass, subtleButtonStyle, tr,
         updateVoiceAgent, updateVoiceGlobal, voiceAliasConflict, voiceDirty, voiceDraft,
         voiceError, voiceLoaded, voiceSaving,
       }}

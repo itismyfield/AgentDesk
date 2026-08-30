@@ -254,8 +254,19 @@ pub(crate) fn set_agent_auth_profile_at(
     }
     let next = match normalized_auth_profile(auth_profile) {
         Some(profile_id) => {
-            if !document.provider_auth_profiles.contains_key(&profile_id) {
+            let Some(profile) = document.provider_auth_profiles.get(&profile_id) else {
                 return Err(format!("unknown auth_profile '{profile_id}'"));
+            };
+            let Some(agent) = document.agents.get(role_id) else {
+                return Err(format!("agent '{role_id}' not found"));
+            };
+            if let Some(agent_provider) = agent.provider.as_deref()
+                && !profile.provider.eq_ignore_ascii_case(agent_provider)
+            {
+                return Err(format!(
+                    "auth_profile '{profile_id}' provider '{}' does not match agent '{role_id}' provider '{agent_provider}'",
+                    profile.provider
+                ));
             }
             Some(profile_id)
         }
@@ -292,8 +303,27 @@ pub(crate) fn set_channel_auth_profile_at(
     }
     let next = match normalized_auth_profile(auth_profile) {
         Some(profile_id) => {
-            if !document.provider_auth_profiles.contains_key(&profile_id) {
+            let Some(profile) = document.provider_auth_profiles.get(&profile_id) else {
                 return Err(format!("unknown auth_profile '{profile_id}'"));
+            };
+            let binding = document
+                .channels
+                .as_ref()
+                .and_then(|channels| channels.by_id.get(channel_id))
+                .expect("checked channel binding exists");
+            let channel_provider = binding.provider.as_deref().or_else(|| {
+                document
+                    .agents
+                    .get(binding.agent.as_str())
+                    .and_then(|agent| agent.provider.as_deref())
+            });
+            if let Some(channel_provider) = channel_provider
+                && !profile.provider.eq_ignore_ascii_case(channel_provider)
+            {
+                return Err(format!(
+                    "auth_profile '{profile_id}' provider '{}' does not match channel '{channel_id}' provider '{channel_provider}'",
+                    profile.provider
+                ));
             }
             Some(profile_id)
         }
@@ -306,6 +336,53 @@ pub(crate) fn set_channel_auth_profile_at(
     {
         binding.auth_profile = next;
     }
+    persist_org_document(org_path, &document)
+}
+
+/// Removes only the catalog binding. Credential material remains in the
+/// managed profile home so an operator never loses an account by clicking the
+/// dashboard's unlink button. A bound profile must be detached first.
+pub(crate) fn remove_provider_auth_profile(profile_id: &str, provider: &str) -> Result<(), String> {
+    remove_provider_auth_profile_at(&org_yaml_path()?, profile_id, provider)
+}
+
+pub(crate) fn remove_provider_auth_profile_at(
+    org_path: &Path,
+    profile_id: &str,
+    provider: &str,
+) -> Result<(), String> {
+    let mut document = load_org_document(org_path)?;
+    let Some(profile) = document.provider_auth_profiles.get(profile_id) else {
+        return Err(format!("auth profile '{profile_id}' not found"));
+    };
+    if !profile.provider.eq_ignore_ascii_case(provider) {
+        return Err(format!(
+            "auth profile '{profile_id}' belongs to provider '{}', not '{provider}'",
+            profile.provider
+        ));
+    }
+    let bound_agents = document
+        .agents
+        .iter()
+        .filter(|(_, agent)| agent.auth_profile.as_deref() == Some(profile_id))
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>();
+    let bound_channels = document
+        .channels
+        .as_ref()
+        .into_iter()
+        .flat_map(|channels| channels.by_id.iter())
+        .filter(|(_, binding)| binding.auth_profile.as_deref() == Some(profile_id))
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>();
+    if !bound_agents.is_empty() || !bound_channels.is_empty() {
+        return Err(format!(
+            "auth profile '{profile_id}' is still bound to agents [{}] or channels [{}]; select default first",
+            bound_agents.join(", "),
+            bound_channels.join(", ")
+        ));
+    }
+    document.provider_auth_profiles.remove(profile_id);
     persist_org_document(org_path, &document)
 }
 
@@ -362,5 +439,54 @@ mod tests {
                     .unwrap_or_default()
                     .contains("auth_profile")
         );
+    }
+
+    #[test]
+    fn named_profile_unlink_requires_detach_and_keeps_catalog_operation_scoped() {
+        let dir = tempfile::tempdir().expect("org dir");
+        let path = dir.path().join("org.yaml");
+        fs::write(
+            &path,
+            "version: 1\nagents:\n  coder:\n    display_name: Coder\n    provider: codex\n",
+        )
+        .unwrap();
+        let profile = ProviderAuthProfileDef {
+            provider: "codex".into(),
+            home: Some("~/.adk/profiles/codex/work".into()),
+            env: BTreeMap::new(),
+        };
+        append_provider_auth_profile_at(&path, "work", profile.clone()).unwrap();
+        set_agent_auth_profile_at(&path, "coder", Some("work")).unwrap();
+        let err = remove_provider_auth_profile_at(&path, "work", "codex").unwrap_err();
+        assert!(err.contains("still bound"));
+
+        set_agent_auth_profile_at(&path, "coder", None).unwrap();
+        remove_provider_auth_profile_at(&path, "work", "codex").unwrap();
+        let rendered = fs::read_to_string(&path).unwrap();
+        assert!(!rendered.contains("auth_profile: work"));
+        assert!(!rendered.contains("\n  work:"));
+    }
+
+    #[test]
+    fn named_profile_rejects_provider_mismatch_before_persisting_binding() {
+        let dir = tempfile::tempdir().expect("org dir");
+        let path = dir.path().join("org.yaml");
+        fs::write(
+            &path,
+            "version: 1\nagents:\n  coder:\n    display_name: Coder\n    provider: codex\n",
+        )
+        .unwrap();
+        append_provider_auth_profile_at(
+            &path,
+            "claude-work",
+            ProviderAuthProfileDef {
+                provider: "claude".into(),
+                home: Some("~/.adk/profiles/claude/claude-work".into()),
+                env: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let err = set_agent_auth_profile_at(&path, "coder", Some("claude-work")).unwrap_err();
+        assert!(err.contains("does not match"));
     }
 }

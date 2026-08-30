@@ -252,6 +252,43 @@ pub async fn login_complete(
     ))
 }
 
+/// DELETE /api/provider-auth-profiles/{provider}/{profile_id}
+///
+/// Unlinks a named account from org.yaml. This deliberately retains the
+/// profile's credential directory; deleting credentials needs an explicit,
+/// separate operator action and must never be the side effect of an UI ×.
+pub async fn remove_profile(
+    Path((provider, profile_id)): Path<(String, String)>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let kind = intern_provider(&provider).map_err(profile_error)?;
+    let profile_id = profile_id.trim();
+    validate_profile_id(profile_id).map_err(profile_error)?;
+    org_writer::remove_provider_auth_profile(profile_id, kind.as_str()).map_err(|error| {
+        let status = if error.contains("not found") {
+            StatusCode::NOT_FOUND
+        } else if error.contains("still bound") {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        AppError::new(status, ErrorCode::Config, error)
+    })?;
+    let session = login_tmux_session_name(&kind, profile_id);
+    if crate::services::platform::tmux::has_session(&session) {
+        let _ =
+            crate::services::platform::tmux::kill_session(&session, "provider-auth-profile-unlink");
+    }
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "provider": kind.as_str(),
+            "profile_id": profile_id,
+            "credentials_retained": true,
+        })),
+    ))
+}
+
 /// PATCH /api/agents/{id} auth_profile helper used by agents_crud.
 pub fn apply_agent_auth_profile_patch(
     agent_id: &str,

@@ -84,6 +84,16 @@ export async function completeProviderAuthLogin(
   });
 }
 
+export async function removeProviderAuthProfile(
+  providerId: string,
+  profileId: string,
+): Promise<{ ok: boolean; credentials_retained: boolean }> {
+  return request(
+    `/api/provider-auth-profiles/${encodeURIComponent(providerId)}/${encodeURIComponent(profileId)}`,
+    { method: "DELETE" },
+  );
+}
+
 export function selectableCatalogIds(
   entries: ProviderCatalogEntry[],
   currentId?: string | null,
