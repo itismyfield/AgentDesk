@@ -191,12 +191,6 @@ def parse_cells(raw: str) -> list[str]:
     return cells
 
 
-def parse_filter(raw: str | None) -> set[str]:
-    if raw is None:
-        return set()
-    return {token.strip() for token in raw.split(",") if token.strip()}
-
-
 def resolve_output_dir(arg: str | None) -> Path:
     if arg:
         out = Path(arg)
@@ -1593,11 +1587,19 @@ def _matrix_coverage_class_violations(
 
 def main() -> int:
     args = parse_args()
+    scenarios_dir = Path(args.scenarios)
+    if not scenarios_dir.is_dir():
+        print(f"[matrix] scenarios dir not found: {scenarios_dir}", file=sys.stderr)
+        return 2
+    try:
+        wanted = cell_driver.validate_scenario_filter(args.filter, scenarios_dir)
+    except ValueError as error:
+        print(f"[matrix] invalid --filter: {error}", file=sys.stderr)
+        return 2
     cells = parse_cells(args.cells)
     channel_ids = load_channel_ids(Path(args.config).expanduser())
-    cross_scenarios = load_cross_channel_scenarios(Path(args.scenarios))
-    restart_guard_scenarios = load_restart_guard_scenarios(Path(args.scenarios))
-    wanted = parse_filter(args.filter)
+    cross_scenarios = load_cross_channel_scenarios(scenarios_dir)
+    restart_guard_scenarios = load_restart_guard_scenarios(scenarios_dir)
     if wanted:
         cross_scenarios = [
             scenario for scenario in cross_scenarios if str(scenario.get("id")) in wanted
