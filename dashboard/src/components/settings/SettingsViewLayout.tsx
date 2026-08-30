@@ -38,6 +38,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
     isRowVisible,
     handleAddProviderAccount,
     handleCompleteProviderLogin,
+    handleRemoveProviderAccount,
     loadOperatorConnectors,
     loadProviderAuthProfiles,
     loadVoiceConfig,
@@ -64,6 +65,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
     rcDirty,
     rcLoaded,
     rcSaving,
+    removingProviderAccountKey,
     renderSettingGroupCard,
     renderSettingRow,
     runtimeMetas,
@@ -174,12 +176,14 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
             loading={providerAuthLoading}
             onAddAccount={(providerId: string) => void handleAddProviderAccount(providerId)}
             onCompleteLogin={() => void handleCompleteProviderLogin()}
+            onRemoveAccount={(providerId: string, profileId: string) => void handleRemoveProviderAccount(providerId, profileId)}
             onReload={() => void loadProviderAuthProfiles()}
             pendingLogin={pendingProviderLogin}
             providers={providerAuthProviders}
             secondaryActionClass={secondaryActionClass}
             secondaryActionStyle={secondaryActionStyle}
             startingProviderId={startingProviderId}
+            removingAccountKey={removingProviderAccountKey}
             tr={tr}
           />
         );

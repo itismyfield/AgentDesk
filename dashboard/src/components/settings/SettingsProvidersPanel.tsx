@@ -1,4 +1,4 @@
-import { Plus, RefreshCw, Terminal } from "lucide-react";
+import { Plus, RefreshCw, Terminal, X } from "lucide-react";
 import type { CSSProperties } from "react";
 import { SurfaceEmptyState as SettingsEmptyState } from "../common/SurfacePrimitives";
 import {
@@ -22,12 +22,14 @@ interface SettingsProvidersPanelProps {
   loading: boolean;
   onAddAccount: (providerId: string) => void;
   onCompleteLogin: () => void;
+  onRemoveAccount: (providerId: string, profileId: string) => void;
   onReload: () => void;
   pendingLogin: PendingProviderLogin | null;
   providers: ProviderAuthProvider[];
   secondaryActionClass: string;
   secondaryActionStyle: CSSProperties;
   startingProviderId: string | null;
+  removingAccountKey: string | null;
   tr: (ko: string, en: string) => string;
 }
 
@@ -36,12 +38,14 @@ export function SettingsProvidersPanel({
   loading,
   onAddAccount,
   onCompleteLogin,
+  onRemoveAccount,
   onReload,
   pendingLogin,
   providers,
   secondaryActionClass,
   secondaryActionStyle,
   startingProviderId,
+  removingAccountKey,
   tr,
 }: SettingsProvidersPanelProps) {
   const extras = extraAccountCount(providers);
@@ -141,10 +145,12 @@ export function SettingsProvidersPanel({
             <ProviderCard
               key={provider.id}
               onAddAccount={() => onAddAccount(provider.id)}
+              onRemoveAccount={(profileId) => onRemoveAccount(provider.id, profileId)}
               provider={provider}
               secondaryActionClass={secondaryActionClass}
               secondaryActionStyle={secondaryActionStyle}
               starting={startingProviderId === provider.id}
+              removingAccountKey={removingAccountKey}
               tr={tr}
             />
           ))}
@@ -156,17 +162,21 @@ export function SettingsProvidersPanel({
 
 function ProviderCard({
   onAddAccount,
+  onRemoveAccount,
   provider,
   secondaryActionClass,
   secondaryActionStyle,
   starting,
+  removingAccountKey,
   tr,
 }: {
   onAddAccount: () => void;
+  onRemoveAccount: (profileId: string) => void;
   provider: ProviderAuthProvider;
   secondaryActionClass: string;
   secondaryActionStyle: CSSProperties;
   starting: boolean;
+  removingAccountKey: string | null;
   tr: (ko: string, en: string) => string;
 }) {
   const accounts = provider.accounts ?? [];
@@ -202,7 +212,13 @@ function ProviderCard({
       </div>
       <div className="mt-3 space-y-2">
         {accounts.map((account) => (
-          <AccountRow key={`${provider.id}:${account.id}`} account={account} tr={tr} />
+          <AccountRow
+            key={`${provider.id}:${account.id}`}
+            account={account}
+            onRemove={() => onRemoveAccount(account.id)}
+            removing={removingAccountKey === `${provider.id}:${account.id}`}
+            tr={tr}
+          />
         ))}
       </div>
     </section>
@@ -211,9 +227,13 @@ function ProviderCard({
 
 function AccountRow({
   account,
+  onRemove,
+  removing,
   tr,
 }: {
   account: ProviderAuthAccount;
+  onRemove: () => void;
+  removing: boolean;
   tr: (ko: string, en: string) => string;
 }) {
   const isDefault = accountIsDefault(account);
@@ -231,6 +251,19 @@ function AccountRow({
         <div className="text-sm font-medium" style={{ color: "var(--th-text)" }}>
           {isDefault ? tr("시스템 기본", "System default") : account.id}
         </div>
+        {isDefault ? null : (
+          <button
+            type="button"
+            onClick={onRemove}
+            disabled={removing}
+            className="rounded-lg p-1 disabled:opacity-50"
+            style={{ color: "var(--th-text-muted)" }}
+            title={tr("연결 해제 (자격 증명은 유지)", "Unlink (keep credentials)")}
+            aria-label={tr("계정 연결 해제", "Unlink account")}
+          >
+            <X size={14} />
+          </button>
+        )}
         {account.usage?.unsupported ? (
           <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
             {account.usage.reason ?? tr("사용량 미지원", "Usage unsupported")}

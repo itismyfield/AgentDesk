@@ -34,6 +34,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(provider_auth_profiles::login_complete),
             )
             .route(
+                "/provider-auth-profiles/{provider}/{profile_id}",
+                delete(provider_auth_profiles::remove_profile),
+            )
+            .route(
                 "/channels/{id}",
                 patch(provider_auth_profiles::patch_channel_auth_profile),
             )
