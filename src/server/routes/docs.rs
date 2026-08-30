@@ -389,20 +389,11 @@ mod tests {
 
     fn docs_router() -> Router {
         Router::new()
-            .route(
-                "/api/docs/{segment}",
-                get(api_docs_group_or_category),
-            )
-            .route(
-                "/api/docs/{group}/{category}",
-                get(api_docs_group_category),
-            )
+            .route("/api/docs/{segment}", get(api_docs_group_or_category))
+            .route("/api/docs/{group}/{category}", get(api_docs_group_category))
     }
 
-    async fn request_docs_json(
-        router: &Router,
-        uri: &str,
-    ) -> (StatusCode, Value) {
+    async fn request_docs_json(router: &Router, uri: &str) -> (StatusCode, Value) {
         let response = router
             .clone()
             .oneshot(
@@ -810,8 +801,7 @@ mod tests {
                     "advertised child path for {group}/{name}"
                 );
 
-                let (child_status, child) =
-                    request_docs_json(&docs_router, advertised_path).await;
+                let (child_status, child) = request_docs_json(&docs_router, advertised_path).await;
                 assert_eq!(child_status, StatusCode::OK, "child {advertised_path}");
                 assert_eq!(child["group"], group, "child {advertised_path}");
                 assert_eq!(child["category"], name, "child {advertised_path}");
@@ -901,10 +891,7 @@ mod tests {
                 category_to_group(segment),
                 "legacy child {canonical_path}"
             );
-            assert_eq!(
-                child["category"], segment,
-                "legacy child {canonical_path}"
-            );
+            assert_eq!(child["category"], segment, "legacy child {canonical_path}");
         }
         assert!(
             unresolved_legacy_canonical_paths.is_empty(),
