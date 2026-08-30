@@ -81,9 +81,7 @@ pub fn run(
     };
     let _ = std::fs::remove_file(prompt_file);
 
-    let expanded_dir = crate::runtime_layout::expand_user_path(working_dir)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| working_dir.to_string());
+    let expanded_dir = crate::utils::format::expand_tilde_string(working_dir);
 
     let (prompt_tx, prompt_rx) = mpsc::channel::<String>();
 
