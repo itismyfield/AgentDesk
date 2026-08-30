@@ -138,6 +138,8 @@ pub(crate) mod tmux_turn_liveness;
 #[cfg(unix)]
 pub mod tmux_wrapper;
 pub mod tool_output_guard;
+#[allow(dead_code)]
+pub(crate) mod writer_protocol;
 // #3034: 4 residual dead-code items; scoped here so the lint stays
 // live on clean sibling modules. Remove during tui_prompt_dedupe dead-code cleanup.
 pub(crate) mod tui_prompt_control;

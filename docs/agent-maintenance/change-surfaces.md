@@ -158,6 +158,21 @@ time for diagnostics; neither is a stored approval value.
 
 ## Surface Map (by feature)
 
+### `writer_protocol`
+
+- canonical_modules: `services::writer_protocol` owns the dormant typed grammar,
+  safe control-path derivation, trusted per-value record aliases, and the
+  process-local registry. It has no production consumer.
+- invariants: provider-native artifacts are always observation-only, even for
+  unknown artifacts and unsupported providers. Every non-native tuple is an
+  exact allowlist member or fails closed; Gemini/OpenCode only observe their
+  explicit no-managed-local-transcript tuple.
+- non_guarantees: the registry is not host/node/fleet authority and the derived
+  path is not an acquired lock. Aliases do not canonicalize paths, inspect
+  symlinks, perform I/O, or define a global path catalog. This surface changes
+  no open, append, rotate, truncate, cleanup, configuration, or cutover caller.
+
+
 ### `writer_gate_ci_wiring`
 
 - canonical_modules: `scripts/check_writer_gate_ci_wiring.py` owns the exact
