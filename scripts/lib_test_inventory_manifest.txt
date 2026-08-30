@@ -1220,6 +1220,7 @@ services::auto_queue::route::planning::failed_entry_alert_tests::production_fail
 services::auto_queue::route::planning::phase_gate_generate_validation_tests::deploy_gate_generation_is_statically_unavailable
 services::auto_queue::route::planning::phase_gate_generate_validation_tests::pr_confirm_and_legacy_default_remain_generation_compatible
 services::auto_queue::route::query::tests::reset_before_reuse_requires_reassignment_and_existing_thread_state
+services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::dependency_label_preserves_done_pending_and_missing_semantics
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::postgres_tests::unavailable_deploy_gate_creates_no_database_rows
 services::auto_queue::route::route_generate::deploy_gate_request_rejection_tests::unavailable_deploy_gate_is_a_typed_client_error_before_database_access
 services::auto_queue::route::route_generate::empty_generate_status_count_tests::requested_states_keep_zero_counts_and_ignore_unrequested_rows
