@@ -1488,6 +1488,8 @@ src/
 │   │   ├── registry_purge.rs
 │   │   ├── source_generation.rs
 │   │   └── turn_finished_signal.rs
+│   ├── writer_protocol/
+│   │   └── tests.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
 │   ├── auto_queue.rs
@@ -1576,7 +1578,8 @@ src/
 │   ├── tui_turn_state.rs
 │   ├── turn_cancel_finalizer.rs
 │   ├── turn_lifecycle.rs
-│   └── turn_orchestrator.rs
+│   ├── turn_orchestrator.rs
+│   └── writer_protocol.rs
 ├── supervisor/
 │   └── mod.rs
 ├── ui/

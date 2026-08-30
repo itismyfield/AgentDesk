@@ -158,6 +158,19 @@ time for diagnostics; neither is a stored approval value.
 
 ## Surface Map (by feature)
 
+### `writer_protocol`
+
+- canonical_modules: `services::writer_protocol` owns the dormant typed grammar,
+  pure logical/control-path derivation, and process-local registry. The exact
+  existing caller census is `scripts/writer_surface_manifest.jsonl`, guarded by
+  `scripts/check_writer_surface_manifest.py`.
+- invariants: provider-native artifacts are always observation-only. Gemini and
+  OpenCode have an explicit no-managed-local-transcript terminal result;
+  unsupported providers and unknown artifacts fail closed.
+- non_guarantees: the registry is process-local only. `control_lock_path` derives
+  a path but grants no lock authority; even a future `flock` would be host-local.
+  W0 changes no open, append, reopen, rotate, truncate, or cleanup caller.
+
 ### `writer_gate_ci_wiring`
 
 - canonical_modules: `scripts/check_writer_gate_ci_wiring.py` owns the exact

@@ -23,6 +23,8 @@ EXPECTED_COMMANDS = (
     '"$PYTHON" -m unittest tests.test_durable_frontier_writer_call_sites',
     '"$PYTHON" scripts/check_intake_outbox_done_writer_call_sites.py',
     '"$PYTHON" -m unittest tests.test_intake_outbox_done_writer_call_sites',
+    '"$PYTHON" scripts/check_writer_surface_manifest.py',
+    '"$PYTHON" -m unittest tests.test_writer_surface_manifest',
     '"$PYTHON" scripts/check_sql_execution_surface_inventory.py --check',
     "git diff --exit-code HEAD -- scripts/sql_execution_surface_inventory.json",
     '"$PYTHON" -m unittest tests.test_sql_execution_surface_inventory',
@@ -133,7 +135,7 @@ class WriterGateCiWiringTests(unittest.TestCase):
                 self.assertTrue(any("found 0" in error for error in errors), errors)
 
     def test_duplicate_invocation_fails(self) -> None:
-        for command in (EXPECTED_COMMANDS[1], EXPECTED_COMMANDS[5], EXPECTED_COMMANDS[6], EXPECTED_COMMANDS[7]):
+        for command in (EXPECTED_COMMANDS[1], EXPECTED_COMMANDS[5], EXPECTED_COMMANDS[7], EXPECTED_COMMANDS[8], EXPECTED_COMMANDS[9]):
             errors = guard.check_text(self.fixture_text() + f"{command}\n")
             self.assertTrue(any("found 2" in error for error in errors), errors)
 
@@ -141,8 +143,8 @@ class WriterGateCiWiringTests(unittest.TestCase):
         baseline = self.fixture_text()
         variants = (
             baseline.replace(
-                EXPECTED_COMMANDS[5],
-                EXPECTED_COMMANDS[5].replace("--check", "--write-baseline") + "\n" + EXPECTED_COMMANDS[5],
+                EXPECTED_COMMANDS[7],
+                EXPECTED_COMMANDS[7].replace("--check", "--write-baseline") + "\n" + EXPECTED_COMMANDS[7],
                 1,
             ),
             baseline + "# --write-baseline\n",
@@ -153,7 +155,7 @@ class WriterGateCiWiringTests(unittest.TestCase):
                 self.assertTrue(any("must not contain" in error for error in errors), errors)
 
     def test_each_tested_gate_must_precede_its_unittest(self) -> None:
-        pairs = ((1, 2), (3, 4), (5, 7))
+        pairs = ((1, 2), (3, 4), (5, 6), (7, 9))
         for gate_index, test_index in pairs:
             with self.subTest(gate=EXPECTED_COMMANDS[gate_index]):
                 commands = list(EXPECTED_COMMANDS)
@@ -166,8 +168,8 @@ class WriterGateCiWiringTests(unittest.TestCase):
 
     def test_dirty_worktree_guard_must_immediately_follow_check(self) -> None:
         mutated = self.fixture_text().replace(
-            EXPECTED_COMMANDS[5] + "\n" + EXPECTED_COMMANDS[6],
-            EXPECTED_COMMANDS[5] + "\necho decoy\n" + EXPECTED_COMMANDS[6],
+            EXPECTED_COMMANDS[7] + "\n" + EXPECTED_COMMANDS[8],
+            EXPECTED_COMMANDS[7] + "\necho decoy\n" + EXPECTED_COMMANDS[8],
             1,
         )
         errors = guard.check_text(mutated)
@@ -177,7 +179,7 @@ class WriterGateCiWiringTests(unittest.TestCase):
         passing = self.run_process(self.fixture_text())
         self.assertEqual(passing.returncode, 0, passing.stderr)
         self.assertIn(
-            "10 exact aggregate invocations and 2 effective-execution assertions protected",
+            "12 exact aggregate invocations and 2 effective-execution assertions protected",
             passing.stdout,
         )
 

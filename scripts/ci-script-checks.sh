@@ -216,6 +216,8 @@ echo "=== Intake-outbox done writer per-file call-site allowlist (#5071 T2) ==="
 # the script docstring declares the lexical forms and semantic facts it cannot see.
 "$PYTHON" scripts/check_intake_outbox_done_writer_call_sites.py
 "$PYTHON" -m unittest tests.test_intake_outbox_done_writer_call_sites
+"$PYTHON" scripts/check_writer_surface_manifest.py
+"$PYTHON" -m unittest tests.test_writer_surface_manifest
 "$PYTHON" -m unittest tests.test_rust_lex
 
 echo "=== Hotfile LOC ratchet guard (#3565) ==="

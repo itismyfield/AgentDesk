@@ -124,6 +124,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/provider_output_guard_tests.rs",
         "src/services/scheduled_messages/postgres_tests.rs",
         "src/services/tui_prompt_dedupe/tests.rs",
+        "src/services/writer_protocol/tests.rs",
     }
 )
 
