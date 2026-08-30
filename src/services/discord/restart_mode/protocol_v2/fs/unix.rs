@@ -1,6 +1,7 @@
 use super::{
-    ConfinedDir, ConfinedRuntimeRoot, DirectoryIdentity, DirectoryTypeFact, FsError, FsOperation,
-    InvalidRootFact, OpenDirectoryFact, RootLineage,
+    Attempt, ConfinedDir, ConfinedRuntimeRoot, DirectoryIdentity, DirectoryLocator,
+    DirectoryMutation, DirectoryTypeFact, FsError, FsOperation, InvalidRootFact, IoFact,
+    LineageSeal, MutationComponent, MutationFacts, OpenDirectoryFact, RootLineage,
 };
 use std::{
     ffi::{CStr, CString},
@@ -9,6 +10,7 @@ use std::{
         unix::ffi::OsStrExt,
     },
     path::{Component, Path},
+    sync::Arc,
 };
 
 pub(super) type DirHandle = OwnedFd;
@@ -25,15 +27,31 @@ pub(in super::super) fn open_runtime_root(path: &Path) -> Result<ConfinedRuntime
     let plan = parse_root(path)?;
     let (mut fd, anchor) = open_directory(libc::AT_FDCWD, plan.anchor)?;
     let mut root = anchor;
+    let mut locator = DirectoryLocator {
+        parent: anchor.identity,
+        component: Arc::new(plan.anchor.to_owned()),
+    };
     for component in &plan.components {
+        locator = DirectoryLocator {
+            parent: root.identity,
+            component: Arc::new(component.clone()),
+        };
         (fd, root) = open_directory(fd.as_raw_fd(), component)?;
     }
+    let lineage = RootLineage {
+        anchor: anchor.identity,
+        root: root.identity,
+    };
+    let seal = Arc::new(LineageSeal);
     Ok(ConfinedRuntimeRoot {
-        lineage: RootLineage {
-            anchor: anchor.identity,
-            root: root.identity,
+        lineage,
+        seal: seal.clone(),
+        directory: ConfinedDir {
+            fd: Arc::new(fd),
+            open: root,
+            lineage: seal,
+            locator,
         },
-        directory: ConfinedDir { fd, open: root },
     })
 }
 
@@ -111,23 +129,293 @@ fn open_directory(
     }
     // SAFETY: a successful fstat initialized the complete value.
     let stat = unsafe { stat.assume_init() };
-    let identity = DirectoryIdentity {
-        device: stat.st_dev as u64,
-        inode: stat.st_ino as u64,
-    };
-    let file_type = DirectoryTypeFact {
-        mode: stat.st_mode as u32,
-    };
-    let fact = OpenDirectoryFact {
-        identity,
-        file_type,
-    };
+    let fact = directory_fact(&stat);
     #[cfg(test)]
     record_fstat(fd.as_raw_fd(), result, None, Some(fact));
     if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
-        return Err(FsError::not_directory(file_type.mode));
+        return Err(FsError::not_directory(fact.file_type.mode));
     }
     Ok((fd, fact))
+}
+
+fn directory_fact(stat: &libc::stat) -> OpenDirectoryFact {
+    OpenDirectoryFact {
+        identity: DirectoryIdentity {
+            device: stat.st_dev as u64,
+            inode: stat.st_ino as u64,
+        },
+        file_type: DirectoryTypeFact {
+            mode: stat.st_mode as u32,
+        },
+    }
+}
+
+const CREATE_MODE: libc::mode_t = 0o700;
+
+pub(super) fn open_or_create_child(
+    parent: &ConfinedDir,
+    component: MutationComponent,
+) -> DirectoryMutation {
+    let name = component.0.as_c_str();
+    let locator = DirectoryLocator {
+        parent: parent.open.identity,
+        component: component.0,
+    };
+    let mut facts = MutationFacts {
+        locator: locator.clone(),
+        requested_mode: CREATE_MODE as u32,
+        mkdir: Attempt::NotAttempted,
+        parent_sync: Attempt::NotAttempted,
+        observed: Attempt::NotAttempted,
+        open: Attempt::NotAttempted,
+        fd_flags: Attempt::NotAttempted,
+        fstat: Attempt::NotAttempted,
+    };
+    let parent_fd = parent.fd.as_raw_fd();
+    let mut report = None;
+
+    let injected = injected_failure(MutationStage::Mkdir);
+    // SAFETY: name is NUL-terminated and parent_fd is owned by parent.
+    let mkdir_result = injected.map_or_else(
+        || unsafe { libc::mkdirat(parent_fd, name.as_ptr(), CREATE_MODE) },
+        |_| -1,
+    );
+    let mkdir_errno = (mkdir_result == -1).then(|| injected.unwrap_or_else(last_errno));
+    #[cfg(test)]
+    record_mutation(MutationTrace::Mkdir {
+        parent_fd,
+        component: name.to_bytes().into(),
+        mode: CREATE_MODE,
+        result: mkdir_result,
+        errno: mkdir_errno,
+    });
+    if let Some(errno) = mkdir_errno {
+        let io = IoFact {
+            operation: FsOperation::Mkdir,
+            raw_errno: errno,
+        };
+        facts.mkdir = Attempt::Failed(io);
+        if errno != libc::EEXIST {
+            report = Some(FsError::io(FsOperation::Mkdir, errno));
+        }
+    } else {
+        facts.mkdir = Attempt::Succeeded(());
+        let injected = injected_failure(MutationStage::Sync);
+        // SAFETY: parent_fd is live and owned by parent.
+        let result = injected.map_or_else(|| unsafe { libc::fsync(parent_fd) }, |_| -1);
+        let errno = (result == -1).then(|| injected.unwrap_or_else(last_errno));
+        #[cfg(test)]
+        record_mutation(MutationTrace::Sync {
+            fd: parent_fd,
+            result,
+            errno,
+        });
+        facts.parent_sync = attempt(FsOperation::SyncParent, result, errno, ());
+        if let Some(errno) = errno {
+            report = Some(FsError::io(FsOperation::SyncParent, errno));
+        }
+    }
+
+    let mut observed_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let injected = injected_failure(MutationStage::Observe);
+    // SAFETY: name and output storage are valid and parent_fd is live.
+    let observe_result = injected.map_or_else(
+        || unsafe {
+            libc::fstatat(
+                parent_fd,
+                name.as_ptr(),
+                observed_stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        },
+        |_| -1,
+    );
+    let observe_errno =
+        (observe_result == -1).then(|| injected.unwrap_or_else(last_errno));
+    let observed = (observe_result == 0).then(|| {
+        // SAFETY: successful fstatat initialized the output.
+        directory_fact(unsafe { observed_stat.assume_init_ref() })
+    });
+    #[cfg(test)]
+    record_mutation(MutationTrace::Observe {
+        parent_fd,
+        component: name.to_bytes().into(),
+        flags: libc::AT_SYMLINK_NOFOLLOW,
+        result: observe_result,
+        errno: observe_errno,
+        fact: observed,
+    });
+    facts.observed = match (observed, observe_errno) {
+        (Some(fact), _) => Attempt::Succeeded(fact),
+        (_, Some(errno)) => Attempt::Failed(IoFact {
+            operation: FsOperation::Observe,
+            raw_errno: errno,
+        }),
+        _ => unreachable!(),
+    };
+    if let Some(errno) = observe_errno {
+        report.get_or_insert(FsError::io(FsOperation::Observe, errno));
+    } else if let Some(fact) = observed {
+        if fact.file_type.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32 {
+            report.get_or_insert(FsError::not_directory(fact.file_type.mode));
+        }
+    }
+
+    let flags = OPEN_DIRECTORY_FLAGS;
+    let injected = injected_failure(MutationStage::Open);
+    // SAFETY: name is NUL-terminated and parent_fd is live.
+    let open_result = injected.map_or_else(
+        || unsafe { libc::openat(parent_fd, name.as_ptr(), flags) },
+        |_| -1,
+    );
+    let open_errno = (open_result == -1).then(|| injected.unwrap_or_else(last_errno));
+    #[cfg(test)]
+    record_mutation(MutationTrace::Open {
+        parent_fd,
+        component: name.to_bytes().into(),
+        flags,
+        result: open_result,
+        errno: open_errno,
+    });
+    if let Some(errno) = open_errno {
+        facts.open = Attempt::Failed(IoFact {
+            operation: FsOperation::Open,
+            raw_errno: errno,
+        });
+        report.get_or_insert(FsError::io(FsOperation::Open, errno));
+        return DirectoryMutation {
+            directory: None,
+            facts: Some(facts),
+            error: report,
+        };
+    }
+    facts.open = Attempt::Succeeded(());
+    // SAFETY: openat returned a new descriptor, adopted before further fallible work.
+    let child_fd = unsafe { OwnedFd::from_raw_fd(open_result) };
+
+    let injected = injected_failure(MutationStage::GetFdFlags);
+    // SAFETY: child_fd is live and F_GETFD takes no variadic argument.
+    let fd_flags = injected.map_or_else(
+        || unsafe { libc::fcntl(child_fd.as_raw_fd(), libc::F_GETFD) },
+        |_| -1,
+    );
+    let fd_errno = (fd_flags == -1).then(|| injected.unwrap_or_else(last_errno));
+    #[cfg(test)]
+    record_mutation(MutationTrace::GetFdFlags {
+        fd: child_fd.as_raw_fd(),
+        result: fd_flags,
+        errno: fd_errno,
+    });
+    facts.fd_flags = attempt(FsOperation::GetFdFlags, fd_flags, fd_errno, fd_flags);
+    if let Some(errno) = fd_errno {
+        report.get_or_insert(FsError::io(FsOperation::GetFdFlags, errno));
+    } else if fd_flags & libc::FD_CLOEXEC == 0 {
+        report.get_or_insert(FsError::missing_close_on_exec(fd_flags));
+    }
+
+    let mut opened_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let injected = injected_failure(MutationStage::Fstat);
+    // SAFETY: child_fd is live and output storage is valid.
+    let fstat_result = injected.map_or_else(
+        || unsafe { libc::fstat(child_fd.as_raw_fd(), opened_stat.as_mut_ptr()) },
+        |_| -1,
+    );
+    let fstat_errno =
+        (fstat_result == -1).then(|| injected.unwrap_or_else(last_errno));
+    let opened = (fstat_result == 0).then(|| {
+        // SAFETY: successful fstat initialized the output.
+        directory_fact(unsafe { opened_stat.assume_init_ref() })
+    });
+    #[cfg(test)]
+    record_mutation(MutationTrace::Fstat {
+        fd: child_fd.as_raw_fd(),
+        result: fstat_result,
+        errno: fstat_errno,
+        fact: opened,
+    });
+    facts.fstat = match (opened, fstat_errno) {
+        (Some(fact), _) => Attempt::Succeeded(fact),
+        (_, Some(errno)) => Attempt::Failed(IoFact {
+            operation: FsOperation::Fstat,
+            raw_errno: errno,
+        }),
+        _ => unreachable!(),
+    };
+    if let Some(errno) = fstat_errno {
+        report.get_or_insert(FsError::io(FsOperation::Fstat, errno));
+    } else if let Some(fact) = opened {
+        if fact.file_type.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32 {
+            report.get_or_insert(FsError::not_directory(fact.file_type.mode));
+        }
+        if let Some(observed) = observed {
+            if observed.identity != fact.identity {
+                report.get_or_insert(FsError::identity_mismatch(
+                    observed.identity,
+                    fact.identity,
+                ));
+            }
+        }
+    }
+
+    let directory = if report.is_none() {
+        opened.map(|open| ConfinedDir {
+            fd: Arc::new(child_fd),
+            open,
+            lineage: parent.lineage.clone(),
+            locator,
+        })
+    } else {
+        None
+    };
+    DirectoryMutation {
+        directory,
+        facts: Some(facts),
+        error: report,
+    }
+}
+
+fn attempt<T: Copy>(
+    operation: FsOperation,
+    result: libc::c_int,
+    errno: Option<i32>,
+    fact: T,
+) -> Attempt<T> {
+    if result == -1 {
+        Attempt::Failed(IoFact {
+            operation,
+            raw_errno: errno.expect("failed syscall errno"),
+        })
+    } else {
+        Attempt::Succeeded(fact)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MutationStage {
+    Mkdir,
+    Sync,
+    Observe,
+    Open,
+    GetFdFlags,
+    Fstat,
+}
+
+fn injected_failure(stage: MutationStage) -> Option<i32> {
+    #[cfg(test)]
+    {
+        return MUTATION_FAILURE.with(|failure| {
+            let (selected, errno) = failure.get()?;
+            (selected == stage).then(|| {
+                failure.set(None);
+                errno
+            })
+        });
+    }
+    #[cfg(not(test))]
+    {
+        let _ = stage;
+        None
+    }
 }
 
 fn last_errno() -> i32 {
@@ -163,9 +451,64 @@ struct FstatResult {
 }
 
 #[cfg(test)]
+#[derive(Debug)]
+enum MutationTrace {
+    Mkdir {
+        parent_fd: RawFd,
+        component: Box<[u8]>,
+        mode: libc::mode_t,
+        result: libc::c_int,
+        errno: Option<i32>,
+    },
+    Sync {
+        fd: RawFd,
+        result: libc::c_int,
+        errno: Option<i32>,
+    },
+    Observe {
+        parent_fd: RawFd,
+        component: Box<[u8]>,
+        flags: libc::c_int,
+        result: libc::c_int,
+        errno: Option<i32>,
+        fact: Option<OpenDirectoryFact>,
+    },
+    Open {
+        parent_fd: RawFd,
+        component: Box<[u8]>,
+        flags: libc::c_int,
+        result: RawFd,
+        errno: Option<i32>,
+    },
+    GetFdFlags {
+        fd: RawFd,
+        result: libc::c_int,
+        errno: Option<i32>,
+    },
+    Fstat {
+        fd: RawFd,
+        result: libc::c_int,
+        errno: Option<i32>,
+        fact: Option<OpenDirectoryFact>,
+    },
+}
+
+#[cfg(test)]
 thread_local! {
     static TRACE: std::cell::RefCell<Vec<TraceResult>> = const { std::cell::RefCell::new(Vec::new()) };
     static FSTAT_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static MUTATION_TRACE: std::cell::RefCell<Vec<MutationTrace>> = const { std::cell::RefCell::new(Vec::new()) };
+    static MUTATION_FAILURE: std::cell::Cell<Option<(MutationStage, i32)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn record_mutation(event: MutationTrace) {
+    MUTATION_TRACE.with(|trace| trace.borrow_mut().push(event));
+}
+
+#[cfg(test)]
+pub(super) fn take_mutation_trace() -> Vec<MutationTrace> {
+    MUTATION_TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()))
 }
 
 #[cfg(test)]
