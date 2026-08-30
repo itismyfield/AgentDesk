@@ -63,10 +63,34 @@ pub(crate) enum ArtifactSlot {
     RuntimeMarker,
 }
 
+impl ArtifactSlot {
+    const fn canonical_tag_v1(self) -> u8 {
+        match self {
+            Self::RelayJsonl => 0,
+            Self::NativeTranscript => 1,
+            Self::NativeRollout => 2,
+            Self::Prompt => 3,
+            Self::InputFifo => 4,
+            Self::OwnerMarker => 5,
+            Self::WrapperScript => 6,
+            Self::RuntimeMarker => 7,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum ConfigSlot {
     AgentDesk,
     RuntimeOverride,
+}
+
+impl ConfigSlot {
+    const fn canonical_tag_v1(self) -> u8 {
+        match self {
+            Self::AgentDesk => 0,
+            Self::RuntimeOverride => 1,
+        }
+    }
 }
 
 /// Closed semantic coordinates. Raw filesystem components never enter overlap.
@@ -81,6 +105,35 @@ pub(crate) enum ConflictSegment {
     ConfigRoot,
     ConfigArtifact(ConfigSlot),
     Artifact(ArtifactSlot),
+}
+
+impl ConflictSegment {
+    fn encode_v1(self, encoded: &mut Vec<u8>) {
+        match self {
+            Self::RuntimeSessions => encoded.push(0),
+            Self::Session(key) => {
+                encoded.push(1);
+                encoded.extend_from_slice(&key.get().to_be_bytes());
+            }
+            Self::HookQueues => encoded.push(2),
+            Self::HookQueue(key) => {
+                encoded.push(3);
+                encoded.extend_from_slice(&key.get().to_be_bytes());
+            }
+            Self::RestartRoot => encoded.push(4),
+            Self::RestartAttempt(key) => {
+                encoded.push(5);
+                encoded.extend_from_slice(&key.get().to_be_bytes());
+            }
+            Self::ConfigRoot => encoded.push(6),
+            Self::ConfigArtifact(slot) => {
+                encoded.extend_from_slice(&[7, slot.canonical_tag_v1()]);
+            }
+            Self::Artifact(slot) => {
+                encoded.extend_from_slice(&[8, slot.canonical_tag_v1()]);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -129,6 +182,26 @@ impl AuthorityKey {
             conflict_domain,
             alias_group,
         }
+    }
+
+    pub(crate) fn canonical_bytes_v1(&self) -> Vec<u8> {
+        let mut encoded = Vec::with_capacity(64);
+        encoded.extend_from_slice(b"agentdesk.writer-authority-key.v1\0");
+        encoded.extend_from_slice(&self.runtime_namespace.0.to_be_bytes());
+        encoded.extend_from_slice(&(self.conflict_domain.lineage.len() as u64).to_be_bytes());
+        for segment in &self.conflict_domain.lineage {
+            segment.encode_v1(&mut encoded);
+        }
+        encoded.push(match self.conflict_domain.coverage {
+            ConflictCoverage::Exact => 0,
+            ConflictCoverage::Subtree => 1,
+        });
+        encoded.extend_from_slice(&self.alias_group.0.to_be_bytes());
+        encoded
+    }
+
+    pub(crate) fn canonical_digest_v1(&self) -> blake3::Hash {
+        blake3::hash(&self.canonical_bytes_v1())
     }
 }
 
@@ -192,7 +265,7 @@ impl AuthorityRequest {
         if keys.is_empty() {
             return Err(AuthorityRequestError::EmptyKeySet);
         }
-        keys.sort_unstable();
+        keys.sort_by_cached_key(AuthorityKey::canonical_bytes_v1);
         if keys.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(AuthorityRequestError::DuplicateKey);
         }
