@@ -8163,6 +8163,10 @@ services::turn_orchestrator::turn_finished_signal_tests::turn_finished_reset_unl
 services::writer_protocol::authority::tests::canonical_v1_digests_and_request_order_ignore_provider_and_permutation
 services::writer_protocol::authority::tests::exact_parent_does_not_overlap_descendant
 services::writer_protocol::authority::tests::failed_multi_key_acquisition_rolls_back_atomically
+services::writer_protocol::authority::tests::invalid_raw_requests_do_not_pollute_registry
+services::writer_protocol::authority::tests::multi_key_permutations_contend_identically
+services::writer_protocol::authority::tests::namespace_and_alias_dimensions_are_independent
+services::writer_protocol::authority::tests::panic_unwind_releases_entire_set
 services::writer_protocol::authority::tests::provider_metadata_does_not_discriminate_authority
 services::writer_protocol::authority::tests::sibling_exact_domains_do_not_conflict
 services::writer_protocol::authority::tests::stale_release_does_not_clear_reused_holder_with_new_set_id

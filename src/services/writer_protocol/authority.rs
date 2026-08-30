@@ -547,6 +547,100 @@ mod tests {
     }
 
     #[test]
+    fn namespace_and_alias_dimensions_are_independent() {
+        let original = key(7, ArtifactSlot::RelayJsonl, ConflictCoverage::Exact);
+        let mut other_namespace = original.clone();
+        other_namespace.runtime_namespace = RuntimeNamespaceId::from_catalog(2);
+        let mut other_alias = original.clone();
+        other_alias.alias_group = AliasGroupId::from_catalog(999);
+
+        assert!(!overlaps(&original, &other_namespace));
+        assert!(!overlaps(&original, &other_alias));
+    }
+
+    #[test]
+    fn invalid_raw_requests_do_not_pollute_registry() {
+        let registry = AuthoritySetRegistry::new();
+        let artifact = key(7, ArtifactSlot::RelayJsonl, ConflictCoverage::Exact);
+        let actor = AuthorityActor::new(Some(ProviderDomain::Claude), HolderInstance::new(1));
+        assert_eq!(
+            AuthorityRequest::new(
+                AuthoritySetId::new(1),
+                actor,
+                std::iter::empty::<AuthorityKey>()
+            )
+            .unwrap_err(),
+            AuthorityRequestError::EmptyKeySet
+        );
+        assert_eq!(
+            AuthorityRequest::new(
+                AuthoritySetId::new(2),
+                actor,
+                [artifact.clone(), artifact.clone()]
+            )
+            .unwrap_err(),
+            AuthorityRequestError::DuplicateKey
+        );
+        assert!(
+            registry
+                .acquire(request(3, ProviderDomain::Codex, 2, [artifact]))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn multi_key_permutations_contend_identically() {
+        for reverse in [false, true] {
+            let registry = AuthoritySetRegistry::new();
+            let relay = key(7, ArtifactSlot::RelayJsonl, ConflictCoverage::Exact);
+            let prompt = key(7, ArtifactSlot::Prompt, ConflictCoverage::Exact);
+            let first = if reverse {
+                [prompt.clone(), relay.clone()]
+            } else {
+                [relay.clone(), prompt.clone()]
+            };
+            let second = if reverse {
+                [relay, prompt]
+            } else {
+                [prompt, relay]
+            };
+            let _held = registry
+                .acquire(request(1, ProviderDomain::Claude, 1, first))
+                .unwrap();
+            assert_eq!(
+                registry
+                    .acquire(request(2, ProviderDomain::Codex, 2, second))
+                    .unwrap_err(),
+                AcquireError::Conflict
+            );
+        }
+    }
+
+    #[test]
+    fn panic_unwind_releases_entire_set() {
+        let registry = AuthoritySetRegistry::new();
+        let relay = key(7, ArtifactSlot::RelayJsonl, ConflictCoverage::Exact);
+        let prompt = key(7, ArtifactSlot::Prompt, ConflictCoverage::Exact);
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = registry
+                .acquire(request(
+                    1,
+                    ProviderDomain::Claude,
+                    1,
+                    [relay.clone(), prompt.clone()],
+                ))
+                .unwrap();
+            panic!("exercise AuthoritySet::drop");
+        }));
+        assert!(unwind.is_err());
+        assert!(
+            registry
+                .acquire(request(2, ProviderDomain::Codex, 2, [relay, prompt]))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn failed_multi_key_acquisition_rolls_back_atomically() {
         let registry = AuthoritySetRegistry::new();
         let available = key(7, ArtifactSlot::Prompt, ConflictCoverage::Exact);
