@@ -500,13 +500,16 @@ mod tests {
         let (cleanup_first, cleanup_first_wait) = mpsc::channel();
         let (cleanup_second, cleanup_second_wait) = mpsc::channel();
         let outcomes = std::thread::scope(|scope| {
-            let contender = |cleanup: mpsc::Receiver<()>, report: mpsc::Sender<(bool, bool)>| move || {
-                start.wait();
-                let outcome = registry.register(contested.clone());
-                report.send((outcome.is_ok(), outcome.as_ref().err() == Some(&DuplicateRegistration))).unwrap();
-                drop(report);
-                cleanup.recv().unwrap();
-                drop(outcome);
+            let contender = |cleanup: mpsc::Receiver<()>, report: mpsc::Sender<(bool, bool)>| {
+                let contested = contested.clone(); let registry = &registry; let start = &start;
+                move || {
+                    start.wait();
+                    let outcome = registry.register(contested);
+                    report.send((outcome.is_ok(), outcome.as_ref().err() == Some(&DuplicateRegistration))).unwrap();
+                    drop(report);
+                    cleanup.recv().unwrap();
+                    drop(outcome);
+                }
             };
             let first = scope.spawn(contender(cleanup_first_wait, report.clone()));
             let second = scope.spawn(contender(cleanup_second_wait, report.clone()));
