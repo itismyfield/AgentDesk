@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "59c50750f235a0f6f791b59f48b815066003efe3",
+  "measured_at_sha": "c1f5e52948e8e27a9c9c50963fe967f4f2c022e9",
   "records": [
     {
       "root": "migrations/postgres",
@@ -20322,15 +20322,6 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:8de8e2506c41deafd5a40f236ae509c985a57597fdab3a3a77263508e494c565"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/auto_queue/cleanup_tasks.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
       "fingerprint": "sha256:946e3e4699db8edfdcf8214ff18618009d1936ae990b7764724e639fc57b4e34"
     },
     {
@@ -20359,6 +20350,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:c056671228dde2a0fd1fc2b6d5ad0da6219e667f4b638f7f3fa1778c9fd1d7f4"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/cleanup_tasks.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e1e846a75dd87e5373b3165c365bdd2f01a5e446025a8fd6c911207ee6f16bde"
     },
     {
       "root": "src",
@@ -21609,7 +21609,7 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:54e506478fda7626cf38c5071fca9d119a581ffdb9157793b21ac3563927e886"
+      "fingerprint": "sha256:5f5444eab6ef98e4cc75c7478cd1470c9c0713f52819d2f136aec26575bc3601"
     },
     {
       "root": "src",
@@ -22221,7 +22221,7 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
-      "fingerprint": "sha256:5b53967c9b6604246a939f3f1d80a09756d6e2e7fbeb91dd5c61c222b118d407"
+      "fingerprint": "sha256:b34f61b0c1121b1a622278fdb6fd4ba329bdbf83f0eee0f4b174e130c1190501"
     },
     {
       "root": "src",
