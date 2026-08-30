@@ -339,7 +339,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )])
         .with_example(
             json!({"path": {"group": "kanban"}}),
-            json!({"group": "kanban", "categories": [{"name": "kanban", "endpoint_count": 24}, {"name": "reviews", "endpoint_count": 8}]}),
+            json!({"group": "kanban", "categories": [{"name": "kanban", "endpoint_count": 24, "canonical_path": "/api/docs/kanban/kanban"}, {"name": "reviews", "endpoint_count": 8, "canonical_path": "/api/docs/kanban/reviews"}]}),
         ),
         ep(
             "GET",
