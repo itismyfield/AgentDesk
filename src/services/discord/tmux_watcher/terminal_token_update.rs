@@ -147,6 +147,7 @@ pub(super) async fn run_watcher_terminal_token_update(ctx: WatcherTerminalTokenU
                     source: "system",
                     reason_code: None,
                     session_key: None,
+                    attachment: None,
                 },
             )
             .await;
