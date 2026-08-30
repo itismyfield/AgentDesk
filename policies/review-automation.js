@@ -563,17 +563,13 @@ var reviewAutomation = {
     // explicit verdict, create a review-decision dispatch so the original agent
     // can inspect the review comments and decide the outcome.
     if (!verdict && result.auto_completed && dispatch.dispatch_type === "review") {
-      var cards = agentdesk.db.query(
-        "SELECT assigned_agent_id, title, github_issue_number, status FROM kanban_cards WHERE id = ?",
-        [dispatch.kanban_card_id]
-      );
+      var card = agentdesk.cards.get(dispatch.kanban_card_id);
       // Guard: skip dispatch creation for terminal cards — prevents stale review loops after dismiss
-      if (cards.length > 0 && agentdesk.pipeline.isTerminal(cards[0].status, cfg)) {
+      if (card && agentdesk.pipeline.isTerminal(card.status, cfg)) {
         agentdesk.log.info("[review] Card " + dispatch.kanban_card_id + " already terminal — skipping review-decision dispatch");
         return;
       }
-      if (cards.length > 0 && cards[0].assigned_agent_id) {
-        var card = cards[0];
+      if (card && card.assigned_agent_id) {
         var issueNum = card.github_issue_number || "?";
         // #2051 Finding 26 (P2): dedupe pending review-decision dispatches.
         // If the previous round's review-decision is still pending/dispatched
@@ -1318,16 +1314,14 @@ function processVerdict(cardId, verdict, result, options) {
   var initialState = agentdesk.pipeline.kickoffState(cfg);
   var inProgressState = agentdesk.pipeline.nextGatedTarget(initialState, cfg);
 
-  var cardCheck = agentdesk.db.query(
-    "SELECT status FROM kanban_cards WHERE id = ?", [cardId]
-  );
-  if (cardCheck.length > 0 && agentdesk.pipeline.isTerminal(cardCheck[0].status, cfg)) {
+  var card = agentdesk.cards.get(cardId);
+  if (card && agentdesk.pipeline.isTerminal(card.status, cfg)) {
     agentdesk.log.info("[review] processVerdict skipped — card " + cardId + " already terminal");
     return;
   }
 
   var fallbackReviewState = agentdesk.pipeline.nextGatedTarget(inProgressState, cfg);
-  var currentState = cardCheck.length > 0 ? cardCheck[0].status : null;
+  var currentState = card ? card.status : null;
   var currentReviewPassTarget = currentState
     ? agentdesk.pipeline.nextGatedTargetWithGate(currentState, "review_passed", cfg)
     : null;
@@ -1436,14 +1430,11 @@ function processVerdict(cardId, verdict, result, options) {
     // Review passed — check for next pipeline stage, otherwise terminal (#110)
     // Look for the next stage AFTER current pipeline_stage_id (stage_order based),
     // OR the first review_pass stage if card has no current pipeline stage.
-    var cardInfo = agentdesk.db.query(
-      "SELECT pipeline_stage_id, repo_id FROM kanban_cards WHERE id = ?",
-      [cardId]
-    );
+    var cardInfo = agentdesk.cards.get(cardId);
     var nextStage = null;
-    if (cardInfo.length > 0 && cardInfo[0].repo_id) {
-      var repoId = cardInfo[0].repo_id;
-      var currentStageId = cardInfo[0].pipeline_stage_id;
+    if (cardInfo && cardInfo.repo_id) {
+      var repoId = cardInfo.repo_id;
+      var currentStageId = cardInfo.pipeline_stage_id;
 
       if (currentStageId) {
         // Has current stage — find next stage by stage_order
@@ -1587,7 +1578,7 @@ function processVerdict(cardId, verdict, result, options) {
       }
     } else {
       // No more stages — clear pipeline_stage_id and mark terminal.
-      if (cardInfo.length > 0 && cardInfo[0].pipeline_stage_id) {
+      if (cardInfo && cardInfo.pipeline_stage_id) {
         agentdesk.db.execute(
           "UPDATE kanban_cards SET pipeline_stage_id = NULL, updated_at = datetime('now') WHERE id = ?",
           [cardId]

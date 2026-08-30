@@ -146,6 +146,7 @@ test("review-automation carries the completed work slot into review dispatch con
 
 test("review-automation creates a review-decision dispatch when an auto-completed review has no verdict", () => {
   const { policy, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-4": { id: "card-4", assigned_agent_id: "agent-4", title: "Needs decision", github_issue_number: 925, status: "review" } },
     dbQuery: createSqlRouter([
       {
         match: "FROM task_dispatches WHERE id = ?",
@@ -193,18 +194,18 @@ test("review-automation creates a review-decision dispatch when an auto-complete
 
 test("review-automation noop verification passes go terminal without creating a PR dispatch", () => {
   const { module, state } = loadPolicy("policies/review-automation.js", {
+    cards: {
+      "card-5": {
+        id: "card-5",
+        status: "review",
+        pipeline_stage_id: null,
+        repo_id: null
+      }
+    },
     dbQuery: createSqlRouter([
-      {
-        match: "SELECT status FROM kanban_cards WHERE id = ?",
-        result: [{ status: "review" }]
-      },
       {
         match: "WHERE id = ? AND kanban_card_id = ? AND dispatch_type = 'review' LIMIT 1",
         result: [{ context: JSON.stringify({ review_mode: "noop_verification" }) }]
-      },
-      {
-        match: "SELECT pipeline_stage_id, repo_id FROM kanban_cards WHERE id = ?",
-        result: [{ pipeline_stage_id: null, repo_id: null }]
       },
       {
         match: "AND dispatch_type IN ('implementation', 'rework')",
@@ -238,8 +239,59 @@ test("review-automation noop verification passes go terminal without creating a 
   assert.equal(state.dispatchCreates.length, 0);
 });
 
+test("review-automation clears a completed pipeline stage after cards.get migration", () => {
+  const { module, state } = loadPolicy("policies/review-automation.js", {
+    cards: {
+      "card-completed-stage": {
+        id: "card-completed-stage",
+        status: "review",
+        pipeline_stage_id: "stage-complete",
+        repo_id: null
+      }
+    },
+    dbQuery: createSqlRouter([
+      {
+        match: "SELECT status FROM kanban_cards WHERE id = ?",
+        result: [{ status: "review" }]
+      },
+      {
+        match: "WHERE id = ? AND kanban_card_id = ? AND dispatch_type = 'review' LIMIT 1",
+        result: [{ context: JSON.stringify({ review_mode: "normal" }) }]
+      },
+      {
+        match: "AND dispatch_type IN ('implementation', 'rework')",
+        result: []
+      }
+    ])
+  });
+
+  module.__test.processVerdict(
+    "card-completed-stage",
+    "pass",
+    { verdict: "pass" },
+    { review_dispatch_id: "review-dispatch-completed-stage" }
+  );
+
+  assert.equal(
+    state.executions.some(
+      ({ sql, params }) =>
+        sql.includes("SET pipeline_stage_id = NULL") &&
+        params[0] === "card-completed-stage"
+    ),
+    true
+  );
+});
+
 test("review-automation skips create-pr when reviewed work is already on origin mainline", () => {
   const { module, state } = loadPolicy("policies/review-automation.js", {
+    cards: {
+      "card-direct-push": {
+        id: "card-direct-push",
+        status: "review",
+        pipeline_stage_id: null,
+        repo_id: "itismyfield/AgentDesk"
+      }
+    },
     exec: createExecRouter([
       {
         match: (cmd, args) => cmd === "git" && args.includes("rev-parse") && args.includes("origin/main"),
@@ -252,16 +304,8 @@ test("review-automation skips create-pr when reviewed work is already on origin 
     ]),
     dbQuery: createSqlRouter([
       {
-        match: "SELECT status FROM kanban_cards WHERE id = ?",
-        result: [{ status: "review" }]
-      },
-      {
         match: "WHERE id = ? AND kanban_card_id = ? AND dispatch_type = 'review' LIMIT 1",
         result: [{ context: JSON.stringify({ review_mode: "normal" }) }]
-      },
-      {
-        match: "SELECT pipeline_stage_id, repo_id FROM kanban_cards WHERE id = ?",
-        result: [{ pipeline_stage_id: null, repo_id: "itismyfield/AgentDesk" }]
       },
       {
         match: "trigger_after = 'review_pass'",
@@ -357,6 +401,7 @@ test("loadLatestReviewDispatchContext falls back to newest and warns when no rou
 // for the card, an auto-completed review fallback must NOT spawn another one.
 test("review-automation dedupes review-decision dispatches when one is already pending", () => {
   const { policy, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-dup": { id: "card-dup", assigned_agent_id: "agent-dup", title: "Dup decision card", github_issue_number: 999, status: "review" } },
     dbQuery: createSqlRouter([
       {
         match: "FROM task_dispatches WHERE id = ?",
