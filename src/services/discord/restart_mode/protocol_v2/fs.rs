@@ -168,3 +168,8 @@ impl FsError {
         }
     }
 }
+
+#[cfg(test)]
+fn mutation_preflight_semantic_stub() -> bool {
+    false
+}

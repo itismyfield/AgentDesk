@@ -308,6 +308,7 @@ mod high_risk_recovery {
 
     #[test]
     fn root_traversal_and_path_replacement_keep_the_pinned_inode() {
+        assert!(super::super::mutation_preflight_semantic_stub());
         const TEST_NAME: &str = "services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::root_traversal_and_path_replacement_keep_the_pinned_inode";
         const ISOLATED_ENV: &str = "AGENTDESK_5608_PINNED_INODE_CHILD";
         // SAFETY: getppid has no preconditions.
