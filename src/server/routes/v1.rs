@@ -1195,11 +1195,19 @@ async fn load_agents_pg(
         .into_iter()
         .map(|row| {
             let agent_id = row.try_get::<String, _>("id").unwrap_or_default();
+            let name = row.try_get::<String, _>("name").unwrap_or_default();
+            let cli_provider = row.try_get::<Option<String>, _>("provider").ok().flatten();
+            let identity = crate::services::discord::api_agent_identity(
+                &agent_id,
+                cli_provider.as_deref(),
+                Some(name.as_str()),
+            );
             json!({
                 "id": agent_id.clone(),
-                "name": row.try_get::<String, _>("name").unwrap_or_default(),
+                "name": name,
                 "name_ko": row.try_get::<Option<String>, _>("name_ko").ok().flatten(),
-                "cli_provider": row.try_get::<Option<String>, _>("provider").ok().flatten(),
+                "cli_provider": cli_provider,
+                "identity": identity,
                 "department_id": row.try_get::<Option<String>, _>("department").ok().flatten(),
                 "avatar_emoji": row.try_get::<Option<String>, _>("avatar_emoji").ok().flatten(),
                 "discord_channel_id": row.try_get::<Option<String>, _>("discord_channel_id").ok().flatten(),

@@ -369,6 +369,10 @@ pub(super) fn execute_streaming_local_process(
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
 
+    let overlay = crate::services::discord::overlay_from_tmux_session(
+        ProviderKind::Qwen,
+        session_name,
+    )?;
     let config = SessionConfig {
         session_name: session_name.to_string(),
         working_dir: working_dir.to_string(),
@@ -397,11 +401,15 @@ pub(super) fn execute_streaming_local_process(
             }
             args
         },
-        env_vars: qwen_resolution
-            .exec_path
-            .as_ref()
-            .map(|exec_path| vec![("PATH".to_string(), exec_path.clone())])
-            .unwrap_or_default(),
+        env_vars: crate::services::provider_auth_profile::merge_overlay_env(
+            qwen_resolution
+                .exec_path
+                .as_ref()
+                .map(|exec_path| vec![("PATH".to_string(), exec_path.clone())])
+                .unwrap_or_default(),
+            &overlay,
+        ),
+        unset_env: crate::services::provider_auth_profile::overlay_unset_keys(&overlay),
     };
 
     let backend = ProcessBackend::new();

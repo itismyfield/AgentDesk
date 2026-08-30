@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
 use super::runtime_store::org_schema_path_for_root;
+use crate::services::provider_auth_profile::{
+    ProviderAuthProfileDef, intern_provider, validate_profile_id,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct OrgAgentUpdate {
@@ -46,6 +49,8 @@ struct OrgDocument {
     meeting: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     suffix_map: Option<Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_auth_profiles: BTreeMap<String, ProviderAuthProfileDef>,
     #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
     extra: BTreeMap<String, Value>,
 }
@@ -66,6 +71,8 @@ struct OrgAgentDef {
     workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     peer_agents: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_profile: Option<String>,
     #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
     extra: BTreeMap<String, Value>,
 }
@@ -92,6 +99,8 @@ struct OrgChannelBinding {
     model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     peer_agents: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_profile: Option<String>,
     #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
     extra: BTreeMap<String, Value>,
 }
@@ -166,4 +175,195 @@ fn load_org_document(path: &Path) -> Result<OrgDocument, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read '{}': {e}", path.display()))?;
     serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse '{}': {e}", path.display()))
+}
+
+fn persist_org_document(path: &Path, document: &OrgDocument) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create '{}': {e}", parent.display()))?;
+    }
+    let rendered = serde_yaml::to_string(document)
+        .map_err(|e| format!("Failed to serialize '{}': {e}", path.display()))?;
+    let tmp = path.with_extension("yaml.tmp");
+    fs::write(&tmp, rendered).map_err(|e| format!("Failed to write '{}': {e}", tmp.display()))?;
+    fs::rename(&tmp, path).map_err(|e| {
+        format!(
+            "Failed to replace '{}' with '{}': {e}",
+            path.display(),
+            tmp.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn org_yaml_path() -> Result<PathBuf, String> {
+    let root =
+        crate::config::runtime_root().ok_or_else(|| "runtime root not configured".to_string())?;
+    Ok(org_schema_path_for_root(&root))
+}
+
+fn normalized_auth_profile(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "default")
+        .map(str::to_string)
+}
+
+pub(crate) fn append_provider_auth_profile(
+    profile_id: &str,
+    def: ProviderAuthProfileDef,
+) -> Result<(), String> {
+    append_provider_auth_profile_at(&org_yaml_path()?, profile_id, def)
+}
+
+pub(crate) fn append_provider_auth_profile_at(
+    org_path: &Path,
+    profile_id: &str,
+    def: ProviderAuthProfileDef,
+) -> Result<(), String> {
+    validate_profile_id(profile_id).map_err(|error| error.to_string())?;
+    intern_provider(&def.provider).map_err(|error| error.to_string())?;
+    let mut document = load_org_document(org_path)?;
+    if let Some(existing) = document.provider_auth_profiles.get(profile_id) {
+        if existing == &def {
+            return Ok(());
+        }
+        return Err(format!("auth profile '{profile_id}' already exists"));
+    }
+    document
+        .provider_auth_profiles
+        .insert(profile_id.to_string(), def);
+    persist_org_document(org_path, &document)
+}
+
+pub(crate) fn set_agent_auth_profile(
+    role_id: &str,
+    auth_profile: Option<&str>,
+) -> Result<(), String> {
+    set_agent_auth_profile_at(&org_yaml_path()?, role_id, auth_profile)
+}
+
+pub(crate) fn set_agent_auth_profile_at(
+    org_path: &Path,
+    role_id: &str,
+    auth_profile: Option<&str>,
+) -> Result<(), String> {
+    let mut document = load_org_document(org_path)?;
+    if !document.agents.contains_key(role_id) {
+        return Err(format!(
+            "agent '{role_id}' not found in '{}'",
+            org_path.display()
+        ));
+    }
+    let next = match normalized_auth_profile(auth_profile) {
+        Some(profile_id) => {
+            if !document.provider_auth_profiles.contains_key(&profile_id) {
+                return Err(format!("unknown auth_profile '{profile_id}'"));
+            }
+            Some(profile_id)
+        }
+        None => None,
+    };
+    if let Some(agent) = document.agents.get_mut(role_id) {
+        agent.auth_profile = next;
+    }
+    persist_org_document(org_path, &document)
+}
+
+pub(crate) fn set_channel_auth_profile(
+    channel_id: &str,
+    auth_profile: Option<&str>,
+) -> Result<(), String> {
+    set_channel_auth_profile_at(&org_yaml_path()?, channel_id, auth_profile)
+}
+
+pub(crate) fn set_channel_auth_profile_at(
+    org_path: &Path,
+    channel_id: &str,
+    auth_profile: Option<&str>,
+) -> Result<(), String> {
+    let mut document = load_org_document(org_path)?;
+    let has_binding = document
+        .channels
+        .as_ref()
+        .is_some_and(|channels| channels.by_id.contains_key(channel_id));
+    if !has_binding {
+        return Err(format!(
+            "channel '{channel_id}' not found in '{}'",
+            org_path.display()
+        ));
+    }
+    let next = match normalized_auth_profile(auth_profile) {
+        Some(profile_id) => {
+            if !document.provider_auth_profiles.contains_key(&profile_id) {
+                return Err(format!("unknown auth_profile '{profile_id}'"));
+            }
+            Some(profile_id)
+        }
+        None => None,
+    };
+    if let Some(binding) = document
+        .channels
+        .as_mut()
+        .and_then(|channels| channels.by_id.get_mut(channel_id))
+    {
+        binding.auth_profile = next;
+    }
+    persist_org_document(org_path, &document)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_012_catalog_append_round_trips_extra_and_skips_secrets() {
+        let dir = tempfile::tempdir().expect("org dir");
+        let path = dir.path().join("org.yaml");
+        fs::write(
+            &path,
+            "version: 1\nname: desk\ncustom_flag: true\nagents:\n  coder:\n    display_name: Coder\n    provider: codex\n",
+        )
+        .unwrap();
+
+        append_provider_auth_profile_at(
+            &path,
+            "work",
+            ProviderAuthProfileDef {
+                provider: "codex".into(),
+                home: Some("~/.adk/profiles/codex/work".into()),
+                env: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        let rendered = fs::read_to_string(&path).unwrap();
+        assert!(rendered.contains("provider_auth_profiles:"));
+        assert!(rendered.contains("work:"));
+        assert!(rendered.contains("custom_flag: true"));
+        assert!(!rendered.contains("sk-"));
+        assert!(!rendered.contains("access_token"));
+
+        set_agent_auth_profile_at(&path, "coder", Some("work")).unwrap();
+        let rendered = fs::read_to_string(&path).unwrap();
+        assert!(rendered.contains("auth_profile: work"));
+        set_agent_auth_profile_at(&path, "coder", None).unwrap();
+        let rendered = fs::read_to_string(&path).unwrap();
+        assert!(!rendered.contains("auth_profile: work"));
+    }
+
+    #[test]
+    fn extra_login_does_not_overwrite_missing_catalog_on_unknown_agent() {
+        let dir = tempfile::tempdir().expect("org dir");
+        let path = dir.path().join("org.yaml");
+        let err = set_agent_auth_profile_at(&path, "missing", Some("work")).unwrap_err();
+        assert!(err.contains("not found"));
+        assert!(
+            !path.exists()
+                || !fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .contains("auth_profile")
+        );
+    }
 }

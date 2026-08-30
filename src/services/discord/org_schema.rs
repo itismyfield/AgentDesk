@@ -10,7 +10,11 @@ use super::settings::{
     MemoryConfigOverride, PeerAgentInfo, RegisteredChannelBinding, RoleBinding,
     resolve_memory_settings,
 };
+use crate::services::agent_identity::{self, identity_from_parts, identity_label};
 use crate::services::provider::ProviderKind;
+use crate::services::provider_auth_profile::{
+    ProviderAuthProfileDef, selected_profile_id, validate_catalog,
+};
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
 // ─── YAML Schema Types ──────────────────────────────────────────────────────
@@ -42,6 +46,8 @@ pub(super) struct OrgSchema {
     pub channels: Option<ChannelsConfig>,
     pub meeting: Option<MeetingDef>,
     pub suffix_map: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub provider_auth_profiles: Option<HashMap<String, ProviderAuthProfileDef>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +65,8 @@ pub(super) struct AgentDef {
     pub workspace: Option<String>,
     pub peer_agents: Option<bool>,
     #[serde(default)]
+    pub auth_profile: Option<String>,
+    #[serde(default)]
     pub memory: Option<MemoryConfigOverride>,
 }
 
@@ -75,6 +83,8 @@ pub(super) struct ChannelBinding {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub peer_agents: Option<bool>,
+    #[serde(default)]
+    pub auth_profile: Option<String>,
     #[serde(default)]
     pub memory: Option<MemoryConfigOverride>,
 }
@@ -117,7 +127,171 @@ pub(super) struct SummaryRuleDef {
 fn load_org_schema() -> Option<OrgSchema> {
     let path = org_schema_path()?;
     let content = fs::read_to_string(path).ok()?;
-    serde_yaml::from_str(&content).ok()
+    match parse_org_schema(&content) {
+        Ok(schema) => Some(schema),
+        Err(error) => {
+            tracing::error!("org schema rejected: {error}");
+            None
+        }
+    }
+}
+
+pub(crate) fn provider_auth_catalog()
+-> std::collections::HashMap<String, crate::services::provider_auth_profile::ProviderAuthProfileDef>
+{
+    load_org_schema()
+        .and_then(|schema| schema.provider_auth_profiles)
+        .unwrap_or_default()
+}
+
+pub(crate) fn parse_org_schema(content: &str) -> Result<OrgSchema, String> {
+    let schema: OrgSchema =
+        serde_yaml::from_str(content).map_err(|error| format!("org schema yaml: {error}"))?;
+    if let Some(catalog) = schema.provider_auth_profiles.as_ref() {
+        validate_catalog(catalog).map_err(|error| error.to_string())?;
+    }
+    Ok(schema)
+}
+
+pub(crate) fn spawn_auth_overlay(
+    provider: ProviderKind,
+    channel_id: Option<u64>,
+) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
+    use crate::services::provider_auth_profile::resolve;
+
+    let schema = load_org_schema();
+    let catalog = schema
+        .as_ref()
+        .and_then(|schema| schema.provider_auth_profiles.clone())
+        .unwrap_or_default();
+    let profile = channel_id.and_then(|id| {
+        resolve_role_binding(ChannelId::new(id), None).map(|binding| binding.auth_profile)
+    });
+    let overlay = resolve(provider.clone(), profile.as_deref(), None, &catalog)
+        .map_err(|error| error.to_string())?;
+    if let Some(binding) = channel_id.and_then(|id| resolve_role_binding(ChannelId::new(id), None))
+    {
+        if let Some(bound_provider) = binding.provider.clone() {
+            let identity = identity_from_parts(
+                &binding.role_id,
+                &binding.role_id,
+                bound_provider,
+                binding.model.clone(),
+                Some(binding.auth_profile.as_str()),
+            );
+            tracing::info!(
+                identity = %identity_label(&identity),
+                profile_id = %overlay.profile_id,
+                home = overlay.home.as_ref().map(|path| path.display().to_string()),
+                "provider spawn identity"
+            );
+        }
+    }
+    Ok(overlay)
+}
+
+pub(crate) fn overlay_from_tmux_session(
+    provider: ProviderKind,
+    session_name: &str,
+) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
+    let channel_id =
+        crate::services::provider::parse_provider_and_channel_from_tmux_name(session_name)
+            .and_then(|(_, channel)| channel.parse().ok());
+    spawn_auth_overlay(provider, channel_id)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProfileBinding {
+    pub agent_id: String,
+    pub provider: String,
+    pub profile_id: String,
+}
+
+pub(crate) fn list_profile_bindings() -> Vec<ProfileBinding> {
+    let Some(schema) = load_org_schema() else {
+        return Vec::new();
+    };
+    let mut bindings = Vec::new();
+    for (agent_id, def) in &schema.agents {
+        let provider = def
+            .provider
+            .as_deref()
+            .and_then(ProviderKind::from_str)
+            .map(|kind| kind.as_str().to_string())
+            .unwrap_or_else(|| {
+                def.provider
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
+        let profile_id = selected_profile_id(None, def.auth_profile.as_deref())
+            .unwrap_or("default")
+            .to_string();
+        bindings.push(ProfileBinding {
+            agent_id: agent_id.clone(),
+            provider,
+            profile_id,
+        });
+    }
+    if let Some(channels) = schema
+        .channels
+        .as_ref()
+        .and_then(|channels| channels.by_id.as_ref())
+    {
+        for binding in channels.values() {
+            let agent_def = schema.agents.get(&binding.agent);
+            let provider = binding
+                .provider
+                .as_deref()
+                .or(agent_def.and_then(|def| def.provider.as_deref()))
+                .and_then(ProviderKind::from_str)
+                .map(|kind| kind.as_str().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let profile_id = selected_profile_id(
+                binding.auth_profile.as_deref(),
+                agent_def.and_then(|def| def.auth_profile.as_deref()),
+            )
+            .unwrap_or("default")
+            .to_string();
+            if !bindings.iter().any(|row| {
+                row.agent_id == binding.agent
+                    && row.provider == provider
+                    && row.profile_id == profile_id
+            }) {
+                bindings.push(ProfileBinding {
+                    agent_id: binding.agent.clone(),
+                    provider,
+                    profile_id,
+                });
+            }
+        }
+    }
+    bindings
+}
+
+pub(crate) fn api_agent_identity(
+    agent_id: &str,
+    db_provider: Option<&str>,
+    db_name: Option<&str>,
+) -> serde_json::Value {
+    let schema = load_org_schema();
+    let def = schema
+        .as_ref()
+        .and_then(|schema| schema.agents.get(agent_id));
+    let provider = def
+        .and_then(|def| def.provider.as_deref())
+        .or(db_provider)
+        .and_then(ProviderKind::from_str)
+        .unwrap_or_else(|| ProviderKind::Unsupported(db_provider.unwrap_or("unknown").to_string()));
+    let identity = identity_from_parts(
+        agent_id,
+        def.map(|def| def.display_name.clone())
+            .or_else(|| db_name.map(str::to_string))
+            .unwrap_or_else(|| agent_id.to_string()),
+        provider,
+        def.and_then(|def| def.model.clone()),
+        def.and_then(|def| def.auth_profile.as_deref()),
+    );
+    agent_identity::identity_json(&identity)
 }
 
 pub(super) fn org_schema_exists() -> bool {
@@ -210,6 +384,12 @@ pub(super) fn resolve_role_binding(
         reasoning_effort: None,
         peer_agents_enabled,
         quality_feedback_injection_enabled: true,
+        auth_profile: selected_profile_id(
+            ch_binding.auth_profile.as_deref(),
+            agent_def.auth_profile.as_deref(),
+        )
+        .unwrap_or("default")
+        .to_string(),
         memory,
     })
 }
@@ -256,10 +436,24 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
 
     let mut result = Vec::new();
     for (role_id, def) in &schema.agents {
+        let provider = def
+            .provider
+            .as_deref()
+            .and_then(ProviderKind::from_str)
+            .unwrap_or(ProviderKind::Unsupported("unknown".into()));
+        let identity = identity_from_parts(
+            role_id,
+            def.display_name.clone(),
+            provider.clone(),
+            def.model.clone(),
+            def.auth_profile.as_deref(),
+        );
         result.push(PeerAgentInfo {
             role_id: role_id.clone(),
             display_name: def.display_name.clone(),
             keywords: def.keywords.clone().unwrap_or_default(),
+            provider: Some(provider),
+            identity_label: identity_label(&identity),
         });
     }
 
@@ -399,4 +593,54 @@ pub(super) fn lookup_suffix_provider(channel_name: &str) -> Option<ProviderKind>
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::agent_identity::identity_label;
+
+    #[test]
+    fn test_010_peer_identity_label_uses_formatter() {
+        let yaml = r#"
+version: 1
+agents:
+  coder:
+    display_name: Coder
+    provider: codex
+    model: gpt-5.6-terra
+    keywords: [code]
+"#;
+        let schema = parse_org_schema(yaml).expect("schema");
+        let def = schema.agents.get("coder").expect("coder");
+        let provider = ProviderKind::from_str(def.provider.as_deref().unwrap()).unwrap();
+        let identity = identity_from_parts(
+            "coder",
+            def.display_name.clone(),
+            provider,
+            def.model.clone(),
+            def.auth_profile.as_deref(),
+        );
+        assert_eq!(identity_label(&identity), "coder · codex terra · default");
+        let json = agent_identity::identity_json(&identity);
+        assert_eq!(json["label"], "coder · codex terra · default");
+        assert!(json.get("token").is_none());
+    }
+
+    #[test]
+    fn unknown_catalog_id_fails_org_load() {
+        let yaml = r#"
+version: 1
+provider_auth_profiles:
+  default:
+    provider: codex
+    home: ~/.adk/profiles/codex/default
+agents:
+  coder:
+    display_name: Coder
+    provider: codex
+"#;
+        let err = parse_org_schema(yaml).unwrap_err();
+        assert!(err.contains("reserved") || err.contains("default"));
+    }
 }

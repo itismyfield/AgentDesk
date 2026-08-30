@@ -2662,6 +2662,8 @@ fn execute_streaming_local_process_codex(
         .with_goals_enabled(goals_enabled)
         .with_cwd(Some(working_dir));
 
+    let overlay =
+        crate::services::discord::overlay_from_tmux_session(ProviderKind::Codex, session_name)?;
     let config = SessionConfig {
         session_name: session_name.to_string(),
         working_dir: working_dir.to_string(),
@@ -2670,11 +2672,15 @@ fn execute_streaming_local_process_codex(
         prompt_path: prompt_path.clone(),
         wrapper_subcommand: "codex-tmux-wrapper".to_string(),
         wrapper_args: build_codex_wrapper_cli_args(&launch_options, &codex_bin),
-        env_vars: resolution
-            .exec_path
-            .clone()
-            .map(|path| vec![("PATH".to_string(), path)])
-            .unwrap_or_default(),
+        env_vars: crate::services::provider_auth_profile::merge_overlay_env(
+            resolution
+                .exec_path
+                .clone()
+                .map(|path| vec![("PATH".to_string(), path)])
+                .unwrap_or_default(),
+            &overlay,
+        ),
+        unset_env: crate::services::provider_auth_profile::overlay_unset_keys(&overlay),
     };
 
     let backend = ProcessBackend::new();
