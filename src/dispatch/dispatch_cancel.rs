@@ -19,8 +19,16 @@ const RUN_OWNERS_FOR_DISPATCH: &str = r#"
     FROM auto_queue_phase_gates pg
     WHERE pg.dispatch_id = td.id
     UNION ALL
-    SELECT json_extract(td.context, '$.phase_gate.run_id')
-    WHERE json_extract(td.context, '$.phase_gate.run_id') IS NOT NULL
+    SELECT CASE
+        WHEN td.context IS NULL OR BTRIM(td.context) = '' THEN NULL
+        WHEN substring(BTRIM(td.context) FROM 1 FOR 1) NOT IN ('{', '[') THEN NULL
+        ELSE (td.context::jsonb #>> '{phase_gate,run_id}')
+    END
+    WHERE CASE
+        WHEN td.context IS NULL OR BTRIM(td.context) = '' THEN NULL
+        WHEN substring(BTRIM(td.context) FROM 1 FOR 1) NOT IN ('{', '[') THEN NULL
+        ELSE (td.context::jsonb #>> '{phase_gate,run_id}')
+    END IS NOT NULL
 "#;
 
 /// Returns true when the supplied cancel reason represents a user /
