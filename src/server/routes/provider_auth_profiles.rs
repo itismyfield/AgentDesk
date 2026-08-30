@@ -184,6 +184,7 @@ pub async fn login_complete(
     }
     let profile_id = body.profile_id.trim();
     validate_profile_id(profile_id).map_err(profile_error)?;
+    let expected_home = extra_account_home(&kind, profile_id);
     let home = match body
         .home
         .as_deref()
@@ -191,15 +192,14 @@ pub async fn login_complete(
         .filter(|value| !value.is_empty())
     {
         Some(raw) => PathBuf::from(crate::utils::format::expand_tilde_string(raw)),
-        None => extra_account_home(&kind, profile_id),
+        None => expected_home.clone(),
     };
-    if let Some(global) = provider_auth_profile::default_home_path(&kind) {
-        if same_existing_path(&home, &global) {
-            return Err(profile_error(AuthProfileError::GlobalHomeForbidden {
-                provider: kind.as_str().to_string(),
-                home: home.display().to_string(),
-            }));
-        }
+    if !provider_auth_profile::is_managed_extra_account_home(&kind, profile_id, &home) {
+        return Err(profile_error(AuthProfileError::UnmanagedHomeForbidden {
+            profile_id: profile_id.to_string(),
+            provider: kind.as_str().to_string(),
+            home: home.display().to_string(),
+        }));
     }
     if !home.is_dir() {
         return Err(profile_error(AuthProfileError::HomeMissing {
@@ -339,13 +339,31 @@ fn account_payload(
                 "unsupported": entry.get("unsupported").and_then(Value::as_bool).unwrap_or(false),
                 "reason": entry.get("reason").cloned().unwrap_or(Value::Null),
             })
-        });
+        })
+        .or_else(|| unsupported_usage(provider));
     json!({
         "id": profile_id,
         "home": home,
         "bound_agents": bound_agents,
         "usage": usage,
     })
+}
+
+/// Keep a missing telemetry source distinguishable from an empty rate-limit
+/// response.  This is per account too: a profile must not look healthy merely
+/// because its provider has no supported usage endpoint.
+fn unsupported_usage(provider: &ProviderKind) -> Option<Value> {
+    let reason = match provider {
+        ProviderKind::OpenCode => "No OpenCode rate-limit telemetry source is implemented yet.",
+        ProviderKind::Qwen => "No Qwen rate-limit telemetry source is implemented yet.",
+        _ => return None,
+    };
+    Some(json!({
+        "buckets": [],
+        "stale": false,
+        "unsupported": true,
+        "reason": reason,
+    }))
 }
 
 fn spawn_login_tmux(
@@ -386,16 +404,6 @@ fn profile_error(error: AuthProfileError) -> AppError {
         _ => StatusCode::BAD_REQUEST,
     };
     AppError::new(status, ErrorCode::Validation, error.to_string())
-}
-
-fn same_existing_path(left: &std::path::Path, right: &std::path::Path) -> bool {
-    if left == right {
-        return true;
-    }
-    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -466,6 +474,23 @@ mod tests {
         let encoded = account.to_string();
         assert!(!encoded.contains("token"));
         assert!(!encoded.contains("sk-"));
+    }
+
+    #[test]
+    fn unsupported_provider_account_is_not_reported_as_empty_usage() {
+        let account = account_payload(
+            "qwen-alt",
+            "~/.adk/profiles/qwen/qwen-alt",
+            &ProviderKind::Qwen,
+            &[],
+            &HashMap::new(),
+        );
+        assert_eq!(account["usage"]["unsupported"], true);
+        assert!(
+            account["usage"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("Qwen"))
+        );
     }
 
     #[test]
