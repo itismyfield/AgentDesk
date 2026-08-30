@@ -213,18 +213,66 @@ impl WriterRegistrationKey {
 
 pub(crate) struct WriterRegistry {
     active: Mutex<HashSet<WriterRegistrationKey>>,
+    #[cfg(test)]
+    active_release_barriers: Mutex<Vec<std::sync::Arc<std::sync::Barrier>>>,
 }
+
+#[cfg(not(test))]
+type ActiveGuard<'a> = MutexGuard<'a, HashSet<WriterRegistrationKey>>;
+
+#[cfg(test)]
+#[rustfmt::skip]
+// Releases the real lock before rendezvous so split check/insert mutants cannot hide.
+struct ActiveGuard<'a> { inner: Option<MutexGuard<'a, HashSet<WriterRegistrationKey>>>, release_barrier: Option<std::sync::Arc<std::sync::Barrier>> }
+
+#[cfg(test)]
+#[rustfmt::skip]
+impl std::ops::Deref for ActiveGuard<'_> { type Target = HashSet<WriterRegistrationKey>; fn deref(&self) -> &Self::Target { self.inner.as_deref().expect("active guard is present") } }
+
+#[cfg(test)]
+#[rustfmt::skip]
+impl std::ops::DerefMut for ActiveGuard<'_> { fn deref_mut(&mut self) -> &mut Self::Target { self.inner.as_deref_mut().expect("active guard is present") } }
+
+#[cfg(test)]
+#[rustfmt::skip]
+impl Drop for ActiveGuard<'_> { fn drop(&mut self) { self.inner.take(); if let Some(barrier) = self.release_barrier.take() { barrier.wait(); } } }
 
 impl WriterRegistry {
     fn new() -> Self {
         Self {
             active: Mutex::new(HashSet::new()),
+            #[cfg(test)]
+            active_release_barriers: Mutex::new(Vec::new()),
         }
     }
-    fn active(&self) -> MutexGuard<'_, HashSet<WriterRegistrationKey>> {
-        self.active
+    fn active(&self) -> ActiveGuard<'_> {
+        let inner = self
+            .active
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        #[cfg(not(test))]
+        {
+            inner
+        }
+        #[cfg(test)]
+        {
+            let release_barrier = self
+                .active_release_barriers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pop();
+            ActiveGuard {
+                inner: Some(inner),
+                release_barrier,
+            }
+        }
+    }
+    #[cfg(test)]
+    #[rustfmt::skip]
+    fn synchronize_next_two_active_releases(&self, barrier: std::sync::Arc<std::sync::Barrier>) {
+        let mut release_barriers = self.active_release_barriers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(release_barriers.is_empty());
+        release_barriers.extend([std::sync::Arc::clone(&barrier), barrier]);
     }
     pub(crate) fn register(
         &self,
@@ -274,14 +322,17 @@ pub(crate) fn writer_registry() -> &'static WriterRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{path::Component, sync::Arc};
+    use std::{
+        path::Component,
+        sync::{Arc, Barrier},
+    };
 
     #[rustfmt::skip]
-    const PROVIDERS: [ProviderDomain; 6] = [ProviderDomain::Claude, ProviderDomain::Codex, ProviderDomain::Gemini, ProviderDomain::OpenCode, ProviderDomain::Qwen, ProviderDomain::Unsupported];
+    const PROVIDER_SLUGS: [(ProviderDomain, &str); 6] = [(ProviderDomain::Claude, "claude"), (ProviderDomain::Codex, "codex"), (ProviderDomain::Gemini, "gemini"), (ProviderDomain::OpenCode, "opencode"), (ProviderDomain::Qwen, "qwen"), (ProviderDomain::Unsupported, "unsupported")];
     #[rustfmt::skip]
     const ORIGINS: [ArtifactOrigin; 4] = [ArtifactOrigin::AgentDeskManaged, ArtifactOrigin::ProviderNative, ArtifactOrigin::SessionAuxiliary, ArtifactOrigin::Unsupported];
     #[rustfmt::skip]
-    const ARTIFACTS: [ArtifactKind; 10] = [ArtifactKind::RelayJsonl, ArtifactKind::NativeTranscript, ArtifactKind::NativeRollout, ArtifactKind::Prompt, ArtifactKind::InputFifo, ArtifactKind::OwnerMarker, ArtifactKind::WrapperScript, ArtifactKind::RuntimeMarker, ArtifactKind::NoManagedLocalTranscript, ArtifactKind::Unknown];
+    const ARTIFACT_SLUGS: [(ArtifactKind, &str); 10] = [(ArtifactKind::RelayJsonl, "relay-jsonl"), (ArtifactKind::NativeTranscript, "native-transcript"), (ArtifactKind::NativeRollout, "native-rollout"), (ArtifactKind::Prompt, "prompt"), (ArtifactKind::InputFifo, "input-fifo"), (ArtifactKind::OwnerMarker, "owner-marker"), (ArtifactKind::WrapperScript, "wrapper-script"), (ArtifactKind::RuntimeMarker, "runtime-marker"), (ArtifactKind::NoManagedLocalTranscript, "no-managed-local-transcript"), (ArtifactKind::Unknown, "unknown")];
     type Tuple = (ProviderDomain, ArtifactOrigin, ArtifactKind);
     #[rustfmt::skip]
     const MANAGED: [Tuple; 3] = [(ProviderDomain::Claude, ArtifactOrigin::AgentDeskManaged, ArtifactKind::RelayJsonl), (ProviderDomain::Codex, ArtifactOrigin::AgentDeskManaged, ArtifactKind::RelayJsonl), (ProviderDomain::Qwen, ArtifactOrigin::AgentDeskManaged, ArtifactKind::RelayJsonl)];
@@ -297,11 +348,32 @@ mod tests {
         for (kind, expected) in cases { assert_eq!(ProviderDomain::from(&kind), expected); }
     }
 
+    #[rustfmt::skip]
+    #[test]
+    fn full_slug_domains_are_injective_and_separate_lock_coordinates() {
+        let mut provider_slugs = HashSet::new();
+        for (provider, expected) in PROVIDER_SLUGS {
+            let actual = provider.slug(); assert_eq!(actual, expected); assert!(provider_slugs.insert(actual), "duplicate provider slug: {actual}");
+        }
+        let mut artifact_slugs = HashSet::new();
+        for (artifact, expected) in ARTIFACT_SLUGS {
+            let actual = artifact.slug(); assert_eq!(actual, expected); assert!(artifact_slugs.insert(actual), "duplicate artifact slug: {actual}");
+        }
+        let mut coordinates = HashSet::new();
+        for (provider, _) in PROVIDER_SLUGS {
+            for (artifact, _) in ARTIFACT_SLUGS {
+                let identity = LogicalArtifactIdentity::new("same-session", artifact);
+                let path = control_lock_path(Path::new("/control"), provider, &identity);
+                assert!(coordinates.insert(path), "duplicate lock coordinate: {provider:?}/{artifact:?}");
+            }
+        }
+    }
+
     #[test]
     fn exact_tuple_allowlist_is_exhaustive_and_independent() {
-        for provider in PROVIDERS {
+        for (provider, _) in PROVIDER_SLUGS {
             for origin in ORIGINS {
-                for artifact in ARTIFACTS {
+                for (artifact, _) in ARTIFACT_SLUGS {
                     let tuple = (provider, origin, artifact);
                     let expected = if origin == ArtifactOrigin::ProviderNative {
                         WriterDisposition::Observed
@@ -326,8 +398,8 @@ mod tests {
 
     #[test]
     fn provider_native_precedes_unknown_and_unsupported_provider() {
-        for provider in PROVIDERS {
-            for artifact in ARTIFACTS {
+        for (provider, _) in PROVIDER_SLUGS {
+            for (artifact, _) in ARTIFACT_SLUGS {
                 assert_eq!(
                     classify_writer(provider, ArtifactOrigin::ProviderNative, artifact),
                     WriterDisposition::Observed
@@ -401,6 +473,41 @@ mod tests {
         artifact: ArtifactKind,
     ) -> WriterRegistrationKey {
         WriterRegistrationKey::new(provider, LogicalArtifactIdentity::new(session, artifact))
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn drop_releases_exact_key_without_disturbing_unrelated_registration() {
+        let registry = WriterRegistry::new();
+        let target = key(ProviderDomain::Claude, "drop-target", ArtifactKind::RelayJsonl);
+        let unrelated = key(ProviderDomain::Qwen, "unrelated", ArtifactKind::Prompt);
+        let target_guard = registry.register(target.clone()).unwrap();
+        let unrelated_guard = registry.register(unrelated.clone()).unwrap();
+        drop(target_guard);
+        let replacement = registry.register(target).expect("dropped exact key must be reusable");
+        assert_eq!(registry.register(unrelated).err(), Some(DuplicateRegistration));
+        drop(replacement); drop(unrelated_guard);
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn simultaneous_contenders_admit_exactly_one_then_drop_allows_reentry() {
+        let registry = WriterRegistry::new();
+        let contested = key(ProviderDomain::Codex, "contested", ArtifactKind::RelayJsonl);
+        registry.synchronize_next_two_active_releases(Arc::new(Barrier::new(2)));
+        let start = Barrier::new(3);
+        let outcomes = std::thread::scope(|scope| {
+            let first = scope.spawn(|| { start.wait(); registry.register(contested.clone()) });
+            let second = scope.spawn(|| { start.wait(); registry.register(contested.clone()) });
+            start.wait();
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        let successes = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+        let duplicates = outcomes.iter().filter(|outcome| outcome.as_ref().err() == Some(&DuplicateRegistration)).count();
+        assert_eq!((successes, duplicates), (1, 1));
+        drop(outcomes);
+        let reentry = registry.register(contested).expect("winner guard drop must make the exact key reusable");
+        drop(reentry);
     }
 
     #[rustfmt::skip]
