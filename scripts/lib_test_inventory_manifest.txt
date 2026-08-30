@@ -4302,6 +4302,7 @@ services::discord::response_sanitizer::subagent_notification_card::tests::human_
 services::discord::response_sanitizer::tests::strips_echoed_memory_recall_ownership_block
 services::discord::restart_mode::protocol_v2::disposition::high_risk_recovery::every_disposition_owns_exact_original_bytes
 services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::absolute_and_relative_root_traversal_record_exact_pairs_and_identity
+services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::directory_mutation_records_sync_facts_and_owned_fds_outlive_parents
 services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::root_traversal_and_path_replacement_keep_the_pinned_inode
 services::discord::restart_mode::protocol_v2::fs::unsupported::high_risk_recovery::unsupported_precedes_validation_for_every_facade_operation
 services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::all_phase_kinds_round_trip_to_golden_canonical_wire

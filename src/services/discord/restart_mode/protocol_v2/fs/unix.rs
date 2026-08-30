@@ -230,6 +230,12 @@ mod high_risk_recovery {
     const EXPECTED_OPEN_FLAGS: libc::c_int =
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
     const SYMLINK_ERRNO: i32 = libc::ENOTDIR;
+
+    #[test]
+    fn directory_mutation_records_sync_facts_and_owned_fds_outlive_parents() {
+        assert!(false, "descriptor-relative directory mutation is not implemented");
+    }
+
     fn assert_io(error: FsError, expected: (FsOperation, i32)) {
         let FsErrorKind::Io(io) = error.kind() else {
             panic!("expected I/O error, got {error:?}");
