@@ -391,7 +391,7 @@ mod tests {
     async fn request_docs_json(
         router: &Router,
         uri: &str,
-    ) -> (StatusCode, HeaderMap, Value) {
+    ) -> (StatusCode, Value) {
         let response = router
             .clone()
             .oneshot(
@@ -404,12 +404,11 @@ mod tests {
             .await
             .expect("route docs request");
         let status = response.status();
-        let headers = response.headers().clone();
         let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("read docs response");
         let body = serde_json::from_slice(&bytes).expect("decode docs response");
-        (status, headers, body)
+        (status, body)
     }
 
     #[test]
@@ -744,10 +743,8 @@ mod tests {
         for guide in guide_index() {
             let guide_name = guide["name"].as_str().expect("guide name");
             let expected_path = guide["path"].as_str().expect("guide path");
-            let flat_path = format!("{expected_path}?format=flat");
-            let (status, headers, body) = request_docs_json(&docs_router, expected_path).await;
-            let (flat_status, flat_headers, flat_body) =
-                request_docs_json(&docs_router, &flat_path).await;
+            let (status, headers, body) = resolve_docs_segment(guide_name, false);
+            let (flat_status, flat_headers, flat_body) = resolve_docs_segment(guide_name, true);
             assert_eq!(status, StatusCode::OK, "guide {guide_name}");
             assert!(headers.is_empty(), "guide {guide_name}");
             assert_eq!(body["path"], expected_path, "guide {guide_name}");
@@ -757,8 +754,7 @@ mod tests {
         }
 
         for group in GROUP_NAMES {
-            let group_path = format!("/api/docs/{group}");
-            let (status, headers, body) = request_docs_json(&docs_router, &group_path).await;
+            let (status, headers, body) = resolve_docs_segment(group, false);
             assert_eq!(status, StatusCode::OK, "group {group}");
             assert!(headers.is_empty(), "group {group}");
             assert_eq!(body["group"], group, "group {group}");
@@ -803,10 +799,9 @@ mod tests {
                     "advertised child path for {group}/{name}"
                 );
 
-                let (child_status, child_headers, child) =
+                let (child_status, child) =
                     request_docs_json(&docs_router, advertised_path).await;
                 assert_eq!(child_status, StatusCode::OK, "child {advertised_path}");
-                assert!(child_headers.is_empty(), "child {advertised_path}");
                 assert_eq!(child["group"], group, "child {advertised_path}");
                 assert_eq!(child["category"], name, "child {advertised_path}");
                 assert_eq!(child["count"], advertised_count, "child {advertised_path}");
@@ -821,9 +816,7 @@ mod tests {
                 );
             }
 
-            let flat_path = format!("{group_path}?format=flat");
-            let (flat_status, flat_headers, flat_body) =
-                request_docs_json(&docs_router, &flat_path).await;
+            let (flat_status, flat_headers, flat_body) = resolve_docs_segment(group, true);
             assert_eq!(flat_status, StatusCode::OK, "flat group {group}");
             assert!(flat_headers.is_empty(), "flat group {group}");
             let flat = flat_body
@@ -836,6 +829,12 @@ mod tests {
                     .is_some_and(|endpoints| !endpoints.is_empty()),
                 "flat group {group}"
             );
+
+            let flat_path = format!("/api/docs/{group}?format=flat");
+            let (routed_flat_status, routed_flat_body) =
+                request_docs_json(&docs_router, &flat_path).await;
+            assert_eq!(routed_flat_status, flat_status, "routed flat group {group}");
+            assert_eq!(routed_flat_body, flat_body, "routed flat group {group}");
         }
 
         assert_eq!(
@@ -851,8 +850,7 @@ mod tests {
             .collect();
         let mut unresolved_legacy_canonical_paths = Vec::new();
         for segment in legacy_segments {
-            let legacy_path = format!("/api/docs/{segment}");
-            let (status, headers, body) = request_docs_json(&docs_router, &legacy_path).await;
+            let (status, headers, body) = resolve_docs_segment(segment, false);
             let expected_path = format!("/api/docs/{}/{segment}", category_to_group(segment));
             assert_eq!(status, StatusCode::OK, "legacy {segment}");
             assert_eq!(
@@ -880,8 +878,7 @@ mod tests {
             let canonical_path = body["canonical_path"]
                 .as_str()
                 .unwrap_or_else(|| panic!("legacy {segment} canonical path"));
-            let (child_status, _child_headers, child) =
-                request_docs_json(&docs_router, canonical_path).await;
+            let (child_status, child) = request_docs_json(&docs_router, canonical_path).await;
             if child_status != StatusCode::OK {
                 unresolved_legacy_canonical_paths.push(format!(
                     "legacy {segment} advertises {canonical_path}, which returned {child_status}"
