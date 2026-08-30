@@ -157,17 +157,23 @@ pub(super) async fn resolve_direct_meeting_runtime(
     for (index, shared) in &shared_candidates {
         let settings = shared.settings.read().await.clone();
         let explicit_channel_match = settings.allowed_channel_ids.contains(&channel_id.get());
-        let live_channel_match = match shared.http.cached_serenity_ctx.get() {
-            Some(ctx) => {
-                crate::services::discord::provider_handles_channel(
-                    ctx,
-                    owner_provider,
-                    &settings,
-                    channel_id,
-                )
-                .await
+        // An explicit allowlist match is authoritative. Avoid Discord REST
+        // channel/category/thread probes on the health and cancel hot path.
+        let live_channel_match = if explicit_channel_match {
+            false
+        } else {
+            match shared.http.cached_serenity_ctx.get() {
+                Some(ctx) => {
+                    crate::services::discord::provider_handles_channel(
+                        ctx,
+                        owner_provider,
+                        &settings,
+                        channel_id,
+                    )
+                    .await
+                }
+                None => false,
             }
-            None => false,
         };
         candidate_matches.push(DirectMeetingRuntimeCandidate {
             index: *index,
@@ -263,17 +269,23 @@ pub(super) async fn resolve_direct_meeting_shared(
     for (index, shared) in &shared_candidates {
         let settings = shared.settings.read().await.clone();
         let explicit_channel_match = settings.allowed_channel_ids.contains(&channel_id.get());
-        let live_channel_match = match shared.http.cached_serenity_ctx.get() {
-            Some(ctx) => {
-                crate::services::discord::provider_handles_channel(
-                    ctx,
-                    owner_provider,
-                    &settings,
-                    channel_id,
-                )
-                .await
+        // An explicit allowlist match is authoritative. Avoid Discord REST
+        // channel/category/thread probes on the health and cancel hot path.
+        let live_channel_match = if explicit_channel_match {
+            false
+        } else {
+            match shared.http.cached_serenity_ctx.get() {
+                Some(ctx) => {
+                    crate::services::discord::provider_handles_channel(
+                        ctx,
+                        owner_provider,
+                        &settings,
+                        channel_id,
+                    )
+                    .await
+                }
+                None => false,
             }
-            None => false,
         };
         candidate_matches.push(DirectMeetingRuntimeCandidate {
             index: *index,

@@ -4,6 +4,7 @@ use axum::{Json, http::HeaderMap};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
+use crate::db::agents::AgentChannelBindings;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::session_identity::{SessionIdentity, tmux_name_from_session_key};
 use crate::services::provider::ProviderKind;
@@ -141,6 +142,37 @@ pub struct QueueService {
 struct CancelTurnChannelTarget {
     agent_id: String,
     requested_provider: Option<String>,
+}
+
+/// Resolve the provider that owns an exact Discord channel binding.
+///
+/// Explicit `cc`/`cdx`/`alt` bindings retain their historical ownership, but
+/// a legacy primary channel must use the agent's configured provider. The old
+/// SQL fallback treated every `discord_channel_id` as Claude, which made
+/// single-provider custom mailboxes such as OpenCode unreachable by the
+/// cancel/recovery path.
+fn cancel_provider_for_channel(
+    bindings: &AgentChannelBindings,
+    channel_id: &str,
+) -> Option<String> {
+    let matches = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|value| value.trim() == channel_id)
+    };
+
+    if matches(&bindings.discord_channel_cc) {
+        return Some("claude".to_string());
+    }
+    if matches(&bindings.discord_channel_cdx) || matches(&bindings.discord_channel_alt) {
+        return Some("codex".to_string());
+    }
+    if matches(&bindings.discord_channel_id) {
+        return bindings
+            .resolved_primary_provider_kind()
+            .map(|provider| provider.as_str().to_string());
+    }
+    None
 }
 
 #[derive(Debug)]
@@ -756,13 +788,23 @@ impl QueueService {
             .with_operation("cancel_turn.query_channel_target.no_pool")
             .with_context("channel_id", channel_id));
         };
-        sqlx::query_as::<_, (String, Option<String>)>(
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
             "SELECT id,
-                    CASE
-                      WHEN discord_channel_cc = $1 OR discord_channel_id = $1 THEN 'claude'
-                      WHEN discord_channel_cdx = $1 OR discord_channel_alt = $1 THEN 'codex'
-                      ELSE NULL
-                    END AS requested_provider
+                    provider,
+                    discord_channel_id,
+                    discord_channel_alt,
+                    discord_channel_cc,
+                    discord_channel_cdx
              FROM agents
              WHERE discord_channel_id = $1
                 OR discord_channel_alt = $1
@@ -774,10 +816,28 @@ impl QueueService {
         .fetch_optional(pool)
         .await
         .map(|row| {
-            row.map(|(agent_id, requested_provider)| CancelTurnChannelTarget {
-                agent_id,
-                requested_provider,
-            })
+            row.map(
+                |(
+                    agent_id,
+                    provider,
+                    discord_channel_id,
+                    discord_channel_alt,
+                    discord_channel_cc,
+                    discord_channel_cdx,
+                )| {
+                    let bindings = AgentChannelBindings {
+                        provider,
+                        discord_channel_id,
+                        discord_channel_alt,
+                        discord_channel_cc,
+                        discord_channel_cdx,
+                    };
+                    CancelTurnChannelTarget {
+                        agent_id,
+                        requested_provider: cancel_provider_for_channel(&bindings, channel_id),
+                    }
+                },
+            )
         })
         .map_err(|error| {
             ServiceError::internal(format!("load postgres cancel channel target: {error}"))
@@ -874,6 +934,35 @@ mod tests {
             pending_uploads: Vec::new(),
             voice_announcement: None,
         }
+    }
+
+    #[test]
+    fn cancel_provider_for_channel_uses_custom_primary_provider() {
+        let bindings = AgentChannelBindings {
+            provider: Some("opencode".to_string()),
+            discord_channel_id: Some("1495040912361914398".to_string()),
+            ..AgentChannelBindings::default()
+        };
+
+        assert_eq!(
+            cancel_provider_for_channel(&bindings, "1495040912361914398").as_deref(),
+            Some("opencode")
+        );
+    }
+
+    #[test]
+    fn cancel_provider_for_channel_preserves_explicit_mailbox_ownership() {
+        let bindings = AgentChannelBindings {
+            provider: Some("opencode".to_string()),
+            discord_channel_id: Some("1495040912361914398".to_string()),
+            discord_channel_cc: Some("1495040912361914398".to_string()),
+            ..AgentChannelBindings::default()
+        };
+
+        assert_eq!(
+            cancel_provider_for_channel(&bindings, "1495040912361914398").as_deref(),
+            Some("claude")
+        );
     }
 
     #[test]

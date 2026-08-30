@@ -1,9 +1,11 @@
 use super::super::relay_health::RelayStallClassifier;
 use super::*;
 use crate::services::provider::{CancelToken, ProviderKind};
+use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 #[path = "tests/circuit_breaker_apply.rs"]
 mod circuit_breaker_apply;
@@ -2736,6 +2738,67 @@ async fn watchdog_auto_apply_is_rate_limited_after_first_token_reclaim() {
     );
     assert!(!second_token.cancelled.load(Ordering::Relaxed));
     assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn orphan_token_auto_heal_preserves_and_kicks_pending_queue() {
+    let _guard = auto_heal_test_lock().lock().await;
+    clear_auto_heal_attempts_for_tests();
+    let (_root_guard, _root_dir) = isolated_agentdesk_root();
+    let provider = ProviderKind::Codex;
+    let (registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(3_360_006);
+    let _token = start_test_turn(&shared, channel, MessageId::new(96)).await;
+    shared.restart.global_active.store(1, Ordering::Relaxed);
+
+    let queued_message = MessageId::new(97);
+    let enqueue = super::super::queue_io::with_post_enqueue_idle_queue_kick_suppressed(
+        super::super::mailbox_enqueue_intervention(
+            &shared,
+            &provider,
+            channel,
+            Intervention {
+                author_id: UserId::new(1),
+                author_is_bot: false,
+                message_id: queued_message,
+                queued_generation: 1,
+                source_message_ids: vec![queued_message],
+                source_message_queued_generations: Vec::new(),
+                source_text_segments: Vec::new(),
+                text: "queued follow-up".to_string(),
+                mode: InterventionMode::Soft,
+                created_at: Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: true,
+                pending_uploads: Vec::new(),
+                voice_announcement: None,
+            },
+        ),
+    )
+    .await;
+    assert!(enqueue.enqueued, "test follow-up must be durably queued");
+
+    let response = auto_apply_relay_recovery_for_shared_at(
+        &registry,
+        shared.clone(),
+        &provider,
+        channel.get(),
+        RelayRecoveryActionKind::ClearOrphanPendingToken,
+        RelayRecoveryApplySource::StallWatchdog,
+        chrono::Utc::now().timestamp_millis()
+            + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64,
+    )
+    .await
+    .expect("orphan token auto-heal should evaluate");
+
+    assert!(response.applied);
+    let apply_result = response.apply_result.as_ref().expect("apply result");
+    assert_eq!(apply_result.post_mailbox_queue_depth, Some(1));
+    let after = super::super::mailbox_snapshot(&shared, channel).await;
+    assert_eq!(after.intervention_queue.len(), 1);
+    assert_eq!(after.intervention_queue[0].message_id, queued_message);
+    assert!(after.cancel_token.is_none());
 }
 
 #[tokio::test]
