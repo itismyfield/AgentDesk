@@ -26,7 +26,9 @@ mod provider_targets;
 mod snapshot_capture;
 
 use discord_mentions::{
+    effective_user_ids as effective_scheduled_discord_mention_user_ids,
     ensure_rollout_ready as ensure_discord_mentions_rollout_ready,
+    required_from_state as required_discord_mentions,
     validate_rendered_content_length as validate_discord_rendered_content_length,
     validate_user_ids as validate_discord_mention_user_ids,
 };
@@ -115,7 +117,7 @@ pub async fn create_scheduled_message(
     Json(body): Json<CreateScheduledMessageBody>,
 ) -> ApiResponse {
     let pool = pool_or_unavailable(&state)?;
-    let new = validate_create(pool, &body).await?;
+    let new = validate_create(pool, &body, required_discord_mentions(&state)).await?;
 
     // Capture an immutable snapshot atomically; an empty source fails closed.
     if new.context_strategy == db::CONTEXT_STRATEGY_SNAPSHOT {
@@ -153,6 +155,7 @@ pub async fn create_scheduled_message(
 async fn validate_create(
     pool: &PgPool,
     body: &CreateScheduledMessageBody,
+    required_discord_mention_user_ids: &[String],
 ) -> Result<NewScheduledMessage, AppError> {
     let content = body.content.trim();
     if content.is_empty() {
@@ -173,9 +176,10 @@ async fn validate_create(
             "deliveryKind must be 'push' or 'agent'",
         ));
     }
-    let discord_mention_user_ids = validate_discord_mention_user_ids(
+    let discord_mention_user_ids = effective_scheduled_discord_mention_user_ids(
         body.discord_mention_user_ids.as_deref().unwrap_or_default(),
         &delivery_kind,
+        required_discord_mention_user_ids,
     )?;
     let validated_provider_targets =
         provider_targets::prepare_create(body.provider_targets.as_ref(), content, &delivery_kind)?;
@@ -597,7 +601,7 @@ pub async fn patch_scheduled_message(
         ));
     }
 
-    let patch = build_patch(pool, body, &existing).await?;
+    let patch = build_patch(pool, body, &existing, required_discord_mentions(&state)).await?;
 
     match db::update_scheduled_message_pg(pool, &id, &patch).await {
         Ok(Some(row)) => Ok((
@@ -679,6 +683,7 @@ async fn build_patch(
     pool: &PgPool,
     body: &serde_json::Map<String, JsonValue>,
     existing: &ScheduledMessageRow,
+    required_discord_mention_user_ids: &[String],
 ) -> Result<ScheduledMessagePatch, AppError> {
     let bad_request = |message: String| app_error(StatusCode::BAD_REQUEST, message);
     let mut patch = ScheduledMessagePatch::default();
@@ -698,21 +703,7 @@ async fn build_patch(
         let content = content.ok_or_else(|| bad_request("content must not be null".to_string()))?;
         patch.content = Some(content);
     }
-    if let Some(value) = body.get("discordMentionUserIds") {
-        let user_ids = if value.is_null() {
-            Vec::new()
-        } else {
-            serde_json::from_value::<Vec<String>>(value.clone()).map_err(|error| {
-                bad_request(format!(
-                    "discordMentionUserIds must be an array or null: {error}"
-                ))
-            })?
-        };
-        patch.discord_mention_user_ids = Some(validate_discord_mention_user_ids(
-            &user_ids,
-            &existing.delivery_kind,
-        )?);
-    }
+    let requested_discord_mentions = discord_mentions::parse_patch_value(body)?;
     patch.title = patch_string(body, "title").map_err(|e| bad_request(e))?;
     patch.target_channel_id =
         match patch_string(body, "targetChannelId").map_err(|e| bad_request(e))? {
@@ -766,10 +757,17 @@ async fn build_patch(
         .clone()
         .unwrap_or_else(|| existing.agent_instruction.clone());
     let has_provider_targets = provider_targets::apply_patch(body, &mut patch, existing)?;
-    let effective_mentions = patch
-        .discord_mention_user_ids
+    let mention_source = requested_discord_mentions
         .as_deref()
         .unwrap_or(&existing.discord_mention_user_ids);
+    let effective_mentions = effective_scheduled_discord_mention_user_ids(
+        mention_source,
+        effective_kind,
+        required_discord_mention_user_ids,
+    )?;
+    if effective_mentions != existing.discord_mention_user_ids {
+        patch.discord_mention_user_ids = Some(effective_mentions.clone());
+    }
     if !effective_mentions.is_empty() {
         if effective_target.is_none() {
             return Err(bad_request(
@@ -779,7 +777,7 @@ async fn build_patch(
         ensure_discord_mentions_rollout_ready(pool).await?;
     }
     let effective_content = patch.content.as_deref().unwrap_or(&existing.content);
-    validate_discord_rendered_content_length(effective_content, effective_mentions)?;
+    validate_discord_rendered_content_length(effective_content, &effective_mentions)?;
     validate_agent_only_fields(
         effective_kind,
         effective_agent.as_deref(),

@@ -165,6 +165,12 @@ pub struct DiscordConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub owner_id: Option<u64>,
+    #[serde(
+        default,
+        alias = "scheduledMessageRequiredMentionUserIds",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub scheduled_message_required_mention_user_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -3405,7 +3411,52 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 }
 
 fn validate_config(config: &Config) -> Result<()> {
-    validate_escalation_schedule(&config.escalation.schedule)
+    validate_escalation_schedule(&config.escalation.schedule)?;
+    validate_scheduled_message_required_mentions(
+        &config.discord.scheduled_message_required_mention_user_ids,
+    )
+}
+
+fn validate_scheduled_message_required_mentions(user_ids: &[String]) -> Result<()> {
+    crate::utils::discord::normalize_discord_recipient_ids(user_ids)
+        .map(|_| ())
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "discord.scheduled_message_required_mention_user_ids must contain 0..={} unique positive Discord user IDs: {error:?}",
+                crate::utils::discord::MAX_DISCORD_RECIPIENT_IDS
+            )
+        })
+}
+
+#[cfg(test)]
+mod scheduled_message_required_mention_config_tests {
+    use super::validate_scheduled_message_required_mentions;
+
+    #[test]
+    fn required_mentions_allow_empty_or_valid_lists() {
+        assert!(validate_scheduled_message_required_mentions(&[]).is_ok());
+        assert!(
+            validate_scheduled_message_required_mentions(&[
+                "1469509284508340276".to_string(),
+                "1469509284508340277".to_string(),
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn required_mentions_reject_duplicates_and_invalid_ids() {
+        assert!(
+            validate_scheduled_message_required_mentions(&[
+                "1469509284508340276".to_string(),
+                "1469509284508340276".to_string(),
+            ])
+            .is_err()
+        );
+        assert!(
+            validate_scheduled_message_required_mentions(&["not-a-user-id".to_string()]).is_err()
+        );
+    }
 }
 
 fn validate_escalation_schedule(schedule: &EscalationScheduleConfig) -> Result<()> {

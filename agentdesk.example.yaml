@@ -58,6 +58,10 @@ cluster:
 discord:
   guild_id: "YOUR_GUILD_ID"
   owner_id: "YOUR_DISCORD_USER_ID"
+  # Optional recipients that every scheduled Discord push must mention.
+  # Request-specific discordMentionUserIds are preserved and appended.
+  # scheduled_message_required_mention_user_ids:
+  #   - "123456789012345678"
   bots:
     command:
       token: "YOUR_COMMAND_BOT_TOKEN"

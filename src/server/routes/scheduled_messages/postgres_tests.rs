@@ -84,7 +84,7 @@ async fn postgres_scheduled_message_create_persists_trimmed_explicit_bot() {
         on_context_failure: None,
     };
 
-    let new = validate_create(&pool, &body)
+    let new = validate_create(&pool, &body, &[])
         .await
         .expect("validate explicit bot create");
     assert_eq!(new.bot, "notify");
@@ -127,7 +127,7 @@ async fn postgres_scheduled_push_rejects_agent_id_before_foreign_key_insert() {
         on_context_failure: None,
     };
 
-    let err = validate_create(&pool, &body)
+    let err = validate_create(&pool, &body, &[])
         .await
         .expect_err("push agentId must fail as a request error before INSERT");
     assert_eq!(err.status(), StatusCode::BAD_REQUEST);
@@ -187,6 +187,7 @@ async fn postgres_scheduled_push_patch_distinguishes_values_from_null_clears() {
         &pool,
         metadata_body.as_object().expect("metadata patch object"),
         &existing,
+        &[],
     )
     .await
     .expect("metadata-only PATCH must not treat stored default fail as explicit input");
@@ -200,6 +201,7 @@ async fn postgres_scheduled_push_patch_distinguishes_values_from_null_clears() {
         &pool,
         clear_body.as_object().expect("agent clear patch object"),
         &existing,
+        &[],
     )
     .await
     .expect("explicit null clears leave no effective agent-only value");
@@ -224,6 +226,7 @@ async fn postgres_scheduled_push_patch_distinguishes_values_from_null_clears() {
             &pool,
             body.as_object().expect("invalid push patch object"),
             &existing,
+            &[],
         )
         .await
         .expect_err("push PATCH must reject effective agent-only values");
