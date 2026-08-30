@@ -936,6 +936,7 @@ server::routes::dispatches::crud::tests::dispatch_api_pg_tests::dispatch_deliver
 server::routes::dispatches::crud::tests::dispatch_api_pg_tests::publish_only_dispatch_patch_broadcasts_without_mutating_result_or_phase_gate_pg
 server::routes::docs::inventory::endpoints::part_06::tests::queue_generate_docs_use_canonical_thread_group_contract
 server::routes::docs::inventory::endpoints::part_08::tests::add_run_entry_docs_use_canonical_thread_group_contract
+server::routes::docs::inventory::endpoints::part_08::tests::docs_group_example_advertises_canonical_paths
 server::routes::docs::tests::advertised_group_category_paths_resolve_without_behavior_regressions
 server::routes::docs::tests::api_friction_marker_guide_is_indexed_and_describes_collection
 server::routes::docs::tests::auto_queue_docs_surface_slot_recovery_identifiers

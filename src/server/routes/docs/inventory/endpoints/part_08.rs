@@ -758,6 +758,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn docs_group_example_advertises_canonical_paths() {
+        let response = &endpoints()
+            .into_iter()
+            .find(|endpoint| endpoint.path == "/api/docs/{group}")
+            .expect("group docs endpoint")
+            .example
+            .expect("group docs example")
+            .response;
+
+        for (name, canonical_path) in [
+            ("kanban", "/api/docs/kanban/kanban"),
+            ("reviews", "/api/docs/kanban/reviews"),
+        ] {
+            let category = response["categories"]
+                .as_array()
+                .expect("group categories array")
+                .iter()
+                .find(|category| category["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name} category"));
+            assert_eq!(category["canonical_path"], canonical_path);
+        }
+    }
+
+    #[test]
     fn add_run_entry_docs_use_canonical_thread_group_contract() {
         let endpoint = endpoints()
             .into_iter()
