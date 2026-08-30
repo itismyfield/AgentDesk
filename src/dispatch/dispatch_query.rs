@@ -47,13 +47,13 @@ pub(crate) async fn query_dispatch_row_pg(
         .try_get::<Option<String>, _>("dispatch_type")
         .map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?;
     let context_raw = row
-        .try_get::<Option<String>, _>("context")
+        .try_get::<Option<&str>, _>("context")
         .map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?;
     let result_raw = row
-        .try_get::<Option<String>, _>("result")
+        .try_get::<Option<&str>, _>("result")
         .map_err(|error| anyhow::anyhow!("Dispatch query error: {error}"))?;
-    let context = parse_dispatch_json_text(context_raw.as_deref());
-    let result = parse_dispatch_json_text(result_raw.as_deref());
+    let context = parse_dispatch_json_text(context_raw);
+    let result = parse_dispatch_json_text(result_raw);
     let result_summary = summarize_dispatch_result(
         dispatch_type.as_deref(),
         Some(status.as_str()),
