@@ -3344,6 +3344,7 @@ services::discord::outbound::delivery_record::tests::shadow_write_preserves_exis
 services::discord::outbound::delivery_record::tests::shadow_writes_frontier_and_reports_match
 services::discord::outbound::delivery_record::tests::should_shadow_mirror_requires_delivered_and_enabled
 services::discord::outbound::delivery_record::tests::sidecar_path_is_outside_inflight_scan_set
+services::discord::outbound::delivery_record::tests::sink_consumed_frontier_persists_exact_source_turn_receipt
 services::discord::outbound::delivery_record::tests::unknown_generation_confirmed_delivery_settles_ledger_without_frontier_5154
 services::discord::outbound::delivery_record::tests::unknown_generation_without_pinned_inbound_id_settles_nothing_5154
 services::discord::outbound::delivery_record::tests::watcher_long_chunk_partial_or_unadvanced_never_records_3610d
@@ -4713,6 +4714,7 @@ services::discord::session_relay_sink::journal::tests::authority_and_shadow_obse
 services::discord::session_relay_sink::journal::tests::delivery_journal_defaults_to_legacy
 services::discord::session_relay_sink::journal::tests::execution_id_changes_for_each_canonical_component
 services::discord::session_relay_sink::journal::tests::finish_fresh_emits_transport_and_commit_as_one_batch
+services::discord::session_relay_sink::journal::tests::fresh_obligation_frontier_uses_consumed_coordinate_and_rejects_malformed_metadata
 services::discord::session_relay_sink::journal::tests::obligation_window_exact_delivery_predicate_is_exhaustive_and_fail_closed
 services::discord::session_relay_sink::journal::tests::p2_1_authority_reader_returns_real_judgment_and_reconcile_selects_it
 services::discord::session_relay_sink::journal::tests::shadow_candidate_delivered_requires_transport_confirmed
@@ -4744,7 +4746,7 @@ services::discord::session_relay_sink::task_notification_context::tests::task_no
 services::discord::session_relay_sink::task_notification_context::tests::transient_card_failure_blocks_answer_and_frontier
 services::discord::session_relay_sink::tests::a0_characterization_tests::a0_session_bound_predicate_boundary_is_strictly_greater_than_2000
 services::discord::session_relay_sink::tests::controller_skips_empty_body_so_cutover_gate_keeps_it_legacy
-services::discord::session_relay_sink::tests::cutover_short_replace_production_path_advance_is_fresh_identity_gated
+services::discord::session_relay_sink::tests::cutover_short_replace_production_path_is_pretransport_authority_gated
 services::discord::session_relay_sink::tests::deliver_response_err_path_releases_external_input_lease_via_guard
 services::discord::session_relay_sink::tests::discord_and_tui_direct_have_explicit_terminal_owner_models
 services::discord::session_relay_sink::tests::fenceless_frame_with_complete_result_carries_no_commit_fence
@@ -4778,6 +4780,7 @@ services::discord::session_relay_sink::tests::korean_answer_under_the_character_
 services::discord::session_relay_sink::tests::lease_guard_drop_clears_own_lease_and_is_inert_for_foreign_owner
 services::discord::session_relay_sink::tests::lease_guard_drop_preserves_newer_turn_lease_no_clobber
 services::discord::session_relay_sink::tests::lease_guard_drop_preserves_newer_unassigned_lease_by_generation
+services::discord::session_relay_sink::tests::malformed_terminal_metadata_refuses_before_lease_or_transport
 services::discord::session_relay_sink::tests::offset_authority_handles_partial_and_batch_overlaps
 services::discord::session_relay_sink::tests::offset_authority_relays_wake_range_exactly_once
 services::discord::session_relay_sink::tests::parser_delivers_background_task_notification_with_result_text

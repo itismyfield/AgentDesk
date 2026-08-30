@@ -10,14 +10,11 @@ pub(super) mod source_epoch_observer;
 // ===========================================================================
 // #3041 §2-§3 — Delivery-lease `DeliveryLeaseCell` state machine.
 //
-// As of P1-1 the WATCHER terminal-delivery path wires this LIVE: the watcher
-// acquires the cell before sending, heartbeat-renews it during the send, and
-// commits+advances+releases INLINE. The `relay_slot` field above is LEFT
-// UNTOUCHED for now (its guard migration is a later step). The SINK/BRIDGE
-// committers (P1-2) and the 3-way ACK reconciliation (P1-3) are not wired yet,
-// so the actor `CommitDelivery`/`ReleaseDelivery` messages and some helpers
-// remain dormant — those still carry targeted `#[allow(dead_code)]` attributes
-// tagged with this issue/phase, to be wired/removed by the follow-up phases.
+// The watcher, sink, and bridge terminal-delivery paths use this cell to
+// acquire, heartbeat, commit, and release one-time publication authority.
+// The legacy `relay_slot` remains separate. `Positive` and `NoRange` are live;
+// zero-width permits, sink epochs, and actor-message helpers remain dormant for
+// later Stack B slices and keep targeted dead-code markers.
 //
 // Design (faithful to #3041 §2-§3):
 //   lease = (delivery_lease_key, byte_range [start,end))
@@ -33,14 +30,12 @@ pub(super) mod source_epoch_observer;
 // ===========================================================================
 
 /// A non-empty half-open byte range that is allowed to carry frontier authority.
-#[allow(dead_code)] // #5191 S2c PR-A: dormant until the producer/consumer cutover.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::services::discord) struct PositiveByteRange {
     start: u64,
     end: u64,
 }
 
-#[allow(dead_code)] // #5191 S2c PR-A: dormant until the producer/consumer cutover.
 impl PositiveByteRange {
     pub(in crate::services::discord) fn new(start: u64, end: u64) -> Option<Self> {
         (end > start).then_some(Self { start, end })
@@ -87,15 +82,14 @@ impl ZeroWidthPermit {
 }
 
 /// Typed publication coordinate: only `Positive` may advance a byte frontier.
-#[allow(dead_code)] // #5191 S2c PR-A: dormant until the producer/consumer cutover.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::services::discord) enum PublicationCoordinate {
     Positive(PositiveByteRange),
+    #[allow(dead_code)] // #5191 S2c PR-A: dormant until the zero-width producer cutover.
     ZeroWidth(ZeroWidthPermit),
     NoRange,
 }
 
-#[allow(dead_code)] // #5191 S2c PR-A: dormant until the producer/consumer cutover.
 impl PublicationCoordinate {
     pub(in crate::services::discord) fn positive_range(self) -> Option<PositiveByteRange> {
         match self {

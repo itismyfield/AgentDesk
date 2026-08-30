@@ -851,6 +851,7 @@ async fn split_terminal_forward_signals_trailing_turn_and_keeps_terminal_ack() {
     let turn_b = "{\"type\":\"assistant\",\"message\":{\"content\":[]}}\n";
     let combined = format!("{turn_a}{turn_b}");
     let fence = TerminalCommitFence {
+        consumed_start: 100,
         consumed_end: 240,
         turn_user_msg_id: 0,
         turn_started_at: "12:00:00".to_string(),
@@ -1504,8 +1505,9 @@ fn watcher_terminal_commit_fence_only_for_a_real_terminal_chunk() {
         turn_start_offset: Some(64),
     };
     // Real terminal chunk: found_result, end > start, identity for this session.
-    let fence = watcher_terminal_commit_fence(true, 0, 256, Some(&identity), session)
+    let fence = watcher_terminal_commit_fence(true, 128, 256, Some(&identity), session)
         .expect("a real terminal chunk must carry a commit fence");
+    assert_eq!(fence.consumed_start, 128);
     assert_eq!(fence.consumed_end, 256);
     assert_eq!(fence.turn_user_msg_id, 0);
     assert_eq!(fence.turn_started_at, "2026-06-04T00:00:00Z");

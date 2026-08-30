@@ -158,6 +158,7 @@ async fn fenced_zero_delivery_resolves_exact_not_delivered_without_timeout_4909(
     let sent = producer.try_send_terminal_frame_with_sequence(
         PURE_SUBAGENT_ZERO_DELIVERY_PAYLOAD.to_string(),
         TerminalCommitFence {
+            consumed_start: 64,
             consumed_end: 256,
             turn_user_msg_id: 49_090,
             turn_started_at: "2026-07-27T00:00:00Z".to_string(),

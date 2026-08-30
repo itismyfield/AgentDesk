@@ -46,10 +46,12 @@ impl RelaySink for SessionBoundDiscordRelaySink {
         // (inline in `deliver_response`) — outcome and advance are decoupled.
         let deliveries = self.ingest_frame(frame);
         let fenced_terminal_without_delivery = deliveries.is_empty()
-            && matches!(
-                (frame.turn_start_offset, frame.terminal_consumed_end),
-                (Some(start), Some(end)) if end > start
-            );
+            && delivery_frontier::sink_publication_coordinate(
+                frame.terminal_consumed_start,
+                frame.terminal_consumed_end,
+            )
+            .positive_range()
+            .is_some();
         let mut terminal_delivered = false;
         let mut terminal_fresh_delivered = None;
         let mut terminal_not_delivered = false;

@@ -12,9 +12,14 @@ impl SessionBoundDiscordRelaySink {
         delivery: &SessionRelayDelivery,
         inflight: Option<&crate::services::discord::inflight::InflightTurnState>,
     ) -> bool {
-        let Some(end) = delivery.terminal_consumed_end.filter(|end| *end > 0) else {
+        let Some(range) = super::delivery_frontier::sink_publication_coordinate(
+            delivery.terminal_consumed_start,
+            delivery.terminal_consumed_end,
+        )
+        .positive_range() else {
             return false;
         };
+        let end = range.end();
         // IDENTITY GATE: the frame's pinned turn identity must still match the
         // channel's current inflight. A delayed frame from an already-replaced
         // turn (or a cleared inflight) is ignored — never advances a wrong turn.

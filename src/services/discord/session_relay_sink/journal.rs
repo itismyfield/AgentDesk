@@ -131,7 +131,7 @@ impl JournalObserver {
             return None;
         }
         let pool = shared.pg_pool.clone()?;
-        let key = TuiObligationKey::capture(shared, delivery);
+        let key = TuiObligationKey::capture(shared, delivery)?;
         let obligation_id = key.obligation_id();
         let internal = runtime
             .delivery_journal_internal_channel_ids
@@ -317,7 +317,7 @@ struct TuiObligationKey {
 }
 
 impl TuiObligationKey {
-    fn capture(shared: &SharedData, delivery: &super::SessionRelayDelivery) -> Self {
+    fn capture(shared: &SharedData, delivery: &super::SessionRelayDelivery) -> Option<Self> {
         let path = shared
             .tmux_watchers
             .watcher_output_path(&delivery.session_name);
@@ -332,16 +332,7 @@ impl TuiObligationKey {
         let reset_incarnation = shared
             .relay_frontier_token(poise::serenity_prelude::ChannelId::new(delivery.channel_id))
             .reset_incarnation;
-        let start = delivery
-            .relay_range
-            .map(|range| range.0)
-            .or(delivery.frame_turn_start_offset)
-            .unwrap_or(0);
-        let end = delivery
-            .relay_range
-            .map(|range| range.1)
-            .or(delivery.terminal_consumed_end)
-            .unwrap_or(start);
+        let (start, end) = obligation_frontier(delivery)?;
         // execution_id is derived from the watcher pause epoch plus durable source/turn
         // coordinates. The same inputs are node-independent; a restart that loses or
         // changes the epoch creates a new execution rather than falsely coalescing it.
@@ -369,10 +360,10 @@ impl TuiObligationKey {
         bytes.extend_from_slice(&start.to_be_bytes());
         bytes.extend_from_slice(&end.to_be_bytes());
         bytes.extend_from_slice(b"fresh");
-        Self {
+        Some(Self {
             canonical: bytes,
             frontier: (start, end),
-        }
+        })
     }
 
     fn obligation_id(&self) -> Uuid {
@@ -381,6 +372,24 @@ impl TuiObligationKey {
     fn payload(&self) -> Value {
         json!({"canonical_key_sha256": format!("{:x}", Sha256::digest(&self.canonical))})
     }
+}
+
+fn obligation_frontier(delivery: &super::SessionRelayDelivery) -> Option<(u64, u64)> {
+    if delivery.terminal_consumed_start.is_some() || delivery.terminal_consumed_end.is_some() {
+        return super::delivery_frontier::sink_publication_coordinate(
+            delivery.terminal_consumed_start,
+            delivery.terminal_consumed_end,
+        )
+        .positive_range()
+        .map(|range| (range.start(), range.end()));
+    }
+    let start = delivery
+        .relay_range
+        .map(|range| range.0)
+        .or(delivery.frame_turn_start_offset)
+        .unwrap_or(0);
+    let end = delivery.relay_range.map(|range| range.1).unwrap_or(start);
+    Some((start, end))
 }
 
 fn push_field(bytes: &mut Vec<u8>, value: &str) {
@@ -433,13 +442,11 @@ pub(super) enum ShadowClassification { CandidateDelivered, SettledWithoutTranspo
 /// Consumers can observe only a verified intake binding and fail-closed state,
 /// never the stored event rows or either classifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(in crate::services::discord) struct ObligationWindowJudgment {
     delivered_outbox_id: Option<i64>,
     malformed: bool,
 }
 
-#[allow(dead_code)]
 impl ObligationWindowJudgment {
     pub(in crate::services::discord) fn delivered_outbox_id(&self) -> Option<i64> {
         self.delivered_outbox_id
@@ -467,7 +474,6 @@ pub(in crate::services::discord) async fn read_authority_obligation_window(
     Ok(authority_obligation_window_from_loaded(mode, loaded))
 }
 
-#[allow(dead_code)]
 pub(in crate::services::discord) async fn judge_obligation_window(
     connection: &mut sqlx::PgConnection,
     obligation_id: Uuid,
@@ -505,8 +511,8 @@ fn judge_loaded_obligation_window(
 }
 
 /// Choose the reader result for one obligation after the transaction's mode
-/// snapshot has been captured. The fallback remains available for dormant
-/// Legacy/Shadow operation and for a defensive Authority read miss.
+/// snapshot has been captured. The fallback remains available in this dormant
+/// reconciler during Legacy/Shadow operation and for a defensive Authority miss.
 pub(in crate::services::discord) fn select_reconcile_judgment(
     mode: DeliveryJournalMode,
     authority: Option<ObligationWindowJudgment>,
@@ -1014,6 +1020,50 @@ mod tests {
             Some(fallback)
         );
     }
+    #[test]
+    fn fresh_obligation_frontier_uses_consumed_coordinate_and_rejects_malformed_metadata() {
+        let mut delivery = super::super::SessionRelayDelivery {
+            provider: crate::services::provider::ProviderKind::Claude,
+            channel_id: 7,
+            session_name: "journal-frontier".into(),
+            response_text: "answer".into(),
+            task_notification_kind: None,
+            task_notification_context: None,
+            terminal_consumed_end: Some(8192),
+            terminal_consumed_start: Some(4096),
+            frame_turn_user_msg_id: 7,
+            frame_turn_started_at: "now".into(),
+            frame_turn_start_offset: Some(0),
+            relay_range: Some((100, 8192)),
+            relay_generation_mtime_ns: Some(1),
+            relay_source_stamp: None,
+        };
+        assert_eq!(obligation_frontier(&delivery), Some((4096, 8192)));
+
+        for (start, end) in [
+            (None, Some(8192)),
+            (Some(4096), None),
+            (Some(8192), Some(8192)),
+            (Some(9000), Some(8192)),
+        ] {
+            delivery.terminal_consumed_start = start;
+            delivery.terminal_consumed_end = end;
+            assert_eq!(
+                obligation_frontier(&delivery),
+                None,
+                "malformed terminal metadata must not borrow relay or turn coordinates"
+            );
+        }
+
+        delivery.terminal_consumed_start = None;
+        delivery.terminal_consumed_end = None;
+        assert_eq!(
+            obligation_frontier(&delivery),
+            Some((100, 8192)),
+            "metadata-free legacy delivery keeps its relay range"
+        );
+    }
+
     #[test]
     fn absent_file_id_has_one_canonical_sentinel_byte() {
         let (mut absent, mut present) = (vec![], vec![]);

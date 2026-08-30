@@ -143,6 +143,7 @@ mod tests {
             payload: "{}".into(),
             sequence: 7,
             terminal_consumed_end: None,
+            terminal_consumed_start: None,
             turn_user_msg_id: 0,
             turn_started_at: String::new(),
             turn_start_offset: None,

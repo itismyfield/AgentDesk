@@ -21,6 +21,7 @@ pub(in crate::services::discord) struct WatcherDeliveryIdentity {
     pub(in crate::services::discord) generation_mtime_ns: i64,
     pub(in crate::services::discord) lease_reset_incarnation: u64,
     pub(in crate::services::discord) ledger_user_msg_id: Option<u64>,
+    pub(in crate::services::discord) receipt_source_range: Option<(u64, u64)>,
 }
 
 pub(in crate::services::discord) fn watcher_delivery_identity(
@@ -34,6 +35,7 @@ pub(in crate::services::discord) fn watcher_delivery_identity(
         ledger_user_msg_id: lease_key
             .map(|key| key.user_msg_id)
             .filter(|user_msg_id| *user_msg_id != 0),
+        receipt_source_range: None,
     }
 }
 
@@ -130,6 +132,7 @@ impl WatcherDeliveryMutation {
                 lease_reset_incarnation: self.identity.lease_reset_incarnation,
                 generation_mtime_ns: self.identity.generation_mtime_ns,
                 ledger_user_msg_id: self.identity.ledger_user_msg_id,
+                receipt_source_range: self.identity.receipt_source_range,
             },
             range,
             terminal_anchor_msg_id,

@@ -44,6 +44,7 @@ mod delivery_outcome_classify;
 mod idle_jsonl;
 pub(in crate::services::discord) mod journal;
 mod short_controller;
+mod sink_delivery_lease_guard;
 // #3960: orphaned `SessionBoundRelay` TUI-direct reclaim (producer-liveness TOCTOU).
 mod orphan_reclaim;
 mod relay_format;
@@ -60,6 +61,7 @@ use self::idle_jsonl::{
     idle_jsonl_session_has_init, idle_jsonl_suppressed_range_action, idle_relay_range_action,
     prune_idle_jsonl_session_state, read_jsonl_range,
 };
+use self::sink_delivery_lease_guard::SinkDeliveryLeaseGuard;
 use self::task_notification_context::ensure_card_and_route;
 use self::terminal_handoff::SessionRelayDeliveryOutcome;
 use self::turn_parser::{SessionRelayDelivery, SessionRelayParser};
@@ -290,93 +292,6 @@ impl Drop for SessionBoundExternalInputLeaseGuard {
     }
 }
 
-/// #3151: RAII in-flight sink-delivery marker on the per-channel
-/// [`super::DeliveryLeaseCell`], acquired as [`super::LeaseHolder::Sink`] for the SAME
-/// `(channel, turn, [start,end))` the watcher's §3.2 reconciliation computes, BEFORE the
-/// POST; a [`super::DeliveryLeaseHeartbeat`] renews the deadline so the watcher reads
-/// `Leased{Sink, fresh}` and WAITS instead of re-sending (slow-sink dup). RECLAIMABLE: a
-/// crashed sink stops renewing → the watcher reclaims within ~one deadline (no black-hole).
-/// CLEAR ordering (SUCCESS): advance committed FIRST (`advance_after_confirmed_post`) THEN
-/// [`Self::commit`] → watcher reads `committed >= end` → Skip. EVERY exit Drop RELEASES
-/// (full-identity → stale no-ops); a never-committed failure leaves `Unleased`, committed
-/// NOT advanced → watcher SendFull.
-struct SinkDeliveryLeaseGuard {
-    cell: Arc<super::DeliveryLeaseCell>,
-    key: super::DeliveryLeaseKey,
-    start: u64,
-    end: u64,
-    /// The in-flight heartbeat; aborted on Drop (mirrors the watcher's RAII).
-    _heartbeat: super::DeliveryLeaseHeartbeat,
-}
-
-impl SinkDeliveryLeaseGuard {
-    /// Self-heal a dead PRIOR holder, then CAS-acquire as `LeaseHolder::Sink` for
-    /// `(turn, [start,end))`. `Some` (spawning the heartbeat) only when the acquire wins;
-    /// `None` means another holder owns the range and the caller must return NotDelivered
-    /// without reaching transport.
-    fn acquire(
-        cell: &Arc<super::DeliveryLeaseCell>,
-        key: super::DeliveryLeaseKey,
-        start: u64,
-        end: u64,
-    ) -> Option<Self> {
-        // Mirror the watcher's self-healing acquire (tmux_watcher.rs:8594): reclaim an
-        // EXPIRED prior holder so a stale dead lease can't lose this acquire.
-        cell.reclaim_if_expired(super::lease_now_ms());
-        let acquired = cell.try_acquire(
-            key.clone(),
-            super::LeaseHolder::Sink,
-            start,
-            end,
-            super::lease_now_ms().saturating_add(super::DELIVERY_LEASE_DEADLINE_MS),
-        );
-        if !acquired {
-            return None;
-        }
-        let heartbeat = super::DeliveryLeaseHeartbeat::spawn(
-            cell.clone(),
-            super::LeaseHolder::Sink,
-            key.clone(),
-        );
-        Some(Self {
-            cell: cell.clone(),
-            key,
-            start,
-            end,
-            _heartbeat: heartbeat,
-        })
-    }
-
-    /// Terminal-decision commit, AFTER the advance was attempted: `outcome` reflects
-    /// whether it ACTUALLY happened — `Delivered` only when the offset advanced (so the
-    /// watcher reads `committed >= end` → Skip), else `NotDelivered` (offset `< end` →
-    /// the watcher re-sends → SendFull, no black-hole). Full-identity compare-and-X →
-    /// a stale older-turn clear no-ops. Drop still releases.
-    fn commit(&self, outcome: super::LeaseOutcome) {
-        self.cell.commit(
-            super::LeaseHolder::Sink,
-            self.key.clone(),
-            self.start,
-            self.end,
-            outcome,
-        );
-    }
-}
-
-impl Drop for SinkDeliveryLeaseGuard {
-    fn drop(&mut self) {
-        // Release on EVERY exit. `release` is valid from `Leased` (failure) and `Committed`
-        // (success) and full-identity-gated, so it clears ONLY our marker — a newer turn
-        // that re-leased this cell survives. (`_heartbeat` Drop aborts the renew task.)
-        self.cell.release(
-            super::LeaseHolder::Sink,
-            self.key.clone(),
-            self.start,
-            self.end,
-        );
-    }
-}
-
 /// #3089 A2b: adapts the sink's `DeliveryLeaseHeartbeat` to [`toc::PostHeartbeat`]. Holds the
 /// `Arc` (the controller drives the lease behind a borrowed `&cell`) and spawns the SAME
 /// `DeliveryLeaseHeartbeat::spawn` the legacy guard used (#3151 — identical renew); the guard
@@ -407,28 +322,36 @@ fn session_bound_should_send_new_chunks_for_placeholder(response_text: &str) -> 
     super::formatting::needs_multiple_messages(response_text)
 }
 
-/// Pick the one ordered coordinate used by every terminal sink path. Strict
-/// commit-fenced frames take precedence; inflight-less idle/catch-up frames use
-/// their carried range; legacy no-range frames still return a degenerate
-/// zero-width coordinate so no terminal POST can bypass the shared lease.
-fn sink_delivery_lease_coordinate(delivery: &SessionRelayDelivery) -> ((u64, u64), Option<u64>) {
-    if let (Some(start), Some(end)) = (
-        delivery.frame_turn_start_offset,
-        delivery.terminal_consumed_end,
-    ) && end > start
-    {
-        return ((start, end), Some(start));
+/// Pick the one ordered coordinate used by every terminal sink path. Terminal
+/// metadata and the idle/catch-up range are mutually exclusive; conflicting,
+/// partial, or invalid terminal coordinates fail closed. Legacy no-range frames
+/// retain the degenerate serialization coordinate.
+fn sink_delivery_lease_coordinate(
+    delivery: &SessionRelayDelivery,
+) -> Option<((u64, u64), Option<u64>)> {
+    let has_terminal_metadata =
+        delivery.terminal_consumed_start.is_some() || delivery.terminal_consumed_end.is_some();
+    if has_terminal_metadata && delivery.relay_range.is_some() {
+        return None;
+    }
+    if has_terminal_metadata {
+        return delivery_frontier::sink_publication_coordinate(
+            delivery.terminal_consumed_start,
+            delivery.terminal_consumed_end,
+        )
+        .positive_range()
+        .map(|range| ((range.start(), range.end()), Some(range.start())));
     }
     if let Some((start, end)) = delivery.relay_range
         && end > start
     {
-        return ((start, end), Some(start));
+        return Some(((start, end), Some(start)));
     }
 
     // A terminal delivery without an ordered byte range must still serialize on
     // the channel cell. The zero-width coordinate and absent fallback retain the
     // legacy degenerate id-0 key instead of allowing a lease-free POST.
-    ((0, 0), None)
+    Some(((0, 0), None))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -556,6 +479,16 @@ impl SessionBoundDiscordRelaySink {
     ) -> Self {
         let mut sink = Self::new(health_registry);
         sink.lease_test_probe = Some(lease_test_probe);
+        sink
+    }
+
+    #[cfg(test)]
+    fn with_test_gateway(
+        health_registry: Arc<HealthRegistry>,
+        gateway: Arc<dyn super::gateway::TurnGateway>,
+    ) -> Self {
+        let mut sink = Self::new(health_registry);
+        sink.test_gateway = Some(gateway);
         sink
     }
 
@@ -772,6 +705,22 @@ impl SessionBoundDiscordRelaySink {
                 return Ok(SessionRelayDeliveryOutcome::NotDelivered);
             }
         };
+        if !delivery_frontier::terminal_transport_authority_is_current(
+            &provider,
+            channel_id,
+            &delivery.session_name,
+            &delivery,
+        ) {
+            tracing::debug!(
+                provider = provider.as_str(),
+                channel_id,
+                tmux_session = %delivery.session_name,
+                frame_user_msg_id = delivery.frame_turn_user_msg_id,
+                frame_generation = delivery.relay_generation_mtime_ns,
+                "session-bound relay sink refused stale or missing terminal authority before transport"
+            );
+            return Ok(SessionRelayDeliveryOutcome::NotDelivered);
+        }
         // #3041 P1-4 (§4-④): arm the RAII release-on-all-paths guard now this sink owns
         // the delivery — see `SessionBoundExternalInputLeaseGuard`.
         let _external_input_lease_guard =
@@ -795,13 +744,12 @@ impl SessionBoundDiscordRelaySink {
             relay_format::session_bound_relay_bodies(&shared, &provider, &delivery);
         let channel = ChannelId::new(channel_id);
 
-        let cutover_range = match (
-            delivery.frame_turn_start_offset,
+        let cutover_range = delivery_frontier::sink_publication_coordinate(
+            delivery.terminal_consumed_start,
             delivery.terminal_consumed_end,
-        ) {
-            (Some(start), Some(end)) if end > start => Some((start, end)),
-            _ => None,
-        };
+        )
+        .positive_range()
+        .map(|range| (range.start(), range.end()));
         // Task-context delivery may confirm a card and then promote the response
         // route from PlaceholderEdit to NewMessage. Keep that entire operation on
         // the outer lease so both the card transport and the final answer remain
@@ -821,7 +769,19 @@ impl SessionBoundDiscordRelaySink {
                     true
                 }
             };
-        let (lease_range, lease_fallback_start) = sink_delivery_lease_coordinate(&delivery);
+        let Some((lease_range, lease_fallback_start)) = sink_delivery_lease_coordinate(&delivery)
+        else {
+            tracing::warn!(
+                provider = provider.as_str(),
+                channel_id,
+                tmux_session = %delivery.session_name,
+                terminal_consumed_start = delivery.terminal_consumed_start,
+                terminal_consumed_end = delivery.terminal_consumed_end,
+                relay_range = ?delivery.relay_range,
+                "session-bound relay sink refused conflicting or malformed terminal coordinates"
+            );
+            return Ok(SessionRelayDeliveryOutcome::NotDelivered);
+        };
         let sink_lease_key = delivery_lease_key_for_frame(
             channel,
             shared.restart.current_generation,
@@ -1544,6 +1504,7 @@ mod tests {
             payload: payload.to_string(),
             sequence,
             terminal_consumed_end: None,
+            terminal_consumed_start: None,
             turn_user_msg_id: 0,
             turn_started_at: String::new(),
             turn_start_offset: None,
@@ -1580,6 +1541,7 @@ mod tests {
             binding,
             payload,
             sequence,
+            Some(0),
             consumed_end,
             turn_user_msg_id,
             turn_started_at,
@@ -1592,6 +1554,7 @@ mod tests {
         binding: &MatchedChannel,
         payload: &str,
         sequence: u64,
+        terminal_consumed_start: Option<u64>,
         consumed_end: u64,
         turn_user_msg_id: u64,
         turn_started_at: &str,
@@ -1603,6 +1566,7 @@ mod tests {
             payload: payload.to_string(),
             sequence,
             terminal_consumed_end: Some(consumed_end),
+            terminal_consumed_start,
             turn_user_msg_id,
             turn_started_at: turn_started_at.to_string(),
             turn_start_offset,
@@ -2765,6 +2729,7 @@ mod tests {
             &binding,
             payload,
             1,
+            Some(range_start),
             range_end,
             0,
             &rebind.started_at,
@@ -2946,6 +2911,7 @@ mod tests {
     ) -> SessionRelayDelivery {
         delivery_with_fence_offset(
             session_name,
+            None,
             consumed_end,
             turn_user_msg_id,
             turn_started_at,
@@ -2955,6 +2921,7 @@ mod tests {
 
     fn delivery_with_fence_offset(
         session_name: &str,
+        terminal_consumed_start: Option<u64>,
         consumed_end: Option<u64>,
         turn_user_msg_id: u64,
         turn_started_at: &str,
@@ -2968,6 +2935,7 @@ mod tests {
             task_notification_kind: None,
             task_notification_context: None,
             terminal_consumed_end: consumed_end,
+            terminal_consumed_start,
             frame_turn_user_msg_id: turn_user_msg_id,
             frame_turn_started_at: turn_started_at.to_string(),
             frame_turn_start_offset: turn_start_offset,
@@ -2997,7 +2965,7 @@ mod tests {
 
         let shared = super::super::make_shared_data_for_tests();
         let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
-        let mut delivery = delivery_with_fence_offset(&session, None, 0, "", None);
+        let mut delivery = delivery_with_fence_offset(&session, None, None, 0, "", None);
         delivery.channel_id = channel.get();
         delivery.relay_range = Some((128, 256));
         delivery.relay_generation_mtime_ns = Some(generation);
@@ -3058,6 +3026,7 @@ mod tests {
         let start_offset = 128;
         let delivery = delivery_with_fence_offset(
             "AgentDesk-claude-lease-key",
+            Some(start_offset),
             Some(256),
             0,
             started_at,
@@ -3082,11 +3051,9 @@ mod tests {
         );
     }
 
-    // #3089 A2b: minimal `TurnGateway` fake for the short-replace controller-path
-    // characterization. Only `replace_message_with_outcome` is exercised (the
-    // `Replace { Active }` transport); `post_send_finalize` is a no-op for the
-    // non-terminal `Active` lifecycle, so no edit/delete fires. Every other method
-    // `panic!`s — reaching one would be a behaviour drift the test must catch.
+    // #3089 A2b: minimal `TurnGateway` fake for the short-replace controller path.
+    // Only `replace_message_with_outcome` is allowed; reaching another gateway
+    // transport is behaviour drift that these tests must catch.
     struct ShortReplaceFakeGateway {
         outcome: super::super::formatting::ReplaceLongMessageOutcome,
         ok: bool,
@@ -3332,7 +3299,7 @@ mod tests {
     //      the MISMATCH case below would flip `NotDelivered`/no-advance into
     //      `Delivered`/advance and fail.
     #[test]
-    fn cutover_short_replace_production_path_advance_is_fresh_identity_gated() {
+    fn cutover_short_replace_production_path_is_pretransport_authority_gated() {
         let temp = tempfile::TempDir::new().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(temp.path());
 
@@ -3353,13 +3320,19 @@ mod tests {
             crate::services::tmux_common::session_temp_path(session, "generation");
         std::fs::create_dir_all(std::path::Path::new(&generation_path).parent().unwrap()).unwrap();
         std::fs::write(&generation_path, b"1").unwrap();
-        let mut delivery =
-            delivery_with_fence_offset(session, Some(end), 0, "2026-06-04T00:00:00Z", Some(0));
+        let mut delivery = delivery_with_fence_offset(
+            session,
+            Some(0),
+            Some(end),
+            0,
+            "2026-06-04T00:00:00Z",
+            Some(0),
+        );
         delivery.relay_generation_mtime_ns = Some(dr::current_generation_mtime_ns(session));
 
         // ---- MATCH: the on-disk inflight identity matches the frame ----------
-        // The fresh-reload identity gate inside the production `advance` closure
-        // returns true → Delivered AND the committed offset advances to `end`.
+        // Exact identity and current source generation pass before transport;
+        // the post-transport TOCTOU recheck then commits through `end`.
         let shared = super::super::make_shared_data_for_tests();
         let sink = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
         let matching = inflight_with_identity_offset(
@@ -3426,9 +3399,8 @@ mod tests {
 
         // ---- MISMATCH: the on-disk inflight identity DIVERGES ----------------
         // A different turn now owns the channel (later turn_start_offset). The
-        // production `advance` closure re-loads inflight FRESH and the gate
-        // REFUSES → NotDelivered AND the committed offset does NOT advance.
-        // A mutation that hard-codes advance=`true` would advance here and Deliver.
+        // production fence refuses before the controller acquires its lease or
+        // reaches the gateway, leaving reconciliation free to retry the old turn.
         let shared2 = super::super::make_shared_data_for_tests();
         let sink2 = SessionBoundDiscordRelaySink::new(Arc::new(HealthRegistry::new()));
         let mismatched = inflight_with_identity_offset(
@@ -3475,11 +3447,11 @@ mod tests {
                     delivered_total: &sink.delivered_total,
                 },
             ))
-            .expect("mismatched-identity cut-over delivery is still Ok (POST landed)");
-        // The POST landed (sink-local Delivered maps both lease outcomes), but the
-        // committed offset must NOT advance — the gate refused. The decisive
-        // mutation-sensitive assertion is the offset, not the sink-local outcome.
-        assert!(matches!(outcome2, SessionRelayDeliveryOutcome::LandedStale));
+            .expect("mismatched-identity cut-over delivery is a known refusal");
+        assert!(matches!(
+            outcome2,
+            SessionRelayDeliveryOutcome::NotDelivered
+        ));
         assert_eq!(
             shared2.committed_relay_offset(channel),
             0,
@@ -3490,9 +3462,53 @@ mod tests {
             gateway2
                 .replace_calls
                 .load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "the mismatched run still POSTs once under its held lease; only the advance differs"
+            0,
+            "stale identity must be refused before gateway transport"
         );
+        assert!(matches!(
+            shared2.delivery_lease(channel).read(),
+            super::super::LeaseSnapshot::Unleased
+        ));
+
+        // Identity alone is insufficient: a delayed frame from an old wrapper
+        // generation is also refused before lease acquisition and transport.
+        super::super::inflight::save_inflight_state(&matching).unwrap();
+        delivery.relay_generation_mtime_ns =
+            Some(dr::current_generation_mtime_ns(session).saturating_sub(1));
+        let lease_key3 = delivery_lease_key_for_frame(channel, 0, &delivery, Some(start));
+        let authority3 = delivery_frontier::capture_sink_delivery_authority(
+            &shared2,
+            channel,
+            &delivery,
+            &lease_key3,
+            (start, end),
+        );
+        let outcome3 = rt
+            .block_on(short_controller::deliver_short_replace_via_controller(
+                &gateway2,
+                short_controller::SinkShortReplaceCtx {
+                    shared: &shared2,
+                    provider: &provider,
+                    channel,
+                    channel_id: channel.get(),
+                    msg_id: MessageId::new(99),
+                    relay_text: "answer",
+                    delivered_fingerprint_body: "answer",
+                    delivery: &delivery,
+                    sink_lease_key: lease_key3,
+                    sink_delivery_authority: authority3,
+                    trace: &trace,
+                    range: (start, end),
+                    delivered_total: &sink2.delivered_total,
+                },
+            ))
+            .unwrap();
+        assert_eq!(outcome3, SessionRelayDeliveryOutcome::NotDelivered);
+        assert_eq!(gateway2.replace_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            shared2.delivery_lease(channel).read(),
+            super::super::LeaseSnapshot::Unleased
+        ));
     }
 
     #[test]
@@ -3516,6 +3532,7 @@ mod tests {
         let replacement_user_msg_id = 8_041_491_200;
         let mut delivery = delivery_with_fence_offset(
             session,
+            Some(start),
             Some(end),
             old_user_msg_id,
             "2026-07-29T00:00:00Z",
@@ -3672,6 +3689,7 @@ mod tests {
                 let replacement_user_msg_id = 8_041_492_200 + index;
                 let mut delivery = delivery_with_fence_offset(
                     &session,
+                    Some(0),
                     Some(256),
                     old_user_msg_id,
                     "2026-07-29T01:00:00Z",
@@ -3835,6 +3853,7 @@ mod tests {
         let end = raw_body.len() as u64;
         let mut delivery = delivery_with_fence_offset(
             session,
+            Some(start),
             Some(end),
             user_msg_id,
             "2026-07-04T00:00:00Z",
@@ -3913,21 +3932,122 @@ mod tests {
 
     #[test]
     fn terminal_lease_coordinate_prefers_fence_then_idle_range_then_degenerate() {
-        let fenced = delivery_with_fence_offset("fenced", Some(256), 0, "", Some(64));
+        let fenced = delivery_with_fence_offset("fenced", Some(64), Some(256), 0, "", Some(64));
         assert_eq!(
             sink_delivery_lease_coordinate(&fenced),
-            ((64, 256), Some(64))
+            Some(((64, 256), Some(64)))
         );
 
-        let mut ranged = delivery_with_fence_offset("ranged", None, 0, "", None);
+        let mut ranged = delivery_with_fence_offset("ranged", None, None, 0, "", None);
         ranged.relay_range = Some((300, 512));
         assert_eq!(
             sink_delivery_lease_coordinate(&ranged),
-            ((300, 512), Some(300))
+            Some(((300, 512), Some(300)))
         );
 
-        let degenerate = delivery_with_fence_offset("degenerate", None, 0, "", None);
-        assert_eq!(sink_delivery_lease_coordinate(&degenerate), ((0, 0), None));
+        let degenerate = delivery_with_fence_offset("degenerate", None, None, 0, "", None);
+        assert_eq!(
+            sink_delivery_lease_coordinate(&degenerate),
+            Some(((0, 0), None))
+        );
+
+        let identity_mismatch =
+            delivery_with_fence_offset("mismatch", Some(128), Some(256), 0, "", Some(9_999));
+        assert_eq!(
+            sink_delivery_lease_coordinate(&identity_mismatch),
+            Some(((128, 256), Some(128))),
+            "turn identity is not a consumed-byte start",
+        );
+
+        let mut mixed = delivery_with_fence_offset("mixed", Some(128), Some(256), 0, "", Some(128));
+        mixed.relay_range = Some((0, 256));
+        assert_eq!(
+            sink_delivery_lease_coordinate(&mixed),
+            None,
+            "terminal and idle metadata cannot share one publication path",
+        );
+
+        for (start, end) in [
+            (None, Some(256)),
+            (Some(64), None),
+            (Some(256), Some(256)),
+            (Some(300), Some(256)),
+        ] {
+            let mut invalid = delivery_with_fence_offset("invalid", start, end, 0, "", Some(9_999));
+            invalid.relay_range = Some((300, 512));
+            assert_eq!(
+                sink_delivery_lease_coordinate(&invalid),
+                None,
+                "malformed terminal metadata must fail closed instead of borrowing identity or idle range",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_terminal_metadata_refuses_before_lease_or_transport() {
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let channel = ChannelId::new(8_041_701);
+        let registry = Arc::new(HealthRegistry::new());
+        let shared = super::super::make_shared_data_for_tests();
+        registry
+            .register(ProviderKind::Claude.as_str().to_string(), shared.clone())
+            .await;
+        let gateway = Arc::new(ShortReplaceFakeGateway {
+            outcome: ReplaceLongMessageOutcome::EditedOriginal,
+            ok: true,
+            replace_calls: std::sync::atomic::AtomicUsize::new(0),
+            on_replace: None,
+        });
+        let sink = SessionBoundDiscordRelaySink::with_test_gateway(registry, gateway.clone());
+        let session = "AgentDesk-claude-malformed-terminal";
+        let mut matching = inflight_with_identity_offset(
+            channel.get(),
+            session,
+            0,
+            "2026-08-27T00:00:00Z",
+            Some(4096),
+        );
+        matching.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+        super::super::inflight::save_inflight_state(&matching).unwrap();
+        let output_path =
+            crate::services::cluster::session_matcher::expected_rollout_path_for(session);
+        let generation_path =
+            crate::services::tmux_common::session_temp_path(session, "generation");
+        std::fs::create_dir_all(std::path::Path::new(&output_path).parent().unwrap()).unwrap();
+        std::fs::write(&output_path, vec![b'x'; 8192]).unwrap();
+        std::fs::write(&generation_path, b"1").unwrap();
+        let generation = dr::current_generation_mtime_ns(session);
+        assert_ne!(generation, 0);
+        let mut delivery = delivery_with_fence_offset(
+            session,
+            Some(4096),
+            Some(8192),
+            0,
+            "2026-08-27T00:00:00Z",
+            Some(4096),
+        );
+        delivery.channel_id = channel.get();
+        delivery.relay_range = Some((4096, 8192));
+        delivery.relay_generation_mtime_ns = Some(generation);
+
+        let outcome = sink
+            .deliver_response(delivery)
+            .await
+            .expect("malformed metadata is a known refusal");
+        assert_eq!(outcome, SessionRelayDeliveryOutcome::NotDelivered);
+        assert!(matches!(
+            shared.delivery_lease(channel).read(),
+            super::super::LeaseSnapshot::Unleased
+        ));
+        assert_eq!(
+            gateway
+                .replace_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "malformed metadata must fail before any gateway method"
+        );
+        assert_eq!(sink.delivered_total.load(Ordering::Acquire), 0);
     }
 
     // #3089 A2b (review-fix M2): an EMPTY body diverges between the controller and
@@ -4108,7 +4228,14 @@ mod tests {
             &ProviderKind::Claude,
             channel.get(),
             session,
-            &delivery_with_fence_offset(session, Some(256), 0, "2026-06-04T00:00:00Z", Some(0)),
+            &delivery_with_fence_offset(
+                session,
+                Some(0),
+                Some(256),
+                0,
+                "2026-06-04T00:00:00Z",
+                Some(0),
+            ),
             Some(&inflight),
         );
         assert_eq!(
@@ -4124,7 +4251,14 @@ mod tests {
             &ProviderKind::Claude,
             channel.get(),
             session,
-            &delivery_with_fence_offset(session, Some(256), 0, "2026-06-04T00:00:00Z", Some(0)),
+            &delivery_with_fence_offset(
+                session,
+                Some(0),
+                Some(256),
+                0,
+                "2026-06-04T00:00:00Z",
+                Some(0),
+            ),
             Some(&inflight),
         );
         assert_eq!(shared.committed_relay_offset(channel), 256);
@@ -4136,7 +4270,7 @@ mod tests {
             &ProviderKind::Claude,
             channel.get(),
             session,
-            &delivery_with_fence_offset(session, None, 0, "2026-06-04T00:00:00Z", Some(0)),
+            &delivery_with_fence_offset(session, None, None, 0, "2026-06-04T00:00:00Z", Some(0)),
             Some(&inflight),
         );
         sink.advance_offset_for_confirmed_delegated_terminal(
@@ -4144,13 +4278,50 @@ mod tests {
             &ProviderKind::Claude,
             channel.get(),
             session,
-            &delivery_with_fence_offset(session, Some(0), 0, "2026-06-04T00:00:00Z", Some(0)),
+            &delivery_with_fence_offset(
+                session,
+                Some(0),
+                Some(0),
+                0,
+                "2026-06-04T00:00:00Z",
+                Some(0),
+            ),
+            Some(&inflight),
+        );
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            session,
+            &delivery_with_fence_offset(
+                session,
+                None,
+                Some(900),
+                0,
+                "2026-06-04T00:00:00Z",
+                Some(0),
+            ),
+            Some(&inflight),
+        );
+        sink.advance_offset_for_confirmed_delegated_terminal(
+            &shared,
+            &ProviderKind::Claude,
+            channel.get(),
+            session,
+            &delivery_with_fence_offset(
+                session,
+                Some(900),
+                Some(800),
+                0,
+                "2026-06-04T00:00:00Z",
+                Some(0),
+            ),
             Some(&inflight),
         );
         assert_eq!(
             shared.committed_relay_offset(channel),
             256,
-            "no delegated range (None/0) must not advance the authority"
+            "missing, zero-width, end-only, or inverted canonical ranges must not advance the authority"
         );
 
         // Monotonic guard: a later confirmed delivery at a LARGER end advances; a
@@ -4160,7 +4331,14 @@ mod tests {
             &ProviderKind::Claude,
             channel.get(),
             session,
-            &delivery_with_fence_offset(session, Some(128), 0, "2026-06-04T00:00:00Z", Some(0)),
+            &delivery_with_fence_offset(
+                session,
+                Some(0),
+                Some(128),
+                0,
+                "2026-06-04T00:00:00Z",
+                Some(0),
+            ),
             Some(&inflight),
         );
         assert_eq!(
@@ -4173,7 +4351,14 @@ mod tests {
             &ProviderKind::Claude,
             channel.get(),
             session,
-            &delivery_with_fence_offset(session, Some(512), 0, "2026-06-04T00:00:00Z", Some(0)),
+            &delivery_with_fence_offset(
+                session,
+                Some(0),
+                Some(512),
+                0,
+                "2026-06-04T00:00:00Z",
+                Some(0),
+            ),
             Some(&inflight),
         );
         assert_eq!(shared.committed_relay_offset(channel), 512);
@@ -4200,8 +4385,14 @@ mod tests {
             "2026-06-04T00:00:09Z",
             Some(4096),
         );
-        let stale_frame =
-            delivery_with_fence_offset(session, Some(256), 0, "2026-06-04T00:00:00Z", Some(0));
+        let stale_frame = delivery_with_fence_offset(
+            session,
+            Some(0),
+            Some(256),
+            0,
+            "2026-06-04T00:00:00Z",
+            Some(0),
+        );
 
         sink.advance_offset_for_confirmed_delegated_terminal(
             &shared,
@@ -4302,7 +4493,7 @@ mod tests {
         // arrives — its (user_msg_id, started_at) pair matches, but its offset does
         // not. Pre-fix this would have advanced the NEW turn's authority.
         let stale_same_second_frame =
-            delivery_with_fence_offset(session, Some(256), 0, same_second, Some(0));
+            delivery_with_fence_offset(session, Some(0), Some(256), 0, same_second, Some(0));
 
         sink.advance_offset_for_confirmed_delegated_terminal(
             &shared,
@@ -4321,7 +4512,7 @@ mod tests {
         // The NEW turn's OWN terminal frame (matching turn_start_offset) DOES
         // advance, proving the offset gate is discriminating, not blocking all.
         let new_turn_frame =
-            delivery_with_fence_offset(session, Some(512), 0, same_second, Some(4096));
+            delivery_with_fence_offset(session, Some(128), Some(512), 0, same_second, Some(4096));
         sink.advance_offset_for_confirmed_delegated_terminal(
             &shared,
             &ProviderKind::Claude,
@@ -4333,7 +4524,7 @@ mod tests {
         assert_eq!(
             shared.committed_relay_offset(channel),
             512,
-            "the matching-offset frame for the current turn DOES advance the authority"
+            "identity equality and canonical consumed coordinates stay on separate axes"
         );
     }
 
@@ -4358,7 +4549,7 @@ mod tests {
             inflight_with_identity_offset(channel.get(), session, 0, same_second, Some(4096));
         // A fenced frame whose turn_start_offset is None (the weak-fallback case).
         let none_offset_frame =
-            delivery_with_fence_offset(session, Some(256), 0, same_second, None);
+            delivery_with_fence_offset(session, None, Some(256), 0, same_second, None);
 
         sink.advance_offset_for_confirmed_delegated_terminal(
             &shared,
@@ -4379,7 +4570,7 @@ mod tests {
         // one (the prior turn's offset) is blocked even though user_msg_id+started_at
         // are identical (same-second TUI-direct collision).
         let mismatched_offset_frame =
-            delivery_with_fence_offset(session, Some(256), 0, same_second, Some(0));
+            delivery_with_fence_offset(session, Some(0), Some(256), 0, same_second, Some(0));
         sink.advance_offset_for_confirmed_delegated_terminal(
             &shared,
             &ProviderKind::Claude,
@@ -4395,7 +4586,7 @@ mod tests {
         );
 
         let matching_offset_frame =
-            delivery_with_fence_offset(session, Some(256), 0, same_second, Some(4096));
+            delivery_with_fence_offset(session, Some(0), Some(256), 0, same_second, Some(4096));
         sink.advance_offset_for_confirmed_delegated_terminal(
             &shared,
             &ProviderKind::Claude,
@@ -4428,8 +4619,14 @@ mod tests {
 
         // The frame was delegated for the ORIGINAL turn (turn_start_offset=0). A
         // pre-POST snapshot would carry this identity and authorize the advance.
-        let delivery =
-            delivery_with_fence_offset(session, Some(256), 0, "2026-06-04T00:00:00Z", Some(0));
+        let delivery = delivery_with_fence_offset(
+            session,
+            Some(0),
+            Some(256),
+            0,
+            "2026-06-04T00:00:00Z",
+            Some(0),
+        );
 
         // DURING the (simulated) slow POST a NEW turn took the channel: same
         // user_msg_id==0 and same second, but a later turn_start_offset. We persist
@@ -4486,8 +4683,14 @@ mod tests {
         // Cleared inflight (stop/cancel during POST) → no advance either.
         super::super::make_shared_data_for_tests();
         super::super::inflight::clear_inflight_state(&ProviderKind::Claude, channel.get());
-        let advanced_delivery =
-            delivery_with_fence_offset(session, Some(512), 0, "2026-06-04T00:00:00Z", Some(0));
+        let advanced_delivery = delivery_with_fence_offset(
+            session,
+            Some(0),
+            Some(512),
+            0,
+            "2026-06-04T00:00:00Z",
+            Some(0),
+        );
         sink.advance_after_confirmed_post(
             &shared,
             &ProviderKind::Claude,
@@ -4559,6 +4762,43 @@ mod tests {
             assert_eq!((delivery.terminal_consumed_end, delivery.frame_turn_user_msg_id, delivery.frame_turn_started_at.as_str(), delivery.frame_turn_start_offset),
                        (Some(512), 77, "2026-06-04T00:00:00Z", Some(0)));
         }
+        let mut parser = SessionRelayParser::default();
+        // A non-terminal text frame: accumulates, emits nothing.
+        let assistant = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"final answer\"}]}}\n";
+        assert!(
+            parser
+                .ingest_frame(&frame(&binding, assistant, 1))
+                .is_empty()
+        );
+        // The result-bearing TERMINAL frame carries the commit fence.
+        let result = "{\"type\":\"result\",\"result\":\"final answer\"}\n";
+        let deliveries = parser.ingest_frame(&terminal_frame_offset(
+            &binding,
+            result,
+            2,
+            Some(128),
+            512,
+            77,
+            "2026-06-04T00:00:00Z",
+            Some(64),
+        ));
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].response_text, "final answer");
+        assert_eq!(
+            deliveries[0].terminal_consumed_start,
+            Some(128),
+            "the delivery must preserve the canonical consumed start independently of turn identity",
+        );
+        assert_eq!(
+            deliveries[0].terminal_consumed_end,
+            Some(512),
+            "the delivery must carry the terminal frame's consumed_end"
+        );
+        assert_eq!(deliveries[0].frame_turn_user_msg_id, 77);
+        assert_eq!(deliveries[0].frame_turn_started_at, "2026-06-04T00:00:00Z");
+        // #3041 P1-3 (codex P1-3 issue 2): the delivery also carries the frame's
+        // pinned turn_start_offset for the sink's identity gate.
+        assert_eq!(deliveries[0].frame_turn_start_offset, Some(64));
     }
 
     #[test]
@@ -4630,7 +4870,8 @@ mod tests {
             &binding,
             turn_a_result,
             1,
-            /*consumed_end=*/ 100,
+            /*terminal_consumed_start=*/ Some(0),
+            /*terminal_consumed_end=*/ 100,
             /*user_msg_id=*/ 0,
             "2026-06-04T00:00:00Z",
             /*turn_start_offset=*/ Some(0),
@@ -4664,7 +4905,8 @@ mod tests {
             &binding,
             turn_b_result,
             3,
-            /*consumed_end=*/ 250,
+            /*terminal_consumed_start=*/ Some(100),
+            /*terminal_consumed_end=*/ 250,
             /*user_msg_id=*/ 0,
             "2026-06-04T00:00:01Z",
             /*turn_start_offset=*/ Some(100),
@@ -4704,6 +4946,7 @@ mod tests {
             &binding,
             turn_a,
             1,
+            Some(0),
             100,
             0,
             "2026-07-24T00:00:00Z",
@@ -4718,6 +4961,7 @@ mod tests {
             &binding,
             turn_b,
             2,
+            Some(100),
             220,
             0,
             "2026-07-24T00:00:01Z",
@@ -4742,6 +4986,7 @@ mod tests {
             &binding,
             combined,
             1,
+            Some(0),
             100,
             0,
             "2026-07-24T00:00:00Z",
@@ -4754,6 +4999,7 @@ mod tests {
             &binding,
             "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"turn B\"}\n",
             2,
+            Some(100),
             220,
             0,
             "2026-07-24T00:00:01Z",
@@ -4914,6 +5160,7 @@ mod tests {
             task_notification_kind: None,
             task_notification_context: None,
             terminal_consumed_end: None,
+            terminal_consumed_start: None,
             frame_turn_user_msg_id: 0,
             frame_turn_started_at: "2026-06-04T00:00:00Z".to_string(),
             frame_turn_start_offset: None,

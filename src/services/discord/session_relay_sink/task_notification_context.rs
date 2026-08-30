@@ -809,6 +809,7 @@ mod tests {
             task_notification_kind: Some(TaskNotificationKind::Background),
             task_notification_context: Some(context.clone()),
             terminal_consumed_end: None,
+            terminal_consumed_start: None,
             frame_turn_user_msg_id: 0,
             frame_turn_started_at: "2026-07-11T01:37:00Z".to_string(),
             frame_turn_start_offset: Some(4055),

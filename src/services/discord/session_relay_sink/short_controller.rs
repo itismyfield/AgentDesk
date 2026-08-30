@@ -52,6 +52,14 @@ pub(super) async fn deliver_short_replace_via_controller<
         range: (start, end),
         delivered_total,
     } = ctx;
+    if !delivery_frontier::terminal_transport_authority_is_current(
+        provider,
+        channel_id,
+        &delivery.session_name,
+        delivery,
+    ) {
+        return Ok(SessionRelayDeliveryOutcome::NotDelivered);
+    }
     let cell = shared.delivery_lease(channel);
     cell.reclaim_if_expired(crate::services::discord::lease_now_ms());
     let heartbeat = SinkPostHeartbeat { cell: cell.clone() };

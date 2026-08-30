@@ -3,6 +3,8 @@ use std::sync::Arc;
 use poise::serenity_prelude::ChannelId;
 
 use super::{SessionRelayDelivery, SinkDeliveryLeaseGuard};
+use crate::services::discord::delivery_lease_cell::{PositiveByteRange, PublicationCoordinate};
+use crate::services::discord::outbound::delivery_record as dr;
 use crate::services::discord::tmux::WatcherDeliveryTarget;
 use crate::services::discord::tmux::tmux_watcher::terminal_long_chunks::{
     WatcherDeliveryIdentity, WatcherDeliveryMutation, begin_watcher_delivery_mutation,
@@ -10,6 +12,21 @@ use crate::services::discord::tmux::tmux_watcher::terminal_long_chunks::{
 };
 use crate::services::discord::{DeliveryLeaseKey, LeaseOutcome, SharedData};
 use crate::services::provider::ProviderKind;
+
+/// Convert only the producer's canonical consumed-byte coordinates into typed
+/// frontier authority. Turn identity and idle/catch-up ranges are intentionally
+/// excluded: they belong to different axes and cannot repair a missing start.
+pub(super) fn sink_publication_coordinate(
+    terminal_consumed_start: Option<u64>,
+    terminal_consumed_end: Option<u64>,
+) -> PublicationCoordinate {
+    match (terminal_consumed_start, terminal_consumed_end) {
+        (Some(start), Some(end)) => PositiveByteRange::new(start, end)
+            .map(PublicationCoordinate::Positive)
+            .unwrap_or(PublicationCoordinate::NoRange),
+        _ => PublicationCoordinate::NoRange,
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct SinkDeliveryAuthority {
@@ -57,6 +74,23 @@ pub(super) enum SinkDeliveryProofResult {
     LandedUnrecorded,
 }
 
+fn delivery_receipt_source_range(
+    delivery: &SessionRelayDelivery,
+    frontier_range: (u64, u64),
+) -> Option<(u64, u64)> {
+    sink_publication_coordinate(
+        delivery.terminal_consumed_start,
+        delivery.terminal_consumed_end,
+    )
+    .positive_range()
+    .and_then(|_| {
+        delivery
+            .frame_turn_start_offset
+            .filter(|start| *start < frontier_range.1)
+            .map(|start| (start, frontier_range.1))
+    })
+}
+
 pub(super) fn capture_sink_delivery_authority(
     shared: &SharedData,
     channel: ChannelId,
@@ -64,14 +98,13 @@ pub(super) fn capture_sink_delivery_authority(
     lease_key: &DeliveryLeaseKey,
     range: (u64, u64),
 ) -> SinkDeliveryAuthority {
-    SinkDeliveryAuthority {
-        identity: watcher_delivery_identity(
-            delivery.relay_generation_mtime_ns.unwrap_or(0),
-            shared.relay_frontier_token(channel).reset_incarnation,
-            Some(lease_key),
-        ),
-        range,
-    }
+    let mut identity = watcher_delivery_identity(
+        delivery.relay_generation_mtime_ns.unwrap_or(0),
+        shared.relay_frontier_token(channel).reset_incarnation,
+        Some(lease_key),
+    );
+    identity.receipt_source_range = delivery_receipt_source_range(delivery, range);
+    SinkDeliveryAuthority { identity, range }
 }
 
 fn current_inflight_matches(
@@ -87,6 +120,37 @@ fn current_inflight_matches(
         && inflight.turn_start_offset == delivery.frame_turn_start_offset
         && inflight.tmux_session_name.as_deref() == Some(session_name))
     .then_some(inflight)
+}
+
+/// Refuse an authoritative terminal range before it can mutate Discord unless
+/// both frame-carried authority axes still name the live source. Legacy
+/// fenceless and idle/catch-up deliveries are outside this terminal-only gate.
+///
+/// The frame does not carry a frontier-reset token, so reset incarnation cannot
+/// be compared here without inventing authority. `capture_sink_delivery_authority`
+/// pins the current incarnation immediately after this check and the existing
+/// post-transport mutation admission remains the TOCTOU fence.
+pub(super) fn terminal_transport_authority_is_current(
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_name: &str,
+    delivery: &SessionRelayDelivery,
+) -> bool {
+    if sink_publication_coordinate(
+        delivery.terminal_consumed_start,
+        delivery.terminal_consumed_end,
+    )
+    .positive_range()
+    .is_none()
+    {
+        return true;
+    }
+    current_inflight_matches(provider, channel_id, session_name, delivery).is_some()
+        && delivery
+            .relay_generation_mtime_ns
+            .is_some_and(|generation| {
+                generation != 0 && dr::current_generation_mtime_ns(session_name) == generation
+            })
 }
 
 pub(super) fn begin_sink_delivery_mutation(

@@ -11,6 +11,7 @@ async fn fenced_terminal_without_parser_delivery_is_terminal_not_delivered() {
         &binding,
         "{\"type\":\"result\",\"result\":\"\"}\n",
         1,
+        Some(64),
         256,
         0,
         "2026-08-03T00:00:00Z",
@@ -41,6 +42,7 @@ async fn relay_deliver_propagates_injected_transport_error() {
     )
     .expect("generation directory");
     std::fs::write(&generation_path, b"transport-error").expect("generation marker");
+    let generation = dr::current_generation_mtime_ns(session);
     let started_at = "2026-08-03T00:00:01Z";
     let mut inflight = inflight_with_identity_offset(channel_id, session, 700, started_at, Some(0));
     inflight.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
@@ -58,7 +60,9 @@ async fn relay_deliver_propagates_injected_transport_error() {
         "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
         "{\"type\":\"result\",\"result\":\"answer\"}\n"
     );
-    let terminal = terminal_frame_offset(&binding, payload, 1, 256, 700, started_at, Some(0));
+    let mut terminal =
+        terminal_frame_offset(&binding, payload, 1, Some(0), 256, 700, started_at, Some(0));
+    terminal.relay_generation_mtime_ns = Some(generation);
 
     let error = sink
         .deliver(&terminal)
@@ -111,7 +115,8 @@ async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
         "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
         "{\"type\":\"result\",\"result\":\"answer\"}\n"
     );
-    let mut terminal = terminal_frame_offset(&binding, payload, 1, 256, 701, started_at, Some(0));
+    let mut terminal =
+        terminal_frame_offset(&binding, payload, 1, Some(0), 256, 701, started_at, Some(0));
     terminal.relay_generation_mtime_ns = Some(generation);
 
     let outcome = sink.deliver(&terminal).await.expect("persisted delivery");
@@ -176,7 +181,8 @@ async fn relay_deliver_observes_landed_stale_proof() {
         "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
         "{\"type\":\"result\",\"result\":\"answer\"}\n"
     );
-    let mut terminal = terminal_frame_offset(&binding, payload, 1, 256, 702, started_at, Some(0));
+    let mut terminal =
+        terminal_frame_offset(&binding, payload, 1, Some(0), 256, 702, started_at, Some(0));
     terminal.relay_generation_mtime_ns = Some(generation);
 
     let outcome = sink
@@ -236,7 +242,8 @@ async fn relay_deliver_observes_landed_unrecorded_proof() {
         "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
         "{\"type\":\"result\",\"result\":\"answer\"}\n"
     );
-    let mut terminal = terminal_frame_offset(&binding, payload, 1, 256, 703, started_at, Some(0));
+    let mut terminal =
+        terminal_frame_offset(&binding, payload, 1, Some(0), 256, 703, started_at, Some(0));
     terminal.relay_generation_mtime_ns = Some(generation);
 
     let outcome = sink

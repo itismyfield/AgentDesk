@@ -486,6 +486,7 @@ struct WatcherFrontierLockAuthority<'a> {
     channel: ChannelId,
     lease_reset_incarnation: u64,
     generation_mtime_ns: i64,
+    receipt_source_range: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -493,6 +494,7 @@ pub(in crate::services::discord) struct WatcherDeliveryRecordAuthority {
     pub(in crate::services::discord) lease_reset_incarnation: u64,
     pub(in crate::services::discord) generation_mtime_ns: i64,
     pub(in crate::services::discord) ledger_user_msg_id: Option<u64>,
+    pub(in crate::services::discord) receipt_source_range: Option<(u64, u64)>,
 }
 
 /// #5071 T1 S7: what the RECOVERY caller must bring to the shadow-mirror funnel
@@ -777,8 +779,13 @@ fn write_confirmed_delivery_at_with_lock_authority(
     equal_range_anchor_policy: EqualRangeAnchorPolicy,
     lock_authority: Option<WatcherFrontierLockAuthority<'_>>,
 ) -> Result<(), String> {
+    let receipt_range_matches = receipt.source.range == frontier.range
+        || lock_authority.is_some_and(|authority| {
+            authority.receipt_source_range == Some(receipt.source.range)
+                && receipt.source.range.1 == frontier.range.1
+        });
     if !receipt.is_authoritative()
-        || receipt.source.range != frontier.range
+        || !receipt_range_matches
         || receipt.source.generation_mtime_ns != frontier.generation_mtime_ns
         || frontier.panel_msg_id != Some(receipt.message_id)
         || frontier.panel_channel_id != Some(receipt.delivery_channel_id)
@@ -2443,13 +2450,16 @@ fn shadow_mirror_delivered_frontier_inner(
         panel_msg_id: terminal_anchor_msg_id,
         panel_channel_id: terminal_anchor_channel_id,
     };
+    let receipt_source_range = watcher_authority
+        .and_then(|authority| authority.receipt_source_range)
+        .unwrap_or(range);
     let receipt = exact_receipt_from_inflight(
         provider,
         fresh.as_ref(),
         channel,
         delivery_channel,
         terminal_anchor_msg_id,
-        range,
+        receipt_source_range,
         generation_mtime_ns,
     );
     // A ledger id is safe only when the caller pinned it to this delivery or
@@ -2467,6 +2477,7 @@ fn shadow_mirror_delivered_frontier_inner(
         channel,
         lease_reset_incarnation: authority.lease_reset_incarnation,
         generation_mtime_ns: authority.generation_mtime_ns,
+        receipt_source_range: authority.receipt_source_range,
     });
     // #5071 T1 S7: the ONLY policy that is not `PreserveExisting` is the
     // recovery re-anchor Discord has proved GONE. It is selected by the caller's
@@ -2803,6 +2814,71 @@ mod tests {
                 message_id,
             },
         )
+    }
+
+    #[test]
+    fn sink_consumed_frontier_persists_exact_source_turn_receipt() {
+        let _root = IsolatedRoot::new();
+        let provider = ProviderKind::Claude;
+        let channel = ChannelId::new(5_543_001);
+        let tmux = "AgentDesk-claude-5543-source-receipt";
+        let generation = set_phase_a_generation(tmux, 1_700_554_300);
+        let message_id = 5_543_002;
+        let mut state = crate::services::discord::inflight::InflightTurnState::new(
+            provider.clone(),
+            channel.get(),
+            None,
+            1,
+            5_543_003,
+            message_id,
+            "answer".into(),
+            None,
+            Some(tmux.into()),
+            None,
+            None,
+            0,
+        );
+        state.started_at = "now".into();
+        state.turn_start_offset = Some(0);
+        state.last_offset = 8192;
+        state.turn_nonce = Some("turn-nonce-5543".into());
+        crate::services::discord::inflight::save_inflight_state(&state)
+            .expect("persist exact source identity");
+
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let coord = shared.tmux_relay_coord(channel);
+        coord.confirmed_end_offset.store(8192, Ordering::Release);
+        coord
+            .confirmed_end_generation_mtime_ns
+            .store(generation, Ordering::Release);
+        let authority = WatcherDeliveryRecordAuthority {
+            lease_reset_incarnation: coord.frontier_token().reset_incarnation,
+            generation_mtime_ns: generation,
+            ledger_user_msg_id: Some(state.user_msg_id),
+            receipt_source_range: Some((0, 8192)),
+        };
+        assert!(record_watcher_terminal_delivery(
+            &shared,
+            &provider,
+            channel,
+            tmux,
+            authority,
+            (4096, 8192),
+            Some(message_id),
+            "answer",
+        ));
+
+        let record = read_record(&provider, channel.get()).expect("delivery record");
+        assert_eq!(
+            record.delivered_frontier.expect("canonical frontier").range,
+            (4096, 8192)
+        );
+        assert_eq!(record.confirmed_deliveries.len(), 1);
+        assert_eq!(
+            record.confirmed_deliveries[0].source.range,
+            (0, 8192),
+            "receipt must retain the exact source turn coordinate"
+        );
     }
 
     #[test]

@@ -653,6 +653,7 @@ pub(super) fn watcher_terminal_commit_fence(
     let turn_start_offset = identity.turn_start_offset?;
     Some(
         crate::services::cluster::stream_relay::TerminalCommitFence {
+            consumed_start: turn_data_start_offset,
             consumed_end,
             turn_user_msg_id: identity.user_msg_id,
             turn_started_at: identity.started_at.clone(),

@@ -672,9 +672,8 @@ mod tests {
     use super::*;
     use poise::serenity_prelude::ChannelId;
 
-    /// Legacy test name retained: an invalid/missing captured generation must
-    /// remain a complete no-op even when the shadow flag is OFF. The flag controls
-    /// telemetry only; durable authority still fails closed on identity.
+    /// An invalid/missing captured generation is a no-op even with the shadow flag off;
+    /// durable authority still fails closed on identity.
     #[test]
     fn watcher_long_chunk_delivery_off_is_noop_3610d() {
         let temp = tempfile::TempDir::new().expect("temp runtime root");
@@ -694,6 +693,7 @@ mod tests {
                 generation_mtime_ns: 0,
                 lease_reset_incarnation: 0,
                 ledger_user_msg_id: None,
+                receipt_source_range: None,
             },
             (0, 8192),
             Some(912_345_678),
@@ -703,10 +703,8 @@ mod tests {
         assert!(dr::read_record(&ProviderKind::Claude, channel.get()).is_none());
     }
 
-    /// #3610 PR-1d gate (D), `last = None`: the empty-Vec anchor (impossible on the
-    /// full-commit `Ok` path, but type-honest) is forwarded as `None` and the helper
-    /// still no-ops with invalid generation without panicking. Pins that a null
-    /// anchor is a legal input to the watcher wrapper.
+    /// #3610 PR-1d gate (D): an empty-Vec anchor is forwarded as `None`; invalid
+    /// generation still no-ops, pinning that a null anchor is legal.
     #[test]
     fn watcher_long_chunk_delivery_none_anchor_is_noop_3610d() {
         let temp = tempfile::TempDir::new().expect("temp runtime root");
@@ -725,6 +723,7 @@ mod tests {
                 generation_mtime_ns: 0,
                 lease_reset_incarnation: 0,
                 ledger_user_msg_id: None,
+                receipt_source_range: None,
             },
             (0, 2048),
             None,
