@@ -324,7 +324,7 @@ mod tests {
     use super::*;
     use std::{
         path::Component,
-        sync::{Arc, Barrier},
+        sync::{mpsc, Arc, Barrier},
     };
 
     #[rustfmt::skip]
@@ -496,16 +496,31 @@ mod tests {
         let contested = key(ProviderDomain::Codex, "contested", ArtifactKind::RelayJsonl);
         registry.synchronize_next_two_active_releases(Arc::new(Barrier::new(2)));
         let start = Barrier::new(3);
+        let (report, reports) = mpsc::channel();
+        let (cleanup_first, cleanup_first_wait) = mpsc::channel();
+        let (cleanup_second, cleanup_second_wait) = mpsc::channel();
         let outcomes = std::thread::scope(|scope| {
-            let first = scope.spawn(|| { start.wait(); registry.register(contested.clone()) });
-            let second = scope.spawn(|| { start.wait(); registry.register(contested.clone()) });
+            let contender = |cleanup: mpsc::Receiver<()>, report: mpsc::Sender<(bool, bool)>| move || {
+                start.wait();
+                let outcome = registry.register(contested.clone());
+                report.send((outcome.is_ok(), outcome.as_ref().err() == Some(&DuplicateRegistration))).unwrap();
+                drop(report);
+                cleanup.recv().unwrap();
+                drop(outcome);
+            };
+            let first = scope.spawn(contender(cleanup_first_wait, report.clone()));
+            let second = scope.spawn(contender(cleanup_second_wait, report.clone()));
+            drop(report);
             start.wait();
-            [first.join().unwrap(), second.join().unwrap()]
+            let outcomes = [reports.recv(), reports.recv()];
+            let _ = cleanup_first.send(()); let _ = cleanup_second.send(());
+            let joins = [first.join(), second.join()];
+            assert!(joins.into_iter().all(|join| join.is_ok()));
+            outcomes.map(Result::unwrap)
         });
-        let successes = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
-        let duplicates = outcomes.iter().filter(|outcome| outcome.as_ref().err() == Some(&DuplicateRegistration)).count();
+        let successes = outcomes.iter().filter(|(is_ok, _)| *is_ok).count();
+        let duplicates = outcomes.iter().filter(|(_, exact_duplicate)| *exact_duplicate).count();
         assert_eq!((successes, duplicates), (1, 1));
-        drop(outcomes);
         let reentry = registry.register(contested).expect("winner guard drop must make the exact key reusable");
         drop(reentry);
     }
