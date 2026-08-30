@@ -135,7 +135,11 @@ pub(super) fn stream_error_has_stale_resume_error(message: &str, stderr: &str) -
 
 pub(super) fn stream_error_requires_terminal_session_reset(message: &str, stderr: &str) -> bool {
     let lower = format!("{} {}", message, stderr).to_ascii_lowercase();
-    lower.contains("gemini session could not be recovered after retry")
+    // A StreamJson process that produced no output cannot safely be resumed.
+    // Its persisted selector is the only repeatable input across attempts, so
+    // retain neither it nor the in-memory provider session for the next turn.
+    lower.contains(crate::services::stream_json_cli::runner::NO_OUTPUT_ERROR_MARKER)
+        || lower.contains("gemini session could not be recovered after retry")
         || lower.contains("gemini stream ended without a terminal result")
         || lower.contains("invalidargument: gemini resume selector must be")
         || lower.contains("qwen session could not be recovered after retry")
@@ -284,7 +288,11 @@ mod tests {
     }
 
     #[test]
-    fn terminal_reset_matchers_unchanged_for_gemini_qwen() {
+    fn terminal_reset_matchers_cover_no_output_and_existing_provider_failures() {
+        assert!(stream_error_requires_terminal_session_reset(
+            "[stream-json-no-output] StreamJson CLI produced no output for 90 seconds",
+            ""
+        ));
         assert!(stream_error_requires_terminal_session_reset(
             "Gemini session could not be recovered after retry",
             ""

@@ -13,6 +13,12 @@ use crate::services::provider::{cancel_requested, register_child_pid, spawn_canc
 
 use super::codec::StreamJsonCodec;
 
+/// Stable marker for a stream that never became live (or stopped producing
+/// output) before its CLI process exited.  Callers use this to discard a
+/// persisted provider resume token: retrying that token would otherwise put
+/// the next turn into the same silent state.
+pub const NO_OUTPUT_ERROR_MARKER: &str = "stream-json-no-output";
+
 pub struct PreparedCommand {
     pub executable: PathBuf,
     pub resolution: BinaryResolution,
@@ -25,6 +31,7 @@ pub struct PreparedCommand {
 pub fn run_prepared(
     prepared: PreparedCommand,
     sender: Sender<StreamMessage>,
+    no_output_timeout: Duration,
     cancel: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
 ) -> Result<(), String> {
     tracing::info!(
@@ -88,8 +95,7 @@ pub fn run_prepared(
 
     let mut codec = prepared.codec;
     let poll = Duration::from_secs(5);
-    let idle = Duration::from_secs(120);
-    let startup = Duration::from_secs(60);
+    let (startup, idle) = no_output_watchdogs(no_output_timeout);
     let mut silent = Duration::ZERO;
     let mut startup_silent = Duration::ZERO;
     let mut saw_progress = false;
@@ -119,24 +125,24 @@ pub fn run_prepared(
             Err(RecvTimeoutError::Timeout) => {
                 if !saw_progress {
                     startup_silent += poll;
-                    if startup_silent >= startup {
+                    if startup.is_some_and(|limit| startup_silent >= limit) {
                         kill_child_tree(&mut child);
                         let _ = child.wait();
                         let _ = stderr_handle.join();
                         return Err(format!(
-                            "StreamJson CLI produced no output for {} seconds",
-                            startup.as_secs()
+                            "[{NO_OUTPUT_ERROR_MARKER}] StreamJson CLI produced no output for {} seconds",
+                            startup.expect("checked above").as_secs()
                         ));
                     }
                 } else {
                     silent += poll;
-                    if silent >= idle {
+                    if idle.is_some_and(|limit| silent >= limit) {
                         kill_child_tree(&mut child);
                         let _ = child.wait();
                         let _ = stderr_handle.join();
                         return Err(format!(
-                            "StreamJson CLI produced no output for {} seconds",
-                            idle.as_secs()
+                            "[{NO_OUTPUT_ERROR_MARKER}] StreamJson CLI produced no output for {} seconds",
+                            idle.expect("checked above").as_secs()
                         ));
                     }
                 }
@@ -155,4 +161,57 @@ pub fn run_prepared(
         let _ = sender.send(message);
     }
     Ok(())
+}
+
+/// `Duration::ZERO` means the caller permits an unbounded *turn* duration. It
+/// must not disable stream liveness detection: an outputless process has made
+/// no progress and cannot be distinguished from a poisoned `--resume` token.
+///
+/// The longer values for that mode allow genuinely long Grok turns while still
+/// recovering a CLI that never emits its initial streaming event.
+fn no_output_watchdogs(timeout: Duration) -> (Option<Duration>, Option<Duration>) {
+    if timeout.is_zero() {
+        (
+            Some(Duration::from_secs(90)),
+            Some(Duration::from_secs(300)),
+        )
+    } else {
+        (
+            Some(Duration::from_secs(60)),
+            Some(Duration::from_secs(120)),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_timeout_keeps_liveness_watchdogs_for_unbounded_turns() {
+        assert_eq!(
+            no_output_watchdogs(Duration::ZERO),
+            (
+                Some(Duration::from_secs(90)),
+                Some(Duration::from_secs(300))
+            )
+        );
+    }
+
+    #[test]
+    fn nonzero_no_output_timeout_keeps_default_watchdogs() {
+        assert_eq!(
+            no_output_watchdogs(Duration::from_secs(1)),
+            (
+                Some(Duration::from_secs(60)),
+                Some(Duration::from_secs(120))
+            )
+        );
+    }
+
+    #[test]
+    fn no_output_error_has_machine_readable_marker() {
+        let message = format!("[{NO_OUTPUT_ERROR_MARKER}] StreamJson CLI produced no output");
+        assert!(message.contains(NO_OUTPUT_ERROR_MARKER));
+    }
 }
