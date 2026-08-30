@@ -342,15 +342,16 @@ pub async fn update_dispatch(
             .allowed_from
             .as_ref()
             .map(|statuses| statuses.iter().map(String::as_str).collect::<Vec<_>>());
-        let changed = crate::dispatch::set_dispatch_status_with_backends(
-            Some(pool),
+        let changed = crate::dispatch::set_dispatch_status_on_pg_async(
+            pool,
             &id,
             &status,
             body.result.as_ref(),
             "api_update_dispatch",
             allowed_from_refs.as_deref(),
             false,
-        );
+        )
+        .await;
         match changed {
             Ok(0) => {
                 if allowed_from_refs.is_some()
