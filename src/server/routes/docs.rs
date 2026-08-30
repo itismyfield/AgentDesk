@@ -168,6 +168,7 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
                     "name": name,
                     "description": category_description(name),
                     "endpoint_count": count,
+                    "canonical_path": format!("/api/docs/{segment}/{name}"),
                 })
             })
             .collect();
@@ -363,6 +364,8 @@ pub async fn api_docs_group_category(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -676,6 +679,171 @@ mod tests {
             assert!(
                 endpoint.get("deprecated").is_none(),
                 "no dispatches endpoint should be advertised as API-deprecated"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn advertised_group_category_paths_resolve_without_behavior_regressions() {
+        let endpoints = all_endpoints();
+        let expected_pairs: BTreeSet<(String, String)> = GROUP_NAMES
+            .iter()
+            .flat_map(|group| {
+                categories_for_group(&endpoints, group)
+                    .into_iter()
+                    .map(|(category, _)| ((*group).to_owned(), category.to_owned()))
+            })
+            .collect();
+        let mut advertised_pairs = BTreeSet::new();
+
+        for (guide, expected_path) in [
+            ("card-lifecycle-ops", "/api/docs/card-lifecycle-ops"),
+            ("api-friction-markers", "/api/docs/api-friction-markers"),
+        ] {
+            let (status, headers, body) = resolve_docs_segment(guide, false);
+            let (flat_status, flat_headers, flat_body) = resolve_docs_segment(guide, true);
+            assert_eq!(status, StatusCode::OK, "guide {guide}");
+            assert!(headers.is_empty(), "guide {guide}");
+            assert_eq!(body["path"], expected_path, "guide {guide}");
+            assert_eq!(flat_status, status, "guide {guide}");
+            assert_eq!(flat_headers, headers, "guide {guide}");
+            assert_eq!(flat_body, body, "guide {guide}");
+        }
+
+        for group in GROUP_NAMES {
+            let (status, headers, body) = resolve_docs_segment(group, false);
+            assert_eq!(status, StatusCode::OK, "group {group}");
+            assert!(headers.is_empty(), "group {group}");
+            assert_eq!(body["group"], group, "group {group}");
+            assert!(body["description"].is_string(), "group {group}");
+
+            let categories = body["categories"]
+                .as_array()
+                .unwrap_or_else(|| panic!("group {group} must advertise categories"));
+            assert!(!categories.is_empty(), "group {group}");
+
+            for category in categories {
+                let category_fields: BTreeSet<&str> = category
+                    .as_object()
+                    .unwrap_or_else(|| panic!("group {group} category object"))
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                assert_eq!(
+                    category_fields,
+                    BTreeSet::from(["canonical_path", "description", "endpoint_count", "name",]),
+                    "canonical_path must be the only additive category field for group {group}"
+                );
+
+                let name = category["name"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("group {group} category name"));
+                let advertised_count = category["endpoint_count"]
+                    .as_u64()
+                    .unwrap_or_else(|| panic!("endpoint count for {group}/{name}"));
+                assert!(category["description"].is_string(), "{group}/{name}");
+
+                assert!(
+                    advertised_pairs.insert((group.to_owned(), name.to_owned())),
+                    "duplicate advertised category {group}/{name}"
+                );
+                let expected_path = format!("/api/docs/{group}/{name}");
+                let advertised_path = category["canonical_path"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("canonical path for {group}/{name}"));
+                assert_eq!(
+                    advertised_path, expected_path,
+                    "advertised child path for {group}/{name}"
+                );
+
+                let mut child_segments = advertised_path
+                    .strip_prefix("/api/docs/")
+                    .unwrap_or_else(|| panic!("docs path prefix for {group}/{name}"))
+                    .split('/');
+                let advertised_group = child_segments
+                    .next()
+                    .unwrap_or_else(|| panic!("group path segment for {group}/{name}"));
+                let advertised_category = child_segments
+                    .next()
+                    .unwrap_or_else(|| panic!("category path segment for {group}/{name}"));
+                assert!(
+                    child_segments.next().is_none(),
+                    "exactly two child path segments for {group}/{name}"
+                );
+
+                let (child_status, Json(child)) = api_docs_group_category(Path((
+                    advertised_group.to_owned(),
+                    advertised_category.to_owned(),
+                )))
+                .await;
+                assert_eq!(child_status, StatusCode::OK, "child {advertised_path}");
+                assert_eq!(child["group"], group, "child {advertised_path}");
+                assert_eq!(
+                    child["category"], advertised_category,
+                    "child {advertised_path}"
+                );
+                assert_eq!(child["count"], advertised_count, "child {advertised_path}");
+                assert!(child["description"].is_string(), "child {advertised_path}");
+                assert_eq!(
+                    child["endpoints"]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("child endpoints for {advertised_path}"))
+                        .len() as u64,
+                    advertised_count,
+                    "child {advertised_path}"
+                );
+            }
+
+            let (flat_status, flat_headers, flat_body) = resolve_docs_segment(group, true);
+            assert_eq!(flat_status, StatusCode::OK, "flat group {group}");
+            assert!(flat_headers.is_empty(), "flat group {group}");
+            let flat = flat_body
+                .as_object()
+                .unwrap_or_else(|| panic!("flat group {group} body"));
+            assert_eq!(flat.len(), 1, "flat group {group}");
+            assert!(
+                flat.get("endpoints")
+                    .and_then(Value::as_array)
+                    .is_some_and(|endpoints| !endpoints.is_empty()),
+                "flat group {group}"
+            );
+        }
+
+        assert_eq!(
+            advertised_pairs, expected_pairs,
+            "every currently emitted group/category pair must be exercised"
+        );
+
+        let legacy_segments: BTreeSet<&str> = CANONICAL_CATEGORIES
+            .iter()
+            .copied()
+            .chain(endpoints.iter().filter_map(|endpoint| endpoint.subcategory))
+            .filter(|segment| !GROUP_NAMES.contains(segment))
+            .collect();
+        for segment in legacy_segments {
+            let (status, headers, body) = resolve_docs_segment(segment, false);
+            let expected_path = format!("/api/docs/{}/{segment}", category_to_group(segment));
+            assert_eq!(status, StatusCode::OK, "legacy {segment}");
+            assert_eq!(
+                headers
+                    .get("X-Deprecated")
+                    .and_then(|value| value.to_str().ok()),
+                Some(expected_path.as_str()),
+                "legacy {segment}"
+            );
+            assert_eq!(body["legacy_docs_path"], true, "legacy {segment}");
+            assert_eq!(body["canonical_path"], expected_path, "legacy {segment}");
+            assert_eq!(
+                body["deprecation"]["replacement"], expected_path,
+                "legacy {segment}"
+            );
+            assert_eq!(
+                body["deprecation"]["kind"], "docs_route",
+                "legacy {segment}"
+            );
+            assert_eq!(
+                body["deprecation"]["api_status"], "active",
+                "legacy {segment}"
             );
         }
     }
