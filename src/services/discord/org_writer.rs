@@ -6,9 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
 use super::runtime_store::org_schema_path_for_root;
-use crate::services::provider_auth_profile::{
-    ProviderAuthProfileDef, intern_provider, validate_profile_id,
-};
+use crate::services::provider_auth_profile::{ProviderAuthProfileDef, validate_profile_def};
 
 #[derive(Clone, Debug)]
 pub(crate) struct OrgAgentUpdate {
@@ -221,8 +219,7 @@ pub(crate) fn append_provider_auth_profile_at(
     profile_id: &str,
     def: ProviderAuthProfileDef,
 ) -> Result<(), String> {
-    validate_profile_id(profile_id).map_err(|error| error.to_string())?;
-    intern_provider(&def.provider).map_err(|error| error.to_string())?;
+    validate_profile_def(profile_id, &def).map_err(|error| error.to_string())?;
     let mut document = load_org_document(org_path)?;
     if let Some(existing) = document.provider_auth_profiles.get(profile_id) {
         if existing == &def {

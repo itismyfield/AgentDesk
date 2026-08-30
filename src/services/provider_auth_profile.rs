@@ -87,6 +87,16 @@ pub enum AuthProfileError {
         provider: String,
         home: String,
     },
+    UnmanagedHomeForbidden {
+        profile_id: String,
+        provider: String,
+        home: String,
+    },
+    UnsupportedEnvironmentKey {
+        profile_id: String,
+        provider: String,
+        key: String,
+    },
     AlreadyCataloged(String),
     CredentialsMissing {
         profile_id: String,
@@ -134,6 +144,22 @@ impl fmt::Display for AuthProfileError {
             Self::GlobalHomeForbidden { provider, home } => write!(
                 f,
                 "refusing to use global {provider} home '{home}' as an extra account"
+            ),
+            Self::UnmanagedHomeForbidden {
+                profile_id,
+                provider,
+                home,
+            } => write!(
+                f,
+                "auth_profile '{profile_id}' for {provider} must use its managed extra-account home, not '{home}'"
+            ),
+            Self::UnsupportedEnvironmentKey {
+                profile_id,
+                provider,
+                key,
+            } => write!(
+                f,
+                "auth_profile '{profile_id}' cannot set environment key '{key}' for {provider}"
             ),
             Self::AlreadyCataloged(id) => write!(f, "auth_profile '{id}' already exists"),
             Self::CredentialsMissing { profile_id, home } => write!(
@@ -220,19 +246,61 @@ pub fn validate_catalog(
     catalog: &HashMap<String, ProviderAuthProfileDef>,
 ) -> Result<(), AuthProfileError> {
     for (id, def) in catalog {
-        validate_profile_id(id)?;
-        let provider = intern_provider(&def.provider)?;
-        if named_profile_requires_home(&provider) {
-            let home = def.home.as_deref().map(str::trim).unwrap_or("");
-            if home.is_empty() {
-                return Err(AuthProfileError::HomeRequired {
-                    profile_id: id.clone(),
-                    provider: provider.as_str().to_string(),
-                });
-            }
+        validate_profile_def(id, def)?;
+    }
+    Ok(())
+}
+
+pub fn validate_profile_def(
+    id: &str,
+    def: &ProviderAuthProfileDef,
+) -> Result<(), AuthProfileError> {
+    validate_profile_id(id)?;
+    let provider = intern_provider(&def.provider)?;
+    if named_profile_requires_home(&provider) {
+        let home = def.home.as_deref().map(str::trim).unwrap_or("");
+        if home.is_empty() {
+            return Err(AuthProfileError::HomeRequired {
+                profile_id: id.to_string(),
+                provider: provider.as_str().to_string(),
+            });
+        }
+        let home = PathBuf::from(expand_tilde(home));
+        if !is_managed_extra_account_home(&provider, id, &home) {
+            return Err(AuthProfileError::UnmanagedHomeForbidden {
+                profile_id: id.to_string(),
+                provider: provider.as_str().to_string(),
+                home: home.display().to_string(),
+            });
+        }
+    }
+    for key in def.env.keys() {
+        if !profile_env_key_allowed(&provider, key) {
+            return Err(AuthProfileError::UnsupportedEnvironmentKey {
+                profile_id: id.to_string(),
+                provider: provider.as_str().to_string(),
+                key: key.clone(),
+            });
         }
     }
     Ok(())
+}
+
+/// Named accounts own only provider credentials.  They never control the
+/// process home, executable search path, shell startup, or dynamic loader.
+/// The resolver owns each provider's home variables exclusively.
+pub fn profile_env_key_allowed(provider: &ProviderKind, key: &str) -> bool {
+    let allowed: &[&str] = match provider {
+        ProviderKind::Claude => &["ANTHROPIC_API_KEY"],
+        ProviderKind::Codex => &["OPENAI_API_KEY"],
+        ProviderKind::Grok => &["XAI_API_KEY"],
+        ProviderKind::Qwen => &["DASHSCOPE_API_KEY", "OPENAI_API_KEY"],
+        ProviderKind::OpenCode => &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY"],
+        ProviderKind::Antigravity => &["NVIDIA_API_KEY"],
+        ProviderKind::Gemini => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        ProviderKind::Unsupported(_) => &[],
+    };
+    allowed.iter().any(|candidate| *candidate == key)
 }
 
 pub fn selected_profile_id<'a>(
@@ -389,6 +457,24 @@ pub fn extra_account_home(provider: &ProviderKind, profile_id: &str) -> PathBuf 
     extra_account_home_at(&extra_accounts_root(), provider, profile_id)
 }
 
+/// Returns true only for the deterministic, AgentDesk-managed home assigned to
+/// this `(provider, profile_id)`.  This intentionally excludes imported or
+/// global homes: otherwise a config/API caller could turn a named account into
+/// an arbitrary credential-directory reader.
+pub fn is_managed_extra_account_home(
+    provider: &ProviderKind,
+    profile_id: &str,
+    home: &Path,
+) -> bool {
+    if std::fs::symlink_metadata(home)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    same_path(home, &extra_account_home(provider, profile_id))
+}
+
 pub fn extra_account_home_at(root: &Path, provider: &ProviderKind, profile_id: &str) -> PathBuf {
     root.join(provider.as_str()).join(profile_id)
 }
@@ -502,6 +588,15 @@ pub fn create_empty_profile_home_at(
     if home.is_file() {
         return Err(AuthProfileError::Io(format!(
             "profile home '{}' exists as a file",
+            home.display()
+        )));
+    }
+    if std::fs::symlink_metadata(&home)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(AuthProfileError::Io(format!(
+            "profile home '{}' must not be a symlink",
             home.display()
         )));
     }
@@ -793,6 +888,47 @@ mod tests {
         assert!(matches!(
             validate_catalog(&catalog),
             Err(AuthProfileError::HomeRequired { .. })
+        ));
+    }
+
+    #[test]
+    fn catalog_accepts_only_its_managed_home_and_credential_env_keys() {
+        let profile_id = "work";
+        let managed_home = extra_account_home(&ProviderKind::Codex, profile_id);
+        let catalog = catalog_with(
+            profile_id,
+            ProviderAuthProfileDef {
+                provider: "codex".into(),
+                home: Some(managed_home.display().to_string()),
+                env: BTreeMap::from([("OPENAI_API_KEY".into(), "profile-key".into())]),
+            },
+        );
+        validate_catalog(&catalog).unwrap();
+
+        let outside_catalog = catalog_with(
+            profile_id,
+            ProviderAuthProfileDef {
+                provider: "codex".into(),
+                home: Some("/tmp/not-an-agentdesk-profile".into()),
+                env: BTreeMap::new(),
+            },
+        );
+        assert!(matches!(
+            validate_catalog(&outside_catalog),
+            Err(AuthProfileError::UnmanagedHomeForbidden { .. })
+        ));
+
+        let home_override_catalog = catalog_with(
+            profile_id,
+            ProviderAuthProfileDef {
+                provider: "codex".into(),
+                home: Some(managed_home.display().to_string()),
+                env: BTreeMap::from([("HOME".into(), "/tmp/unsafe".into())]),
+            },
+        );
+        assert!(matches!(
+            validate_catalog(&home_override_catalog),
+            Err(AuthProfileError::UnsupportedEnvironmentKey { .. })
         ));
     }
 
