@@ -59,16 +59,34 @@ function rotateActiveRunSweepCursor(runId) {
   }
 }
 
+function rotateActiveRunSweepCursors(runIds) {
+  if (!runIds || runIds.length === 0) return;
+  if (runIds.length === 1) {
+    rotateActiveRunSweepCursor(runIds[0]);
+    return;
+  }
+  try {
+    var placeholders = runIds.map(function() { return "?"; }).join(",");
+    agentdesk.db.execute(
+      "UPDATE auto_queue_entries SET updated_at = datetime('now') WHERE run_id IN (" + placeholders + ") AND status = 'pending'",
+      runIds
+    );
+  } catch (e) {
+    autoQueueLog("warn", "failed to rotate active run sweep cursors: " + e, {});
+  }
+}
+
 function _isDispatchableState(state, cfg) {
   if (!cfg || !cfg.transitions) return false;
   var hasGatedOut = false;
-  var hasGatedIn = false;
   for (var i = 0; i < cfg.transitions.length; i++) {
     var t = cfg.transitions[i];
-    if (t.from === state && t.type === "gated") hasGatedOut = true;
-    if (t.to === state && t.type === "gated") hasGatedIn = true;
+    if (t.type === "gated") {
+      if (t.to === state) return false;
+      if (t.from === state) hasGatedOut = true;
+    }
   }
-  return hasGatedOut && !hasGatedIn;
+  return hasGatedOut;
 }
 
 function _dispatchableTargets(cfg) {
@@ -80,10 +98,24 @@ function _dispatchableTargets(cfg) {
     targets.push("requested");
   }
 
+  var gatedOut = Object.create(null);
+  var gatedIn = Object.create(null);
+  if (cfg.transitions) {
+    for (var i = 0; i < cfg.transitions.length; i++) {
+      var t = cfg.transitions[i];
+      if (t.type === "gated") {
+        gatedOut[t.from] = true;
+        gatedIn[t.to] = true;
+      }
+    }
+  }
+
   for (var i = 0; i < cfg.states.length; i++) {
     var s = cfg.states[i];
     if (s.terminal) continue;
-    if (!_isDispatchableState(s.id, cfg)) continue;
+    var hasGatedOut = Object.prototype.hasOwnProperty.call(gatedOut, s.id);
+    var hasGatedIn = Object.prototype.hasOwnProperty.call(gatedIn, s.id);
+    if (!(hasGatedOut && !hasGatedIn)) continue;
     if (targets.indexOf(s.id) === -1) targets.push(s.id);
   }
   return targets;
@@ -153,6 +185,7 @@ module.exports = {
   activationDispatchCount: activationDispatchCount,
   activationWasDeferred: activationWasDeferred,
   rotateActiveRunSweepCursor: rotateActiveRunSweepCursor,
+  rotateActiveRunSweepCursors: rotateActiveRunSweepCursors,
   isDispatchableState: _isDispatchableState,
   dispatchableTargets: _dispatchableTargets,
   freePathToDispatchable: _freePathToDispatchable,

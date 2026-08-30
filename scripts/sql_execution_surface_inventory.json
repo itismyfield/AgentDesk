@@ -1346,6 +1346,15 @@
     {
       "root": "policies",
       "kind": "POLICY",
+      "path": "policies/lib/auto-queue-dispatch.js",
+      "api": "agentdesk.db.execute",
+      "symbol": "execute",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:d9bd439c432969b49de8bb5e6a49abddd3fa2f24d2089e2971ad27239ae4cfe6"
+    },
+    {
+      "root": "policies",
+      "kind": "POLICY",
       "path": "policies/lib/auto-queue-error-recovery.js",
       "api": "agentdesk.db.query",
       "symbol": "query",
