@@ -122,8 +122,8 @@ enum DirectoryMutation {
 }
 
 impl DirectoryMutation {
-    fn preflight<T>(result: Result<T, FsError>) -> Result<T, Self> {
-        result.map_err(Self::Rejected)
+    fn rejected(error: FsError) -> Self {
+        Self::Rejected(error)
     }
 }
 
@@ -131,9 +131,9 @@ struct MutationSession<'root>(&'root mut ConfinedRuntimeRoot);
 
 impl MutationSession<'_> {
     fn open_or_create_child(&mut self, parent: &ConfinedDir, value: &str) -> DirectoryMutation {
-        let prepared = match DirectoryMutation::preflight(self.prepare_child(parent, value)) {
+        let prepared = match self.prepare_child(parent, value) {
             Ok(prepared) => prepared,
-            Err(rejection) => return rejection,
+            Err(error) => return DirectoryMutation::rejected(error),
         };
         platform::open_or_create_child(prepared)
     }

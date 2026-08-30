@@ -9,7 +9,7 @@ pub(in super::super) fn open_runtime_root(_: &Path) -> Result<ConfinedRuntimeRoo
     Err(FsError::unsupported())
 }
 pub(super) fn open_or_create_child(_: PreparedChild) -> DirectoryMutation {
-    DirectoryMutation::Rejected(FsError::unsupported())
+    DirectoryMutation::rejected(FsError::unsupported())
 }
 
 #[cfg(test)]
@@ -39,7 +39,7 @@ mod high_risk_recovery {
         let error =
             super::super::prepare_locator(false, &root, (&foreign, identity), "..").unwrap_err();
         assert!(matches!(
-            DirectoryMutation::preflight::<()>(Err(error)).unwrap_err(),
+            DirectoryMutation::rejected(error),
             DirectoryMutation::Rejected(error) if error.kind() == FsErrorKind::UnsupportedPlatform
         ));
         assert_eq!(super::super::take_preflight_activity(), 0);

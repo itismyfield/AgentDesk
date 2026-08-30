@@ -263,7 +263,11 @@ pub(super) fn open_or_create_child(prepared: PreparedChild) -> DirectoryMutation
         (fd.as_raw_fd(), c"", 0),
         || unsafe { libc::fstat(fd.as_raw_fd(), stat_ptr) },
         |_| {
-            let fact = directory_fact(unsafe { &*stat_ptr });
+            #[cfg(test)]
+            let injected = INJECTED_FSTAT_FACT.with(std::cell::Cell::take);
+            #[cfg(not(test))]
+            let injected = None;
+            let fact = injected.unwrap_or_else(|| directory_fact(unsafe { &*stat_ptr }));
             (fact, Some(fact))
         },
     );
@@ -320,12 +324,15 @@ fn mutation_call<T>(
     #[cfg(test)]
     let injected = MUTATION_FAULT.with(|fault| {
         let (selected, result, errno) = fault.get()?;
-        (selected == _operation && (errno.is_some() || _operation == FsOperation::GetFdFlags)).then(
-            || {
-                fault.set(None);
-                (result, errno)
-            },
-        )
+        (selected == _operation
+            && (errno.is_some()
+                || _operation == FsOperation::GetFdFlags
+                || (_operation == FsOperation::Fstat
+                    && INJECTED_FSTAT_FACT.with(|fact| fact.get().is_some()))))
+        .then(|| {
+            fault.set(None);
+            (result, errno)
+        })
     });
     #[cfg(not(test))]
     let injected = None;
@@ -339,6 +346,13 @@ fn mutation_call<T>(
     } else {
         (None, None)
     };
+    #[cfg(test)]
+    PANIC_AFTER_OPEN_ADOPTION.with(|fd| {
+        if _operation == FsOperation::Open && fd.get() == Some(-1) {
+            fd.set(Some(result));
+            panic!("injected panic after open adoption");
+        }
+    });
     #[cfg(test)]
     {
         super::PREFLIGHT_ACTIVITY.with(|activity| activity.set(activity.get() | 12));
@@ -369,15 +383,8 @@ enum TraceResult {
     Fstat(FstatResult),
 }
 
-#[cfg(test)]
-#[derive(Debug)]
-pub(super) struct MutationTrace(
-    FsOperation,
-    (RawFd, Box<[u8]>, i32),
-    i32,
-    Option<i32>,
-    Option<OpenDirectoryFact>,
-);
+#[cfg(test)] #[rustfmt::skip] #[derive(Debug)]
+pub(super) struct MutationTrace(FsOperation, (RawFd, Box<[u8]>, i32), i32, Option<i32>, Option<OpenDirectoryFact>);
 
 #[cfg(test)]
 #[derive(Debug)]
@@ -406,6 +413,8 @@ thread_local! {
     static FSTAT_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static MUTATION_TRACE: std::cell::RefCell<Vec<MutationTrace>> = const { std::cell::RefCell::new(Vec::new()) };
     static MUTATION_FAULT: std::cell::Cell<Option<(FsOperation, i32, Option<i32>)>> = const { std::cell::Cell::new(None) };
+    static INJECTED_FSTAT_FACT: std::cell::Cell<Option<OpenDirectoryFact>> = const { std::cell::Cell::new(None) };
+    static PANIC_AFTER_OPEN_ADOPTION: std::cell::Cell<Option<RawFd>> = const { std::cell::Cell::new(None) };
     static POST_OBSERVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -465,20 +474,10 @@ mod high_risk_recovery {
     const EXPECTED_OPEN_FLAGS: libc::c_int =
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
     const SYMLINK_ERRNO: i32 = libc::ENOTDIR;
-    #[rustfmt::skip] fn attempted(mutation: DirectoryMutation) -> (MutationFacts, Result<ConfinedDir, FsError>) {
-        match mutation { DirectoryMutation::Attempted(facts, child) => (facts, child), DirectoryMutation::Rejected(error) => panic!("unexpected rejection: {error:?}") }
-    }
-    #[rustfmt::skip] fn traced<T>(trace: &[MutationTrace], operation: FsOperation, success: impl Fn(&MutationTrace) -> T) -> Attempt<T> {
-        let Some(row) = trace.iter().find(|row| row.0 == operation) else { return Attempt::NotAttempted };
-        row.3.map_or_else(|| Attempt::Succeeded(success(row)), |raw_errno| Attempt::Failed(super::super::IoFact { operation, raw_errno }))
-    }
+    #[rustfmt::skip] fn attempted(mutation: DirectoryMutation) -> (MutationFacts, Result<ConfinedDir, FsError>) { match mutation { DirectoryMutation::Attempted(facts, child) => (facts, child), DirectoryMutation::Rejected(error) => panic!("unexpected rejection: {error:?}") } }
+    #[rustfmt::skip] fn traced<T>(trace: &[MutationTrace], operation: FsOperation, success: impl Fn(&MutationTrace) -> T) -> Attempt<T> { let Some(row) = trace.iter().find(|row| row.0 == operation) else { return Attempt::NotAttempted }; row.3.map_or_else(|| Attempt::Succeeded(success(row)), |raw_errno| Attempt::Failed(super::super::IoFact { operation, raw_errno })) }
     #[rustfmt::skip] fn assert_facts(facts: &MutationFacts, trace: &[MutationTrace]) {
-        assert_eq!(facts.mkdir, traced(trace, FsOperation::Mkdir, |_| ()));
-        assert_eq!(facts.sync, traced(trace, FsOperation::SyncParent, |_| ()));
-        assert_eq!(facts.observe, traced(trace, FsOperation::Observe, |row| row.4.unwrap()));
-        assert_eq!(facts.open, traced(trace, FsOperation::Open, |row| OpenAttemptFact { raw_fd: row.2 }));
-        assert_eq!(facts.fd_flags, traced(trace, FsOperation::GetFdFlags, |row| row.2));
-        assert_eq!(facts.fstat, traced(trace, FsOperation::Fstat, |row| row.4.unwrap()));
+        assert_eq!(facts.mkdir, traced(trace, FsOperation::Mkdir, |_| ())); assert_eq!(facts.sync, traced(trace, FsOperation::SyncParent, |_| ())); assert_eq!(facts.observe, traced(trace, FsOperation::Observe, |row| row.4.unwrap())); assert_eq!(facts.open, traced(trace, FsOperation::Open, |row| OpenAttemptFact { raw_fd: row.2 })); assert_eq!(facts.fd_flags, traced(trace, FsOperation::GetFdFlags, |row| row.2)); assert_eq!(facts.fstat, traced(trace, FsOperation::Fstat, |row| row.4.unwrap()));
     }
     #[rustfmt::skip] #[test] fn directory_mutation_records_sync_facts_and_owned_fds_outlive_parents() {
         const TEST_NAME: &str = "services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::directory_mutation_records_sync_facts_and_owned_fds_outlive_parents"; const CHILD: &str = "AGENTDESK_5606_MUTATION_CHILD"; let ppid = unsafe { libc::getppid() }.to_string();
@@ -513,6 +512,10 @@ mod high_risk_recovery {
             let selected = trace.iter().find(|row| row.0 == operation).unwrap(); assert_eq!((selected.2, selected.3), (result, errno)); assert_facts(&facts, &trace);
             if let Attempt::Succeeded(open) = facts.open { assert_closed(open.raw_fd); }
         }
+        fs::create_dir(path.join("opened-nondir")).unwrap(); let meta = fs::metadata(path.join("opened-nondir")).unwrap(); let non_dir = OpenDirectoryFact { identity: DirectoryIdentity { device: meta.dev(), inode: meta.ino() }, file_type: DirectoryTypeFact { mode: libc::S_IFREG as u32 | 0o600 } };
+        INJECTED_FSTAT_FACT.with(|fact| fact.set(Some(non_dir))); MUTATION_FAULT.with(|fault| fault.set(Some((Fstat, 0, None)))); let (facts, child) = attempted(session.open_or_create_child(&parent, "opened-nondir")); assert!(matches!(child.unwrap_err().kind(), FsErrorKind::NotDirectory(fact) if fact == non_dir.file_type));
+        let (_, trace) = take_mutation_evidence(); assert_facts(&facts, &trace); let Attempt::Succeeded(open) = facts.open else { unreachable!() }; assert_closed(open.raw_fd);
+        PANIC_AFTER_OPEN_ADOPTION.with(|fd| fd.set(Some(-1))); let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.open_or_create_child(&parent, "adoption-panic"))); let adopted = PANIC_AFTER_OPEN_ADOPTION.with(|fd| fd.replace(None)).unwrap(); assert!(panic.is_err() && adopted >= 0); assert_closed(adopted); take_mutation_evidence();
         for name in ["file", "link"] { take_mutation_evidence(); let (facts, child) = attempted(session.open_or_create_child(&parent, name)); assert!(matches!(child.unwrap_err().kind(), FsErrorKind::NotDirectory(_))); let (_, trace) = take_mutation_evidence(); assert_facts(&facts, &trace); assert!(matches!(facts.open, Attempt::Failed(io) if io.raw_errno == SYMLINK_ERRNO)); }
         let swap = path.join("swap"); let retired = path.join("swap-retired"); POST_OBSERVE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || { fs::rename(&swap, &retired).unwrap(); fs::create_dir(&swap).unwrap(); })));
         let (mismatch, child) = attempted(session.open_or_create_child(&parent, "swap")); assert!(matches!(child.unwrap_err().kind(), FsErrorKind::IdentityMismatch { observed, opened } if observed != opened));
