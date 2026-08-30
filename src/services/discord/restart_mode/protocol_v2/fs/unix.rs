@@ -65,12 +65,20 @@ fn open_directory(
     parent_fd: RawFd,
     component: &CStr,
 ) -> Result<(OwnedFd, OpenDirectoryFact), FsError> {
+    let open_flags = OPEN_DIRECTORY_FLAGS;
     // SAFETY: component is NUL-terminated and parent_fd is either AT_FDCWD or owned by caller.
-    let result_fd = unsafe { libc::openat(parent_fd, component.as_ptr(), OPEN_DIRECTORY_FLAGS) };
+    let result_fd = unsafe { libc::openat(parent_fd, component.as_ptr(), open_flags) };
     if result_fd == -1 {
         let raw_errno = last_errno();
         #[cfg(test)]
-        record_open(parent_fd, component, result_fd, Some(raw_errno), -1, None);
+        record_open(
+            parent_fd,
+            component,
+            open_flags,
+            result_fd,
+            Some(raw_errno),
+            None,
+        );
         return Err(FsError::io(FsOperation::Open, raw_errno));
     }
     // SAFETY: openat returned a new descriptor; adoption precedes every fallible trace action.
@@ -82,10 +90,10 @@ fn open_directory(
     record_open(
         parent_fd,
         component,
+        open_flags,
         result_fd,
         None,
-        fd_flags,
-        fd_flags_errno,
+        Some((fd_flags, fd_flags_errno)),
     );
     if let Some(raw_errno) = fd_flags_errno {
         return Err(FsError::io(FsOperation::GetFdFlags, raw_errno));
@@ -95,9 +103,25 @@ fn open_directory(
     }
 
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    #[cfg(test)]
+    let injected_errno = FSTAT_FAILURE.with(|failure| {
+        let (remaining, errno) = failure.get()?;
+        failure.set(remaining.checked_sub(1).map(|next| (next, errno)));
+        (remaining == 0).then_some(errno)
+    });
+    #[cfg(test)]
+    // SAFETY: fd is live and stat points to writable storage for one libc::stat.
+    let result = injected_errno.map_or_else(
+        || unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) },
+        |_| -1,
+    );
+    #[cfg(not(test))]
     // SAFETY: fd is live and stat points to writable storage for one libc::stat.
     let result = unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) };
     if result == -1 {
+        #[cfg(test)]
+        let raw_errno = injected_errno.unwrap_or_else(last_errno);
+        #[cfg(not(test))]
         let raw_errno = last_errno();
         #[cfg(test)]
         record_fstat(fd.as_raw_fd(), result, Some(raw_errno), None);
@@ -159,22 +183,24 @@ struct FstatResult {
 #[cfg(test)]
 thread_local! {
     static TRACE: std::cell::RefCell<Vec<TraceResult>> = const { std::cell::RefCell::new(Vec::new()) };
+    static FSTAT_FAILURE: std::cell::Cell<Option<(usize, i32)>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
 fn record_open(
     parent_fd: RawFd,
     component: &CStr,
+    flags: libc::c_int,
     result_fd: RawFd,
     errno: Option<i32>,
-    f_getfd_result: libc::c_int,
-    f_getfd_errno: Option<i32>,
+    f_getfd: Option<(libc::c_int, Option<i32>)>,
 ) {
+    let (f_getfd_result, f_getfd_errno) = f_getfd.unwrap_or((-1, None));
     TRACE.with(|trace| {
         trace.borrow_mut().push(TraceResult::Open(OpenResult {
             parent_fd,
             component: component.to_bytes().into(),
-            flags: OPEN_DIRECTORY_FLAGS,
+            flags,
             result_fd,
             errno,
             f_getfd_result,
@@ -205,6 +231,9 @@ mod high_risk_recovery {
     use super::*;
     use crate::services::discord::restart_mode::protocol_v2::fs::FsErrorKind;
     use std::{fs, os::unix::fs::MetadataExt, path::PathBuf};
+
+    const EXPECTED_OPEN_FLAGS: libc::c_int =
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
 
     #[test]
     fn absolute_and_relative_root_traversal_record_exact_pairs_and_identity() {
@@ -275,5 +304,148 @@ mod high_risk_recovery {
             );
             assert!(TRACE.with(|trace| trace.borrow().is_empty()));
         }
+    }
+
+    #[test]
+    fn root_traversal_and_path_replacement_keep_the_pinned_inode() {
+        const TEST_NAME: &str = "root_traversal_and_path_replacement_keep_the_pinned_inode";
+        const ISOLATED_ENV: &str = "AGENTDESK_5608_PINNED_INODE_CHILD";
+        // SAFETY: getppid has no preconditions.
+        let parent_pid = unsafe { libc::getppid() }.to_string();
+        if std::env::var(ISOLATED_ENV).ok().as_deref() != Some(parent_pid.as_str()) {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([TEST_NAME, "--test-threads=1"])
+                .env(ISOLATED_ENV, std::process::id().to_string())
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let assert_closed = |fd| {
+            // SAFETY: F_GETFD takes no variadic argument and never dereferences fd.
+            let result = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            let errno = std::io::Error::last_os_error().raw_os_error();
+            assert_eq!((result, errno), (-1, Some(libc::EBADF)));
+        };
+        let assert_successful_open = |open: &OpenResult, parent_fd: RawFd, component: &[u8]| {
+            let observed = (open.parent_fd, &*open.component, open.flags);
+            assert_eq!(observed, (parent_fd, component, EXPECTED_OPEN_FLAGS));
+            assert!(open.result_fd >= 0 && open.f_getfd_result >= 0);
+            assert_eq!((open.errno, open.f_getfd_errno), (None, None));
+            assert_ne!(open.f_getfd_result & libc::FD_CLOEXEC, 0);
+        };
+
+        let cwd = std::env::current_dir().unwrap();
+        let temp = tempfile::tempdir_in(&cwd).unwrap();
+        let relative = temp.path().strip_prefix(&cwd).unwrap();
+        let temp_name = relative.as_os_str().as_bytes();
+        let root_path = temp.path();
+        let nested = root_path.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(temp.path().join("file"), b"not a directory").unwrap();
+        fs::write(nested.join("file"), b"not a directory").unwrap();
+        std::os::unix::fs::symlink(root_path, temp.path().join("root-link")).unwrap();
+        std::os::unix::fs::symlink(&cwd, nested.join("final-link")).unwrap();
+
+        let successful_prefix = |trace: &[TraceResult], expected: &[&[u8]]| {
+            assert_eq!(trace.len(), expected.len() * 2);
+            let mut prior = libc::AT_FDCWD;
+            let mut first_fd = None;
+            let mut final_fact = None;
+            for (pair, component) in trace.chunks_exact(2).zip(expected) {
+                let [TraceResult::Open(open), TraceResult::Fstat(fstat)] = pair else {
+                    panic!("successful prefix was not open/fstat: {pair:?}");
+                };
+                assert_successful_open(open, prior, component);
+                let observed_fstat = (fstat.fd, fstat.result, fstat.errno);
+                assert_eq!(observed_fstat, (open.result_fd, 0, None));
+                first_fd.get_or_insert(open.result_fd);
+                final_fact = fstat.fact;
+                prior = open.result_fd;
+            }
+            (final_fact.unwrap(), prior, first_fd.unwrap())
+        };
+
+        let reject = |suffix: &str, successful: &[&[u8]], failed: &[u8]| {
+            TRACE.with(|trace| trace.borrow_mut().clear());
+            let error = open_runtime_root(&relative.join(suffix)).unwrap_err();
+            let FsErrorKind::Io(io) = error.kind() else {
+                panic!("hostile path was not an open failure: {error:?}");
+            };
+            assert_eq!(io.operation(), FsOperation::Open);
+            assert_ne!(io.raw_errno(), 0);
+            let trace = TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()));
+            assert_eq!(trace.len(), successful.len() * 2 + 1);
+            let prior = successful_prefix(&trace[..successful.len() * 2], successful).1;
+            let TraceResult::Open(open) = trace.last().unwrap() else {
+                panic!("failed component had a trailing fstat: {trace:?}");
+            };
+            assert_eq!(
+                (open.parent_fd, &*open.component, open.flags),
+                (prior, failed, EXPECTED_OPEN_FLAGS)
+            );
+            assert_eq!(open.result_fd, -1);
+            assert_eq!(open.errno, Some(io.raw_errno()));
+            assert_eq!((open.f_getfd_result, open.f_getfd_errno), (-1, None));
+        };
+        let root_prefix = [b".".as_slice(), temp_name];
+        let nested_prefix = [root_prefix[0], temp_name, b"nested"];
+        reject("missing/leaf", &root_prefix, b"missing");
+        reject("nested/missing", &nested_prefix, b"missing");
+        reject("root-link/nested", &root_prefix, b"root-link");
+        reject("nested/final-link", &nested_prefix, b"final-link");
+        reject("file/leaf", &root_prefix, b"file");
+        reject("nested/file", &nested_prefix, b"file");
+
+        TRACE.with(|trace| trace.borrow_mut().clear());
+        let root = open_runtime_root(relative).unwrap();
+        let trace = TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()));
+        let (final_fact, raw_fd, anchor_fd) = successful_prefix(&trace, &root_prefix);
+        assert_eq!(raw_fd, root.directory.fd.as_raw_fd());
+        assert_ne!(anchor_fd, raw_fd);
+        assert_closed(anchor_fd);
+        let cwd_metadata = fs::metadata(&cwd).unwrap();
+        let original = fs::metadata(root_path).unwrap();
+        let identity = |metadata: &fs::Metadata| DirectoryIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        let retired = root_path.with_extension("retired");
+        fs::rename(root_path, &retired).unwrap();
+        std::os::unix::fs::symlink(&cwd, root_path).unwrap();
+        let pinned = fs::File::from(root.directory.fd.try_clone().unwrap())
+            .metadata()
+            .unwrap();
+        fs::remove_file(root_path).unwrap();
+        fs::rename(&retired, root_path).unwrap();
+        assert_eq!(root.lineage().anchor(), identity(&cwd_metadata));
+        assert_eq!(root.lineage().root(), identity(&original));
+        assert_eq!(root.identity(), identity(&original));
+        assert_eq!(final_fact.identity, identity(&original));
+        assert_eq!(identity(&pinned), identity(&original));
+        assert_ne!(identity(&pinned), identity(&cwd_metadata));
+        drop(root);
+        assert_closed(raw_fd);
+
+        TRACE.with(|trace| trace.borrow_mut().clear());
+        // The "." anchor succeeds before final runtime-directory fstat.
+        FSTAT_FAILURE.with(|failure| failure.set(Some((1, libc::EIO))));
+        let error = open_runtime_root(relative).unwrap_err();
+        let FsErrorKind::Io(io) = error.kind() else {
+            panic!("injected fstat was not an I/O failure: {error:?}");
+        };
+        let observed_failure = (io.operation(), io.raw_errno());
+        assert_eq!(observed_failure, (FsOperation::Fstat, libc::EIO));
+        let trace = TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()));
+        assert_eq!(trace.len(), 4);
+        let prior = successful_prefix(&trace[..2], &root_prefix[..1]).1;
+        let [TraceResult::Open(open), TraceResult::Fstat(fstat)] = &trace[2..] else {
+            panic!("final injected trace was not open/fstat: {trace:?}");
+        };
+        assert_successful_open(open, prior, temp_name);
+        assert_eq!((fstat.fd, fstat.result), (open.result_fd, -1));
+        assert_eq!((fstat.errno, fstat.fact), (Some(libc::EIO), None));
+        assert_closed(open.result_fd);
+        assert_closed(prior);
     }
 }
