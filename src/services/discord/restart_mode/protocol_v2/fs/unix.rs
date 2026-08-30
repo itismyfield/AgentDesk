@@ -426,4 +426,13 @@ mod high_risk_recovery {
         assert_closed(open.result_fd);
         assert_closed(prior);
     }
+
+    fn directory_mutation_semantic_stub() -> bool {
+        false
+    }
+
+    #[test]
+    fn directory_mutation_records_sync_facts_and_owned_fds_outlive_parents() {
+        assert!(directory_mutation_semantic_stub());
+    }
 }
