@@ -6,14 +6,23 @@ primitives that close the presence-only blind spot of the legacy contract.
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 import datetime as dt
+from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts" / "e2e"))
 
+import run_tui_relay as driver  # noqa: E402
+import run_multi_provider_matrix as matrix  # noqa: E402
 from tui_relay import assertions  # noqa: E402
 
 
@@ -852,6 +861,107 @@ class RunAssertionDispatch(unittest.TestCase):
                     message = str(error)
                     self.assertNotIn("unknown assertion", message, f"{path}: {spec}")
                     self.assertNotIn("bad assertion spec", message, f"{path}: {spec}")
+
+
+class ScenarioFilterFailClosed(unittest.TestCase):
+    def test_direct_main_rejects_invalid_filters_before_side_effects(self):
+        for raw in ("E-999", "E-1,E-999", "E-1-extra", " , "):
+            with self.subTest(raw=raw):
+                args = Namespace(
+                    base_url="http://agentdesk.test", cell="claude-tui", channel_id="222",
+                    thread_channel_id=None, scenarios=str(ROOT / "tests/e2e/tui_relay/scenarios"),
+                    filter=raw, output="/unused/direct-filter-output", dry_run=False,
+                    allow_destructive=False, reset_before_each=True,
+                    queue_runtime_root="/unused/runtime", hard_reset_session_each=False,
+                    handoff_to_agent=None, handoff_from_agent="e2e-orchestrator",
+                    restart_script=None, restart_target_override=None,
+                    turn_start_timeout_s=1, phase_deadline_s=None,
+                    required_agent_mode=None, required_coverage_class=None,
+                    final_refetches=0, final_refetch_interval_s=0,
+                )
+                stderr = io.StringIO()
+                with (
+                    patch.object(driver, "parse_args", return_value=args),
+                    patch("pathlib.Path.mkdir") as mkdir,
+                    patch("pathlib.Path.write_text") as report,
+                    patch.object(driver.discord, "DiscordClient") as client,
+                    patch.object(driver.subprocess, "run") as child,
+                    patch.object(driver.lease, "acquire") as acquire,
+                    patch.object(driver, "run_scenario", return_value={"id": "E-1", "status": "pass"}) as run,
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    rc = driver.main()
+                self.assertEqual(rc, 2)
+                self.assertRegex(stderr.getvalue(), r"invalid --filter: (unknown|--filter)")
+                for side_effect in (mkdir, report, client, child, acquire, run):
+                    side_effect.assert_not_called()
+
+    def test_matrix_main_rejects_invalid_filters_before_side_effects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for raw in ("E-999", "E-1,E-999", "E-1-extra", " , "):
+                with self.subTest(raw=raw):
+                    args = Namespace(
+                        base_url="http://agentdesk.test", config="/unused/config.yaml",
+                        scenarios=str(ROOT / "tests/e2e/tui_relay/scenarios"),
+                        cells="claude-tui", filter=raw, output=str(Path(tmp) / "sentinel"),
+                        twice=False, dry_run=True, allow_destructive=False,
+                        reset_before_each=True, queue_runtime_root="/unused/runtime",
+                        hard_reset_session_each=False, turn_start_timeout_s=1,
+                        required_agent_mode=None, required_coverage_class=None,
+                        final_refetches=0, final_refetch_interval_s=0,
+                    )
+                    stderr = io.StringIO()
+                    with (
+                        patch.object(matrix, "parse_args", return_value=args),
+                        patch.object(matrix, "load_channel_ids", return_value={"claude-tui": "222"}) as config,
+                        patch.object(matrix, "load_cross_channel_scenarios", return_value=[]) as cross,
+                        patch.object(matrix, "load_restart_guard_scenarios", return_value=[]) as restart,
+                        patch("pathlib.Path.mkdir") as mkdir,
+                        patch("pathlib.Path.write_text") as report,
+                        patch.object(matrix.cell_driver.discord, "DiscordClient") as client,
+                        patch.object(matrix.subprocess, "run", return_value=Namespace(returncode=0)) as child,
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        rc = matrix.main()
+                    self.assertEqual(rc, 2)
+                    self.assertRegex(stderr.getvalue(), r"invalid --filter: (unknown|--filter)")
+                    for side_effect in (config, cross, restart, mkdir, report, client, child):
+                        side_effect.assert_not_called()
+
+    def test_real_matrix_cli_uses_last_filter_and_global_orchestrator_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "agentdesk.yaml"
+            agents = (("claude-pipe", "claude", "111"), ("claude-tui", "claude", "222"),
+                      ("claude-e", "claude", "333"), ("codex-pipe", "codex", "444"),
+                      ("codex-tui", "codex", "555"))
+            config.write_text("agents:\n" + "".join(
+                f"  - {{id: adk-{cell}-e2e, channels: {{{provider}: {{id: '{channel}'}}}}}}\n"
+                for cell, provider, channel in agents
+            ), encoding="utf-8")
+            output = root / "matrix"
+            proc = subprocess.run(
+                ["env", "AGENTDESK_E2E_ALLOW_DESTRUCTIVE=1", sys.executable, str(ROOT / "scripts/e2e/run_multi_provider_matrix.py"),
+                 "--config", str(config), "--scenarios", str(ROOT / "tests/e2e/tui_relay/scenarios"),
+                 "--output", str(output), "--dry-run", "--allow-destructive", "--cells", "claude-tui,codex-tui",
+                 "--filter", "E-999", "--filter", " E-17, E-17, "],
+                cwd=ROOT, check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            report = json.loads((output / "matrix.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["cells"], ["claude-tui", "codex-tui"])
+        self.assertEqual(report["cross_channel_scenarios"], [])
+        self.assertEqual(report["restart_guard_scenarios"], ["E-17"])
+        self.assertEqual(len(report["results"]), 3)
+        cells = [row for row in report["results"] if row["kind"] == "cell"]
+        self.assertEqual([(row["cell"], row["provider_identity"]["cell"]) for row in cells],
+                         [("claude-tui", "claude-tui"), ("codex-tui", "codex-tui")])
+        for row in cells:
+            self.assertTrue(row["ok"])
+            self.assertEqual(row["totals"], {"pass": 0, "fail": 0, "skipped": 0})
+        restart = [row for row in report["results"] if row["kind"] == "foreign_active_restart_guard"]
+        self.assertEqual([(row["id"], row["status"], row["ok"]) for row in restart],
+                         [("E-17", "pass", True)])
 
 
 if __name__ == "__main__":
