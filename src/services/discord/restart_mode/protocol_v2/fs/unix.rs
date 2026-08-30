@@ -448,6 +448,12 @@ mod high_risk_recovery {
                 FsErrorKind::InvalidComponent(fact)
             );
         }
+        for expected in ["AZaz09_-", "..."] {
+            let candidate = session.prepare_child(&parent, expected).unwrap();
+            assert!(matches!(&candidate.1,
+                DirectoryLocator::Child { component, .. }
+                    if component.as_bytes() == expected.as_bytes()));
+        }
         let prepared = session.prepare_child(&parent, "a..b").unwrap();
         assert_eq!(super::super::take_preflight_activity(), 3);
         assert_eq!(prepared.0.fd.as_raw_fd(), keep);
