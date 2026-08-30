@@ -4,6 +4,8 @@
 //! open, lock, mutate, rotate, or clean artifacts. Its registry coordinates
 //! only this process; it makes no host, node, or fleet claim.
 
+mod authority;
+
 use crate::services::provider::ProviderKind;
 use std::{
     collections::HashSet,
