@@ -42,7 +42,8 @@ pub(crate) use dispatch_context::{
 };
 #[allow(unused_imports)]
 pub(crate) use dispatch_create::{
-    apply_dispatch_attached_intents_on_pg_tx, dispatch_required_capabilities_from_routing,
+    apply_dispatch_attached_intents_on_pg_tx, dispatch_context_requests_sidecar,
+    dispatch_required_capabilities_from_routing,
 };
 #[allow(unused_imports)]
 pub use dispatch_create::{

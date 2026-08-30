@@ -175,14 +175,7 @@ pub async fn create_dispatch(
     }
     let options = crate::dispatch::DispatchCreateOptions {
         skip_outbox: body.skip_outbox.unwrap_or(false),
-        sidecar_dispatch: context
-            .get("sidecar_dispatch")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false)
-            || context
-                .get("phase_gate")
-                .and_then(|value| value.as_object())
-                .is_some(),
+        sidecar_dispatch: crate::dispatch::dispatch_context_requests_sidecar(&context),
     };
 
     let result = crate::dispatch::create_dispatch_core_with_options(

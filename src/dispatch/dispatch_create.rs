@@ -19,7 +19,7 @@ use super::dispatch_context::{
 use super::dispatch_query::query_dispatch_row_pg;
 use super::{DispatchCreateOptions, cancel_dispatch_and_reset_auto_queue_on_pg_tx};
 
-fn dispatch_context_requests_sidecar(context: &serde_json::Value) -> bool {
+pub(crate) fn dispatch_context_requests_sidecar(context: &serde_json::Value) -> bool {
     context
         .get("sidecar_dispatch")
         .and_then(|value| value.as_bool())
