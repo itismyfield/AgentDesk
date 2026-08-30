@@ -47,7 +47,9 @@
 #     swapped hard days ago still reports a huge total while sitting idle now.
 #     Two samples of the `vm_stat` / `memory_pressure` swapouts counter,
 #     LANE_HEADROOM_SWAP_SAMPLE_SECONDS apart, answer the actual question —
-#     is the machine swapping RIGHT NOW.
+#     is the machine swapping RIGHT NOW. The requested interval is the rate
+#     denominator: scheduler delay is reported but never allowed to dilute the
+#     rate and turn a conservative NO into OK.
 #   • `pgrep -x cargo|rustc` is reported as context, NOT as a gate. Builders are
 #     the workload lanes exist to run; their CPU/RAM cost is already visible in
 #     the four gated metrics, and gating on their presence would refuse every
@@ -101,11 +103,12 @@ MIN_MEM_FREE_PCT="${LANE_HEADROOM_MIN_MEM_FREE_PCT:-25}"
 MAX_MEM_PRESSURE_LEVEL="${LANE_HEADROOM_MAX_MEM_PRESSURE_LEVEL:-1}"
 MAX_SWAPOUT_RATE="${LANE_HEADROOM_MAX_SWAPOUT_RATE:-10}"
 MIN_DISK_FREE_GB="${LANE_HEADROOM_MIN_DISK_FREE_GB:-50}"
-SWAP_SAMPLE_SECONDS="${LANE_HEADROOM_SWAP_SAMPLE_SECONDS:-10}"
+SWAP_SAMPLE_SECONDS="${LANE_HEADROOM_SWAP_SAMPLE_SECONDS-10}"
 DISK_PATH="${LANE_HEADROOM_DISK_PATH:-$REPO_ROOT}"
 
-case "$SWAP_SAMPLE_SECONDS" in ''|*[!0-9]*) SWAP_SAMPLE_SECONDS=10 ;; esac
+case "$SWAP_SAMPLE_SECONDS" in ''|*[!0-9]*) swap_interval_valid=0 ;; *) swap_interval_valid=1 ;; esac
 
+is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 is_num() {
   # True only for a bare non-empty decimal number (no sign, no exponent).
   case "${1:-}" in
@@ -248,31 +251,54 @@ else
   details+=("$(printf '  %-13s %s' 'mem-pressure' "${mem_level} (need <= ${MAX_MEM_PRESSURE_LEVEL}; 1=normal 2=warn 4=critical)")")
 fi
 
-# (4) Swapout RATE over LANE_HEADROOM_SWAP_SAMPLE_SECONDS (not the lifetime counter)
-swap_before="$(probe_swapouts_counter)"
-swap_t0="$(date +%s)"
-if [ "$SWAP_SAMPLE_SECONDS" -gt 0 ]; then
-  sleep "$SWAP_SAMPLE_SECONDS"
-fi
-swap_after="$(probe_swapouts_counter)"
-swap_t1="$(date +%s)"
-swap_elapsed=$((swap_t1 - swap_t0))
-[ "$swap_elapsed" -lt 1 ] && swap_elapsed=1
-swap_window="${swap_elapsed}s"
-[ "$SWAP_SAMPLE_SECONDS" -eq 0 ] && swap_window="back-to-back"
-
-if ! is_num "$swap_before" || ! is_num "$swap_after"; then
+# (4) Swapout RATE over the requested policy window (not the lifetime counter).
+swap_timing_ok=1
+if [ "$swap_interval_valid" -eq 0 ]; then
   reasons+=("swapout-rate=unreadable")
-  details+=("$(printf '  %-13s %s' 'swapout-rate' "unreadable (vm_stat/memory_pressure failed or gave no swapouts counter) — need <= ${MAX_SWAPOUT_RATE} pages/s")")
+  details+=("$(printf '  %-13s %s' 'swapout-rate' "unreadable (invalid swap sample interval) — need <= ${MAX_SWAPOUT_RATE} pages/s")")
 else
-  # A counter that went backwards means a reset (reboot), not negative swapping.
-  swap_rate="$(awk -v a="$swap_before" -v b="$swap_after" -v e="$swap_elapsed" \
-    'BEGIN { d = (b + 0) - (a + 0); if (d < 0) d = 0; printf "%.1f", d / e }')"
-  if num_gt "$swap_rate" "$MAX_SWAPOUT_RATE"; then
-    reasons+=("swapout-rate=${swap_rate}/s(max=${MAX_SWAPOUT_RATE}/s)")
-    details+=("$(printf '  %-13s %s' 'swapout-rate' "${swap_rate} pages/s over ${swap_window} — ABOVE the ${MAX_SWAPOUT_RATE} pages/s near-zero ceiling (counter ${swap_before} -> ${swap_after})")")
+  swap_before="$(probe_swapouts_counter)"
+  swap_denominator=1
+  if num_gt "$SWAP_SAMPLE_SECONDS" 0; then
+    swap_t0="$(probe_run date +%s)" || swap_timing_ok=0
+    if [ "$swap_timing_ok" -eq 1 ] && ! is_uint "$swap_t0"; then swap_timing_ok=0; fi
+    if [ "$swap_timing_ok" -eq 1 ] && ! probe_run sleep "$SWAP_SAMPLE_SECONDS" >/dev/null; then swap_timing_ok=0; fi
+    if [ "$swap_timing_ok" -eq 1 ]; then
+      swap_after="$(probe_swapouts_counter)"
+      swap_t1="$(probe_run date +%s)" || swap_timing_ok=0
+    fi
+    if [ "$swap_timing_ok" -eq 1 ] && is_uint "$swap_t1"; then
+      swap_elapsed="$(awk -v a="$swap_t0" -v b="$swap_t1" 'BEGIN { printf "%.0f", (b + 0) - (a + 0) }')"
+      num_lt "$swap_elapsed" "$SWAP_SAMPLE_SECONDS" && swap_timing_ok=0
+      swap_denominator="$SWAP_SAMPLE_SECONDS"
+    else
+      swap_timing_ok=0
+    fi
   else
-    details+=("$(printf '  %-13s %s' 'swapout-rate' "${swap_rate} pages/s over ${swap_window} (need <= ${MAX_SWAPOUT_RATE}) [counter ${swap_before} -> ${swap_after}]")")
+    swap_after="$(probe_swapouts_counter)"
+  fi
+  if [ "$swap_timing_ok" -eq 0 ]; then
+    reasons+=("swapout-rate=unreadable")
+    details+=("$(printf '  %-13s %s' 'swapout-rate' "unreadable (swap sample timing failed) — need <= ${MAX_SWAPOUT_RATE} pages/s")")
+  elif ! is_uint "$swap_before" || ! is_uint "$swap_after"; then
+    reasons+=("swapout-rate=unreadable")
+    details+=("$(printf '  %-13s %s' 'swapout-rate' "unreadable (vm_stat/memory_pressure failed or gave no swapouts counter) — need <= ${MAX_SWAPOUT_RATE} pages/s")")
+  elif num_lt "$swap_after" "$swap_before"; then
+    reasons+=("swapout-rate=unreadable")
+    details+=("$(printf '  %-13s %s' 'swapout-rate' "unreadable (swapouts counter reset: ${swap_before} -> ${swap_after}) — need <= ${MAX_SWAPOUT_RATE} pages/s")")
+  else
+    swap_rate="$(awk -v a="$swap_before" -v b="$swap_after" -v e="$swap_denominator" 'BEGIN { printf "%.1f", ((b + 0) - (a + 0)) / e }')"
+    swap_window="back-to-back"
+    if num_gt "$SWAP_SAMPLE_SECONDS" 0; then
+      swap_window="${SWAP_SAMPLE_SECONDS}s policy window"
+      [ "$swap_elapsed" = "$SWAP_SAMPLE_SECONDS" ] || swap_window+=" (observed ${swap_elapsed}s)"
+    fi
+    if awk -v a="$swap_before" -v b="$swap_after" -v m="$MAX_SWAPOUT_RATE" -v e="$swap_denominator" 'BEGIN { exit !(((b + 0) - (a + 0)) > (m + 0) * e) }'; then
+      reasons+=("swapout-rate=${swap_rate}/s(max=${MAX_SWAPOUT_RATE}/s)")
+      details+=("$(printf '  %-13s %s' 'swapout-rate' "${swap_rate} pages/s over ${swap_window} — ABOVE the ${MAX_SWAPOUT_RATE} pages/s near-zero ceiling (counter ${swap_before} -> ${swap_after})")")
+    else
+      details+=("$(printf '  %-13s %s' 'swapout-rate' "${swap_rate} pages/s over ${swap_window} (need <= ${MAX_SWAPOUT_RATE}) [counter ${swap_before} -> ${swap_after}]")")
+    fi
   fi
 fi
 

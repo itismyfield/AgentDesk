@@ -200,14 +200,14 @@ run_headroom() {
   # run_headroom [VAR=VAL ...] — every override is a stub knob or a
   # LANE_HEADROOM_* threshold. Captures OUT / RC / LINE1. Set HEADROOM_PATH to
   # run against a PATH other than the full stub set (see section 8).
-  local -a sample_env=()
+  local sample_env="STUB_SAMPLE_INTERVAL_UNSET=1"
   rm -f "$STATE_DIR"/*
   if [ "${SWAP_SAMPLE_SECONDS:-0}" != "__UNSET__" ]; then
-    sample_env=("LANE_HEADROOM_SWAP_SAMPLE_SECONDS=${SWAP_SAMPLE_SECONDS:-0}")
+    sample_env="LANE_HEADROOM_SWAP_SAMPLE_SECONDS=${SWAP_SAMPLE_SECONDS:-0}"
   fi
   OUT="$(env "PATH=${HEADROOM_PATH:-$CLOCK_BIN:$PROBE_BIN:$SYSBIN}" \
     "STUB_STATE_DIR=$STATE_DIR" \
-    "${sample_env[@]}" \
+    "$sample_env" \
     "$@" bash "$LANE_HEADROOM" 2>&1)"
   RC=$?
   LINE1="$(printf '%s\n' "$OUT" | head -1)"
@@ -329,11 +329,9 @@ SWAP_SAMPLE_SECONDS=1 run_headroom STUB_CLOCK_T0=100 STUB_CLOCK_T1=102 STUB_SWAP
 assert_contains "requested 1s, observed 2s still rejects delta 11" "swapout-rate=11.0/s(max=10/s)" "$LINE1"
 assert_contains "policy and delayed observation are both reported" "over 1s policy window (observed 2s)" "$OUT"
 assert_eq "sleeper receives the requested 1s exactly" "1" "$(cat "$STATE_DIR/sleep_args" 2>/dev/null)"
-
 SWAP_SAMPLE_SECONDS=__UNSET__ run_headroom STUB_CLOCK_T0=100 STUB_CLOCK_T1=110
 assert_contains "unset interval retains default 10s policy" "over 10s policy window" "$OUT"
 assert_eq "default sleeper receives 10s" "10" "$(cat "$STATE_DIR/sleep_args" 2>/dev/null)"
-
 for invalid in '' -1 +1 1.5 nope; do
   SWAP_SAMPLE_SECONDS=0 run_headroom "LANE_HEADROOM_SWAP_SAMPLE_SECONDS=$invalid"
   assert_contains "invalid interval '$invalid' fails closed" "swapout-rate=unreadable" "$LINE1"
@@ -341,7 +339,6 @@ for invalid in '' -1 +1 1.5 nope; do
   assert_eq "invalid interval '$invalid' invokes no sampling command" "0" \
     "$(if [ -e "$STATE_DIR/vm_stat_calls" ] || [ -e "$STATE_DIR/date_calls" ] || [ -e "$STATE_DIR/sleep_args" ]; then echo 1; else echo 0; fi)"
 done
-
 SWAP_SAMPLE_SECONDS=1 run_headroom STUB_CLOCK_T0=101 STUB_CLOCK_T1=100
 assert_contains "backward clock fails closed" "swapout-rate=unreadable" "$LINE1"
 assert_contains "backward clock is a timing failure" "swap sample timing failed" "$OUT"
@@ -355,7 +352,6 @@ assert_contains "non-uint timestamp fails closed" "swap sample timing failed" "$
 SWAP_SAMPLE_SECONDS=1 run_headroom STUB_SLEEP_RC=1
 assert_eq "noisy sleep failure preserves verdict on line 1" "HEADROOM: NO swapout-rate=unreadable" "$LINE1"
 assert_not_contains "failed sleep output is contained" "noisy sleep" "$OUT"
-
 SWAP_SAMPLE_SECONDS=1 run_headroom STUB_CLOCK_T0=100 STUB_CLOCK_T1=101 STUB_SWAPOUTS_STEP=-1
 assert_contains "counter rollback is unreadable" "swapout-rate=unreadable" "$LINE1"
 assert_contains "counter reset detail carries both readings" "swapouts counter reset:" "$OUT"
