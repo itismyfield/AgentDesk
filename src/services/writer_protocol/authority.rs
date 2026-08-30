@@ -331,6 +331,21 @@ mod tests {
         )
     }
 
+    fn session_boundary_key(session: u64, coverage: ConflictCoverage) -> AuthorityKey {
+        AuthorityKey::new(
+            RuntimeNamespaceId::from_catalog(1),
+            ConflictDomain::try_new(
+                [
+                    ConflictSegment::RuntimeSessions,
+                    ConflictSegment::Session(SessionKey::new(session)),
+                ],
+                coverage,
+            )
+            .unwrap(),
+            AliasGroupId::from_catalog(90),
+        )
+    }
+
     fn request(
         set_id: u64,
         provider: ProviderDomain,
@@ -398,6 +413,67 @@ mod tests {
     }
 
     #[test]
+    fn exact_parent_does_not_overlap_descendant() {
+        let exact_parent = session_boundary_key(7, ConflictCoverage::Exact);
+        let descendant = key(7, ArtifactSlot::Prompt, ConflictCoverage::Exact);
+
+        assert!(!overlaps(&exact_parent, &descendant));
+        assert!(!overlaps(&descendant, &exact_parent));
+    }
+
+    #[test]
+    fn subtree_session_does_not_overlap_sibling_session() {
+        let session_seven = session_boundary_key(7, ConflictCoverage::Subtree);
+        let session_eight = key(8, ArtifactSlot::Prompt, ConflictCoverage::Exact);
+
+        assert!(!overlaps(&session_seven, &session_eight));
+        assert!(!overlaps(&session_eight, &session_seven));
+    }
+
+    #[test]
+    fn canonical_v1_digests_and_request_order_ignore_provider_and_permutation() {
+        let relay = key(7, ArtifactSlot::RelayJsonl, ConflictCoverage::Exact);
+        let prompt = key(7, ArtifactSlot::Prompt, ConflictCoverage::Exact);
+        let forward = request(
+            1,
+            ProviderDomain::Claude,
+            1,
+            [relay.clone(), prompt.clone()],
+        );
+        let reverse = request(2, ProviderDomain::Codex, 2, [prompt, relay]);
+        let forward_bytes = forward
+            .keys
+            .iter()
+            .map(AuthorityKey::canonical_bytes_v1)
+            .collect::<Vec<_>>();
+        let reverse_bytes = reverse
+            .keys
+            .iter()
+            .map(AuthorityKey::canonical_bytes_v1)
+            .collect::<Vec<_>>();
+
+        assert_eq!(forward_bytes, reverse_bytes);
+        assert!(forward_bytes.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            forward_bytes
+                .iter()
+                .all(|encoded| encoded.starts_with(b"agentdesk.writer-authority-key.v1\0"))
+        );
+        assert_eq!(
+            forward
+                .keys
+                .iter()
+                .map(AuthorityKey::canonical_digest_v1)
+                .collect::<Vec<_>>(),
+            reverse
+                .keys
+                .iter()
+                .map(AuthorityKey::canonical_digest_v1)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn failed_multi_key_acquisition_rolls_back_atomically() {
         let registry = AuthoritySetRegistry::new();
         let available = key(7, ArtifactSlot::Prompt, ConflictCoverage::Exact);
@@ -425,11 +501,25 @@ mod tests {
     }
 
     #[test]
-    fn stale_release_cannot_clear_successor() {
+    fn stale_release_does_not_clear_reused_set_id_with_new_holder() {
+        assert_stale_release_does_not_clear_successor(1, 1, 1, 2);
+    }
+
+    #[test]
+    fn stale_release_does_not_clear_reused_holder_with_new_set_id() {
+        assert_stale_release_does_not_clear_successor(1, 1, 2, 1);
+    }
+
+    fn assert_stale_release_does_not_clear_successor(
+        stale_set_id: u64,
+        stale_holder_id: u64,
+        successor_set_id: u64,
+        successor_holder_id: u64,
+    ) {
         let registry = AuthoritySetRegistry::new();
         let contested = key(7, ArtifactSlot::RelayJsonl, ConflictCoverage::Exact);
-        let stale_set = AuthoritySetId::new(1);
-        let stale_holder = HolderInstance::new(1);
+        let stale_set = AuthoritySetId::new(stale_set_id);
+        let stale_holder = HolderInstance::new(stale_holder_id);
         drop(
             registry
                 .acquire(request(
@@ -441,7 +531,12 @@ mod tests {
                 .unwrap(),
         );
         let _successor = registry
-            .acquire(request(2, ProviderDomain::Codex, 2, [contested.clone()]))
+            .acquire(request(
+                successor_set_id,
+                ProviderDomain::Codex,
+                successor_holder_id,
+                [contested.clone()],
+            ))
             .unwrap();
 
         registry.release(stale_set, stale_holder);
