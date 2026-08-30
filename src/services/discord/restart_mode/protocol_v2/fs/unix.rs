@@ -313,12 +313,12 @@ mod high_risk_recovery {
         // SAFETY: getppid has no preconditions.
         let parent_pid = unsafe { libc::getppid() }.to_string();
         if std::env::var(ISOLATED_ENV).ok().as_deref() != Some(parent_pid.as_str()) {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([TEST_NAME, "--test-threads=1"])
                 .env(ISOLATED_ENV, std::process::id().to_string())
-                .status()
+                .output()
                 .unwrap();
-            assert!(status.success());
+            assert!(output.status.success());
             return;
         }
         let assert_closed = |fd| {
