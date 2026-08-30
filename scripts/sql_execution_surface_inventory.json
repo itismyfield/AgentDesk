@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "59c50750f235a0f6f791b59f48b815066003efe3",
+  "measured_at_sha": "c1f5e52948e8e27a9c9c50963fe967f4f2c022e9",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1801,15 +1801,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:ade695a46077058bd6bf06b61e55da1cc4db30566f21bedb3bc2ecf481e1fe3d"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/merge-automation.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:c7c83e18a47df0a1cf0c2291dbb8d91713244206709c0fbd645837163251e30e"
     },
     {
       "root": "policies",
