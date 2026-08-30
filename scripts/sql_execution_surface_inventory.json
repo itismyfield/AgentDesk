@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "59c50750f235a0f6f791b59f48b815066003efe3",
+  "measured_at_sha": "183d3f7c906b67c417ccb753c62937cc91108f0c",
   "records": [
     {
       "root": "migrations/postgres",
@@ -15525,6 +15525,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:30ca4b036a7fa18018450bdad1addbe319198bbb659d6370e469996d30834877"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/reconcile.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:312d762c98b8e003bc6a441bc45f230a5c6381e9afbceb51703edca83599b118"
     },
     {
@@ -15571,15 +15580,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:4ac22934c14f9529ce23cc402692881f5df22706ea3c91d658b43b21041836d7"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/reconcile.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:6aed5a97970731e4280ed7e7ac852eaaec84e9e44c13dea65576f9da124a9a97"
     },
     {
       "root": "src",

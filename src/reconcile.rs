@@ -1170,18 +1170,7 @@ async fn auto_queue_pending_delivery_orphan_candidates_pg(
     pool: &PgPool,
 ) -> Result<Vec<AutoQueuePendingDeliveryOrphanCandidate>> {
     let rows = sqlx::query(
-        "WITH latest_notify AS (
-            SELECT DISTINCT ON (dispatch_id)
-                   id,
-                   dispatch_id,
-                   status,
-                   claimed_at,
-                   claim_owner
-              FROM dispatch_outbox
-             WHERE action = 'notify'
-             ORDER BY dispatch_id, id DESC
-         )
-         SELECT td.id AS dispatch_id,
+        "SELECT td.id AS dispatch_id,
                 e.id AS entry_id,
                 e.run_id AS run_id,
                 o.status AS outbox_status
@@ -1192,8 +1181,14 @@ async fn auto_queue_pending_delivery_orphan_candidates_pg(
            JOIN auto_queue_runs r
              ON r.id = e.run_id
             AND r.status = 'active'
-           LEFT JOIN latest_notify o
-             ON o.dispatch_id = td.id
+           LEFT JOIN LATERAL (
+               SELECT id, status, claimed_at, claim_owner
+                 FROM dispatch_outbox
+                WHERE dispatch_id = td.id
+                  AND action = 'notify'
+                ORDER BY id DESC
+                LIMIT 1
+           ) o ON true
           WHERE td.status = 'pending'
             AND (COALESCE(NULLIF(td.context, ''), '{}')::jsonb)->>'auto_queue' = 'true'
             AND COALESCE(e.dispatched_at, td.created_at, NOW())
