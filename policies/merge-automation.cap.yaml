@@ -28,8 +28,8 @@ db:
     markers_required: false
     rationale: broad legacy merge automation DB access pinned by no-silent-growth baseline
     no_silent_growth:
-      callsites: 21
-      fingerprint: sha256:97bc5a54a0815356381d47ed38420291977b41679f59534ed60463f4768bd73c
+      callsites: 20
+      fingerprint: sha256:26c0318b67918f064dda66b922cf18450ce30175b24313d21c8fdf9a12ad1aa9
 exec:
   allow:
     - gh

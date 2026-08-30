@@ -298,13 +298,7 @@ function resolveTrackedMergeStrategyMode(cardId) {
 }
 
 function loadCardContext(cardId) {
-  var cards = agentdesk.db.query(
-    "SELECT id, status, assigned_agent_id, title, github_issue_number, active_thread_id, repo_id " +
-    ", github_issue_url " +
-    "FROM kanban_cards WHERE id = ?",
-    [cardId]
-  );
-  return cards.length > 0 ? cards[0] : null;
+  return agentdesk.cards.get(cardId);
 }
 
 function loadTrackedPrForCard(cardId) {

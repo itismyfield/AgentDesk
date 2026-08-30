@@ -431,19 +431,21 @@ test("onTick5min reads Codex snapshots from kv_meta and bounds slow gh refresh w
     },
     dbQuery(sql, params) {
       events.push({ type: "query", sql, params: params.slice() });
-      if (sql.includes("FROM kanban_cards WHERE id = ?")) {
-        return [{
-          id: params[0],
-          status: "review",
-          assigned_agent_id: "TD",
-          title: params[0],
-          repo_id: "itismyfield/AgentDesk"
-        }];
-      }
       if (sql.includes("key LIKE 'merge_request:%'")) return [];
       throw new Error(`unexpected query: ${sql} :: ${JSON.stringify(params)}`);
     },
     extraAgentdesk: {
+      cards: {
+        get(cardId) {
+          return {
+            id: cardId,
+            status: "review",
+            assigned_agent_id: "TD",
+            title: cardId,
+            repo_id: "itismyfield/AgentDesk"
+          };
+        }
+      },
       kv: {
         get(key) {
           events.push({ type: "kv-get", key });
@@ -565,6 +567,17 @@ test("enableAutoMerge cache miss fetches live Codex state and fails closed when 
       throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
     },
     extraAgentdesk: {
+      cards: {
+        get(cardId) {
+          return {
+            id: cardId,
+            status: "review",
+            assigned_agent_id: "TD",
+            title: cardId,
+            repo_id: "itismyfield/AgentDesk"
+          };
+        }
+      },
       prTracking: {
         load() { return tracking; },
         upsert() { throw new Error("live review failure should defer without escalation"); },
@@ -646,6 +659,17 @@ test("enableAutoMerge live blocking snapshot prevents merge and is cached by cur
       throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
     },
     extraAgentdesk: {
+      cards: {
+        get(cardId) {
+          return {
+            id: cardId,
+            status: "review",
+            assigned_agent_id: "TD",
+            title: cardId,
+            repo_id: "itismyfield/AgentDesk"
+          };
+        }
+      },
       prTracking: {
         load() { return tracking; },
         upsert() { return tracking; },
@@ -700,6 +724,17 @@ test("enableAutoMerge treats a readiness timeout as retryable without escalation
       throw new Error(`retryable readiness timeout must stop before: ${JSON.stringify(args)}`);
     },
     extraAgentdesk: {
+      cards: {
+        get(cardId) {
+          return {
+            id: cardId,
+            status: "review",
+            assigned_agent_id: "TD",
+            title: cardId,
+            repo_id: "itismyfield/AgentDesk"
+          };
+        }
+      },
       prTracking: {
         load() { return tracking; },
         upsert(...args) { upserts.push(args); },
