@@ -45,7 +45,6 @@ impl RootLineage {
 #[derive(Debug)]
 pub(super) struct ConfinedRuntimeRoot {
     lineage: RootLineage,
-    seal: Arc<LineageSeal>,
     directory: ConfinedDir,
 }
 
@@ -63,11 +62,7 @@ impl ConfinedRuntimeRoot {
     }
 
     fn mutation_session(&mut self) -> MutationSession<'_> {
-        MutationSession {
-            root: self,
-            #[cfg(test)]
-            unsupported: false,
-        }
+        MutationSession(self)
     }
 }
 
@@ -94,16 +89,9 @@ enum DirectoryLocator {
 }
 
 #[derive(Debug)]
-struct PreparedChild {
-    parent: ConfinedDir,
-    locator: DirectoryLocator,
-}
+struct PreparedChild(ConfinedDir, DirectoryLocator);
 
-struct MutationSession<'root> {
-    root: &'root mut ConfinedRuntimeRoot,
-    #[cfg(test)]
-    unsupported: bool,
-}
+struct MutationSession<'root>(&'root mut ConfinedRuntimeRoot);
 
 impl MutationSession<'_> {
     fn prepare_child(
@@ -111,44 +99,60 @@ impl MutationSession<'_> {
         parent: &ConfinedDir,
         value: &str,
     ) -> Result<PreparedChild, FsError> {
-        if !platform::MUTATION_SUPPORTED {
-            return Err(FsError::unsupported());
-        }
-        #[cfg(test)]
-        if self.unsupported {
-            return Err(FsError::unsupported());
-        }
-        if !Arc::ptr_eq(&parent.seal, &self.root.seal) {
-            return Err(FsError::cross_lineage());
-        }
-        let component = validate_component(value)?;
-        Ok(PreparedChild {
-            parent: parent.clone(),
-            locator: DirectoryLocator::Child {
-                parent: parent.open.identity,
-                component,
-            },
-        })
+        let locator = prepare_locator(
+            platform::MUTATION_SUPPORTED,
+            &self.0.directory.seal,
+            (&parent.seal, parent.open.identity),
+            value,
+        )?;
+        Ok(PreparedChild(parent.clone(), locator))
     }
 }
 
+fn prepare_locator(
+    supported: bool,
+    root: &Arc<LineageSeal>,
+    parent: (&Arc<LineageSeal>, DirectoryIdentity),
+    value: &str,
+) -> Result<DirectoryLocator, FsError> {
+    if !supported {
+        return Err(FsError::unsupported());
+    }
+    if !Arc::ptr_eq(root, parent.0) {
+        return Err(FsError::cross_lineage());
+    }
+    Ok(DirectoryLocator::Child {
+        parent: parent.1,
+        component: validate_component(value)?,
+    })
+}
+
 fn validate_component(value: &str) -> Result<CString, FsError> {
-    let invalid = match value {
-        "" => Some(InvalidComponentFact::Empty),
-        "." => Some(InvalidComponentFact::Current),
-        ".." => Some(InvalidComponentFact::Parent),
+    #[cfg(test)]
+    PREFLIGHT_ACTIVITY.with(|activity| activity.set(activity.get() | 1));
+    let fact = match value {
+        "" => InvalidComponentFact::Empty,
+        "." => InvalidComponentFact::Current,
+        ".." => InvalidComponentFact::Parent,
         _ if value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte)) =>
         {
-            None
+            #[cfg(test)]
+            PREFLIGHT_ACTIVITY.with(|activity| activity.set(activity.get() | 2));
+            return Ok(CString::new(value).expect("validated component"));
         }
-        _ => Some(InvalidComponentFact::Character),
+        _ => InvalidComponentFact::Character,
     };
-    invalid.map_or_else(
-        || Ok(CString::new(value).expect("validated component")),
-        |fact| Err(FsError::invalid_component(fact)),
-    )
+    Err(FsError::invalid_component(fact))
+}
+
+#[cfg(test)]
+thread_local! { static PREFLIGHT_ACTIVITY: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+
+#[cfg(test)]
+fn take_preflight_activity() -> u8 {
+    PREFLIGHT_ACTIVITY.with(|activity| activity.replace(0))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,7 +196,7 @@ pub(super) enum FsOperation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InvalidComponentFact {
+pub(super) enum InvalidComponentFact {
     Empty,
     Current,
     Parent,

@@ -43,7 +43,6 @@ pub(in super::super) fn open_runtime_root(path: &Path) -> Result<ConfinedRuntime
             anchor: anchor.identity,
             root: root.identity,
         },
-        seal: seal.clone(),
         directory: ConfinedDir {
             fd: Arc::new(fd),
             open: root,
@@ -418,8 +417,8 @@ mod high_risk_recovery {
         let (final_fact, raw_fd) = successful_prefix(&trace, &nested_ok, Some(keep));
         assert_eq!(raw_fd, keep);
         let other = open_runtime_root(&relative.join("nested")).unwrap();
-        assert_eq!(root.identity(), other.identity());
-        assert!(!Arc::ptr_eq(&root.seal, &other.seal));
+        assert_eq!(root.lineage(), other.lineage());
+        assert!(!Arc::ptr_eq(&root.directory.seal, &other.directory.seal));
         let parent_identity = identity(&fs::metadata(root_path).unwrap());
         assert!(matches!(&root.directory.locator,
             DirectoryLocator::Child { parent, component }
@@ -429,27 +428,38 @@ mod high_risk_recovery {
         let parent = root.directory.clone();
         let parent_identity = root.identity();
         let mut session = root.mutation_session();
-        assert_eq!(
-            session.prepare_child(&foreign, "..").unwrap_err().kind(),
-            FsErrorKind::CrossLineage
-        );
+        super::super::take_preflight_activity();
+        let error = session.prepare_child(&foreign, "..").unwrap_err();
+        assert_eq!(error.kind(), FsErrorKind::CrossLineage);
+        assert_eq!(super::super::take_preflight_activity(), 0);
         for (value, fact) in [
             ("", super::super::InvalidComponentFact::Empty),
             (".", super::super::InvalidComponentFact::Current),
             ("..", super::super::InvalidComponentFact::Parent),
             ("slash/name", super::super::InvalidComponentFact::Character),
+            ("back\\slash", super::super::InvalidComponentFact::Character),
+            ("white space", super::super::InvalidComponentFact::Character),
+            ("nul\0", super::super::InvalidComponentFact::Character),
+            ("é", super::super::InvalidComponentFact::Character),
+            ("/absolute", super::super::InvalidComponentFact::Character),
         ] {
             assert_eq!(
                 session.prepare_child(&parent, value).unwrap_err().kind(),
                 FsErrorKind::InvalidComponent(fact)
             );
         }
-        let prepared = session.prepare_child(&parent, "A0._-").unwrap();
-        assert_eq!(prepared.parent.fd.as_raw_fd(), keep);
-        let DirectoryLocator::Child { parent, component } = &prepared.locator else {
+        let prepared = session.prepare_child(&parent, "a..b").unwrap();
+        assert_eq!(super::super::take_preflight_activity(), 3);
+        assert_eq!(prepared.0.fd.as_raw_fd(), keep);
+        let DirectoryLocator::Child {
+            parent: locator_parent,
+            component,
+        } = &prepared.1
+        else {
             panic!("prepared child did not retain a child locator")
         };
-        assert_eq!((*parent, component.as_bytes()), (parent_identity, b"A0._-"));
+        assert_eq!(*locator_parent, parent_identity);
+        assert_eq!(component.as_bytes(), b"a..b");
         assert!(TRACE.with(|trace| trace.borrow().is_empty()));
         drop((session, parent, foreign, other));
         let original = identity(&fs::metadata(&nested).unwrap());
@@ -467,7 +477,7 @@ mod high_risk_recovery {
         assert_eq!((final_fact.identity, pinned), original_pair);
         assert_ne!(pinned, replacement);
         drop(root);
-        let live = unsafe { libc::fcntl(prepared.parent.fd.as_raw_fd(), libc::F_GETFD) };
+        let live = unsafe { libc::fcntl(prepared.0.fd.as_raw_fd(), libc::F_GETFD) };
         assert_ne!(live, -1);
         drop(prepared);
         assert_closed(raw_fd);
