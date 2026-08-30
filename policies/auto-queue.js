@@ -45,7 +45,7 @@ var staleDispatchedRecoveryConditionsSql = _autoQueueConfigLib.staleDispatchedRe
 var terminalStatesFromConfig = _autoQueueDispatchLib.terminalStatesFromConfig;
 var activationDispatchCount = _autoQueueDispatchLib.activationDispatchCount;
 var activationWasDeferred = _autoQueueDispatchLib.activationWasDeferred;
-var rotateActiveRunSweepCursor = _autoQueueDispatchLib.rotateActiveRunSweepCursor;
+var rotateActiveRunSweepCursors = _autoQueueDispatchLib.rotateActiveRunSweepCursors;
 var _isDispatchableState = _autoQueueDispatchLib.isDispatchableState;
 var _dispatchableTargets = _autoQueueDispatchLib.dispatchableTargets;
 var _freePathToDispatchable = _autoQueueDispatchLib.freePathToDispatchable;
@@ -553,12 +553,17 @@ var autoQueue = {
       []
     );
 
+    var runsToRotate = [];
     for (var ri = 0; ri < activeRuns.length; ri++) {
       var run = activeRuns[ri];
       var activation = activateRun(run.id, null);
       if (!activationWasDeferred(activation) && activationDispatchCount(activation) === 0) {
-        rotateActiveRunSweepCursor(run.id);
+        runsToRotate.push(run.id);
       }
+    }
+
+    if (runsToRotate.length > 0) {
+      rotateActiveRunSweepCursors(runsToRotate);
     }
 
     // Recovery path 2 (#179/#191/#214/#952): dispatched entries whose dispatch is stuck.

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "59c50750f235a0f6f791b59f48b815066003efe3",
+  "measured_at_sha": "a89e105bb34a610bde3c671976d5c3dd1f1bb17a",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1342,6 +1342,15 @@
       "symbol": "execute",
       "classification": "STATIC",
       "fingerprint": "sha256:c8abf2b9d495e252c89254e12fbfa755fe5fbc3da32cd8cd085d55d137a8abbe"
+    },
+    {
+      "root": "policies",
+      "kind": "POLICY",
+      "path": "policies/lib/auto-queue-dispatch.js",
+      "api": "agentdesk.db.execute",
+      "symbol": "execute",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:d9bd439c432969b49de8bb5e6a49abddd3fa2f24d2089e2971ad27239ae4cfe6"
     },
     {
       "root": "policies",
