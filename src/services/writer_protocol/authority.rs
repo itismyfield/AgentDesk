@@ -444,6 +444,18 @@ mod tests {
         .unwrap()
     }
 
+    fn assert_conflict(
+        registry: &AuthoritySetRegistry,
+        keys: impl IntoIterator<Item = AuthorityKey>,
+    ) {
+        assert_eq!(
+            registry
+                .acquire(request(99, ProviderDomain::Codex, 99, keys))
+                .unwrap_err(),
+            AcquireError::Conflict
+        );
+    }
+
     #[test]
     fn provider_metadata_does_not_discriminate_authority() {
         let registry = AuthoritySetRegistry::new();
@@ -452,12 +464,7 @@ mod tests {
             .acquire(request(1, ProviderDomain::Claude, 1, [contested.clone()]))
             .unwrap();
 
-        assert_eq!(
-            registry
-                .acquire(request(2, ProviderDomain::Codex, 2, [contested]))
-                .unwrap_err(),
-            AcquireError::Conflict
-        );
+        assert_conflict(&registry, [contested]);
     }
 
     #[test]
@@ -471,12 +478,7 @@ mod tests {
             let descendant = key(7, artifact, ConflictCoverage::Exact);
             assert!(overlaps(&ancestor, &descendant));
             assert!(overlaps(&descendant, &ancestor));
-            assert_eq!(
-                registry
-                    .acquire(request(2, ProviderDomain::Codex, 2, [descendant]))
-                    .unwrap_err(),
-                AcquireError::Conflict
-            );
+            assert_conflict(&registry, [descendant]);
         }
     }
 
@@ -526,7 +528,11 @@ mod tests {
         };
         let forward_canonical = canonical(&forward);
         assert_eq!(forward_canonical, canonical(&reverse));
-        assert!(forward_canonical.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(
+            forward_canonical
+                .windows(2)
+                .all(|pair| pair[0].0 < pair[1].0)
+        );
         assert!(
             forward_canonical
                 .iter()
@@ -620,10 +626,16 @@ mod tests {
                 .acquire(request(1, ProviderDomain::Claude, 1, first))
                 .unwrap();
             for (set_id, holder, session) in [(1, 2, 8), (2, 1, 9)] {
-                let disjoint = key(session, ArtifactSlot::RuntimeMarker, ConflictCoverage::Exact);
-                assert!(registry
-                    .acquire(request(set_id, ProviderDomain::Qwen, holder, [disjoint]))
-                    .is_ok());
+                let disjoint = key(
+                    session,
+                    ArtifactSlot::RuntimeMarker,
+                    ConflictCoverage::Exact,
+                );
+                assert!(
+                    registry
+                        .acquire(request(set_id, ProviderDomain::Qwen, holder, [disjoint]))
+                        .is_ok()
+                );
             }
             let disjoint = key(10, ArtifactSlot::RuntimeMarker, ConflictCoverage::Exact);
             assert_eq!(
@@ -632,12 +644,7 @@ mod tests {
                     .unwrap_err(),
                 AcquireError::IdentityAlreadyActive
             );
-            assert_eq!(
-                registry
-                    .acquire(request(2, ProviderDomain::Codex, 2, second))
-                    .unwrap_err(),
-                AcquireError::Conflict
-            );
+            assert_conflict(&registry, second);
         }
     }
 
@@ -674,17 +681,7 @@ mod tests {
             .acquire(request(1, ProviderDomain::Claude, 1, [occupied.clone()]))
             .unwrap();
 
-        assert_eq!(
-            registry
-                .acquire(request(
-                    2,
-                    ProviderDomain::Codex,
-                    2,
-                    [available.clone(), occupied],
-                ))
-                .unwrap_err(),
-            AcquireError::Conflict
-        );
+        assert_conflict(&registry, [available.clone(), occupied]);
         assert!(
             registry
                 .acquire(request(3, ProviderDomain::Qwen, 3, [available]))
@@ -732,11 +729,6 @@ mod tests {
             .unwrap();
 
         registry.release(stale_set, stale_holder);
-        assert_eq!(
-            registry
-                .acquire(request(3, ProviderDomain::Qwen, 3, [contested]))
-                .unwrap_err(),
-            AcquireError::Conflict
-        );
+        assert_conflict(&registry, [contested]);
     }
 }
