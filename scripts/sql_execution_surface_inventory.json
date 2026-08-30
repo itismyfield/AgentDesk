@@ -4194,7 +4194,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:55774473ef0937d33ba30beed1503b81fb5e0311526b7144320c6c60fe016dcf"
+      "fingerprint": "sha256:216a4ba3a5f1f1215d97bb82f9f8b1434e80d178e582980eaece9913b28d5d22"
     },
     {
       "root": "src",
