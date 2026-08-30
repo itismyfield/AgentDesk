@@ -178,6 +178,20 @@ exit 101
         for relative in MUTATION_FILES:
             test.assertEqual((root / relative).read_bytes(), (REPO_ROOT / relative).read_bytes())
 
+    def assert_cache_proofs(
+        self, result: subprocess.CompletedProcess[str], package_name: str
+    ) -> None:
+        actual = [
+            line
+            for line in result.stdout.splitlines()
+            if line.startswith("CACHE_PROOF ")
+        ]
+        expected = [
+            f"CACHE_PROOF mutation={mutation} package={package_name} compiling=1 fresh=0"
+            for mutation in MUTATION_NAMES
+        ]
+        self.assertEqual(actual, expected, result.stdout)
+
     def test_color_neutralization_keeps_cache_proof_color_proof(self) -> None:
         root = self.copy_fixture()
         cargo = self.write_fake_cargo(root)
@@ -185,9 +199,7 @@ exit 101
         result = self.run_script_with_fake_cargo(root, cargo)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(
-            result.stdout.count("compiling_agentdesk=1"), MUTATION_COUNT, result.stdout
-        )
+        self.assert_cache_proofs(result, "agentdesk")
         self.assertNotIn("cache-proof=invalid", result.stderr)
         # #5243 case E control: a freshly built, genuinely killed mutant must not
         # be misgraded by the new build/test gates.
@@ -227,6 +239,7 @@ exit 101
         result = self.run_script_with_fake_cargo(root, cargo)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("cache-proof=invalid", result.stderr)
+        self.assert_cache_proofs(result, package_name)
 
         runner = self.write_runner(
             root,
@@ -432,7 +445,27 @@ error: could not compile `{package_name}` (lib test) due to 1 previous error
         source = root / TERMINAL_HANDOFF
         source.write_text(
             source.read_text(encoding="utf-8").replace(
-                "terminal_not_delivered = true;", "terminal_delivery_missing = true;", 1
+                "terminal_not_delivered", "terminal_delivery_missing"
+            ),
+            encoding="utf-8",
+        )
+
+        # Simulate a coordinated source rename where M6 moves with the code but
+        # M8's dependent-assignment anchor is accidentally left behind. M10 and
+        # M6 must remain selectable so the failure is attributable to M8 itself.
+        script = root / MUTATION_SCRIPT
+        script_source = script.read_text(encoding="utf-8")
+        m6_old = """run_mutation \\
+  M6 "$TERMINAL_HANDOFF" \\
+  'terminal_not_delivered || fenced_terminal_without_delivery' \\
+  'terminal_not_delivered' \\
+"""
+        self.assertEqual(script_source.count(m6_old), 1)
+        script.write_text(
+            script_source.replace(
+                m6_old,
+                m6_old.replace("terminal_not_delivered", "terminal_delivery_missing"),
+                1,
             ),
             encoding="utf-8",
         )
@@ -441,6 +474,9 @@ error: could not compile `{package_name}` (lib test) due to 1 previous error
         result = self.run_script(root, runner)
 
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("MUTATION_RESULT mutation=M10 status=KILLED", result.stdout)
+        self.assertIn("MUTATION_RESULT mutation=M6 status=KILLED", result.stdout)
+        self.assertIn("mutation=M8", result.stderr)
         self.assertIn("matches=0", result.stderr)
         self.assertEqual(source.read_bytes(), expected)
 

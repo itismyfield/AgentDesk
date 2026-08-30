@@ -167,19 +167,21 @@ on_exit() {
 }
 
 apply_exact_mutation() {
-  local relative=$1 expected=$2 replacement=$3
-  python3 - "$REPO_ROOT/$relative" "$expected" "$replacement" <<'PY'
+  local mutation=$1 relative=$2 expected=$3 replacement=$4
+  python3 - "$mutation" "$REPO_ROOT/$relative" "$expected" "$replacement" <<'PY'
 from pathlib import Path
 import sys
 
-path = Path(sys.argv[1])
-expected = sys.argv[2]
-replacement = sys.argv[3]
+mutation = sys.argv[1]
+path = Path(sys.argv[2])
+expected = sys.argv[3]
+replacement = sys.argv[4]
 source = path.read_text(encoding="utf-8")
 count = source.count(expected)
 if count != 1:
     raise SystemExit(
-        f"ERROR mutation anchor must match exactly once: path={path} matches={count} anchor={expected!r}"
+        f"ERROR mutation={mutation} anchor must match exactly once: "
+        f"path={path} matches={count} anchor={expected!r}"
     )
 path.write_text(source.replace(expected, replacement, 1), encoding="utf-8")
 PY
@@ -225,7 +227,8 @@ run_target() {
     fi
 
     # CARGO_TERM_COLOR=never above makes both cache-proof markers stable for grep.
-    printf 'CACHE_PROOF mutation=%s compiling_agentdesk=%s fresh_agentdesk=0\n' "$mutation" "$compile_count"
+    printf 'CACHE_PROOF mutation=%s package=%s compiling=%s fresh=0\n' \
+      "$mutation" "$CARGO_PACKAGE_NAME" "$compile_count"
   fi
 
   # #5243: rc alone cannot separate "the test caught the mutant" from "the mutant
@@ -272,7 +275,7 @@ run_mutation() {
   local mutation=$1 relative=$2 expected=$3 replacement=$4 target=$5 log rc command
   CURRENT_MUTATION="$mutation"
   restore_after_row
-  apply_exact_mutation "$relative" "$expected" "$replacement"
+  apply_exact_mutation "$mutation" "$relative" "$expected" "$replacement"
   log="$(mktemp "${TMPDIR:-$REPO_ROOT/target}/relay-authority-${mutation}.XXXXXX")"
   command="cargo test --offline --lib $target -- --exact --test-threads=1"
 
