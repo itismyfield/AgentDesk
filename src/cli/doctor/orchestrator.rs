@@ -1964,6 +1964,9 @@ fn print_group(title: &str, checks: &[Check]) {
                 println!("      → {}", guidance);
             }
         }
+        if !check.next_steps.is_empty() {
+            println!("      → try: {}", check.next_steps.join(" or "));
+        }
     }
     println!();
 }
