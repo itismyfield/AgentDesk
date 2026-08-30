@@ -66,6 +66,8 @@ pub struct SessionConfig {
     pub wrapper_args: Vec<String>,
     /// Environment variables to set
     pub env_vars: Vec<(String, String)>,
+    /// Environment variable names to remove from the child process.
+    pub unset_env: Vec<String>,
 }
 
 /// Handle to a running session, returned by create_session.
@@ -211,9 +213,11 @@ impl ProcessBackend {
         // Create a new process group so kill_pid_tree(-pid) can clean up
         // the entire subtree (wrapper + Claude/Codex child) on cancel.
         let mut cmd = Command::new(&config.agentdesk_exe);
-        cmd.args(&args)
-            .envs(config.env_vars.iter().cloned())
-            .stdin(Stdio::piped())
+        cmd.args(&args).envs(config.env_vars.iter().cloned());
+        for key in &config.unset_env {
+            cmd.env_remove(key);
+        }
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::null()) // wrapper writes to file, not stdout
             .stderr(Stdio::inherit()); // show wrapper logs
         apply_command_env(&mut cmd);

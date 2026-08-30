@@ -117,6 +117,10 @@ fn execute_simple_blocking_inner(
                 remote_profile: None,
                 timeout: Duration::from_secs(300),
                 cancel: cancel_token,
+                auth_overlay:
+                    crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
+                        provider.clone(),
+                    ),
             };
             let result = execute_streaming(dialect, request, sender);
             collect_stream_result(result, receiver)
@@ -269,6 +273,10 @@ pub async fn execute_structured_with_context(
                         remote_profile: None,
                         timeout: Duration::from_secs(timeout_secs),
                         cancel: Some(Arc::clone(&cancel_token)),
+                        auth_overlay:
+                            crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
+                                provider.clone(),
+                            ),
                     };
                     execute_streaming(dialect, request, sender.clone())
                 }

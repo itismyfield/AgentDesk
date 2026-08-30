@@ -116,6 +116,10 @@ pub(crate) fn prepare(request: &ProviderTurnRequest) -> Result<PreparedCommand, 
         args,
         redacted_args,
         current_dir: request.working_directory.clone(),
+        env: crate::services::provider_auth_profile::overlay_env_pairs(&request.auth_overlay),
+        unset_env: crate::services::provider_auth_profile::overlay_unset_keys(
+            &request.auth_overlay,
+        ),
         codec: Box::new(MessagesJsonCodec::new()),
     })
 }
@@ -207,6 +211,9 @@ mod tests {
             remote_profile: None,
             timeout: Duration::from_secs(60),
             cancel: None,
+            auth_overlay: crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
+                crate::services::provider::ProviderKind::Grok,
+            ),
         }
     }
 

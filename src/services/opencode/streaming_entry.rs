@@ -39,6 +39,7 @@ pub fn execute_command_streaming(
                 remote_profile.cloned(),
                 Duration::from_secs(300),
                 cancel_token,
+                report_channel_id,
             ),
             sender,
         );

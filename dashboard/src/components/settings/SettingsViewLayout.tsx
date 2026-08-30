@@ -6,6 +6,7 @@ import { SettingsNavigation } from "./SettingsNavigation";
 import { SettingsOnboardingOverlay } from "./SettingsOnboardingOverlay";
 import { SettingsOnboardingPanel } from "./SettingsOnboardingPanel";
 import { SettingsOperatorConnectorsPanel } from "./SettingsOperatorConnectorsPanel";
+import { SettingsProvidersPanel } from "./SettingsProvidersPanel";
 import { SettingsPipelinePanel } from "./SettingsPipelinePanel";
 import { SettingsRuntimePanel } from "./SettingsRuntimePanel";
 import { SettingsVoicePanel } from "./SettingsVoicePanel";
@@ -35,7 +36,10 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
     inputStyle,
     isKo,
     isRowVisible,
+    handleAddProviderAccount,
+    handleCompleteProviderLogin,
     loadOperatorConnectors,
+    loadProviderAuthProfiles,
     loadVoiceConfig,
     matchingKeysInActivePanel,
     onboardingMetas,
@@ -44,6 +48,10 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
     operatorConnectorsError,
     operatorConnectorsLoading,
     panelQuery,
+    pendingProviderLogin,
+    providerAuthError,
+    providerAuthLoading,
+    providerAuthProviders,
     panelQueryNormalized,
     pendingDangerousConfigSave,
     pipelineAgents,
@@ -71,6 +79,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
     setSelectedPipelineRepo,
     setShowOnboarding,
     showOnboarding,
+    startingProviderId,
     subtleButtonClass,
     subtleButtonStyle,
     tr,
@@ -156,6 +165,22 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
             voiceError={voiceError}
             voiceLoaded={voiceLoaded}
             voiceSaving={voiceSaving}
+          />
+        );
+      case "providers":
+        return (
+          <SettingsProvidersPanel
+            error={providerAuthError}
+            loading={providerAuthLoading}
+            onAddAccount={(providerId: string) => void handleAddProviderAccount(providerId)}
+            onCompleteLogin={() => void handleCompleteProviderLogin()}
+            onReload={() => void loadProviderAuthProfiles()}
+            pendingLogin={pendingProviderLogin}
+            providers={providerAuthProviders}
+            secondaryActionClass={secondaryActionClass}
+            secondaryActionStyle={secondaryActionStyle}
+            startingProviderId={startingProviderId}
+            tr={tr}
           />
         );
       case "connectors":
@@ -261,6 +286,21 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
             {voiceSaving ? tr("저장 중...", "Saving...") : tr("저장", "Save")}
           </button>
         </>
+      );
+    }
+
+    if (activePanel === "providers") {
+      return (
+        <button
+          type="button"
+          onClick={() => void loadProviderAuthProfiles()}
+          disabled={providerAuthLoading}
+          className={secondaryActionClass}
+          style={secondaryActionStyle}
+        >
+          <RefreshCw size={12} />
+          {providerAuthLoading ? tr("불러오는 중...", "Loading...") : tr("다시 불러오기", "Reload")}
+        </button>
       );
     }
 

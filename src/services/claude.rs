@@ -3036,11 +3036,16 @@ pub(crate) fn execute_streaming_local_process(
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
 
-    let env_vars = resolution
-        .exec_path
-        .clone()
-        .map(|path| vec![("PATH".to_string(), path)])
-        .unwrap_or_default();
+    let overlay =
+        crate::services::discord::overlay_from_tmux_session(ProviderKind::Claude, session_name)?;
+    let env_vars = crate::services::provider_auth_profile::merge_overlay_env(
+        resolution
+            .exec_path
+            .clone()
+            .map(|path| vec![("PATH".to_string(), path)])
+            .unwrap_or_default(),
+        &overlay,
+    );
     let auto_compact_window = launch_auto_compact_window_for_session(
         session_name,
         claude_model_from_args(args),
@@ -3056,6 +3061,7 @@ pub(crate) fn execute_streaming_local_process(
         wrapper_subcommand: "tmux-wrapper".to_string(),
         wrapper_args,
         env_vars,
+        unset_env: crate::services::provider_auth_profile::overlay_unset_keys(&overlay),
     };
 
     let backend = ProcessBackend::new();

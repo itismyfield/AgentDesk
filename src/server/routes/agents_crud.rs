@@ -73,6 +73,8 @@ pub(super) struct UpdateAgentBody {
     #[serde(default, alias = "commitMessage")]
     commit_message: Option<String>,
     pipeline_config: Option<serde_json::Value>,
+    #[serde(default)]
+    auth_profile: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -493,12 +495,19 @@ async fn list_agents_pg(
                 .try_get::<Option<String>, _>("discord_channel_cdx")
                 .ok()
                 .flatten();
+            let agent_id = row.try_get::<String, _>("id").unwrap_or_default();
+            let name = row.try_get::<String, _>("name").unwrap_or_default();
             json!({
-                "id": row.try_get::<String, _>("id").unwrap_or_default(),
-                "name": row.try_get::<String, _>("name").unwrap_or_default(),
+                "id": agent_id.clone(),
+                "name": name.clone(),
                 "name_ko": row.try_get::<Option<String>, _>("name_ko").ok().flatten(),
                 "provider": provider.clone(),
-                "cli_provider": provider,
+                "cli_provider": provider.clone(),
+                "identity": crate::services::discord::api_agent_identity(
+                    &agent_id,
+                    provider.as_deref(),
+                    Some(name.as_str()),
+                ),
                 "department": row.try_get::<Option<String>, _>("department").ok().flatten(),
                 "department_id": row.try_get::<Option<String>, _>("department").ok().flatten(),
                 "avatar_emoji": row.try_get::<Option<String>, _>("avatar_emoji").ok().flatten(),
@@ -607,7 +616,12 @@ async fn load_agent_pg(pool: &sqlx::PgPool, id: &str) -> Result<Option<serde_jso
             "name": row.try_get::<String, _>("name").unwrap_or_default(),
             "name_ko": row.try_get::<Option<String>, _>("name_ko").ok().flatten(),
             "provider": provider.clone(),
-            "cli_provider": provider,
+            "cli_provider": provider.clone(),
+            "identity": crate::services::discord::api_agent_identity(
+                &id,
+                provider.as_deref(),
+                row.try_get::<String, _>("name").ok().as_deref(),
+            ),
             "department": row.try_get::<Option<String>, _>("department").ok().flatten(),
             "department_id": row.try_get::<Option<String>, _>("department").ok().flatten(),
             "avatar_emoji": row.try_get::<Option<String>, _>("avatar_emoji").ok().flatten(),
@@ -942,7 +956,8 @@ pub(super) async fn update_agent(
             None
         };
 
-        if !updated_any && prompt_result.is_none() {
+        let auth_profile_requested = body.auth_profile.is_some();
+        if !updated_any && prompt_result.is_none() && !auth_profile_requested {
             return Err(AppError::bad_request("no fields to update"));
         }
 
@@ -961,6 +976,10 @@ pub(super) async fn update_agent(
                     );
                 }
             }
+        }
+
+        if let Some(ref auth_profile) = body.auth_profile {
+            super::provider_auth_profiles::apply_agent_auth_profile_patch(&id, auth_profile)?;
         }
 
         return match load_agent_pg(pool, &id).await {

@@ -942,6 +942,7 @@ fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec
         check_qwen_auth_hints(qwen_configured),
         check_qwen_runtime_artifacts(qwen_configured),
         check_provider_bindings(cfg, snapshot),
+        check_claude_cswap_global_conflict(),
         check_credential_permissions(cfg),
     ]
 }
@@ -1460,6 +1461,34 @@ fn permission_finding(label: &'static str, path: &Path, _sensitive: bool) -> Per
             risk: None,
         }
     }
+}
+
+fn check_claude_cswap_global_conflict() -> Check {
+    let catalog = crate::services::discord::provider_auth_catalog();
+    let named = crate::services::provider_auth_profile::named_claude_profile_ids(&catalog);
+    if named.is_empty() {
+        return Check::ok(
+            "claude_cswap_global_conflict",
+            CheckGroup::ProviderRuntime,
+            "Claude cswap vs named profiles",
+            "No named Claude auth profiles; cswap remains the default/global switch.",
+        );
+    }
+    Check::warn(
+        "claude_cswap_global_conflict",
+        CheckGroup::ProviderRuntime,
+        "Claude cswap vs named profiles",
+        format!(
+            "Named Claude profiles present ({}). cswap switch stays machine-global for the default home.",
+            named.join(", ")
+        ),
+        "Keep /api/claude-accounts for the default Claude login only. Extra Claude accounts use isolated CLAUDE_CONFIG_DIR homes and must not be switched via cswap.",
+    )
+    .with_next_steps(vec![
+        "Use Settings → Providers extra Claude accounts instead of cswap for named profiles."
+            .to_string(),
+    ])
+    .with_evidence(json!({ "named_claude_profiles": named }))
 }
 
 fn check_credential_permissions(cfg: &config::Config) -> Check {
