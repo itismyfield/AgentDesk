@@ -210,7 +210,9 @@ export function renderDeskAgentAndSubClones({
       hitContainer.eventMode = "static";
       hitContainer.cursor = "pointer";
       const issueUrl = activeIssue.url;
-      hitContainer.on("pointertap", () => { window.open(issueUrl, "_blank"); });
+      hitContainer.on("pointertap", () => {
+        window.open(issueUrl, "_blank", "noopener,noreferrer");
+      });
       room.addChild(hitContainer);
     }
   }
