@@ -336,10 +336,21 @@ pub async fn api_docs_group_category(
     }
 
     let endpoints = all_endpoints();
-    let matching: Vec<EndpointDoc> = endpoints
-        .into_iter()
+    let mut matching: Vec<EndpointDoc> = endpoints
+        .iter()
         .filter(|endpoint| effective_category(endpoint) == category.as_str())
+        .cloned()
         .collect();
+
+    // A canonical legacy category can be an aggregate whose endpoints all use
+    // finer effective categories (for example `admin`). Preserve the normal
+    // child-category result whenever it exists, and only then use the aggregate.
+    if matching.is_empty() && is_canonical_category(&category) {
+        matching = endpoints
+            .into_iter()
+            .filter(|endpoint| endpoint.category == category.as_str())
+            .collect();
+    }
 
     if matching.is_empty() {
         return (
@@ -366,7 +377,41 @@ pub async fn api_docs_group_category(
 mod tests {
     use std::collections::BTreeSet;
 
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Method, Request},
+        routing::get,
+    };
+    use tower::ServiceExt;
+
     use super::*;
+
+    fn docs_router() -> Router {
+        Router::new()
+            .route("/api/docs/{segment}", get(api_docs_group_or_category))
+            .route("/api/docs/{group}/{category}", get(api_docs_group_category))
+    }
+
+    async fn request_docs_json(router: &Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build docs request"),
+            )
+            .await
+            .expect("route docs request");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read docs response");
+        let body = serde_json::from_slice(&bytes).expect("decode docs response");
+        (status, body)
+    }
 
     #[test]
     fn release_source_docs_show_observed_partial_and_unobserved_shapes() {
@@ -685,6 +730,7 @@ mod tests {
 
     #[tokio::test]
     async fn advertised_group_category_paths_resolve_without_behavior_regressions() {
+        let docs_router = docs_router();
         let endpoints = all_endpoints();
         let expected_pairs: BTreeSet<(String, String)> = GROUP_NAMES
             .iter()
@@ -696,18 +742,17 @@ mod tests {
             .collect();
         let mut advertised_pairs = BTreeSet::new();
 
-        for (guide, expected_path) in [
-            ("card-lifecycle-ops", "/api/docs/card-lifecycle-ops"),
-            ("api-friction-markers", "/api/docs/api-friction-markers"),
-        ] {
-            let (status, headers, body) = resolve_docs_segment(guide, false);
-            let (flat_status, flat_headers, flat_body) = resolve_docs_segment(guide, true);
-            assert_eq!(status, StatusCode::OK, "guide {guide}");
-            assert!(headers.is_empty(), "guide {guide}");
-            assert_eq!(body["path"], expected_path, "guide {guide}");
-            assert_eq!(flat_status, status, "guide {guide}");
-            assert_eq!(flat_headers, headers, "guide {guide}");
-            assert_eq!(flat_body, body, "guide {guide}");
+        for guide in guide_index() {
+            let guide_name = guide["name"].as_str().expect("guide name");
+            let expected_path = guide["path"].as_str().expect("guide path");
+            let (status, headers, body) = resolve_docs_segment(guide_name, false);
+            let (flat_status, flat_headers, flat_body) = resolve_docs_segment(guide_name, true);
+            assert_eq!(status, StatusCode::OK, "guide {guide_name}");
+            assert!(headers.is_empty(), "guide {guide_name}");
+            assert_eq!(body["path"], expected_path, "guide {guide_name}");
+            assert_eq!(flat_status, status, "guide {guide_name}");
+            assert_eq!(flat_headers, headers, "guide {guide_name}");
+            assert_eq!(flat_body, body, "guide {guide_name}");
         }
 
         for group in GROUP_NAMES {
@@ -732,7 +777,7 @@ mod tests {
                 assert_eq!(
                     category_fields,
                     BTreeSet::from(["canonical_path", "description", "endpoint_count", "name",]),
-                    "canonical_path must be the only additive category field for group {group}"
+                    "update this category field pin when adding fields for group {group}"
                 );
 
                 let name = category["name"]
@@ -756,32 +801,10 @@ mod tests {
                     "advertised child path for {group}/{name}"
                 );
 
-                let mut child_segments = advertised_path
-                    .strip_prefix("/api/docs/")
-                    .unwrap_or_else(|| panic!("docs path prefix for {group}/{name}"))
-                    .split('/');
-                let advertised_group = child_segments
-                    .next()
-                    .unwrap_or_else(|| panic!("group path segment for {group}/{name}"));
-                let advertised_category = child_segments
-                    .next()
-                    .unwrap_or_else(|| panic!("category path segment for {group}/{name}"));
-                assert!(
-                    child_segments.next().is_none(),
-                    "exactly two child path segments for {group}/{name}"
-                );
-
-                let (child_status, Json(child)) = api_docs_group_category(Path((
-                    advertised_group.to_owned(),
-                    advertised_category.to_owned(),
-                )))
-                .await;
+                let (child_status, child) = request_docs_json(&docs_router, advertised_path).await;
                 assert_eq!(child_status, StatusCode::OK, "child {advertised_path}");
                 assert_eq!(child["group"], group, "child {advertised_path}");
-                assert_eq!(
-                    child["category"], advertised_category,
-                    "child {advertised_path}"
-                );
+                assert_eq!(child["category"], name, "child {advertised_path}");
                 assert_eq!(child["count"], advertised_count, "child {advertised_path}");
                 assert!(child["description"].is_string(), "child {advertised_path}");
                 assert_eq!(
@@ -807,6 +830,12 @@ mod tests {
                     .is_some_and(|endpoints| !endpoints.is_empty()),
                 "flat group {group}"
             );
+
+            let flat_path = format!("/api/docs/{group}?format=flat");
+            let (routed_flat_status, routed_flat_body) =
+                request_docs_json(&docs_router, &flat_path).await;
+            assert_eq!(routed_flat_status, flat_status, "routed flat group {group}");
+            assert_eq!(routed_flat_body, flat_body, "routed flat group {group}");
         }
 
         assert_eq!(
@@ -820,6 +849,7 @@ mod tests {
             .chain(endpoints.iter().filter_map(|endpoint| endpoint.subcategory))
             .filter(|segment| !GROUP_NAMES.contains(segment))
             .collect();
+        let mut unresolved_legacy_canonical_paths = Vec::new();
         for segment in legacy_segments {
             let (status, headers, body) = resolve_docs_segment(segment, false);
             let expected_path = format!("/api/docs/{}/{segment}", category_to_group(segment));
@@ -845,7 +875,29 @@ mod tests {
                 body["deprecation"]["api_status"], "active",
                 "legacy {segment}"
             );
+
+            let canonical_path = body["canonical_path"]
+                .as_str()
+                .unwrap_or_else(|| panic!("legacy {segment} canonical path"));
+            let (child_status, child) = request_docs_json(&docs_router, canonical_path).await;
+            if child_status != StatusCode::OK {
+                unresolved_legacy_canonical_paths.push(format!(
+                    "legacy {segment} advertises {canonical_path}, which returned {child_status}"
+                ));
+                continue;
+            }
+            assert_eq!(
+                child["group"],
+                category_to_group(segment),
+                "legacy child {canonical_path}"
+            );
+            assert_eq!(child["category"], segment, "legacy child {canonical_path}");
         }
+        assert!(
+            unresolved_legacy_canonical_paths.is_empty(),
+            "every advertised legacy canonical_path must resolve through the real child route: \
+             {unresolved_legacy_canonical_paths:?}"
+        );
     }
 
     #[test]
