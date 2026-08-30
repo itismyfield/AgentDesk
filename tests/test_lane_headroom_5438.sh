@@ -53,14 +53,22 @@ assert_not_contains() {
 
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
-STUB_DIR="$TMP_ROOT/bin"
+PROBE_BIN="$TMP_ROOT/probe-bin"
+CLOCK_BIN="$TMP_ROOT/clock-bin"
 STATE_DIR="$TMP_ROOT/state"
-mkdir -p "$STUB_DIR" "$STATE_DIR"
+SYSBIN="$TMP_ROOT/sysbin"
+mkdir -p "$PROBE_BIN" "$CLOCK_BIN" "$STATE_DIR" "$SYSBIN"
 
 write_stub() {
   local name="$1"
-  cat > "$STUB_DIR/$name"
-  chmod +x "$STUB_DIR/$name"
+  cat > "$PROBE_BIN/$name"
+  chmod +x "$PROBE_BIN/$name"
+}
+
+write_clock_stub() {
+  local name="$1"
+  cat > "$CLOCK_BIN/$name"
+  chmod +x "$CLOCK_BIN/$name"
 }
 
 # Two distinct failure knobs per probe, because they are different bugs:
@@ -144,23 +152,45 @@ i=1
 while [ "$i" -le "$n" ]; do echo "$((1000 + i))"; i=$((i + 1)); done
 STUB
 
+write_clock_stub date <<'STUB'
+#!/usr/bin/env bash
+state="$STUB_STATE_DIR/date_calls"
+n="$(cat "$state" 2>/dev/null || echo 0)"
+printf '%s' "$((n + 1))" > "$state"
+if [ "${STUB_DATE_RC:-0}" -ne 0 ]; then
+  echo "noisy date stdout"
+  echo "noisy date stderr" >&2
+  exit "$STUB_DATE_RC"
+fi
+if [ "$n" -eq 0 ]; then echo "${STUB_CLOCK_T0:-100}"; else echo "${STUB_CLOCK_T1:-100}"; fi
+STUB
+
+write_clock_stub sleep <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_STATE_DIR/sleep_args"
+if [ "${STUB_SLEEP_RC:-0}" -ne 0 ]; then
+  echo "noisy sleep stdout"
+  echo "noisy sleep stderr" >&2
+  exit "$STUB_SLEEP_RC"
+fi
+STUB
+
 # A "vm_stat is GONE" case needs the command genuinely off PATH: an exit-1
 # vm_stat is a FAILED probe (section 13 — fails closed), not a missing one. So
 # section 8 runs against a sanitized PATH — the stubs minus vm_stat, plus
 # symlinks to exactly the real utilities lane_headroom.sh itself calls. Without
 # the sanitizing, /usr/bin/vm_stat would answer and the case would assert
 # nothing about the fallback.
-SYSBIN="$TMP_ROOT/sysbin"
 STUB_DIR_NO_VM_STAT="$TMP_ROOT/bin-no-vm_stat"
-mkdir -p "$SYSBIN" "$STUB_DIR_NO_VM_STAT"
-for util in awk bash basename cat date dirname sleep; do
+mkdir -p "$STUB_DIR_NO_VM_STAT"
+for util in awk bash basename cat dirname; do
   real="$(command -v "$util")" || { echo "FATAL: $util not on PATH"; exit 2; }
   ln -sf "$real" "$SYSBIN/$util"
 done
-for stub in "$STUB_DIR"/*; do
+for stub in "$PROBE_BIN"/*; do
   [ "$(basename "$stub")" = "vm_stat" ] || ln -sf "$stub" "$STUB_DIR_NO_VM_STAT/"
 done
-NO_VM_STAT_PATH="$STUB_DIR_NO_VM_STAT:$SYSBIN"
+NO_VM_STAT_PATH="$CLOCK_BIN:$STUB_DIR_NO_VM_STAT:$SYSBIN"
 
 OUT=""
 RC=0
@@ -170,10 +200,14 @@ run_headroom() {
   # run_headroom [VAR=VAL ...] — every override is a stub knob or a
   # LANE_HEADROOM_* threshold. Captures OUT / RC / LINE1. Set HEADROOM_PATH to
   # run against a PATH other than the full stub set (see section 8).
-  rm -f "$STATE_DIR/vm_stat_calls"
-  OUT="$(env "PATH=${HEADROOM_PATH:-$STUB_DIR:$PATH}" \
+  local sample_env="STUB_SAMPLE_INTERVAL_UNSET=1"
+  rm -f "$STATE_DIR"/*
+  if [ "${SWAP_SAMPLE_SECONDS:-0}" != "__UNSET__" ]; then
+    sample_env="LANE_HEADROOM_SWAP_SAMPLE_SECONDS=${SWAP_SAMPLE_SECONDS:-0}"
+  fi
+  OUT="$(env "PATH=${HEADROOM_PATH:-$CLOCK_BIN:$PROBE_BIN:$SYSBIN}" \
     "STUB_STATE_DIR=$STATE_DIR" \
-    "LANE_HEADROOM_SWAP_SAMPLE_SECONDS=${SWAP_SAMPLE_SECONDS:-0}" \
+    "$sample_env" \
     "$@" bash "$LANE_HEADROOM" 2>&1)"
   RC=$?
   LINE1="$(printf '%s\n' "$OUT" | head -1)"
@@ -290,18 +324,52 @@ assert_contains "raised CPU floor turns a passing box into NO" "cpu-idle=85.0%(m
 run_headroom LANE_HEADROOM_MIN_DISK_FREE_GB=10 STUB_DISK_AVAIL_KB=31457280
 assert_eq "lowered disk floor admits 30GB" "HEADROOM: OK" "$LINE1"
 
-echo "== 11. real sampling interval is honoured =="
-SWAP_SAMPLE_SECONDS=1 run_headroom
-assert_contains "1s window reported in detail" "over 1s" "$OUT"
-assert_eq "1s window verdict" "HEADROOM: OK" "$LINE1"
+echo "== 11. deterministic swap sampling and conservative policy =="
+SWAP_SAMPLE_SECONDS=1 run_headroom STUB_CLOCK_T0=100 STUB_CLOCK_T1=102 STUB_SWAPOUTS_STEP=11
+assert_contains "requested 1s, observed 2s still rejects delta 11" "swapout-rate=11.0/s(max=10/s)" "$LINE1"
+assert_contains "policy and delayed observation are both reported" "over 1s policy window (observed 2s)" "$OUT"
+assert_eq "sleeper receives the requested 1s exactly" "1" "$(cat "$STATE_DIR/sleep_args" 2>/dev/null)"
+SWAP_SAMPLE_SECONDS=__UNSET__ run_headroom STUB_CLOCK_T0=100 STUB_CLOCK_T1=110
+assert_contains "unset interval retains default 10s policy" "over 10s policy window" "$OUT"
+assert_eq "default sleeper receives 10s" "10" "$(cat "$STATE_DIR/sleep_args" 2>/dev/null)"
+for invalid in '' -1 +1 1.5 nope; do
+  SWAP_SAMPLE_SECONDS=0 run_headroom "LANE_HEADROOM_SWAP_SAMPLE_SECONDS=$invalid"
+  assert_contains "invalid interval '$invalid' fails closed" "swapout-rate=unreadable" "$LINE1"
+  assert_contains "invalid interval '$invalid' has generic detail" "invalid swap sample interval" "$OUT"
+  assert_eq "invalid interval '$invalid' invokes no sampling command" "0" \
+    "$(if [ -e "$STATE_DIR/vm_stat_calls" ] || [ -e "$STATE_DIR/date_calls" ] || [ -e "$STATE_DIR/sleep_args" ]; then echo 1; else echo 0; fi)"
+done
+SWAP_SAMPLE_SECONDS=1 run_headroom STUB_CLOCK_T0=101 STUB_CLOCK_T1=100
+assert_contains "backward clock fails closed" "swapout-rate=unreadable" "$LINE1"
+assert_contains "backward clock is a timing failure" "swap sample timing failed" "$OUT"
+SWAP_SAMPLE_SECONDS=2 run_headroom STUB_CLOCK_T0=100 STUB_CLOCK_T1=101
+assert_contains "observed interval below request fails closed" "swapout-rate=unreadable" "$LINE1"
+SWAP_SAMPLE_SECONDS=1 run_headroom STUB_DATE_RC=1
+assert_eq "noisy date failure preserves verdict on line 1" "HEADROOM: NO swapout-rate=unreadable" "$LINE1"
+assert_not_contains "failed date output is contained" "noisy date" "$OUT"
+SWAP_SAMPLE_SECONDS=1 run_headroom STUB_CLOCK_T0=bad STUB_CLOCK_T1=101
+assert_contains "non-uint timestamp fails closed" "swap sample timing failed" "$OUT"
+SWAP_SAMPLE_SECONDS=1 run_headroom STUB_SLEEP_RC=1
+assert_eq "noisy sleep failure preserves verdict on line 1" "HEADROOM: NO swapout-rate=unreadable" "$LINE1"
+assert_not_contains "failed sleep output is contained" "noisy sleep" "$OUT"
+SWAP_SAMPLE_SECONDS=1 run_headroom STUB_CLOCK_T0=100 STUB_CLOCK_T1=101 STUB_SWAPOUTS_STEP=-1
+assert_contains "counter rollback is unreadable" "swapout-rate=unreadable" "$LINE1"
+assert_contains "counter reset detail carries both readings" "swapouts counter reset:" "$OUT"
+
 SWAP_SAMPLE_SECONDS=0 run_headroom
 assert_contains "0s window labelled back-to-back" "back-to-back" "$OUT"
+assert_eq "0s sampling invokes neither date nor sleep" "0" \
+  "$(if [ -e "$STATE_DIR/date_calls" ] || [ -e "$STATE_DIR/sleep_args" ]; then echo 1; else echo 0; fi)"
+SWAP_SAMPLE_SECONDS=25 run_headroom STUB_CLOCK_T0=100 STUB_CLOCK_T1=125 STUB_SWAPOUTS_STEP=250
+assert_eq "raw boundary delta 250 over 25s passes" "HEADROOM: OK" "$LINE1"
+SWAP_SAMPLE_SECONDS=25 run_headroom STUB_CLOCK_T0=100 STUB_CLOCK_T1=125 STUB_SWAPOUTS_STEP=251
+assert_contains "raw delta 251 stays above threshold despite 10.0 display" "swapout-rate=10.0/s(max=10/s)" "$LINE1"
 
 echo "== 12. usage handling =="
 set +e
-help_out="$(env "PATH=$STUB_DIR:$PATH" bash "$LANE_HEADROOM" --help 2>&1)"
+help_out="$(env "PATH=$CLOCK_BIN:$PROBE_BIN:$SYSBIN" bash "$LANE_HEADROOM" --help 2>&1)"
 help_rc=$?
-bad_out="$(env "PATH=$STUB_DIR:$PATH" bash "$LANE_HEADROOM" --nope 2>&1)"
+bad_out="$(env "PATH=$CLOCK_BIN:$PROBE_BIN:$SYSBIN" bash "$LANE_HEADROOM" --nope 2>&1)"
 bad_rc=$?
 set +e   # restore the suite's real mode: it runs without -e (line 23), and
          # turning -e ON here would abort the next section on its first NO rc.
