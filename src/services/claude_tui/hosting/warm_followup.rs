@@ -2,8 +2,9 @@ use std::sync::mpsc::Sender;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::claude::{
-    ClaudeFollowupResult, classify_followup_result, claude_tui_turn_start_offset_after_timestamp,
-    debug_log, emit_claude_tui_watcher_handoff, emit_followup_restart_suppressed_notice,
+    ClaudeFollowupResult, classify_followup_result,
+    claude_tui_user_record_boundary_evidence_after_timestamp, debug_log,
+    emit_claude_tui_watcher_handoff, emit_followup_restart_suppressed_notice,
     fresh_claude_tui_session_resolution, log_producer_exit, read_claude_tui_transcript_until_done,
     read_output_result_kind, tui_delivered_zero_harvest,
 };
@@ -449,6 +450,8 @@ fn run_claude_tui_warm_followup_submit_and_stream(
         );
         return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Ok(()));
     }
+    let generation_before =
+        crate::services::claude::claude_tui_generation_mtime_ns(tmux_session_name);
     let turn_started_at = chrono::Utc::now();
     if let Err(error) = crate::services::claude_tui::input::send_followup_prompt_or_idle_transcript(
         tmux_session_name,
@@ -476,11 +479,14 @@ fn run_claude_tui_warm_followup_submit_and_stream(
         return ClaudeTuiWarmFollowupSubmitOutcome::Terminal(Err(error));
     }
     let hook_events_after = chrono::Utc::now();
-    let start_offset = claude_tui_turn_start_offset_after_timestamp(
-        &transcript_path,
-        turn_started_at,
-        fallback_start_offset,
-    );
+    let (record_boundary, turn_start_evidence) =
+        claude_tui_user_record_boundary_evidence_after_timestamp(
+            &transcript_path,
+            turn_started_at,
+            tmux_session_name,
+            generation_before,
+        );
+    let start_offset = record_boundary.unwrap_or(fallback_start_offset);
     let (read_result, harvest) = match read_claude_tui_transcript_until_done(
         &transcript_path_string,
         start_offset,
@@ -533,6 +539,7 @@ fn run_claude_tui_warm_followup_submit_and_stream(
                 &transcript_path_string,
                 tmux_session_name,
                 &transcript_path,
+                turn_start_evidence,
             );
             let transcript_len = std::fs::metadata(&transcript_path)
                 .map(|meta| meta.len())

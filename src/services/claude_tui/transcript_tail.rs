@@ -230,6 +230,28 @@ pub(crate) fn claude_transcript_timestamp_at_or_after(
     transcript_path: &Path,
     turn_started_at: DateTime<Utc>,
 ) -> Result<Option<u64>, String> {
+    claude_transcript_boundary_at_or_after(transcript_path, turn_started_at, |_| true)
+}
+
+pub(crate) fn claude_user_record_boundary_at_or_after(
+    transcript_path: &Path,
+    turn_started_at: DateTime<Utc>,
+) -> Result<Option<u64>, String> {
+    claude_transcript_boundary_at_or_after(transcript_path, turn_started_at, |json| {
+        json.get("type").and_then(serde_json::Value::as_str) == Some("user")
+            && json
+                .get("message")
+                .and_then(|message| message.get("role"))
+                .and_then(serde_json::Value::as_str)
+                == Some("user")
+    })
+}
+
+fn claude_transcript_boundary_at_or_after(
+    transcript_path: &Path,
+    turn_started_at: DateTime<Utc>,
+    accepts: impl Fn(&serde_json::Value) -> bool,
+) -> Result<Option<u64>, String> {
     let file = std::fs::File::open(transcript_path).map_err(|error| {
         format!(
             "read transcript {}: {error}",
@@ -259,7 +281,8 @@ pub(crate) fn claude_transcript_timestamp_at_or_after(
             }
             continue;
         };
-        if let Some(timestamp) = claude_transcript_line_timestamp(&json)
+        if accepts(&json)
+            && let Some(timestamp) = claude_transcript_line_timestamp(&json)
             && timestamp >= turn_started_at
         {
             return Ok(Some(line_start_offset));
@@ -495,13 +518,13 @@ mod tests {
     }
 
     #[test]
-    fn claude_transcript_timestamp_at_or_after_returns_first_matching_line_offset() {
+    fn claude_user_record_boundary_at_or_after_returns_first_matching_line_offset() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let first = r#"{"timestamp":"2026-05-28T00:00:00Z","type":"assistant","message":{"content":[{"type":"text","text":"first"}]}}"#;
-        let second = r#"{"timestamp":"2026-05-28T00:00:01Z","type":"user","message":{"content":[{"type":"text","text":"second"}]}}"#;
+        let first = r#"{"timestamp":"2026-05-28T00:00:02Z","type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"first"}]}}"#;
+        let second = r#"{"timestamp":"2026-05-28T00:00:03Z","type":"user","message":{"role":"user","content":[{"type":"text","text":"second"}]}}"#;
         std::fs::write(file.path(), format!("{first}\n{second}\n")).unwrap();
 
-        let offset = claude_transcript_timestamp_at_or_after(
+        let offset = claude_user_record_boundary_at_or_after(
             file.path(),
             Utc.with_ymd_and_hms(2026, 5, 28, 0, 0, 1).unwrap(),
         )
@@ -511,30 +534,32 @@ mod tests {
     }
 
     #[test]
-    fn claude_transcript_timestamp_at_or_after_is_inclusive() {
+    fn claude_user_record_boundary_at_or_after_is_inclusive() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let line = r#"{"timestamp":"2026-05-28T00:00:00.123Z","type":"assistant"}"#;
+        let line =
+            r#"{"timestamp":"2026-05-28T00:00:00.123Z","type":"user","message":{"role":"user"}}"#;
         std::fs::write(file.path(), format!("{line}\n")).unwrap();
         let turn_started_at = DateTime::parse_from_rfc3339("2026-05-28T00:00:00.123Z")
             .unwrap()
             .with_timezone(&Utc);
 
-        let offset = claude_transcript_timestamp_at_or_after(file.path(), turn_started_at).unwrap();
+        let offset = claude_user_record_boundary_at_or_after(file.path(), turn_started_at).unwrap();
 
         assert_eq!(offset, Some(0));
     }
 
     #[test]
-    fn claude_transcript_timestamp_at_or_after_skips_unusable_lines() {
+    fn claude_user_record_boundary_at_or_after_skips_unusable_lines() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let matching = r#"{"timestamp":"2026-05-28T00:00:05Z","type":"assistant"}"#;
+        let matching =
+            r#"{"timestamp":"2026-05-28T00:00:05Z","type":"user","message":{"role":"user"}}"#;
         let transcript = format!(
             "{}\n{}\n{}\n",
             r#"{"type":"assistant"}"#, "not-json", matching
         );
         std::fs::write(file.path(), &transcript).unwrap();
 
-        let offset = claude_transcript_timestamp_at_or_after(
+        let offset = claude_user_record_boundary_at_or_after(
             file.path(),
             Utc.with_ymd_and_hms(2026, 5, 28, 0, 0, 1).unwrap(),
         )

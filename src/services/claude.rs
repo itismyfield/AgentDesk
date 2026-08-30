@@ -1668,27 +1668,43 @@ fn claude_tui_fresh_turn_start_offset(transcript_path: &std::path::Path) -> u64 
 }
 
 #[cfg(unix)]
-pub(crate) fn claude_tui_turn_start_offset_after_timestamp(
+fn claude_tui_source_consistent_evidence(
+    before: Option<i64>,
+    generation_after: impl FnOnce() -> Option<i64>,
+    scan: impl FnOnce() -> Option<u64>,
+) -> (Option<u64>, Option<(u64, i64)>) {
+    let boundary = scan();
+    let evidence = before
+        .filter(|before| Some(*before) == generation_after())
+        .and_then(|generation| boundary.map(|boundary| (boundary, generation)));
+    (evidence.map(|(boundary, _)| boundary), evidence)
+}
+
+/// One-shot scan: late append/generation mismatch uses pre-submit offset, no evidence.
+#[cfg(unix)]
+pub(crate) fn claude_tui_user_record_boundary_evidence_after_timestamp(
     transcript_path: &std::path::Path,
     turn_started_at: chrono::DateTime<chrono::Utc>,
-    fallback_offset: u64,
-) -> u64 {
-    match crate::services::claude_tui::transcript_tail::claude_transcript_timestamp_at_or_after(
-        transcript_path,
-        turn_started_at,
-    ) {
-        Ok(Some(offset)) => offset,
-        Ok(None) => fallback_offset,
-        Err(error) => {
-            debug_log(&format!(
-                "Claude TUI transcript timestamp scan failed for {}: {}; falling back to offset {}",
-                transcript_path.display(),
-                error,
-                fallback_offset
-            ));
-            fallback_offset
-        }
-    }
+    tmux_session_name: &str,
+    generation_before: Option<i64>,
+) -> (Option<u64>, Option<(u64, i64)>) {
+    claude_tui_source_consistent_evidence(
+        generation_before,
+        || claude_tui_generation_mtime_ns(tmux_session_name),
+        || {
+            crate::services::claude_tui::transcript_tail::claude_user_record_boundary_at_or_after(
+                transcript_path,
+                turn_started_at,
+            )
+            .unwrap_or_else(|error| {
+                debug_log(&format!(
+                    "Claude TUI transcript timestamp scan failed for {}: {error}",
+                    transcript_path.display()
+                ));
+                None
+            })
+        },
+    )
 }
 
 #[cfg(unix)]
@@ -1864,29 +1880,30 @@ fn run_claude_tui_fresh_turn_and_finalize(
         resolved_session_id,
         prompt,
     );
-    let (read_result, harvest, turn_read_start_offset) = match fresh_turn_result {
-        Ok(result) => result,
-        Err(error) => {
-            crate::services::termination_audit::record_termination_for_tmux(
-                tmux_session_name,
-                None,
-                "claude_tui_provider",
-                "fresh_turn_start_failed",
-                Some(&format!("claude tui fresh turn failed: {}", error)),
-                None,
-            );
-            record_tmux_exit_reason(
-                tmux_session_name,
-                &format!("claude tui fresh turn failed: {}", error),
-            );
-            crate::services::platform::tmux::kill_session(
-                tmux_session_name,
-                &format!("claude tui fresh turn failed: {}", error),
-            );
-            let _ = std::fs::remove_file(owner_path);
-            return Err(error);
-        }
-    };
+    let (read_result, harvest, turn_read_start_offset, turn_start_evidence) =
+        match fresh_turn_result {
+            Ok(result) => result,
+            Err(error) => {
+                crate::services::termination_audit::record_termination_for_tmux(
+                    tmux_session_name,
+                    None,
+                    "claude_tui_provider",
+                    "fresh_turn_start_failed",
+                    Some(&format!("claude tui fresh turn failed: {}", error)),
+                    None,
+                );
+                record_tmux_exit_reason(
+                    tmux_session_name,
+                    &format!("claude tui fresh turn failed: {}", error),
+                );
+                crate::services::platform::tmux::kill_session(
+                    tmux_session_name,
+                    &format!("claude tui fresh turn failed: {}", error),
+                );
+                let _ = std::fs::remove_file(owner_path);
+                return Err(error);
+            }
+        };
     if matches!(read_result, ReadOutputResult::SessionDied { .. }) {
         crate::services::termination_audit::record_termination_for_tmux(
             tmux_session_name,
@@ -1912,6 +1929,7 @@ fn run_claude_tui_fresh_turn_and_finalize(
         transcript_path_string,
         tmux_session_name,
         transcript_path,
+        turn_start_evidence,
     );
     let transcript_len = std::fs::metadata(transcript_path)
         .map(|meta| meta.len())
@@ -2050,9 +2068,10 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
     tmux_session_name: &str,
     resolved_session_id: &str,
     prompt: &str,
-) -> Result<(ReadOutputResult, ReadHarvestStats, u64), String> {
+) -> Result<(ReadOutputResult, ReadHarvestStats, u64, Option<(u64, i64)>), String> {
     for attempt in 1..=CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS {
         let hook_rx = crate::services::claude_tui::hook_server::subscribe_hook_events();
+        let generation_before = claude_tui_generation_mtime_ns(tmux_session_name);
         let turn_started_at = chrono::Utc::now();
         match crate::services::claude_tui::input::send_fresh_prompt(
             tmux_session_name,
@@ -2061,11 +2080,14 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
         ) {
             Ok(()) => {
                 let hook_events_after = chrono::Utc::now();
-                let start_offset = claude_tui_turn_start_offset_after_timestamp(
-                    std::path::Path::new(transcript_path_string),
-                    turn_started_at,
-                    fresh_turn_start_offset,
-                );
+                let (record_boundary, evidence) =
+                    claude_tui_user_record_boundary_evidence_after_timestamp(
+                        std::path::Path::new(transcript_path_string),
+                        turn_started_at,
+                        tmux_session_name,
+                        generation_before,
+                    );
+                let start_offset = record_boundary.unwrap_or(fresh_turn_start_offset);
                 return read_claude_tui_transcript_until_done(
                     transcript_path_string,
                     start_offset,
@@ -2076,7 +2098,7 @@ fn run_claude_tui_fresh_turn_with_ready_retry(
                     hook_rx,
                     hook_events_after,
                 )
-                .map(|(read_result, harvest)| (read_result, harvest, start_offset));
+                .map(|(read_result, harvest)| (read_result, harvest, start_offset, evidence));
             }
             Err(error) if should_retry_claude_tui_fresh_prompt_ready(&error, attempt) => {
                 let backoff = claude_tui_fresh_prompt_ready_backoff(attempt);
@@ -2133,15 +2155,34 @@ fn claude_tui_fresh_prompt_ready_backoff(completed_attempts: usize) -> Duration 
 }
 
 #[cfg(unix)]
+pub(crate) fn claude_tui_generation_mtime_ns(tmux_session_name: &str) -> Option<i64> {
+    let path =
+        crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "generation")?;
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_nanos()).ok())
+        .filter(|generation| *generation != 0)
+}
+
+#[cfg(unix)]
 pub(crate) fn emit_claude_tui_watcher_handoff(
     sender: &Sender<StreamMessage>,
     transcript_path_string: &str,
     tmux_session_name: &str,
     transcript_path: &std::path::Path,
+    turn_start_evidence: Option<(u64, i64)>,
 ) {
     let last_offset = std::fs::metadata(transcript_path)
         .map(|meta| meta.len())
         .unwrap_or(0);
+    let (turn_start_evidence, turn_start_evidence_generation_mtime_ns) = turn_start_evidence
+        .map_or((None, None), |(boundary, generation)| {
+            (Some(boundary), Some(generation))
+        });
     crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
         tmux_session_name,
         crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
@@ -2159,6 +2200,8 @@ pub(crate) fn emit_claude_tui_watcher_handoff(
             transcript_path: transcript_path_string.to_string(),
             tmux_session_name: tmux_session_name.to_string(),
             last_offset,
+            turn_start_evidence,
+            turn_start_evidence_generation_mtime_ns,
         },
     });
 }
@@ -3419,7 +3462,13 @@ mod local_tmux_lifecycle_tests {
         let transcript_path = temp.path().display().to_string();
         let (sender, receiver) = std::sync::mpsc::channel();
 
-        emit_claude_tui_watcher_handoff(&sender, &transcript_path, "claude-tui-test", temp.path());
+        emit_claude_tui_watcher_handoff(
+            &sender,
+            &transcript_path,
+            "claude-tui-test",
+            temp.path(),
+            Some((7, 11)),
+        );
 
         let message = receiver.recv().unwrap();
         match message {
@@ -3429,11 +3478,15 @@ mod local_tmux_lifecycle_tests {
                         transcript_path: actual_path,
                         tmux_session_name,
                         last_offset,
+                        turn_start_evidence,
+                        turn_start_evidence_generation_mtime_ns,
                     },
             } => {
                 assert_eq!(actual_path, transcript_path);
                 assert_eq!(tmux_session_name, "claude-tui-test");
                 assert_eq!(last_offset, std::fs::metadata(temp.path()).unwrap().len());
+                assert_eq!(turn_start_evidence, Some(7));
+                assert_eq!(turn_start_evidence_generation_mtime_ns, Some(11));
             }
             other => panic!("expected RuntimeReady ClaudeTui, got {other:?}"),
         }
@@ -3572,6 +3625,51 @@ mod local_tmux_lifecycle_tests {
     }
 
     #[test]
+    fn generation_fence_selects_boundary_or_fallback() {
+        assert_eq!(
+            claude_tui_source_consistent_evidence(Some(1), || Some(1), || Some(64)),
+            (Some(64), Some((64, 1)))
+        );
+        assert_eq!(
+            claude_tui_source_consistent_evidence(Some(1), || Some(2), || Some(64)),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn one_shot_timestamp_miss_uses_read_fallback_without_evidence() {
+        let transcript = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            transcript.path(),
+            concat!(
+                r#"{"timestamp":"2026-05-28T00:00:00Z","type":"user"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let after_eof = chrono::DateTime::parse_from_rfc3339("2026-05-29T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            crate::services::claude_tui::transcript_tail::claude_user_record_boundary_at_or_after(
+                transcript.path(),
+                after_eof,
+            )
+            .unwrap(),
+            None,
+        );
+        assert_eq!(
+            crate::services::claude_tui::transcript_tail::claude_user_record_boundary_at_or_after(
+                transcript.path(),
+                after_eof,
+            )
+            .unwrap()
+            .unwrap_or(77),
+            77,
+        );
+    }
+
+    #[test]
     fn claude_tui_timestamp_start_offset_isolates_second_turn_from_stale_offset() {
         let transcript_path = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
@@ -3595,11 +3693,13 @@ mod local_tmux_lifecycle_tests {
         let second_turn_started_at = chrono::DateTime::parse_from_rfc3339("2026-05-28T00:01:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        let start_offset = claude_tui_turn_start_offset_after_timestamp(
-            transcript_path.path(),
-            second_turn_started_at,
-            0,
-        );
+        let start_offset =
+            crate::services::claude_tui::transcript_tail::claude_user_record_boundary_at_or_after(
+                transcript_path.path(),
+                second_turn_started_at,
+            )
+            .unwrap()
+            .unwrap_or(0);
         assert!(start_offset > 0);
 
         let (sender, receiver) = std::sync::mpsc::channel();

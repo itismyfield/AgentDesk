@@ -167,6 +167,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn delayed_evidence_is_not_episode_authority() {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            4_805_903,
+            None,
+            7,
+            8,
+            9,
+            "episode evidence".into(),
+            None,
+            Some("tmux-4805-evidence".into()),
+            Some("/tmp/evidence.jsonl".into()),
+            None,
+            0,
+        );
+        let identity = InflightTurnIdentity::from_state(&state);
+        let pin = InflightEpisodePin::from_state(&state);
+        let finalizer = state.effective_finalizer_turn_id();
+        let lease =
+            crate::services::discord::delivery_lease_key::DeliveryLeaseKey::from_inflight_state(
+                crate::services::discord::ChannelId::new(state.channel_id),
+                1,
+                &state,
+            );
+        state.claude_turn_start_evidence = Some(128);
+        state.claude_turn_start_evidence_path = Some("/tmp/new-evidence.jsonl".into());
+        state.claude_turn_start_evidence_generation_mtime_ns = Some(456);
+        assert!(identity.matches_state(&state));
+        assert!(pin.matches_state(&state));
+        assert_eq!(state.effective_finalizer_turn_id(), finalizer);
+        assert_eq!(
+            crate::services::discord::delivery_lease_key::DeliveryLeaseKey::from_inflight_state(
+                crate::services::discord::ChannelId::new(state.channel_id),
+                1,
+                &state,
+            ),
+            lease,
+        );
+    }
+
+    #[test]
     fn exact_episode_readoption_consumes_marker_before_completion_clear() {
         let root = tempfile::tempdir().expect("runtime root");
         let provider = ProviderKind::Claude;

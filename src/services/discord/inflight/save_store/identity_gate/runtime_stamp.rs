@@ -19,6 +19,89 @@ fn canonical_regular_file(path: &str) -> Option<(PathBuf, u64)> {
     let metadata = std::fs::metadata(&path).ok()?;
     metadata.is_file().then_some((path, metadata.len()))
 }
+
+fn admit_claude_turn_start_evidence(
+    provider: &ProviderKind,
+    on_disk: &mut InflightTurnState,
+    requested: &InflightTurnState,
+) -> bool {
+    let Some(((boundary, requested_path), producer_generation)) = requested
+        .claude_turn_start_evidence
+        .zip(requested.claude_turn_start_evidence_path.as_deref())
+        .zip(requested.claude_turn_start_evidence_generation_mtime_ns)
+    else {
+        return false;
+    };
+    if let Some(previous) = on_disk.claude_turn_start_evidence {
+        let same_tuple = previous == boundary
+            && on_disk.claude_turn_start_evidence_generation_mtime_ns == Some(producer_generation)
+            && on_disk
+                .claude_turn_start_evidence_path
+                .as_deref()
+                .is_some_and(|path| {
+                    std::fs::canonicalize(path)
+                        .ok()
+                        .zip(std::fs::canonicalize(requested_path).ok())
+                        .is_some_and(|(durable, requested)| durable == requested)
+                });
+        if !same_tuple {
+            record_inflight_invariant_with_severity(
+                false,
+                on_disk,
+                "claude_turn_start_evidence_contradiction",
+                "inflight/runtime_stamp:admit_claude_turn_start_evidence",
+                "ClaudeTUI delayed user-record evidence contradicted the durable write-once tuple",
+                serde_json::json!({
+                    "previous": previous,
+                    "requested": boundary,
+                    "observe_only": true,
+                }),
+                ObsSeverity::Warn,
+            );
+        }
+        return false;
+    }
+    if *provider != ProviderKind::Claude
+        || on_disk.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+        || on_disk.rebind_origin
+        || on_disk.restart_mode.is_some()
+        || producer_generation == 0
+    {
+        return false;
+    }
+    let Some(tmux) = nonempty(on_disk.tmux_session_name.as_deref()) else {
+        return false;
+    };
+    let Some(output_path) = on_disk.output_path.as_deref() else {
+        return false;
+    };
+    let Some((canonical, len)) = canonical_regular_file(output_path) else {
+        return false;
+    };
+    let requested_canonical = std::fs::canonicalize(requested_path).ok();
+    if len < boundary
+        || requested_canonical.as_deref() != Some(canonical.as_path())
+        || tmux_generation_file_mtime_ns(tmux) != producer_generation
+    {
+        return false;
+    }
+    let binding_matches = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+        tmux,
+    )
+    .is_some_and(|binding| {
+        binding.runtime_kind == RuntimeHandoffKind::ClaudeTui
+            && std::fs::canonicalize(binding.output_path).ok().as_deref()
+                == Some(canonical.as_path())
+    });
+    if !binding_matches {
+        return false;
+    }
+    on_disk.claude_turn_start_evidence = Some(boundary);
+    on_disk.claude_turn_start_evidence_path = Some(canonical.display().to_string());
+    on_disk.claude_turn_start_evidence_generation_mtime_ns = Some(producer_generation);
+    true
+}
+
 fn marker_matches(tmux: &str, path: &Path, session: &str, start: u64) -> bool {
     crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux).is_some_and(|marker| {
         nonempty(marker.session_id.as_deref()) == Some(session)
@@ -431,6 +514,10 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
         on_disk.watcher_owns_live_relay = requested.watcher_owns_live_relay;
         on_disk.relay_owner_kind = requested.relay_owner_kind;
     }
+    // Evidence is an independent write-once projection. It is evaluated only
+    // after the runtime three-way merge, against the resulting durable path.
+    let newly_admitted_evidence =
+        admit_claude_turn_start_evidence(&provider, &mut on_disk, &requested);
     match persist_under_lock_with_snapshot(
         root,
         &path,
@@ -438,6 +525,11 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
         "src/services/discord/inflight.rs:stamp_runtime_handoff_if_matches_identity_in_root",
     ) {
         Ok(Some(persisted)) => {
+            if newly_admitted_evidence {
+                super::super::create_monotonic_observer::observe_successful_delayed_evidence(
+                    &persisted,
+                );
+            }
             state.adopt_persisted(persisted);
             GuardedSaveOutcome::Saved
         }
@@ -640,6 +732,106 @@ mod tests {
                 RelayOwnerKind::Watcher
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[rustfmt::skip]
+    fn claude_evidence_is_post_merge_independent_write_once_and_fail_open() {
+        let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        dedupe::reset_state_for_tests();
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        let (provider, channel_id) = (ProviderKind::Claude, 42_592_149);
+        let tmux = "AgentDesk-claude-evidence-5490";
+        let transcript = root.path().join("transcript.jsonl");
+        std::fs::write(&transcript, vec![b'a'; 512]).unwrap();
+        let generation_path = session_temp_path(tmux, "generation");
+        std::fs::create_dir_all(Path::new(&generation_path).parent().unwrap()).unwrap();
+        std::fs::write(generation_path, b"1").unwrap();
+        dedupe::register_tmux_runtime_binding(tmux, dedupe::TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui, output_path: transcript.display().to_string(),
+            relay_output_path: None, input_fifo_path: None, session_id: None,
+            last_offset: 512, relay_last_offset: None,
+        });
+        let generation = tmux_generation_file_mtime_ns(tmux);
+        let with_evidence = |mut state: InflightTurnState, boundary, generation| {
+            state.claude_turn_start_evidence = Some(boundary);
+            state.claude_turn_start_evidence_path = Some(transcript.display().to_string());
+            state.claude_turn_start_evidence_generation_mtime_ns = Some(generation);
+            state
+        };
+
+        let mut seed = runtime_seed(provider.clone(), channel_id, Some(tmux));
+        seed.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        seed.output_path = Some(root.path().join("old.jsonl").display().to_string());
+        save_inflight_state_in_root(root.path(), &seed).unwrap();
+        let baseline = load(root.path(), &provider, channel_id);
+        let mut durable = baseline.clone();
+        durable.output_path = Some(transcript.display().to_string());
+        save_inflight_state_in_root(root.path(), &durable).unwrap();
+
+        let mut requested = with_evidence(baseline.clone(), 256, generation);
+        super::super::super::create_monotonic_observer::test_seams::clear(provider.clone(), channel_id);
+        assert_eq!(stamp_runtime_handoff_if_matches_identity_in_root(root.path(), (&baseline, &mut requested),
+            &InflightTurnIdentity::from_state(&baseline), "test::evidence"), GuardedSaveOutcome::Saved);
+        assert_eq!(requested.output_path, durable.output_path);
+        assert_eq!(super::super::super::create_monotonic_observer::test_seams::delayed_offset(
+            provider.clone(), channel_id), Some(256));
+
+        let admitted = load(root.path(), &provider, channel_id);
+        let mut contradiction = with_evidence(admitted.clone(), 128, generation);
+        let (_, events) = invariant_test_capture::capture(|| {
+            assert_eq!(stamp_runtime_handoff_if_matches_identity_in_root(root.path(), (&admitted, &mut contradiction),
+                &InflightTurnIdentity::from_state(&admitted), "test::contradiction"), GuardedSaveOutcome::Saved);
+        });
+        assert_eq!(contradiction.claude_turn_start_evidence, Some(256));
+        assert_eq!(events.len(), 1);
+
+        let mut miss = admitted.clone();
+        miss.claude_turn_start_evidence = None;
+        miss.claude_turn_start_evidence_path = None;
+        miss.claude_turn_start_evidence_generation_mtime_ns = None;
+        save_inflight_state_in_root(root.path(), &miss).unwrap();
+        let mut requested_miss = with_evidence(miss.clone(), 900, generation);
+        assert_eq!(stamp_runtime_handoff_if_matches_identity_in_root(root.path(), (&miss, &mut requested_miss),
+            &InflightTurnIdentity::from_state(&miss), "test::miss"), GuardedSaveOutcome::Saved);
+        assert_eq!(requested_miss.claude_turn_start_evidence, None);
+        let other = root.path().join("other.jsonl");
+        std::fs::write(&other, vec![b'b'; 512]).unwrap();
+        let mut foreign = with_evidence(miss.clone(), 128, generation);
+        foreign.claude_turn_start_evidence_path = Some(other.display().to_string());
+        let mut foreign_disk = miss.clone();
+        assert!(!admit_claude_turn_start_evidence(&provider, &mut foreign_disk, &foreign));
+        assert_eq!(foreign_disk.claude_turn_start_evidence, None);
+
+        for rebind in [false, true] {
+            let mut reserved = miss.clone();
+            if rebind { reserved.rebind_origin = true } else {
+                reserved.set_restart_mode(InflightRestartMode::DrainRestart);
+            }
+            assert!(!admit_claude_turn_start_evidence(&provider, &mut reserved,
+                &with_evidence(miss.clone(), 128, generation)));
+        }
+
+        save_inflight_state_in_root(root.path(), &admitted).unwrap();
+        super::super::super::create_monotonic_observer::test_seams::clear(provider.clone(), channel_id);
+        let mut switched = admitted.clone();
+        switched.output_path = Some(root.path().join("other.jsonl").display().to_string());
+        switched.claude_turn_start_evidence = None;
+        switched.claude_turn_start_evidence_path = None;
+        switched.claude_turn_start_evidence_generation_mtime_ns = None;
+        assert_eq!(stamp_runtime_handoff_if_matches_identity_in_root(root.path(), (&admitted, &mut switched),
+            &InflightTurnIdentity::from_state(&admitted), "test::path_switch"), GuardedSaveOutcome::Saved);
+        assert_eq!(super::super::super::create_monotonic_observer::test_seams::delayed_offset(
+            provider.clone(), channel_id), None);
+        assert_eq!(std::fs::canonicalize(switched.claude_turn_start_evidence_path.unwrap()).unwrap(),
+            std::fs::canonicalize(&transcript).unwrap());
+
+        let mut generation_miss = miss.clone();
+        assert!(!admit_claude_turn_start_evidence(&provider, &mut generation_miss,
+            &with_evidence(miss, 128, generation.saturating_add(1))));
+        dedupe::reset_state_for_tests();
     }
 
     #[test]

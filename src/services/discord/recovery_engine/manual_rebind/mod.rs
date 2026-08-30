@@ -969,10 +969,14 @@ mod post_work_evidence_tests {
                 transcript_path,
                 tmux_session_name,
                 last_offset,
+                turn_start_evidence,
+                turn_start_evidence_generation_mtime_ns,
             } => {
                 assert_eq!(transcript_path, "/tmp/claude-transcript.jsonl");
                 assert_eq!(tmux_session_name, "AgentDesk-claude-adk");
                 assert_eq!(last_offset, 42);
+                assert_eq!(turn_start_evidence, None);
+                assert_eq!(turn_start_evidence_generation_mtime_ns, None);
             }
             other => panic!("expected ClaudeTui handoff, got {other:?}"),
         }

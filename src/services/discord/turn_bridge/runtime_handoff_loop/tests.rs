@@ -665,3 +665,60 @@ fn provisional_cleanup_preserves_replacement_incarnation() {
     assert!(!registered.cancel.load(Ordering::Relaxed));
     assert!(provisional_cancel.load(Ordering::Relaxed));
 }
+
+#[tokio::test]
+async fn claude_evidence_rolls_back_on_identity_miss_without_reverting_runtime_projection() {
+    let _lock = crate::config::shared_test_env_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let root = tempfile::tempdir().expect("runtime root");
+    let _env_reset = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        root.path(),
+    );
+    let provider = ProviderKind::Claude;
+    let mut state = runtime_seed(provider.clone(), 42_592_699);
+    state.claude_turn_start_evidence = Some(44);
+    state.claude_turn_start_evidence_path =
+        Some("/runtime/claude-evidence-original.jsonl".to_string());
+    state.claude_turn_start_evidence_generation_mtime_ns = Some(444);
+    save_inflight_state(&state).expect("seed owner row");
+    let mut reowned = state.clone();
+    reowned.user_msg_id += 1;
+    save_inflight_state(&reowned).expect("replace durable owner");
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let mut state_dirty = false;
+    let requested_path = "/runtime/claude-evidence-miss.jsonl";
+
+    let observed = dispatch_process_handoff(
+        &shared,
+        &provider,
+        &mut state,
+        RuntimeHandoffLoopMessage::RuntimeReady {
+            handoff: RuntimeHandoff::ClaudeTui {
+                transcript_path: requested_path.to_string(),
+                tmux_session_name: "AgentDesk-claude-evidence-miss".to_string(),
+                last_offset: 512,
+                turn_start_evidence: Some(128),
+                turn_start_evidence_generation_mtime_ns: Some(999),
+            },
+        },
+        &mut state_dirty,
+        false,
+    )
+    .await;
+
+    assert_eq!(observed.outcome, Some(GuardedSaveOutcome::IdentityMismatch));
+    assert_eq!(state.claude_turn_start_evidence, Some(44));
+    assert_eq!(
+        state.claude_turn_start_evidence_path.as_deref(),
+        Some("/runtime/claude-evidence-original.jsonl"),
+    );
+    assert_eq!(
+        state.claude_turn_start_evidence_generation_mtime_ns,
+        Some(444),
+    );
+    assert_eq!(state.output_path.as_deref(), Some(requested_path));
+    assert_eq!(state.last_offset, 512);
+    assert!(observed.retry_message.is_none());
+}

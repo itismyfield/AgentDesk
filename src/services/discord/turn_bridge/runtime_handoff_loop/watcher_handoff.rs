@@ -12,6 +12,8 @@ pub(super) struct WatcherRuntimeHandoffContext<'a> {
     pub(super) tmux_session_name: String,
     pub(super) session_id: Option<String>,
     pub(super) last_offset: u64,
+    pub(super) turn_start_evidence: Option<u64>,
+    pub(super) turn_start_evidence_generation_mtime_ns: Option<i64>,
     pub(super) done: bool,
 }
 
@@ -57,6 +59,8 @@ pub(super) fn handle_watcher_runtime_handoff(
     let tmux_session_name = ctx.tmux_session_name;
     let session_id = ctx.session_id;
     let last_offset = ctx.last_offset;
+    let turn_start_evidence = ctx.turn_start_evidence;
+    let turn_start_evidence_generation_mtime_ns = ctx.turn_start_evidence_generation_mtime_ns;
     let done = ctx.done;
     let inflight_state = state.inflight_state;
     let tmux_last_offset = state.tmux_last_offset;
@@ -94,6 +98,11 @@ pub(super) fn handle_watcher_runtime_handoff(
     }
     inflight_state.input_fifo_path = fifo_path;
     inflight_state.last_offset = last_offset;
+    inflight_state.claude_turn_start_evidence = turn_start_evidence;
+    inflight_state.claude_turn_start_evidence_path =
+        turn_start_evidence.map(|_| output_path.clone());
+    inflight_state.claude_turn_start_evidence_generation_mtime_ns =
+        turn_start_evidence_generation_mtime_ns;
     *state_dirty |= inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
     #[cfg(unix)]
     let relay_http_available = shared_owned.serenity_http_or_token_fallback().is_some();
@@ -124,6 +133,12 @@ pub(super) fn handle_watcher_runtime_handoff(
         "turn_bridge::runtime_handoff_loop::watcher_runtime_owner_handoff",
     );
     if outcome != crate::services::discord::inflight::GuardedSaveOutcome::Saved {
+        inflight_state.claude_turn_start_evidence = persisted_baseline.claude_turn_start_evidence;
+        inflight_state
+            .claude_turn_start_evidence_path
+            .clone_from(&persisted_baseline.claude_turn_start_evidence_path);
+        inflight_state.claude_turn_start_evidence_generation_mtime_ns =
+            persisted_baseline.claude_turn_start_evidence_generation_mtime_ns;
         *watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
         *watcher_relay_available_for_turn = false;
         *tmux_handed_off = false;
@@ -210,6 +225,13 @@ pub(super) fn handle_watcher_runtime_handoff(
             "turn_bridge::runtime_handoff_loop::watcher_runtime_claim_owner",
         );
         if outcome != crate::services::discord::inflight::GuardedSaveOutcome::Saved {
+            inflight_state.claude_turn_start_evidence =
+                pre_claim_persisted.claude_turn_start_evidence;
+            inflight_state
+                .claude_turn_start_evidence_path
+                .clone_from(&pre_claim_persisted.claude_turn_start_evidence_path);
+            inflight_state.claude_turn_start_evidence_generation_mtime_ns =
+                pre_claim_persisted.claude_turn_start_evidence_generation_mtime_ns;
             if watcher_claimed {
                 cancel_provisional_watcher_claim_if_matches(
                     shared_owned.as_ref(),

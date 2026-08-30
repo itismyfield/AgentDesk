@@ -122,6 +122,8 @@ pub enum RuntimeHandoff {
         transcript_path: String,
         tmux_session_name: String,
         last_offset: u64,
+        turn_start_evidence: Option<u64>,
+        turn_start_evidence_generation_mtime_ns: Option<i64>,
     },
     CodexTui {
         rollout_path: String,

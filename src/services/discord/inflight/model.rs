@@ -210,6 +210,13 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Stable start offset for the current turn's output JSONL slice.
     #[serde(default)]
     pub turn_start_offset: Option<u64>,
+    /// One-shot ClaudeTUI user-record boundary after submit; a late append may miss.
+    /// It is not exact identity and never grants turn identity,
+    /// episode fencing, lease, retry, destructive, or finalizer authority. Offset,
+    /// canonical path, and producer generation form one additive write-once tuple.
+    #[serde(default)] pub claude_turn_start_evidence: Option<u64>,
+    #[serde(default)] pub claude_turn_start_evidence_path: Option<String>,
+    #[serde(default)] pub claude_turn_start_evidence_generation_mtime_ns: Option<i64>,
     pub full_response: String,
     pub response_sent_offset: usize,
     /// True once the terminal assistant response has been committed to the
@@ -906,6 +913,68 @@ mod turn_source_tests {
     }
 
     #[test]
+    fn claude_turn_start_evidence_is_additive_and_bidirectionally_compatible() {
+        #[derive(serde::Deserialize)]
+        struct LegacyProjection {
+            version: u32,
+            provider: String,
+        }
+
+        let mut state = InflightTurnState::new(
+            ProviderKind::Claude,
+            42,
+            None,
+            7,
+            8,
+            9,
+            "hello".into(),
+            None,
+            Some("AgentDesk-claude-evidence".into()),
+            Some("/tmp/evidence.jsonl".into()),
+            None,
+            0,
+        );
+        state.claude_turn_start_evidence = Some(128);
+        state.claude_turn_start_evidence_path = Some("/tmp/evidence.jsonl".into());
+        state.claude_turn_start_evidence_generation_mtime_ns = Some(456);
+        let mut encoded = serde_json::to_value(&state).expect("serialize evidence");
+        assert_eq!(
+            encoded["claude_turn_start_evidence"],
+            serde_json::json!(128)
+        );
+        assert_eq!(
+            encoded["claude_turn_start_evidence_path"],
+            serde_json::json!("/tmp/evidence.jsonl")
+        );
+        assert_eq!(
+            encoded["claude_turn_start_evidence_generation_mtime_ns"],
+            serde_json::json!(456)
+        );
+
+        let legacy: LegacyProjection =
+            serde_json::from_value(encoded.clone()).expect("old reader ignores evidence");
+        assert_eq!(legacy.version, state.version);
+        assert_eq!(legacy.provider, "claude");
+
+        let object = encoded.as_object_mut().expect("state object");
+        for field in [
+            "claude_turn_start_evidence",
+            "claude_turn_start_evidence_path",
+            "claude_turn_start_evidence_generation_mtime_ns",
+        ] {
+            object.remove(field);
+        }
+        let new_reader: InflightTurnState =
+            serde_json::from_value(encoded).expect("new reader accepts legacy row");
+        assert_eq!(new_reader.claude_turn_start_evidence, None);
+        assert_eq!(new_reader.claude_turn_start_evidence_path, None);
+        assert_eq!(
+            new_reader.claude_turn_start_evidence_generation_mtime_ns,
+            None
+        );
+    }
+
+    #[test]
     fn source_message_ids_round_trip_and_default_for_legacy_rows() {
         let mut state = InflightTurnState::new(
             ProviderKind::Claude,
@@ -1018,6 +1087,9 @@ impl InflightTurnState {
             base_commit: None,
             last_offset,
             turn_start_offset: Some(last_offset),
+            claude_turn_start_evidence: None,
+            claude_turn_start_evidence_path: None,
+            claude_turn_start_evidence_generation_mtime_ns: None,
             full_response: String::new(),
             response_sent_offset: 0,
             terminal_delivery_committed: false,

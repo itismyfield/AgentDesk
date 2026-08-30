@@ -1,13 +1,7 @@
-//! Process-local, observe-only continuity witness for real turn births (#5490).
+//! Process-local, observe-only continuity witnesses for output coordinates (#5490).
 //!
-//! A readable output coordinate whose start is at least 64 stamps its canonical
-//! path, length, and the exact preceding 64 bytes. A later lower start warns only
-//! while that evidence still matches. An unobservable real birth clears the prior
-//! witness; synthetic births are excluded. The process-local slot map is bounded;
-//! eviction only ends observe-only continuity for the evicted key. Restarts, multiple
-//! processes, later RMW saves, and path switches are outside continuity comparison.
-//! Same-path replacement preserving the evidence window and at least the stamped
-//! length remains an indistinguishable alias.
+//! Real starts and one-shot delayed boundaries use distinct slots; late appends may miss.
+//! IO stays outside the bounded mutex; misses/warnings never grant runtime authority.
 
 use super::*;
 use std::collections::HashMap;
@@ -17,14 +11,20 @@ use std::sync::{LazyLock, Mutex};
 
 const WINDOW_LEN: u64 = 64;
 const MAX_WITNESS_SLOTS: usize = 4096;
-type WitnessKey = (ProviderKind, u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum WitnessKind {
+    RealTurnStart,
+    DelayedUserRecordBoundary,
+}
 
+type WitnessKey = (ProviderKind, u64, WitnessKind);
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CoordinateWitness {
     path: PathBuf,
     start: u64,
     len: u64,
     prior: [u8; WINDOW_LEN as usize],
+    generation: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -36,7 +36,7 @@ struct WitnessSlot {
 static WITNESSES: LazyLock<Mutex<HashMap<WitnessKey, WitnessSlot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn read_witness(path: &Path, start: u64) -> Option<CoordinateWitness> {
+fn read_witness(path: &Path, start: u64, generation: Option<i64>) -> Option<CoordinateWitness> {
     if start < WINDOW_LEN {
         return None;
     }
@@ -56,11 +56,12 @@ fn read_witness(path: &Path, start: u64) -> Option<CoordinateWitness> {
         start,
         len,
         prior,
+        generation,
     })
 }
 
 fn proof_matches(path: &Path, previous: &CoordinateWitness) -> bool {
-    read_witness(path, previous.start).is_some_and(|current| {
+    read_witness(path, previous.start, previous.generation).is_some_and(|current| {
         current.path == previous.path
             && current.len >= previous.len
             && current.prior == previous.prior
@@ -71,7 +72,7 @@ pub(super) fn observe_successful_real_create(state: &InflightTurnState) {
     let Some(provider) = state.provider_kind() else {
         return;
     };
-    let key = (provider, state.channel_id);
+    let key = (provider, state.channel_id, WitnessKind::RealTurnStart);
     let (revision, previous) = {
         let map = WITNESSES.lock().unwrap_or_else(|error| error.into_inner());
         let slot = map.get(&key).cloned().unwrap_or_default();
@@ -101,7 +102,7 @@ pub(super) fn observe_successful_real_create(state: &InflightTurnState) {
             ObsSeverity::Warn,
         );
     }
-    let candidate = coordinate.and_then(|(start, _, path)| read_witness(path, start));
+    let candidate = coordinate.and_then(|(start, _, path)| read_witness(path, start, None));
     let mut map = WITNESSES.lock().unwrap_or_else(|error| error.into_inner());
     let unchanged = map
         .get(&key)
@@ -125,6 +126,74 @@ pub(super) fn observe_successful_real_create(state: &InflightTurnState) {
     let slot = map.entry(key).or_default();
     slot.revision = slot.revision.wrapping_add(1);
     slot.witness = candidate;
+}
+
+/// Install new delayed evidence without clearing an earlier witness on
+/// unreadable input. Revision CAS prevents stale IO from winning.
+pub(super) fn observe_successful_delayed_evidence(state: &InflightTurnState) {
+    let Some(provider) = state.provider_kind() else {
+        return;
+    };
+    let Some(((start, output_path), generation_mtime_ns)) = state
+        .claude_turn_start_evidence
+        .zip(state.claude_turn_start_evidence_path.as_deref())
+        .zip(state.claude_turn_start_evidence_generation_mtime_ns)
+    else {
+        return;
+    };
+    let key = (
+        provider,
+        state.channel_id,
+        WitnessKind::DelayedUserRecordBoundary,
+    );
+    let (revision, previous) = {
+        let map = WITNESSES.lock().unwrap_or_else(|error| error.into_inner());
+        let slot = map.get(&key).cloned().unwrap_or_default();
+        (slot.revision, slot.witness)
+    };
+    let path = Path::new(output_path);
+    if let Some(previous) = previous.as_ref()
+        && previous.generation == Some(generation_mtime_ns)
+        && start < previous.start
+        && proof_matches(path, previous)
+    {
+        record_inflight_invariant_with_severity(
+            false,
+            state,
+            "claude_turn_start_evidence_monotonic",
+            "inflight/create_monotonic_observer:observe_successful_delayed_evidence",
+            "delayed ClaudeTUI user-record boundary moved backwards in an evidenced output coordinate",
+            serde_json::json!({
+                "previous": previous.start,
+                "next": start,
+                "len_at_stamp": previous.len,
+                "evidence_path": output_path,
+                "generation_mtime_ns": generation_mtime_ns,
+                "observe_only": true,
+            }),
+            ObsSeverity::Warn,
+        );
+    }
+    let Some(candidate) = read_witness(path, start, Some(generation_mtime_ns)) else {
+        return;
+    };
+    let mut map = WITNESSES.lock().unwrap_or_else(|error| error.into_inner());
+    let unchanged = map
+        .get(&key)
+        .map_or(revision == 0 && previous.is_none(), |slot| {
+            slot.revision == revision && slot.witness == previous
+        });
+    if !unchanged {
+        return;
+    }
+    if !map.contains_key(&key) && map.len() >= MAX_WITNESS_SLOTS {
+        if let Some(evicted) = map.keys().find(|candidate| **candidate != key).cloned() {
+            map.remove(&evicted);
+        }
+    }
+    let slot = map.entry(key).or_default();
+    slot.revision = slot.revision.wrapping_add(1);
+    slot.witness = Some(candidate);
 }
 
 #[cfg(test)]
@@ -162,28 +231,41 @@ pub(super) mod test_seams {
         });
     }
 
-    pub(super) fn set_io_hook(hook: impl FnMut() + 'static) {
+    pub(in crate::services::discord::inflight) fn set_io_hook(hook: impl FnMut() + 'static) {
         IO_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
-    pub(super) fn clear_io_hook() {
+    pub(in crate::services::discord::inflight) fn clear_io_hook() {
         IO_HOOK.with(|slot| slot.borrow_mut().take());
     }
 
-    pub(super) fn clear(provider: ProviderKind, channel: u64) {
+    pub(in crate::services::discord::inflight) fn clear(provider: ProviderKind, channel: u64) {
         WITNESSES
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .remove(&(provider, channel));
+            .retain(|(candidate_provider, candidate_channel, _), _| {
+                *candidate_provider != provider || *candidate_channel != channel
+            });
     }
 
-    pub(super) fn offset(provider: ProviderKind, channel: u64) -> Option<u64> {
+    fn offset(provider: ProviderKind, channel: u64, kind: WitnessKind) -> Option<u64> {
         WITNESSES
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .get(&(provider, channel))
+            .get(&(provider, channel, kind))
             .and_then(|slot| slot.witness.as_ref())
             .map(|witness| witness.start)
+    }
+
+    pub(super) fn real_offset(provider: ProviderKind, channel: u64) -> Option<u64> {
+        offset(provider, channel, WitnessKind::RealTurnStart)
+    }
+
+    pub(in crate::services::discord::inflight) fn delayed_offset(
+        provider: ProviderKind,
+        channel: u64,
+    ) -> Option<u64> {
+        offset(provider, channel, WitnessKind::DelayedUserRecordBoundary)
     }
 
     pub(super) fn clear_all() {
@@ -262,7 +344,7 @@ mod tests {
         });
         assert!(switched.is_empty());
         assert_eq!(
-            test_seams::offset(ProviderKind::Codex, 54_900_002),
+            test_seams::real_offset(ProviderKind::Codex, 54_900_002),
             Some(128)
         );
         let (_, alias) = invariant_test_capture::capture(|| {
@@ -276,7 +358,10 @@ mod tests {
             observe_successful_real_create(&state(54_900_002, &second, 0));
         });
         assert!(unobservable_switch.is_empty());
-        assert_eq!(test_seams::offset(ProviderKind::Codex, 54_900_002), None);
+        assert_eq!(
+            test_seams::real_offset(ProviderKind::Codex, 54_900_002),
+            None
+        );
         let (_, return_to_first) = invariant_test_capture::capture(|| {
             observe_successful_real_create(&state(54_900_002, &first, 128));
         });
@@ -293,7 +378,7 @@ mod tests {
         test_seams::clear(ProviderKind::Codex, real.channel_id);
         save_inflight_state_create_new_in_root(temp.path(), &real).unwrap();
         assert_eq!(
-            test_seams::offset(ProviderKind::Codex, real.channel_id),
+            test_seams::real_offset(ProviderKind::Codex, real.channel_id),
             Some(256)
         );
 
@@ -304,7 +389,7 @@ mod tests {
         test_seams::clear(ProviderKind::Codex, adopted.channel_id);
         save_inflight_state_create_new_in_root(temp.path(), &adopted).unwrap();
         assert_eq!(
-            test_seams::offset(ProviderKind::Codex, adopted.channel_id),
+            test_seams::real_offset(ProviderKind::Codex, adopted.channel_id),
             None
         );
 
@@ -327,7 +412,7 @@ mod tests {
         test_seams::clear(ProviderKind::Codex, tui.channel_id);
         assert!(save_inflight_state_if_absent_in_root(temp.path(), &tui).unwrap());
         assert_eq!(
-            test_seams::offset(ProviderKind::Codex, tui.channel_id),
+            test_seams::real_offset(ProviderKind::Codex, tui.channel_id),
             None
         );
 
@@ -340,7 +425,7 @@ mod tests {
             test_seams::clear(ProviderKind::Codex, monitor.channel_id);
             save_inflight_state_create_new_in_root(temp.path(), &monitor).unwrap();
             assert_eq!(
-                test_seams::offset(ProviderKind::Codex, monitor.channel_id),
+                test_seams::real_offset(ProviderKind::Codex, monitor.channel_id),
                 None
             );
 
@@ -351,7 +436,7 @@ mod tests {
             test_seams::clear(ProviderKind::Codex, watcher.channel_id);
             assert!(save_inflight_state_if_absent_in_root(temp.path(), &watcher).unwrap());
             assert_eq!(
-                test_seams::offset(ProviderKind::Codex, watcher.channel_id),
+                test_seams::real_offset(ProviderKind::Codex, watcher.channel_id),
                 None
             );
         }
@@ -361,7 +446,7 @@ mod tests {
         assert!(!is_synthetic_create_state(&real_if_absent));
         assert!(save_inflight_state_if_absent_in_root(temp.path(), &real_if_absent).unwrap());
         assert_eq!(
-            test_seams::offset(ProviderKind::Codex, real_if_absent.channel_id),
+            test_seams::real_offset(ProviderKind::Codex, real_if_absent.channel_id),
             Some(192)
         );
     }
@@ -391,7 +476,7 @@ mod tests {
         test_seams::fail_next_sync(std::io::ErrorKind::Other);
         assert!(save_inflight_state_create_new_in_root(temp.path(), &failed).is_err());
         assert_eq!(
-            test_seams::offset(ProviderKind::Codex, failed.channel_id),
+            test_seams::real_offset(ProviderKind::Codex, failed.channel_id),
             None
         );
     }
@@ -410,16 +495,65 @@ mod tests {
         {
             let mut map = WITNESSES.lock().unwrap();
             for channel in 0..MAX_WITNESS_SLOTS as u64 {
-                map.insert((ProviderKind::Codex, channel), WitnessSlot::default());
+                map.insert(
+                    (ProviderKind::Codex, channel, WitnessKind::RealTurnStart),
+                    WitnessSlot::default(),
+                );
             }
         }
         observe_successful_real_create(&state(54_900_013, &output, 128));
         assert_eq!(test_seams::slot_count(), MAX_WITNESS_SLOTS);
         assert_eq!(
-            test_seams::offset(ProviderKind::Codex, 54_900_013),
+            test_seams::real_offset(ProviderKind::Codex, 54_900_013),
             Some(128)
         );
         test_seams::clear_all();
+    }
+
+    #[test]
+    fn delayed_unreadable_or_small_coordinate_preserves_previous_witness() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("turn.jsonl");
+        write_bytes(&output, b'a', 512);
+        let channel = 54_900_014;
+        let mut delayed = state(channel, &output, 320);
+        delayed.provider = ProviderKind::Claude.as_str().to_string();
+        delayed.claude_turn_start_evidence = Some(256);
+        delayed.claude_turn_start_evidence_path = Some(output.display().to_string());
+        delayed.claude_turn_start_evidence_generation_mtime_ns = Some(7);
+        test_seams::clear(ProviderKind::Claude, channel);
+        observe_successful_real_create(&delayed);
+        observe_successful_delayed_evidence(&delayed);
+        assert_eq!(
+            test_seams::real_offset(ProviderKind::Claude, channel),
+            Some(320)
+        );
+        assert_eq!(
+            test_seams::delayed_offset(ProviderKind::Claude, channel),
+            Some(256)
+        );
+
+        delayed.claude_turn_start_evidence = Some(128);
+        let (_, same_generation) =
+            invariant_test_capture::capture(|| observe_successful_delayed_evidence(&delayed));
+        assert_eq!(same_generation.len(), 1);
+        delayed.claude_turn_start_evidence = Some(96);
+        delayed.claude_turn_start_evidence_generation_mtime_ns = Some(8);
+        let (_, turnover) =
+            invariant_test_capture::capture(|| observe_successful_delayed_evidence(&delayed));
+        assert!(turnover.is_empty());
+        assert_eq!(
+            test_seams::delayed_offset(ProviderKind::Claude, channel),
+            Some(96)
+        );
+        delayed.claude_turn_start_evidence_path =
+            Some(temp.path().join("missing.jsonl").display().to_string());
+        observe_successful_delayed_evidence(&delayed);
+        assert_eq!(
+            test_seams::delayed_offset(ProviderKind::Claude, channel),
+            Some(96)
+        );
     }
 
     #[test]
@@ -433,17 +567,23 @@ mod tests {
         test_seams::set_io_hook(move || {
             assert!(WITNESSES.try_lock().is_ok());
             let mut map = WITNESSES.lock().unwrap();
-            let slot = map.entry((ProviderKind::Codex, channel)).or_default();
+            let slot = map
+                .entry((ProviderKind::Codex, channel, WitnessKind::RealTurnStart))
+                .or_default();
             slot.revision += 1;
             slot.witness = Some(CoordinateWitness {
                 path: PathBuf::from("newer"),
                 start: 384,
                 len: 384,
                 prior: [b'z'; WINDOW_LEN as usize],
+                generation: None,
             });
         });
         observe_successful_real_create(&state(channel, &output, 256));
         test_seams::clear_io_hook();
-        assert_eq!(test_seams::offset(ProviderKind::Codex, channel), Some(384));
+        assert_eq!(
+            test_seams::real_offset(ProviderKind::Codex, channel),
+            Some(384)
+        );
     }
 }
