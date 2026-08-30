@@ -7152,6 +7152,7 @@ services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests::emit_tu
 services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests::emit_turn_lifecycle_persists_round_trip
 services::onboarding::canonical_status_tests::new_agents_start_with_core_canonical_idle_status
 services::onboarding::credential_token_permission_tests::write_credential_token_creates_owner_only_secret_file
+services::onboarding::secondary_command_provider_tests::supported_primary_providers_have_stable_secondary_defaults
 services::opencode::tests::hard_kill_marks_retiring_only_for_exclusive_session
 services::opencode::tests::hard_kill_veto_clears_retiring_for_shared_session
 services::opencode::tests::idle_disposal_delay_reschedules_until_ttl_elapsed

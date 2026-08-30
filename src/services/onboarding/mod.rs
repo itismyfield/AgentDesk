@@ -1229,7 +1229,33 @@ fn default_secondary_command_provider(primary_provider: &str) -> &'static str {
         "codex" => "claude",
         "gemini" => "codex",
         "opencode" => "claude",
+        "qwen" => "claude",
         _ => "codex",
+    }
+}
+
+#[cfg(test)]
+mod secondary_command_provider_tests {
+    use super::default_secondary_command_provider;
+
+    #[test]
+    fn supported_primary_providers_have_stable_secondary_defaults() {
+        let cases = [
+            ("claude", "codex"),
+            ("codex", "claude"),
+            ("gemini", "codex"),
+            ("opencode", "claude"),
+            ("qwen", "claude"),
+            ("unknown-provider", "codex"),
+        ];
+
+        for (primary, expected_secondary) in cases {
+            assert_eq!(
+                default_secondary_command_provider(primary),
+                expected_secondary,
+                "unexpected default secondary provider for {primary}"
+            );
+        }
     }
 }
 
