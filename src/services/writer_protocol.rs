@@ -324,7 +324,7 @@ mod tests {
     use super::*;
     use std::{
         path::Component,
-        sync::{mpsc, Arc, Barrier},
+        sync::{Arc, Barrier, mpsc},
     };
 
     #[rustfmt::skip]
