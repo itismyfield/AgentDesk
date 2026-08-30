@@ -1,6 +1,6 @@
 use super::{
-    ConfinedDir, ConfinedRuntimeRoot, DirectoryIdentity, DirectoryTypeFact, FsError, FsOperation,
-    InvalidRootFact, OpenDirectoryFact, RootLineage,
+    ConfinedDir, ConfinedRuntimeRoot, DirectoryIdentity, DirectoryLocator, DirectoryTypeFact,
+    FsError, FsOperation, InvalidRootFact, LineageSeal, OpenDirectoryFact, RootLineage,
 };
 use std::{
     ffi::{CStr, CString},
@@ -9,9 +9,11 @@ use std::{
         unix::ffi::OsStrExt,
     },
     path::{Component, Path},
+    sync::Arc,
 };
 
 pub(super) type DirHandle = OwnedFd;
+pub(super) const MUTATION_SUPPORTED: bool = true;
 
 const OPEN_DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
@@ -25,15 +27,28 @@ pub(in super::super) fn open_runtime_root(path: &Path) -> Result<ConfinedRuntime
     let plan = parse_root(path)?;
     let (mut fd, anchor) = open_directory(libc::AT_FDCWD, plan.anchor)?;
     let mut root = anchor;
+    let mut locator = DirectoryLocator::Anchor {
+        component: plan.anchor.to_owned(),
+    };
     for component in &plan.components {
+        locator = DirectoryLocator::Child {
+            parent: root.identity,
+            component: component.clone(),
+        };
         (fd, root) = open_directory(fd.as_raw_fd(), component)?;
     }
+    let seal = Arc::new(LineageSeal);
     Ok(ConfinedRuntimeRoot {
         lineage: RootLineage {
             anchor: anchor.identity,
             root: root.identity,
         },
-        directory: ConfinedDir { fd, open: root },
+        directory: ConfinedDir {
+            fd: Arc::new(fd),
+            open: root,
+            seal,
+            locator,
+        },
     })
 }
 
@@ -386,15 +401,73 @@ mod high_risk_recovery {
         reject("file/leaf", &root_ok, b"file", libc::ENOTDIR);
         reject("nested/file", &nested_ok, b"file", libc::ENOTDIR);
 
-        let root = open_runtime_root(&relative.join("nested")).unwrap();
-        let keep = root.directory.fd.as_raw_fd();
-        let trace = TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()));
-        let (final_fact, raw_fd) = successful_prefix(&trace, &nested_ok, Some(keep));
-        assert_eq!(raw_fd, keep);
+        for (path, expected) in [(Path::new("."), b".".as_slice()), (Path::new("/"), b"/")] {
+            let anchor = open_runtime_root(path).unwrap();
+            assert!(matches!(&anchor.directory.locator,
+                DirectoryLocator::Anchor { component } if component.as_bytes() == expected));
+        }
+        TRACE.with(|trace| trace.borrow_mut().clear());
         let identity = |metadata: &fs::Metadata| DirectoryIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
         };
+        let mut root = open_runtime_root(&relative.join("nested")).unwrap();
+        let keep = root.directory.fd.as_raw_fd();
+        let trace = TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()));
+        let (final_fact, raw_fd) = successful_prefix(&trace, &nested_ok, Some(keep));
+        assert_eq!(raw_fd, keep);
+        let other = open_runtime_root(&relative.join("nested")).unwrap();
+        assert_eq!(root.lineage(), other.lineage());
+        assert!(!Arc::ptr_eq(&root.directory.seal, &other.directory.seal));
+        let parent_identity = identity(&fs::metadata(root_path).unwrap());
+        assert!(matches!(&root.directory.locator,
+            DirectoryLocator::Child { parent, component }
+                if (*parent, component.as_bytes()) == (parent_identity, b"nested")));
+        TRACE.with(|trace| trace.borrow_mut().clear());
+        let foreign = other.directory.clone();
+        let parent = root.directory.clone();
+        let parent_identity = root.identity();
+        let mut session = root.mutation_session();
+        super::super::take_preflight_activity();
+        let error = session.prepare_child(&foreign, "..").unwrap_err();
+        assert_eq!(error.kind(), FsErrorKind::CrossLineage);
+        assert_eq!(super::super::take_preflight_activity(), 0);
+        for (value, fact) in [
+            ("", super::super::InvalidComponentFact::Empty),
+            (".", super::super::InvalidComponentFact::Current),
+            ("..", super::super::InvalidComponentFact::Parent),
+            ("slash/name", super::super::InvalidComponentFact::Character),
+            ("back\\slash", super::super::InvalidComponentFact::Character),
+            ("white space", super::super::InvalidComponentFact::Character),
+            ("nul\0", super::super::InvalidComponentFact::Character),
+            ("é", super::super::InvalidComponentFact::Character),
+            ("/absolute", super::super::InvalidComponentFact::Character),
+        ] {
+            assert_eq!(
+                session.prepare_child(&parent, value).unwrap_err().kind(),
+                FsErrorKind::InvalidComponent(fact)
+            );
+        }
+        for expected in ["AZaz09_-", "..."] {
+            let candidate = session.prepare_child(&parent, expected).unwrap();
+            assert!(matches!(&candidate.1,
+                DirectoryLocator::Child { component, .. }
+                    if component.as_bytes() == expected.as_bytes()));
+        }
+        let prepared = session.prepare_child(&parent, "a..b").unwrap();
+        assert_eq!(super::super::take_preflight_activity(), 3);
+        assert_eq!(prepared.0.fd.as_raw_fd(), keep);
+        let DirectoryLocator::Child {
+            parent: locator_parent,
+            component,
+        } = &prepared.1
+        else {
+            panic!("prepared child did not retain a child locator")
+        };
+        assert_eq!(*locator_parent, parent_identity);
+        assert_eq!(component.as_bytes(), b"a..b");
+        assert!(TRACE.with(|trace| trace.borrow().is_empty()));
+        drop((session, parent, foreign, other));
         let original = identity(&fs::metadata(&nested).unwrap());
         let original_pair = (original, original);
         let retired = nested.with_extension("retired");
@@ -410,6 +483,9 @@ mod high_risk_recovery {
         assert_eq!((final_fact.identity, pinned), original_pair);
         assert_ne!(pinned, replacement);
         drop(root);
+        let live = unsafe { libc::fcntl(prepared.0.fd.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(live, -1);
+        drop(prepared);
         assert_closed(raw_fd);
 
         FSTAT_FAILURE.with(|failure| failure.set(Some(1)));

@@ -3,6 +3,7 @@ use std::path::Path;
 
 #[derive(Debug)]
 pub(super) enum DirHandle {}
+pub(super) const MUTATION_SUPPORTED: bool = false;
 
 pub(in super::super) fn open_runtime_root(_: &Path) -> Result<ConfinedRuntimeRoot, FsError> {
     Err(FsError::unsupported())
@@ -24,5 +25,17 @@ mod high_risk_recovery {
                 );
             }
         }
+
+        let root = std::sync::Arc::new(super::super::LineageSeal);
+        let foreign = std::sync::Arc::new(super::super::LineageSeal);
+        let identity = super::super::DirectoryIdentity {
+            device: 0,
+            inode: 0,
+        };
+        super::super::take_preflight_activity();
+        let error =
+            super::super::prepare_locator(false, &root, (&foreign, identity), "..").unwrap_err();
+        assert_eq!(error.kind(), FsErrorKind::UnsupportedPlatform);
+        assert_eq!(super::super::take_preflight_activity(), 0);
     }
 }

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{ffi::CString, path::Path, sync::Arc};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix;
@@ -60,12 +60,99 @@ impl ConfinedRuntimeRoot {
     pub(super) fn identity(&self) -> DirectoryIdentity {
         self.directory.open.identity
     }
+
+    fn mutation_session(&mut self) -> MutationSession<'_> {
+        MutationSession(self)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ConfinedDir {
+    fd: Arc<platform::DirHandle>,
+    open: OpenDirectoryFact,
+    seal: Arc<LineageSeal>,
+    locator: DirectoryLocator,
 }
 
 #[derive(Debug)]
-pub(super) struct ConfinedDir {
-    fd: platform::DirHandle,
-    open: OpenDirectoryFact,
+struct LineageSeal;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DirectoryLocator {
+    Anchor {
+        component: CString,
+    },
+    Child {
+        parent: DirectoryIdentity,
+        component: CString,
+    },
+}
+
+#[derive(Debug)]
+struct PreparedChild(ConfinedDir, DirectoryLocator);
+
+struct MutationSession<'root>(&'root mut ConfinedRuntimeRoot);
+
+impl MutationSession<'_> {
+    fn prepare_child(
+        &mut self,
+        parent: &ConfinedDir,
+        value: &str,
+    ) -> Result<PreparedChild, FsError> {
+        let locator = prepare_locator(
+            platform::MUTATION_SUPPORTED,
+            &self.0.directory.seal,
+            (&parent.seal, parent.open.identity),
+            value,
+        )?;
+        Ok(PreparedChild(parent.clone(), locator))
+    }
+}
+
+fn prepare_locator(
+    supported: bool,
+    root: &Arc<LineageSeal>,
+    parent: (&Arc<LineageSeal>, DirectoryIdentity),
+    value: &str,
+) -> Result<DirectoryLocator, FsError> {
+    if !supported {
+        return Err(FsError::unsupported());
+    }
+    if !Arc::ptr_eq(root, parent.0) {
+        return Err(FsError::cross_lineage());
+    }
+    Ok(DirectoryLocator::Child {
+        parent: parent.1,
+        component: validate_component(value)?,
+    })
+}
+
+fn validate_component(value: &str) -> Result<CString, FsError> {
+    #[cfg(test)]
+    PREFLIGHT_ACTIVITY.with(|activity| activity.set(activity.get() | 1));
+    let fact = match value {
+        "" => InvalidComponentFact::Empty,
+        "." => InvalidComponentFact::Current,
+        ".." => InvalidComponentFact::Parent,
+        _ if value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte)) =>
+        {
+            #[cfg(test)]
+            PREFLIGHT_ACTIVITY.with(|activity| activity.set(activity.get() | 2));
+            return Ok(CString::new(value).expect("validated component"));
+        }
+        _ => InvalidComponentFact::Character,
+    };
+    Err(FsError::invalid_component(fact))
+}
+
+#[cfg(test)]
+thread_local! { static PREFLIGHT_ACTIVITY: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+
+#[cfg(test)]
+fn take_preflight_activity() -> u8 {
+    PREFLIGHT_ACTIVITY.with(|activity| activity.replace(0))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +196,14 @@ pub(super) enum FsOperation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum InvalidComponentFact {
+    Empty,
+    Current,
+    Parent,
+    Character,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum InvalidRootFact {
     Empty,
     ParentDir,
@@ -119,6 +214,8 @@ pub(super) enum InvalidRootFact {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FsErrorKind {
     InvalidRoot(InvalidRootFact),
+    InvalidComponent(InvalidComponentFact),
+    CrossLineage,
     Io(IoFact),
     NotDirectory(DirectoryTypeFact),
     MissingCloseOnExec { fd_flags: i32 },
@@ -147,6 +244,18 @@ impl FsError {
                 operation,
                 raw_errno,
             }),
+        }
+    }
+
+    fn invalid_component(fact: InvalidComponentFact) -> Self {
+        Self {
+            kind: FsErrorKind::InvalidComponent(fact),
+        }
+    }
+
+    fn cross_lineage() -> Self {
+        Self {
+            kind: FsErrorKind::CrossLineage,
         }
     }
 
