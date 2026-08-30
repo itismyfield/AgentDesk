@@ -1,117 +1,334 @@
-//! Contract tests for provider-independent, process-local writer authority.
+//! Provider-independent, process-local writer authority.
+//!
+//! This module models semantic conflicts only. Namespace construction,
+//! cross-process coordination, writer census, and production activation belong
+//! to later W0b slices.
 
-#[cfg(test)]
-mod red_contract {
-    use super::super::ProviderDomain;
+use super::ProviderDomain;
+use std::sync::{Mutex, MutexGuard};
 
-    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub(super) struct RuntimeNamespaceId(pub(super) u64);
+macro_rules! semantic_id {
+    ($name:ident) => {
+        #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub(crate) struct $name(u64);
 
-    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub(super) struct AliasGroupId(pub(super) u64);
+        impl $name {
+            pub(crate) const fn new(value: u64) -> Self {
+                Self(value)
+            }
 
-    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub(super) struct AuthoritySetId(pub(super) u64);
+            pub(crate) const fn get(self) -> u64 {
+                self.0
+            }
+        }
+    };
+}
 
-    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub(super) struct HolderInstance(pub(super) u64);
+semantic_id!(SessionKey);
+semantic_id!(HookQueueKey);
+semantic_id!(RestartAttemptKey);
+semantic_id!(AuthoritySetId);
+semantic_id!(HolderInstance);
 
-    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub(super) enum ArtifactSlot {
-        RelayJsonl,
-        Prompt,
+/// Opaque namespace identity issued by the trusted layout catalog in W0b-a2.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct RuntimeNamespaceId(u64);
+
+impl RuntimeNamespaceId {
+    pub(crate) const fn from_catalog(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// Opaque alias identity issued by the semantic artifact catalog.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct AliasGroupId(u64);
+
+impl AliasGroupId {
+    pub(crate) const fn from_catalog(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub(crate) enum ArtifactSlot {
+    RelayJsonl,
+    NativeTranscript,
+    NativeRollout,
+    Prompt,
+    InputFifo,
+    OwnerMarker,
+    WrapperScript,
+    RuntimeMarker,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ConfigSlot {
+    AgentDesk,
+    RuntimeOverride,
+}
+
+/// Closed semantic coordinates. Raw filesystem components never enter overlap.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ConflictSegment {
+    RuntimeSessions,
+    Session(SessionKey),
+    HookQueues,
+    HookQueue(HookQueueKey),
+    RestartRoot,
+    RestartAttempt(RestartAttemptKey),
+    ConfigRoot,
+    ConfigArtifact(ConfigSlot),
+    Artifact(ArtifactSlot),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ConflictCoverage {
+    Exact,
+    Subtree,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct ConflictDomain {
+    lineage: Vec<ConflictSegment>,
+    coverage: ConflictCoverage,
+}
+
+impl ConflictDomain {
+    pub(crate) fn try_new(
+        lineage: impl IntoIterator<Item = ConflictSegment>,
+        coverage: ConflictCoverage,
+    ) -> Result<Self, EmptyConflictLineage> {
+        let lineage = lineage.into_iter().collect::<Vec<_>>();
+        if lineage.is_empty() {
+            return Err(EmptyConflictLineage);
+        }
+        Ok(Self { lineage, coverage })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EmptyConflictLineage;
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct AuthorityKey {
+    runtime_namespace: RuntimeNamespaceId,
+    conflict_domain: ConflictDomain,
+    alias_group: AliasGroupId,
+}
+
+impl AuthorityKey {
+    pub(crate) fn new(
+        runtime_namespace: RuntimeNamespaceId,
+        conflict_domain: ConflictDomain,
+        alias_group: AliasGroupId,
+    ) -> Self {
+        Self {
+            runtime_namespace,
+            conflict_domain,
+            alias_group,
+        }
+    }
+}
+
+pub(crate) fn overlaps(left: &AuthorityKey, right: &AuthorityKey) -> bool {
+    if left.runtime_namespace != right.runtime_namespace {
+        return false;
     }
 
-    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub(super) enum ConflictSegment {
-        RuntimeSessions,
-        Session(u64),
-        Artifact(ArtifactSlot),
+    let left_domain = &left.conflict_domain;
+    let right_domain = &right.conflict_domain;
+    if left_domain.lineage == right_domain.lineage {
+        return left.alias_group == right.alias_group
+            || left_domain.coverage == ConflictCoverage::Subtree
+            || right_domain.coverage == ConflictCoverage::Subtree;
     }
 
-    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub(super) enum ConflictCoverage {
-        Exact,
-        Subtree,
+    (left_domain.coverage == ConflictCoverage::Subtree
+        && right_domain.lineage.starts_with(&left_domain.lineage))
+        || (right_domain.coverage == ConflictCoverage::Subtree
+            && left_domain.lineage.starts_with(&right_domain.lineage))
+}
+
+/// Actor metadata for an in-process holder. Process and coordination identity
+/// are added by W0b-a2; provider never participates in AuthorityKey equality.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AuthorityActor {
+    provider: Option<ProviderDomain>,
+    holder_instance: HolderInstance,
+}
+
+impl AuthorityActor {
+    pub(crate) const fn new(
+        provider: Option<ProviderDomain>,
+        holder_instance: HolderInstance,
+    ) -> Self {
+        Self {
+            provider,
+            holder_instance,
+        }
     }
 
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub(super) struct ConflictDomain {
-        pub(super) lineage: Vec<ConflictSegment>,
-        pub(super) coverage: ConflictCoverage,
+    pub(crate) const fn provider(self) -> Option<ProviderDomain> {
+        self.provider
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AuthorityRequest {
+    set_id: AuthoritySetId,
+    actor: AuthorityActor,
+    keys: Vec<AuthorityKey>,
+}
+
+impl AuthorityRequest {
+    pub(crate) fn new(
+        set_id: AuthoritySetId,
+        actor: AuthorityActor,
+        keys: impl IntoIterator<Item = AuthorityKey>,
+    ) -> Result<Self, AuthorityRequestError> {
+        let mut keys = keys.into_iter().collect::<Vec<_>>();
+        if keys.is_empty() {
+            return Err(AuthorityRequestError::EmptyKeySet);
+        }
+        keys.sort_unstable();
+        if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(AuthorityRequestError::DuplicateKey);
+        }
+        Ok(Self {
+            set_id,
+            actor,
+            keys,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuthorityRequestError {
+    EmptyKeySet,
+    DuplicateKey,
+}
+
+#[derive(Debug)]
+struct ActiveAuthoritySet {
+    set_id: AuthoritySetId,
+    actor: AuthorityActor,
+    keys: Vec<AuthorityKey>,
+}
+
+/// One-mutex, process-local authority registry. It makes no cross-process,
+/// host-lock, database-fence, or cross-host coordination claim.
+#[derive(Debug, Default)]
+pub(crate) struct AuthoritySetRegistry {
+    active: Mutex<Vec<ActiveAuthoritySet>>,
+}
+
+impl AuthoritySetRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            active: Mutex::new(Vec::new()),
+        }
     }
 
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-    pub(super) struct AuthorityKey {
-        pub(super) namespace: RuntimeNamespaceId,
-        pub(super) domain: ConflictDomain,
-        pub(super) alias: AliasGroupId,
+    fn active(&self) -> MutexGuard<'_, Vec<ActiveAuthoritySet>> {
+        self.active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    #[derive(Clone, Copy, Debug)]
-    pub(super) struct AuthorityActor {
-        pub(super) provider: ProviderDomain,
-        pub(super) holder: HolderInstance,
-    }
-
-    #[derive(Clone, Debug)]
-    pub(super) struct AuthorityRequest {
-        pub(super) set_id: AuthoritySetId,
-        pub(super) actor: AuthorityActor,
-        pub(super) keys: Vec<AuthorityKey>,
-    }
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub(super) enum AcquireError {
-        Conflict,
-    }
-
-    #[derive(Debug, Default)]
-    pub(super) struct AuthoritySetRegistry;
-
-    #[derive(Debug)]
-    pub(super) struct AuthoritySet;
-
-    impl AuthoritySetRegistry {
-        pub(super) fn acquire(
-            &self,
-            request: AuthorityRequest,
-        ) -> Result<AuthoritySet, AcquireError> {
-            let _ = (
-                request.set_id,
-                request.actor.provider,
-                request.actor.holder,
-                request.keys,
-            );
-            Ok(AuthoritySet)
+    pub(crate) fn acquire(
+        &self,
+        request: AuthorityRequest,
+    ) -> Result<AuthoritySet<'_>, AcquireError> {
+        let mut active = self.active();
+        if active.iter().any(|held| {
+            held.set_id == request.set_id
+                && held.actor.holder_instance == request.actor.holder_instance
+        }) {
+            return Err(AcquireError::IdentityAlreadyActive);
+        }
+        if active.iter().any(|held| {
+            held.keys.iter().any(|held_key| {
+                request
+                    .keys
+                    .iter()
+                    .any(|requested_key| overlaps(held_key, requested_key))
+            })
+        }) {
+            return Err(AcquireError::Conflict);
         }
 
-        pub(super) fn release(&self, _set_id: AuthoritySetId, _holder: HolderInstance) {}
+        let set_id = request.set_id;
+        let holder_instance = request.actor.holder_instance;
+        active.push(ActiveAuthoritySet {
+            set_id,
+            actor: request.actor,
+            keys: request.keys,
+        });
+        drop(active);
+        Ok(AuthoritySet {
+            registry: self,
+            set_id,
+            holder_instance,
+            released: false,
+        })
     }
 
-    pub(super) fn overlaps(_left: &AuthorityKey, _right: &AuthorityKey) -> bool {
-        true
+    fn release(&self, set_id: AuthoritySetId, holder_instance: HolderInstance) {
+        self.active()
+            .retain(|held| held.set_id != set_id || held.actor.holder_instance != holder_instance);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AcquireError {
+    Conflict,
+    IdentityAlreadyActive,
+}
+
+#[derive(Debug)]
+pub(crate) struct AuthoritySet<'a> {
+    registry: &'a AuthoritySetRegistry,
+    set_id: AuthoritySetId,
+    holder_instance: HolderInstance,
+    released: bool,
+}
+
+impl AuthoritySet<'_> {
+    pub(crate) fn release(mut self) {
+        self.registry.release(self.set_id, self.holder_instance);
+        self.released = true;
+    }
+}
+
+impl Drop for AuthoritySet<'_> {
+    fn drop(&mut self) {
+        if !self.released {
+            self.registry.release(self.set_id, self.holder_instance);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::red_contract::*;
+    use super::*;
     use crate::services::writer_protocol::ProviderDomain;
 
     fn key(session: u64, artifact: ArtifactSlot, coverage: ConflictCoverage) -> AuthorityKey {
-        AuthorityKey {
-            namespace: RuntimeNamespaceId(1),
-            domain: ConflictDomain {
-                lineage: vec![
+        AuthorityKey::new(
+            RuntimeNamespaceId::from_catalog(1),
+            ConflictDomain::try_new(
+                [
                     ConflictSegment::RuntimeSessions,
-                    ConflictSegment::Session(session),
+                    ConflictSegment::Session(SessionKey::new(session)),
                     ConflictSegment::Artifact(artifact),
                 ],
                 coverage,
-            },
-            alias: AliasGroupId(artifact as u64),
-        }
+            )
+            .unwrap(),
+            AliasGroupId::from_catalog(artifact as u64),
+        )
     }
 
     fn request(
@@ -120,19 +337,17 @@ mod tests {
         holder: u64,
         keys: impl IntoIterator<Item = AuthorityKey>,
     ) -> AuthorityRequest {
-        AuthorityRequest {
-            set_id: AuthoritySetId(set_id),
-            actor: AuthorityActor {
-                provider,
-                holder: HolderInstance(holder),
-            },
-            keys: keys.into_iter().collect(),
-        }
+        AuthorityRequest::new(
+            AuthoritySetId::new(set_id),
+            AuthorityActor::new(Some(provider), HolderInstance::new(holder)),
+            keys,
+        )
+        .unwrap()
     }
 
     #[test]
     fn provider_metadata_does_not_discriminate_authority() {
-        let registry = AuthoritySetRegistry;
+        let registry = AuthoritySetRegistry::new();
         let contested = key(7, ArtifactSlot::RelayJsonl, ConflictCoverage::Exact);
         let _claude = registry
             .acquire(request(1, ProviderDomain::Claude, 1, [contested.clone()]))
@@ -148,9 +363,19 @@ mod tests {
 
     #[test]
     fn subtree_ancestor_conflicts_with_descendant() {
-        let registry = AuthoritySetRegistry;
-        let mut ancestor = key(7, ArtifactSlot::RelayJsonl, ConflictCoverage::Subtree);
-        ancestor.domain.lineage.pop();
+        let registry = AuthoritySetRegistry::new();
+        let ancestor = AuthorityKey::new(
+            RuntimeNamespaceId::from_catalog(1),
+            ConflictDomain::try_new(
+                [
+                    ConflictSegment::RuntimeSessions,
+                    ConflictSegment::Session(SessionKey::new(7)),
+                ],
+                ConflictCoverage::Subtree,
+            )
+            .unwrap(),
+            AliasGroupId::from_catalog(90),
+        );
         let descendant = key(7, ArtifactSlot::Prompt, ConflictCoverage::Exact);
         let _ancestor = registry
             .acquire(request(1, ProviderDomain::Claude, 1, [ancestor]))
@@ -174,7 +399,7 @@ mod tests {
 
     #[test]
     fn failed_multi_key_acquisition_rolls_back_atomically() {
-        let registry = AuthoritySetRegistry;
+        let registry = AuthoritySetRegistry::new();
         let available = key(7, ArtifactSlot::Prompt, ConflictCoverage::Exact);
         let occupied = key(7, ArtifactSlot::RelayJsonl, ConflictCoverage::Exact);
         let _occupied = registry
@@ -201,16 +426,16 @@ mod tests {
 
     #[test]
     fn stale_release_cannot_clear_successor() {
-        let registry = AuthoritySetRegistry;
+        let registry = AuthoritySetRegistry::new();
         let contested = key(7, ArtifactSlot::RelayJsonl, ConflictCoverage::Exact);
-        let stale_set = AuthoritySetId(1);
-        let stale_holder = HolderInstance(1);
+        let stale_set = AuthoritySetId::new(1);
+        let stale_holder = HolderInstance::new(1);
         drop(
             registry
                 .acquire(request(
-                    stale_set.0,
+                    stale_set.get(),
                     ProviderDomain::Claude,
-                    stale_holder.0,
+                    stale_holder.get(),
                     [contested.clone()],
                 ))
                 .unwrap(),

@@ -8159,6 +8159,11 @@ services::turn_orchestrator::registry_purge::tests::remove_idle_entry_skips_glob
 services::turn_orchestrator::registry_purge::tests::remove_idle_entry_unlinks_all_six_maps_when_idle
 services::turn_orchestrator::turn_finished_signal_tests::turn_finished_latch_short_circuits_late_subscribers
 services::turn_orchestrator::turn_finished_signal_tests::turn_finished_reset_unlatches_on_new_turn
+services::writer_protocol::authority::tests::failed_multi_key_acquisition_rolls_back_atomically
+services::writer_protocol::authority::tests::provider_metadata_does_not_discriminate_authority
+services::writer_protocol::authority::tests::sibling_exact_domains_do_not_conflict
+services::writer_protocol::authority::tests::stale_release_cannot_clear_successor
+services::writer_protocol::authority::tests::subtree_ancestor_conflicts_with_descendant
 services::writer_protocol::tests::adjudicated_anti_cases_fail_closed
 services::writer_protocol::tests::aliases_are_per_value_and_unknown_paths_fail
 services::writer_protocol::tests::drop_releases_exact_key_without_disturbing_unrelated_registration
