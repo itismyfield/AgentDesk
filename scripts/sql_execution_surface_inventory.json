@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "59c50750f235a0f6f791b59f48b815066003efe3",
+  "measured_at_sha": "4cb5d4a9dd9b7cde8c8066c0dcbc62cfdb138b0f",
   "records": [
     {
       "root": "migrations/postgres",
@@ -4221,7 +4221,7 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:55774473ef0937d33ba30beed1503b81fb5e0311526b7144320c6c60fe016dcf"
+      "fingerprint": "sha256:216a4ba3a5f1f1215d97bb82f9f8b1434e80d178e582980eaece9913b28d5d22"
     },
     {
       "root": "src",
