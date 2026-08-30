@@ -344,6 +344,11 @@ jobs:
               # compile all targets in the required native Windows lane.
               - 'src/services/discord/inflight/store.rs'
               - 'src/services/discord/inflight/save_store.rs'
+              # The restart-v2 fs backend has per-platform implementations
+              # (unix + unsupported). Changes must compile in the native
+              # Windows lane before merge.
+              - 'src/services/discord/restart_mode/protocol_v2/fs.rs'
+              - 'src/services/discord/restart_mode/protocol_v2/fs/**'
               - 'src/services/git/**'
               - 'src/services/maintenance/**'
               - 'src/services/memory/**'

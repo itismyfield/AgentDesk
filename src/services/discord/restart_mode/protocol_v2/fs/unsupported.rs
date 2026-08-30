@@ -1,6 +1,9 @@
 use super::{ConfinedRuntimeRoot, FsError};
 use std::path::Path;
 
+#[derive(Debug)]
+pub(super) enum DirHandle {}
+
 pub(in super::super) fn open_runtime_root(_: &Path) -> Result<ConfinedRuntimeRoot, FsError> {
     Err(FsError::unsupported())
 }

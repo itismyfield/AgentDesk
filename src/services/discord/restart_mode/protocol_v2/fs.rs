@@ -1,4 +1,4 @@
-use std::{os::fd::OwnedFd, path::Path};
+use std::path::Path;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix;
@@ -64,7 +64,7 @@ impl ConfinedRuntimeRoot {
 
 #[derive(Debug)]
 pub(super) struct ConfinedDir {
-    fd: OwnedFd,
+    fd: platform::DirHandle,
     open: OpenDirectoryFact,
 }
 

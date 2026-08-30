@@ -11,6 +11,8 @@ use std::{
     path::{Component, Path},
 };
 
+pub(super) type DirHandle = OwnedFd;
+
 const OPEN_DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
 
