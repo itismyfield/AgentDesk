@@ -388,6 +388,17 @@ mod tests {
     use super::*;
     use crate::services::writer_protocol::ProviderDomain;
 
+    const ARTIFACT_SLOTS: [ArtifactSlot; 8] = [
+        ArtifactSlot::RelayJsonl,
+        ArtifactSlot::NativeTranscript,
+        ArtifactSlot::NativeRollout,
+        ArtifactSlot::Prompt,
+        ArtifactSlot::InputFifo,
+        ArtifactSlot::OwnerMarker,
+        ArtifactSlot::WrapperScript,
+        ArtifactSlot::RuntimeMarker,
+    ];
+
     fn key(session: u64, artifact: ArtifactSlot, coverage: ConflictCoverage) -> AuthorityKey {
         AuthorityKey::new(
             RuntimeNamespaceId::from_catalog(1),
@@ -456,16 +467,7 @@ mod tests {
         let _ancestor = registry
             .acquire(request(1, ProviderDomain::Claude, 1, [ancestor.clone()]))
             .unwrap();
-        for artifact in [
-            ArtifactSlot::RelayJsonl,
-            ArtifactSlot::NativeTranscript,
-            ArtifactSlot::NativeRollout,
-            ArtifactSlot::Prompt,
-            ArtifactSlot::InputFifo,
-            ArtifactSlot::OwnerMarker,
-            ArtifactSlot::WrapperScript,
-            ArtifactSlot::RuntimeMarker,
-        ] {
+        for artifact in ARTIFACT_SLOTS {
             let descendant = key(7, artifact, ConflictCoverage::Exact);
             assert!(overlaps(&ancestor, &descendant));
             assert!(overlaps(&descendant, &ancestor));
@@ -524,13 +526,12 @@ mod tests {
         };
         let forward_canonical = canonical(&forward);
         assert_eq!(forward_canonical, canonical(&reverse));
-        assert!(forward_canonical.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(forward_canonical.windows(2).all(|pair| pair[0].0 < pair[1].0));
         assert!(
             forward_canonical
                 .iter()
                 .all(|(encoded, _)| encoded.starts_with(b"agentdesk.writer-authority-key.v1\0"))
         );
-
         let encodings = [
             ConflictSegment::RuntimeSessions,
             ConflictSegment::Session(SessionKey::new(7)),
@@ -541,16 +542,9 @@ mod tests {
             ConflictSegment::ConfigRoot,
             ConflictSegment::ConfigArtifact(ConfigSlot::AgentDesk),
             ConflictSegment::ConfigArtifact(ConfigSlot::RuntimeOverride),
-            ConflictSegment::Artifact(ArtifactSlot::RelayJsonl),
-            ConflictSegment::Artifact(ArtifactSlot::NativeTranscript),
-            ConflictSegment::Artifact(ArtifactSlot::NativeRollout),
-            ConflictSegment::Artifact(ArtifactSlot::Prompt),
-            ConflictSegment::Artifact(ArtifactSlot::InputFifo),
-            ConflictSegment::Artifact(ArtifactSlot::OwnerMarker),
-            ConflictSegment::Artifact(ArtifactSlot::WrapperScript),
-            ConflictSegment::Artifact(ArtifactSlot::RuntimeMarker),
         ]
         .into_iter()
+        .chain(ARTIFACT_SLOTS.map(ConflictSegment::Artifact))
         .map(|segment| {
             let mut encoded = Vec::new();
             segment.encode_v1(&mut encoded);
@@ -567,9 +561,15 @@ mod tests {
         other_namespace.runtime_namespace = RuntimeNamespaceId::from_catalog(2);
         let mut other_alias = original.clone();
         other_alias.alias_group = AliasGroupId::from_catalog(999);
-
+        let mut subtree = original.clone();
+        subtree.conflict_domain.coverage = ConflictCoverage::Subtree;
+        let canonical = [&original, &other_namespace, &other_alias, &subtree]
+            .map(AuthorityKey::canonical_bytes_v1)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
         assert!(!overlaps(&original, &other_namespace));
         assert!(!overlaps(&original, &other_alias));
+        assert_eq!(canonical.len(), 4);
         other_alias.conflict_domain.coverage = ConflictCoverage::Subtree;
         assert!(overlaps(&original, &other_alias));
         assert!(overlaps(&other_alias, &original));
@@ -611,20 +611,21 @@ mod tests {
             let registry = AuthoritySetRegistry::new();
             let relay = key(7, ArtifactSlot::RelayJsonl, ConflictCoverage::Exact);
             let prompt = key(7, ArtifactSlot::Prompt, ConflictCoverage::Exact);
-            let first = if reverse {
-                [prompt.clone(), relay.clone()]
+            let (first, second) = if reverse {
+                ([prompt.clone(), relay.clone()], [relay, prompt])
             } else {
-                [relay.clone(), prompt.clone()]
-            };
-            let second = if reverse {
-                [relay, prompt]
-            } else {
-                [prompt, relay]
+                ([relay.clone(), prompt.clone()], [prompt, relay])
             };
             let _held = registry
                 .acquire(request(1, ProviderDomain::Claude, 1, first))
                 .unwrap();
-            let disjoint = key(8, ArtifactSlot::RuntimeMarker, ConflictCoverage::Exact);
+            for (set_id, holder, session) in [(1, 2, 8), (2, 1, 9)] {
+                let disjoint = key(session, ArtifactSlot::RuntimeMarker, ConflictCoverage::Exact);
+                assert!(registry
+                    .acquire(request(set_id, ProviderDomain::Qwen, holder, [disjoint]))
+                    .is_ok());
+            }
+            let disjoint = key(10, ArtifactSlot::RuntimeMarker, ConflictCoverage::Exact);
             assert_eq!(
                 registry
                     .acquire(request(1, ProviderDomain::Qwen, 1, [disjoint]))
