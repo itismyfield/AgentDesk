@@ -1,6 +1,6 @@
 use super::{
-    ConfinedDir, ConfinedRuntimeRoot, DirectoryIdentity, DirectoryTypeFact, FsError, FsOperation,
-    InvalidRootFact, OpenDirectoryFact, RootLineage,
+    ConfinedDir, ConfinedRuntimeRoot, DirectoryIdentity, DirectoryLocator, DirectoryTypeFact,
+    FsError, FsOperation, InvalidRootFact, LineageSeal, OpenDirectoryFact, RootLineage,
 };
 use std::{
     ffi::{CStr, CString},
@@ -9,9 +9,11 @@ use std::{
         unix::ffi::OsStrExt,
     },
     path::{Component, Path},
+    sync::Arc,
 };
 
 pub(super) type DirHandle = OwnedFd;
+pub(super) const MUTATION_SUPPORTED: bool = true;
 
 const OPEN_DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
@@ -25,15 +27,29 @@ pub(in super::super) fn open_runtime_root(path: &Path) -> Result<ConfinedRuntime
     let plan = parse_root(path)?;
     let (mut fd, anchor) = open_directory(libc::AT_FDCWD, plan.anchor)?;
     let mut root = anchor;
+    let mut locator = DirectoryLocator::Anchor {
+        component: plan.anchor.to_owned(),
+    };
     for component in &plan.components {
+        locator = DirectoryLocator::Child {
+            parent: root.identity,
+            component: component.clone(),
+        };
         (fd, root) = open_directory(fd.as_raw_fd(), component)?;
     }
+    let seal = Arc::new(LineageSeal);
     Ok(ConfinedRuntimeRoot {
         lineage: RootLineage {
             anchor: anchor.identity,
             root: root.identity,
         },
-        directory: ConfinedDir { fd, open: root },
+        seal: seal.clone(),
+        directory: ConfinedDir {
+            fd: Arc::new(fd),
+            open: root,
+            seal,
+            locator,
+        },
     })
 }
 
@@ -308,7 +324,6 @@ mod high_risk_recovery {
 
     #[test]
     fn root_traversal_and_path_replacement_keep_the_pinned_inode() {
-        assert!(super::super::mutation_preflight_semantic_stub());
         const TEST_NAME: &str = "services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::root_traversal_and_path_replacement_keep_the_pinned_inode";
         const ISOLATED_ENV: &str = "AGENTDESK_5608_PINNED_INODE_CHILD";
         // SAFETY: getppid has no preconditions.
@@ -387,15 +402,56 @@ mod high_risk_recovery {
         reject("file/leaf", &root_ok, b"file", libc::ENOTDIR);
         reject("nested/file", &nested_ok, b"file", libc::ENOTDIR);
 
-        let root = open_runtime_root(&relative.join("nested")).unwrap();
-        let keep = root.directory.fd.as_raw_fd();
-        let trace = TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()));
-        let (final_fact, raw_fd) = successful_prefix(&trace, &nested_ok, Some(keep));
-        assert_eq!(raw_fd, keep);
+        for (path, expected) in [(Path::new("."), b".".as_slice()), (Path::new("/"), b"/")] {
+            let anchor = open_runtime_root(path).unwrap();
+            assert!(matches!(&anchor.directory.locator,
+                DirectoryLocator::Anchor { component } if component.as_bytes() == expected));
+        }
+        TRACE.with(|trace| trace.borrow_mut().clear());
         let identity = |metadata: &fs::Metadata| DirectoryIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
         };
+        let mut root = open_runtime_root(&relative.join("nested")).unwrap();
+        let keep = root.directory.fd.as_raw_fd();
+        let trace = TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()));
+        let (final_fact, raw_fd) = successful_prefix(&trace, &nested_ok, Some(keep));
+        assert_eq!(raw_fd, keep);
+        let other = open_runtime_root(&relative.join("nested")).unwrap();
+        assert_eq!(root.identity(), other.identity());
+        assert!(!Arc::ptr_eq(&root.seal, &other.seal));
+        let parent_identity = identity(&fs::metadata(root_path).unwrap());
+        assert!(matches!(&root.directory.locator,
+            DirectoryLocator::Child { parent, component }
+                if (*parent, component.as_bytes()) == (parent_identity, b"nested")));
+        TRACE.with(|trace| trace.borrow_mut().clear());
+        let foreign = other.directory.clone();
+        let parent = root.directory.clone();
+        let parent_identity = root.identity();
+        let mut session = root.mutation_session();
+        assert_eq!(
+            session.prepare_child(&foreign, "..").unwrap_err().kind(),
+            FsErrorKind::CrossLineage
+        );
+        for (value, fact) in [
+            ("", super::super::InvalidComponentFact::Empty),
+            (".", super::super::InvalidComponentFact::Current),
+            ("..", super::super::InvalidComponentFact::Parent),
+            ("slash/name", super::super::InvalidComponentFact::Character),
+        ] {
+            assert_eq!(
+                session.prepare_child(&parent, value).unwrap_err().kind(),
+                FsErrorKind::InvalidComponent(fact)
+            );
+        }
+        let prepared = session.prepare_child(&parent, "A0._-").unwrap();
+        assert_eq!(prepared.parent.fd.as_raw_fd(), keep);
+        let DirectoryLocator::Child { parent, component } = &prepared.locator else {
+            panic!("prepared child did not retain a child locator")
+        };
+        assert_eq!((*parent, component.as_bytes()), (parent_identity, b"A0._-"));
+        assert!(TRACE.with(|trace| trace.borrow().is_empty()));
+        drop((session, parent, foreign, other));
         let original = identity(&fs::metadata(&nested).unwrap());
         let original_pair = (original, original);
         let retired = nested.with_extension("retired");
@@ -411,6 +467,9 @@ mod high_risk_recovery {
         assert_eq!((final_fact.identity, pinned), original_pair);
         assert_ne!(pinned, replacement);
         drop(root);
+        let live = unsafe { libc::fcntl(prepared.parent.fd.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(live, -1);
+        drop(prepared);
         assert_closed(raw_fd);
 
         FSTAT_FAILURE.with(|failure| failure.set(Some(1)));

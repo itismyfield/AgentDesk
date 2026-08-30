@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{ffi::CString, path::Path, sync::Arc};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix;
@@ -45,6 +45,7 @@ impl RootLineage {
 #[derive(Debug)]
 pub(super) struct ConfinedRuntimeRoot {
     lineage: RootLineage,
+    seal: Arc<LineageSeal>,
     directory: ConfinedDir,
 }
 
@@ -60,12 +61,94 @@ impl ConfinedRuntimeRoot {
     pub(super) fn identity(&self) -> DirectoryIdentity {
         self.directory.open.identity
     }
+
+    fn mutation_session(&mut self) -> MutationSession<'_> {
+        MutationSession {
+            root: self,
+            #[cfg(test)]
+            unsupported: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ConfinedDir {
+    fd: Arc<platform::DirHandle>,
+    open: OpenDirectoryFact,
+    seal: Arc<LineageSeal>,
+    locator: DirectoryLocator,
 }
 
 #[derive(Debug)]
-pub(super) struct ConfinedDir {
-    fd: platform::DirHandle,
-    open: OpenDirectoryFact,
+struct LineageSeal;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DirectoryLocator {
+    Anchor {
+        component: CString,
+    },
+    Child {
+        parent: DirectoryIdentity,
+        component: CString,
+    },
+}
+
+#[derive(Debug)]
+struct PreparedChild {
+    parent: ConfinedDir,
+    locator: DirectoryLocator,
+}
+
+struct MutationSession<'root> {
+    root: &'root mut ConfinedRuntimeRoot,
+    #[cfg(test)]
+    unsupported: bool,
+}
+
+impl MutationSession<'_> {
+    fn prepare_child(
+        &mut self,
+        parent: &ConfinedDir,
+        value: &str,
+    ) -> Result<PreparedChild, FsError> {
+        if !platform::MUTATION_SUPPORTED {
+            return Err(FsError::unsupported());
+        }
+        #[cfg(test)]
+        if self.unsupported {
+            return Err(FsError::unsupported());
+        }
+        if !Arc::ptr_eq(&parent.seal, &self.root.seal) {
+            return Err(FsError::cross_lineage());
+        }
+        let component = validate_component(value)?;
+        Ok(PreparedChild {
+            parent: parent.clone(),
+            locator: DirectoryLocator::Child {
+                parent: parent.open.identity,
+                component,
+            },
+        })
+    }
+}
+
+fn validate_component(value: &str) -> Result<CString, FsError> {
+    let invalid = match value {
+        "" => Some(InvalidComponentFact::Empty),
+        "." => Some(InvalidComponentFact::Current),
+        ".." => Some(InvalidComponentFact::Parent),
+        _ if value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte)) =>
+        {
+            None
+        }
+        _ => Some(InvalidComponentFact::Character),
+    };
+    invalid.map_or_else(
+        || Ok(CString::new(value).expect("validated component")),
+        |fact| Err(FsError::invalid_component(fact)),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +192,14 @@ pub(super) enum FsOperation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InvalidComponentFact {
+    Empty,
+    Current,
+    Parent,
+    Character,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum InvalidRootFact {
     Empty,
     ParentDir,
@@ -119,6 +210,8 @@ pub(super) enum InvalidRootFact {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FsErrorKind {
     InvalidRoot(InvalidRootFact),
+    InvalidComponent(InvalidComponentFact),
+    CrossLineage,
     Io(IoFact),
     NotDirectory(DirectoryTypeFact),
     MissingCloseOnExec { fd_flags: i32 },
@@ -150,6 +243,18 @@ impl FsError {
         }
     }
 
+    fn invalid_component(fact: InvalidComponentFact) -> Self {
+        Self {
+            kind: FsErrorKind::InvalidComponent(fact),
+        }
+    }
+
+    fn cross_lineage() -> Self {
+        Self {
+            kind: FsErrorKind::CrossLineage,
+        }
+    }
+
     fn not_directory(mode: u32) -> Self {
         Self {
             kind: FsErrorKind::NotDirectory(DirectoryTypeFact { mode }),
@@ -167,9 +272,4 @@ impl FsError {
             kind: FsErrorKind::UnsupportedPlatform,
         }
     }
-}
-
-#[cfg(test)]
-fn mutation_preflight_semantic_stub() -> bool {
-    false
 }
