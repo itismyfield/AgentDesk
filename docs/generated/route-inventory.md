@@ -97,7 +97,7 @@
 | `GET` | `/api/dispatches/delivery-events/reconcile-stats` | `dispatches::get_dispatch_delivery_reconcile_stats` | `src/server/routes/dispatches/crud.rs:129` | `src/server/routes/domains/ops.rs:112` |
 | `GET` | `/api/dispatches/pending` | `queue_api::list_pending_dispatches` | `src/server/routes/queue_api.rs:67` | `src/server/routes/domains/ops.rs:353` |
 | `GET` | `/api/dispatches/{id}` | `dispatches::get_dispatch` | `src/server/routes/dispatches/crud.rs:77` | `src/server/routes/domains/ops.rs:116` |
-| `PATCH` | `/api/dispatches/{id}` | `dispatches::update_dispatch` | `src/server/routes/dispatches/crud.rs:232` | `src/server/routes/domains/ops.rs:116` |
+| `PATCH` | `/api/dispatches/{id}` | `dispatches::update_dispatch` | `src/server/routes/dispatches/crud.rs:225` | `src/server/routes/domains/ops.rs:116` |
 | `POST` | `/api/dispatches/{id}/cancel` | `queue_api::cancel_dispatch` | `src/server/routes/queue_api.rs:105` | `src/server/routes/domains/ops.rs:357` |
 | `GET` | `/api/dispatches/{id}/events` | `dispatches::get_dispatch_delivery_events` | `src/server/routes/dispatches/crud.rs:99` | `src/server/routes/domains/ops.rs:120` |
 | `POST` | `/api/dm-reply/register` | `dm_reply::register_handler` | `src/server/routes/dm_reply.rs:23` | `src/server/routes/domains/integrations.rs:48` |
