@@ -336,10 +336,21 @@ pub async fn api_docs_group_category(
     }
 
     let endpoints = all_endpoints();
-    let matching: Vec<EndpointDoc> = endpoints
-        .into_iter()
+    let mut matching: Vec<EndpointDoc> = endpoints
+        .iter()
         .filter(|endpoint| effective_category(endpoint) == category.as_str())
+        .cloned()
         .collect();
+
+    // A canonical legacy category can be an aggregate whose endpoints all use
+    // finer effective categories (for example `admin`). Preserve the normal
+    // child-category result whenever it exists, and only then use the aggregate.
+    if matching.is_empty() && is_canonical_category(&category) {
+        matching = endpoints
+            .into_iter()
+            .filter(|endpoint| endpoint.category == category.as_str())
+            .collect();
+    }
 
     if matching.is_empty() {
         return (
