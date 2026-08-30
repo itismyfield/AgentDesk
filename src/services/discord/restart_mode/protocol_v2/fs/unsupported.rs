@@ -24,5 +24,21 @@ mod high_risk_recovery {
                 );
             }
         }
+
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let mut first = ConfinedRuntimeRoot::open(first_dir.path()).unwrap();
+        let second = ConfinedRuntimeRoot::open(second_dir.path()).unwrap();
+        let parent = second.directory.clone();
+        let mut session = first.mutation_session();
+        session.unsupported = true;
+        super::super::take_facade_trace();
+        let super::super::DirectoryMutation::Rejected(error) =
+            session.open_or_create_child(&parent, "..")
+        else {
+            panic!("unsupported backend attempted mutation")
+        };
+        assert_eq!(error.kind(), FsErrorKind::UnsupportedPlatform);
+        assert_eq!(super::super::take_facade_trace(), (0, 0));
     }
 }
