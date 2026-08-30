@@ -102,8 +102,8 @@
 | `GET` | `/api/dispatches/{id}/events` | `dispatches::get_dispatch_delivery_events` | `src/server/routes/dispatches/crud.rs:99` | `src/server/routes/domains/ops.rs:120` |
 | `POST` | `/api/dm-reply/register` | `dm_reply::register_handler` | `src/server/routes/dm_reply.rs:23` | `src/server/routes/domains/integrations.rs:48` |
 | `GET` | `/api/docs` | `docs::api_docs` | `src/server/routes/docs.rs:64` | `src/server/routes/domains/ops.rs:368` |
-| `GET` | `/api/docs/{group}/{category}` | `docs::api_docs_group_category` | `src/server/routes/docs.rs:318` | `src/server/routes/domains/ops.rs:370` |
-| `GET` | `/api/docs/{segment}` | `docs::api_docs_group_or_category` | `src/server/routes/docs.rs:295` | `src/server/routes/domains/ops.rs:369` |
+| `GET` | `/api/docs/{group}/{category}` | `docs::api_docs_group_category` | `src/server/routes/docs.rs:319` | `src/server/routes/domains/ops.rs:370` |
+| `GET` | `/api/docs/{segment}` | `docs::api_docs_group_or_category` | `src/server/routes/docs.rs:296` | `src/server/routes/domains/ops.rs:369` |
 | `POST` | `/api/doctor/stale-mailbox/repair` | `health_api::stale_mailbox_repair_handler` | `src/server/routes/health_api.rs:1142` | `src/server/routes/domains/ops.rs:108` |
 | `GET` | `/api/doctor/startup/latest` | `health_api::startup_doctor_latest_handler` | `src/server/routes/health_api.rs:1125` | `src/server/routes/domains/ops.rs:37` |
 | `DELETE` | `/api/e2e/discord/channels/{channel_id}/messages/{message_id}` | `e2e_control::delete_discord_message` | `src/server/routes/e2e_control.rs:59` | `src/server/routes/domains/ops.rs:390` |
