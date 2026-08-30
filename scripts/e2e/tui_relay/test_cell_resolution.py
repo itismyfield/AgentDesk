@@ -6,7 +6,10 @@ Or:       python3 scripts/e2e/tui_relay/test_cell_resolution.py
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,6 +17,23 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts" / "e2e"))
 
 import run_tui_relay as driver  # noqa: E402
+
+
+def _run_filter_cli(*filter_args: str):
+    with tempfile.TemporaryDirectory() as tmp:
+        output = Path(tmp) / "direct"
+        proc = subprocess.run(
+            [
+                sys.executable, str(ROOT / "scripts/e2e/run_tui_relay.py"),
+                "--cell", "codex-tui", "--channel-id", "0", "--dry-run",
+                "--scenarios", str(ROOT / "tests/e2e/tui_relay/scenarios"),
+                "--output", str(output), *filter_args,
+            ],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        report_path = output / "report.codex-tui.json"
+        report = json.loads(report_path.read_text()) if report_path.exists() else None
+        return proc, report_path.exists(), report
 
 
 class CellHelpers(unittest.TestCase):
@@ -70,6 +90,47 @@ class CellHelpers(unittest.TestCase):
 class ScenarioFilter(unittest.TestCase):
     def setUp(self):
         self.scenarios_dir = ROOT / "tests" / "e2e" / "tui_relay" / "scenarios"
+
+    def test_filter_fail_closed_unknown_direct(self):
+        proc, report_exists, _ = _run_filter_cli("--filter", "E-999")
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertFalse(report_exists)
+
+    def test_filter_fail_closed_partial_id(self):
+        proc, report_exists, _ = _run_filter_cli("--filter", "E-1-extra")
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertFalse(report_exists)
+
+    def test_filter_fail_closed_explicit_empty(self):
+        proc, report_exists, _ = _run_filter_cli("--filter", " , ")
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertFalse(report_exists)
+
+    def test_filter_fail_closed_normalizes_multi_whitespace_duplicates(self):
+        proc, report_exists, report = _run_filter_cli(
+            "--filter", " E-1, E-11, E-17, E-1, "
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(report_exists)
+        self.assertEqual([row["id"] for row in report["scenarios"]], ["E-1"])
+
+    def test_filter_fail_closed_repeated_option_last_wins(self):
+        proc, _, report = _run_filter_cli(
+            "--filter", "E-999", "--filter", "E-1"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual([row["id"] for row in report["scenarios"]], ["E-1"])
+
+    def test_filter_fail_closed_none_runs_unfiltered(self):
+        proc, _, report = _run_filter_cli()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertGreater(len(report["scenarios"]), 0)
+
+    def test_filter_fail_closed_known_orchestrator_id_allows_empty_cell(self):
+        proc, report_exists, report = _run_filter_cli("--filter", "E-17")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(report_exists)
+        self.assertEqual(report["scenarios"], [])
 
     def test_claude_pipe_scenarios(self):
         scenarios = driver.load_scenarios(self.scenarios_dir, cell="claude-pipe")

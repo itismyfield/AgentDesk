@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -17,7 +19,43 @@ import run_multi_provider_matrix as matrix  # noqa: E402
 from tui_relay import assertions  # noqa: E402
 
 
+def _run_matrix_filter_cli(*filter_args: str):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        config = root / "agentdesk.yaml"
+        config.write_text(matrix.yaml.safe_dump({"agents": [
+            {"id": matrix.cell_driver.cell_default_agent(cell), "channels": {
+                matrix.cell_driver.cell_provider(cell): {"id": str(index)}}}
+            for index, cell in enumerate(matrix.DEFAULT_CELLS, 1)
+        ]}))
+        output = root / "matrix"
+        proc = subprocess.run(
+            [
+                sys.executable, str(ROOT / "scripts/e2e/run_multi_provider_matrix.py"),
+                "--config", str(config), "--dry-run", "--output", str(output),
+                "--cells", "claude-tui,codex-tui", *filter_args,
+            ],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        report_path = output / "matrix.json"
+        report = json.loads(report_path.read_text()) if report_path.exists() else None
+        return proc, report_path.exists(), report
+
+
 class MatrixConfig(unittest.TestCase):
+    def test_filter_fail_closed_unknown_matrix(self):
+        proc, report_exists, _ = _run_matrix_filter_cli("--filter", "E-999")
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertFalse(report_exists)
+
+    def test_filter_fail_closed_orchestrator_only_matrix(self):
+        proc, report_exists, report = _run_matrix_filter_cli("--filter", "E-17")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(report_exists)
+        self.assertEqual(report["restart_guard_scenarios"], ["E-17"])
+        cell_results = [row for row in report["results"] if row["kind"] == "cell"]
+        self.assertTrue(all(row["totals"]["pass"] == 0 for row in cell_results))
+
     def test_load_channel_ids_from_agentdesk_yaml_shape(self):
         yaml = """
 agents:
