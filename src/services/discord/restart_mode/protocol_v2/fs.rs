@@ -91,9 +91,53 @@ enum DirectoryLocator {
 #[derive(Debug)]
 struct PreparedChild(ConfinedDir, DirectoryLocator);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Attempt<T> {
+    NotAttempted,
+    Succeeded(T),
+    Failed(IoFact),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OpenAttemptFact {
+    raw_fd: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MutationFacts {
+    locator: DirectoryLocator,
+    requested_mode: u32,
+    mkdir: Attempt<()>,
+    sync: Attempt<()>,
+    observe: Attempt<OpenDirectoryFact>,
+    open: Attempt<OpenAttemptFact>,
+    fd_flags: Attempt<i32>,
+    fstat: Attempt<OpenDirectoryFact>,
+}
+
+#[derive(Debug)]
+enum DirectoryMutation {
+    Rejected(FsError),
+    Attempted(MutationFacts, Result<ConfinedDir, FsError>),
+}
+
+impl DirectoryMutation {
+    fn rejected(error: FsError) -> Self {
+        Self::Rejected(error)
+    }
+}
+
 struct MutationSession<'root>(&'root mut ConfinedRuntimeRoot);
 
 impl MutationSession<'_> {
+    fn open_or_create_child(&mut self, parent: &ConfinedDir, value: &str) -> DirectoryMutation {
+        let prepared = match self.prepare_child(parent, value) {
+            Ok(prepared) => prepared,
+            Err(error) => return DirectoryMutation::rejected(error),
+        };
+        platform::open_or_create_child(prepared)
+    }
+
     fn prepare_child(
         &mut self,
         parent: &ConfinedDir,
@@ -190,6 +234,9 @@ impl IoFact {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FsOperation {
+    Mkdir,
+    SyncParent,
+    Observe,
     Open,
     GetFdFlags,
     Fstat,
@@ -218,7 +265,13 @@ pub(super) enum FsErrorKind {
     CrossLineage,
     Io(IoFact),
     NotDirectory(DirectoryTypeFact),
-    MissingCloseOnExec { fd_flags: i32 },
+    MissingCloseOnExec {
+        fd_flags: i32,
+    },
+    IdentityMismatch {
+        observed: DirectoryIdentity,
+        opened: DirectoryIdentity,
+    },
     UnsupportedPlatform,
 }
 
@@ -268,6 +321,12 @@ impl FsError {
     fn missing_close_on_exec(fd_flags: i32) -> Self {
         Self {
             kind: FsErrorKind::MissingCloseOnExec { fd_flags },
+        }
+    }
+
+    fn identity_mismatch(observed: DirectoryIdentity, opened: DirectoryIdentity) -> Self {
+        Self {
+            kind: FsErrorKind::IdentityMismatch { observed, opened },
         }
     }
 
