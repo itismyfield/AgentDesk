@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+_reject_inherited_build_token_for_deploy() {
+    [ -z "${AGENTDESK_BUILD_TOKEN_FD:-}" ] || {
+        echo "✗ Refusing whole-deploy build-token wrapping: acquire deploy lock before the internal Cargo token." >&2
+        echo "  Run deploy-release.sh directly; its Cargo phases acquire the canonical token internally." >&2
+        return 1
+    }
+}
+
+# The deploy lock is the outer authority. A caller that wraps this whole script
+# in the build token reverses the required order and can ABBA-deadlock against a
+# normal deploy already waiting for Cargo. Reject before detaching or taking any
+# lock; nested non-deploy helper calls still reuse their validated inherited FD.
+_reject_inherited_build_token_for_deploy
+
 # --- macOS: always run detached (decouple from the invoking shell/session) ---
 # On macOS the deploy restarts the release dcserver mid-run. When invoked from a
 # tmux/agent session's shell, that restart can perturb the caller and, worse,
@@ -107,6 +121,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
+# shellcheck source=_build_token.sh
+. "$SCRIPT_DIR/_build_token.sh"
 
 ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
 POST_DEPLOY_SMOKE_WEDGE_COVERAGE="not run: wedge check did not execute"
@@ -506,7 +522,7 @@ _ensure_dashboard_dependencies() {
 _resolve_default_release_binary() {
     local profile_dir="${1:-release}"
     local target_dir
-    target_dir="$(cd "$REPO" && cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r '.target_directory // empty' 2>/dev/null || true)"
+    target_dir="$(cd "$REPO" && _with_build_token cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r '.target_directory // empty' 2>/dev/null || true)"
     if [ -z "$target_dir" ]; then
         target_dir="${CARGO_TARGET_DIR:-$REPO/target}"
     fi
@@ -632,7 +648,7 @@ _clean_release_build_cache_after_staging() {
     else
         clean_cmd=(cargo clean --profile "$DEPLOY_BUILD_PROFILE")
     fi
-    if (cd "$REPO" && "${clean_cmd[@]}"); then
+    if (cd "$REPO" && _with_build_token "${clean_cmd[@]}"); then
         echo "  ✓ ${DEPLOY_BUILD_PROFILE} build cache cleaned"
     else
         echo "⚠ cargo clean for ${DEPLOY_BUILD_PROFILE} failed; continuing with staged release artifact"
@@ -1850,10 +1866,10 @@ fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
         echo "▸ Building release binary..."
-        (cd "$REPO" && cargo build --release --bin agentdesk)
+        (cd "$REPO" && _with_build_token cargo build --release --bin agentdesk)
     else
         echo "▸ Building ${DEPLOY_BUILD_PROFILE} binary (opt-in fast deploy profile)..."
-        (cd "$REPO" && cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk)
+        (cd "$REPO" && _with_build_token cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk)
     fi
     # Cargo tracks embedded migration inputs via build.rs. The freshness gate
     # below is mtime-based, and a successful current-HEAD cargo build can still

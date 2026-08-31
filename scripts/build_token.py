@@ -169,7 +169,6 @@ def _supervise_posix(command: Sequence[str], child_env: Mapping[str, str], token
                 list(command),
                 env=dict(child_env),
                 close_fds=True,
-                pass_fds=(token_fd,),  # RED: child/descendants incorrectly retain the lease.
                 start_new_session=True,
             )
             relay.child = child

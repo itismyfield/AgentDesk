@@ -360,6 +360,19 @@ class BuildTokenContractTests(unittest.TestCase):
         self.assertFalse(hasattr(helper, "run_command"))
         self.assertNotIn("token_path", inspect.signature(helper.main).parameters)
         source = HELPER_PATH.read_text()
+        from unittest import mock
+        self.assertIn('getattr(os, "O_CLOEXEC", 0)', source)
+        self.assertIn("os.set_inheritable(fd, False)", source)
+        self.assertNotIn("pass_fds", source)
+        command = ["cargo.exe", "check"]
+        child_env = {"CARGO_BUILD_JOBS": "2"}
+        backend = type(sys)("build_token_win32")
+        backend.supervise_windows = mock.Mock(return_value=41)
+        with mock.patch.dict(sys.modules, {"build_token_win32": backend}), mock.patch.object(sys, "platform", "win32"), mock.patch.object(helper, "_supervise_posix", return_value=42) as posix:
+            result = helper._supervise_canonical(command, child_env)
+        self.assertEqual(result, 41)
+        backend.supervise_windows.assert_called_once_with(command, child_env)
+        posix.assert_not_called()
         test_seam_lines = [line for line in source.splitlines() if "_supervise_for_test(" in line]
         self.assertEqual(len(test_seam_lines), 1)
 
@@ -381,6 +394,24 @@ class BuildTokenContractTests(unittest.TestCase):
     def test_raw_cargo_inventory_is_exact_and_mutation_discriminating(self):
         deploy = DEPLOY_PATH.read_text()
         build_release = BUILD_RELEASE_PATH.read_text()
+        protected_sites = [
+            (DEPLOY_PATH, "metadata", "cargo", "_with_build_token", "_with_build_token cargo metadata --format-version 1 --no-deps"),
+            (DEPLOY_PATH, "release-build", "cargo", "_with_build_token", "_with_build_token cargo build --release --bin agentdesk"),
+            (DEPLOY_PATH, "release-fast", "cargo", "_with_build_token", '_with_build_token cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk'),
+            (DEPLOY_PATH, "clean-array", "cargo", "_with_build_token", '_with_build_token "${clean_cmd[@]}"'),
+            (BUILD_RELEASE_PATH, "release-build", "cargo", "_with_build_token", "_with_build_token cargo build --release"),
+        ]
+        inventory: list[tuple[str, str, str, str]] = []
+        for path, role, executable, wrapper, needle in protected_sites:
+            count = path.read_text().count(needle)
+            inventory.extend(
+                (path.name, role, executable, wrapper)
+                for _ in range(count)
+            )
+        expected = [(path.name, role, executable, wrapper)
+                    for path, role, executable, wrapper, _ in protected_sites]
+        self.assertEqual(inventory, expected)
+        self.assertEqual((deploy.count("_with_build_token "), build_release.count("_with_build_token ")), (4, 1))
         self.assertEqual(raw_cargo_sites(deploy), [])
         self.assertEqual(raw_cargo_sites(build_release), [])
         mutations = [
@@ -389,6 +420,12 @@ class BuildTokenContractTests(unittest.TestCase):
             deploy.replace('_with_build_token "${clean_cmd[@]}"', '"${clean_cmd[@]}"', 1),
             build_release.replace("_with_build_token cargo build", "env cargo build", 1),
             build_release + "\ncargo test --workspace\n",
+            deploy.replace('_with_build_token cargo build --profile "$DEPLOY_BUILD_PROFILE"', 'cargo build --profile "$DEPLOY_BUILD_PROFILE"', 1),
+            deploy.replace("_with_build_token cargo metadata --format-version 1 --no-deps", "env cargo metadata --format-version 1 --no-deps", 1),
+            deploy.replace("_with_build_token cargo build --release --bin agentdesk", "cargo build --release --bin agentdesk", 1),
+            deploy.replace('_with_build_token cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk', 'env cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk', 1),
+            deploy.replace('_with_build_token "${clean_cmd[@]}"', '"${clean_cmd[@]}"', 1),
+            build_release.replace("_with_build_token cargo build --release", "command cargo build --release", 1),
         ]
         for mutated in mutations:
             with self.subTest(mutant=mutated[-80:]):
