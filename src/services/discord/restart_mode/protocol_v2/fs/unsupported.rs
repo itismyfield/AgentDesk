@@ -48,11 +48,23 @@ mod high_risk_recovery {
         };
         super::super::take_preflight_activity();
         let error =
-            super::super::prepare_locator(false, &root, (&foreign, identity), "..").unwrap_err();
+            super::super::prepare_locator(MUTATION_SUPPORTED, &root, (&foreign, identity), "..")
+                .unwrap_err();
         assert!(matches!(
             DirectoryMutation::rejected(error),
             DirectoryMutation::Rejected(error) if error.kind() == FsErrorKind::UnsupportedPlatform
         ));
+        assert_eq!(
+            super::super::prepare_locator(
+                REGULAR_READ_SUPPORTED,
+                &root,
+                (&foreign, identity),
+                ".."
+            )
+            .unwrap_err()
+            .kind(),
+            FsErrorKind::UnsupportedPlatform
+        );
         assert_eq!(
             read_bounded((), usize::MAX).unwrap_err().kind(),
             FsErrorKind::UnsupportedPlatform
