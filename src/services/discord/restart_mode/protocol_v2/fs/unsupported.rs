@@ -1,6 +1,7 @@
 use super::{
-    BoundedRead, ConfinedRuntimeRoot, DirectoryMutation, FsError, PreparedChild, PreparedRegular,
-    RegularFile,
+    BoundedRead, ConfinedDir, ConfinedRuntimeRoot, DirectoryIdentity, DirectoryLocator,
+    DirectoryMutation, FsError, PinnedStage, PlatformStageCreation, PreparedChild, PreparedRegular,
+    PreparedSeal, PreparedStage, RegularFile, SealedLinkFacts, StageCleanup,
 };
 use std::path::Path;
 
@@ -23,6 +24,39 @@ pub(super) fn open_regular(_: PreparedRegular) -> Result<RegularFile, FsError> {
 pub(super) fn read_bounded(_: FileHandle, _: usize) -> Result<BoundedRead, FsError> {
     Err(FsError::unsupported())
 }
+pub(super) fn create_stage(_: PreparedStage) -> Result<PlatformStageCreation, FsError> {
+    #[cfg(test)]
+    UNSUPPORTED_STAGE_CALLERS.with(|callers| callers.set(callers.get() + 1));
+    Err(FsError::unsupported())
+}
+pub(super) fn seal_stage(_: PreparedSeal, _: &[u8]) -> Result<PinnedStage, FsError> {
+    #[cfg(test)]
+    UNSUPPORTED_STAGE_CALLERS.with(|callers| callers.set(callers.get() + 1));
+    Err(FsError::unsupported())
+}
+pub(super) fn link_stage(
+    _: &ConfinedDir,
+    _: &DirectoryLocator,
+    _: &ConfinedDir,
+    _: &DirectoryLocator,
+    _: DirectoryIdentity,
+) -> Result<SealedLinkFacts, FsError> {
+    #[cfg(test)]
+    UNSUPPORTED_STAGE_CALLERS.with(|callers| callers.set(callers.get() + 1));
+    Err(FsError::unsupported())
+}
+pub(super) fn cleanup_stage(
+    _: &ConfinedDir,
+    _: &DirectoryLocator,
+    _: super::OpenDirectoryFact,
+) -> StageCleanup {
+    #[cfg(test)]
+    UNSUPPORTED_STAGE_CALLERS.with(|callers| callers.set(callers.get() + 1));
+    StageCleanup::Rejected(FsError::unsupported())
+}
+
+#[cfg(test)]
+thread_local! { static UNSUPPORTED_STAGE_CALLERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 #[cfg(test)]
 mod high_risk_recovery {
@@ -48,6 +82,7 @@ mod high_risk_recovery {
             inode: 0,
         };
         super::super::take_preflight_activity();
+        UNSUPPORTED_STAGE_CALLERS.with(|callers| callers.set(0));
         let error =
             super::super::prepare_locator(MUTATION_SUPPORTED, &root, (&foreign, identity), "..")
                 .unwrap_err();
@@ -81,6 +116,7 @@ mod high_risk_recovery {
             read_bounded((), usize::MAX).unwrap_err().kind(),
             FsErrorKind::UnsupportedPlatform
         );
+        assert_eq!(UNSUPPORTED_STAGE_CALLERS.with(std::cell::Cell::get), 0);
         assert_eq!(super::super::take_preflight_activity(), 0);
     }
 }
