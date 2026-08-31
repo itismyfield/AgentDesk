@@ -18,7 +18,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "0ad4fd55fe9d25642c6e6f739e1fdb11746a17d071f3cd3fefe2c12b71c55ea3"
+    "14c6b737924d263a1d1ee969df1a4b92669e225aa898d6046978dd83441b88db"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
@@ -385,15 +385,19 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertEqual(steps[writer]["shell"], "bash")
         self.assertEqual(steps[writer]["run"], "./scripts/ci/run-writer-namespace-windows-targets.sh")
         self.assertEqual(job.count("run-writer-namespace-windows-targets.sh"), 1)
+        self.assertIn("needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'", job)
+        self.assertIn("FILTER_OUTPUT: ${{ needs.changes.outputs.cross_os_rust }}", job_block(workflow, "check_fast_cross_os_required_context"))
         self.assertNotIn("cargo test", job)
         self.assertNotRegex(job, r"(?m)^\s*cargo test\b")
         self.assertNotIn("- name: cargo test", job)
-        self.assertEqual(
-            paths_filter_definitions(workflow)["cross_os_rust"].count(
-                "src/services/writer_protocol/**"
-            ),
-            1,
-        )
+        filters = paths_filter_definitions(workflow)
+        runner_path = "scripts/ci/run-writer-namespace-windows-targets.sh"
+        for selector in ("rust_compile", "cross_os_rust"):
+            self.assertEqual(filters[selector].count(runner_path), 1)
+        self.assertEqual(filters["cross_os_rust"].count("src/services/writer_protocol/**"), 1)
+        filter_line = f"              - '{runner_path}'"
+        for mutated in (workflow.replace(filter_line, "", 1), replace_last(workflow, filter_line, "")):
+            self.assertNotEqual(self.run_hardening_fixture(mutated).returncode, 0)
 
     def test_inflight_lock_primitive_triggers_required_native_windows_lane(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

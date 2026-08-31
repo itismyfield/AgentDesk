@@ -54,8 +54,10 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                 " ignored) echo 'running 1 test'; echo 'test result: ok. 0 passed; 0 failed; 1 ignored;' ;;\n"
                 " failed) echo 'running 1 test'; echo 'failures:'; echo 'test x ... FAILED'; echo 'test result: FAILED. 0 passed; 1 failed; 0 ignored;' ;;\n"
                 " multi) echo 'running 2 tests'; echo 'test result: ok. 2 passed; 0 failed; 0 ignored;' ;;\n"
+                " contradictory) echo 'running 2 tests'; echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored;' ;;\n"
+                " interleaved) echo 'running 1 test'; echo 'Doc-tests noise'; echo 'running 0 tests'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored;' ;;\n"
                 " duplicate_result) echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored;'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored;' ;;\n"
-                " *) echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored;' ;;\n"
+                " *) echo 'Doc-tests agentdesk'; echo 'note: running 2 tests elsewhere'; echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored;' ;;\n"
                 "esac\n"
                 "[ \"$FAKE_MODE\" != nonzero ] || exit 7\n"
             )
@@ -80,7 +82,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             self.assertNotEqual(self.run_fixture(active=True, mutation=mutation)[0].returncode, 0)
 
     def test_exact_selection_reducer(self) -> None:
-        for mode in ("zero", "ignored", "failed", "multi", "duplicate_result", "nonzero"):
+        for mode in ("zero", "ignored", "failed", "multi", "contradictory", "interleaved", "duplicate_result", "nonzero"):
             with self.subTest(mode=mode):
                 self.assertNotEqual(self.run_fixture(active=True, mode=mode)[0].returncode, 0)
         success, calls = self.run_fixture(active=True)

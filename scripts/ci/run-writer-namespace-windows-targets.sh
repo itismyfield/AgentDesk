@@ -50,13 +50,14 @@ for id in "${ids[@]}"; do
   rc=$?
   tr -d '\r' <"$output" >"$output.normalized"
   cat "$output.normalized"
+  headers="$(awk '$0 ~ /^running [0-9]+ tests?$/ { count++ } END { print count + 0 }' "$output.normalized")"
   running="$(awk '$0 == "running 1 test" { count++ } END { print count + 0 }' "$output.normalized")"
   results="$(awk '/^test result:/ { count++ } END { print count + 0 }' "$output.normalized")"
   passed="$(awk 'index($0, "test result: ok. 1 passed; 0 failed; 0 ignored;") == 1 { count++ } END { print count + 0 }' "$output.normalized")"
   failures="$(awk '/^failures:$/ || / FAILED$/ { count++ } END { print count + 0 }' "$output.normalized")"
   rm -f "$output" "$output.normalized"
-  if [ "$rc" -ne 0 ] || [ "$running" -ne 1 ] || [ "$results" -ne 1 ] || [ "$passed" -ne 1 ] || [ "$failures" -ne 0 ]; then
-    echo "ERROR: $id rc=$rc running=$running results=$results passed=$passed failures=$failures" >&2
+  if [ "$rc" -ne 0 ] || [ "$headers" -ne 1 ] || [ "$running" -ne 1 ] || [ "$results" -ne 1 ] || [ "$passed" -ne 1 ] || [ "$failures" -ne 0 ]; then
+    echo "ERROR: $id rc=$rc headers=$headers running1=$running results=$results passed=$passed failures=$failures" >&2
     exit 1
   fi
   echo "WRITER_NAMESPACE_WINDOWS_TARGET PASS id=$id selected=1 passed=1"
