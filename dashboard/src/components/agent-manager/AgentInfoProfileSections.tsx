@@ -118,7 +118,9 @@ export function AgentInfoProfileSections({
           >
             {authProfileOptions.map((profileId) => (
               <option key={profileId} value={profileId}>
-                {profileId === "default" ? tr("시스템 기본", "System default") : profileId}
+                {profileId === "__primary__"
+                  ? tr("Provider 기본 계정", "Provider primary account")
+                  : profileId === "default" ? tr("시스템 기본", "System default") : profileId}
               </option>
             ))}
           </select>

@@ -86,7 +86,7 @@ export default function AgentInfoCard({
   const providerCatalog = useProviderCatalog(selectedProvider);
   const [savingProvider, setSavingProvider] = useState(false);
   const [providerAuthProfiles, setProviderAuthProfiles] = useState<ProviderAuthProvider[]>([]);
-  const [selectedAuthProfile, setSelectedAuthProfile] = useState("default");
+  const [selectedAuthProfile, setSelectedAuthProfile] = useState("__primary__");
   const [savingAuthProfile, setSavingAuthProfile] = useState(false);
   const [officeMemberships, setOfficeMemberships] = useState<
     AgentOfficeMembership[]
@@ -125,7 +125,7 @@ export default function AgentInfoCard({
     setAliasValue(agent.alias ?? "");
     setSelectedDeptId(agent.department_id ?? "");
     setSelectedProvider(agent.cli_provider ?? "claude");
-    setSelectedAuthProfile("default");
+    setSelectedAuthProfile("__primary__");
     setSessionsOpen(true);
     setRoutingOpen(false);
     setIdleSessionsOpen(false);
@@ -138,10 +138,10 @@ export default function AgentInfoCard({
         if (cancelled) return;
         const providers = Array.isArray(response.providers) ? response.providers : [];
         setProviderAuthProfiles(providers);
-        const bound = providers
-          .flatMap((provider) => provider.accounts ?? [])
-          .find((account) => account.bound_agents?.includes(agent.id));
-        setSelectedAuthProfile(bound?.id ?? "default");
+        const override = response.agent_profile_overrides?.find(
+          (entry) => entry.agent_id === agent.id,
+        );
+        setSelectedAuthProfile(override?.profile_id ?? "__primary__");
       })
       .catch(() => {
         if (!cancelled) setProviderAuthProfiles([]);
@@ -176,7 +176,7 @@ export default function AgentInfoCard({
         cli_provider: nextProvider as Agent["cli_provider"],
         auth_profile: null,
       });
-      setSelectedAuthProfile("default");
+      setSelectedAuthProfile("__primary__");
       onAgentUpdated?.();
     } catch (e) {
       setSelectedProvider(previousProvider);
@@ -193,7 +193,7 @@ export default function AgentInfoCard({
     setSavingAuthProfile(true);
     try {
       await api.updateAgent(agent.id, {
-        auth_profile: nextProfile === "default" ? null : nextProfile,
+        auth_profile: nextProfile === "__primary__" ? null : nextProfile,
       });
       onAgentUpdated?.();
     } catch (error) {
@@ -204,9 +204,12 @@ export default function AgentInfoCard({
     }
   };
 
-  const authProfileOptions = providerAuthProfiles
-    .find((provider) => provider.id === selectedProvider)
-    ?.accounts ?? [{ id: "default", home: "" }];
+  const authProfileOptions = [
+    { id: "__primary__", home: "" },
+    ...(providerAuthProfiles
+      .find((provider) => provider.id === selectedProvider)
+      ?.accounts ?? [{ id: "default", home: "" }]),
+  ];
 
   const toggleOfficeMembership = async (office: AgentOfficeMembership) => {
     const nextAssigned = !office.assigned;

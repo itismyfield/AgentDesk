@@ -108,6 +108,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "providers": [{
                     "id": "codex",
                     "default_home": "~/.codex",
+                    "primary_profile_id": "codex-alt",
                     "accounts": [{
                         "id": "default",
                         "home": "~/.codex",
@@ -116,6 +117,20 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     }]
                 }]
             }),
+        ),
+        ep(
+            "PUT",
+            "/api/provider-auth-profiles/{provider}/primary",
+            "providers",
+            "Select the provider-wide primary profile used when a channel and agent have no explicit auth_profile. Use default to restore the system home.",
+        )
+        .with_params([
+            ("provider", path_param("Provider id")),
+            ("profile_id", body_param("string", false, "Named account id, default, or null for system default")),
+        ])
+        .with_example(
+            json!({"path": {"provider": "codex"}, "body": {"profile_id": "codex-alt"}}),
+            json!({"ok": true, "provider": "codex", "primary_profile_id": "codex-alt"}),
         ),
         ep(
             "POST",

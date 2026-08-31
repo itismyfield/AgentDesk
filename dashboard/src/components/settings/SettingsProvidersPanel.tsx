@@ -1,4 +1,4 @@
-import { Plus, RefreshCw, Terminal, X } from "lucide-react";
+import { Check, Plus, RefreshCw, Terminal, X } from "lucide-react";
 import type { CSSProperties } from "react";
 import { SurfaceEmptyState as SettingsEmptyState } from "../common/SurfacePrimitives";
 import {
@@ -23,6 +23,7 @@ interface SettingsProvidersPanelProps {
   onAddAccount: (providerId: string) => void;
   onCompleteLogin: () => void;
   onRemoveAccount: (providerId: string, profileId: string) => void;
+  onSetPrimary: (providerId: string, profileId: string) => void;
   onReload: () => void;
   pendingLogin: PendingProviderLogin | null;
   providers: ProviderAuthProvider[];
@@ -39,6 +40,7 @@ export function SettingsProvidersPanel({
   onAddAccount,
   onCompleteLogin,
   onRemoveAccount,
+  onSetPrimary,
   onReload,
   pendingLogin,
   providers,
@@ -146,6 +148,7 @@ export function SettingsProvidersPanel({
               key={provider.id}
               onAddAccount={() => onAddAccount(provider.id)}
               onRemoveAccount={(profileId) => onRemoveAccount(provider.id, profileId)}
+              onSetPrimary={(profileId) => onSetPrimary(provider.id, profileId)}
               provider={provider}
               secondaryActionClass={secondaryActionClass}
               secondaryActionStyle={secondaryActionStyle}
@@ -163,6 +166,7 @@ export function SettingsProvidersPanel({
 function ProviderCard({
   onAddAccount,
   onRemoveAccount,
+  onSetPrimary,
   provider,
   secondaryActionClass,
   secondaryActionStyle,
@@ -172,6 +176,7 @@ function ProviderCard({
 }: {
   onAddAccount: () => void;
   onRemoveAccount: (profileId: string) => void;
+  onSetPrimary: (profileId: string) => void;
   provider: ProviderAuthProvider;
   secondaryActionClass: string;
   secondaryActionStyle: CSSProperties;
@@ -216,6 +221,8 @@ function ProviderCard({
             key={`${provider.id}:${account.id}`}
             account={account}
             onRemove={() => onRemoveAccount(account.id)}
+            onSetPrimary={() => onSetPrimary(account.id)}
+            isPrimary={(provider.primary_profile_id ?? "default") === account.id}
             removing={removingAccountKey === `${provider.id}:${account.id}`}
             tr={tr}
           />
@@ -228,11 +235,15 @@ function ProviderCard({
 function AccountRow({
   account,
   onRemove,
+  onSetPrimary,
+  isPrimary,
   removing,
   tr,
 }: {
   account: ProviderAuthAccount;
   onRemove: () => void;
+  onSetPrimary: () => void;
+  isPrimary: boolean;
   removing: boolean;
   tr: (ko: string, en: string) => string;
 }) {
@@ -264,6 +275,17 @@ function AccountRow({
             <X size={14} />
           </button>
         )}
+        <button
+          type="button"
+          onClick={onSetPrimary}
+          disabled={isPrimary}
+          className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] disabled:opacity-70"
+          style={{ borderColor: "var(--th-border)", color: "var(--th-text-muted)" }}
+          title={tr("이 provider의 기본 계정으로 사용", "Use as this provider's primary account")}
+        >
+          {isPrimary ? <Check size={12} /> : null}
+          {isPrimary ? tr("기본", "Primary") : tr("기본으로", "Make primary")}
+        </button>
         {account.usage?.unsupported ? (
           <span className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
             {account.usage.reason ?? tr("사용량 미지원", "Usage unsupported")}
@@ -276,6 +298,11 @@ function AccountRow({
       {(account.bound_agents ?? []).length > 0 ? (
         <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
           {tr("연결된 에이전트", "Bound agents")}: {(account.bound_agents ?? []).join(", ")}
+        </div>
+      ) : null}
+      {(account.bound_channels ?? []).length > 0 ? (
+        <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
+          {tr("채널 override", "Channel overrides")}: {(account.bound_channels ?? []).join(", ")}
         </div>
       ) : null}
       {buckets.length > 0 ? (

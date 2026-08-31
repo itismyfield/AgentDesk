@@ -39,6 +39,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
     handleAddProviderAccount,
     handleCompleteProviderLogin,
     handleRemoveProviderAccount,
+    handleSetProviderPrimary,
     loadOperatorConnectors,
     loadProviderAuthProfiles,
     loadVoiceConfig,
@@ -177,6 +178,7 @@ export function SettingsViewLayout({ ctx }: { ctx: any }) {
             onAddAccount={(providerId: string) => void handleAddProviderAccount(providerId)}
             onCompleteLogin={() => void handleCompleteProviderLogin()}
             onRemoveAccount={(providerId: string, profileId: string) => void handleRemoveProviderAccount(providerId, profileId)}
+            onSetPrimary={(providerId: string, profileId: string) => void handleSetProviderPrimary(providerId, profileId)}
             onReload={() => void loadProviderAuthProfiles()}
             pendingLogin={pendingProviderLogin}
             providers={providerAuthProviders}

@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 
 use super::super::{
@@ -32,6 +32,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route(
                 "/provider-auth-profiles/{provider}/login-complete",
                 post(provider_auth_profiles::login_complete),
+            )
+            .route(
+                "/provider-auth-profiles/{provider}/primary",
+                put(provider_auth_profiles::set_primary_profile),
             )
             .route(
                 "/provider-auth-profiles/{provider}/{profile_id}",
