@@ -329,6 +329,7 @@ jobs:
               - 'src/utils/**'
               - 'src/voice/**'
               - 'src/services/*'
+              - 'src/services/writer_protocol/**'
               - 'src/services/agent_quality/**'
               - 'src/services/agents/**'
               - 'src/services/analytics/**'
@@ -530,7 +531,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Keep Windows inline and default-feature-only instead of `just check`.
-      # This PR lane provides cross-OS compile signal only; main-push and
+      # This PR lane provides broad compile signal plus the bounded writer
+      # namespace owner below; main-push and
       # nightly retain the Windows runtime and non-PG test coverage outside the
       # PR critical path (#4747 option 2). Ubuntu fmt/staged clippy and full
       # workspace checks remain authoritative in the jobs above.
@@ -541,6 +543,16 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo check --workspace --all-targets
+
+      - name: Writer namespace exact Windows targets
+        if: runner.os == 'Windows'
+        timeout-minutes: 30
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: ./scripts/ci/run-writer-namespace-windows-targets.sh
 
       - name: sccache stats
         if: always() && runner.os != 'macOS'
@@ -1444,7 +1456,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=e32217629c135d5cbd16c8bb81eb58fe53e07cea0def203a5ce6380191f80263
+          expected=0ad4fd55fe9d25642c6e6f739e1fdb11746a17d071f3cd3fefe2c12b71c55ea3
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1551,7 +1563,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=e32217629c135d5cbd16c8bb81eb58fe53e07cea0def203a5ce6380191f80263
+          expected=0ad4fd55fe9d25642c6e6f739e1fdb11746a17d071f3cd3fefe2c12b71c55ea3
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
