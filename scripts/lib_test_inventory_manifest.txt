@@ -4305,6 +4305,7 @@ services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::abso
 services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::directory_mutation_records_sync_facts_and_owned_fds_outlive_parents
 services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::regular_open_rejects_special_nodes_and_bounded_reads_stay_bounded
 services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::root_traversal_and_path_replacement_keep_the_pinned_inode
+services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::sealed_stage_link_records_identity_and_cleanup_stays_maintenance_only
 services::discord::restart_mode::protocol_v2::fs::unsupported::high_risk_recovery::unsupported_precedes_validation_for_every_facade_operation
 services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::all_phase_kinds_round_trip_to_golden_canonical_wire
 services::discord::restart_mode::protocol_v2::phase::codec::high_risk_recovery::malformed_and_unknown_versions_classify_without_panicking_or_losing_raw

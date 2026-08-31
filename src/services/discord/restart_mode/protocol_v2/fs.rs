@@ -61,8 +61,11 @@ impl ConfinedRuntimeRoot {
         self.directory.open.identity
     }
 
-    fn mutation_session(&mut self) -> MutationSession<'_> {
-        MutationSession(self)
+    fn mutation_session(&mut self) -> Result<MutationSession<'_>, FsError> {
+        Ok(MutationSession {
+            lock: platform::lock_mutation(self)?,
+            root: self,
+        })
     }
 
     fn open_regular(&self, parent: &ConfinedDir, value: &str) -> Result<RegularFile, FsError> {
@@ -123,6 +126,33 @@ struct PreparedChild(ConfinedDir, DirectoryLocator);
 #[derive(Debug)]
 struct PreparedRegular(ConfinedDir, DirectoryLocator);
 
+#[derive(Debug)]
+struct PreparedStage(ConfinedDir, DirectoryLocator);
+#[rustfmt::skip] #[derive(Debug)] struct PreparedSeal { parent: ConfinedDir, locator: DirectoryLocator, writer: platform::FileHandle, writer_open: OpenDirectoryFact }
+#[rustfmt::skip] #[derive(Debug)] enum PlatformStageCreation { Writer(platform::FileHandle, OpenDirectoryFact), Collision(platform::FileHandle, OpenDirectoryFact) }
+#[derive(Debug)]
+struct PinnedStage(platform::FileHandle, OpenDirectoryFact);
+#[rustfmt::skip] pub(super) enum StageCreation<'session, 'root> { Writer(StageWriter<'session, 'root>), Collision(CollisionStageToken<'session, 'root>) }
+#[rustfmt::skip] pub(super) struct StageWriter<'session, 'root> { session: &'session mut MutationSession<'root>, parent: ConfinedDir, locator: DirectoryLocator, writer: platform::FileHandle, writer_open: OpenDirectoryFact }
+pub(super) struct SyncedStage<'session, 'root> {
+    token: StageToken<'session, 'root>,
+}
+#[rustfmt::skip] struct StageToken<'session, 'root> { session: &'session mut MutationSession<'root>, parent: ConfinedDir, locator: DirectoryLocator, sealed_fd: platform::FileHandle, sealed: OpenDirectoryFact, target: Option<BoundTarget> }
+#[rustfmt::skip] struct BoundTarget { parent: ConfinedDir, locator: DirectoryLocator }
+#[rustfmt::skip] pub(super) enum LinkOutcome<'session, 'root> { Durable(DurableLinkedStage<'session, 'root>), Collision(CollisionStageToken<'session, 'root>), Prelink(PrelinkStageToken<'session, 'root>), Indeterminate(LinkOutcomeIndeterminate<'session, 'root>) }
+#[rustfmt::skip] pub(super) struct DurableLinkedStage<'session, 'root> { token: StageToken<'session, 'root>, facts: SealedLinkFacts, evidence: SealedLinkDisposition }
+#[rustfmt::skip] pub(super) struct CollisionStageToken<'session, 'root> { token: StageToken<'session, 'root>, facts: Option<SealedLinkFacts> }
+#[rustfmt::skip] pub(super) struct PrelinkStageToken<'session, 'root> { token: StageToken<'session, 'root>, error: FsError }
+#[rustfmt::skip] pub(super) struct LinkOutcomeIndeterminate<'session, 'root> { token: StageToken<'session, 'root>, facts: SealedLinkFacts }
+#[rustfmt::skip] #[derive(Clone, Copy, Debug, PartialEq, Eq)] struct SealedLinkFacts { sealed: DirectoryIdentity, link: Attempt<()>, target: Attempt<Option<OpenDirectoryFact>>, parent_sync: Attempt<()> }
+#[rustfmt::skip] #[derive(Clone, Copy, Debug, PartialEq, Eq)] enum SealedLinkDisposition { LinkedNormally, ObservedAfterReportedError, CleanupEligible, Indeterminate }
+#[rustfmt::skip] #[derive(Clone, Debug, PartialEq, Eq)] pub(super) struct CleanupFacts { unlink: Attempt<()>, observe: Attempt<Option<OpenDirectoryFact>>, parent_sync: Attempt<()> }
+#[rustfmt::skip] #[derive(Clone, Debug, PartialEq, Eq)] pub(super) enum StageCleanup { Rejected(FsError), Attempted(CleanupFacts) }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct MaintenanceCleanup(StageCleanup);
+
+struct PostVerificationCleanupGrant(());
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Attempt<T> {
     NotAttempted,
@@ -159,9 +189,12 @@ impl DirectoryMutation {
     }
 }
 
-struct MutationSession<'root>(&'root mut ConfinedRuntimeRoot);
+struct MutationSession<'root> {
+    lock: platform::MutationLock,
+    root: &'root mut ConfinedRuntimeRoot,
+}
 
-impl MutationSession<'_> {
+impl<'root> MutationSession<'root> {
     fn open_or_create_child(&mut self, parent: &ConfinedDir, value: &str) -> DirectoryMutation {
         let prepared = match self.prepare_child(parent, value) {
             Ok(prepared) => prepared,
@@ -177,12 +210,205 @@ impl MutationSession<'_> {
     ) -> Result<PreparedChild, FsError> {
         let locator = prepare_locator(
             platform::MUTATION_SUPPORTED,
-            &self.0.directory.seal,
+            &self.root.directory.seal,
             (&parent.seal, parent.open.identity),
             value,
         )?;
         Ok(PreparedChild(parent.clone(), locator))
     }
+
+    fn create_stage<'session>(
+        &'session mut self,
+        parent: &ConfinedDir,
+        value: &str,
+    ) -> Result<StageCreation<'session, 'root>, FsError> {
+        let locator = prepare_locator(
+            platform::SEALED_STAGE_SUPPORTED,
+            &self.root.directory.seal,
+            (&parent.seal, parent.open.identity),
+            value,
+        )?;
+        let created = platform::create_stage(PreparedStage(parent.clone(), locator.clone()))?;
+        Ok(match created {
+            PlatformStageCreation::Writer(writer, writer_open) => {
+                StageCreation::Writer(StageWriter {
+                    session: self,
+                    parent: parent.clone(),
+                    locator,
+                    writer,
+                    writer_open,
+                })
+            }
+            PlatformStageCreation::Collision(sealed_fd, sealed) => {
+                StageCreation::Collision(CollisionStageToken {
+                    token: StageToken {
+                        session: self,
+                        parent: parent.clone(),
+                        locator,
+                        sealed_fd,
+                        sealed,
+                        target: None,
+                    },
+                    facts: None,
+                })
+            }
+        })
+    }
+}
+
+impl<'session, 'root> StageWriter<'session, 'root> {
+    fn seal(self, bytes: &[u8]) -> Result<SyncedStage<'session, 'root>, FsError> {
+        let Self {
+            session,
+            parent,
+            locator,
+            writer,
+            writer_open,
+        } = self;
+        let PinnedStage(sealed_fd, sealed) = platform::seal_stage(
+            PreparedSeal {
+                parent: parent.clone(),
+                locator: locator.clone(),
+                writer,
+                writer_open,
+            },
+            bytes,
+        )?;
+        Ok(SyncedStage {
+            token: StageToken {
+                session,
+                parent,
+                locator,
+                sealed_fd,
+                sealed,
+                target: None,
+            },
+        })
+    }
+}
+
+impl<'session, 'root> SyncedStage<'session, 'root> {
+    fn link(self, target_parent: &ConfinedDir, value: &str) -> LinkOutcome<'session, 'root> {
+        let mut token = self.token;
+        let target_locator = match prepare_locator(
+            platform::SEALED_STAGE_SUPPORTED,
+            &token.session.root.directory.seal,
+            (&target_parent.seal, target_parent.open.identity),
+            value,
+        ) {
+            Ok(locator) => locator,
+            Err(error) => {
+                return LinkOutcome::Prelink(PrelinkStageToken { token, error });
+            }
+        };
+        if token.parent.open.identity == target_parent.open.identity {
+            let error =
+                FsError::directory_alias(token.parent.open.identity, target_parent.open.identity);
+            return LinkOutcome::Prelink(PrelinkStageToken { token, error });
+        }
+        token.target = Some(BoundTarget {
+            parent: target_parent.clone(),
+            locator: target_locator,
+        });
+        let target = token.target.as_ref().expect("bound target");
+        let facts = match platform::link_stage(
+            &token.parent,
+            &token.locator,
+            &target.parent,
+            &target.locator,
+            token.sealed.identity,
+        ) {
+            Ok(facts) => facts,
+            Err(error) => {
+                return LinkOutcome::Prelink(PrelinkStageToken { token, error });
+            }
+        };
+        match reduce_sealed_link(facts) {
+            evidence @ (SealedLinkDisposition::LinkedNormally
+            | SealedLinkDisposition::ObservedAfterReportedError) => {
+                LinkOutcome::Durable(DurableLinkedStage {
+                    token,
+                    facts,
+                    evidence,
+                })
+            }
+            SealedLinkDisposition::CleanupEligible => LinkOutcome::Collision(CollisionStageToken {
+                token,
+                facts: Some(facts),
+            }),
+            SealedLinkDisposition::Indeterminate => {
+                LinkOutcome::Indeterminate(LinkOutcomeIndeterminate { token, facts })
+            }
+        }
+    }
+}
+
+impl CollisionStageToken<'_, '_> {
+    fn cleanup(self) -> StageCleanup {
+        cleanup_token(self.token)
+    }
+}
+
+impl PrelinkStageToken<'_, '_> {
+    fn cleanup(self) -> StageCleanup {
+        cleanup_token(self.token)
+    }
+}
+
+impl DurableLinkedStage<'_, '_> {
+    fn cleanup(self, _: PostVerificationCleanupGrant) -> MaintenanceCleanup {
+        MaintenanceCleanup(cleanup_token(self.token))
+    }
+}
+
+fn reduce_sealed_link(facts: SealedLinkFacts) -> SealedLinkDisposition {
+    match (facts.link, facts.target, facts.parent_sync) {
+        (Attempt::Succeeded(()), Attempt::Succeeded(Some(target)), Attempt::Succeeded(()))
+            if target.identity == facts.sealed =>
+        {
+            SealedLinkDisposition::LinkedNormally
+        }
+        (Attempt::Failed(_), Attempt::Succeeded(Some(target)), Attempt::Succeeded(()))
+            if target.identity == facts.sealed =>
+        {
+            SealedLinkDisposition::ObservedAfterReportedError
+        }
+        (Attempt::Failed(_), Attempt::Succeeded(Some(target)), sync)
+            if target.identity != facts.sealed && !matches!(sync, Attempt::NotAttempted) =>
+        {
+            SealedLinkDisposition::CleanupEligible
+        }
+        _ => SealedLinkDisposition::Indeterminate,
+    }
+}
+
+fn cleanup_token(token: StageToken<'_, '_>) -> StageCleanup {
+    if !Arc::ptr_eq(&token.session.root.directory.seal, &token.parent.seal) {
+        return StageCleanup::Rejected(FsError::cross_lineage());
+    }
+    let DirectoryLocator::Child { parent, .. } = &token.locator else {
+        unreachable!("stage token must name a child")
+    };
+    if *parent != token.parent.open.identity {
+        return StageCleanup::Rejected(FsError::identity_mismatch(
+            *parent,
+            token.parent.open.identity,
+        ));
+    }
+    if let Some(target) = &token.target
+        && target.parent.open.identity == token.parent.open.identity
+    {
+        return StageCleanup::Rejected(FsError::directory_alias(
+            token.parent.open.identity,
+            target.parent.open.identity,
+        ));
+    }
+    platform::cleanup_stage(&token.parent, &token.locator, token.sealed)
+}
+
+#[cfg(test)]
+fn post_verification_cleanup_grant() -> PostVerificationCleanupGrant {
+    PostVerificationCleanupGrant(())
 }
 
 fn prepare_locator(
@@ -273,6 +499,12 @@ pub(super) enum FsOperation {
     GetFdFlags,
     Fstat,
     Read,
+    Write,
+    SyncFile,
+    Link,
+    Unlink,
+    LockMutation,
+    Chmod,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -305,6 +537,14 @@ pub(super) enum FsErrorKind {
     IdentityMismatch {
         observed: DirectoryIdentity,
         opened: DirectoryIdentity,
+    },
+    DirectoryAlias {
+        source: DirectoryIdentity,
+        target: DirectoryIdentity,
+    },
+    ModeMismatch {
+        expected: u32,
+        actual: u32,
     },
     ReadLimitOverflow {
         limit: usize,
@@ -370,6 +610,18 @@ impl FsError {
     fn identity_mismatch(observed: DirectoryIdentity, opened: DirectoryIdentity) -> Self {
         Self {
             kind: FsErrorKind::IdentityMismatch { observed, opened },
+        }
+    }
+
+    fn directory_alias(source: DirectoryIdentity, target: DirectoryIdentity) -> Self {
+        Self {
+            kind: FsErrorKind::DirectoryAlias { source, target },
+        }
+    }
+
+    fn mode_mismatch(expected: u32, actual: u32) -> Self {
+        Self {
+            kind: FsErrorKind::ModeMismatch { expected, actual },
         }
     }
 
