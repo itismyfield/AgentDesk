@@ -14,6 +14,7 @@ import time
 import unittest
 from unittest import mock
 import uuid
+import yaml
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts" / "build_token_win32.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci-pr.yml"
@@ -181,17 +182,16 @@ class PortableWin32BuildTokenContractTests(unittest.TestCase):
                 self.assertEqual(module._supervise_windows(["x"], {}, cancelled, relay=relay, trace=[]), 128 + signal.SIGTERM)
             self.assertEqual(cancelled.closed, [1]); self.assertEqual(cancelled.released, releases)
     def test_helper_only_change_selects_windows_required_lane(self):
-        workflow = WORKFLOW.read_text()
-        self.assertIn("win32_build_token: ${{ steps.filter.outputs.win32_build_token }}", workflow)
-        self.assertIn("scripts/build_token_win32.py", workflow)
-        self.assertIn("tests/test_build_token_win32_5663.py", workflow)
-        self.assertIn("needs.changes.outputs.win32_build_token == 'true'", workflow)
-        self.assertIn("win32_build_token_required_context:", workflow)
-        self.assertIn("FILTER_NAME: win32_build_token", workflow)
-        self.assertIn("FILTER_OUTPUT: '${{ needs.changes.outputs.win32_build_token }}'", workflow)
-        self.assertIn('git cat-file -e "HEAD:scripts/build_token_win32.py"', workflow)
-        self.assertIn('git cat-file -e "HEAD:tests/test_build_token_win32_5663.py"', workflow)
-        self.assertIn("python -m unittest -v tests.test_build_token_win32_5663", workflow)
+        jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+        win = jobs["win32_build_token"]
+        self.assertEqual((win["needs"], win["if"], win["runs-on"]),
+                         ("changes", "needs.changes.outputs.win32_build_token == 'true'", "windows-latest"))
+        self.assertEqual(win["steps"], [
+            {"uses": "actions/checkout@v4"}, {"uses": "actions/setup-python@v5", "with": {"python-version": "3.11"}}, {"shell": "pwsh", "run": 'git cat-file -e "HEAD:scripts/build_token_win32.py" && git cat-file -e "HEAD:tests/test_build_token_win32_5663.py" && python -m unittest -v tests.test_build_token_win32_5663'}])
+        mirror = jobs["win32_build_token_required_context"]
+        self.assertEqual((mirror["needs"], mirror.get("if"), mirror["runs-on"]), (["changes", "win32_build_token"], "always()", "ubuntu-latest"))
+        self.assertEqual(mirror["steps"], [
+            {"uses": "actions/checkout@v4"}, {"env": {"CHANGED_PATHS_RESULT": "${{ needs.changes.result }}", "FILTER_NAME": "win32_build_token", "FILTER_OUTPUT": "${{ needs.changes.outputs.win32_build_token }}", "UPSTREAM_JOB_NAME": "win32_build_token", "UPSTREAM_RESULT": "${{ needs.win32_build_token.result }}"}, "run": "./scripts/required-check-mirror.sh"}])
 @unittest.skipUnless(sys.platform == "win32", "native Win32 contract")
 class NativeWin32BuildTokenContractTests(unittest.TestCase):
     def nonce(self) -> str:
