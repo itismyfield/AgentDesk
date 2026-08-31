@@ -64,6 +64,25 @@ impl ConfinedRuntimeRoot {
     fn mutation_session(&mut self) -> MutationSession<'_> {
         MutationSession(self)
     }
+
+    fn open_regular(&self, _parent: &ConfinedDir, _value: &str) -> Result<RegularFile, FsError> {
+        Ok(RegularFile)
+    }
+}
+
+#[derive(Debug)]
+struct RegularFile;
+
+#[derive(Debug, PartialEq, Eq)]
+enum BoundedRead {
+    Complete(Vec<u8>),
+    Oversize,
+}
+
+impl RegularFile {
+    fn read_bounded(self, _limit: usize) -> Result<BoundedRead, FsError> {
+        Ok(BoundedRead::Oversize)
+    }
 }
 
 #[derive(Clone, Debug)]

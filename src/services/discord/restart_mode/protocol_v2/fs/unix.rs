@@ -474,6 +474,18 @@ mod high_risk_recovery {
     const EXPECTED_OPEN_FLAGS: libc::c_int =
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
     const SYMLINK_ERRNO: i32 = libc::ENOTDIR;
+    #[test]
+    fn regular_open_rejects_special_nodes_and_bounded_reads_stay_bounded() {
+        let cwd = std::env::current_dir().unwrap();
+        let temp = tempfile::tempdir_in(&cwd).unwrap();
+        fs::write(temp.path().join("regular"), b"abc").unwrap();
+        let root = open_runtime_root(temp.path().strip_prefix(&cwd).unwrap()).unwrap();
+        let file = root.open_regular(&root.directory, "regular").unwrap();
+        assert_eq!(
+            file.read_bounded(3).unwrap(),
+            super::super::BoundedRead::Complete(b"abc".to_vec())
+        );
+    }
     #[rustfmt::skip] fn attempted(mutation: DirectoryMutation) -> (MutationFacts, Result<ConfinedDir, FsError>) { match mutation { DirectoryMutation::Attempted(facts, child) => (facts, child), DirectoryMutation::Rejected(error) => panic!("unexpected rejection: {error:?}") } }
     #[rustfmt::skip] fn traced<T>(trace: &[MutationTrace], operation: FsOperation, success: impl Fn(&MutationTrace) -> T) -> Attempt<T> { let Some(row) = trace.iter().find(|row| row.0 == operation) else { return Attempt::NotAttempted }; row.3.map_or_else(|| Attempt::Succeeded(success(row)), |raw_errno| Attempt::Failed(super::super::IoFact { operation, raw_errno })) }
     #[rustfmt::skip] fn assert_facts(facts: &MutationFacts, trace: &[MutationTrace]) {
