@@ -124,6 +124,20 @@ struct PreparedChild(ConfinedDir, DirectoryLocator);
 struct PreparedRegular(ConfinedDir, DirectoryLocator);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SealedLinkFacts {
+    sealed: DirectoryIdentity,
+    link: Attempt<()>,
+    target: Attempt<Option<OpenDirectoryFact>>,
+    parent_sync: Attempt<()>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SealedLinkDisposition {
+    LinkedNormally,
+    Indeterminate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Attempt<T> {
     NotAttempted,
     Succeeded(T),

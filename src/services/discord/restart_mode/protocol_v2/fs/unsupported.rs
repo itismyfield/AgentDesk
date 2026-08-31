@@ -9,6 +9,7 @@ pub(super) enum DirHandle {}
 pub(super) type FileHandle = ();
 pub(super) const MUTATION_SUPPORTED: bool = false;
 pub(super) const REGULAR_READ_SUPPORTED: bool = false;
+pub(super) const SEALED_STAGE_SUPPORTED: bool = false;
 
 pub(in super::super) fn open_runtime_root(_: &Path) -> Result<ConfinedRuntimeRoot, FsError> {
     Err(FsError::unsupported())
@@ -57,6 +58,17 @@ mod high_risk_recovery {
         assert_eq!(
             super::super::prepare_locator(
                 REGULAR_READ_SUPPORTED,
+                &root,
+                (&foreign, identity),
+                ".."
+            )
+            .unwrap_err()
+            .kind(),
+            FsErrorKind::UnsupportedPlatform
+        );
+        assert_eq!(
+            super::super::prepare_locator(
+                SEALED_STAGE_SUPPORTED,
                 &root,
                 (&foreign, identity),
                 ".."

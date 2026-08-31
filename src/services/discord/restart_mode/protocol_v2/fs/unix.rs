@@ -2,7 +2,7 @@ use super::{
     Attempt, BoundedRead, ConfinedDir, ConfinedRuntimeRoot, DirectoryIdentity, DirectoryLocator,
     DirectoryMutation, DirectoryTypeFact, FsError, FsOperation, InvalidRootFact, LineageSeal,
     MutationFacts, OpenAttemptFact, OpenDirectoryFact, PreparedChild, PreparedRegular, RegularFile,
-    RootLineage,
+    RootLineage, SealedLinkDisposition, SealedLinkFacts,
 };
 use std::{
     ffi::{CStr, CString},
@@ -20,11 +20,16 @@ pub(super) type DirHandle = OwnedFd;
 pub(super) type FileHandle = OwnedFd;
 pub(super) const MUTATION_SUPPORTED: bool = true;
 pub(super) const REGULAR_READ_SUPPORTED: bool = true;
+pub(super) const SEALED_STAGE_SUPPORTED: bool = true;
 
 const OPEN_DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
 const OPEN_REGULAR_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+
+fn reduce_sealed_link(facts: SealedLinkFacts) -> (SealedLinkFacts, SealedLinkDisposition) {
+    (facts, SealedLinkDisposition::Indeterminate)
+}
 
 struct RootPlan {
     anchor: &'static CStr,
@@ -604,6 +609,27 @@ mod high_risk_recovery {
     #[rustfmt::skip]
     const EXPECTED_REGULAR_FLAGS: libc::c_int = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
     const SYMLINK_ERRNO: i32 = libc::ENOTDIR;
+    #[test]
+    fn sealed_stage_link_records_identity_and_cleanup_stays_maintenance_only() {
+        let sealed = DirectoryIdentity {
+            device: 41,
+            inode: 43,
+        };
+        let facts = SealedLinkFacts {
+            sealed,
+            link: Attempt::Succeeded(()),
+            target: Attempt::Succeeded(Some(OpenDirectoryFact {
+                identity: sealed,
+                file_type: DirectoryTypeFact {
+                    mode: libc::S_IFREG as u32 | 0o600,
+                },
+            })),
+            parent_sync: Attempt::Succeeded(()),
+        };
+        let (recorded, disposition) = reduce_sealed_link(facts);
+        assert_eq!(recorded, facts);
+        assert_eq!(disposition, SealedLinkDisposition::LinkedNormally);
+    }
     #[rustfmt::skip] fn make_fifo(path: &Path) { let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()); let path = CString::new(bytes).unwrap(); assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0); }
     #[rustfmt::skip] fn assert_regular_trace(trace: &[MutationTrace], parent_fd: RawFd, name: &[u8]) -> RawFd { use FsOperation::*; assert_eq!(trace.len(), 4); let raw_fd = trace[1].2; assert!(raw_fd >= 0); let expected = [(Observe, parent_fd, name, libc::AT_SYMLINK_NOFOLLOW), (Open, parent_fd, name, EXPECTED_REGULAR_FLAGS), (GetFdFlags, raw_fd, b"".as_slice(), libc::F_GETFD), (Fstat, raw_fd, b"".as_slice(), 0)]; for (row, expected) in trace.iter().zip(expected) { assert_eq!((row.0, row.1.0, &*row.1.1, row.1.2), expected); } assert!(trace.iter().all(|row| row.3.is_none())); assert_eq!((trace[0].2, trace[3].2), (0, 0)); assert_ne!(trace[2].2 & libc::FD_CLOEXEC, 0); raw_fd }
     #[rustfmt::skip]
