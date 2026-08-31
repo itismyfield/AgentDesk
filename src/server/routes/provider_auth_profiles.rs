@@ -17,10 +17,10 @@ use crate::services::discord::org_writer;
 use crate::services::provider::ProviderKind;
 use crate::services::provider_auth::{ProviderAuthSpec, detect_provider_credentials_with_overlay};
 use crate::services::provider_auth_profile::{
-    self, AuthProfileError, EXTRA_ACCOUNT_PROVIDER_IDS, ProviderAuthProfileDef,
-    compact_home_for_yaml, create_empty_profile_home, extra_account_home,
+    self, AuthProfileError, EXTRA_ACCOUNT_PROVIDER_IDS, ManagedHomeValidationMode,
+    ProviderAuthProfileDef, compact_home_for_yaml, create_empty_profile_home, extra_account_home,
     extra_account_login_supported, intern_provider, login_tmux_session_name, overlay_for_home,
-    validate_profile_id, vendor_login_argv, write_login_script,
+    validate_managed_profile_home, validate_profile_id, vendor_login_argv, write_login_script,
 };
 
 #[derive(Debug, Deserialize, Default)]
@@ -135,8 +135,12 @@ pub async fn login_start(
             }
             id.to_string()
         }
-        None => provider_auth_profile::allocate_profile_id(&kind, &catalog, &[])
-            .map_err(profile_error)?,
+        None => {
+            let existing_homes =
+                provider_auth_profile::list_existing_profile_homes(&kind).map_err(profile_error)?;
+            provider_auth_profile::allocate_profile_id(&kind, &catalog, &existing_homes)
+                .map_err(profile_error)?
+        }
     };
 
     let home = create_empty_profile_home(&kind, &profile_id).map_err(profile_error)?;
@@ -194,19 +198,13 @@ pub async fn login_complete(
         Some(raw) => PathBuf::from(crate::utils::format::expand_tilde_string(raw)),
         None => expected_home.clone(),
     };
-    if !provider_auth_profile::is_managed_extra_account_home(&kind, profile_id, &home) {
-        return Err(profile_error(AuthProfileError::UnmanagedHomeForbidden {
-            profile_id: profile_id.to_string(),
-            provider: kind.as_str().to_string(),
-            home: home.display().to_string(),
-        }));
-    }
-    if !home.is_dir() {
-        return Err(profile_error(AuthProfileError::HomeMissing {
-            profile_id: profile_id.to_string(),
-            home: home.display().to_string(),
-        }));
-    }
+    validate_managed_profile_home(
+        &kind,
+        profile_id,
+        &home,
+        ManagedHomeValidationMode::Existing,
+    )
+    .map_err(profile_error)?;
 
     let overlay = overlay_for_home(kind.clone(), profile_id, &home);
     let spec = kind
