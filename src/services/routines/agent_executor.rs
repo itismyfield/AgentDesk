@@ -1372,12 +1372,14 @@ impl RoutineAgentExecutor {
     async fn has_timed_out(&self, run: &RunningAgentRoutineRun, timeout_secs: u64) -> Result<bool> {
         let timeout_secs = i64::try_from(timeout_secs)
             .map_err(|_| anyhow!("routine agent completion timeout exceeds i64 seconds"))?;
+        // The timeout is per provider attempt. A fallback must receive a full
+        // budget after the primary attempt has timed out or failed.
         sqlx::query_scalar(
             r#"
             SELECT $1::timestamptz + ($2::bigint * INTERVAL '1 second') <= NOW()
             "#,
         )
-        .bind(run.started_at)
+        .bind(current_attempt_started_at(run))
         .bind(timeout_secs)
         .fetch_one(&*self.pool)
         .await
@@ -1607,6 +1609,27 @@ fn timeout_secs_for_run(run: &RunningAgentRoutineRun, default_completion_timeout
         .and_then(|value| u64::try_from(value).ok())
         .filter(|value| *value > 0)
         .unwrap_or(default_completion_timeout_secs)
+}
+
+fn current_attempt_started_at(run: &RunningAgentRoutineRun) -> DateTime<Utc> {
+    run.attempts
+        .as_array()
+        .into_iter()
+        .flat_map(|attempts| attempts.iter().rev())
+        .filter(|attempt| {
+            attempt
+                .get("event")
+                .and_then(Value::as_str)
+                .is_some_and(|event| event == "started")
+        })
+        .find_map(|attempt| {
+            attempt
+                .get("at")
+                .and_then(Value::as_str)
+                .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| at.with_timezone(&Utc))
+        })
+        .unwrap_or(run.started_at)
 }
 
 async fn fail_claimed_agent_run(
@@ -2476,6 +2499,63 @@ mod tests {
         assert_eq!(timeout_secs_for_run(&running_run(None), 1800), 1800);
         assert_eq!(timeout_secs_for_run(&running_run(Some(0)), 1800), 1800);
         assert_eq!(timeout_secs_for_run(&running_run(Some(-5)), 1800), 1800);
+    }
+
+    #[test]
+    fn current_attempt_started_at_uses_latest_started_attempt() {
+        let mut run = running_run(None);
+        run.started_at = DateTime::parse_from_rfc3339("2026-08-30T04:00:00Z")
+            .expect("valid start")
+            .with_timezone(&Utc);
+        run.attempts = json!([
+            {
+                "event": "started",
+                "kind": "primary",
+                "at": "2026-08-30T04:05:00Z"
+            },
+            {
+                "event": "started",
+                "kind": "fallback",
+                "at": "2026-08-30T05:10:00+00:00"
+            }
+        ]);
+
+        assert_eq!(
+            current_attempt_started_at(&run),
+            DateTime::parse_from_rfc3339("2026-08-30T05:10:00Z")
+                .expect("valid attempt start")
+                .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn current_attempt_started_at_ignores_malformed_attempts_and_falls_back() {
+        let mut run = running_run(None);
+        run.started_at = DateTime::parse_from_rfc3339("2026-08-30T04:00:00Z")
+            .expect("valid start")
+            .with_timezone(&Utc);
+        run.attempts = json!([
+            {
+                "event": "started",
+                "kind": "primary",
+                "at": "2026-08-30T04:05:00Z"
+            },
+            {
+                "event": "started",
+                "kind": "fallback",
+                "at": "not-a-timestamp"
+            }
+        ]);
+
+        assert_eq!(
+            current_attempt_started_at(&run),
+            DateTime::parse_from_rfc3339("2026-08-30T04:05:00Z")
+                .expect("valid attempt start")
+                .with_timezone(&Utc)
+        );
+
+        run.attempts = json!([]);
+        assert_eq!(current_attempt_started_at(&run), run.started_at);
     }
 
     #[test]

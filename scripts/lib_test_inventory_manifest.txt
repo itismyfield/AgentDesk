@@ -7425,6 +7425,8 @@ services::routines::agent_executor::tests::completed_result_preserves_started_th
 services::routines::agent_executor::tests::completed_result_records_terminal_completion_without_transcript
 services::routines::agent_executor::tests::completion_last_result_handles_no_reply
 services::routines::agent_executor::tests::completion_preserves_verified_fresh_context_guarantee
+services::routines::agent_executor::tests::current_attempt_started_at_ignores_malformed_attempts_and_falls_back
+services::routines::agent_executor::tests::current_attempt_started_at_uses_latest_started_attempt
 services::routines::agent_executor::tests::empty_response_quality_event_is_terminal_no_reply_completion
 services::routines::agent_executor::tests::failed_start_clears_stale_fresh_context_guarantee
 services::routines::agent_executor::tests::fresh_context_guarantee_is_read_only_from_verified_durable_result
