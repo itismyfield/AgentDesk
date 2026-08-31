@@ -23,8 +23,11 @@
 //!   1. sessions-map writeback — provider `session_id` + history into
 //!      `data.sessions[channel_id]` (live intake resumes it). Guarded inside
 //!      [`apply_channel_turn_writeback`].
-//!   2. memento reflect  (`take_memento_reflect_request` → recalled at intake).
-//!   3. memento capture  (`should_spawn_memory_capture` → recalled at intake).
+//!   2. legacy memento reflect request creation. The Memento backend currently
+//!      rejects automatic transcript-derived persistence; the isolation gate
+//!      still prevents even constructing the cross-session request.
+//!   3. memory capture scheduling. Raw-turn capture is disabled for Memento and
+//!      retained only for the file backend.
 //!   4. voluntary tool_feedback reminder stash — `store_voluntary_feedback_reminder`
 //!      writes a (provider, channel_id) KV that the NEXT live intake takes and
 //!      injects into the model prompt (`response_format.rs`). Gated via

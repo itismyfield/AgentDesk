@@ -6153,6 +6153,7 @@ services::discord::turn_bridge::intake_settlement::tests::settlement_sql_error_i
 services::discord::turn_bridge::intake_settlement::tests::stale_capability_probe_after_downgrade_cannot_block_own_row_settlement_pg
 services::discord::turn_bridge::intake_settlement::tests::terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags
 services::discord::turn_bridge::intake_settlement::tests::worker_mark_done_and_settlement_converge_under_either_order_pg
+services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::memento_turn_plan_never_schedules_raw_capture
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::model_memento_tool_call_arms_session_end_reflect
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::observes_background_memory_tasks_under_one_timeout_window
 services::discord::turn_bridge::memory_lifecycle::background_memory_task_tests::observes_reflect_and_capture_background_memory_tasks
@@ -7081,6 +7082,7 @@ services::mcp_config::review_slim_tests::claude_mcp_config_arg_extends_review_al
 services::mcp_config::review_slim_tests::claude_mcp_config_arg_filters_review_catalog_to_allowlist
 services::mcp_config::review_slim_tests::claude_mcp_config_arg_keeps_full_catalog_for_non_review_dispatches
 services::memory::local::tests::recall_with_empty_catalog_returns_empty_guidance_without_panicking
+services::memory::memento::static_slice_cache_tests::automatic_turn_capture_and_transcript_reflect_never_reach_memento_writers
 services::memory::memento::static_slice_cache_tests::build_static_slice_cache_key_omits_user_text_and_dispatch_profile
 services::memory::memento::static_slice_cache_tests::elide_static_slice_first_call_keeps_full_text
 services::memory::memento::static_slice_cache_tests::elide_static_slice_keeps_banner_when_only_static_sections_present
