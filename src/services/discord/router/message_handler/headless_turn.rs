@@ -31,6 +31,22 @@ fn scheduled_snapshot_session_label(metadata: Option<&serde_json::Value>) -> Opt
         .map(str::to_string)
 }
 
+/// Select the session-key basis for isolated headless turns. Fresh routine
+/// turns already receive a synthetic per-routine tmux label; using that same
+/// label for the persisted session key prevents an old agent-channel row from
+/// owning the new routine's heartbeat and model metadata.
+fn session_key_basis_override<'a>(
+    scheduled_snapshot_label: Option<&'a str>,
+    metadata: Option<&serde_json::Value>,
+    tmux_session_label: Option<&'a str>,
+) -> Option<&'a str> {
+    scheduled_snapshot_label.or_else(|| {
+        fresh_routine_turn(metadata)
+            .then_some(tmux_session_label)
+            .flatten()
+    })
+}
+
 /// Whether an explicit routine turn must sever provider and transcript continuity.
 /// Only `persistent` routines retain continuity; absent strategy preserves the
 /// legacy routine default of `fresh`. Non-routine metadata must never reset a
@@ -593,13 +609,13 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     // session_key row.
     let scheduled_snapshot_label = scheduled_snapshot_session_label(metadata.as_ref());
     let scheduled_snapshot_turn = scheduled_snapshot_label.is_some();
-    let adk_session_key = build_adk_session_key(
-        shared,
-        channel_id,
-        &provider,
+    let session_key_basis_override = session_key_basis_override(
         scheduled_snapshot_label.as_deref(),
-    )
-    .await;
+        metadata.as_ref(),
+        tmux_session_label.as_deref(),
+    );
+    let adk_session_key =
+        build_adk_session_key(shared, channel_id, &provider, session_key_basis_override).await;
     if !scheduled_snapshot_turn
         && valid_routine_metadata(metadata.as_ref()).is_some()
         && let (Some(pool), Some(binding), Some(session_key)) = (
@@ -996,8 +1012,18 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         prelaunch_runtime_kind,
     );
 
-    let model_for_turn =
-        super::super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
+    // Routine turns execute in a synthetic child channel, while their model is
+    // configured on the real agent channel carried in routine metadata. Resolve
+    // from that parent so provider CLIs receive the configured model explicitly
+    // instead of falling back to a stale/default CLI session configuration.
+    let model_resolution_channel_id =
+        metadata_parent_channel_id(metadata.as_ref()).unwrap_or(channel_id);
+    let model_for_turn = super::super::super::commands::resolve_model_for_turn(
+        shared,
+        model_resolution_channel_id,
+        &provider,
+    )
+    .await;
     let adk_session_name = channel_name.clone();
     let adk_session_info =
         derive_adk_session_info(Some(prompt), channel_name.as_deref(), Some(&current_path));
@@ -1244,6 +1270,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             Some(provider_for_blocking.clone()),
                             model_for_turn.as_deref(),
                             None,
+                            force_fresh_provider_session,
                         ),
                         ProviderKind::OpenCode => opencode::execute_command_streaming(
                             &context_prompt,
@@ -1606,8 +1633,8 @@ mod headless_hard_ceiling_tests {
 #[cfg(test)]
 mod fresh_routine_tests {
     use super::{
-        fresh_routine_turn, persist_boundary_before_provider_clear, routine_metadata_agent_id,
-        routine_metadata_role_binding,
+        fresh_routine_turn, metadata_parent_channel_id, persist_boundary_before_provider_clear,
+        routine_metadata_agent_id, routine_metadata_role_binding, session_key_basis_override,
     };
     use crate::services::provider::ProviderKind;
     use serde_json::json;
@@ -1648,6 +1675,49 @@ mod fresh_routine_tests {
     }
 
     #[test]
+    fn fresh_routine_uses_its_synthetic_label_for_the_session_key() {
+        let metadata = json!({
+            "routine_id": "routine-1",
+            "execution_strategy": "fresh"
+        });
+
+        assert_eq!(
+            session_key_basis_override(None, Some(&metadata), Some("routine-monitoring-agent")),
+            Some("routine-monitoring-agent")
+        );
+    }
+
+    #[test]
+    fn persistent_routine_does_not_change_its_session_key_basis() {
+        let metadata = json!({
+            "routine_id": "routine-1",
+            "execution_strategy": "persistent"
+        });
+
+        assert_eq!(
+            session_key_basis_override(None, Some(&metadata), Some("routine-agent")),
+            None
+        );
+    }
+
+    #[test]
+    fn scheduled_snapshot_basis_takes_precedence() {
+        let metadata = json!({
+            "routine_id": "routine-1",
+            "execution_strategy": "fresh"
+        });
+
+        assert_eq!(
+            session_key_basis_override(
+                Some("scheduled-snapshot-1"),
+                Some(&metadata),
+                Some("routine-agent")
+            ),
+            Some("scheduled-snapshot-1")
+        );
+    }
+
+    #[test]
     fn malformed_routine_metadata_cannot_enter_routine_paths() {
         for metadata in [
             json!({ "agent_id": "other-agent", "execution_strategy": "fresh" }),
@@ -1662,6 +1732,21 @@ mod fresh_routine_tests {
             );
         }
         assert!(!fresh_routine_turn(None));
+    }
+
+    #[test]
+    fn routine_model_resolution_uses_configured_parent_channel() {
+        let metadata = json!({
+            "routine_id": "routine-1",
+            "agent_id": "qwen",
+            "parent_channel_id": "1488546844417200199"
+        });
+
+        assert_eq!(
+            metadata_parent_channel_id(Some(&metadata)).map(|channel| channel.get()),
+            Some(1_488_546_844_417_200_199)
+        );
+        assert_eq!(metadata_parent_channel_id(None), None);
     }
 
     // #4658 F1 (non-disruption contract): a scheduled-snapshot turn must NOT join

@@ -10,6 +10,8 @@ use crate::services::discord::health::{
     resolve_bot_http, start_reserved_headless_agent_turn_in_dm,
     start_reserved_headless_agent_turn_with_owner_channel,
 };
+use crate::services::provider::ProviderKind;
+use crate::services::provider_error_transcript::is_strong_provider_error_transcript;
 
 use super::fresh_context_guaranteed;
 use super::runtime::RoutineRunOutcome;
@@ -74,6 +76,8 @@ struct AgentTurnCompletion {
     evidence: AgentTurnCompletionEvidence,
     terminal_status: Option<String>,
 }
+
+const FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS: i64 = 120;
 
 impl RoutineAgentExecutor {
     pub fn new(
@@ -369,6 +373,46 @@ impl RoutineAgentExecutor {
             }
 
             if let Some(completion) = self.find_turn_completion(&run).await? {
+                if let Some(provider_error) = provider_error_from_completion(&completion) {
+                    let message = format!(
+                        "routine provider returned an error-only response: {provider_error}"
+                    );
+                    let result_json = Some(merge_pending_result(
+                        &run,
+                        "provider_error",
+                        Some(&message),
+                        Some(&completion),
+                    ));
+                    self.teardown_fresh_agent_session(
+                        store,
+                        &run.routine_id,
+                        result_json.as_ref(),
+                        "routine provider error response",
+                    )
+                    .await;
+                    let failed_agent_id = current_agent_id_from_result(run.result_json.as_ref())
+                        .or(run.agent_id.as_deref())
+                        .map(str::to_string);
+                    let attempt_kind = current_attempt_kind_from_result(run.result_json.as_ref())
+                        .unwrap_or("primary")
+                        .to_string();
+                    if let Some(outcome) = self
+                        .handle_running_agent_failure(
+                            store,
+                            run,
+                            &message,
+                            result_json,
+                            failed_agent_id.as_deref(),
+                            &attempt_kind,
+                            pause_on_terminal_failure,
+                        )
+                        .await?
+                    {
+                        outcomes.push(outcome);
+                    }
+                    continue;
+                }
+
                 let checkpoint =
                     pending_checkpoint_for_completion(run.result_json.as_ref(), &completion);
                 let next_due_at = pending_next_due_at(run.result_json.as_ref());
@@ -406,6 +450,43 @@ impl RoutineAgentExecutor {
                     error: None,
                     fresh_context_guaranteed,
                 });
+                continue;
+            }
+
+            if let Some(message) = self.fresh_provider_session_failure(&run).await {
+                let result_json = Some(merge_pending_result(
+                    &run,
+                    "provider_session_dead",
+                    Some(&message),
+                    None,
+                ));
+                self.teardown_fresh_agent_session(
+                    store,
+                    &run.routine_id,
+                    result_json.as_ref(),
+                    "routine fresh provider session ended before completion",
+                )
+                .await;
+                let failed_agent_id = current_agent_id_from_result(run.result_json.as_ref())
+                    .or(run.agent_id.as_deref())
+                    .map(str::to_string);
+                let attempt_kind = current_attempt_kind_from_result(run.result_json.as_ref())
+                    .unwrap_or("primary")
+                    .to_string();
+                if let Some(outcome) = self
+                    .handle_running_agent_failure(
+                        store,
+                        run,
+                        &message,
+                        result_json,
+                        failed_agent_id.as_deref(),
+                        &attempt_kind,
+                        pause_on_terminal_failure,
+                    )
+                    .await?
+                {
+                    outcomes.push(outcome);
+                }
                 continue;
             }
 
@@ -1365,6 +1446,37 @@ impl RoutineAgentExecutor {
         Ok(terminal.and_then(terminal_completion_from_quality_event))
     }
 
+    /// A fresh managed-tmux turn that lost its pane cannot produce a
+    /// transcript or terminal quality event. Detect that state before the
+    /// routine's long completion timeout so the existing cleanup and
+    /// retry/fallback policy can take over. Probe errors are deliberately
+    /// ignored by `probe_tmux_session_pane_liveness` callers: only a definitive
+    /// dead/absent result is actionable.
+    async fn fresh_provider_session_failure(&self, run: &RunningAgentRoutineRun) -> Option<String> {
+        if !fresh_provider_session_probe_allowed(run, Utc::now()) {
+            return None;
+        }
+        let result_json = run.result_json.as_ref()?;
+        let provider_name = result_json.get("provider").and_then(Value::as_str)?;
+        let provider = ProviderKind::from_str(provider_name)?;
+        if !provider.uses_managed_tmux_backend() {
+            return None;
+        }
+        let agent_id =
+            current_agent_id_from_result(Some(result_json)).or(run.agent_id.as_deref())?;
+        let session_name =
+            provider.build_tmux_session_name(&routine_agent_session_name(&run.name, agent_id));
+        match crate::services::tmux_diagnostics::probe_tmux_session_pane_liveness(&session_name)
+            .await
+        {
+            crate::services::platform::tmux::PaneLiveness::DeadOrAbsent => Some(format!(
+                "routine fresh provider session ended before completion ({provider_name})"
+            )),
+            crate::services::platform::tmux::PaneLiveness::Live
+            | crate::services::platform::tmux::PaneLiveness::ProbeError => None,
+        }
+    }
+
     fn timeout_secs_for_run(&self, run: &RunningAgentRoutineRun) -> u64 {
         timeout_secs_for_run(run, self.default_completion_timeout_secs)
     }
@@ -1372,12 +1484,14 @@ impl RoutineAgentExecutor {
     async fn has_timed_out(&self, run: &RunningAgentRoutineRun, timeout_secs: u64) -> Result<bool> {
         let timeout_secs = i64::try_from(timeout_secs)
             .map_err(|_| anyhow!("routine agent completion timeout exceeds i64 seconds"))?;
+        // The timeout is per provider attempt. A fallback must receive a full
+        // budget after the primary attempt has timed out or failed.
         sqlx::query_scalar(
             r#"
             SELECT $1::timestamptz + ($2::bigint * INTERVAL '1 second') <= NOW()
             "#,
         )
-        .bind(run.started_at)
+        .bind(current_attempt_started_at(run))
         .bind(timeout_secs)
         .fetch_one(&*self.pool)
         .await
@@ -1607,6 +1721,27 @@ fn timeout_secs_for_run(run: &RunningAgentRoutineRun, default_completion_timeout
         .and_then(|value| u64::try_from(value).ok())
         .filter(|value| *value > 0)
         .unwrap_or(default_completion_timeout_secs)
+}
+
+fn current_attempt_started_at(run: &RunningAgentRoutineRun) -> DateTime<Utc> {
+    run.attempts
+        .as_array()
+        .into_iter()
+        .flat_map(|attempts| attempts.iter().rev())
+        .filter(|attempt| {
+            attempt
+                .get("event")
+                .and_then(Value::as_str)
+                .is_some_and(|event| event == "started")
+        })
+        .find_map(|attempt| {
+            attempt
+                .get("at")
+                .and_then(Value::as_str)
+                .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| at.with_timezone(&Utc))
+        })
+        .unwrap_or(run.started_at)
 }
 
 async fn fail_claimed_agent_run(
@@ -2079,6 +2214,21 @@ fn assistant_preview(message: &str) -> String {
     preview
 }
 
+fn provider_error_from_completion(completion: &AgentTurnCompletion) -> Option<String> {
+    if !completion.evidence.confirms_assistant_delivery() {
+        return None;
+    }
+    let message = completion.assistant_message.as_deref()?;
+    is_strong_provider_error_transcript(message).then(|| assistant_preview(message))
+}
+
+fn fresh_provider_session_probe_allowed(run: &RunningAgentRoutineRun, now: DateTime<Utc>) -> bool {
+    run.execution_strategy == "fresh"
+        && run.turn_id.is_some()
+        && now.signed_duration_since(current_attempt_started_at(run))
+            >= Duration::seconds(FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS)
+}
+
 fn completion_last_result(completion: &AgentTurnCompletion) -> String {
     match completion.evidence {
         AgentTurnCompletionEvidence::AssistantTranscript => {
@@ -2197,6 +2347,58 @@ mod tests {
             terminal_status: matches!(evidence, AgentTurnCompletionEvidence::TerminalTurn)
                 .then(|| "empty_response".to_string()),
         }
+    }
+
+    #[test]
+    fn provider_error_from_completion_detects_known_error_only_transcript() {
+        let mut completion =
+            completion_with_evidence(AgentTurnCompletionEvidence::AssistantTranscript);
+        completion.assistant_message =
+            Some("Error: AI_APICallError: Too Many Requests (429)".to_string());
+
+        assert_eq!(
+            provider_error_from_completion(&completion).as_deref(),
+            Some("Error: AI_APICallError: Too Many Requests (429)")
+        );
+    }
+
+    #[test]
+    fn provider_error_from_completion_allows_normal_error_reports() {
+        let mut completion =
+            completion_with_evidence(AgentTurnCompletionEvidence::AssistantTranscript);
+        completion.assistant_message =
+            Some("Error summary: the PR check failed, and the remediation is ready.".to_string());
+
+        assert_eq!(provider_error_from_completion(&completion), None);
+    }
+
+    #[test]
+    fn provider_error_from_completion_ignores_terminal_evidence() {
+        let completion = completion_with_evidence(AgentTurnCompletionEvidence::TerminalTurn);
+
+        assert_eq!(provider_error_from_completion(&completion), None);
+    }
+
+    #[test]
+    fn fresh_provider_session_probe_waits_for_grace_period() {
+        let mut run = running_run(None);
+        run.turn_id = Some("discord:123:456".to_string());
+        run.started_at = DateTime::parse_from_rfc3339("2026-08-30T04:00:00Z")
+            .expect("valid start")
+            .with_timezone(&Utc);
+        run.attempts = json!([{
+            "event": "started",
+            "at": "2026-08-30T04:00:00Z"
+        }]);
+
+        assert!(!fresh_provider_session_probe_allowed(
+            &run,
+            run.started_at + Duration::seconds(FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS - 1)
+        ));
+        assert!(fresh_provider_session_probe_allowed(
+            &run,
+            run.started_at + Duration::seconds(FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS)
+        ));
     }
 
     #[test]
@@ -2476,6 +2678,63 @@ mod tests {
         assert_eq!(timeout_secs_for_run(&running_run(None), 1800), 1800);
         assert_eq!(timeout_secs_for_run(&running_run(Some(0)), 1800), 1800);
         assert_eq!(timeout_secs_for_run(&running_run(Some(-5)), 1800), 1800);
+    }
+
+    #[test]
+    fn current_attempt_started_at_uses_latest_started_attempt() {
+        let mut run = running_run(None);
+        run.started_at = DateTime::parse_from_rfc3339("2026-08-30T04:00:00Z")
+            .expect("valid start")
+            .with_timezone(&Utc);
+        run.attempts = json!([
+            {
+                "event": "started",
+                "kind": "primary",
+                "at": "2026-08-30T04:05:00Z"
+            },
+            {
+                "event": "started",
+                "kind": "fallback",
+                "at": "2026-08-30T05:10:00+00:00"
+            }
+        ]);
+
+        assert_eq!(
+            current_attempt_started_at(&run),
+            DateTime::parse_from_rfc3339("2026-08-30T05:10:00Z")
+                .expect("valid attempt start")
+                .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn current_attempt_started_at_ignores_malformed_attempts_and_falls_back() {
+        let mut run = running_run(None);
+        run.started_at = DateTime::parse_from_rfc3339("2026-08-30T04:00:00Z")
+            .expect("valid start")
+            .with_timezone(&Utc);
+        run.attempts = json!([
+            {
+                "event": "started",
+                "kind": "primary",
+                "at": "2026-08-30T04:05:00Z"
+            },
+            {
+                "event": "started",
+                "kind": "fallback",
+                "at": "not-a-timestamp"
+            }
+        ]);
+
+        assert_eq!(
+            current_attempt_started_at(&run),
+            DateTime::parse_from_rfc3339("2026-08-30T04:05:00Z")
+                .expect("valid attempt start")
+                .with_timezone(&Utc)
+        );
+
+        run.attempts = json!([]);
+        assert_eq!(current_attempt_started_at(&run), run.started_at);
     }
 
     #[test]

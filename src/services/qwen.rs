@@ -28,6 +28,7 @@ use crate::services::remote::RemoteProfile;
 use crate::services::session_backend::{
     ReadOutputFailure, StreamLineState, insert_process_session, process_session_is_alive,
     process_session_probe, process_stream_line, remove_process_session, send_process_session_input,
+    terminate_process_session,
 };
 #[cfg(unix)]
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
@@ -327,6 +328,7 @@ pub fn execute_command_streaming(
     report_provider: Option<ProviderKind>,
     model: Option<&str>,
     _compact_percent: Option<u64>,
+    force_fresh_provider_session: bool,
 ) -> Result<(), String> {
     if remote_profile.is_some() {
         return Err(remote_profile_not_supported_message());
@@ -355,6 +357,7 @@ pub fn execute_command_streaming(
                 allowed_core_tools.as_deref(),
                 report_channel_id,
                 report_provider,
+                force_fresh_provider_session,
             );
         }
         return execute_streaming_local_process(
@@ -367,10 +370,12 @@ pub fn execute_command_streaming(
             session_name,
             &resolution,
             allowed_core_tools.as_deref(),
+            force_fresh_provider_session,
         );
     }
 
-    let mut resume_strategy = normalize_resume_strategy(session_id, working_dir)?;
+    let mut resume_strategy =
+        normalize_resume_strategy_for_turn(session_id, working_dir, force_fresh_provider_session)?;
 
     for attempt in 0..=QWEN_MAX_SESSION_RETRIES {
         match execute_qwen_streaming_attempt(
@@ -1191,8 +1196,13 @@ fn execute_streaming_local_tmux(
     allowed_core_tools: Option<&[String]>,
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
+    force_fresh_provider_session: bool,
 ) -> Result<(), String> {
-    let resume_session_id = validated_resume_session_id(session_id)?;
+    let resume_session_id = if force_fresh_provider_session {
+        None
+    } else {
+        validated_resume_session_id(session_id)?
+    };
     let output_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
     let input_fifo_path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, "input");
@@ -1209,7 +1219,18 @@ fn execute_streaming_local_tmux(
     let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
     let session_usable = has_live_pane && resolved_output.is_some() && resolved_input.is_some();
 
-    if session_usable {
+    if force_fresh_provider_session {
+        if session_exists || has_live_pane {
+            record_tmux_exit_reason(
+                tmux_session_name,
+                "forced fresh provider session cleanup before recreate",
+            );
+            crate::services::platform::tmux::kill_session(
+                tmux_session_name,
+                "forced fresh provider session cleanup before recreate",
+            );
+        }
+    } else if session_usable {
         let output_path = resolved_output
             .clone()
             .unwrap_or_else(|| output_path.clone());
@@ -1327,7 +1348,7 @@ fn execute_streaming_local_tmux(
         --input-fifo {input_fifo} \\\n  \
         --prompt-file {prompt} \\\n  \
         --cwd {wd} \\\n  \
-        --qwen-bin {qwen_bin}{model_arg}{resume_arg}{core_tool_args}\n",
+        --qwen-bin {qwen_bin}{model_arg}{fresh_arg}{resume_arg}{core_tool_args}\n",
         env = env_lines,
         exe = shell_escape(&exe.display().to_string()),
         output = shell_escape(&output_path),
@@ -1340,6 +1361,11 @@ fn execute_streaming_local_tmux(
             .filter(|value| !value.is_empty())
             .map(|value| format!(" \\\n  --qwen-model {}", shell_escape(value)))
             .unwrap_or_default(),
+        fresh_arg = if force_fresh_provider_session {
+            " \\\n  --fresh-session".to_string()
+        } else {
+            String::new()
+        },
         resume_arg = resume_session_id
             .map(|value| format!(" \\\n  --resume-session-id {}", shell_escape(value)))
             .unwrap_or_default(),
@@ -1623,10 +1649,15 @@ fn execute_streaming_local_process(
     session_name: &str,
     qwen_resolution: &crate::services::platform::BinaryResolution,
     allowed_core_tools: Option<&[String]>,
+    force_fresh_provider_session: bool,
 ) -> Result<(), String> {
     use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
 
-    let resume_session_id = validated_resume_session_id(session_id)?;
+    let resume_session_id = if force_fresh_provider_session {
+        None
+    } else {
+        validated_resume_session_id(session_id)?
+    };
     let output_path = format!(
         "{}/agentdesk-{}.jsonl",
         std::env::temp_dir().display(),
@@ -1638,7 +1669,11 @@ fn execute_streaming_local_process(
         session_name
     );
 
-    if process_session_is_alive(session_name) {
+    if force_fresh_provider_session {
+        // A fresh routine must not send its prompt to a warm pipe-mode wrapper.
+        // Drop and terminate any registered process before creating the new one.
+        let _ = terminate_process_session(session_name);
+    } else if process_session_is_alive(session_name) {
         let start_offset = std::fs::metadata(&output_path)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -1700,6 +1735,9 @@ fn execute_streaming_local_process(
             if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
                 args.push("--qwen-model".to_string());
                 args.push(model.to_string());
+            }
+            if force_fresh_provider_session {
+                args.push("--fresh-session".to_string());
             }
             if let Some(session_id) = resume_session_id {
                 args.push("--resume-session-id".to_string());
@@ -1932,6 +1970,17 @@ pub(crate) fn normalize_resume_strategy(
     }
 
     Ok(QwenResumeStrategy::Resume(session_id.to_string()))
+}
+
+pub(crate) fn normalize_resume_strategy_for_turn(
+    session_id: Option<&str>,
+    working_dir: &str,
+    force_fresh_provider_session: bool,
+) -> Result<QwenResumeStrategy, String> {
+    if force_fresh_provider_session {
+        return Ok(QwenResumeStrategy::Fresh);
+    }
+    normalize_resume_strategy(session_id, working_dir)
 }
 
 fn has_prior_qwen_chat_cache(working_dir: &str) -> bool {
@@ -2193,8 +2242,8 @@ mod qwen_provider_lifecycle_tests {
     use std::time::Duration;
 
     use super::{
-        QWEN_STREAM_STARTUP_WATCHDOG, QwenStreamWatchdog,
-        should_preserve_live_reused_provider_session,
+        QWEN_STREAM_STARTUP_WATCHDOG, QwenResumeStrategy, QwenStreamWatchdog,
+        normalize_resume_strategy_for_turn, should_preserve_live_reused_provider_session,
     };
 
     #[test]
@@ -2223,5 +2272,17 @@ mod qwen_provider_lifecycle_tests {
             true
         ));
         assert!(!should_preserve_live_reused_provider_session(None, true));
+    }
+
+    #[test]
+    fn forced_fresh_turn_does_not_resume_cached_or_invalid_session() {
+        let strategy = normalize_resume_strategy_for_turn(
+            Some("not-a-qwen-session"),
+            "/tmp/agentdesk-qwen-test-workspace",
+            true,
+        )
+        .expect("fresh turns ignore the previous provider session");
+
+        assert!(matches!(strategy, QwenResumeStrategy::Fresh));
     }
 }

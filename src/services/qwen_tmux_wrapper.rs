@@ -57,6 +57,7 @@ pub fn run(
     qwen_model: Option<&str>,
     qwen_core_tools: &[String],
     resume_session_id: Option<&str>,
+    force_fresh_provider_session: bool,
     input_mode: InputMode,
 ) {
     let mode_label = match input_mode {
@@ -187,6 +188,7 @@ pub fn run(
         &prompt,
         &mut session_id,
         settings_override.as_ref(),
+        force_fresh_provider_session,
     );
     if let Err(err) = first_turn {
         emit_result_error(&mut output, &err);
@@ -219,6 +221,7 @@ pub fn run(
             next_prompt.trim(),
             &mut session_id,
             settings_override.as_ref(),
+            false,
         ) {
             emit_result_error(&mut output, &err);
             followup_error = Some(err);
@@ -267,9 +270,13 @@ fn run_turn(
     prompt: &str,
     session_id: &mut Option<String>,
     settings_override: Option<&crate::services::qwen::QwenSystemSettingsOverride>,
+    force_fresh_provider_session: bool,
 ) -> Result<(), String> {
-    let mut resume_strategy =
-        crate::services::qwen::normalize_resume_strategy(session_id.as_deref(), working_dir)?;
+    let mut resume_strategy = crate::services::qwen::normalize_resume_strategy_for_turn(
+        session_id.as_deref(),
+        working_dir,
+        force_fresh_provider_session,
+    )?;
 
     for attempt in 0..=crate::services::qwen::QWEN_MAX_SESSION_RETRIES {
         let output_checkpoint = output

@@ -3703,8 +3703,11 @@ fn resolve_graceful_config_path(
         .unwrap_or_else(|| std::path::PathBuf::from("config").join("agentdesk.yaml"))
 }
 
-/// Load config gracefully — returns Config::default() if the file doesn't exist
-/// or fails to parse, instead of panicking.
+/// Load config gracefully — returns the last validated live snapshot when one
+/// is installed and the on-disk file is missing/invalid; otherwise returns
+/// `Config::default()` instead of panicking. Keeping the live snapshot prevents
+/// a transient editor write or malformed hot-reload candidate from silently
+/// disabling the operator's provider, routine, and fallback settings.
 /// Searches:
 /// $AGENTDESK_CONFIG →
 /// $AGENTDESK_ROOT_DIR/config/agentdesk.yaml →
@@ -3733,21 +3736,30 @@ pub fn load_graceful() -> Config {
                 cfg.apply_runtime_defaults()
                     .resolve_runtime_relative_paths(runtime_root.as_deref())
             }
-            Err(e) => {
-                tracing::warn!("  ⚠ Failed to parse {path_display}: {e} — using defaults");
-                Config::default()
-            }
+            Err(e) => graceful_fallback_config(
+                &path_display,
+                format!("Failed to parse {path_display}: {e}"),
+            ),
         },
-        Err(_) => {
-            tracing::warn!("  ⚠ {path_display} not found — using defaults");
-            Config::default()
-        }
+        Err(_) => graceful_fallback_config(&path_display, format!("{path_display} not found")),
     };
 
     // Ensure data dir exists (best effort)
     let _ = std::fs::create_dir_all(&config.data.dir);
 
     config
+}
+
+fn graceful_fallback_config(path_display: &str, reason: String) -> Config {
+    if let Some(live) = crate::config_live_reload::current() {
+        tracing::warn!(
+            "  ⚠ {reason} — keeping the last validated live config (source: {path_display})"
+        );
+        return (*live).clone();
+    }
+
+    tracing::warn!("  ⚠ {reason} — using defaults");
+    Config::default()
 }
 
 /// The process-global mutex serialising tests that mutate process environment
