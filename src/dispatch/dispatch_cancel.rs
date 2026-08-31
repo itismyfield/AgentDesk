@@ -19,16 +19,15 @@ const RUN_OWNERS_FOR_DISPATCH: &str = r#"
     FROM auto_queue_phase_gates pg
     WHERE pg.dispatch_id = td.id
     UNION ALL
-    SELECT CASE
-        WHEN td.context IS NULL OR BTRIM(td.context) = '' THEN NULL
-        WHEN substring(BTRIM(td.context) FROM 1 FOR 1) NOT IN ('{', '[') THEN NULL
-        ELSE (td.context::jsonb #>> '{phase_gate,run_id}')
-    END
-    WHERE CASE
-        WHEN td.context IS NULL OR BTRIM(td.context) = '' THEN NULL
-        WHEN substring(BTRIM(td.context) FROM 1 FOR 1) NOT IN ('{', '[') THEN NULL
-        ELSE (td.context::jsonb #>> '{phase_gate,run_id}')
-    END IS NOT NULL
+    SELECT parsed.context_json #>> '{phase_gate,run_id}'
+    FROM LATERAL (
+        SELECT CASE
+            WHEN td.context IS NULL OR BTRIM(td.context) = '' THEN NULL::jsonb
+            WHEN pg_input_is_valid(BTRIM(td.context), 'jsonb') THEN BTRIM(td.context)::jsonb
+            ELSE NULL::jsonb
+        END AS context_json
+    ) parsed
+    WHERE parsed.context_json #>> '{phase_gate,run_id}' IS NOT NULL
 "#;
 
 /// Returns true when the supplied cancel reason represents a user /
@@ -628,9 +627,11 @@ async fn clear_cancelled_dispatch_thread_link_on_pg_tx(
 mod pg_observability_tests {
     use super::*;
 
-    async fn create_test_pg_db() -> crate::dispatch::test_support::DispatchPostgresTestDb {
+    async fn create_test_pg_db(
+        prefix: &str,
+    ) -> crate::dispatch::test_support::DispatchPostgresTestDb {
         crate::dispatch::test_support::DispatchPostgresTestDb::create(
-            "agentdesk_dispatch_cancel_obs",
+            prefix,
             "dispatch cancel observability tests",
         )
         .await
@@ -644,7 +645,7 @@ mod pg_observability_tests {
     /// every other terminal transition.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancel_emits_dispatch_result_observability_event() {
-        let pg_db = create_test_pg_db().await;
+        let pg_db = create_test_pg_db("agentdesk_dispatch_cancel_obs").await;
         let pool = pg_db.connect_and_migrate().await;
 
         let dispatch_id = "dispatch-cancel-obs-3039";
@@ -669,6 +670,54 @@ mod pg_observability_tests {
         assert_eq!(event.payload["to_status"], "cancelled");
         assert_eq!(event.payload["from_status"], "pending");
         assert_eq!(event.payload["transition_source"], "cancel_dispatch");
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// A legacy `task_dispatches.context` value may be truncated after a
+    /// partial write. The owner lookup is a read-side guard and must ignore
+    /// malformed context instead of aborting the whole cancellation query.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_run_lookup_ignores_malformed_legacy_context() {
+        let pg_db = create_test_pg_db("agentdesk_dispatch_cancel_malformed").await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        let dispatch_id = "dispatch-cancel-malformed-context";
+        crate::dispatch::test_support::seed_pg_dispatch(
+            &pool,
+            dispatch_id,
+            "Malformed context cancel test",
+        )
+        .await;
+        sqlx::query("UPDATE task_dispatches SET context = $1 WHERE id = $2")
+            .bind("{")
+            .bind(dispatch_id)
+            .execute(&pool)
+            .await
+            .expect("store malformed legacy context fixture");
+
+        let mut tx = pool.begin().await.expect("begin cancellation transaction");
+        let run_ids = vec!["run-not-present".to_string()];
+        let transitions = cancel_dispatches_for_runs_on_pg_tx_with_meta(
+            &mut tx,
+            &run_ids,
+            Some("operator_cancelled"),
+            true,
+        )
+        .await
+        .expect("malformed context must not abort owner lookup");
+        assert!(transitions.is_empty());
+        tx.commit()
+            .await
+            .expect("commit no-op cancellation transaction");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
+            .bind(dispatch_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load malformed context dispatch status");
+        assert_eq!(status, "pending");
 
         pool.close().await;
         pg_db.drop().await;
