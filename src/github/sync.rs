@@ -1490,6 +1490,7 @@ async fn enqueue_terminal_open_alert_pg(
             source: "github_sync",
             reason_code: Some(TERMINAL_OPEN_REASON_CODE),
             session_key: Some(session_key.as_str()),
+            attachment: None,
         },
         TERMINAL_OPEN_ALERT_DEDUPE_TTL_SECS,
     )

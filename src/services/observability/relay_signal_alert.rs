@@ -191,6 +191,7 @@ async fn enqueue_relay_alert_pg(
             source: "relay_signal_rollup",
             reason_code: Some("relay_signal.threshold"),
             session_key: Some(dedupe_key),
+            attachment: None,
         },
     )
     .await

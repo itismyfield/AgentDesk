@@ -44,6 +44,7 @@ fn message<'a>(target: &'a str, reason: &'a str) -> OutboxMessage<'a> {
         source: "system",
         reason_code: Some(reason),
         session_key: Some(target),
+        attachment: None,
     }
 }
 

@@ -229,6 +229,7 @@ async fn enqueue_alert(
             source: "long_turn_watchdog",
             reason_code: Some(LONG_TURN_ALERT_REASON_CODE),
             session_key: Some(LONG_TURN_ALERT_SESSION_KEY),
+            attachment: None,
         },
         alert_cooldown_secs(),
     )

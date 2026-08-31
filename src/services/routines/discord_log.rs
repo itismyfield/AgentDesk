@@ -740,6 +740,7 @@ impl RoutineDiscordLogger {
                 source: "routine-runtime",
                 reason_code: Some(reason_code),
                 session_key: Some(session_key),
+                attachment: None,
             },
         )
         .await
@@ -773,6 +774,7 @@ impl RoutineDiscordLogger {
                 source: "routine-runtime",
                 reason_code: Some(reason_code),
                 session_key: Some(session_key),
+                attachment: None,
             },
             dedupe_ttl_secs,
         )
@@ -1747,7 +1749,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        let diagnostic = "routine script secret.js tick(ctx) failed: api_key=sk-live-secret";
+        let diagnostic = "routine script secret.js tick(ctx) failed: api_key=test-fixture-token";
         let outcome = RoutineRunOutcome {
             run_id: "run-123456789".to_string(),
             routine_id: routine.id.clone(),
@@ -1768,8 +1770,8 @@ mod tests {
         let api_json = serde_json::to_string(&outcome).unwrap();
         assert!(message.contains("routine_tick_exception"), "{message}");
         assert!(api_json.contains("routine_tick_exception"), "{api_json}");
-        assert!(!message.contains("sk-live-secret"), "{message}");
-        assert!(!api_json.contains("sk-live-secret"), "{api_json}");
+        assert!(!message.contains("test-fixture-token"), "{message}");
+        assert!(!api_json.contains("test-fixture-token"), "{api_json}");
         assert!(!message.contains(diagnostic), "{message}");
         assert!(!api_json.contains(diagnostic), "{api_json}");
     }

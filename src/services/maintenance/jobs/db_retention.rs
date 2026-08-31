@@ -1,6 +1,6 @@
 //! DB retention job (#1093 / 909-4; extended in #3865).
 //!
-//! Nine retention policies across the AgentDesk postgres backbone:
+//! Ten retention policies across the AgentDesk postgres backbone:
 //!
 //! | Table                                   | Retention | Strategy                          |
 //! |-----------------------------------------|-----------|-----------------------------------|
@@ -12,6 +12,7 @@
 //! | `turn_lifecycle_events`                 | 30 days   | DELETE (on `created_at`)          |
 //! | `skill_usage`                           | 90 days   | DELETE (on `used_at`)             |
 //! | `turns`                                 | 90 days   | Archive-table copy, then DELETE   |
+//! | `scheduled_messages` image bytes        | 7 days    | Clear terminal one-shot payloads  |
 //! | `scheduled_message_context_snapshots`   | 30 days   | DELETE (all refs terminal + aged) |
 //!
 //! `kanban_cards` is explicitly **not** touched — done cards are permanent
@@ -40,7 +41,7 @@ pub struct TableReport {
     pub rows_affected: i64,
 }
 
-/// Full report for one run of [`db_retention_job`]. Eight table entries plus
+/// Full report for one run of [`db_retention_job`]. Ten table entries plus
 /// any aggregate-write / archive-write entries (turn_analytics, task_dispatches,
 /// session_transcripts_archive, turns_archive).
 #[derive(Debug, Clone, Serialize, Default)]
@@ -88,6 +89,10 @@ const DISPATCH_RETENTION_DAYS: i32 = 90;
 const TURN_LIFECYCLE_RETENTION_DAYS: i32 = 30; // pure operational telemetry, highest volume (multi-row/turn)
 const SKILL_USAGE_RETENTION_DAYS: i32 = 90; // dashboard analytics (used_at DESC fast-path)
 const TURNS_RETENTION_DAYS: i32 = 90; // token/cost analytics → archive before delete
+// Keep durable image bytes no longer than their delivered outbox handoff. Only
+// terminal one-shot definitions are reclaimed; active recurring schedules keep
+// their image for the next fire.
+const SCHEDULED_MESSAGE_IMAGE_RETENTION_DAYS: i32 = OUTBOX_RETENTION_DAYS;
 // #4658/#4723 — immutable scheduled-message context snapshots. Reclaimed once
 // every referencing definition is terminal AND older than this window (the FK
 // pointer is nulled with provenance kept, then the snapshot is deleted), so a
@@ -99,7 +104,7 @@ const CONTEXT_SNAPSHOT_RETENTION_DAYS: i32 = 30;
 pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionReport> {
     let mut report = RetentionReport {
         dry_run,
-        tables: Vec::with_capacity(12),
+        tables: Vec::with_capacity(13),
     };
 
     // 1. turn analytics (agent_quality_event).
@@ -118,7 +123,9 @@ pub async fn db_retention_job(pool: &PgPool, dry_run: bool) -> Result<RetentionR
     retain_skill_usage(pool, dry_run, &mut report).await?;
     // 8. turns (archive-then-delete on finished_at). #3865
     retain_turns(pool, dry_run, &mut report).await?;
-    // 9. scheduled_message_context_snapshots (all refs terminal + aged). #4658/#4723
+    // 9. scheduled_messages image attachments (terminal one-shots only).
+    retain_scheduled_message_image_attachments(pool, dry_run, &mut report).await?;
+    // 10. scheduled_message_context_snapshots (all refs terminal + aged). #4658/#4723
     retain_context_snapshots(pool, dry_run, &mut report).await?;
 
     tracing::info!(
@@ -599,7 +606,55 @@ async fn retain_turns(pool: &PgPool, dry_run: bool, report: &mut RetentionReport
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// 9. scheduled_message_context_snapshots: reclaim a snapshot once EVERY
+// 9. scheduled_messages: clear durable image bytes from aged terminal one-shot
+// definitions. Definitions are intentionally retained for audit, but their
+// 8 MiB upload payload follows the outbox retention window.
+// ─────────────────────────────────────────────────────────────────────────
+async fn retain_scheduled_message_image_attachments(
+    pool: &PgPool,
+    dry_run: bool,
+    report: &mut RetentionReport,
+) -> Result<()> {
+    const TERMINAL_ONE_SHOT_IMAGE_PREDICATE: &str = "image_data IS NOT NULL \
+        AND schedule IS NULL \
+        AND status IN ('sent', 'failed', 'canceled', 'expired') \
+        AND updated_at < NOW() - ($1::INT || ' days')::INTERVAL";
+
+    if dry_run {
+        let would = sqlx::query(&format!(
+            "SELECT COUNT(*)::BIGINT AS n FROM scheduled_messages \
+             WHERE {TERMINAL_ONE_SHOT_IMAGE_PREDICATE}"
+        ))
+        .bind(SCHEDULED_MESSAGE_IMAGE_RETENTION_DAYS)
+        .fetch_one(pool)
+        .await?;
+        report.push(TableReport {
+            table_name: "scheduled_messages",
+            action: "clear_image_attachment_would",
+            rows_affected: would.try_get("n").unwrap_or(0),
+        });
+        return Ok(());
+    }
+
+    let cleared = sqlx::query(&format!(
+        "UPDATE scheduled_messages \
+         SET image_filename = NULL, image_content_type = NULL, image_data = NULL, \
+             updated_at = NOW() \
+         WHERE {TERMINAL_ONE_SHOT_IMAGE_PREDICATE}"
+    ))
+    .bind(SCHEDULED_MESSAGE_IMAGE_RETENTION_DAYS)
+    .execute(pool)
+    .await?;
+    report.push(TableReport {
+        table_name: "scheduled_messages",
+        action: "clear_image_attachment",
+        rows_affected: cleared.rows_affected() as i64,
+    });
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 10. scheduled_message_context_snapshots: reclaim a snapshot once EVERY
 // definition referencing it is terminal AND aged past the 30-day window. #4658,
 // real reclaim landed in #4723.
 //
@@ -758,6 +813,7 @@ mod tests {
                 source: "scheduled_message",
                 reason_code: Some("scheduled_message:v1:retention-test:slot"),
                 session_key: None,
+                attachment: None,
             },
         )
         .await
@@ -771,6 +827,7 @@ mod tests {
                 source: "system",
                 reason_code: None,
                 session_key: None,
+                attachment: None,
             },
             0,
         )
@@ -786,6 +843,7 @@ mod tests {
                 source: "system",
                 reason_code: Some("retention-test-ttl"),
                 session_key: None,
+                attachment: None,
             },
             60,
         )
@@ -1067,6 +1125,91 @@ mod tests {
             count(&pool, "SELECT COUNT(*)::BIGINT AS n FROM turns_archive").await,
             1,
             "turns_archive must hold exactly one row after a double run"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_retention_clears_aged_terminal_one_shot_image_attachments_pg() {
+        let Some(db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
+            "agentdesk_db_retention_scheduled_images",
+            "db_retention scheduled image attachment reclaim",
+        )
+        .await
+        else {
+            return;
+        };
+        let pool = db.connect_and_migrate().await;
+
+        for (id, status, schedule, updated_at) in [
+            (
+                "smsg_image_terminal",
+                "sent",
+                None,
+                "NOW() - INTERVAL '8 days'",
+            ),
+            (
+                "smsg_image_recurring",
+                "scheduled",
+                Some("@every 1h"),
+                "NOW() - INTERVAL '8 days'",
+            ),
+        ] {
+            sqlx::query(&format!(
+                "INSERT INTO scheduled_messages \
+                    (id, content, target_channel_id, delivery_kind, scheduled_at, status, schedule, \
+                     image_filename, image_content_type, image_data, updated_at) \
+                 VALUES ($1, 'image retention', '123', 'push', NOW(), $2, $3, \
+                         'thumbnail.png', 'image/png', decode('89504e470d0a1a0a', 'hex'), {updated_at})"
+            ))
+            .bind(id)
+            .bind(status)
+            .bind(schedule)
+            .execute(&pool)
+            .await
+            .expect("seed scheduled image definition");
+        }
+
+        let dry = db_retention_job(&pool, true)
+            .await
+            .expect("dry-run retention pass");
+        assert_eq!(
+            dry.get("scheduled_messages", "clear_image_attachment_would")
+                .map(|entry| entry.rows_affected),
+            Some(1)
+        );
+
+        let report = db_retention_job(&pool, false)
+            .await
+            .expect("live retention pass");
+        assert_eq!(
+            report
+                .get("scheduled_messages", "clear_image_attachment")
+                .map(|entry| entry.rows_affected),
+            Some(1)
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM scheduled_messages \
+                 WHERE id = 'smsg_image_terminal' \
+                   AND image_filename IS NULL AND image_content_type IS NULL AND image_data IS NULL"
+            )
+            .await,
+            1,
+            "aged terminal one-shot attachments must be cleared"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*)::BIGINT AS n FROM scheduled_messages \
+                 WHERE id = 'smsg_image_recurring' AND image_data IS NOT NULL"
+            )
+            .await,
+            1,
+            "active recurring schedules must retain their image"
         );
 
         pool.close().await;

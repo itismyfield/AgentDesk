@@ -40,6 +40,10 @@ async fn deliver_with_bot(
 ) -> (&'static str, String) {
     let (correlation_id, semantic_event_id) = row.delivery_ids();
     let content = delivery_content(&row.content, &row.source, row.reason_code.as_deref());
+    let attachment = match row.binary_attachment() {
+        Ok(attachment) => attachment,
+        Err(error) => return ("500 Internal Server Error", error.to_string()),
+    };
     crate::services::discord::health::send_message_with_backends_and_delivery_options(
         registry,
         Some(pg_pool),
@@ -55,6 +59,7 @@ async fn deliver_with_bot(
         crate::services::discord::health::ManualOutboundOptions {
             allow_unbound_internal_channel: true,
             trusted_internal_outbox: true,
+            attachment,
             ..Default::default()
         },
     )

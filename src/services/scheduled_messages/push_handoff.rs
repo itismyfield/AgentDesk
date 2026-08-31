@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::db::scheduled_messages as db;
 use crate::db::scheduled_messages::ClaimedFire;
 use crate::services::message_outbox::{
-    OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx,
+    OutboxAttachment, OutboxMessage, enqueue_outbox_pg_returning_id_with_persistent_dedupe_on_tx,
 };
 
 use super::OUTBOX_SOURCE;
@@ -89,6 +89,16 @@ pub(super) async fn commit(
                     source: OUTBOX_SOURCE,
                     reason_code: Some(&reason_code),
                     session_key: None,
+                    attachment: message
+                        .image_filename
+                        .as_deref()
+                        .zip(message.image_content_type.as_deref())
+                        .zip(message.image_data.as_deref())
+                        .map(|((filename, content_type), data)| OutboxAttachment {
+                            filename,
+                            content_type,
+                            data,
+                        }),
                 },
             )
             .await

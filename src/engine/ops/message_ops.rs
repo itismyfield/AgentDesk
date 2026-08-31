@@ -68,6 +68,7 @@ pub(crate) fn queue_message(
                             source: &source,
                             reason_code: None,
                             session_key: None,
+                            attachment: None,
                         },
                         0,
                     )

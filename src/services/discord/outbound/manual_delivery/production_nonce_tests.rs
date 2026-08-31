@@ -159,6 +159,7 @@ async fn production_serenity_inline_path_serializes_canonical_durable_row_nonces
             false,
             None,
             enabled,
+            None,
         )
         .await;
         assert_eq!(result.0, "200 OK");

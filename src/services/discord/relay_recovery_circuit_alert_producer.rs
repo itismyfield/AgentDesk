@@ -30,6 +30,7 @@ fn legacy_message(request: &CircuitAlertRequest) -> OutboxMessage<'_> {
         source: "stall_watchdog",
         reason_code: Some(&request.reason_code),
         session_key: None,
+        attachment: None,
     }
 }
 

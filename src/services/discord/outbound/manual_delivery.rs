@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use poise::serenity_prelude as serenity;
-use serenity::{ChannelId, CreateMessage};
+use serenity::{ChannelId, CreateAttachment, CreateMessage};
 use sqlx::PgPool;
 
 use crate::db::session_transcripts::{PersistSessionTranscript, persist_turn_db};
@@ -52,7 +52,8 @@ pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundCl
     pg_pool: Option<&PgPool>,
     record_transcript: bool,
     transcript_source_label: Option<&str>,
-    headless_nonce_authorized: bool,
+    outbox_nonce_authorized: bool,
+    attachment: Option<&ManualOutboundAttachment>,
 ) -> (&'static str, String) {
     send_resolved_manual_message_with_client_and_nonce_rollout(
         client,
@@ -67,7 +68,8 @@ pub(super) async fn send_resolved_manual_message_with_client<C: ManualOutboundCl
         pg_pool,
         record_transcript,
         transcript_source_label,
-        headless_nonce::headless_discord_nonce_enabled(headless_nonce_authorized),
+        headless_nonce::durable_outbox_nonce_enabled(outbox_nonce_authorized),
+        attachment,
     )
     .await
 }
@@ -87,10 +89,11 @@ pub(super) async fn send_resolved_manual_message_with_client_and_nonce_rollout<
     pg_pool: Option<&PgPool>,
     record_transcript: bool,
     transcript_source_label: Option<&str>,
-    headless_nonce_enabled: bool,
+    outbox_nonce_enabled: bool,
+    attachment: Option<&ManualOutboundAttachment>,
 ) -> (&'static str, String) {
     let channel_id = ChannelId::new(channel_id_raw);
-    let send_result = deliver_manual_notification(
+    let send_result = deliver_manual_notification_with_attachment(
         client,
         dedup,
         &channel_id_raw.to_string(),
@@ -99,7 +102,8 @@ pub(super) async fn send_resolved_manual_message_with_client_and_nonce_rollout<
         source,
         summary,
         delivery_id,
-        headless_nonce_enabled,
+        outbox_nonce_enabled,
+        attachment,
     )
     .await;
     match send_result {
@@ -213,6 +217,17 @@ async fn record_manual_message_transcript(
 pub(crate) struct ManualOutboundDeliveryId<'a> {
     pub(crate) correlation_id: &'a str,
     pub(crate) semantic_event_id: &'a str,
+}
+
+/// Owned binary attachment passed from the durable outbox to Discord.
+///
+/// This deliberately owns its bytes because the send gate may perform async
+/// target authorization before the upload begins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ManualOutboundAttachment {
+    pub(crate) filename: String,
+    pub(crate) content_type: String,
+    pub(crate) data: Vec<u8>,
 }
 
 pub(super) fn is_reserved_voice_correlation_namespace(
@@ -335,6 +350,14 @@ pub(super) trait ManualOutboundClient: DiscordOutboundClient {
         content: &str,
         summary: Option<&str>,
     ) -> Result<String, DispatchMessagePostError>;
+
+    async fn post_binary_attachment(
+        &self,
+        target_channel: &str,
+        content: &str,
+        attachment: &ManualOutboundAttachment,
+        nonce: Option<&str>,
+    ) -> Result<String, DispatchMessagePostError>;
 }
 
 impl ManualOutboundClient for SerenityManualOutboundClient {
@@ -368,6 +391,52 @@ impl ManualOutboundClient for SerenityManualOutboundClient {
                 )
             })
     }
+
+    async fn post_binary_attachment(
+        &self,
+        target_channel: &str,
+        content: &str,
+        attachment: &ManualOutboundAttachment,
+        nonce: Option<&str>,
+    ) -> Result<String, DispatchMessagePostError> {
+        let channel_id = target_channel
+            .parse::<u64>()
+            .map(ChannelId::new)
+            .map_err(|error| {
+                DispatchMessagePostError::new(
+                    DispatchMessagePostErrorKind::Other,
+                    format!("invalid discord channel id {target_channel}: {error}"),
+                )
+            })?;
+        // Discord determines the preview from the file bytes/name. Keep the
+        // validated MIME for durable audit and future transports even though
+        // Serenity's CreateAttachment does not expose a MIME override. If the
+        // text is over Discord's inline limit, preserve it as the existing
+        // text attachment and send the image in the same message.
+        let file = CreateAttachment::bytes(attachment.data.clone(), attachment.filename.clone());
+        let mut message = CreateMessage::new();
+        if content.chars().count() > DISCORD_HARD_LIMIT_CHARS {
+            let (inline, text_file) = build_long_message_attachment(content, None);
+            message = message.content(inline).add_file(text_file);
+        } else {
+            message = message.content(content);
+        }
+        if let Some(nonce) = nonce {
+            message = message
+                .nonce(serenity::model::channel::Nonce::String(nonce.to_string()))
+                .enforce_nonce(true);
+        }
+        channel_id
+            .send_message(&*self.http, message.add_file(file))
+            .await
+            .map(|message| message.id.get().to_string())
+            .map_err(|error| {
+                DispatchMessagePostError::new(
+                    DispatchMessagePostErrorKind::Other,
+                    error.to_string(),
+                )
+            })
+    }
 }
 
 async fn deliver_manual_notification<C: ManualOutboundClient>(
@@ -379,7 +448,34 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
     source: &str,
     summary: Option<&str>,
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
-    headless_nonce_enabled: bool,
+    outbox_nonce_enabled: bool,
+) -> ManualDeliveryOutcome {
+    deliver_manual_notification_with_attachment(
+        client,
+        dedup,
+        channel_id,
+        content,
+        bot,
+        source,
+        summary,
+        delivery_id,
+        outbox_nonce_enabled,
+        None,
+    )
+    .await
+}
+
+async fn deliver_manual_notification_with_attachment<C: ManualOutboundClient>(
+    client: &C,
+    dedup: &OutboundDeduper,
+    channel_id: &str,
+    content: &str,
+    bot: &str,
+    source: &str,
+    summary: Option<&str>,
+    delivery_id: Option<ManualOutboundDeliveryId<'_>>,
+    outbox_nonce_enabled: bool,
+    attachment: Option<&ManualOutboundAttachment>,
 ) -> ManualDeliveryOutcome {
     // Issue #2363: the manual dedupe key must include the resolved target
     // channel AND the sending `bot` identity. Voice announce delivery ids
@@ -410,6 +506,24 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
     } else {
         None
     };
+
+    if let Some(attachment) = attachment {
+        let create_nonce = delivery_id.and_then(|delivery_id| {
+            headless_nonce::durable_outbox_delivery_nonce(outbox_nonce_enabled, source, delivery_id)
+        });
+        let result = client
+            .post_binary_attachment(channel_id, content, attachment, create_nonce.as_deref())
+            .await
+            .map(|message_id| ManualDeliveryOutcome::Sent {
+                message_id,
+                delivery: Some("binary_attachment"),
+            })
+            .unwrap_or_else(|error| ManualDeliveryOutcome::Failed {
+                detail: error.to_string(),
+            });
+        record_manual_delivery_success(dedup, reservation, dedup_key.as_deref(), &result);
+        return result;
+    }
 
     let content_len = content.chars().count();
     if content_len > DISCORD_HARD_LIMIT_CHARS {
@@ -455,7 +569,7 @@ async fn deliver_manual_notification<C: ManualOutboundClient>(
         source,
         summary,
         delivery_id,
-        headless_nonce_enabled,
+        outbox_nonce_enabled,
         content_len > DISCORD_SAFE_LIMIT_CHARS,
     )
     .await;
@@ -589,7 +703,7 @@ async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
     source: &str,
     summary: Option<&str>,
     delivery_id: Option<ManualOutboundDeliveryId<'_>>,
-    headless_nonce_enabled: bool,
+    outbox_nonce_enabled: bool,
     preserve_inline_content: bool,
 ) -> ManualDeliveryOutcome {
     let mut policy = if preserve_inline_content {
@@ -620,7 +734,7 @@ async fn deliver_manual_v3_text<C: DiscordOutboundClient>(
             )
         });
     let create_nonce = delivery_id.and_then(|delivery_id| {
-        headless_nonce::headless_delivery_nonce(headless_nonce_enabled, source, delivery_id)
+        headless_nonce::durable_outbox_delivery_nonce(outbox_nonce_enabled, source, delivery_id)
     });
     let mut outbound_msg =
         DiscordOutboundMessage::new(correlation_id, semantic_event_id, content, target, policy);
@@ -795,6 +909,8 @@ mod manual_v3_delivery_tests {
         posts: Arc<Mutex<Vec<String>>>,
         post_targets: Arc<Mutex<Vec<String>>>,
         dm_resolutions: Arc<Mutex<Vec<String>>>,
+        binary_attachments: Arc<Mutex<Vec<(String, String, String, Vec<u8>)>>>,
+        binary_nonces: Arc<Mutex<Vec<Option<String>>>>,
     }
 
     impl DiscordOutboundClient for MockManualOutboundClient {
@@ -833,6 +949,79 @@ mod manual_v3_delivery_tests {
         ) -> Result<String, DispatchMessagePostError> {
             Ok("attachment-message-1".to_string())
         }
+
+        async fn post_binary_attachment(
+            &self,
+            target_channel: &str,
+            content: &str,
+            attachment: &ManualOutboundAttachment,
+            _nonce: Option<&str>,
+        ) -> Result<String, DispatchMessagePostError> {
+            self.binary_attachments.lock().unwrap().push((
+                target_channel.to_string(),
+                content.to_string(),
+                attachment.filename.clone(),
+                attachment.data.clone(),
+            ));
+            self.binary_nonces
+                .lock()
+                .unwrap()
+                .push(_nonce.map(str::to_string));
+            Ok("binary-attachment-message-1".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_notification_posts_a_binary_attachment_once_with_delivery_identity() {
+        let client = MockManualOutboundClient::default();
+        let dedup = OutboundDeduper::new();
+        let attachment = ManualOutboundAttachment {
+            filename: "thumbnail.png".to_string(),
+            content_type: "image/png".to_string(),
+            data: b"\x89PNG\r\n\x1a\nthumbnail".to_vec(),
+        };
+        let delivery_id = ManualOutboundDeliveryId {
+            correlation_id: "message_outbox:scheduled_message:42",
+            semantic_event_id: "message_outbox:42:deliver",
+        };
+
+        let first = deliver_manual_notification_with_attachment(
+            &client,
+            &dedup,
+            "123",
+            "scheduled update",
+            "notify",
+            "scheduled_message",
+            None,
+            Some(delivery_id),
+            true,
+            Some(&attachment),
+        )
+        .await;
+        let retry = deliver_manual_notification_with_attachment(
+            &client,
+            &dedup,
+            "123",
+            "scheduled update",
+            "notify",
+            "scheduled_message",
+            None,
+            Some(delivery_id),
+            false,
+            Some(&attachment),
+        )
+        .await;
+
+        assert!(matches!(first, ManualDeliveryOutcome::Sent { .. }));
+        assert!(matches!(
+            retry,
+            ManualDeliveryOutcome::Sent {
+                delivery: Some("duplicate"),
+                ..
+            }
+        ));
+        assert_eq!(client.binary_attachments.lock().unwrap().len(), 1);
+        assert!(client.binary_nonces.lock().unwrap()[0].is_some());
     }
 
     #[tokio::test]

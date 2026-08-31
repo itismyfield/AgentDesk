@@ -136,6 +136,7 @@ pub(super) fn note_terminal_outbox_delivery_failure(
                 source: OUTBOX_DELIVERY_ALERT_SOURCE,
                 reason_code: Some("outbox_delivery_failed"),
                 session_key: Some(&session_key),
+                attachment: None,
             },
         )
         .await

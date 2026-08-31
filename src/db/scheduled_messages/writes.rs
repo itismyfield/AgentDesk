@@ -32,10 +32,10 @@ pub async fn insert_scheduled_message_tx(
             (id, content, discord_mention_user_ids, title, target_channel_id, bot, delivery_kind, agent_id,
              agent_instruction, on_agent_failure, scheduled_at, schedule, timezone,
              expires_at, source, created_by, dedupe_key, provider_targets,
-             provider_target_summary, context_strategy, context_snapshot_id,
-             on_context_failure)
+             provider_target_summary, image_filename, image_content_type, image_data,
+             context_strategy, context_snapshot_id, on_context_failure)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                 $17, $18, $19, $20, $21, $22)
+                 $17, $18, $19, $20, $21, $22, $23, $24, $25)
          RETURNING {DEFINITION_COLUMNS}"
     ))
     .bind(&id)
@@ -57,6 +57,21 @@ pub async fn insert_scheduled_message_tx(
     .bind(&new.dedupe_key)
     .bind(&new.provider_targets)
     .bind(&new.provider_target_summary)
+    .bind(
+        new.image_attachment
+            .as_ref()
+            .map(|image| image.filename.as_str()),
+    )
+    .bind(
+        new.image_attachment
+            .as_ref()
+            .map(|image| image.content_type.as_str()),
+    )
+    .bind(
+        new.image_attachment
+            .as_ref()
+            .map(|image| image.data.as_slice()),
+    )
     .bind(&new.context_strategy)
     .bind(&new.context_snapshot_id)
     .bind(&new.on_context_failure)

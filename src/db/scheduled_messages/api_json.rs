@@ -30,12 +30,32 @@ impl ScheduledMessageRow {
             "createdBy": self.created_by,
             "dedupeKey": self.dedupe_key,
             "providerTargets": self.provider_target_summary,
+            "imageAttachment": self.image_attachment_json(),
             "contextStrategy": self.context_strategy,
             "contextSnapshotId": self.context_snapshot_id,
             "onContextFailure": self.on_context_failure,
             "createdAt": self.created_at.to_rfc3339(),
             "updatedAt": self.updated_at.to_rfc3339(),
         })
+    }
+
+    fn image_attachment_json(&self) -> JsonValue {
+        let size_bytes = self
+            .image_size_bytes
+            .map(|size| size as usize)
+            .or_else(|| self.image_data.as_ref().map(Vec::len));
+        match (
+            self.image_filename.as_deref(),
+            self.image_content_type.as_deref(),
+            size_bytes,
+        ) {
+            (Some(filename), Some(content_type), Some(size_bytes)) => json!({
+                "filename": filename,
+                "contentType": content_type,
+                "sizeBytes": size_bytes,
+            }),
+            _ => JsonValue::Null,
+        }
     }
 }
 

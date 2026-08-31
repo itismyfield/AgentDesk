@@ -177,6 +177,7 @@ pub async fn enqueue_monitor_alert(
             source: "auto-queue-monitor",
             reason_code: Some(reason_code),
             session_key: Some(&session_key),
+            attachment: None,
         },
         MONITOR_ALERT_DEDUPE_TTL_SECS,
     )

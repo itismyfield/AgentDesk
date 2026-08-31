@@ -150,6 +150,7 @@ pub(super) async fn notify_suspected_stall_without_cleanup(
             source: "stall_watchdog",
             reason_code: Some(STALL_WATCHDOG_MENTION_REASON_CODE),
             session_key: session_key.as_deref(),
+            attachment: None,
         },
         STALL_WATCHDOG_MENTION_COOLDOWN_SECS,
     )

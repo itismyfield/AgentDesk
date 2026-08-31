@@ -1,21 +1,20 @@
 use super::ManualOutboundDeliveryId;
 use crate::services::discord::outbound::outbound_fingerprint;
 
-const HEADLESS_TURN_SOURCE: &str = "headless_turn";
-const MESSAGE_OUTBOX_CORRELATION_PREFIX: &str = "message_outbox:headless_turn:";
+const MESSAGE_OUTBOX_CORRELATION_PREFIX: &str = "message_outbox:";
 const MESSAGE_OUTBOX_SEMANTIC_PREFIX: &str = "message_outbox:";
 const MESSAGE_OUTBOX_SEMANTIC_SUFFIX: &str = ":deliver";
 const HEADLESS_DISCORD_NONCE_FLAG: &str = "AGENTDESK_HEADLESS_DISCORD_NONCE";
 
-pub(super) fn headless_delivery_nonce(
+pub(super) fn durable_outbox_delivery_nonce(
     enabled: bool,
     source: &str,
     delivery_id: ManualOutboundDeliveryId<'_>,
 ) -> Option<String> {
-    resolve_headless_delivery_nonce(enabled, source, delivery_id)
+    resolve_durable_outbox_delivery_nonce(enabled, source, delivery_id)
 }
 
-pub(super) fn headless_discord_nonce_enabled(authorized_outbox_path: bool) -> bool {
+pub(super) fn durable_outbox_nonce_enabled(authorized_outbox_path: bool) -> bool {
     resolve_rollout_enabled(
         authorized_outbox_path,
         resolve_opt_in_flag(std::env::var(HEADLESS_DISCORD_NONCE_FLAG).ok().as_deref()),
@@ -26,16 +25,18 @@ fn resolve_rollout_enabled(authorized_outbox_path: bool, rollout_flag_enabled: b
     authorized_outbox_path && rollout_flag_enabled
 }
 
-/// Resolves the nonce for the <=2,000-character manual/v3 inline send path.
-/// Oversize attachment and chunk delivery return before this resolver and do
-/// not currently receive a Discord nonce.
-pub(super) fn resolve_headless_delivery_nonce(
+/// Resolves the nonce for any durable `message_outbox` delivery.
+///
+/// Keeping the identity tied to the outbox row, rather than to the rendered
+/// content or transport shape, makes retries converge for both inline text and
+/// binary-attachment sends.
+pub(super) fn resolve_durable_outbox_delivery_nonce(
     enabled: bool,
     source: &str,
     delivery_id: ManualOutboundDeliveryId<'_>,
 ) -> Option<String> {
     enabled.then_some(())?;
-    let row_id = durable_headless_outbox_row_id(source, delivery_id)?;
+    let row_id = durable_message_outbox_row_id(source, delivery_id)?;
     Some(outbound_fingerprint(&[
         "headless-message-outbox-delivery",
         &row_id.to_string(),
@@ -49,17 +50,15 @@ fn resolve_opt_in_flag(raw: Option<&str>) -> bool {
     })
 }
 
-fn durable_headless_outbox_row_id(
+fn durable_message_outbox_row_id(
     source: &str,
     delivery_id: ManualOutboundDeliveryId<'_>,
 ) -> Option<i64> {
-    // `PendingMessageOutboxRow::delivery_ids` owns both shapes. The caller
-    // authority gate is resolved separately before this shape validation.
-    if source != HEADLESS_TURN_SOURCE
-        || !delivery_id
-            .correlation_id
-            .starts_with(MESSAGE_OUTBOX_CORRELATION_PREFIX)
-    {
+    // `PendingMessageOutboxRow::delivery_ids` owns both shapes. Require the
+    // source segment to match as well, so a trusted caller cannot accidentally
+    // reuse a nonce for a different outbox producer.
+    let correlation_prefix = format!("{MESSAGE_OUTBOX_CORRELATION_PREFIX}{}:", source.trim());
+    if source.trim().is_empty() || !delivery_id.correlation_id.starts_with(&correlation_prefix) {
         return None;
     }
     let row_id = delivery_id
@@ -99,35 +98,35 @@ mod tests {
     }
 
     #[test]
-    fn durable_identity_accepts_only_complete_headless_outbox_delivery_ids() {
+    fn durable_identity_accepts_only_complete_outbox_delivery_ids() {
         let complete = delivery_id(
             "message_outbox:headless_turn:terminal:session-a",
             "message_outbox:41:deliver",
         );
         assert_eq!(
-            durable_headless_outbox_row_id("headless_turn", complete),
+            durable_message_outbox_row_id("headless_turn", complete),
             Some(41)
         );
         assert_eq!(
-            durable_headless_outbox_row_id("lifecycle_notifier", complete),
+            durable_message_outbox_row_id("lifecycle_notifier", complete),
             None
         );
         assert_eq!(
-            durable_headless_outbox_row_id(
+            durable_message_outbox_row_id(
                 "headless_turn",
                 delivery_id("manual:headless_turn", "message_outbox:41:deliver"),
             ),
             None
         );
         assert_eq!(
-            durable_headless_outbox_row_id(
+            durable_message_outbox_row_id(
                 "headless_turn",
                 delivery_id("message_outbox:headless_turn:terminal", "message_outbox:41"),
             ),
             None
         );
         assert_eq!(
-            durable_headless_outbox_row_id(
+            durable_message_outbox_row_id(
                 "headless_turn",
                 delivery_id(
                     "message_outbox:headless_turn:terminal",
@@ -144,17 +143,24 @@ mod tests {
             "message_outbox:headless_turn:terminal:session-a",
             "message_outbox:41:deliver",
         );
-        assert!(resolve_headless_delivery_nonce(true, "headless_turn", complete).is_some());
+        assert!(resolve_durable_outbox_delivery_nonce(true, "headless_turn", complete).is_some());
+        let scheduled = delivery_id(
+            "message_outbox:scheduled_message:42",
+            "message_outbox:42:deliver",
+        );
+        assert!(
+            resolve_durable_outbox_delivery_nonce(true, "scheduled_message", scheduled).is_some()
+        );
         assert_eq!(
-            resolve_headless_delivery_nonce(false, "headless_turn", complete),
+            resolve_durable_outbox_delivery_nonce(false, "headless_turn", complete),
             None
         );
         assert_eq!(
-            resolve_headless_delivery_nonce(true, "lifecycle_notifier", complete),
+            resolve_durable_outbox_delivery_nonce(true, "lifecycle_notifier", complete),
             None
         );
         assert_eq!(
-            resolve_headless_delivery_nonce(
+            resolve_durable_outbox_delivery_nonce(
                 true,
                 "headless_turn",
                 delivery_id("manual:headless_turn", "message_outbox:41:deliver"),
@@ -165,7 +171,7 @@ mod tests {
 
     #[test]
     fn inline_nonce_is_stable_by_parsed_durable_row_across_retry_variations() {
-        let first = resolve_headless_delivery_nonce(
+        let first = resolve_durable_outbox_delivery_nonce(
             true,
             "headless_turn",
             delivery_id(
@@ -174,7 +180,7 @@ mod tests {
             ),
         )
         .expect("eligible durable row");
-        let changed_correlation_and_raw_spelling = resolve_headless_delivery_nonce(
+        let changed_correlation_and_raw_spelling = resolve_durable_outbox_delivery_nonce(
             true,
             "headless_turn",
             delivery_id(
@@ -183,7 +189,7 @@ mod tests {
             ),
         )
         .expect("same parsed durable row");
-        let other_row = resolve_headless_delivery_nonce(
+        let other_row = resolve_durable_outbox_delivery_nonce(
             true,
             "headless_turn",
             delivery_id(
@@ -209,7 +215,7 @@ mod tests {
             "message_outbox:9223372036854775808:deliver",
         ] {
             assert_eq!(
-                resolve_headless_delivery_nonce(
+                resolve_durable_outbox_delivery_nonce(
                     true,
                     "headless_turn",
                     delivery_id(

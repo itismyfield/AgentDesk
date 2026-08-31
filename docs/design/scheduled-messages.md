@@ -54,7 +54,8 @@ recurring 자동화 전반은 `routines`의 영역이다. 이 테이블은 "이 
 Postgres 전용 (messages 라우트와 동일하게 pg pool 필수). 마이그레이션:
 `migrations/postgres/0083_scheduled_messages.sql`부터
 `0087_scheduled_message_launch_commit_and_runtime_defer.sql` 및 외부 fan-out용
-`0111_scheduled_external_delivery_outbox.sql`을
+`0111_scheduled_external_delivery_outbox.sql`, 이미지 첨부용
+`0113_scheduled_message_image_attachments.sql`을
 사용한다 (`0079`~`0081`은 최신 upstream 계열이 선점). 라이브에 적용된 0082와
 이어지는 0083의 원문은 immutable하게 유지하고, recurrence anchor 컬럼과 최종
 non-null invariant는 0084/0085에서 additive하게 적용한다. 0086은 agent launch의
@@ -135,6 +136,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_scheduled_messages_active_dedupe
     WHERE dedupe_key IS NOT NULL
       AND status IN ('scheduled', 'firing');
 ```
+
+### 대표 이미지 첨부 (0103)
+
+push 예약은 선택적으로 대표 이미지 한 장을 함께 보낼 수 있다. API는
+`imageAttachment`에 아래 형태를 받고, 정의와 handoff된 `message_outbox` row에
+바이트를 함께 저장한다. 따라서 워커 재시작, 재시도, 다른 노드의 outbox claim
+뒤에도 같은 파일을 Discord에 첨부한다. API 응답은 원본 base64를 재노출하지 않고
+파일명, MIME, 바이트 수만 반환한다.
+
+```json
+{
+  "content": "출산 준비물 확인",
+  "targetChannelId": "1470033354341613691",
+  "scheduledAt": "2026-08-10T09:00:00+09:00",
+  "imageAttachment": {
+    "filename": "hospital-bag.png",
+    "contentType": "image/png",
+    "dataBase64": "iVBORw0KGgo..."
+  }
+}
+```
+
+- 허용 MIME: `image/jpeg`, `image/png`, `image/webp`, `image/gif`
+- 최대 크기: 8 MiB, MIME과 실제 파일 시그니처가 일치해야 함
+- `imageAttachment`는 `deliveryKind: "push"`에서만 허용된다. agent 답변은
+  agent가 생성하는 본문이므로 예약 파일을 별도로 끼워 넣지 않는다.
 
 ### `scheduled_message_deliveries` — 발화 이력 (routine_runs 패턴)
 
@@ -489,6 +516,7 @@ API 응답에 반환하지 않고 count-only summary만 반환한다. 반복 정
 |---|---|
 | `migrations/postgres/0083_scheduled_messages.sql` ~ `0087_scheduled_message_launch_commit_and_runtime_defer.sql` | 기존 0082 checksum 보존 + info-only bot 기본값 + recurrence anchor 보정 + launch/rolling-writer ambiguity barrier + runtime defer gate (+ immutable-checksums.json 갱신) |
 | `migrations/postgres/0111_scheduled_external_delivery_outbox.sql` | provider target + generic durable external outbox + terminal payload scrub |
+| `migrations/postgres/0113_scheduled_message_image_attachments.sql` | scheduled push의 검증된 이미지 바이트와 Discord outbox 재시도 보존 |
 | `src/db/scheduled_messages.rs`, `src/db/scheduled_messages/{agent,outbox,external_delivery}.rs` | CRUD + due-claim + delivery/agent-poll/outbox 조회 쿼리 |
 | `src/server/routes/scheduled_messages.rs` | 위 7개 핸들러 |
 | `src/server/routes/mod.rs`, `domains/ops.rs` | 라우트 등록 (protected ops 도메인) |

@@ -575,6 +575,7 @@ async fn enqueue_raw_fallback_on_tx(
             source: OUTBOX_SOURCE,
             reason_code: Some(&reason_code),
             session_key: None,
+            attachment: None,
         },
     )
     .await
@@ -1195,6 +1196,10 @@ mod tests {
             dedupe_key: None,
             provider_targets: None,
             provider_target_summary: None,
+            image_filename: None,
+            image_content_type: None,
+            image_data: None,
+            image_size_bytes: None,
             context_strategy: "fresh".to_string(),
             context_snapshot_id: None,
             on_context_failure: "fail".to_string(),

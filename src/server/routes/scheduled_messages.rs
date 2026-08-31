@@ -9,6 +9,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
@@ -17,7 +18,8 @@ use sqlx::PgPool;
 use super::AppState;
 use crate::db::scheduled_messages as db;
 use crate::db::scheduled_messages::{
-    CancelOutcome, ListFilters, NewScheduledMessage, ScheduledMessagePatch, ScheduledMessageRow,
+    CancelOutcome, ListFilters, NewScheduledMessage, ScheduledMessageImageAttachment,
+    ScheduledMessagePatch, ScheduledMessageRow,
 };
 use crate::error::{AppError, AppResult, ErrorCode};
 
@@ -44,6 +46,8 @@ const PAST_TOLERANCE_SECS: i64 = 60;
 /// channel, so they use the non-actionable utility-bot role.
 const DEFAULT_SCHEDULED_MESSAGE_BOT: &str =
     crate::services::discord::bot_role::UtilityBotRole::Notify.alias();
+
+const MAX_SCHEDULED_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
 type ApiResponse = AppResult<(StatusCode, Json<JsonValue>)>;
 
@@ -105,10 +109,81 @@ pub struct CreateScheduledMessageBody {
     pub created_by: Option<String>,
     pub dedupe_key: Option<String>,
     pub provider_targets: Option<JsonValue>,
+    pub image_attachment: Option<ScheduledMessageImageAttachmentBody>,
     /// #4658: 'fresh' or a source-channel context `snapshot`.
     pub context_strategy: Option<String>,
     /// #4658: 'fail' (default, fail-closed) or 'fresh' (opt-in degrade).
     pub on_context_failure: Option<String>,
+}
+
+/// JSON-safe upload form for one scheduled-message representative image.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScheduledMessageImageAttachmentBody {
+    pub filename: String,
+    pub content_type: String,
+    pub data_base64: String,
+}
+
+fn validate_image_attachment(
+    body: &ScheduledMessageImageAttachmentBody,
+) -> Result<ScheduledMessageImageAttachment, AppError> {
+    let filename = body.filename.trim();
+    if filename.is_empty()
+        || filename.len() > 128
+        || filename.contains(['/', '\\'])
+        || filename.contains('\0')
+    {
+        return Err(app_error(
+            StatusCode::BAD_REQUEST,
+            "imageAttachment.filename must be a plain filename up to 128 characters",
+        ));
+    }
+    let content_type = body.content_type.trim().to_ascii_lowercase();
+    if !matches!(
+        content_type.as_str(),
+        "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+    ) {
+        return Err(app_error(
+            StatusCode::BAD_REQUEST,
+            "imageAttachment.contentType must be image/jpeg, image/png, image/webp, or image/gif",
+        ));
+    }
+    let data = BASE64_STANDARD
+        .decode(body.data_base64.trim())
+        .map_err(|_| {
+            app_error(
+                StatusCode::BAD_REQUEST,
+                "imageAttachment.dataBase64 must be valid standard base64",
+            )
+        })?;
+    if data.is_empty() || data.len() > MAX_SCHEDULED_IMAGE_BYTES {
+        return Err(app_error(
+            StatusCode::BAD_REQUEST,
+            "imageAttachment must contain between 1 byte and 8 MiB",
+        ));
+    }
+    if !image_signature_matches(&content_type, &data) {
+        return Err(app_error(
+            StatusCode::BAD_REQUEST,
+            "imageAttachment bytes do not match imageAttachment.contentType",
+        ));
+    }
+    Ok(ScheduledMessageImageAttachment {
+        filename: filename.to_string(),
+        content_type,
+        data,
+    })
+}
+
+fn image_signature_matches(content_type: &str, data: &[u8]) -> bool {
+    match content_type {
+        "image/jpeg" => data.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "image/png" => data.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/gif" => data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a"),
+        "image/webp" => data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP",
+        _ => false,
+    }
 }
 
 /// POST /api/scheduled-messages
@@ -117,7 +192,14 @@ pub async fn create_scheduled_message(
     Json(body): Json<CreateScheduledMessageBody>,
 ) -> ApiResponse {
     let pool = pool_or_unavailable(&state)?;
-    let new = validate_create(pool, &body, required_discord_mentions(&state)).await?;
+    let new = validate_create(
+        pool,
+        &body,
+        required_discord_mentions(&state),
+        state.config.cluster.enabled,
+        state.config.cluster.lease_ttl_secs,
+    )
+    .await?;
 
     // Capture an immutable snapshot atomically; an empty source fails closed.
     if new.context_strategy == db::CONTEXT_STRATEGY_SNAPSHOT {
@@ -156,6 +238,8 @@ async fn validate_create(
     pool: &PgPool,
     body: &CreateScheduledMessageBody,
     required_discord_mention_user_ids: &[String],
+    cluster_enabled: bool,
+    cluster_lease_ttl_secs: u64,
 ) -> Result<NewScheduledMessage, AppError> {
     let content = body.content.trim();
     if content.is_empty() {
@@ -316,6 +400,24 @@ async fn validate_create(
     )
     .await?;
 
+    let image_attachment = body
+        .image_attachment
+        .as_ref()
+        .map(validate_image_attachment)
+        .transpose()?;
+    if image_attachment.is_some() && delivery_kind != db::KIND_PUSH {
+        return Err(app_error(
+            StatusCode::BAD_REQUEST,
+            "imageAttachment is only valid for push delivery",
+        ));
+    }
+    validate_image_attachment_target(image_attachment.is_some(), target_channel_id.as_deref())?;
+    validate_image_attachment_content_length(content, image_attachment.is_some())?;
+    if image_attachment.is_some() {
+        ensure_image_attachment_rollout_ready(pool, cluster_enabled, cluster_lease_ttl_secs)
+            .await?;
+    }
+
     Ok(NewScheduledMessage {
         content: content.to_string(),
         discord_mention_user_ids,
@@ -347,10 +449,65 @@ async fn validate_create(
             .as_ref()
             .map(|targets| targets.stored.clone()),
         provider_target_summary: validated_provider_targets.map(|targets| targets.summary),
+        image_attachment,
         context_strategy,
         context_snapshot_id: None,
         on_context_failure,
     })
+}
+
+fn validate_image_attachment_target(
+    has_image_attachment: bool,
+    target_channel_id: Option<&str>,
+) -> Result<(), AppError> {
+    if has_image_attachment && target_channel_id.is_none() {
+        return Err(app_error(
+            StatusCode::BAD_REQUEST,
+            "imageAttachment requires targetChannelId because attachments are delivered through Discord",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_image_attachment_content_length(
+    content: &str,
+    has_image_attachment: bool,
+) -> Result<(), AppError> {
+    let hard_limit = crate::services::discord::outbound::DISCORD_HARD_LIMIT_CHARS;
+    if has_image_attachment && content.chars().count() > hard_limit {
+        return Err(app_error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "content must not exceed {hard_limit} characters when imageAttachment is provided"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+async fn ensure_image_attachment_rollout_ready(
+    pool: &PgPool,
+    cluster_enabled: bool,
+    lease_ttl_secs: u64,
+) -> Result<(), AppError> {
+    if !cluster_enabled {
+        return Ok(());
+    }
+    let ready = db::image_attachment_rollout_ready_pg(pool, lease_ttl_secs)
+        .await
+        .map_err(|error| {
+            app_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("verify scheduled image rollout readiness: {error}"),
+            )
+        })?;
+    if ready {
+        return Ok(());
+    }
+    Err(app_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "imageAttachment is temporarily unavailable while cluster workers upgrade",
+    ))
 }
 
 fn validate_agent_only_fields(
@@ -601,7 +758,15 @@ pub async fn patch_scheduled_message(
         ));
     }
 
-    let patch = build_patch(pool, body, &existing, required_discord_mentions(&state)).await?;
+    let patch = build_patch(
+        pool,
+        body,
+        &existing,
+        required_discord_mentions(&state),
+        state.config.cluster.enabled,
+        state.config.cluster.lease_ttl_secs,
+    )
+    .await?;
 
     match db::update_scheduled_message_pg(pool, &id, &patch).await {
         Ok(Some(row)) => Ok((
@@ -634,6 +799,25 @@ fn patch_string(
         }
         Some(_) => Err(format!("{key} must be a string or null")),
     }
+}
+
+fn patch_image_attachment(
+    body: &serde_json::Map<String, JsonValue>,
+) -> Result<Option<Option<ScheduledMessageImageAttachment>>, AppError> {
+    let Some(value) = body.get("imageAttachment") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(Some(None));
+    }
+    let parsed: ScheduledMessageImageAttachmentBody = serde_json::from_value(value.clone())
+        .map_err(|error| {
+            app_error(
+                StatusCode::BAD_REQUEST,
+                format!("imageAttachment must be an object or null: {error}"),
+            )
+        })?;
+    Ok(Some(Some(validate_image_attachment(&parsed)?)))
 }
 
 fn normalize_effective_scheduled_at(
@@ -684,6 +868,8 @@ async fn build_patch(
     body: &serde_json::Map<String, JsonValue>,
     existing: &ScheduledMessageRow,
     required_discord_mention_user_ids: &[String],
+    cluster_enabled: bool,
+    cluster_lease_ttl_secs: u64,
 ) -> Result<ScheduledMessagePatch, AppError> {
     let bad_request = |message: String| app_error(StatusCode::BAD_REQUEST, message);
     let mut patch = ScheduledMessagePatch::default();
@@ -741,6 +927,7 @@ async fn build_patch(
             None => None,
         });
     }
+    patch.image_attachment = patch_image_attachment(body)?;
 
     // Validate the effective (merged) definition with the create rules.
     let effective_kind = existing.delivery_kind.as_str();
@@ -778,6 +965,12 @@ async fn build_patch(
     }
     let effective_content = patch.content.as_deref().unwrap_or(&existing.content);
     validate_discord_rendered_content_length(effective_content, &effective_mentions)?;
+    let effective_has_image_attachment = match &patch.image_attachment {
+        Some(image_attachment) => image_attachment.is_some(),
+        None => existing.image_data.is_some(),
+    };
+    validate_image_attachment_target(effective_has_image_attachment, effective_target.as_deref())?;
+    validate_image_attachment_content_length(effective_content, effective_has_image_attachment)?;
     validate_agent_only_fields(
         effective_kind,
         effective_agent.as_deref(),
@@ -792,7 +985,16 @@ async fn build_patch(
         has_provider_targets,
     )
     .await?;
+    if effective_has_image_attachment && effective_kind != db::KIND_PUSH {
+        return Err(bad_request(
+            "imageAttachment is only valid for push delivery".to_string(),
+        ));
+    }
 
+    if effective_has_image_attachment {
+        ensure_image_attachment_rollout_ready(pool, cluster_enabled, cluster_lease_ttl_secs)
+            .await?;
+    }
     let mut effective_scheduled_at = patch.scheduled_at.unwrap_or(existing.scheduled_at);
     let effective_schedule = patch
         .schedule

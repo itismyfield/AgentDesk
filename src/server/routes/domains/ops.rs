@@ -1,5 +1,6 @@
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     routing::{delete, get, patch, post},
 };
 
@@ -271,13 +272,17 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route(
                 "/scheduled-messages",
                 get(scheduled_messages::list_scheduled_messages)
-                    .post(scheduled_messages::create_scheduled_message),
+                    .post(scheduled_messages::create_scheduled_message)
+                    // The optional 8 MiB image is base64-encoded in JSON.
+                    // Keep this limit local to the upload-capable endpoint.
+                    .layer(DefaultBodyLimit::max(12 * 1024 * 1024)),
             )
             .route(
                 "/scheduled-messages/{id}",
                 get(scheduled_messages::get_scheduled_message)
                     .patch(scheduled_messages::patch_scheduled_message)
-                    .delete(scheduled_messages::cancel_scheduled_message),
+                    .delete(scheduled_messages::cancel_scheduled_message)
+                    .layer(DefaultBodyLimit::max(12 * 1024 * 1024)),
             )
             .route(
                 "/scheduled-messages/{id}/trigger-now",

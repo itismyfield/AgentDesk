@@ -150,6 +150,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("bot", body_param("string", false, "Delivery bot (default notify; announce intentionally wakes a receiving agent)")),
             ("title", body_param("string", false, "Display title")),
             ("dedupeKey", body_param("string", false, "Idempotency key; unique among live reservations")),
+            ("imageAttachment", body_param("object", false, "Optional push-only representative image: filename, image MIME, and standard base64 data (JPEG/PNG/WebP/GIF, up to 8 MiB)")),
         ])
         .with_example(
             json!({"body": {"content": "standup agenda", "targetChannelId": "123", "providerTargets": {"kakao": {"accountId": "default", "friendUuids": ["kakao-friend-uuid"], "sendToSelf": true, "confirmed": true}}, "scheduledAt": "2026-07-09T09:00:00+09:00"}}),
