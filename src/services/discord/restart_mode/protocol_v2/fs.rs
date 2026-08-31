@@ -189,7 +189,10 @@ impl DirectoryMutation {
     }
 }
 
-#[rustfmt::skip] struct MutationSession<'root> { lock: platform::MutationLock, root: &'root mut ConfinedRuntimeRoot }
+struct MutationSession<'root> {
+    lock: platform::MutationLock,
+    root: &'root mut ConfinedRuntimeRoot,
+}
 
 impl<'root> MutationSession<'root> {
     fn open_or_create_child(&mut self, parent: &ConfinedDir, value: &str) -> DirectoryMutation {

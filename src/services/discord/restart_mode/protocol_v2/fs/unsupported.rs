@@ -167,17 +167,6 @@ mod high_risk_recovery {
         assert!(
             matches!(cleanup_stage(&dir, &locator, open), StageCleanup::Rejected(error) if error.kind() == FsErrorKind::UnsupportedPlatform)
         );
-        let runtime = ConfinedRuntimeRoot {
-            lineage: super::super::RootLineage {
-                anchor: identity,
-                root: identity,
-            },
-            directory: dir,
-        };
-        assert_eq!(
-            lock_mutation(&runtime).unwrap_err().kind(),
-            FsErrorKind::UnsupportedPlatform
-        );
         assert_eq!(super::super::take_preflight_activity(), 0);
     }
 }

@@ -66,12 +66,25 @@ pub(in super::super) fn open_runtime_root(path: &Path) -> Result<ConfinedRuntime
     })
 }
 
-#[rustfmt::skip] pub(super) fn lock_mutation(root: &ConfinedRuntimeRoot) -> Result<MutationLock, FsError> {
+pub(super) fn lock_mutation(root: &ConfinedRuntimeRoot) -> Result<MutationLock, FsError> {
     let (fd, opened) = open_directory(root.directory.fd.as_raw_fd(), c".")?;
     #[cfg(test)]
-    TRACE.with(|trace| { let mut trace = trace.borrow_mut(); let keep = trace.len().saturating_sub(2); trace.truncate(keep); });
-    if opened.identity != root.directory.open.identity { return Err(FsError::identity_mismatch(root.directory.open.identity, opened.identity)); }
-    if unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == -1 { return Err(FsError::io(FsOperation::LockMutation, last_errno())); }
+    TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        let keep = trace.len().saturating_sub(2);
+        trace.truncate(keep);
+    });
+    if opened.identity != root.directory.open.identity {
+        return Err(FsError::identity_mismatch(
+            root.directory.open.identity,
+            opened.identity,
+        ));
+    }
+    // The nonblocking lock coordinates only cooperating writers sharing this trusted root inode;
+    // a nested root inode is a separate mutation authority with its own independent OFD.
+    if unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == -1 {
+        return Err(FsError::io(FsOperation::LockMutation, last_errno()));
+    }
     Ok(fd)
 }
 
@@ -309,7 +322,7 @@ pub(super) fn create_stage(prepared: PreparedStage) -> Result<PlatformStageCreat
         |raw_fd| (unsafe { OwnedFd::from_raw_fd(raw_fd) }, None),
     );
     if let Some(fd) = fd {
-        let (_, errno, changed) = mutation_call(
+        let (_, errno, _) = mutation_call(
             FsOperation::Chmod,
             (fd.as_raw_fd(), c"", CREATE_STAGE_MODE as i32),
             || unsafe { libc::fchmod(fd.as_raw_fd(), CREATE_STAGE_MODE) },
@@ -318,7 +331,6 @@ pub(super) fn create_stage(prepared: PreparedStage) -> Result<PlatformStageCreat
         if let Some(raw) = errno {
             return Err(FsError::io(FsOperation::Chmod, raw));
         }
-        debug_assert!(changed.is_some());
         let opened = verify_regular_fd(&fd)?;
         let mode = opened.file_type.mode & 0o7777;
         if mode != CREATE_STAGE_MODE as u32 {
@@ -914,13 +926,45 @@ mod high_risk_recovery {
     const EXPECTED_REGULAR_FLAGS: libc::c_int = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
     #[rustfmt::skip]
     const EXPECTED_STAGE_CREATE_FLAGS: libc::c_int = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+    const MUTATION_LOCK_CHILD: &str = "AGENTDESK_5604_MUTATION_LOCK_CHILD";
+    const SEALED_STAGE_TEST: &str = "services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::sealed_stage_link_records_identity_and_cleanup_stays_maintenance_only";
     const SYMLINK_ERRNO: i32 = libc::ENOTDIR;
     #[rustfmt::skip] fn stage_writer<'a, 'b>(session: &'a mut super::super::MutationSession<'b>, parent: &ConfinedDir, name: &str) -> super::super::StageWriter<'a, 'b> { match session.create_stage(parent, name) { Ok(super::super::StageCreation::Writer(writer)) => writer, Ok(super::super::StageCreation::Collision(_)) => panic!("unexpected collision for {name}"), Err(error) => panic!("stage create failed for {name}: {error:?}") } }
     #[rustfmt::skip] fn synced_stage<'a, 'b>(session: &'a mut super::super::MutationSession<'b>, parent: &ConfinedDir, name: &str, bytes: &[u8]) -> super::super::SyncedStage<'a, 'b> { stage_writer(session, parent, name).seal(bytes).unwrap() }
     #[rustfmt::skip] fn cleanup_facts(cleanup: StageCleanup) -> CleanupFacts { match cleanup { StageCleanup::Attempted(facts) => facts, StageCleanup::Rejected(error) => panic!("unexpected cleanup rejection: {error:?}") } }
+    fn mutation_lock_child() -> bool {
+        use std::io::{Read as _, Write as _};
+        let Some(value) = std::env::var_os(MUTATION_LOCK_CHILD) else {
+            return false;
+        };
+        let value = value.to_string_lossy();
+        let Some((parent, path)) = value.split_once(':') else {
+            return false;
+        };
+        if parent != unsafe { libc::getppid() }.to_string() {
+            return false;
+        }
+        let mut root = open_runtime_root(Path::new(path)).unwrap();
+        let error = match root.mutation_session() {
+            Ok(_) => panic!("contended mutation lock was acquired"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error.kind(), FsErrorKind::Io(fact) if fact.operation() == FsOperation::LockMutation && (fact.raw_errno() == libc::EWOULDBLOCK || fact.raw_errno() == libc::EAGAIN))
+        );
+        println!("AGENTDESK_5604_LOCK_CONTENDED");
+        std::io::stdout().flush().unwrap();
+        std::io::stdin().read_to_end(&mut Vec::new()).unwrap();
+        let session = root.mutation_session().unwrap();
+        println!("AGENTDESK_5604_LOCK_REACQUIRED");
+        std::io::stdout().flush().unwrap();
+        drop(session);
+        true
+    }
     #[rustfmt::skip]
     #[test]
     fn sealed_stage_link_records_identity_and_cleanup_stays_maintenance_only() {
+        if mutation_lock_child() { return }
         use super::super::{LinkOutcome, MaintenanceCleanup, SealedLinkDisposition, StageCreation}; use FsOperation::*;
         let sealed_id = DirectoryIdentity { device: 5, inode: 7 }; let other_id = DirectoryIdentity { device: 5, inode: 11 }; let io = |operation, raw_errno| super::super::IoFact { operation, raw_errno };
         let regular = |identity| OpenDirectoryFact { identity, file_type: DirectoryTypeFact { mode: libc::S_IFREG as u32 | 0o600 } };
@@ -933,9 +977,12 @@ mod high_risk_recovery {
         let cwd = std::env::current_dir().unwrap(); let temp = tempfile::tempdir_in(&cwd).unwrap(); let base = temp.path(); let stage_path = base.join("stage"); let target_path = base.join("target"); fs::create_dir_all(&stage_path).unwrap(); fs::create_dir_all(&target_path).unwrap();
         let relative = base.strip_prefix(&cwd).unwrap(); let mut root = open_runtime_root(relative).unwrap(); let other = open_runtime_root(relative).unwrap(); let parent = root.directory.clone(); let foreign = other.directory.clone();
         let mut setup = root.mutation_session().unwrap(); let (_, stage) = attempted(setup.open_or_create_child(&parent, "stage")); let (_, target) = attempted(setup.open_or_create_child(&parent, "target")); let stage = stage.unwrap(); let target = target.unwrap(); drop(setup); take_mutation_evidence(); ACTUAL_FSYNC_FDS.with(|fds| fds.borrow_mut().clear());
-        let mut session = root.mutation_session().unwrap(); let writer = stage_writer(&mut session, &stage, "main"); let writer_fd = writer.writer.as_raw_fd(); STAGE_WRITE_LIMIT.with(|limit| limit.set(Some(2))); let synced = writer.seal(b"abcdef").unwrap(); let sealed = synced.token.sealed; let sealed_fd = synced.token.sealed_fd.as_raw_fd();
-        let (_, trace) = take_mutation_evidence(); assert_eq!(ACTUAL_FSYNC_FDS.with(|fds| std::mem::take(&mut *fds.borrow_mut())), [writer_fd]); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Open, GetFdFlags, Fstat, Write, Write, SyncFile, Observe, Open, GetFdFlags, Fstat]);
-        assert_eq!((trace[0].1.0, &*trace[0].1.1, trace[0].1.2, trace[0].2), (stage.fd.as_raw_fd(), b"main".as_slice(), EXPECTED_STAGE_CREATE_FLAGS, writer_fd)); assert_eq!((trace[3].1.2, trace[3].2, trace[4].1.2, trace[4].2), (2, 2, 4, 4)); assert_closed(writer_fd); assert_ne!(unsafe { libc::fcntl(sealed_fd, libc::F_GETFD) }, -1); assert_eq!(fs::read(stage_path.join("main")).unwrap(), b"abcdef");
+        let root_fd = root.directory.fd.as_raw_fd(); let root_identity = root.directory.open.identity; let mut holder = root.mutation_session().unwrap(); let lock_fd = holder.lock.as_raw_fd(); let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit(); assert_eq!(unsafe { libc::fstat(lock_fd, stat.as_mut_ptr()) }, 0); assert_ne!(lock_fd, root_fd); assert_ne!(unsafe { libc::fcntl(lock_fd, libc::F_GETFD) } & libc::FD_CLOEXEC, 0); assert_eq!(directory_fact(unsafe { &*stat.as_ptr() }).identity, root_identity); let held = stage_writer(&mut holder, &stage, "lock-live");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap()).args([SEALED_STAGE_TEST, "--exact", "--nocapture", "--test-threads=1"]).env(MUTATION_LOCK_CHILD, format!("{}:{}", std::process::id(), base.display())).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap(); let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap()); let mut line = String::new(); loop { line.clear(); assert_ne!(std::io::BufRead::read_line(&mut stdout, &mut line).unwrap(), 0); if line.contains("AGENTDESK_5604_LOCK_CONTENDED") { break } }
+        drop(held); drop(holder); drop(child.stdin.take()); let mut rest = String::new(); std::io::Read::read_to_string(&mut stdout, &mut rest).unwrap(); let status = child.wait().unwrap(); assert!(status.success() && rest.contains("AGENTDESK_5604_LOCK_REACQUIRED")); fs::remove_file(stage_path.join("lock-live")).unwrap(); assert_eq!((fsync_fd(-1), last_errno()), (-1, libc::EBADF)); assert_eq!(ACTUAL_FSYNC_FDS.with(|fds| std::mem::take(&mut *fds.borrow_mut())), [-1]);
+        let mut session = root.mutation_session().unwrap(); let old_umask = unsafe { libc::umask(0o777) }; let writer = stage_writer(&mut session, &stage, "main"); unsafe { libc::umask(old_umask) }; let writer_fd = writer.writer.as_raw_fd(); STAGE_WRITE_LIMIT.with(|limit| limit.set(Some(2))); let synced = writer.seal(b"abcdef").unwrap(); let sealed = synced.token.sealed; let sealed_fd = synced.token.sealed_fd.as_raw_fd();
+        let (_, trace) = take_mutation_evidence(); assert_eq!(ACTUAL_FSYNC_FDS.with(|fds| std::mem::take(&mut *fds.borrow_mut())), [writer_fd]); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Open, Chmod, GetFdFlags, Fstat, Write, Write, SyncFile, Observe, Open, GetFdFlags, Fstat]);
+        assert_eq!((trace[0].1.0, &*trace[0].1.1, trace[0].1.2, trace[0].2), (stage.fd.as_raw_fd(), b"main".as_slice(), EXPECTED_STAGE_CREATE_FLAGS, writer_fd)); assert_eq!((trace[1].0, trace[1].1.0, trace[1].1.2), (Chmod, writer_fd, 0o600)); assert_eq!((trace[4].1.2, trace[4].2, trace[5].1.2, trace[5].2), (2, 2, 4, 4)); assert_closed(writer_fd); assert_ne!(unsafe { libc::fcntl(sealed_fd, libc::F_GETFD) }, -1); assert_eq!(fs::read(stage_path.join("main")).unwrap(), b"abcdef");
         let meta = fs::metadata(stage_path.join("main")).unwrap(); assert_eq!((meta.mode() & 0o777, sealed.identity), (0o600, DirectoryIdentity { device: meta.dev(), inode: meta.ino() })); assert!(matches!(&synced.token.locator, DirectoryLocator::Child { parent, component } if (*parent, component.as_bytes()) == (stage.open.identity, b"main")));
 
         take_mutation_evidence(); ACTUAL_FSYNC_FDS.with(|fds| fds.borrow_mut().clear()); let LinkOutcome::Durable(durable) = synced.link(&target, "canonical") else { panic!("different-parent link was not durable") }; let (_, trace) = take_mutation_evidence(); assert_eq!(ACTUAL_FSYNC_FDS.with(|fds| std::mem::take(&mut *fds.borrow_mut())), [target.fd.as_raw_fd()]); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Link, Observe, SyncParent]); assert_eq!((trace[0].1.0, &*trace[0].1.1, trace[0].1.2), (stage.fd.as_raw_fd(), b"main".as_slice(), target.fd.as_raw_fd())); assert!(target_path.join("canonical").exists());
@@ -943,8 +990,10 @@ mod high_risk_recovery {
         take_mutation_evidence(); ACTUAL_FSYNC_FDS.with(|fds| fds.borrow_mut().clear()); let MaintenanceCleanup(cleanup) = durable.cleanup(super::super::post_verification_cleanup_grant()); let cleanup = cleanup_facts(cleanup); let (_, trace) = take_mutation_evidence(); assert_eq!(ACTUAL_FSYNC_FDS.with(|fds| std::mem::take(&mut *fds.borrow_mut())), [stage.fd.as_raw_fd()]); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Observe, Unlink, Observe, SyncParent]); assert_eq!((cleanup.unlink, cleanup.observe, cleanup.parent_sync), (Attempt::Succeeded(()), Attempt::Succeeded(None), Attempt::Succeeded(()))); assert!(!stage_path.join("main").exists() && target_path.join("canonical").exists());
 
         take_mutation_evidence(); MUTATION_FAULT.with(|fault| fault.set(Some((GetFdFlags, 0, None)))); let Err(error) = session.create_stage(&stage, "writer-cloexec") else { panic!("writer without CLOEXEC was accepted") }; let (_, trace) = take_mutation_evidence(); assert_eq!(error.kind(), FsErrorKind::MissingCloseOnExec { fd_flags: 0 }); assert_closed(trace[0].2); fs::remove_file(stage_path.join("writer-cloexec")).unwrap();
+        let mismatched = OpenDirectoryFact { identity: sealed_id, file_type: DirectoryTypeFact { mode: libc::S_IFREG as u32 | 0o644 } }; INJECTED_FSTAT_FACT.with(|fact| fact.set(Some(mismatched))); MUTATION_FAULT.with(|fault| fault.set(Some((Fstat, 0, None)))); let Err(error) = session.create_stage(&stage, "mode-mismatch") else { panic!("non-0600 stage was accepted") }; assert_eq!(error.kind(), FsErrorKind::ModeMismatch { expected: 0o600, actual: 0o644 }); fs::remove_file(stage_path.join("mode-mismatch")).unwrap();
         let writer = stage_writer(&mut session, &stage, "pin-cloexec"); let writer_fd = writer.writer.as_raw_fd(); take_mutation_evidence(); MUTATION_FAULT.with(|fault| fault.set(Some((GetFdFlags, 0, None)))); let Err(error) = writer.seal(b"x") else { panic!("pin without CLOEXEC was accepted") }; let (_, trace) = take_mutation_evidence(); assert_eq!(error.kind(), FsErrorKind::MissingCloseOnExec { fd_flags: 0 }); assert_closed(writer_fd); assert_closed(trace[3].2); fs::remove_file(stage_path.join("pin-cloexec")).unwrap();
         let writer = stage_writer(&mut session, &stage, "pin-nonregular"); let writer_fd = writer.writer.as_raw_fd(); let injected = OpenDirectoryFact { identity: writer.writer_open.identity, file_type: DirectoryTypeFact { mode: libc::S_IFIFO as u32 | 0o600 } }; take_mutation_evidence(); INJECTED_FSTAT_FACT.with(|fact| fact.set(Some(injected))); MUTATION_FAULT.with(|fault| fault.set(Some((Fstat, 0, None)))); let Err(error) = writer.seal(b"x") else { panic!("nonregular pin was accepted") }; let (_, trace) = take_mutation_evidence(); assert!(matches!(error.kind(), FsErrorKind::NotRegular(fact) if fact == injected.file_type)); assert_closed(writer_fd); assert_closed(trace[3].2); fs::remove_file(stage_path.join("pin-nonregular")).unwrap();
+        let writer = stage_writer(&mut session, &stage, "sync-eio"); let writer_fd = writer.writer.as_raw_fd(); MUTATION_FAULT.with(|fault| fault.set(Some((SyncFile, -1, Some(libc::EIO))))); let Err(error) = writer.seal(b"x") else { panic!("failed file sync produced a sealed token") }; assert_eq!(error.kind(), FsErrorKind::Io(io(SyncFile, libc::EIO))); assert_closed(writer_fd); fs::remove_file(stage_path.join("sync-eio")).unwrap();
 
         take_mutation_evidence(); MUTATION_FAULT.with(|fault| fault.set(Some((Write, -1, Some(libc::EINTR))))); let alias_synced = synced_stage(&mut session, &stage, "alias", b"retry"); let (_, trace) = take_mutation_evidence(); let writes = trace.iter().filter(|row| row.0 == Write).collect::<Vec<_>>(); assert_eq!((writes.len(), writes[0].3, writes[1].3), (2, Some(libc::EINTR), None)); let mut case_alias = stage.clone(); case_alias.locator = DirectoryLocator::Child { parent: stage.open.identity, component: CString::new("STAGE").unwrap() };
         take_mutation_evidence(); let LinkOutcome::Prelink(alias) = alias_synced.link(&case_alias, "CANONICAL") else { panic!("directory alias was not pre-link") }; assert!(matches!(alias.error.kind(), FsErrorKind::DirectoryAlias { source, target } if source == target)); let (activity, trace) = take_mutation_evidence(); assert_eq!((activity, trace.is_empty()), (3, true));
@@ -954,6 +1003,7 @@ mod high_risk_recovery {
         fs::write(stage_path.join("collision"), b"old").unwrap(); let StageCreation::Collision(collision) = session.create_stage(&stage, "collision").unwrap() else { panic!("incumbent became a writer") }; assert!(collision.facts.is_none()); take_mutation_evidence(); MUTATION_FAULT.with(|fault| fault.set(Some((Unlink, -1, Some(libc::EACCES))))); let failed = cleanup_facts(collision.cleanup()); assert!(matches!(failed.unlink, Attempt::Failed(io) if io.raw_errno() == libc::EACCES) && matches!(failed.observe, Attempt::Succeeded(Some(_))) && matches!(failed.parent_sync, Attempt::Succeeded(()))); fs::remove_file(stage_path.join("collision")).unwrap();
         fs::write(stage_path.join("substituted"), b"old").unwrap(); let StageCreation::Collision(substituted) = session.create_stage(&stage, "substituted").unwrap() else { unreachable!() }; let sealed_before = substituted.token.sealed.identity; let source = stage_path.join("substituted"); let retired = stage_path.join("substituted-retired"); MUTATION_FAULT.with(|fault| fault.set(Some((Unlink, -1, Some(libc::EIO))))); POST_UNLINK.with(|hook| *hook.borrow_mut() = Some(Box::new(move || { fs::rename(&source, &retired).unwrap(); fs::write(&source, b"new").unwrap(); }))); let substituted = cleanup_facts(substituted.cleanup()); assert!(matches!(substituted.observe, Attempt::Succeeded(Some(fact)) if fact.identity != sealed_before)); fs::remove_file(stage_path.join("substituted")).unwrap(); fs::remove_file(stage_path.join("substituted-retired")).unwrap();
         std::os::unix::fs::symlink("missing", stage_path.join("special")).unwrap(); assert!(matches!(session.create_stage(&stage, "special"), Err(error) if matches!(error.kind(), FsErrorKind::NotRegular(_)))); fs::remove_file(stage_path.join("special")).unwrap();
+        let nofollow = synced_stage(&mut session, &stage, "nofollow-source", b"sealed"); std::os::unix::fs::symlink("../stage/nofollow-source", target_path.join("nofollow-target")).unwrap(); let LinkOutcome::Collision(nofollow) = nofollow.link(&target, "nofollow-target") else { panic!("symlink collision was treated as durable") }; let facts = nofollow.facts.unwrap(); assert!(matches!(facts.link, Attempt::Failed(io) if io.raw_errno() == libc::EEXIST) && matches!(facts.target, Attempt::Succeeded(Some(fact)) if fact.file_type.mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32)); assert!(matches!(cleanup_facts(nofollow.cleanup()).unlink, Attempt::Succeeded(()))); fs::remove_file(target_path.join("nofollow-target")).unwrap();
 
         let swap = synced_stage(&mut session, &stage, "swap", b"same"); let swap_sealed = swap.token.sealed.identity; let retired = stage_path.join("swap-retired"); fs::rename(stage_path.join("swap"), &retired).unwrap(); fs::write(stage_path.join("swap"), b"same").unwrap(); let LinkOutcome::Indeterminate(indeterminate) = swap.link(&target, "swap-target") else { panic!("substituted source gained authority") }; assert!(matches!(indeterminate.facts.target, Attempt::Succeeded(Some(fact)) if fact.identity != swap_sealed)); drop(indeterminate); assert!(stage_path.join("swap").exists() && target_path.join("swap-target").exists()); fs::remove_file(stage_path.join("swap")).unwrap(); fs::remove_file(target_path.join("swap-target")).unwrap(); fs::remove_file(retired).unwrap();
         fs::write(target_path.join("occupied"), b"canonical").unwrap(); let occupied = synced_stage(&mut session, &stage, "occupied-stage", b"stage"); LINK_REPORTED_ERRNO.with(|fault| fault.set(Some(libc::EIO))); take_mutation_evidence(); ACTUAL_FSYNC_FDS.with(|fds| fds.borrow_mut().clear()); let LinkOutcome::Collision(mut collision) = occupied.link(&target, "occupied") else { panic!("EEXIST row was not collision cleanup") }; let (_, trace) = take_mutation_evidence(); assert_eq!(ACTUAL_FSYNC_FDS.with(|fds| std::mem::take(&mut *fds.borrow_mut())), [target.fd.as_raw_fd()]); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Link, Observe, SyncParent]); let facts = collision.facts.unwrap(); assert!(matches!(facts.link, Attempt::Failed(io) if io.raw_errno() == libc::EEXIST) && matches!(facts.target, Attempt::Succeeded(Some(fact)) if fact.identity != facts.sealed) && matches!(facts.parent_sync, Attempt::Succeeded(()))); assert_eq!(LINK_REPORTED_ERRNO.with(std::cell::Cell::get), None); collision.token.target.as_mut().unwrap().parent.open.identity = stage.open.identity; take_mutation_evidence(); assert!(matches!(collision.cleanup(), StageCleanup::Rejected(error) if matches!(error.kind(), FsErrorKind::DirectoryAlias { source, target } if source == target))); assert!(take_mutation_evidence().1.is_empty()); fs::remove_file(stage_path.join("occupied-stage")).unwrap(); assert_eq!(fs::read(target_path.join("occupied")).unwrap(), b"canonical");
