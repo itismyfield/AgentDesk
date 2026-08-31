@@ -56,6 +56,7 @@ jobs:
       # The stable required-context mirror permits unrelated-path skips and
       # fails closed when this output is true but the Windows lane does not pass.
       cross_os_rust: ${{ steps.filter.outputs.cross_os_rust }}
+      win32_build_token: ${{ steps.filter.outputs.win32_build_token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -371,6 +372,10 @@ jobs:
               - '.github/workflows/ci-pr.yml'
               - 'defaults.json'
               - 'routines/**'
+            win32_build_token:
+              - 'scripts/build_token_win32.py'
+              - 'tests/test_build_token_win32_5663.py'
+              - '.github/workflows/ci-pr.yml'
 
   dashboard:
     name: Dashboard (Node 22)
@@ -467,7 +472,7 @@ jobs:
     # Run only when `cross_os_rust` selects a native Windows source surface.
     # Most relay-only PRs still skip it, while the inflight lock primitive is
     # explicitly selected and enforced through the required-context mirror.
-    if: needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'
+    if: (needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true') || needs.changes.outputs.win32_build_token == 'true'
     runs-on: ${{ matrix.os }}
     env:
       # Cross-OS failures need compiler/test diagnostics, not native debug
@@ -489,6 +494,20 @@ jobs:
         os: [windows-latest]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Python for Win32 build-token tests
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Win32 build-token tests (#5663)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git cat-file -e "HEAD:scripts/build_token_win32.py"
+          git cat-file -e "HEAD:tests/test_build_token_win32_5663.py"
+          python -m unittest -v tests.test_build_token_win32_5663
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -1277,8 +1296,8 @@ jobs:
           # mirror on rust_compile would fail closed on that expected skip;
           # cross_os_rust=false lets required-check-mirror.sh treat the skip as
           # pass, while cross_os_rust=true still requires the lane to succeed.
-          FILTER_NAME: cross_os_rust
-          FILTER_OUTPUT: ${{ needs.changes.outputs.cross_os_rust }}
+          FILTER_NAME: cross_os_rust_or_win32_build_token
+          FILTER_OUTPUT: ${{ (needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true') || needs.changes.outputs.win32_build_token == 'true' }}
           UPSTREAM_JOB_NAME: check_fast_cross_os
           UPSTREAM_RESULT: ${{ needs.check_fast_cross_os.result }}
         run: ./scripts/required-check-mirror.sh
