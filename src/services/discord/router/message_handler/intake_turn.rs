@@ -2513,6 +2513,7 @@ pub(super) async fn handle_text_message(
                             Some(provider_for_blocking.clone()),
                             model_for_turn.as_deref(),
                             None, // Qwen: compact not supported
+                            force_fresh_provider_session,
                         ),
                         ProviderKind::OpenCode => opencode::execute_command_streaming(
                             &context_prompt,

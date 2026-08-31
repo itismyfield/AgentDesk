@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "5d59338d07c224dc5e8d389027539dd5baa0961e",
+  "measured_at_sha": "bee7a5315fa057e7ec2af6f4b242955c80712b6e",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -31,7 +31,7 @@
         "src/services/discord/watchers/lifecycle/restore.rs": 1,
         "src/services/dispatched_sessions.rs": 1,
         "src/services/provider/cancel_token_cleanup/executor.rs": 1,
-        "src/services/qwen.rs": 2,
+        "src/services/qwen.rs": 3,
         "src/services/session_resume.rs": 1,
         "src/services/turn_lifecycle.rs": 1
       }

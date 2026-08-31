@@ -1244,6 +1244,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             Some(provider_for_blocking.clone()),
                             model_for_turn.as_deref(),
                             None,
+                            force_fresh_provider_session,
                         ),
                         ProviderKind::OpenCode => opencode::execute_command_streaming(
                             &context_prompt,

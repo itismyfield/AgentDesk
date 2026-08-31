@@ -471,6 +471,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
             qwen_model,
             qwen_core_tools,
             resume_session_id,
+            fresh_session,
             cwd,
             input_mode,
         } => {
@@ -487,6 +488,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
                 qwen_model.as_deref(),
                 &qwen_core_tools,
                 resume_session_id.as_deref(),
+                fresh_session,
                 mode,
             );
             Ok(())
