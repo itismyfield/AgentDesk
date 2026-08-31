@@ -295,7 +295,7 @@ pub(super) fn create_stage(prepared: PreparedStage) -> Result<PlatformStageCreat
                 parent_fd,
                 name.as_ptr(),
                 CREATE_STAGE_FLAGS,
-                CREATE_STAGE_MODE,
+                CREATE_STAGE_MODE as libc::c_int,
             )
         },
         |raw_fd| (unsafe { OwnedFd::from_raw_fd(raw_fd) }, None),
