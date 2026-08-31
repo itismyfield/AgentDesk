@@ -1,32 +1,69 @@
 #!/usr/bin/env python3
-"""Run one foreground command under AgentDesk's host-wide Cargo token."""
+"""Supervise one foreground Cargo command under AgentDesk's build token."""
 
 from __future__ import annotations
 
-import fcntl
 import os
 from pathlib import Path
+import signal
 import stat
+import subprocess
 import sys
-from typing import Callable, Mapping, NoReturn, Sequence
+import time
+from typing import Callable, Mapping, Sequence
+
+if sys.platform != "win32":
+    import fcntl
 
 
 TOKEN_PATH = Path("/tmp/adk-build-token.lock")
-TOKEN_FD_ENV = "AGENTDESK_BUILD_TOKEN_FD"
 TOKEN_ERROR_EXIT = 73
+NESTING_ENV = "AGENTDESK_BUILD_TOKEN_ACTIVE"
+LEGACY_FD_ENV = "AGENTDESK_BUILD_TOKEN_FD"
+SIGNAL_GRACE_SECONDS = 2.0
 
 
 class BuildTokenError(RuntimeError):
-    """The canonical token could not be acquired without splitting authority."""
+    """The protected command cannot use the canonical token safely."""
 
 
-def _validate_token_fd(fd: int, token_path: Path) -> None:
+class _SupervisorSignal(BaseException):
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+
+
+def _validate_command(command: Sequence[str]) -> None:
+    if not command:
+        raise BuildTokenError("protected command is required")
+    executable = Path(command[0]).name.lower()
+    if executable not in {"cargo", "cargo.exe"}:
+        raise BuildTokenError("protected command must invoke cargo directly")
+    for argument in command[1:]:
+        if (
+            argument in {"-j", "--jobs"}
+            or (argument.startswith("-j") and len(argument) > 2)
+            or argument.startswith("--jobs=")
+        ):
+            raise BuildTokenError("explicit Cargo jobs flags are forbidden; CARGO_BUILD_JOBS=2 is canonical")
+
+
+def _child_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    if environ.get(NESTING_ENV) is not None or environ.get(LEGACY_FD_ENV) is not None:
+        raise BuildTokenError("nested or inherited build-token execution is forbidden")
+    child_environment = dict(environ)
+    child_environment.pop(LEGACY_FD_ENV, None)
+    child_environment[NESTING_ENV] = "1"
+    child_environment["CARGO_BUILD_JOBS"] = "2"
+    return child_environment
+
+
+def _validate_posix_token_fd(fd: int, token_path: Path) -> None:
     try:
         opened = os.fstat(fd)
         current = os.lstat(token_path)
+        status_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
     except OSError as error:
         raise BuildTokenError(f"cannot inspect build token authority: {error}") from error
-
     if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(current.st_mode):
         raise BuildTokenError("build token authority must be one regular file")
     if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
@@ -37,84 +74,139 @@ def _validate_token_fd(fd: int, token_path: Path) -> None:
         raise BuildTokenError("build token authority must have exactly one link")
     if current.st_mode & 0o022:
         raise BuildTokenError("build token authority must not be group/world writable")
+    if status_flags & os.O_ACCMODE != os.O_RDWR or not status_flags & os.O_APPEND:
+        raise BuildTokenError("build token FD must be O_RDWR|O_APPEND")
+    if os.get_inheritable(fd):
+        raise BuildTokenError("build token FD must remain non-inheritable")
 
 
-def _open_token(token_path: Path) -> int:
-    flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
+def _open_posix_token(token_path: Path) -> int:
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise BuildTokenError("POSIX build token requires O_NOFOLLOW")
+    flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
     flags |= getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(token_path, flags, 0o600)
     except OSError as error:
         raise BuildTokenError(f"cannot open build token authority: {error}") from error
-    os.set_inheritable(fd, True)
+    os.set_inheritable(fd, False)
     return fd
 
 
-def _parse_inherited_fd(raw_fd: str) -> int:
-    try:
-        fd = int(raw_fd, 10)
-    except ValueError as error:
-        raise BuildTokenError("inherited build token FD is not numeric") from error
-    if fd < 3:
-        raise BuildTokenError("inherited build token FD must not alias stdio")
-    return fd
-
-
-def _acquire_token(
-    token_path: Path = TOKEN_PATH,
+def _acquire_posix_token(
+    token_path: Path,
     *,
-    environ: Mapping[str, str] | None = None,
     on_open: Callable[[], None] | None = None,
-) -> tuple[int, bool]:
-    """Return ``(fd, inherited)`` after validating and acquiring one inode."""
-
-    active_environ = os.environ if environ is None else environ
-    raw_inherited_fd = active_environ.get(TOKEN_FD_ENV)
-    if raw_inherited_fd is not None:
-        fd = _parse_inherited_fd(raw_inherited_fd)
-        _validate_token_fd(fd, token_path)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (BlockingIOError, OSError) as error:
-            raise BuildTokenError("inherited build token FD does not prove lock ownership") from error
-        _validate_token_fd(fd, token_path)
-        os.set_inheritable(fd, True)
-        return fd, True
-
-    fd = _open_token(token_path)
+) -> int:
+    fd = _open_posix_token(token_path)
     try:
-        _validate_token_fd(fd, token_path)
+        _validate_posix_token_fd(fd, token_path)
         if on_open is not None:
             on_open()
         fcntl.flock(fd, fcntl.LOCK_EX)
-        _validate_token_fd(fd, token_path)
+        _validate_posix_token_fd(fd, token_path)
     except BaseException:
         os.close(fd)
         raise
-    return fd, False
+    return fd
 
 
-def run_command(
-    command: Sequence[str],
-    *,
-    token_path: Path = TOKEN_PATH,
-) -> NoReturn:
-    if not command:
-        raise BuildTokenError("protected command is required")
-    fd, _inherited = _acquire_token(token_path)
-    child_environ = os.environ.copy()
-    child_environ[TOKEN_FD_ENV] = str(fd)
-    child_environ["CARGO_BUILD_JOBS"] = "2"
-    os.execvpe(command[0], list(command), child_environ)
+def _supervised_signals() -> tuple[int, ...]:
+    values = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGHUP"):
+        values.append(signal.SIGHUP)
+    return tuple(values)
+
+
+class _SignalRelay:
+    def __init__(self) -> None:
+        self.child: subprocess.Popen[bytes] | None = None
+        self.received: int | None = None
+        self.received_at: float | None = None
+
+    def __call__(self, signum: int, _frame: object) -> None:
+        if self.child is None:
+            raise _SupervisorSignal(signum)
+        if self.received is None:
+            self.received = signum
+            self.received_at = time.monotonic()
+        try:
+            os.killpg(self.child.pid, signum)
+        except ProcessLookupError:
+            pass
+
+
+def _wait_for_child(child: subprocess.Popen[bytes], relay: _SignalRelay) -> int:
+    while True:
+        try:
+            return_code = child.wait(timeout=0.1)
+        except subprocess.TimeoutExpired:
+            if relay.received_at is None or time.monotonic() - relay.received_at < SIGNAL_GRACE_SECONDS:
+                continue
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait()
+            return 128 + (relay.received or signal.SIGTERM)
+        if relay.received is not None:
+            return 128 + relay.received
+        if return_code < 0:
+            return 128 - return_code
+        return return_code
+
+
+def _supervise_posix(command: Sequence[str], child_env: Mapping[str, str], token_path: Path) -> int:
+    relay = _SignalRelay()
+    supervised_signals = _supervised_signals()
+    old_handlers = {signum: signal.signal(signum, relay) for signum in supervised_signals}
+    token_fd: int | None = None
+    try:
+        token_fd = _acquire_posix_token(token_path)
+        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, supervised_signals)
+        try:
+            child = subprocess.Popen(
+                list(command),
+                env=dict(child_env),
+                close_fds=True,
+                start_new_session=True,
+            )
+            relay.child = child
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+        return _wait_for_child(child, relay)
+    except _SupervisorSignal as interrupted:
+        return 128 + interrupted.signum
+    finally:
+        if token_fd is not None:
+            os.close(token_fd)
+        for signum, old_handler in old_handlers.items():
+            signal.signal(signum, old_handler)
+
+
+def _supervise_for_test(command: Sequence[str], token_path: Path) -> int:
+    _validate_command(command)
+    child_env = _child_environment(os.environ)
+    return _supervise_posix(command, child_env, token_path)
+
+
+def _supervise_canonical(command: Sequence[str], child_env: Mapping[str, str]) -> int:
+    if sys.platform == "win32":
+        from build_token_win32 import supervise_windows
+
+        return supervise_windows(command, child_env)
+    return _supervise_posix(command, child_env, TOKEN_PATH)
 
 
 def main(argv: Sequence[str]) -> int:
     if not argv or argv[0] != "--" or len(argv) == 1:
-        print(f"usage: {Path(sys.argv[0]).name} -- <command> [args...]", file=sys.stderr)
+        print(f"usage: {Path(sys.argv[0]).name} -- <cargo-command> [args...]", file=sys.stderr)
         return 2
     try:
-        run_command(argv[1:])
+        command = argv[1:]
+        _validate_command(command)
+        child_env = _child_environment(os.environ)
+        return _supervise_canonical(command, child_env)
     except BuildTokenError as error:
         print(f"build-token: {error}", file=sys.stderr)
         return TOKEN_ERROR_EXIT

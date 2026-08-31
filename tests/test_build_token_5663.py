@@ -33,7 +33,11 @@ spec = importlib.util.spec_from_file_location("adk_build_token_driver", sys.argv
 module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(module)
-raise SystemExit(module._supervise_for_test(sys.argv[3:], Path(sys.argv[2])))
+try:
+    result = module._supervise_for_test(sys.argv[3:], Path(sys.argv[2]))
+except module.BuildTokenError:
+    result = module.TOKEN_ERROR_EXIT
+raise SystemExit(result)
 """
 
 
@@ -105,17 +109,22 @@ def unquoted_shell_code(line: str) -> str:
 
 def raw_cargo_sites(source: str) -> list[str]:
     violations: list[str] = []
+    if "clean_cmd=(cargo clean" in source and '_with_build_token "${clean_cmd[@]}"' not in source:
+        violations.append("cargo clean array executes without _with_build_token")
     for raw_line in source.splitlines():
-        code = unquoted_shell_code(raw_line).strip()
-        if not re.search(r"(^|[^A-Za-z0-9_])cargo(?:\.exe)?(?:\s|$)", code):
-            continue
-        if re.search(r"\b_with_build_token\s+cargo(?:\.exe)?\b", code):
-            continue
-        if re.fullmatch(r"clean_cmd=\(cargo clean .+\)", code):
-            continue
-        if re.search(r"\bcommand\s+-v\s+cargo\b", code):
-            continue
-        violations.append(code)
+        fragments = [raw_line]
+        fragments.extend(match.group(1) for match in re.finditer(r"\$\((.*)\)", raw_line))
+        for fragment in fragments:
+            code = unquoted_shell_code(fragment).strip()
+            if not re.search(r"(^|[^A-Za-z0-9_])cargo(?:\.exe)?(?:\s|$)", code):
+                continue
+            if re.search(r"\b_with_build_token\s+cargo(?:\.exe)?\b", code):
+                continue
+            if re.fullmatch(r"clean_cmd=\(cargo clean .+\)", code):
+                continue
+            if re.search(r"\bcommand\s+-v\s+cargo\b", code):
+                continue
+            violations.append(code)
     return violations
 
 
@@ -188,6 +197,24 @@ class BuildTokenPosixBehaviorTests(unittest.TestCase):
             self.assertFalse(token.exists())
             self.assertFalse(sentinel.exists())
 
+    def test_foreground_cargo_cannot_reenter_production_helper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            token = root / "token.lock"
+            observed = root / "nested.rc"
+            cargo = write_executable(
+                root / "cargo",
+                "from pathlib import Path\nimport subprocess,sys\n"
+                "result=subprocess.run([sys.executable,sys.argv[1],'--','cargo','check'],check=False)\n"
+                "Path(sys.argv[2]).write_text(str(result.returncode))",
+            )
+            result = subprocess.run(
+                driver_command(token, [str(cargo), str(HELPER_PATH), str(observed)]),
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(observed.read_text(), "73")
+
     def test_actual_lock_fd_never_reaches_child(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -251,6 +278,27 @@ class BuildTokenPosixBehaviorTests(unittest.TestCase):
                 process.send_signal(signum)
                 self.assertEqual(process.wait(timeout=5), 128 + signum)
 
+    def test_ignored_term_is_killed_and_reaped_after_bounded_grace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            token = root / "token.lock"
+            started = root / "started"
+            cargo = write_executable(
+                root / "cargo",
+                "from pathlib import Path\nimport signal,sys,time\n"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+                "Path(sys.argv[1]).touch()\ntime.sleep(30)",
+            )
+            process = subprocess.Popen(driver_command(token, [str(cargo), str(started)]))
+            self.addCleanup(stop_process, process)
+            wait_for_path(started)
+            began = time.monotonic()
+            process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=5), 128 + signal.SIGTERM)
+            elapsed = time.monotonic() - began
+            self.assertGreaterEqual(elapsed, 1.5)
+            self.assertLess(elapsed, 4.0)
+
     def test_unlink_recreate_makes_observed_stale_waiter_fail_closed(self):
         helper = load_helper()
         with tempfile.TemporaryDirectory() as tmp:
@@ -306,6 +354,8 @@ class BuildTokenContractTests(unittest.TestCase):
         deploy = DEPLOY_PATH.read_text()
         build_release = BUILD_RELEASE_PATH.read_text()
         self.assertIn("_with_build_token()", facade)
+        self.assertIn("raw Cargo fallback is forbidden", facade)
+        self.assertNotRegex(facade, r"\|\|\s*cargo")
         self.assertNotIn("_with_build_token()", defaults)
         self.assertNotIn("build_token.py", defaults)
         self.assertEqual(deploy.count('. "$SCRIPT_DIR/_build_token.sh"'), 1)
@@ -318,7 +368,13 @@ class BuildTokenContractTests(unittest.TestCase):
         build_release = BUILD_RELEASE_PATH.read_text()
         self.assertEqual(raw_cargo_sites(deploy), [])
         self.assertEqual(raw_cargo_sites(build_release), [])
-        mutations = [deploy.replace("_with_build_token cargo metadata", "cargo metadata", 1), deploy.replace("_with_build_token cargo build", "command cargo build", 1), build_release.replace("_with_build_token cargo build", "env cargo build", 1), build_release + "\ncargo test --workspace\n"]
+        mutations = [
+            deploy.replace("_with_build_token cargo metadata", "cargo metadata", 1),
+            deploy.replace("_with_build_token cargo build", "command cargo build", 1),
+            deploy.replace('_with_build_token "${clean_cmd[@]}"', '"${clean_cmd[@]}"', 1),
+            build_release.replace("_with_build_token cargo build", "env cargo build", 1),
+            build_release + "\ncargo test --workspace\n",
+        ]
         for mutated in mutations:
             with self.subTest(mutant=mutated[-80:]):
                 self.assertNotEqual(raw_cargo_sites(mutated), [])

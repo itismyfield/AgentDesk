@@ -121,6 +121,8 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=_defaults.sh
 . "$SCRIPT_DIR/_defaults.sh"
+# shellcheck source=_build_token.sh
+. "$SCRIPT_DIR/_build_token.sh"
 
 ADK_REL="${AGENTDESK_ROOT_DIR:-$HOME/.adk/release}"
 POST_DEPLOY_SMOKE_WEDGE_COVERAGE="not run: wedge check did not execute"
