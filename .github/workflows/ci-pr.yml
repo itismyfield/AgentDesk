@@ -57,6 +57,7 @@ jobs:
       # fails closed when this output is true but the Windows lane does not pass.
       cross_os_rust: ${{ steps.filter.outputs.cross_os_rust }}
       win32_build_token: ${{ steps.filter.outputs.win32_build_token }}
+      build_token_integration: ${{ steps.filter.outputs.build_token_integration }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -373,6 +374,7 @@ jobs:
               - 'defaults.json'
               - 'routines/**'
             win32_build_token: ['scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']
+            build_token_integration: ['scripts/build_token.py', 'scripts/_build_token.sh', 'scripts/build-release.sh', 'scripts/deploy-release.sh', 'tests/test_build_token_5663.py', '.github/workflows/ci-pr.yml']
 
   dashboard:
     name: Dashboard (Node 22)
@@ -557,6 +559,17 @@ jobs:
         with: {python-version: "3.11"}
       - shell: pwsh
         run: git cat-file -e "HEAD:scripts/build_token_win32.py" && git cat-file -e "HEAD:tests/test_build_token_win32_5663.py" && python -m unittest -v tests.test_build_token_win32_5663
+
+  build_token_integration:
+    needs: changes
+    if: needs.changes.outputs.build_token_integration == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - shell: pwsh
+        run: git cat-file -e "HEAD:scripts/build_token.py" && git cat-file -e "HEAD:scripts/_build_token.sh" && git cat-file -e "HEAD:scripts/build-release.sh" && git cat-file -e "HEAD:scripts/deploy-release.sh" && git cat-file -e "HEAD:tests/test_build_token_5663.py" && git cat-file -e "HEAD:scripts/build_token_win32.py" && git cat-file -e "HEAD:tests/test_build_token_win32_5663.py" && python -m unittest -v tests.test_build_token_5663 && python -m unittest -v tests.test_build_token_win32_5663
 
   fast_check_required_context:
     name: Fast check (ubuntu-latest)
@@ -1304,6 +1317,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - env: {CHANGED_PATHS_RESULT: '${{ needs.changes.result }}', FILTER_NAME: win32_build_token, FILTER_OUTPUT: '${{ needs.changes.outputs.win32_build_token }}', UPSTREAM_JOB_NAME: win32_build_token, UPSTREAM_RESULT: '${{ needs.win32_build_token.result }}'}
+        run: ./scripts/required-check-mirror.sh
+
+  build_token_integration_required_context:
+    name: Build-token integration required context
+    needs: [changes, build_token_integration]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env: {CHANGED_PATHS_RESULT: '${{ needs.changes.result }}', FILTER_NAME: build_token_integration, FILTER_OUTPUT: '${{ needs.changes.outputs.build_token_integration }}', UPSTREAM_JOB_NAME: build_token_integration, UPSTREAM_RESULT: '${{ needs.build_token_integration.result }}'}
         run: ./scripts/required-check-mirror.sh
 
   scripts:
