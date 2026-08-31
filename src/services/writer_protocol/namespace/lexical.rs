@@ -18,39 +18,45 @@ pub(super) enum LexicalError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct NormalizedAbsolute(Vec<u8>);
+pub(super) struct NormalizedAbsolute(LexicalDialect, Vec<u8>);
+
+impl NormalizedAbsolute {
+    fn contains(&self, candidate: &Self) -> bool {
+        self.0 == candidate.0
+            && candidate
+                .1
+                .strip_prefix(self.1.as_slice())
+                .is_some_and(|suffix| {
+                    suffix.is_empty() || self.1.ends_with(b"/") || suffix.starts_with(b"/")
+                })
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct SealedLexicalRoot(LexicalDialect, NormalizedAbsolute);
+pub(super) struct SealedLexicalRoot(NormalizedAbsolute);
 
 impl SealedLexicalRoot {
     fn register(dialect: LexicalDialect, bytes: &[u8]) -> Result<Self, LexicalError> {
         let normalized =
             normalize_absolute(dialect, bytes, true)?.ok_or(LexicalError::MalformedRoot)?;
-        Ok(Self(dialect, normalized))
+        Ok(Self(normalized))
     }
 
     pub(super) fn normalize_candidate(
         &self,
         input: &[u8],
     ) -> Result<Option<NormalizedAbsolute>, LexicalError> {
-        let candidate =
-            normalize_absolute(self.0, input, false)?.filter(|value| self.contains(value));
-        match candidate {
-            None if two_separators(input) => Err(LexicalError::UnsupportedLexicalPrefix),
-            candidate => Ok(candidate),
-        }
+        std::str::from_utf8(input).map_err(|_| LexicalError::NonUtf8)?;
+        let candidate = NormalizedAbsolute(self.0.0, input.to_vec());
+        Ok(self.contains(&candidate).then_some(candidate))
     }
 
     pub(super) fn contains(&self, candidate: &NormalizedAbsolute) -> bool {
-        candidate
-            .0
-            .strip_prefix(self.1.0.as_slice())
-            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(b"/"))
+        self.0.contains(candidate)
     }
 
     pub(super) fn overlaps(&self, other: &SealedLexicalRoot) -> bool {
-        self.0 == other.0 && (self.contains(&other.1) || other.contains(&self.1))
+        self.0.contains(&other.0) || other.0.contains(&self.0)
     }
 }
 
@@ -72,8 +78,7 @@ fn normalize_absolute(
     registering_root: bool,
 ) -> Result<Option<NormalizedAbsolute>, LexicalError> {
     let spelling = std::str::from_utf8(input).map_err(|_| LexicalError::NonUtf8)?;
-    let bytes = spelling.as_bytes();
-    if unsupported_namespace_prefix(bytes) || drive_relative(bytes) {
+    if unsupported_namespace_prefix(input) || drive_relative(input) {
         return Err(LexicalError::UnsupportedLexicalPrefix);
     }
     let (prefix, rest, windows) = match dialect {
@@ -81,18 +86,18 @@ fn normalize_absolute(
             ("/".to_string(), &spelling[1..], false)
         }
         LexicalDialect::WindowsDrive
-            if bytes.len() >= 3
-                && bytes[0].is_ascii_alphabetic()
-                && bytes[1] == b':'
-                && is_windows_separator(bytes[2]) =>
+            if input.len() >= 3
+                && input[0].is_ascii_alphabetic()
+                && input[1] == b':'
+                && is_windows_separator(input[2]) =>
         {
             (
-                format!("{}:/", (bytes[0] as char).to_ascii_uppercase()),
+                format!("{}:/", (input[0] as char).to_ascii_uppercase()),
                 &spelling[3..],
                 true,
             )
         }
-        LexicalDialect::WindowsUnc if two_separators(bytes) => {
+        LexicalDialect::WindowsUnc if two_separators(input) => {
             ("//".to_string(), &spelling[2..], true)
         }
         LexicalDialect::Posix if spelling.starts_with("//") => {
@@ -124,7 +129,7 @@ fn normalize_absolute(
         return Err(error);
     }
     let normalized = format!("{prefix}{}", components.join("/")).into_bytes();
-    Ok(Some(NormalizedAbsolute(normalized)))
+    Ok(Some(NormalizedAbsolute(dialect, normalized)))
 }
 
 fn unsupported_namespace_prefix(bytes: &[u8]) -> bool {
@@ -155,82 +160,81 @@ fn two_separators(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use LexicalDialect::{Posix as P, WindowsDrive as D, WindowsUnc as U};
 
-    fn assert_normalizes(root: &SealedLexicalRoot, input: &[u8], expected: &[u8]) {
-        assert_eq!(
-            root.normalize_candidate(input),
-            Ok(Some(NormalizedAbsolute(expected.to_vec())))
-        );
+    struct LexicalFixtures([SealedLexicalRoot; 5]);
+    fn named_roots() -> LexicalFixtures {
+        LexicalFixtures([
+            register_posix_exact_root(b"/Runtime").unwrap(),
+            register_windows_drive_exact_root(br"C:\Runtime").unwrap(),
+            register_windows_unc_exact_root(br"\\server\share").unwrap(),
+            register_posix_exact_root(b"/").unwrap(),
+            register_windows_drive_exact_root(b"C:/").unwrap(),
+        ])
+    }
+    fn v(dialect: LexicalDialect, bytes: &[u8]) -> NormalizedAbsolute {
+        NormalizedAbsolute(dialect, bytes.to_vec())
+    }
+    fn assert_n(root: &SealedLexicalRoot, input: &[u8], expected: NormalizedAbsolute) {
+        assert_eq!(root.normalize_candidate(input), Ok(Some(expected)));
     }
 
-    fn assert_error(root: &SealedLexicalRoot, input: &[u8], error: LexicalError) {
+    fn assert_e(root: &SealedLexicalRoot, input: &[u8], error: LexicalError) {
         assert_eq!(root.normalize_candidate(input), Err(error), "{input:?}");
     }
 
     #[test]
     fn sealed_portable_roots_normalize_exactly() {
-        assert_normalizes(
-            &register_posix_exact_root(b"/runtime/sessions").unwrap(),
-            b"/runtime//sessions/./relay",
-            b"/runtime/sessions/relay",
-        );
-        assert_normalizes(
-            &register_windows_drive_exact_root(br"C:\runtime\sessions").unwrap(),
-            br"c:/runtime\sessions\.\relay",
-            b"C:/runtime/sessions/relay",
-        );
-        assert_normalizes(
-            &register_windows_unc_exact_root(br"\\server\share").unwrap(),
-            br"\\server\share\\.\relay",
-            b"//server/share/relay",
-        );
+        let [p, d, u, ..] = named_roots().0;
+        assert_n(&p, b"/Runtime//./x", v(P, b"/Runtime/x"));
+        assert_n(&d, br"c:/Runtime\.\x", v(D, b"C:/Runtime/x"));
+        assert_n(&u, br"\\server\share\\.\x", v(U, b"//server/share/x"));
     }
 
     #[test]
     fn unsupported_prefixes_and_escape_components_fail_closed() {
-        let posix = register_posix_exact_root(b"/runtime").unwrap();
-        let drive = register_windows_drive_exact_root(br"C:\runtime").unwrap();
-        let unc = register_windows_unc_exact_root(br"\\server\share").unwrap();
+        let [p, d, u, ..] = named_roots().0;
         let unsupported = LexicalError::UnsupportedLexicalPrefix;
         for mask in 0_usize..8 {
             let separator = |bit: usize| [b'/', b'\\'][(mask >> bit) & 1];
             for marker in [b'?', b'.'] {
                 let input = [separator(0), separator(1), marker, separator(2)];
-                assert_error(&drive, &input, unsupported);
+                assert_e(&d, &input, unsupported);
             }
         }
-        assert_error(&drive, b"C:../x", unsupported);
-        assert_error(&posix, b"//runtime/x", unsupported);
-        assert_error(&posix, b"/runtime/../x", LexicalError::EscapesRoot);
-        assert_error(&posix, b"//?/runtime/\xff", LexicalError::NonUtf8);
-        assert_error(&unc, br"\\server", unsupported);
-        assert_error(&unc, br"\\\share\x", unsupported);
-        assert_error(&unc, br"\\other\share\x", unsupported);
-        assert_error(&drive, br"\\other\share\x", unsupported);
-        assert_eq!(
-            register_windows_unc_exact_root(br"\\server\share\extra"),
-            Err(LexicalError::MalformedRoot)
-        );
+        assert_e(&d, b"C:../x", unsupported);
+        assert_e(&p, b"//Runtime/x", unsupported);
+        assert_e(&p, b"/Runtime/../x", LexicalError::EscapesRoot);
+        assert_e(&p, b"//?/Runtime/\xff", LexicalError::NonUtf8);
+        assert_e(&u, br"\\server", unsupported);
+        assert_e(&u, br"\\\share\x", unsupported);
+        assert_e(&u, br"\\other\share\x", unsupported);
+        assert_e(&d, br"\\other\share\x", unsupported);
+        let malformed = register_windows_unc_exact_root(br"\\server\share\extra");
+        assert_eq!(malformed, Err(LexicalError::MalformedRoot));
     }
 
     #[test]
     fn normalized_candidates_preserve_case_separators_and_root_boundaries() {
-        let posix = register_posix_exact_root(b"/Runtime").unwrap();
-        let drive = register_windows_drive_exact_root(br"C:\Runtime").unwrap();
-        let child = register_posix_exact_root(b"/Runtime/sessions").unwrap();
-        let sibling = register_posix_exact_root(b"/RuntimeElse").unwrap();
-        let posix_value = NormalizedAbsolute(b"/Runtime".to_vec());
-        assert_normalizes(&posix, b"/Runtime", b"/Runtime");
-        assert!(posix.contains(&posix_value));
-        assert_normalizes(&posix, br"/Runtime/a\b", br"/Runtime/a\b");
-        assert_normalizes(&drive, br"c:/Runtime\a", b"C:/Runtime/a");
-        assert_eq!(drive.normalize_candidate(br"c:\runtime\a"), Ok(None));
-        assert_eq!(posix.normalize_candidate(b"relative"), Ok(None));
-        assert_normalizes(&posix, b"/Runtime/~/x", b"/Runtime/~/x");
-        assert!(posix.overlaps(&child));
-        assert!(!posix.overlaps(&sibling));
-        assert!(!posix.contains(&NormalizedAbsolute(b"/RuntimeElse/x".to_vec())));
-        let unc = register_windows_unc_exact_root(br"\\server\share").unwrap();
-        assert!(!register_posix_exact_root(b"/").unwrap().overlaps(&unc));
+        let [p, d, u, pf, df] = named_roots().0;
+        assert_n(&p, b"/Runtime", v(P, b"/Runtime"));
+        assert!(p.contains(&v(P, b"/Runtime")));
+        assert_n(&p, br"/Runtime/a\b", v(P, br"/Runtime/a\b"));
+        assert_n(&d, br"c:/Runtime\a", v(D, b"C:/Runtime/a"));
+        assert_eq!(d.normalize_candidate(br"c:\runtime\a"), Ok(None));
+        assert_eq!(p.normalize_candidate(b"relative"), Ok(None));
+        assert_n(&p, b"/Runtime/~/x", v(P, b"/Runtime/~/x"));
+        assert!(p.overlaps(&register_posix_exact_root(b"/Runtime/sessions").unwrap()));
+        assert!(!p.overlaps(&register_posix_exact_root(b"/RuntimeElse").unwrap()));
+        assert!(!p.contains(&v(P, b"/RuntimeElse/x")));
+        assert_n(&pf, b"/", v(P, b"/"));
+        assert!(pf.contains(&v(P, b"/child")));
+        assert!(pf.overlaps(&register_posix_exact_root(b"/child").unwrap()));
+        assert_n(&df, b"c:/", v(D, b"C:/"));
+        assert!(df.contains(&v(D, b"C:/child")));
+        assert!(df.overlaps(&register_windows_drive_exact_root(b"C:/child").unwrap()));
+        assert!(!pf.contains(&v(U, b"/")));
+        assert!(!pf.contains(&v(U, b"//server/share")));
+        assert!(!pf.overlaps(&u));
     }
 }
