@@ -4407,6 +4407,7 @@ services::discord::router::message_handler::headless_turn::fresh_routine_tests::
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::legacy_routine_without_strategy_is_fresh
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::malformed_routine_metadata_cannot_enter_routine_paths
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::persistent_routine_keeps_provider_continuity
+services::discord::router::message_handler::headless_turn::fresh_routine_tests::routine_model_resolution_uses_configured_parent_channel
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::scheduled_snapshot_session_label_reads_metadata_marker
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::scheduled_snapshot_skips_channel_session_key_refresh
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::scheduled_snapshot_turn_stays_out_of_channel_mutating_severance

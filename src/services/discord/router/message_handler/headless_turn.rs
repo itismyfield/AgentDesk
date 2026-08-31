@@ -996,8 +996,18 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         prelaunch_runtime_kind,
     );
 
-    let model_for_turn =
-        super::super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
+    // Routine turns use a synthetic child channel, while model configuration
+    // belongs to the real agent channel carried in their metadata. Resolve the
+    // model there so the provider receives the configured value, not a CLI
+    // default or stale child-channel value.
+    let model_resolution_channel_id =
+        metadata_parent_channel_id(metadata.as_ref()).unwrap_or(channel_id);
+    let model_for_turn = super::super::super::commands::resolve_model_for_turn(
+        shared,
+        model_resolution_channel_id,
+        &provider,
+    )
+    .await;
     let adk_session_name = channel_name.clone();
     let adk_session_info =
         derive_adk_session_info(Some(prompt), channel_name.as_deref(), Some(&current_path));
@@ -1606,8 +1616,8 @@ mod headless_hard_ceiling_tests {
 #[cfg(test)]
 mod fresh_routine_tests {
     use super::{
-        fresh_routine_turn, persist_boundary_before_provider_clear, routine_metadata_agent_id,
-        routine_metadata_role_binding,
+        fresh_routine_turn, metadata_parent_channel_id, persist_boundary_before_provider_clear,
+        routine_metadata_agent_id, routine_metadata_role_binding,
     };
     use crate::services::provider::ProviderKind;
     use serde_json::json;
@@ -1662,6 +1672,21 @@ mod fresh_routine_tests {
             );
         }
         assert!(!fresh_routine_turn(None));
+    }
+
+    #[test]
+    fn routine_model_resolution_uses_configured_parent_channel() {
+        let metadata = json!({
+            "routine_id": "routine-1",
+            "agent_id": "qwen",
+            "parent_channel_id": "1488546844417200199"
+        });
+
+        assert_eq!(
+            metadata_parent_channel_id(Some(&metadata)).map(|channel| channel.get()),
+            Some(1_488_546_844_417_200_199)
+        );
+        assert_eq!(metadata_parent_channel_id(None), None);
     }
 
     // #4658 F1 (non-disruption contract): a scheduled-snapshot turn must NOT join
