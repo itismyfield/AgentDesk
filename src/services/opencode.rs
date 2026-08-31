@@ -2446,6 +2446,78 @@ fn emit_part(
     }
 }
 
+const OPENCODE_ERROR_MESSAGE_LIMIT: usize = 1_024;
+
+/// OpenCode's `session.error` payload is not stable across CLI releases:
+/// `message` may be a string, while provider failures are often nested under
+/// `error` as an object. Keep the useful bounded diagnostic and avoid
+/// serializing the whole payload, which can contain request metadata.
+fn opencode_error_message(props: Option<&Value>) -> String {
+    let Some(props) = props else {
+        return "Unknown OpenCode error".to_string();
+    };
+
+    ["message", "error", "cause", "detail", "reason"]
+        .iter()
+        .filter_map(|key| props.get(*key))
+        .find_map(opencode_error_value_text)
+        .unwrap_or_else(|| "Unknown OpenCode error".to_string())
+}
+
+fn opencode_error_value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => bounded_non_empty_text(text),
+        Value::Object(object) => {
+            for key in ["message", "error", "cause", "detail", "reason"] {
+                if let Some(text) = object.get(key).and_then(opencode_error_value_text) {
+                    return Some(text);
+                }
+            }
+
+            let name = object
+                .get("name")
+                .or_else(|| object.get("code"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty());
+            let status = ["statusCode", "status_code", "status"]
+                .iter()
+                .find_map(|key| object.get(*key).and_then(opencode_status_text));
+            match (name, status) {
+                (Some(name), Some(status)) => Some(format!("{name} (status {status})")),
+                (Some(name), None) => bounded_non_empty_text(name),
+                (None, Some(status)) => Some(format!("OpenCode provider error (status {status})")),
+                (None, None) => None,
+            }
+        }
+        Value::Array(values) => values.iter().find_map(opencode_error_value_text),
+        _ => None,
+    }
+}
+
+fn opencode_status_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Number(number) => Some(number.to_string()),
+        Value::String(text) => bounded_non_empty_text(text),
+        _ => None,
+    }
+}
+
+fn bounded_non_empty_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().count() <= OPENCODE_ERROR_MESSAGE_LIMIT {
+        return Some(trimmed.to_string());
+    }
+    let mut bounded: String = trimmed
+        .chars()
+        .take(OPENCODE_ERROR_MESSAGE_LIMIT.saturating_sub(3))
+        .collect();
+    bounded.push_str("...");
+    Some(bounded)
+}
+
 /// Returns `Some(true)` if the session is done (idle), `Some(false)` to continue, `None` to ignore.
 fn process_sse_event(
     data: &str,
@@ -2705,11 +2777,7 @@ fn process_sse_event(
         }
 
         "session.error" | "error" => {
-            let msg = props
-                .and_then(|p| p.get("message").or_else(|| p.get("error")))
-                .and_then(|v| v.as_str())
-                .unwrap_or("Unknown OpenCode error")
-                .to_string();
+            let msg = opencode_error_message(props);
             let _ = sender.send(StreamMessage::Error {
                 message: msg,
                 stdout: String::new(),
@@ -3066,6 +3134,79 @@ mod tests {
             process_sse_event(&current.to_string(), "current-session", &tx, &mut state),
             Some(false)
         );
+    }
+
+    #[test]
+    fn opencode_error_message_extracts_nested_provider_payload() {
+        let props = serde_json::json!({
+            "sessionID": "current-session",
+            "error": {
+                "name": "AI_APICallError",
+                "statusCode": 429,
+                "message": "Too Many Requests"
+            }
+        });
+
+        assert_eq!(opencode_error_message(Some(&props)), "Too Many Requests");
+    }
+
+    #[test]
+    fn opencode_error_message_falls_back_to_error_when_message_is_not_text() {
+        let props = serde_json::json!({
+            "message": {"unexpected": true},
+            "error": {"message": "Provider unavailable"}
+        });
+
+        assert_eq!(opencode_error_message(Some(&props)), "Provider unavailable");
+    }
+
+    #[test]
+    fn opencode_error_message_reads_top_level_provider_detail_fields() {
+        let props = serde_json::json!({
+            "message": {"unexpected": true},
+            "error": false,
+            "cause": {"detail": "Upstream gateway unavailable"}
+        });
+
+        assert_eq!(
+            opencode_error_message(Some(&props)),
+            "Upstream gateway unavailable"
+        );
+    }
+
+    #[test]
+    fn opencode_error_message_limit_includes_truncation_marker() {
+        let props = serde_json::json!({"message": "x".repeat(OPENCODE_ERROR_MESSAGE_LIMIT + 32)});
+        let message = opencode_error_message(Some(&props));
+
+        assert_eq!(message.chars().count(), OPENCODE_ERROR_MESSAGE_LIMIT);
+        assert!(message.ends_with("..."));
+    }
+
+    #[test]
+    fn process_sse_event_preserves_nested_provider_error_detail() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut state = SseMessageState::default();
+        let event = serde_json::json!({
+            "type": "session.error",
+            "properties": {
+                "sessionID": "current-session",
+                "error": {
+                    "name": "AI_APICallError",
+                    "statusCode": 429,
+                    "message": "Too Many Requests"
+                }
+            }
+        });
+
+        assert_eq!(
+            process_sse_event(&event.to_string(), "current-session", &tx, &mut state),
+            Some(true)
+        );
+        match rx.recv().expect("error event") {
+            StreamMessage::Error { message, .. } => assert_eq!(message, "Too Many Requests"),
+            other => panic!("expected error event, got {other:?}"),
+        }
     }
 
     /// Regression guard for the warm-pool SSE idle-timeout: the 120s
