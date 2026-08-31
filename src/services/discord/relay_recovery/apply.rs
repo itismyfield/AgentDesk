@@ -46,28 +46,39 @@ pub(super) async fn apply_relay_recovery_decision(
         }
         RelayRecoveryActionKind::ClearOrphanPendingToken => {
             let channel = ChannelId::new(decision.channel_id);
-            let cleared = mailbox_clear_channel(shared, provider, channel).await;
+            // Release only the stale foreground anchor. Queued user work is
+            // durable work and must survive orphan-token cleanup so the idle
+            // queue drain can dispatch it after the mailbox is released.
+            let finished = mailbox_finish_turn(shared, provider, channel).await;
             if source.cleanup_session() {
                 super::stall_recovery::finalize_orphaned_clear(
                     shared,
                     channel,
-                    cleared.removed_token.clone(),
+                    finished.removed_token.clone(),
                     source.finalizer_reason(),
                 );
             } else {
                 super::stall_recovery::finalize_orphaned_clear_preserve_session(
                     shared,
                     channel,
-                    cleared.removed_token.clone(),
+                    finished.removed_token.clone(),
                     source.finalizer_reason(),
                 );
             }
             mailbox_clear_recovery_marker(shared, channel).await;
+            if finished.mailbox_online && finished.has_pending {
+                super::super::schedule_deferred_idle_queue_kickoff(
+                    shared.clone(),
+                    provider.clone(),
+                    channel,
+                    "relay recovery orphan token cleanup",
+                );
+            }
             let after = mailbox_snapshot(shared, channel).await;
             RelayRecoveryApplyResult {
                 status: "applied",
                 removed_thread_proofs: 0,
-                removed_mailbox_token: cleared.removed_token.is_some(),
+                removed_mailbox_token: finished.removed_token.is_some(),
                 post_mailbox_has_cancel_token: Some(after.cancel_token.is_some()),
                 post_mailbox_queue_depth: Some(after.intervention_queue.len()),
                 reattach_watcher_spawned: None,
