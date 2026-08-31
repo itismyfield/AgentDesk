@@ -298,6 +298,7 @@ jobs:
               - 'rust-toolchain*'
               - 'build.rs'
               - '.github/workflows/ci-pr.yml'
+              - 'scripts/ci/run-writer-namespace-windows-targets.sh'
               # defaults.json is embedded into the Rust binary via
               # `include_str!("../defaults.json")` in src/config.rs.
               - 'defaults.json'
@@ -314,6 +315,7 @@ jobs:
             # PR-time Windows lane fail closed. Keep the broad positive list in
             # sync with `rust_compile` and document every relay exception.
             cross_os_rust:
+              - 'scripts/ci/run-writer-namespace-windows-targets.sh'
               - 'src/*'
               - 'src/cli/**'
               - 'src/compat/**'
@@ -329,6 +331,7 @@ jobs:
               - 'src/utils/**'
               - 'src/voice/**'
               - 'src/services/*'
+              - 'src/services/writer_protocol/**'
               - 'src/services/agent_quality/**'
               - 'src/services/agents/**'
               - 'src/services/analytics/**'
@@ -530,7 +533,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Keep Windows inline and default-feature-only instead of `just check`.
-      # This PR lane provides cross-OS compile signal only; main-push and
+      # This PR lane provides broad compile signal plus the bounded writer
+      # namespace owner below; main-push and
       # nightly retain the Windows runtime and non-PG test coverage outside the
       # PR critical path (#4747 option 2). Ubuntu fmt/staged clippy and full
       # workspace checks remain authoritative in the jobs above.
@@ -541,6 +545,16 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
         run: cargo check --workspace --all-targets
+
+      - name: Writer namespace exact Windows targets
+        if: runner.os == 'Windows'
+        timeout-minutes: 30
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: ./scripts/ci/run-writer-namespace-windows-targets.sh
 
       - name: sccache stats
         if: always() && runner.os != 'macOS'
@@ -1444,7 +1458,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=e32217629c135d5cbd16c8bb81eb58fe53e07cea0def203a5ce6380191f80263
+          expected=14c6b737924d263a1d1ee969df1a4b92669e225aa898d6046978dd83441b88db
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1551,7 +1565,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=e32217629c135d5cbd16c8bb81eb58fe53e07cea0def203a5ce6380191f80263
+          expected=14c6b737924d263a1d1ee969df1a4b92669e225aa898d6046978dd83441b88db
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

@@ -18,7 +18,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "e32217629c135d5cbd16c8bb81eb58fe53e07cea0def203a5ce6380191f80263"
+    "14c6b737924d263a1d1ee969df1a4b92669e225aa898d6046978dd83441b88db"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
@@ -365,15 +365,39 @@ class FastCheckCiWiringTests(unittest.TestCase):
         ):
             self.assertIn(f"- '{path}'", changes)
 
-    def test_pr_cross_os_lane_is_compile_only(self) -> None:
-        job = job_block(PR_WORKFLOW.read_text(encoding="utf-8"), "check_fast_cross_os")
+    def test_pr_cross_os_lane_allows_only_targeted_writer_runtime(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        job = job_block(workflow, "check_fast_cross_os")
+        parsed = yaml.safe_load(job_block(workflow, "check_fast_cross_os"))[
+            "check_fast_cross_os"
+        ]
+        steps = parsed["steps"]
+        cargo_check = next(i for i, step in enumerate(steps) if step.get("name") == "cargo check")
+        writer = next(i for i, step in enumerate(steps) if step.get("name") == "Writer namespace exact Windows targets")
 
         self.assertIn("name: Fast check + non-PG tests (${{ matrix.os }})", job)
         self.assertIn("os: [windows-latest]", job)
         self.assertIn("- name: cargo check", job)
+        self.assertEqual(parsed["strategy"]["matrix"]["os"], ["windows-latest"])
+        self.assertLess(cargo_check, writer)
+        self.assertEqual(steps[writer]["if"], "runner.os == 'Windows'")
+        self.assertEqual(steps[writer]["timeout-minutes"], 30)
+        self.assertEqual(steps[writer]["shell"], "bash")
+        self.assertEqual(steps[writer]["run"], "./scripts/ci/run-writer-namespace-windows-targets.sh")
+        self.assertEqual(job.count("run-writer-namespace-windows-targets.sh"), 1)
+        self.assertIn("needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'", job)
+        self.assertIn("FILTER_OUTPUT: ${{ needs.changes.outputs.cross_os_rust }}", job_block(workflow, "check_fast_cross_os_required_context"))
+        self.assertNotIn("cargo test", job)
         self.assertNotRegex(job, r"(?m)^\s*cargo test\b")
         self.assertNotIn("- name: cargo test", job)
-        self.assertNotIn("Discord thread-create cross-process lock", job)
+        filters = paths_filter_definitions(workflow)
+        runner_path = "scripts/ci/run-writer-namespace-windows-targets.sh"
+        for selector in ("rust_compile", "cross_os_rust"):
+            self.assertEqual(filters[selector].count(runner_path), 1)
+        self.assertEqual(filters["cross_os_rust"].count("src/services/writer_protocol/**"), 1)
+        filter_line = f"              - '{runner_path}'"
+        for mutated in (workflow.replace(filter_line, "", 1), replace_last(workflow, filter_line, "")):
+            self.assertNotEqual(self.run_hardening_fixture(mutated).returncode, 0)
 
     def test_inflight_lock_primitive_triggers_required_native_windows_lane(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

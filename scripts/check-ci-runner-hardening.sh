@@ -766,13 +766,17 @@ targets = {
     "needs" => "changes",
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
-    # #4747 (opt.2) re-pins the compile-only PR lane after moving long-pole
-    # Windows runtime tests to nightly. Option 3 keeps PR cache access restore-only.
-    "job_sha256" => "d27244ced15d0bb13f89e680de42978cb74452af4b02457ab034d462f4fa103a",
+    # #5670 adds one bounded Windows owner runner; broad runtime remains nightly.
+    "job_sha256" => "22cddee02d1a98616ad0eeeef7c362600574c66509775cf13c3cba57decb69b2",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
         "timeout_minutes" => nil,
+      },
+      "Writer namespace exact Windows targets" => {
+        "commands" => ["./scripts/ci/run-writer-namespace-windows-targets.sh"],
+        "timeout_minutes" => 30,
+        "if_condition" => "runner.os == 'Windows'",
       },
     },
   },
@@ -974,6 +978,12 @@ protected_step_env = {
   "CARGO_PROFILE_TEST_DEBUG" => "0",
 }
 errors = []
+runner_owner = "scripts/ci/run-writer-namespace-windows-targets.sh"
+filter_step = Array(jobs.dig("changes", "steps")).find { |step| step.is_a?(Hash) && step["uses"] == "dorny/paths-filter@v3" }
+path_filters = YAML.safe_load(filter_step&.dig("with", "filters").to_s) || {}
+%w[rust_compile cross_os_rust].each do |filter|
+  errors << "writer namespace runner must select #{filter} exactly once" unless Array(path_filters[filter]).count(runner_owner) == 1
+end
 
 targets.each do |job_id, spec|
   label = spec.fetch("label")
