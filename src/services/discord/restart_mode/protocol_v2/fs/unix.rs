@@ -1,10 +1,13 @@
 use super::{
-    Attempt, ConfinedDir, ConfinedRuntimeRoot, DirectoryIdentity, DirectoryLocator,
+    Attempt, BoundedRead, ConfinedDir, ConfinedRuntimeRoot, DirectoryIdentity, DirectoryLocator,
     DirectoryMutation, DirectoryTypeFact, FsError, FsOperation, InvalidRootFact, LineageSeal,
-    MutationFacts, OpenAttemptFact, OpenDirectoryFact, PreparedChild, RootLineage,
+    MutationFacts, OpenAttemptFact, OpenDirectoryFact, PreparedChild, PreparedRegular, RegularFile,
+    RootLineage,
 };
 use std::{
     ffi::{CStr, CString},
+    fs::File,
+    io::Read as _,
     os::{
         fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::ffi::OsStrExt,
@@ -14,10 +17,14 @@ use std::{
 };
 
 pub(super) type DirHandle = OwnedFd;
+pub(super) type FileHandle = OwnedFd;
 pub(super) const MUTATION_SUPPORTED: bool = true;
+pub(super) const REGULAR_READ_SUPPORTED: bool = true;
 
 const OPEN_DIRECTORY_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+const OPEN_REGULAR_FLAGS: libc::c_int =
+    libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
 
 struct RootPlan {
     anchor: &'static CStr,
@@ -146,6 +153,123 @@ fn directory_fact(stat: &libc::stat) -> OpenDirectoryFact {
             mode: stat.st_mode as u32,
         },
     }
+}
+
+pub(super) fn open_regular(prepared: PreparedRegular) -> Result<RegularFile, FsError> {
+    let PreparedRegular(parent, locator) = prepared;
+    let DirectoryLocator::Child { component, .. } = &locator else {
+        unreachable!("prepared regular locator must name a child")
+    };
+    let name = component.as_c_str();
+    let parent_fd = parent.fd.as_raw_fd();
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let stat_ptr = stat.as_mut_ptr();
+    let (_, errno, observed) = mutation_call(
+        FsOperation::Observe,
+        (parent_fd, name, libc::AT_SYMLINK_NOFOLLOW),
+        || unsafe {
+            libc::fstatat(
+                parent_fd,
+                name.as_ptr(),
+                stat_ptr,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        },
+        |_| {
+            let fact = directory_fact(unsafe { &*stat_ptr });
+            (fact, Some(fact))
+        },
+    );
+    if let Some(raw) = errno {
+        return Err(FsError::io(FsOperation::Observe, raw));
+    }
+    let observed = observed.expect("successful preflight has a fact");
+    if !is_regular(observed) {
+        return Err(FsError::not_regular(observed.file_type.mode));
+    }
+    #[cfg(test)]
+    POST_OBSERVE.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+
+    let (_, errno, fd) = mutation_call(
+        FsOperation::Open,
+        (parent_fd, name, OPEN_REGULAR_FLAGS),
+        || unsafe { libc::openat(parent_fd, name.as_ptr(), OPEN_REGULAR_FLAGS) },
+        |raw_fd| (unsafe { OwnedFd::from_raw_fd(raw_fd) }, None),
+    );
+    let Some(fd) = fd else {
+        return Err(FsError::io(
+            FsOperation::Open,
+            errno.expect("failed open has errno"),
+        ));
+    };
+    let (flags, errno, _) = mutation_call(
+        FsOperation::GetFdFlags,
+        (fd.as_raw_fd(), c"", libc::F_GETFD),
+        || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) },
+        |flags| (flags, None),
+    );
+    if let Some(raw) = errno {
+        return Err(FsError::io(FsOperation::GetFdFlags, raw));
+    }
+    if flags & libc::FD_CLOEXEC == 0 {
+        return Err(FsError::missing_close_on_exec(flags));
+    }
+
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let stat_ptr = stat.as_mut_ptr();
+    let (_, errno, opened) = mutation_call(
+        FsOperation::Fstat,
+        (fd.as_raw_fd(), c"", 0),
+        || unsafe { libc::fstat(fd.as_raw_fd(), stat_ptr) },
+        |_| {
+            #[cfg(test)]
+            let injected = INJECTED_FSTAT_FACT.with(std::cell::Cell::take);
+            #[cfg(not(test))]
+            let injected = None;
+            let fact = injected.unwrap_or_else(|| directory_fact(unsafe { &*stat_ptr }));
+            (fact, Some(fact))
+        },
+    );
+    if let Some(raw) = errno {
+        return Err(FsError::io(FsOperation::Fstat, raw));
+    }
+    let opened = opened.expect("successful fstat has a fact");
+    if !is_regular(opened) {
+        return Err(FsError::not_regular(opened.file_type.mode));
+    }
+    if observed.identity != opened.identity {
+        return Err(FsError::identity_mismatch(
+            observed.identity,
+            opened.identity,
+        ));
+    }
+    Ok(RegularFile {
+        fd,
+        open: opened,
+        locator,
+    })
+}
+
+pub(super) fn read_bounded(fd: FileHandle, limit: usize) -> Result<BoundedRead, FsError> {
+    let ceiling = limit
+        .checked_add(1)
+        .ok_or_else(|| FsError::read_limit_overflow(limit))?;
+    let mut bytes = Vec::new();
+    File::from(fd)
+        .take(ceiling as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            FsError::io(FsOperation::Read, error.raw_os_error().unwrap_or(libc::EIO))
+        })?;
+    Ok(if bytes.len() > limit {
+        BoundedRead::Oversize
+    } else {
+        BoundedRead::Complete(bytes)
+    })
 }
 
 const CREATE_MODE: libc::mode_t = 0o700;
@@ -315,6 +439,10 @@ fn is_directory(fact: OpenDirectoryFact) -> bool {
     fact.file_type.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
 }
 
+fn is_regular(fact: OpenDirectoryFact) -> bool {
+    fact.file_type.mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
+}
+
 fn mutation_call<T>(
     _operation: FsOperation,
     operands: (RawFd, &CStr, i32),
@@ -473,7 +601,66 @@ mod high_risk_recovery {
 
     const EXPECTED_OPEN_FLAGS: libc::c_int =
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+    #[rustfmt::skip]
+    const EXPECTED_REGULAR_FLAGS: libc::c_int = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
     const SYMLINK_ERRNO: i32 = libc::ENOTDIR;
+    #[rustfmt::skip] fn make_fifo(path: &Path) { let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()); let path = CString::new(bytes).unwrap(); assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0); }
+    #[rustfmt::skip] fn assert_regular_trace(trace: &[MutationTrace], parent_fd: RawFd, name: &[u8]) -> RawFd { use FsOperation::*; assert_eq!(trace.len(), 4); let raw_fd = trace[1].2; assert!(raw_fd >= 0); let expected = [(Observe, parent_fd, name, libc::AT_SYMLINK_NOFOLLOW), (Open, parent_fd, name, EXPECTED_REGULAR_FLAGS), (GetFdFlags, raw_fd, b"".as_slice(), libc::F_GETFD), (Fstat, raw_fd, b"".as_slice(), 0)]; for (row, expected) in trace.iter().zip(expected) { assert_eq!((row.0, row.1.0, &*row.1.1, row.1.2), expected); } assert!(trace.iter().all(|row| row.3.is_none())); assert_eq!((trace[0].2, trace[3].2), (0, 0)); assert_ne!(trace[2].2 & libc::FD_CLOEXEC, 0); raw_fd }
+    #[rustfmt::skip]
+    #[test]
+    fn regular_open_rejects_special_nodes_and_bounded_reads_stay_bounded() {
+        const TEST_NAME: &str = "services::discord::restart_mode::protocol_v2::fs::unix::high_risk_recovery::regular_open_rejects_special_nodes_and_bounded_reads_stay_bounded";
+        const CHILD: &str = "AGENTDESK_5605_M06_MSR_CHILD";
+        const FIFO_READY: &str = "AGENTDESK_5605_M06_FIFO_READY";
+        let ppid = unsafe { libc::getppid() }.to_string();
+        // Non-hostile test discriminator: the exact tag plus actual ppid prevents accidental recursion/collision.
+        let mode = std::env::var(CHILD).ok().and_then(|value| { let (mode, parent) = value.split_once(':')?; (matches!(mode, "fifo" | "full") && parent == ppid).then(|| mode.to_owned()) });
+        if mode.is_none() {
+            let run = |mode: &str| {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command.args([TEST_NAME, "--exact", "--nocapture", "--test-threads=1"]).env(CHILD, format!("{mode}:{}", std::process::id())).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+                let started = std::time::Instant::now(); let mut child = command.spawn().unwrap(); let deadline = started + std::time::Duration::from_secs(10); let mut timed_out = false;
+                let output = loop { if child.try_wait().unwrap().is_some() { break child.wait_with_output().unwrap(); } if std::time::Instant::now() >= deadline { timed_out = true; let killed = child.kill(); let reaped = child.wait_with_output(); killed.unwrap(); break reaped.unwrap(); } std::thread::sleep(std::time::Duration::from_millis(20)); };
+                let elapsed = started.elapsed(); let stdout = String::from_utf8_lossy(&output.stdout); let selected = stdout.matches("running 1 test").count(); let passed = stdout.matches("1 passed; 0 failed; 0 ignored; 0 measured;").count(); let markers = stdout.matches(FIFO_READY).count();
+                assert_eq!(selected, 1); if mode == "fifo" { assert_eq!(markers, 1); if timed_out { assert!(elapsed >= std::time::Duration::from_millis(9_500) && elapsed < std::time::Duration::from_secs(12)); } }
+                println!("AGENTDESK_5605_M06_EVIDENCE mode={mode} selected1={selected} pass1={passed} marker_count={markers} timed_out={timed_out} reaped=true elapsed_ms={}", elapsed.as_millis());
+                assert!(!timed_out, "{mode} child remained blocked after readiness for {elapsed:?}"); assert_child(output);
+            };
+            run("fifo"); run("full"); return;
+        }
+        let fifo_only = mode.as_deref() == Some("fifo");
+        use FsOperation::*; use std::io::Write as _;
+        let cwd = std::env::current_dir().unwrap(); let temp = tempfile::tempdir_in(&cwd).unwrap(); let path = temp.path(); let nested_path = path.join("nested"); fs::create_dir(&nested_path).unwrap();
+        if fifo_only { fs::write(nested_path.join("fifo-race"), b"regular").unwrap(); }
+        let relative = path.strip_prefix(&cwd).unwrap(); let mut root = open_runtime_root(relative).unwrap(); let parent = root.directory.clone(); let mut session = root.mutation_session(); let (_, nested) = attempted(session.open_or_create_child(&parent, "nested")); let nested = nested.unwrap(); drop(session); take_mutation_evidence();
+        if fifo_only {
+            let fifo_race = nested_path.join("fifo-race"); MUTATION_FAULT.with(|fault| fault.set(Some((GetFdFlags, libc::FD_CLOEXEC, None))));
+            POST_OBSERVE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || { fs::remove_file(&fifo_race).unwrap(); make_fifo(&fifo_race); print!("{FIFO_READY}\n"); std::io::stdout().flush().unwrap(); })));
+            let error = root.open_regular(&nested, "fifo-race").unwrap_err(); let (activity, trace) = take_mutation_evidence(); let raw_fd = trace[1].2;
+            assert!(raw_fd >= 0);
+            assert!(matches!(error.kind(), FsErrorKind::NotRegular(fact) if fact.mode() & libc::S_IFMT as u32 == libc::S_IFIFO as u32));
+            assert_eq!((activity, trace.iter().map(|row| row.0).collect::<Vec<_>>()), (15, vec![Observe, Open, GetFdFlags, Fstat])); assert!(trace.iter().all(|row| row.3.is_none()));
+            assert_eq!((trace[0].1.0, &*trace[0].1.1, trace[0].1.2), (nested.fd.as_raw_fd(), b"fifo-race".as_slice(), libc::AT_SYMLINK_NOFOLLOW)); assert_eq!((trace[1].1.0, &*trace[1].1.1), (nested.fd.as_raw_fd(), b"fifo-race".as_slice()));
+            assert_eq!((trace[2].1.0, &*trace[2].1.1, trace[2].1.2, trace[2].2), (raw_fd, b"".as_slice(), libc::F_GETFD, libc::FD_CLOEXEC)); assert_eq!((trace[3].1.0, trace[3].2), (raw_fd, 0));
+            assert_eq!(trace[3].4.unwrap().file_type.mode & libc::S_IFMT as u32, libc::S_IFIFO as u32); assert_closed(raw_fd); return;
+        }
+        fs::write(nested_path.join("regular"), b"abc").unwrap(); fs::write(nested_path.join("grow"), b"a").unwrap(); fs::write(nested_path.join("overflow"), b"x").unwrap(); fs::create_dir(path.join("directory")).unwrap(); make_fifo(&path.join("fifo")); let _socket = std::os::unix::net::UnixListener::bind(path.join("socket")).unwrap(); std::os::unix::fs::symlink("nested/regular", path.join("link")).unwrap();
+        let other = open_runtime_root(relative).unwrap(); let foreign = other.directory.clone();
+        assert!(matches!(root.open_regular(&foreign, "..").unwrap_err().kind(), FsErrorKind::CrossLineage)); let (activity, trace) = take_mutation_evidence(); assert_eq!((activity, trace.is_empty()), (0, true));
+        assert!(matches!(root.open_regular(&parent, "..").unwrap_err().kind(), FsErrorKind::InvalidComponent(super::super::InvalidComponentFact::Parent))); let (_, trace) = take_mutation_evidence(); assert!(trace.is_empty());
+        for name in ["directory", "fifo", "socket", "link"] { let error = root.open_regular(&parent, name).unwrap_err(); assert!(matches!(error.kind(), FsErrorKind::NotRegular(_))); let (activity, trace) = take_mutation_evidence(); assert_eq!((activity, trace.len()), (15, 1)); assert_eq!((trace[0].0, trace[0].1.0, &*trace[0].1.1, trace[0].1.2), (Observe, parent.fd.as_raw_fd(), name.as_bytes(), libc::AT_SYMLINK_NOFOLLOW)); }
+        let dev = open_runtime_root(Path::new("/dev")).unwrap(); assert!(matches!(dev.open_regular(&dev.directory, "null").unwrap_err().kind(), FsErrorKind::NotRegular(_))); let (_, trace) = take_mutation_evidence(); assert_eq!((trace.len(), trace[0].0, &*trace[0].1.1), (1, Observe, b"null".as_slice()));
+        for (operation, result, errno, expected) in [(GetFdFlags, 0, None, FsErrorKind::MissingCloseOnExec { fd_flags: 0 }), (Fstat, -1, Some(libc::EIO), FsErrorKind::Io(super::super::IoFact { operation: Fstat, raw_errno: libc::EIO }))] { MUTATION_FAULT.with(|fault| fault.set(Some((operation, result, errno)))); let error = root.open_regular(&nested, "regular").unwrap_err(); assert_eq!(error.kind(), expected); let (_, trace) = take_mutation_evidence(); let raw_fd = trace[1].2; assert_eq!(trace.last().unwrap().0, operation); assert_closed(raw_fd); }
+        let metadata = fs::metadata(nested_path.join("regular")).unwrap(); let injected = OpenDirectoryFact { identity: DirectoryIdentity { device: metadata.dev(), inode: metadata.ino() }, file_type: DirectoryTypeFact { mode: libc::S_IFIFO as u32 | 0o600 } }; INJECTED_FSTAT_FACT.with(|fact| fact.set(Some(injected))); MUTATION_FAULT.with(|fault| fault.set(Some((Fstat, 0, None)))); let error = root.open_regular(&nested, "regular").unwrap_err(); assert!(matches!(error.kind(), FsErrorKind::NotRegular(fact) if fact == injected.file_type)); let (_, trace) = take_mutation_evidence(); let raw_fd = assert_regular_trace(&trace, nested.fd.as_raw_fd(), b"regular"); assert_closed(raw_fd);
+        PANIC_AFTER_OPEN_ADOPTION.with(|fd| fd.set(Some(-1))); let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| root.open_regular(&nested, "regular"))); let adopted = PANIC_AFTER_OPEN_ADOPTION.with(|fd| fd.replace(None)).unwrap(); assert!(panic.is_err() && adopted >= 0); let (_, trace) = take_mutation_evidence(); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Observe]); assert_closed(adopted);
+        let swap = nested_path.join("swap"); let replacement = nested_path.join("replacement"); fs::write(&swap, b"old").unwrap(); fs::write(&replacement, b"new").unwrap(); POST_OBSERVE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || fs::rename(replacement, swap).unwrap()))); let error = root.open_regular(&nested, "swap").unwrap_err(); assert!(matches!(error.kind(), FsErrorKind::IdentityMismatch { observed, opened } if observed != opened)); let (_, trace) = take_mutation_evidence(); let raw_fd = assert_regular_trace(&trace, nested.fd.as_raw_fd(), b"swap"); assert_closed(raw_fd);
+        std::os::unix::fs::symlink("regular", nested_path.join("oracle-link")).unwrap(); let oracle_name = c"oracle-link"; let oracle = unsafe { libc::openat(nested.fd.as_raw_fd(), oracle_name.as_ptr(), EXPECTED_REGULAR_FLAGS) }; let final_symlink_errno = last_errno(); assert_eq!(oracle, -1);
+        let link_race = nested_path.join("link-race"); fs::write(&link_race, b"regular").unwrap(); POST_OBSERVE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || { fs::remove_file(&link_race).unwrap(); std::os::unix::fs::symlink("regular", &link_race).unwrap(); }))); assert_io(root.open_regular(&nested, "link-race").unwrap_err(), (Open, final_symlink_errno)); let (_, trace) = take_mutation_evidence(); assert_eq!((trace.len(), trace[1].0, trace[1].1.0, &*trace[1].1.1, trace[1].1.2, trace[1].3), (2, Open, nested.fd.as_raw_fd(), b"link-race".as_slice(), EXPECTED_REGULAR_FLAGS, Some(final_symlink_errno)));
+        let grow = nested_path.join("grow"); POST_OBSERVE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || std::fs::OpenOptions::new().append(true).open(grow).unwrap().write_all(&[b'z'; 64]).unwrap()))); let growing = root.open_regular(&nested, "grow").unwrap(); let (_, trace) = take_mutation_evidence(); assert_regular_trace(&trace, nested.fd.as_raw_fd(), b"grow"); let raw_fd = growing.fd.as_raw_fd(); let probe_raw = unsafe { libc::dup(raw_fd) }; assert!(probe_raw >= 0); let probe = unsafe { OwnedFd::from_raw_fd(probe_raw) }; assert_eq!(growing.read_bounded(3).unwrap(), super::super::BoundedRead::Oversize); assert_eq!(unsafe { libc::lseek(probe.as_raw_fd(), 0, libc::SEEK_CUR) }, 4); assert_closed(raw_fd); drop(probe);
+        let overflow = root.open_regular(&nested, "overflow").unwrap(); take_mutation_evidence(); let raw_fd = overflow.fd.as_raw_fd(); assert_eq!(overflow.read_bounded(usize::MAX).unwrap_err().kind(), FsErrorKind::ReadLimitOverflow { limit: usize::MAX }); assert_closed(raw_fd);
+        let survivor = root.open_regular(&nested, "regular").unwrap(); let (_, trace) = take_mutation_evidence(); let raw_fd = assert_regular_trace(&trace, nested.fd.as_raw_fd(), b"regular"); let metadata = fs::metadata(nested_path.join("regular")).unwrap(); assert_eq!(survivor.open.identity, DirectoryIdentity { device: metadata.dev(), inode: metadata.ino() }); assert!(matches!(&survivor.locator, DirectoryLocator::Child { parent, component } if (*parent, component.as_bytes()) == (nested.open.identity, b"regular")));
+        drop((parent, foreign, nested, other, dev, root)); assert_ne!(unsafe { libc::fcntl(raw_fd, libc::F_GETFD) }, -1); assert_eq!(survivor.read_bounded(3).unwrap(), super::super::BoundedRead::Complete(b"abc".to_vec())); assert_closed(raw_fd);
+    }
     #[rustfmt::skip] fn attempted(mutation: DirectoryMutation) -> (MutationFacts, Result<ConfinedDir, FsError>) { match mutation { DirectoryMutation::Attempted(facts, child) => (facts, child), DirectoryMutation::Rejected(error) => panic!("unexpected rejection: {error:?}") } }
     #[rustfmt::skip] fn traced<T>(trace: &[MutationTrace], operation: FsOperation, success: impl Fn(&MutationTrace) -> T) -> Attempt<T> { let Some(row) = trace.iter().find(|row| row.0 == operation) else { return Attempt::NotAttempted }; row.3.map_or_else(|| Attempt::Succeeded(success(row)), |raw_errno| Attempt::Failed(super::super::IoFact { operation, raw_errno })) }
     #[rustfmt::skip] fn assert_facts(facts: &MutationFacts, trace: &[MutationTrace]) {
@@ -545,6 +732,7 @@ mod high_risk_recovery {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             output.status.success()
+                && stdout.contains("running 1 test")
                 && stdout.contains("1 passed; 0 failed; 0 ignored; 0 measured;"),
             "isolated child stdout:\n{stdout}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stderr)

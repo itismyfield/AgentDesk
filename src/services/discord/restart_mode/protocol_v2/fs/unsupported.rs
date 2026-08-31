@@ -1,15 +1,26 @@
-use super::{ConfinedRuntimeRoot, DirectoryMutation, FsError, PreparedChild};
+use super::{
+    BoundedRead, ConfinedRuntimeRoot, DirectoryMutation, FsError, PreparedChild, PreparedRegular,
+    RegularFile,
+};
 use std::path::Path;
 
 #[derive(Debug)]
 pub(super) enum DirHandle {}
+pub(super) type FileHandle = ();
 pub(super) const MUTATION_SUPPORTED: bool = false;
+pub(super) const REGULAR_READ_SUPPORTED: bool = false;
 
 pub(in super::super) fn open_runtime_root(_: &Path) -> Result<ConfinedRuntimeRoot, FsError> {
     Err(FsError::unsupported())
 }
 pub(super) fn open_or_create_child(_: PreparedChild) -> DirectoryMutation {
     DirectoryMutation::rejected(FsError::unsupported())
+}
+pub(super) fn open_regular(_: PreparedRegular) -> Result<RegularFile, FsError> {
+    Err(FsError::unsupported())
+}
+pub(super) fn read_bounded(_: FileHandle, _: usize) -> Result<BoundedRead, FsError> {
+    Err(FsError::unsupported())
 }
 
 #[cfg(test)]
@@ -37,11 +48,27 @@ mod high_risk_recovery {
         };
         super::super::take_preflight_activity();
         let error =
-            super::super::prepare_locator(false, &root, (&foreign, identity), "..").unwrap_err();
+            super::super::prepare_locator(MUTATION_SUPPORTED, &root, (&foreign, identity), "..")
+                .unwrap_err();
         assert!(matches!(
             DirectoryMutation::rejected(error),
             DirectoryMutation::Rejected(error) if error.kind() == FsErrorKind::UnsupportedPlatform
         ));
+        assert_eq!(
+            super::super::prepare_locator(
+                REGULAR_READ_SUPPORTED,
+                &root,
+                (&foreign, identity),
+                ".."
+            )
+            .unwrap_err()
+            .kind(),
+            FsErrorKind::UnsupportedPlatform
+        );
+        assert_eq!(
+            read_bounded((), usize::MAX).unwrap_err().kind(),
+            FsErrorKind::UnsupportedPlatform
+        );
         assert_eq!(super::super::take_preflight_activity(), 0);
     }
 }

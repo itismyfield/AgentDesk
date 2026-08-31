@@ -64,6 +64,35 @@ impl ConfinedRuntimeRoot {
     fn mutation_session(&mut self) -> MutationSession<'_> {
         MutationSession(self)
     }
+
+    fn open_regular(&self, parent: &ConfinedDir, value: &str) -> Result<RegularFile, FsError> {
+        let locator = prepare_locator(
+            platform::REGULAR_READ_SUPPORTED,
+            &self.directory.seal,
+            (&parent.seal, parent.open.identity),
+            value,
+        )?;
+        platform::open_regular(PreparedRegular(parent.clone(), locator))
+    }
+}
+
+#[derive(Debug)]
+struct RegularFile {
+    fd: platform::FileHandle,
+    open: OpenDirectoryFact,
+    locator: DirectoryLocator,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BoundedRead {
+    Complete(Vec<u8>),
+    Oversize,
+}
+
+impl RegularFile {
+    fn read_bounded(self, limit: usize) -> Result<BoundedRead, FsError> {
+        platform::read_bounded(self.fd, limit)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +119,9 @@ enum DirectoryLocator {
 
 #[derive(Debug)]
 struct PreparedChild(ConfinedDir, DirectoryLocator);
+
+#[derive(Debug)]
+struct PreparedRegular(ConfinedDir, DirectoryLocator);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Attempt<T> {
@@ -240,6 +272,7 @@ pub(super) enum FsOperation {
     Open,
     GetFdFlags,
     Fstat,
+    Read,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,12 +298,16 @@ pub(super) enum FsErrorKind {
     CrossLineage,
     Io(IoFact),
     NotDirectory(DirectoryTypeFact),
+    NotRegular(DirectoryTypeFact),
     MissingCloseOnExec {
         fd_flags: i32,
     },
     IdentityMismatch {
         observed: DirectoryIdentity,
         opened: DirectoryIdentity,
+    },
+    ReadLimitOverflow {
+        limit: usize,
     },
     UnsupportedPlatform,
 }
@@ -318,6 +355,12 @@ impl FsError {
         }
     }
 
+    fn not_regular(mode: u32) -> Self {
+        Self {
+            kind: FsErrorKind::NotRegular(DirectoryTypeFact { mode }),
+        }
+    }
+
     fn missing_close_on_exec(fd_flags: i32) -> Self {
         Self {
             kind: FsErrorKind::MissingCloseOnExec { fd_flags },
@@ -327,6 +370,12 @@ impl FsError {
     fn identity_mismatch(observed: DirectoryIdentity, opened: DirectoryIdentity) -> Self {
         Self {
             kind: FsErrorKind::IdentityMismatch { observed, opened },
+        }
+    }
+
+    fn read_limit_overflow(limit: usize) -> Self {
+        Self {
+            kind: FsErrorKind::ReadLimitOverflow { limit },
         }
     }
 
