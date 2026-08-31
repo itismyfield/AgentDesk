@@ -169,8 +169,6 @@ class PortableWin32BuildTokenContractTests(unittest.TestCase):
         api, relay = _CoreApi(), module._SignalRelay()
         child = module._Child(api._handle(3, "process"), api._handle(0, "thread"), 99)
         self.assertEqual(module._wait_foreground(api, api._handle(2, "Job"), child, relay), 37)
-        api.waits = [module.WAIT_OBJECT_0]; api.process_exit_code = lambda _child: 259
-        self.assertEqual(module._wait_foreground(api, api._handle(2, "Job"), child, relay), 259)
         api.waits = [module.WAIT_OBJECT_0]; relay(module.signal.SIGTERM, None)
         self.assertEqual(module._wait_foreground(api, api._handle(2, "Job"), child, relay), 128 + signal.SIGTERM)
         self.assertEqual({module.WAIT_OBJECT_0, module.WAIT_ABANDONED_0, module.WAIT_TIMEOUT}, {0, 0x80, 0x102})
@@ -263,7 +261,8 @@ class NativeWin32BuildTokenContractTests(unittest.TestCase):
             process.send_signal(signal.CTRL_BREAK_EVENT)
             self.assertEqual(process.wait(timeout=7), 128 + signal.SIGBREAK); self.assertTrue(handled.exists())
     def test_native_foreground_exit_code_is_preserved_exactly(self):
-        result = subprocess.run(driver(self.nonce(), "run", sys.executable, "-c", "raise SystemExit(37)"), check=False)
-        self.assertEqual(result.returncode, 37)
+        for exit_code in (37, 259):
+            result = subprocess.run(driver(self.nonce(), "run", sys.executable, "-c", f"raise SystemExit({exit_code})"), check=False)
+            self.assertEqual(result.returncode, exit_code)
 if __name__ == "__main__":
     unittest.main()
