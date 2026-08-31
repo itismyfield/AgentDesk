@@ -16,7 +16,6 @@ WAIT_OBJECT_0 = 0
 WAIT_ABANDONED_0 = 0x80
 WAIT_TIMEOUT = 0x102
 WAIT_FAILED = 0xFFFFFFFF
-STILL_ACTIVE = 259
 MUTEX_ALL_ACCESS = 0x001F0001
 TOKEN_QUERY = 0x0008
 OWNER_SECURITY_INFORMATION = 0x1
@@ -63,10 +62,7 @@ class _ACE_HEADER(ctypes.Structure):
 class _ACCESS_ALLOWED_ACE(ctypes.Structure):
     _fields_ = [("Header", _ACE_HEADER), ("Mask", wintypes.DWORD), ("SidStart", wintypes.DWORD)]
 class _IO_COUNTERS(ctypes.Structure):
-    _fields_ = [(name, ctypes.c_ulonglong) for name in (
-        "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-        "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-    )]
+    _fields_ = [(name, ctypes.c_ulonglong) for name in ("ReadOperationCount", "WriteOperationCount", "OtherOperationCount", "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
 class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
     _fields_ = [
         ("PerProcessUserTimeLimit", ctypes.c_longlong),
@@ -149,7 +145,7 @@ def _mutex_name(sid: str, test_nonce: str | None = None) -> str:
     return f"Global\\AgentDesk.BuildToken.Test.{sid}.{test_nonce}"
 def _validate_mutex_security(
     owner_matches: bool, dacl_present: bool, protected: bool, ace_count: int,
-    ace_type: int, ace_mask: int, ace_sid_matches: bool,
+    ace_type: int, ace_flags: int, ace_mask: int, ace_sid_matches: bool,
 ) -> None:
     if not owner_matches:
         raise BuildTokenWindowsError("build-token mutex owner is not current TokenUser SID")
@@ -157,7 +153,7 @@ def _validate_mutex_security(
         raise BuildTokenWindowsError("build-token mutex DACL is absent or inherited")
     if ace_count != 1:
         raise BuildTokenWindowsError("build-token mutex must have exactly one access rule")
-    if ace_type != ACCESS_ALLOWED_ACE_TYPE or ace_mask != MUTEX_ALL_ACCESS or not ace_sid_matches:
+    if ace_type != ACCESS_ALLOWED_ACE_TYPE or ace_flags != 0 or ace_mask != MUTEX_ALL_ACCESS or not ace_sid_matches:
         raise BuildTokenWindowsError("build-token mutex access rule is not owner-only full control")
 def _prepare_process_inputs(
     command: list[str], child_env: Mapping[str, str]
@@ -272,16 +268,16 @@ class _Win32:
             if dacl.value:
                 self._check(self.GetAclInformation(dacl, ctypes.byref(info), ctypes.sizeof(info), ACL_SIZE_INFORMATION_CLASS), "inspect mutex ACL")
             ace_pointer = ctypes.c_void_p()
-            ace_type, ace_mask, ace_sid_matches = -1, 0, False
+            ace_type, ace_flags, ace_mask, ace_sid_matches = -1, -1, 0, False
             if info.AceCount == 1 and self.GetAce(dacl, 0, ctypes.byref(ace_pointer)):
                 ace = ctypes.cast(ace_pointer, ctypes.POINTER(_ACCESS_ALLOWED_ACE)).contents
                 ace_sid = ctypes.c_void_p(ctypes.addressof(ace) + _ACCESS_ALLOWED_ACE.SidStart.offset)
-                ace_type, ace_mask = ace.Header.AceType, ace.Mask
+                ace_type, ace_flags, ace_mask = ace.Header.AceType, ace.Header.AceFlags, ace.Mask
                 ace_sid_matches = bool(self.EqualSid(ace_sid, expected_sid))
             _validate_mutex_security(
                 bool(owner.value and self.EqualSid(owner, expected_sid)), bool(dacl.value),
                 bool(control.value & SE_DACL_PROTECTED), info.AceCount,
-                ace_type, ace_mask, ace_sid_matches,
+                ace_type, ace_flags, ace_mask, ace_sid_matches,
             )
         finally:
             self.LocalFree(descriptor)
@@ -345,10 +341,22 @@ class _Win32:
                 trace.append("create-suspended")
             return child
         except BaseException:
-            self.TerminateProcess(child.process.value, 126)
-            self.WaitForSingleObject(child.process.value, 2000)
-            child.close()
+            try:
+                self._terminate_unassigned(child)
+            finally:
+                child.close()
             raise
+    def _terminate_unassigned(self, child: _Child) -> None:
+        failure = None
+        while True:
+            if not self.TerminateProcess(child.process.value, 126):
+                failure = failure or self._error("terminate unverified suspended command")
+            status = self.WaitForSingleObject(child.process.value, 2000)
+            if status == WAIT_OBJECT_0:
+                if failure is not None: raise failure
+                return
+            if status != WAIT_TIMEOUT:
+                failure = failure or BuildTokenWindowsError(f"unexpected unverified-process wait 0x{status:08X}")
     def assign_job(self, job: _OwnedHandle, child: _Child, trace: list[str] | None = None) -> None:
         self._check(self.AssignProcessToJobObject(job.value, child.process.value), "assign suspended command to Job")
         if trace is not None:
@@ -366,8 +374,6 @@ class _Win32:
     def process_exit_code(self, child: _Child) -> int:
         code = wintypes.DWORD()
         self._check(self.GetExitCodeProcess(child.process.value, ctypes.byref(code)), "read protected-command exit")
-        if code.value == STILL_ACTIVE:
-            raise BuildTokenWindowsError("process signalled completion but remains active")
         return code.value
     def generate_break(self, pid: int) -> bool:
         return bool(self.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid))

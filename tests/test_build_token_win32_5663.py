@@ -1,5 +1,5 @@
 from __future__ import annotations
-from contextlib import redirect_stderr
+from contextlib import nullcontext, redirect_stderr
 import ctypes
 import importlib.util
 import inspect
@@ -113,12 +113,20 @@ class PortableWin32BuildTokenContractTests(unittest.TestCase):
         self.assertEqual(module._mutex_name(sid), rf"Global\AgentDesk.BuildToken.{sid}")
         self.assertEqual(module._owner_only_sddl(sid), f"O:{sid}D:P(A;;0x001F0001;;;{sid})")
     def test_security_verification_rejects_owner_dacl_ace_and_inheritance_mutants(self):
-        good = [True, True, True, 1, module.ACCESS_ALLOWED_ACE_TYPE, module.MUTEX_ALL_ACCESS, True]
-        module._validate_mutex_security(*good)
-        for index, bad in enumerate([False, False, False, 2, 1, 0, False]):
-            values = good.copy(); values[index] = bad
-            with self.assertRaises(module.BuildTokenWindowsError):
-                module._validate_mutex_security(*values)
+        good, bad = [True, True, 1, module.ACCESS_ALLOWED_ACE_TYPE, 0, module.MUTEX_ALL_ACCESS, True], [False, False, 2, 1, 1, 0, False]
+        def write(pointer: object, kind: object, value: int) -> None: ctypes.cast(pointer, ctypes.POINTER(kind)).contents.value = value
+        for axis in range(-1, len(good)):
+            values = good.copy(); values[axis] = bad[axis] if axis >= 0 else values[axis]
+            owner_ok, protected, count, ace_type, ace_flags, mask, sid_ok = values
+            api = object.__new__(module._Win32); ace = module._ACCESS_ALLOWED_ACE(); ace.Header.AceType, ace.Header.AceFlags, ace.Mask = ace_type, ace_flags, mask
+            api._check = lambda result, _action: self.assertTrue(result); api.LocalFree = lambda _value: None
+            api.GetSecurityInfo = lambda _h, _o, _i, owner, _g, dacl, _s, descriptor: (write(owner, ctypes.c_void_p, 1), write(dacl, ctypes.c_void_p, 2), write(descriptor, ctypes.c_void_p, 3), 0)[-1]
+            api.GetSecurityDescriptorControl = lambda _d, control, _r: (write(control, module.wintypes.WORD, module.SE_DACL_PROTECTED if protected else 0), 1)[-1]
+            api.GetAclInformation = lambda _d, info, _size, _class: (setattr(ctypes.cast(info, ctypes.POINTER(module._ACL_SIZE_INFORMATION)).contents, "AceCount", count), 1)[-1]
+            api.GetAce = lambda _d, _index, pointer: (write(pointer, ctypes.c_void_p, ctypes.addressof(ace)), 1)[-1]
+            answers = iter((sid_ok, owner_ok)); api.EqualSid = lambda _one, _two: next(answers)
+            context = nullcontext() if axis < 0 else self.assertRaises(module.BuildTokenWindowsError)
+            with context: api._verify_mutex(9, 1)
     def test_create_process_inputs_are_quoted_unicode_and_noninheriting(self):
         with mock.patch.object(module.shutil, "which", return_value="C:/Program Files/Cargo/cargo.exe"):
             executable, command, environment = module._prepare_process_inputs(
@@ -151,10 +159,18 @@ class PortableWin32BuildTokenContractTests(unittest.TestCase):
             self.assertCountEqual(api.closed, expected, failure)
             self.assertEqual(len(api.closed), len(set(api.closed)), failure)
             self.assertEqual(api.released, 1, failure)
+        child = module._Child(mock.Mock(value=3), mock.Mock(value=0), 9)
+        for terminated, waited, fails in (([1], [module.WAIT_OBJECT_0], False), ([0, 1], [module.WAIT_TIMEOUT, module.WAIT_OBJECT_0], True), ([1, 1], [module.WAIT_FAILED, module.WAIT_OBJECT_0], True)):
+            api = mock.Mock(); api.TerminateProcess.side_effect = terminated; api.WaitForSingleObject.side_effect = waited; api._error.return_value = module.BuildTokenWindowsError("terminate")
+            context = self.assertRaises(module.BuildTokenWindowsError) if fails else nullcontext()
+            with context: module._Win32._terminate_unassigned(api, child)
+            self.assertEqual((api.TerminateProcess.call_count, api.WaitForSingleObject.call_count), (len(terminated), len(waited)))
     def test_wait_status_and_signal_exit_semantics_are_exact(self):
         api, relay = _CoreApi(), module._SignalRelay()
         child = module._Child(api._handle(3, "process"), api._handle(0, "thread"), 99)
         self.assertEqual(module._wait_foreground(api, api._handle(2, "Job"), child, relay), 37)
+        api.waits = [module.WAIT_OBJECT_0]; api.process_exit_code = lambda _child: 259
+        self.assertEqual(module._wait_foreground(api, api._handle(2, "Job"), child, relay), 259)
         api.waits = [module.WAIT_OBJECT_0]; relay(module.signal.SIGTERM, None)
         self.assertEqual(module._wait_foreground(api, api._handle(2, "Job"), child, relay), 128 + signal.SIGTERM)
         self.assertEqual({module.WAIT_OBJECT_0, module.WAIT_ABANDONED_0, module.WAIT_TIMEOUT}, {0, 0x80, 0x102})
