@@ -82,6 +82,18 @@ pub enum AuthProfileError {
         profile_id: String,
         home: String,
     },
+    ProfileHomeAlreadyExists {
+        profile_id: String,
+        home: String,
+    },
+    ProfileHomeSymlinkForbidden {
+        profile_id: String,
+        home: String,
+    },
+    ProfileParentSymlinkForbidden {
+        profile_id: String,
+        home: String,
+    },
     UnsupportedLogin(String),
     GlobalHomeForbidden {
         provider: String,
@@ -138,6 +150,18 @@ impl fmt::Display for AuthProfileError {
                 f,
                 "auth_profile '{profile_id}' home '{home}' does not exist"
             ),
+            Self::ProfileHomeAlreadyExists { profile_id, home } => write!(
+                f,
+                "auth_profile '{profile_id}' home '{home}' already exists; use reconnect or unlink explicitly"
+            ),
+            Self::ProfileHomeSymlinkForbidden { profile_id, home } => write!(
+                f,
+                "auth_profile '{profile_id}' home '{home}' must not be a symlink"
+            ),
+            Self::ProfileParentSymlinkForbidden { profile_id, home } => write!(
+                f,
+                "auth_profile '{profile_id}' managed parent for '{home}' must not be a symlink"
+            ),
             Self::UnsupportedLogin(provider) => {
                 write!(f, "extra-account login is not supported for '{provider}'")
             }
@@ -169,6 +193,17 @@ impl fmt::Display for AuthProfileError {
             Self::Io(error) => write!(f, "{error}"),
         }
     }
+}
+
+/// The lifecycle intent determines whether the deterministic managed home must
+/// already exist, must be absent, or is only being validated as catalog data.
+/// Keeping this decision here prevents route/config callers from composing
+/// incomplete path and symlink checks themselves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedHomeValidationMode {
+    Catalog,
+    Existing,
+    New,
 }
 
 impl std::error::Error for AuthProfileError {}
@@ -266,13 +301,7 @@ pub fn validate_profile_def(
             });
         }
         let home = PathBuf::from(expand_tilde(home));
-        if !is_managed_extra_account_home(&provider, id, &home) {
-            return Err(AuthProfileError::UnmanagedHomeForbidden {
-                profile_id: id.to_string(),
-                provider: provider.as_str().to_string(),
-                home: home.display().to_string(),
-            });
-        }
+        validate_managed_profile_home(&provider, id, &home, ManagedHomeValidationMode::Catalog)?;
     }
     for key in def.env.keys() {
         if !profile_env_key_allowed(&provider, key) {
@@ -324,6 +353,22 @@ pub fn resolve(
     agent_auth_profile: Option<&str>,
     catalog: &HashMap<String, ProviderAuthProfileDef>,
 ) -> Result<ProviderAuthOverlay, AuthProfileError> {
+    resolve_at(
+        &extra_accounts_root(),
+        provider,
+        channel_auth_profile,
+        agent_auth_profile,
+        catalog,
+    )
+}
+
+fn resolve_at(
+    managed_root: &Path,
+    provider: ProviderKind,
+    channel_auth_profile: Option<&str>,
+    agent_auth_profile: Option<&str>,
+    catalog: &HashMap<String, ProviderAuthProfileDef>,
+) -> Result<ProviderAuthOverlay, AuthProfileError> {
     let Some(profile_id) = selected_profile_id(channel_auth_profile, agent_auth_profile) else {
         return Ok(ProviderAuthOverlay::default_for(provider));
     };
@@ -354,12 +399,13 @@ pub fn resolve(
                 provider: provider.as_str().to_string(),
             });
         };
-        if !home_path.is_dir() {
-            return Err(AuthProfileError::HomeMissing {
-                profile_id: profile_id.to_string(),
-                home: home_path.display().to_string(),
-            });
-        }
+        validate_managed_profile_home_at(
+            managed_root,
+            &provider,
+            profile_id,
+            home_path,
+            ManagedHomeValidationMode::Existing,
+        )?;
     }
 
     let mut env = home
@@ -466,17 +512,116 @@ pub fn is_managed_extra_account_home(
     profile_id: &str,
     home: &Path,
 ) -> bool {
-    if std::fs::symlink_metadata(home)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    same_path(home, &extra_account_home(provider, profile_id))
+    validate_managed_profile_home(
+        provider,
+        profile_id,
+        home,
+        ManagedHomeValidationMode::Catalog,
+    )
+    .is_ok()
 }
 
 pub fn extra_account_home_at(root: &Path, provider: &ProviderKind, profile_id: &str) -> PathBuf {
     root.join(provider.as_str()).join(profile_id)
+}
+
+pub fn validate_managed_profile_home(
+    provider: &ProviderKind,
+    profile_id: &str,
+    home: &Path,
+    mode: ManagedHomeValidationMode,
+) -> Result<PathBuf, AuthProfileError> {
+    validate_managed_profile_home_at(&extra_accounts_root(), provider, profile_id, home, mode)
+}
+
+pub fn validate_managed_profile_home_at(
+    root: &Path,
+    provider: &ProviderKind,
+    profile_id: &str,
+    home: &Path,
+    mode: ManagedHomeValidationMode,
+) -> Result<PathBuf, AuthProfileError> {
+    validate_profile_id(profile_id)?;
+    let expected = extra_account_home_at(root, provider, profile_id);
+    if home != expected {
+        return Err(AuthProfileError::UnmanagedHomeForbidden {
+            profile_id: profile_id.to_string(),
+            provider: provider.as_str().to_string(),
+            home: home.display().to_string(),
+        });
+    }
+
+    // The managed root and provider directory form the trust boundary.  A
+    // leaf-only lstat is insufficient because a symlinked parent can redirect
+    // a seemingly ordinary profile directory outside AgentDesk ownership.
+    let provider_root = root.join(provider.as_str());
+    for parent in [root, provider_root.as_path()] {
+        if std::fs::symlink_metadata(parent)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(AuthProfileError::ProfileParentSymlinkForbidden {
+                profile_id: profile_id.to_string(),
+                home: home.display().to_string(),
+            });
+        }
+    }
+    match std::fs::symlink_metadata(home) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(AuthProfileError::ProfileHomeSymlinkForbidden {
+                profile_id: profile_id.to_string(),
+                home: home.display().to_string(),
+            });
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(AuthProfileError::Io(format!(
+                "profile home '{}' exists but is not a directory",
+                home.display()
+            )));
+        }
+        Ok(_) if mode == ManagedHomeValidationMode::New => {
+            return Err(AuthProfileError::ProfileHomeAlreadyExists {
+                profile_id: profile_id.to_string(),
+                home: home.display().to_string(),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if mode == ManagedHomeValidationMode::Existing {
+                return Err(AuthProfileError::HomeMissing {
+                    profile_id: profile_id.to_string(),
+                    home: home.display().to_string(),
+                });
+            }
+        }
+        Err(error) => {
+            return Err(AuthProfileError::Io(format!(
+                "inspect profile home '{}': {error}",
+                home.display()
+            )));
+        }
+        _ => {}
+    }
+    Ok(expected)
+}
+
+/// Includes homes left behind by unlink.  They remain credential-bearing
+/// paths and must reserve their profile id until an explicit reconnect/delete
+/// lifecycle is introduced.
+pub fn list_existing_profile_homes(
+    provider: &ProviderKind,
+) -> Result<Vec<PathBuf>, AuthProfileError> {
+    let provider_root = extra_accounts_root().join(provider.as_str());
+    match std::fs::read_dir(&provider_root) {
+        Ok(entries) => Ok(entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(AuthProfileError::Io(format!(
+            "read provider profile root '{}': {error}",
+            provider_root.display()
+        ))),
+    }
 }
 
 pub fn compact_home_for_yaml(path: &Path) -> String {
@@ -585,23 +730,32 @@ pub fn create_empty_profile_home_at(
             });
         }
     }
-    if home.is_file() {
-        return Err(AuthProfileError::Io(format!(
-            "profile home '{}' exists as a file",
-            home.display()
-        )));
-    }
-    if std::fs::symlink_metadata(&home)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return Err(AuthProfileError::Io(format!(
-            "profile home '{}' must not be a symlink",
-            home.display()
-        )));
-    }
-    std::fs::create_dir_all(&home).map_err(|error| {
-        AuthProfileError::Io(format!("create profile home '{}': {error}", home.display()))
+    validate_managed_profile_home_at(
+        root,
+        provider,
+        profile_id,
+        &home,
+        ManagedHomeValidationMode::New,
+    )?;
+    let provider_root = root.join(provider.as_str());
+    std::fs::create_dir_all(&provider_root).map_err(|error| {
+        AuthProfileError::Io(format!(
+            "create provider profile root '{}': {error}",
+            provider_root.display()
+        ))
+    })?;
+    // create_dir, rather than create_dir_all(home), makes a concurrent or
+    // previously unlinked home a conflict instead of silently reusing its
+    // credentials.
+    std::fs::create_dir(&home).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            AuthProfileError::ProfileHomeAlreadyExists {
+                profile_id: profile_id.to_string(),
+                home: home.display().to_string(),
+            }
+        } else {
+            AuthProfileError::Io(format!("create profile home '{}': {error}", home.display()))
+        }
     })?;
     if matches!(provider, ProviderKind::OpenCode) {
         for child in ["xdg-config", "xdg-data"] {
@@ -709,40 +863,18 @@ mod tests {
 
     #[test]
     fn test_002_named_profiles_inject_home_env_without_home_rewrite() {
-        let (_dir, home) = temp_home();
-        let home_s = home.display().to_string();
-        let cases: Vec<(ProviderKind, &str, Vec<(&str, String)>)> = vec![
-            (
-                ProviderKind::Codex,
-                "work",
-                vec![("CODEX_HOME", home_s.clone())],
-            ),
-            (
-                ProviderKind::Qwen,
-                "qwen-b",
-                vec![("QWEN_HOME", home_s.clone())],
-            ),
-            (
-                ProviderKind::Claude,
-                "claude-b",
-                vec![("CLAUDE_CONFIG_DIR", home_s.clone())],
-            ),
-            (
-                ProviderKind::OpenCode,
-                "oc-alt",
-                vec![
-                    ("XDG_CONFIG_HOME", format!("{home_s}/xdg-config")),
-                    ("XDG_DATA_HOME", format!("{home_s}/xdg-data")),
-                ],
-            ),
-            (
-                ProviderKind::Grok,
-                "grok-alt",
-                vec![("GROK_HOME", home_s.clone())],
-            ),
+        let (dir, _) = temp_home();
+        let cases = [
+            (ProviderKind::Codex, "work", "CODEX_HOME"),
+            (ProviderKind::Qwen, "qwen-b", "QWEN_HOME"),
+            (ProviderKind::Claude, "claude-b", "CLAUDE_CONFIG_DIR"),
+            (ProviderKind::OpenCode, "oc-alt", "XDG_CONFIG_HOME"),
+            (ProviderKind::Grok, "grok-alt", "GROK_HOME"),
         ];
-        for (provider, id, expected) in cases {
-            let overlay = resolve(
+        for (provider, id, home_key) in cases {
+            let home = create_empty_profile_home_at(dir.path(), &provider, id).unwrap();
+            let overlay = resolve_at(
+                dir.path(),
                 provider.clone(),
                 Some(id),
                 None,
@@ -750,28 +882,35 @@ mod tests {
                     id,
                     ProviderAuthProfileDef {
                         provider: provider.as_str().to_string(),
-                        home: Some(home_s.clone()),
+                        home: Some(home.display().to_string()),
                         env: BTreeMap::new(),
                     },
                 ),
             )
             .unwrap();
             assert!(!overlay.env.contains_key("HOME"));
-            for (key, value) in expected {
-                assert_eq!(overlay.env.get(key), Some(&value), "{id} {key}");
+            assert_eq!(overlay.env.get(home_key), Some(&home.display().to_string()));
+            if provider == ProviderKind::OpenCode {
+                assert_eq!(
+                    overlay.env.get("XDG_DATA_HOME"),
+                    Some(&format!("{}/xdg-data", home.display()))
+                );
             }
         }
     }
 
     #[test]
     fn test_003_channel_overrides_agent() {
-        let (_dir, home) = temp_home();
+        let (dir, _) = temp_home();
+        let work = create_empty_profile_home_at(dir.path(), &ProviderKind::Codex, "work").unwrap();
+        let other =
+            create_empty_profile_home_at(dir.path(), &ProviderKind::Codex, "other").unwrap();
         let mut catalog = HashMap::new();
         catalog.insert(
             "work".to_string(),
             ProviderAuthProfileDef {
                 provider: "codex".into(),
-                home: Some(home.display().to_string()),
+                home: Some(work.display().to_string()),
                 env: BTreeMap::new(),
             },
         );
@@ -779,11 +918,18 @@ mod tests {
             "other".to_string(),
             ProviderAuthProfileDef {
                 provider: "codex".into(),
-                home: Some(home.display().to_string()),
+                home: Some(other.display().to_string()),
                 env: BTreeMap::new(),
             },
         );
-        let overlay = resolve(ProviderKind::Codex, Some("work"), Some("other"), &catalog).unwrap();
+        let overlay = resolve_at(
+            dir.path(),
+            ProviderKind::Codex,
+            Some("work"),
+            Some("other"),
+            &catalog,
+        )
+        .unwrap();
         assert_eq!(overlay.profile_id, "work");
     }
 
@@ -792,27 +938,47 @@ mod tests {
         let err = resolve(ProviderKind::Codex, Some("missing"), None, &HashMap::new()).unwrap_err();
         assert!(matches!(err, AuthProfileError::UnknownProfile(_)));
 
-        let (_dir, home) = temp_home();
+        let (dir, _) = temp_home();
+        let qwen_home =
+            create_empty_profile_home_at(dir.path(), &ProviderKind::Qwen, "work").unwrap();
         let catalog = catalog_with(
             "work",
             ProviderAuthProfileDef {
                 provider: "qwen".into(),
-                home: Some(home.display().to_string()),
+                home: Some(qwen_home.display().to_string()),
                 env: BTreeMap::new(),
             },
         );
-        let err = resolve(ProviderKind::Codex, Some("work"), None, &catalog).unwrap_err();
+        let err = resolve_at(
+            dir.path(),
+            ProviderKind::Codex,
+            Some("work"),
+            None,
+            &catalog,
+        )
+        .unwrap_err();
         assert!(matches!(err, AuthProfileError::ProviderMismatch { .. }));
 
         let catalog = catalog_with(
             "work",
             ProviderAuthProfileDef {
                 provider: "codex".into(),
-                home: Some("/definitely-not-a-real-auth-profile-home".into()),
+                home: Some(
+                    extra_account_home_at(dir.path(), &ProviderKind::Codex, "work")
+                        .display()
+                        .to_string(),
+                ),
                 env: BTreeMap::new(),
             },
         );
-        let err = resolve(ProviderKind::Codex, Some("work"), None, &catalog).unwrap_err();
+        let err = resolve_at(
+            dir.path(),
+            ProviderKind::Codex,
+            Some("work"),
+            None,
+            &catalog,
+        )
+        .unwrap_err();
         assert!(matches!(err, AuthProfileError::HomeMissing { .. }));
     }
 
@@ -837,11 +1003,14 @@ mod tests {
 
     #[test]
     fn empty_env_value_unsets_key() {
-        let (_dir, home) = temp_home();
+        let (dir, _) = temp_home();
+        let home =
+            create_empty_profile_home_at(dir.path(), &ProviderKind::Grok, "grok-alt").unwrap();
         let mut extra = BTreeMap::new();
         extra.insert("XAI_API_KEY".into(), String::new());
         extra.insert("GROK_EXTRA".into(), "1".into());
-        let overlay = resolve(
+        let overlay = resolve_at(
+            dir.path(),
             ProviderKind::Grok,
             Some("grok-alt"),
             None,
@@ -1052,5 +1221,66 @@ mod tests {
         assert!(home.join("xdg-config").is_dir());
         assert!(home.join("xdg-data").is_dir());
         assert!(!home.join("xdg-data/opencode/auth.json").exists());
+    }
+
+    #[test]
+    fn new_profile_rejects_existing_unlinked_home_and_allocation_skips_it() {
+        let root = tempfile::tempdir().expect("profiles root");
+        let old_home = create_empty_profile_home_at(root.path(), &ProviderKind::Codex, "codex-alt")
+            .expect("first profile home");
+        fs::write(old_home.join("auth.json"), "old credential").expect("fake credential");
+
+        let err = create_empty_profile_home_at(root.path(), &ProviderKind::Codex, "codex-alt")
+            .expect_err("an existing home is never a new account");
+        assert!(matches!(
+            err,
+            AuthProfileError::ProfileHomeAlreadyExists { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(old_home.join("auth.json")).unwrap(),
+            "old credential"
+        );
+
+        let catalog = HashMap::new(); // models the post-unlink catalog state
+        let allocated = allocate_profile_id(&ProviderKind::Codex, &catalog, &[old_home]).unwrap();
+        assert_eq!(allocated, "codex-alt-2");
+    }
+
+    #[test]
+    fn existing_mode_requires_a_real_managed_directory() {
+        let root = tempfile::tempdir().expect("profiles root");
+        let home = extra_account_home_at(root.path(), &ProviderKind::Codex, "work");
+        let err = validate_managed_profile_home_at(
+            root.path(),
+            &ProviderKind::Codex,
+            "work",
+            &home,
+            ManagedHomeValidationMode::Existing,
+        )
+        .expect_err("completion/resolve needs an existing directory");
+        assert!(matches!(err, AuthProfileError::HomeMissing { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_parent_symlink_is_rejected_before_profile_creation() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("profiles root");
+        let outside = tempfile::tempdir().expect("outside root");
+        symlink(outside.path(), root.path().join("codex")).expect("provider parent symlink");
+        let home = extra_account_home_at(root.path(), &ProviderKind::Codex, "work");
+        let err = validate_managed_profile_home_at(
+            root.path(),
+            &ProviderKind::Codex,
+            "work",
+            &home,
+            ManagedHomeValidationMode::New,
+        )
+        .expect_err("a symlinked provider parent escapes the managed root");
+        assert!(matches!(
+            err,
+            AuthProfileError::ProfileParentSymlinkForbidden { .. }
+        ));
     }
 }
