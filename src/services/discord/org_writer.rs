@@ -49,6 +49,8 @@ struct OrgDocument {
     suffix_map: Option<Value>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_auth_profiles: BTreeMap<String, ProviderAuthProfileDef>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_auth_primary_profiles: BTreeMap<String, String>,
     #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
     extra: BTreeMap<String, Value>,
 }
@@ -203,8 +205,39 @@ fn org_yaml_path() -> Result<PathBuf, String> {
 fn normalized_auth_profile(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != "default")
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+pub(crate) fn set_provider_primary_profile(provider: &str, profile_id: &str) -> Result<(), String> {
+    set_provider_primary_profile_at(&org_yaml_path()?, provider, profile_id)
+}
+
+pub(crate) fn set_provider_primary_profile_at(
+    org_path: &Path,
+    provider: &str,
+    profile_id: &str,
+) -> Result<(), String> {
+    let provider = provider.trim().to_ascii_lowercase();
+    let profile_id = profile_id.trim();
+    let mut document = load_org_document(org_path)?;
+    if profile_id.is_empty() || profile_id == "default" {
+        document.provider_auth_primary_profiles.remove(&provider);
+        return persist_org_document(org_path, &document);
+    }
+    let Some(profile) = document.provider_auth_profiles.get(profile_id) else {
+        return Err(format!("unknown auth_profile '{profile_id}'"));
+    };
+    if !profile.provider.eq_ignore_ascii_case(&provider) {
+        return Err(format!(
+            "auth_profile '{profile_id}' provider '{}' does not match provider '{provider}'",
+            profile.provider
+        ));
+    }
+    document
+        .provider_auth_primary_profiles
+        .insert(provider, profile_id.to_string());
+    persist_org_document(org_path, &document)
 }
 
 pub(crate) fn append_provider_auth_profile(
@@ -253,6 +286,7 @@ pub(crate) fn set_agent_auth_profile_at(
         ));
     }
     let next = match normalized_auth_profile(auth_profile) {
+        Some(profile_id) if profile_id == "default" => Some(profile_id),
         Some(profile_id) => {
             let Some(profile) = document.provider_auth_profiles.get(&profile_id) else {
                 return Err(format!("unknown auth_profile '{profile_id}'"));
@@ -302,6 +336,7 @@ pub(crate) fn set_channel_auth_profile_at(
         ));
     }
     let next = match normalized_auth_profile(auth_profile) {
+        Some(profile_id) if profile_id == "default" => Some(profile_id),
         Some(profile_id) => {
             let Some(profile) = document.provider_auth_profiles.get(&profile_id) else {
                 return Err(format!("unknown auth_profile '{profile_id}'"));
@@ -380,6 +415,15 @@ pub(crate) fn remove_provider_auth_profile_at(
             "auth profile '{profile_id}' is still bound to agents [{}] or channels [{}]; select default first",
             bound_agents.join(", "),
             bound_channels.join(", ")
+        ));
+    }
+    if document
+        .provider_auth_primary_profiles
+        .get(provider)
+        .is_some_and(|primary| primary == profile_id)
+    {
+        return Err(format!(
+            "auth profile '{profile_id}' is the provider primary; select another primary first"
         ));
     }
     document.provider_auth_profiles.remove(profile_id);
@@ -488,5 +532,27 @@ mod tests {
         .unwrap();
         let err = set_agent_auth_profile_at(&path, "coder", Some("claude-work")).unwrap_err();
         assert!(err.contains("does not match"));
+    }
+
+    #[test]
+    fn primary_profile_cannot_be_unlinked_until_reset_to_system_default() {
+        let dir = tempfile::tempdir().expect("org dir");
+        let path = dir.path().join("org.yaml");
+        fs::write(&path, "version: 1\nagents: {}\n").unwrap();
+        append_provider_auth_profile_at(
+            &path,
+            "work",
+            ProviderAuthProfileDef {
+                provider: "codex".into(),
+                home: Some("~/.adk/profiles/codex/work".into()),
+                env: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        set_provider_primary_profile_at(&path, "codex", "work").unwrap();
+        let err = remove_provider_auth_profile_at(&path, "work", "codex").unwrap_err();
+        assert!(err.contains("provider primary"));
+        set_provider_primary_profile_at(&path, "codex", "default").unwrap();
+        remove_provider_auth_profile_at(&path, "work", "codex").unwrap();
     }
 }

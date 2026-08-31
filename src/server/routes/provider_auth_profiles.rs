@@ -42,11 +42,18 @@ pub struct AuthProfilePatchBody {
     pub auth_profile: Option<Value>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PrimaryProfileBody {
+    #[serde(default)]
+    pub profile_id: Option<String>,
+}
+
 /// GET /api/provider-auth-profiles
 pub async fn list_provider_auth_profiles(
     State(state): State<AppState>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     let catalog = crate::services::discord::provider_auth_catalog();
+    let primary_profiles = crate::services::discord::provider_auth_primary_profiles();
     let bindings = crate::services::discord::list_profile_bindings();
     let usage_by_key = if let Some(pool) = state.pg_pool_ref() {
         let now = chrono::Utc::now().timestamp();
@@ -100,11 +107,56 @@ pub async fn list_provider_auth_profiles(
         providers.push(json!({
             "id": id,
             "default_home": default_home,
+            "primary_profile_id": primary_profiles.get(*id).cloned().unwrap_or_else(|| "default".to_string()),
             "accounts": accounts,
         }));
     }
 
-    Ok((StatusCode::OK, Json(json!({ "providers": providers }))))
+    let agent_profile_overrides: Vec<Value> = bindings
+        .iter()
+        .filter(|binding| binding.channel_id.is_none())
+        .map(|binding| {
+            json!({
+                "agent_id": binding.agent_id.clone(),
+                "provider": binding.provider.clone(),
+                "profile_id": if binding.is_explicit { Value::String(binding.profile_id.clone()) } else { Value::Null },
+            })
+        })
+        .collect();
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "providers": providers,
+            "agent_profile_overrides": agent_profile_overrides,
+        })),
+    ))
+}
+
+/// PUT /api/provider-auth-profiles/{provider}/primary
+pub async fn set_primary_profile(
+    Path(provider): Path<String>,
+    Json(body): Json<PrimaryProfileBody>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let kind = intern_provider(&provider).map_err(profile_error)?;
+    let profile_id = body
+        .profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(provider_auth_profile::DEFAULT_PROFILE_ID);
+    if profile_id != provider_auth_profile::DEFAULT_PROFILE_ID {
+        validate_profile_id(profile_id).map_err(profile_error)?;
+    }
+    org_writer::set_provider_primary_profile(kind.as_str(), profile_id)
+        .map_err(|error| AppError::new(StatusCode::BAD_REQUEST, ErrorCode::Config, error))?;
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "provider": kind.as_str(),
+            "primary_profile_id": profile_id,
+        })),
+    ))
 }
 
 /// POST /api/provider-auth-profiles/{provider}/login-start
@@ -359,11 +411,22 @@ fn account_payload(
 ) -> Value {
     let mut bound_agents: Vec<String> = bindings
         .iter()
-        .filter(|binding| binding.provider == provider.as_str() && binding.profile_id == profile_id)
+        .filter(|binding| {
+            binding.channel_id.is_none()
+                && binding.provider == provider.as_str()
+                && binding.profile_id == profile_id
+        })
         .map(|binding| binding.agent_id.clone())
         .collect();
     bound_agents.sort();
     bound_agents.dedup();
+    let mut bound_channels: Vec<String> = bindings
+        .iter()
+        .filter(|binding| binding.provider == provider.as_str() && binding.profile_id == profile_id)
+        .filter_map(|binding| binding.channel_id.clone())
+        .collect();
+    bound_channels.sort();
+    bound_channels.dedup();
     let usage = usage_by_key
         .get(&(provider.as_str().to_string(), profile_id.to_string()))
         .cloned()
@@ -380,6 +443,7 @@ fn account_payload(
         "id": profile_id,
         "home": home,
         "bound_agents": bound_agents,
+        "bound_channels": bound_channels,
         "usage": usage,
     })
 }
@@ -483,6 +547,8 @@ mod tests {
             agent_id: "coder".into(),
             provider: "codex".into(),
             profile_id: "work".into(),
+            channel_id: None,
+            is_explicit: true,
         }];
         let mut usage = HashMap::new();
         usage.insert(

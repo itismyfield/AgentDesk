@@ -19,17 +19,24 @@ export interface ProviderAuthAccount {
   id: string;
   home: string;
   bound_agents?: string[];
+  bound_channels?: string[];
   usage?: ProviderAuthUsage | null;
 }
 
 export interface ProviderAuthProvider {
   id: string;
   default_home: string;
+  primary_profile_id?: string;
   accounts?: ProviderAuthAccount[];
 }
 
 export interface ProviderAuthProfilesResponse {
   providers?: ProviderAuthProvider[];
+  agent_profile_overrides?: Array<{
+    agent_id: string;
+    provider: string;
+    profile_id: string | null;
+  }>;
 }
 
 export interface ProviderLoginStartResponse {

@@ -232,6 +232,24 @@ export default function SettingsView({
     }
   }, [loadProviderAuthProfiles, notify, tr]);
 
+  const handleSetProviderPrimary = useCallback(async (providerId: string, profileId: string) => {
+    setProviderAuthError(null);
+    try {
+      await api.setProviderAuthPrimaryProfile(providerId, profileId);
+      notify(
+        `${providerId} 기본 계정을 ${profileId === "default" ? "시스템 기본" : profileId}(으)로 변경했습니다.`,
+        `Updated ${providerId} primary account.`,
+        "success",
+      );
+      await loadProviderAuthProfiles();
+    } catch (error) {
+      setProviderAuthError(error instanceof Error ? error.message : tr(
+        "기본 계정을 변경하지 못했습니다.",
+        "Failed to update the primary account.",
+      ));
+    }
+  }, [loadProviderAuthProfiles, notify, tr]);
+
   useEffect(() => {
     setCompanyName(settings.companyName);
     setCeoName(settings.ceoName);
@@ -691,7 +709,7 @@ export default function SettingsView({
         handleConfigSave, handleDangerousConfigConfirm, handlePanelChange,
         handleRcChange, handleRcReset, handleRcSave, handleSave, handleVoiceSave,
         inputStyle, isKo, isRowVisible, loadVoiceConfig, matchingKeysInActivePanel,
-        handleAddProviderAccount, handleCompleteProviderLogin, handleRemoveProviderAccount, loadOperatorConnectors,
+        handleAddProviderAccount, handleCompleteProviderLogin, handleRemoveProviderAccount, handleSetProviderPrimary, loadOperatorConnectors,
         loadProviderAuthProfiles, onboardingMetas, openOnboarding, operatorConnectors,
         operatorConnectorsError, operatorConnectorsLoading, panelQuery, panelQueryNormalized,
         pendingProviderLogin, providerAuthError, providerAuthLoading, providerAuthProviders,

@@ -94,6 +94,17 @@ export async function removeProviderAuthProfile(
   );
 }
 
+export async function setProviderAuthPrimaryProfile(
+  providerId: string,
+  profileId: string,
+): Promise<{ ok: boolean; primary_profile_id: string }> {
+  return request(`/api/provider-auth-profiles/${encodeURIComponent(providerId)}/primary`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile_id: profileId }),
+  });
+}
+
 export function selectableCatalogIds(
   entries: ProviderCatalogEntry[],
   currentId?: string | null,
