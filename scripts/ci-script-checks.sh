@@ -450,6 +450,7 @@ echo "=== Shell test suites (tests/*.sh) ==="
 # owns script-level gates.
 SHELL_TESTS_FAILED=0
 required_shell_suites=(
+  tests/test_build_token_5663.sh
   tests/test_deploy_smoke_wedge_coverage_5244.sh
   tests/test_required_check_mirror.sh
 )
