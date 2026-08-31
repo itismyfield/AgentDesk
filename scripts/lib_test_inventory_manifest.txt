@@ -6235,7 +6235,7 @@ services::discord::turn_bridge::stale_resume::tests::matches_codex_stale_phrases
 services::discord::turn_bridge::stale_resume::tests::result_event_detects_claude_resume_error_shape
 services::discord::turn_bridge::stale_resume::tests::result_event_ignores_unrelated_errors
 services::discord::turn_bridge::stale_resume::tests::stream_error_helpers_compose_message_and_stderr
-services::discord::turn_bridge::stale_resume::tests::terminal_reset_matchers_unchanged_for_gemini_qwen
+services::discord::turn_bridge::stale_resume::tests::terminal_reset_matchers_cover_no_output_and_existing_provider_failures
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::alias_skipped_old_turn_does_not_remove_newer_owners_inflight_row
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::bridge_status_panel_completion_emits_background_agent_pending_payload
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::bridge_status_panel_completion_producer_threads_sniffed_background_agent_pending
@@ -7775,6 +7775,7 @@ services::stream_json_cli::codec::tests::grok_messages_codec_emits_init_and_done
 services::stream_json_cli::dialects::agy::tests::default_argv_uses_conversation_not_continue
 services::stream_json_cli::dialects::agy::tests::envelope_preserves_lengths
 services::stream_json_cli::dialects::agy::tests::restricted_policy_fails_before_prepare
+services::stream_json_cli::dialects::grok::tests::forwards_configured_reasoning_effort
 services::stream_json_cli::dialects::grok::tests::provider_default_argv_has_no_resume_or_session_id
 services::stream_json_cli::dialects::grok::tests::readonly_mapping_is_fail_closed_for_write_tools
 services::stream_json_cli::dialects::grok::tests::resume_requires_uuid
@@ -7782,6 +7783,10 @@ services::stream_json_cli::policy::tests::empty_allowlist_mode_is_error
 services::stream_json_cli::policy::tests::mode_less_vector_is_legacy
 services::stream_json_cli::policy::tests::omitted_mode_and_tools_are_provider_default
 services::stream_json_cli::policy::tests::stream_json_legacy_vector_does_not_become_allowlist
+services::stream_json_cli::runner::tests::exit_before_protocol_progress_gets_terminal_reset_marker
+services::stream_json_cli::runner::tests::no_output_error_has_machine_readable_marker
+services::stream_json_cli::runner::tests::nonzero_no_output_timeout_keeps_default_watchdogs
+services::stream_json_cli::runner::tests::zero_timeout_keeps_liveness_watchdogs_for_unbounded_turns
 services::stream_json_cli::session::tests::accepts_uuid
 services::stream_json_cli::session::tests::rejects_non_uuid
 services::task_completion_v1::tests::canonical_round_trip_and_field_permutation

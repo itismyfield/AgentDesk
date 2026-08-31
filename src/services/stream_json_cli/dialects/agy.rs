@@ -31,7 +31,7 @@ pub fn execute(request: ProviderTurnRequest, sender: Sender<StreamMessage>) -> R
         }
     }
     let prepared = prepare(&request)?;
-    run_prepared(prepared, sender, request.cancel)
+    run_prepared(prepared, sender, request.timeout, request.cancel)
 }
 pub(crate) fn build_argv(request: &ProviderTurnRequest) -> Result<Vec<String>, String> {
     let composed = compose_envelope(
@@ -154,6 +154,7 @@ mod tests {
             system_prompt: Some("sys".into()),
             tool_policy: ConfiguredToolPolicy::for_new_stream_json_provider(),
             model: None,
+            reasoning_effort: None,
             working_directory: PathBuf::from("/tmp"),
             session: None,
             remote_profile: None,
