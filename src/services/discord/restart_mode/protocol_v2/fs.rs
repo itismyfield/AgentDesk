@@ -10,6 +10,36 @@ use unix as platform;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use unsupported as platform;
 
+mod private {
+    pub(super) struct CapabilitySeal;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublicationSupportV2 {
+    Supported,
+    Unsupported,
+}
+
+pub(super) struct PublicationCapabilityV2(private::CapabilitySeal);
+
+fn platform_publication_support() -> PublicationSupportV2 {
+    if platform::MUTATION_SUPPORTED
+        && platform::REGULAR_READ_SUPPORTED
+        && platform::SEALED_STAGE_SUPPORTED
+    {
+        PublicationSupportV2::Supported
+    } else {
+        PublicationSupportV2::Unsupported
+    }
+}
+
+pub(super) fn issue_publication_capability() -> Result<PublicationCapabilityV2, FsError> {
+    match platform_publication_support() {
+        PublicationSupportV2::Supported => Ok(PublicationCapabilityV2(private::CapabilitySeal)),
+        PublicationSupportV2::Unsupported => Err(FsError::unsupported()),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct DirectoryIdentity {
     device: u64,
@@ -61,7 +91,11 @@ impl ConfinedRuntimeRoot {
         self.directory.open.identity
     }
 
-    fn mutation_session(&mut self) -> Result<MutationSession<'_>, FsError> {
+    pub(super) fn root_dir(&self) -> ConfinedDir {
+        self.directory.clone()
+    }
+
+    pub(super) fn mutation_session(&mut self) -> Result<MutationSession<'_>, FsError> {
         Ok(MutationSession {
             lock: platform::lock_mutation(self)?,
             root: self,
@@ -178,7 +212,7 @@ struct MutationFacts {
 }
 
 #[derive(Debug)]
-enum DirectoryMutation {
+pub(super) enum DirectoryMutation {
     Rejected(FsError),
     Attempted(MutationFacts, Result<ConfinedDir, FsError>),
 }
@@ -187,15 +221,26 @@ impl DirectoryMutation {
     fn rejected(error: FsError) -> Self {
         Self::Rejected(error)
     }
+
+    pub(super) fn into_result(self) -> Result<ConfinedDir, FsError> {
+        match self {
+            Self::Rejected(error) => Err(error),
+            Self::Attempted(_, child) => child,
+        }
+    }
 }
 
-struct MutationSession<'root> {
+pub(super) struct MutationSession<'root> {
     lock: platform::MutationLock,
     root: &'root mut ConfinedRuntimeRoot,
 }
 
 impl<'root> MutationSession<'root> {
-    fn open_or_create_child(&mut self, parent: &ConfinedDir, value: &str) -> DirectoryMutation {
+    pub(super) fn open_or_create_child(
+        &mut self,
+        parent: &ConfinedDir,
+        value: &str,
+    ) -> DirectoryMutation {
         let prepared = match self.prepare_child(parent, value) {
             Ok(prepared) => prepared,
             Err(error) => return DirectoryMutation::rejected(error),
@@ -217,7 +262,7 @@ impl<'root> MutationSession<'root> {
         Ok(PreparedChild(parent.clone(), locator))
     }
 
-    fn create_stage<'session>(
+    pub(super) fn create_stage<'session>(
         &'session mut self,
         parent: &ConfinedDir,
         value: &str,
@@ -257,7 +302,7 @@ impl<'root> MutationSession<'root> {
 }
 
 impl<'session, 'root> StageWriter<'session, 'root> {
-    fn seal(self, bytes: &[u8]) -> Result<SyncedStage<'session, 'root>, FsError> {
+    pub(super) fn seal(self, bytes: &[u8]) -> Result<SyncedStage<'session, 'root>, FsError> {
         let Self {
             session,
             parent,

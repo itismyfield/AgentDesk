@@ -6,6 +6,10 @@ macro_rules! canonical_uuid {
         pub(super) struct $name(String);
 
         impl $name {
+            pub(super) fn mint_v4() -> Self {
+                Self(Uuid::new_v4().hyphenated().to_string())
+            }
+
             pub(super) fn parse(text: &str) -> Result<Self, ValueError> {
                 let value = Uuid::parse_str(text).map_err(|_| ValueError)?;
                 (value.hyphenated().to_string().as_bytes() == text.as_bytes())
