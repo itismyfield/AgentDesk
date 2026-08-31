@@ -7169,9 +7169,14 @@ services::opencode::tests::hard_kill_veto_clears_retiring_for_shared_session
 services::opencode::tests::idle_disposal_delay_reschedules_until_ttl_elapsed
 services::opencode::tests::idle_disposal_reschedule_uses_rechecked_soonest_delay
 services::opencode::tests::idle_disposal_sweep_claim_is_coalesced
+services::opencode::tests::opencode_error_message_extracts_nested_provider_payload
+services::opencode::tests::opencode_error_message_falls_back_to_error_when_message_is_not_text
+services::opencode::tests::opencode_error_message_limit_includes_truncation_marker
+services::opencode::tests::opencode_error_message_reads_top_level_provider_detail_fields
 services::opencode::tests::opencode_warm_server_key_canonicalizes_equivalent_working_dirs
 services::opencode::tests::opencode_warm_server_key_separates_working_dirs
 services::opencode::tests::process_sse_event_ignores_other_session_without_liveness_signal
+services::opencode::tests::process_sse_event_preserves_nested_provider_error_detail
 services::opencode::tests::retiring_warm_server_rejects_new_lease_without_incrementing
 services::opencode::tests::scrub_startup_secrets_redacts_colon_delimited_forms
 services::opencode::tests::scrub_startup_secrets_redacts_entire_cookie_header_values
