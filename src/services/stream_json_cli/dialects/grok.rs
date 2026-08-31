@@ -24,7 +24,7 @@ pub fn execute(request: ProviderTurnRequest, sender: Sender<StreamMessage>) -> R
         );
     }
     let prepared = prepare(&request)?;
-    run_prepared(prepared, sender, request.cancel)
+    run_prepared(prepared, sender, request.timeout, request.cancel)
 }
 pub(crate) fn build_argv(request: &ProviderTurnRequest) -> Result<Vec<String>, String> {
     let policy = request.tool_policy.effective_for_stream_json();
@@ -47,6 +47,15 @@ pub(crate) fn build_argv(request: &ProviderTurnRequest) -> Result<Vec<String>, S
     {
         args.push("--model".to_string());
         args.push(model.to_string());
+    }
+    if let Some(reasoning_effort) = request
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        args.push("--reasoning-effort".to_string());
+        args.push(reasoning_effort.to_string());
     }
     if let Some(rules) = request
         .system_prompt
@@ -192,6 +201,7 @@ mod tests {
             system_prompt: Some("be brief".into()),
             tool_policy: policy,
             model: None,
+            reasoning_effort: None,
             working_directory: PathBuf::from("/tmp"),
             session: None,
             remote_profile: None,
@@ -230,5 +240,16 @@ mod tests {
             Some(parse_strict_uuid("01234567-89ab-cdef-0123-456789abcdef", "grok").unwrap());
         let args = build_argv(&req).unwrap();
         assert!(args.windows(2).any(|pair| pair[0] == "--resume"));
+    }
+
+    #[test]
+    fn forwards_configured_reasoning_effort() {
+        let mut req = request(ConfiguredToolPolicy::for_new_stream_json_provider());
+        req.reasoning_effort = Some("xhigh".into());
+        let args = build_argv(&req).unwrap();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--reasoning-effort" && pair[1] == "xhigh")
+        );
     }
 }
