@@ -1497,7 +1497,10 @@ src/
 │   │   ├── source_generation.rs
 │   │   └── turn_finished_signal.rs
 │   ├── writer_protocol/
-│   │   └── authority.rs
+│   │   ├── namespace/
+│   │   │   └── lexical.rs
+│   │   ├── authority.rs
+│   │   └── namespace.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
 │   ├── auto_queue.rs

@@ -5,6 +5,7 @@
 //! only this process; it makes no host, node, or fleet claim.
 
 mod authority;
+mod namespace;
 
 use crate::services::provider::ProviderKind;
 use std::{
