@@ -226,7 +226,11 @@ pub(super) fn open_regular(prepared: PreparedRegular) -> Result<RegularFile, FsE
         (fd.as_raw_fd(), c"", 0),
         || unsafe { libc::fstat(fd.as_raw_fd(), stat_ptr) },
         |_| {
-            let fact = directory_fact(unsafe { &*stat_ptr });
+            #[cfg(test)]
+            let injected = INJECTED_FSTAT_FACT.with(std::cell::Cell::take);
+            #[cfg(not(test))]
+            let injected = None;
+            let fact = injected.unwrap_or_else(|| directory_fact(unsafe { &*stat_ptr }));
             (fact, Some(fact))
         },
     );
@@ -619,6 +623,7 @@ mod high_risk_recovery {
         for name in ["directory", "fifo", "socket", "link"] { let error = root.open_regular(&parent, name).unwrap_err(); assert!(matches!(error.kind(), FsErrorKind::NotRegular(_))); let (activity, trace) = take_mutation_evidence(); assert_eq!((activity, trace.len()), (15, 1)); assert_eq!((trace[0].0, trace[0].1.0, &*trace[0].1.1, trace[0].1.2), (Observe, parent.fd.as_raw_fd(), name.as_bytes(), libc::AT_SYMLINK_NOFOLLOW)); }
         let dev = open_runtime_root(Path::new("/dev")).unwrap(); assert!(matches!(dev.open_regular(&dev.directory, "null").unwrap_err().kind(), FsErrorKind::NotRegular(_))); let (_, trace) = take_mutation_evidence(); assert_eq!((trace.len(), trace[0].0, &*trace[0].1.1), (1, Observe, b"null".as_slice()));
         for (operation, result, errno, expected) in [(GetFdFlags, 0, None, FsErrorKind::MissingCloseOnExec { fd_flags: 0 }), (Fstat, -1, Some(libc::EIO), FsErrorKind::Io(super::super::IoFact { operation: Fstat, raw_errno: libc::EIO }))] { MUTATION_FAULT.with(|fault| fault.set(Some((operation, result, errno)))); let error = root.open_regular(&nested, "regular").unwrap_err(); assert_eq!(error.kind(), expected); let (_, trace) = take_mutation_evidence(); let raw_fd = trace[1].2; assert_eq!(trace.last().unwrap().0, operation); assert_closed(raw_fd); }
+        let metadata = fs::metadata(nested_path.join("regular")).unwrap(); let injected = OpenDirectoryFact { identity: DirectoryIdentity { device: metadata.dev(), inode: metadata.ino() }, file_type: DirectoryTypeFact { mode: libc::S_IFIFO as u32 | 0o600 } }; INJECTED_FSTAT_FACT.with(|fact| fact.set(Some(injected))); MUTATION_FAULT.with(|fault| fault.set(Some((Fstat, 0, None)))); let error = root.open_regular(&nested, "regular").unwrap_err(); assert!(matches!(error.kind(), FsErrorKind::NotRegular(fact) if fact == injected.file_type)); let (_, trace) = take_mutation_evidence(); let raw_fd = assert_regular_trace(&trace, nested.fd.as_raw_fd(), b"regular"); assert_closed(raw_fd);
         PANIC_AFTER_OPEN_ADOPTION.with(|fd| fd.set(Some(-1))); let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| root.open_regular(&nested, "regular"))); let adopted = PANIC_AFTER_OPEN_ADOPTION.with(|fd| fd.replace(None)).unwrap(); assert!(panic.is_err() && adopted >= 0); let (_, trace) = take_mutation_evidence(); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Observe]); assert_closed(adopted);
         let swap = nested_path.join("swap"); let replacement = nested_path.join("replacement"); fs::write(&swap, b"old").unwrap(); fs::write(&replacement, b"new").unwrap(); POST_OBSERVE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || fs::rename(replacement, swap).unwrap()))); let error = root.open_regular(&nested, "swap").unwrap_err(); assert!(matches!(error.kind(), FsErrorKind::IdentityMismatch { observed, opened } if observed != opened)); let (_, trace) = take_mutation_evidence(); let raw_fd = assert_regular_trace(&trace, nested.fd.as_raw_fd(), b"swap"); assert_closed(raw_fd);
         let fifo_race = nested_path.join("fifo-race"); fs::write(&fifo_race, b"regular").unwrap(); POST_OBSERVE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || { fs::remove_file(&fifo_race).unwrap(); make_fifo(&fifo_race); }))); let error = root.open_regular(&nested, "fifo-race").unwrap_err(); assert!(matches!(error.kind(), FsErrorKind::NotRegular(_))); let (_, trace) = take_mutation_evidence(); let raw_fd = assert_regular_trace(&trace, nested.fd.as_raw_fd(), b"fifo-race"); assert_closed(raw_fd);
