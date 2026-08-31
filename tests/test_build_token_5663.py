@@ -62,6 +62,16 @@ def wait_for_path(path: Path, timeout: float = 5.0) -> None:
     raise AssertionError(f"timed out waiting for {path}")
 
 
+def stop_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=2)
+
+
 class BuildTokenBehaviorTests(unittest.TestCase):
     def test_two_commands_serialize_on_one_persistent_inode(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -78,14 +88,14 @@ class BuildTokenBehaviorTests(unittest.TestCase):
             first = subprocess.Popen(
                 driver_command(token, [sys.executable, "-c", first_code, str(first_started)])
             )
-            self.addCleanup(lambda: first.poll() is None and first.kill())
+            self.addCleanup(stop_process, first)
             wait_for_path(first_started)
             inode = token.stat().st_ino
 
             second = subprocess.Popen(
                 driver_command(token, [sys.executable, "-c", second_code, str(second_started)])
             )
-            self.addCleanup(lambda: second.poll() is None and second.kill())
+            self.addCleanup(stop_process, second)
             time.sleep(0.2)
             self.assertFalse(second_started.exists(), "second command spawned before token release")
 
@@ -159,6 +169,7 @@ class BuildTokenBehaviorTests(unittest.TestCase):
                 ),
                 env=env,
                 pass_fds=(wrong_fd,),
+                stderr=subprocess.DEVNULL,
                 check=False,
             )
             self.assertNotEqual(result.returncode, 0)
@@ -168,6 +179,7 @@ class BuildTokenBehaviorTests(unittest.TestCase):
             result = subprocess.run(
                 driver_command(token, [sys.executable, "-c", "raise SystemExit(0)"]),
                 env=env,
+                stderr=subprocess.DEVNULL,
                 check=False,
             )
             self.assertNotEqual(result.returncode, 0)
@@ -185,7 +197,7 @@ class BuildTokenBehaviorTests(unittest.TestCase):
             holder = subprocess.Popen(
                 driver_command(token, [sys.executable, "-c", holder_code, str(holder_started)])
             )
-            self.addCleanup(lambda: holder.poll() is None and holder.kill())
+            self.addCleanup(stop_process, holder)
             wait_for_path(holder_started)
             inode = token.stat().st_ino
             waiter = subprocess.Popen(
@@ -282,10 +294,12 @@ class BuildTokenWiringTests(unittest.TestCase):
 
     def test_deploy_rejects_outer_token_and_acquires_deploy_lock_first(self):
         deploy = DEPLOY_PATH.read_text()
-        reject_call = deploy.index('_reject_inherited_build_token_for_deploy')
+        reject_call = deploy.index('\n_reject_inherited_build_token_for_deploy\n')
+        detach_gate = deploy.index('# --- macOS: always run detached')
         deploy_lock_call = deploy.rindex('_acquire_release_deploy_lock "$@"')
         build_call = deploy.index('_with_build_token cargo build', deploy_lock_call)
         clean_call = deploy.rindex('_clean_release_build_cache_after_staging')
+        self.assertLess(reject_call, detach_gate)
         self.assertLess(reject_call, deploy_lock_call)
         self.assertLess(deploy_lock_call, build_call)
         self.assertLess(build_call, clean_call)

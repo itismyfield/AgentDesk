@@ -114,7 +114,7 @@ if ! command -v cargo &>/dev/null; then
 fi
 
 echo "[1/3] Building Rust binary (release)..."
-cargo build --release 2>&1 | tail -1
+_with_build_token cargo build --release 2>&1 | tail -1
 
 BINARY="target/release/${BINARY_NAME}"
 if [ ! -f "$BINARY" ]; then

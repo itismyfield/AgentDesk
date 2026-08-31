@@ -47,6 +47,12 @@ setup_sccache_env() {
   mkdir -p "$SCCACHE_DIR"
 }
 
+_with_build_token() {
+  local defaults_dir
+  defaults_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  python3 "$defaults_dir/build_token.py" -- "$@"
+}
+
 _trim_whitespace() {
   local value="$1"
   value="${value#"${value%%[![:space:]]*}"}"
