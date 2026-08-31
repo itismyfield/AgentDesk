@@ -1496,6 +1496,8 @@ src/
 │   │   ├── registry_purge.rs
 │   │   ├── source_generation.rs
 │   │   └── turn_finished_signal.rs
+│   ├── writer_protocol/
+│   │   └── authority.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
 │   ├── auto_queue.rs
