@@ -185,7 +185,8 @@ mod background_memory_task_tests {
     use super::{
         BackgroundMemoryTask, BackgroundMemoryTaskKind, DiscordSession,
         note_memento_context_from_turn, observe_background_memory_tasks,
-        observe_background_memory_tasks_with_timeout, settings, take_memento_reflect_request,
+        observe_background_memory_tasks_with_timeout, plan_turn_end_memory, settings,
+        take_memento_reflect_request,
     };
     use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
     use crate::services::memory::{CaptureResult, SessionEndReason, TokenUsage};
@@ -357,6 +358,39 @@ mod background_memory_task_tests {
         assert!(take_reflect(&mut session).is_none());
     }
 
+    #[test]
+    fn memento_turn_plan_never_schedules_raw_capture() {
+        let session = live_session();
+        let memento_plan = plan_turn_end_memory(
+            &session,
+            settings::MemoryBackendKind::Memento,
+            false,
+            false,
+            false,
+            true,
+        )
+        .expect("active session plan");
+        let file_plan = plan_turn_end_memory(
+            &session,
+            settings::MemoryBackendKind::File,
+            false,
+            false,
+            false,
+            true,
+        )
+        .expect("active session plan");
+
+        assert!(memento_plan.persist_transcript);
+        assert!(
+            !memento_plan.spawn_capture,
+            "Memento must not receive the raw user/assistant turn"
+        );
+        assert!(
+            file_plan.spawn_capture,
+            "the file backend keeps its existing transcript capture behaviour"
+        );
+    }
+
     fn completed_task(
         kind: BackgroundMemoryTaskKind,
         input_tokens: u64,
@@ -521,16 +555,17 @@ pub(in crate::services::discord) fn take_memento_reflect_request(
 /// #5168: arm the session's memento-reflect gate from the MODEL's own memento
 /// tool calls (path B), replacing the deleted server-side recall gate (path A).
 ///
-/// `session.memento_context_loaded` gates every reflect request through
+/// `session.memento_context_loaded` gates every legacy reflect request through
 /// [`take_memento_reflect_request`] — both the turn-end path
 /// (`completion_postlude`) and the idle-expiry path (`idle_detector`). Under
 /// path A the flag was set at turn INTAKE, right after AgentDesk itself called
 /// memento `recall`/`context` on the model's behalf. Slice 2 (`abb72d261`)
 /// deleted those two intake call sites and with them the only production
 /// writer of the flag, so it stayed `false` forever and reflect stopped firing
-/// everywhere. Reflect is NOT on #5168's removal list — the issue's 24h
-/// measurement counts it as a live feature — so the flag is re-defined for
-/// path B rather than deleted:
+/// everywhere. Reflect was not on #5168's removal list, so the flag remains
+/// defined for path B. The Memento backend now rejects these mechanically
+/// transcript-derived requests before transport; explicit model-owned MCP
+/// `reflect` remains the only persistence path:
 ///
 ///   "memento context entered this session" == "the MODEL called a memento
 ///   `context`/`recall` tool during a turn of this session".
@@ -604,7 +639,12 @@ pub(super) fn plan_turn_end_memory(
         clear_provider_session,
         persist_transcript,
         analyze_recall_feedback: backend == settings::MemoryBackendKind::Memento,
-        spawn_capture: persist_transcript,
+        // A complete transcript remains in AgentDesk's own session store.
+        // Forwarding the raw user/assistant turn to Memento creates a durable
+        // episode, which is neither atomic memory nor guaranteed to fit
+        // Memento's fragment limits. Keep file-backend capture compatibility,
+        // but never schedule the automatic raw-turn writer for Memento.
+        spawn_capture: persist_transcript && backend != settings::MemoryBackendKind::Memento,
     })
 }
 

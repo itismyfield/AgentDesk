@@ -14,6 +14,7 @@ route-level rows with `workspace` metadata, but it does not implement Memento
 - `permanent` is for durable, identity-level knowledge about the user, their environment, and long-lived decisions.
 - `workspace` (session) is for project-, task-, or turn-scoped state that should not pollute the next unrelated session.
 - If a fact has a canonical home in a tracked file (prompt, runtime YAML, policy, doc), Memento MUST NOT mirror it. Re-read the file instead.
+- Raw AgentDesk turns and transcript-tail summaries are session records, not semantic memory. Automatic capture/reflect MUST NOT persist them; only explicit, atomic model-authored memory writes may enter Memento.
 - When unsure, write `workspace`. Promote to `permanent` only after the fact has survived multiple sessions and is not file-canonical.
 
 ## Scope: permanent

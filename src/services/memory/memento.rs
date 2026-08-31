@@ -28,7 +28,6 @@ const MAX_MEMORY_LINES: usize = 6;
 const MAX_SKIP_LINES: usize = 4;
 const MEMENTO_CONTEXT_FULL_TOKEN_BUDGET: u64 = 1_000;
 const MEMENTO_CONTEXT_FULL_TYPES: &[&str] = &["preference", "error", "procedure", "decision"];
-const MAX_CAPTURE_TURN_CHARS: usize = 2_000;
 const MEMENTO_MODEL_OUTPUT_MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug)]
@@ -391,105 +390,6 @@ impl MementoBackend {
         Ok(ContextFetchResult {
             external_recall,
             token_usage: result.token_usage,
-        })
-    }
-
-    async fn reflect_transcript(
-        &self,
-        request: &ReflectRequest,
-        config: &MementoRuntimeConfig,
-        workspace: &str,
-    ) -> Result<TokenUsage, String> {
-        let agent_id = self.resolve_agent_id(&request.role_id, request.channel_id);
-        let mut args = Map::new();
-        args.insert("agentId".to_string(), json!(agent_id));
-        args.insert("sessionId".to_string(), json!(request.session_id));
-        args.insert(
-            "summary".to_string(),
-            json!([build_reflect_summary(request)]),
-        );
-        if !workspace.trim().is_empty() {
-            args.insert("workspace".to_string(), json!(workspace));
-        }
-        note_memento_tool_request("reflect");
-        note_memento_remote_call("reflect");
-        self.call_tool(config, "reflect", Value::Object(args))
-            .await
-            .map(|result| result.token_usage)
-    }
-
-    fn build_capture_remember_request(
-        &self,
-        request: CaptureRequest,
-        workspace: String,
-    ) -> Option<MementoRememberRequest> {
-        let user_text = normalize_whitespace(&request.user_text);
-        let assistant_text = normalize_whitespace(&request.assistant_text);
-        if user_text.is_empty() && assistant_text.is_empty() {
-            return None;
-        }
-
-        let provider = request.provider.as_str().to_string();
-        let agent_id = self.resolve_agent_id(&request.role_id, request.channel_id);
-        let mut content = Vec::new();
-        if !user_text.is_empty() {
-            content.push(format!(
-                "User: {}",
-                truncate_text(&user_text, MAX_CAPTURE_TURN_CHARS)
-            ));
-        }
-        if !assistant_text.is_empty() {
-            content.push(format!(
-                "Assistant: {}",
-                truncate_text(&assistant_text, MAX_CAPTURE_TURN_CHARS)
-            ));
-        }
-
-        let source = match request.dispatch_id.as_deref().map(str::trim) {
-            Some(dispatch_id) if !dispatch_id.is_empty() => format!(
-                "agentdesk:turn_capture/provider:{provider}/channel:{}/session:{}/dispatch:{dispatch_id}",
-                request.channel_id, request.session_id
-            ),
-            _ => format!(
-                "agentdesk:turn_capture/provider:{provider}/channel:{}/session:{}",
-                request.channel_id, request.session_id
-            ),
-        };
-        let topic = request
-            .dispatch_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|dispatch_id| format!("turn {dispatch_id}"))
-            .unwrap_or_else(|| format!("session {} turn", request.session_id));
-
-        Some(MementoRememberRequest {
-            content: content.join("\n"),
-            topic,
-            kind: "episode".to_string(),
-            importance: Some(0.45),
-            keywords: vec![
-                "agentdesk-turn".to_string(),
-                format!("provider:{provider}"),
-                format!("role:{}", request.role_id),
-                format!("session:{}", request.session_id),
-            ],
-            source: Some(source),
-            workspace: Some(workspace),
-            global: false,
-            channel_id: None,
-            channel_name: None,
-            agent_id: Some(agent_id),
-            case_id: request.dispatch_id,
-            goal: (!user_text.is_empty()).then(|| truncate_text(&user_text, 160)),
-            outcome: (!assistant_text.is_empty()).then(|| truncate_text(&assistant_text, 160)),
-            phase: Some("turn_capture".to_string()),
-            resolution_status: None,
-            assertion_status: None,
-            context_summary: Some(format!(
-                "Per-turn AgentDesk capture for provider={provider} role_id={} channel_id={} session_id={}",
-                request.role_id, request.channel_id, request.session_id
-            )),
         })
     }
 
@@ -990,19 +890,6 @@ mod workspace_scope_tests {
     }
 }
 
-fn truncate_text(value: &str, max_chars: usize) -> String {
-    let trimmed = value.trim();
-    if trimmed.chars().count() <= max_chars {
-        return trimmed.to_string();
-    }
-    if max_chars <= 3 {
-        return trimmed.chars().take(max_chars).collect();
-    }
-    let mut shortened = trimmed.chars().take(max_chars - 3).collect::<String>();
-    shortened.push_str("...");
-    shortened
-}
-
 fn truncate_to_byte_boundary(value: &str, max_bytes: usize) -> &str {
     let mut end = max_bytes.min(value.len());
     while end > 0 && !value.is_char_boundary(end) {
@@ -1051,60 +938,6 @@ fn guard_mcp_output_for_model(value: String, max_bytes: usize) -> ModelOutputGua
         original_bytes,
         limit_bytes: max_bytes,
     }
-}
-
-fn summarize_transcript_line(line: &str) -> Option<String> {
-    let line = line.trim();
-    if line.is_empty() || line == "[Stopped]" || line.starts_with("[System]:") {
-        return None;
-    }
-    let (prefix, content) = if let Some(rest) = line.strip_prefix("[User]:") {
-        ("User: ", rest)
-    } else if let Some(rest) = line.strip_prefix("[Assistant]:") {
-        ("Assistant: ", rest)
-    } else if let Some(rest) = line.strip_prefix("[Tool]:") {
-        ("Tool: ", rest)
-    } else {
-        ("", line)
-    };
-    let content = normalize_whitespace(content);
-    if content.is_empty() {
-        return None;
-    }
-    Some(format!("{prefix}{}", truncate_text(&content, 120)))
-}
-
-fn summarize_transcript_for_reflect(transcript: &str) -> Option<String> {
-    let mut lines = Vec::new();
-    for line in transcript.lines().rev() {
-        let Some(line) = summarize_transcript_line(line) else {
-            continue;
-        };
-        if lines.iter().any(|existing| existing == &line) {
-            continue;
-        }
-        lines.push(line);
-        if lines.len() >= 4 {
-            break;
-        }
-    }
-    lines.reverse();
-    if lines.is_empty() {
-        None
-    } else {
-        Some(truncate_text(&lines.join(" | "), 320))
-    }
-}
-
-fn build_reflect_summary(request: &ReflectRequest) -> String {
-    summarize_transcript_for_reflect(&request.transcript).unwrap_or_else(|| {
-        format!(
-            "Session ended via {} for role_id={} channel_id={}",
-            request.reason.as_str(),
-            request.role_id,
-            request.channel_id
-        )
-    })
 }
 
 fn dedup_lines<I>(items: I, limit: usize) -> Vec<String>
@@ -1693,120 +1526,28 @@ impl MemoryBackend for MementoBackend {
 
     fn capture<'a>(&'a self, request: CaptureRequest) -> MemoryFuture<'a, CaptureResult> {
         Box::pin(async move {
-            if request.user_text.trim().is_empty() && request.assistant_text.trim().is_empty() {
-                return CaptureResult {
-                    warnings: vec![
-                        "memento capture skipped because user and assistant text are empty"
-                            .to_string(),
-                    ],
-                    skipped: true,
-                    ..CaptureResult::default()
-                };
-            }
-
-            let config = match self.runtime_config() {
-                Ok(config) => config,
-                Err(err) => {
-                    return CaptureResult {
-                        warnings: vec![err],
-                        skipped: true,
-                        ..CaptureResult::default()
-                    };
-                }
-            };
-            let workspace =
-                self.resolve_workspace(&request.role_id, request.channel_id, None, &config);
-            let Some(remember_request) = self.build_capture_remember_request(request, workspace)
-            else {
-                return CaptureResult {
-                    warnings: vec![
-                        "memento capture skipped because user and assistant text are empty"
-                            .to_string(),
-                    ],
-                    skipped: true,
-                    ..CaptureResult::default()
-                };
-            };
-
-            match tokio::time::timeout(
-                Duration::from_millis(self.settings.capture_timeout_ms),
-                self.remember(remember_request),
-            )
-            .await
-            {
-                Ok(Ok(token_usage)) => CaptureResult {
-                    token_usage,
-                    ..CaptureResult::default()
-                },
-                Ok(Err(err)) => CaptureResult {
-                    warnings: vec![err],
-                    skipped: true,
-                    ..CaptureResult::default()
-                },
-                Err(_) => CaptureResult {
-                    warnings: vec![format!(
-                        "memento capture timed out after {}ms; skipping capture",
-                        self.settings.capture_timeout_ms
-                    )],
-                    skipped: true,
-                    ..CaptureResult::default()
-                },
+            // Raw turns belong to AgentDesk's transcript store, not durable
+            // semantic memory. The previous writer exceeded Memento's 1,000
+            // character episode limit and produced hard-cut `...` fragments.
+            // Explicit model-owned `remember` calls remain available.
+            let _ = request;
+            CaptureResult {
+                skipped: true,
+                ..CaptureResult::default()
             }
         })
     }
 
     fn reflect<'a>(&'a self, request: ReflectRequest) -> MemoryFuture<'a, CaptureResult> {
         Box::pin(async move {
-            if request.transcript.trim().is_empty() {
-                return CaptureResult {
-                    warnings: vec![
-                        "memento reflect skipped because session transcript is empty".to_string(),
-                    ],
-                    skipped: true,
-                    ..CaptureResult::default()
-                };
-            }
-
-            let config = match self.runtime_config() {
-                Ok(config) => config,
-                Err(err) => {
-                    return CaptureResult {
-                        warnings: vec![err],
-                        skipped: true,
-                        ..CaptureResult::default()
-                    };
-                }
-            };
-            let workspace = self.resolve_workspace(
-                &request.role_id,
-                request.channel_id,
-                request.channel_name.as_deref(),
-                &config,
-            );
-
-            match tokio::time::timeout(
-                Duration::from_millis(self.settings.capture_timeout_ms),
-                self.reflect_transcript(&request, &config, &workspace),
-            )
-            .await
-            {
-                Ok(Ok(token_usage)) => CaptureResult {
-                    token_usage,
-                    ..CaptureResult::default()
-                },
-                Ok(Err(err)) => CaptureResult {
-                    warnings: vec![err],
-                    skipped: true,
-                    ..CaptureResult::default()
-                },
-                Err(_) => CaptureResult {
-                    warnings: vec![format!(
-                        "memento reflect timed out after {}ms; skipping reflect",
-                        self.settings.capture_timeout_ms
-                    )],
-                    skipped: true,
-                    ..CaptureResult::default()
-                },
+            // A transcript tail is not a self-contained fact. Passing the
+            // former 320-character mechanical summary to `reflect` created a
+            // 300+`...` fact and then a duplicate episode. Keep explicit MCP
+            // reflect calls model-owned; the automatic backend sink is inert.
+            let _ = request;
+            CaptureResult {
+                skipped: true,
+                ..CaptureResult::default()
             }
         })
     }
@@ -1815,6 +1556,7 @@ impl MemoryBackend for MementoBackend {
 #[cfg(test)]
 mod static_slice_cache_tests {
     use super::*;
+    use crate::services::provider::ProviderKind;
     use serde_json::json;
 
     /// #5185: `clear_static_slice_cache()` wipes one process-global map, and
@@ -1832,6 +1574,51 @@ mod static_slice_cache_tests {
     fn cache_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    #[tokio::test]
+    async fn automatic_turn_capture_and_transcript_reflect_never_reach_memento_writers() {
+        let backend = MementoBackend::new(ResolvedMemorySettings {
+            backend: crate::services::discord::settings::MemoryBackendKind::Memento,
+            ..ResolvedMemorySettings::default()
+        });
+
+        // These payloads cross both truncation boundaries that previously
+        // yielded 1,003-character episodes and 303-character reflect rows.
+        let capture = backend
+            .capture(CaptureRequest {
+                provider: ProviderKind::Codex,
+                role_id: "project-agentdesk".to_string(),
+                channel_id: 42,
+                session_id: "provider-session".to_string(),
+                dispatch_id: None,
+                user_text: "u".repeat(2_500),
+                assistant_text: "a".repeat(2_500),
+            })
+            .await;
+        let reflect = backend
+            .reflect(ReflectRequest {
+                provider: ProviderKind::Codex,
+                role_id: "project-agentdesk".to_string(),
+                channel_id: 42,
+                channel_name: Some("agentdesk".to_string()),
+                session_id: "provider-session".to_string(),
+                reason: crate::services::memory::SessionEndReason::IdleExpiry,
+                transcript: "[Assistant]: progress update\n".repeat(40),
+            })
+            .await;
+
+        for result in [capture, reflect] {
+            assert!(result.skipped, "automatic persistence must stay disabled");
+            assert!(
+                result.warnings.is_empty(),
+                "policy skip is not a transport/runtime failure"
+            );
+            assert!(
+                result.token_usage.is_zero(),
+                "a skipped writer must not report an MCP call"
+            );
+        }
     }
 
     // #2660 — static-slice cache behaviour
