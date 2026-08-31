@@ -1,6 +1,7 @@
 from __future__ import annotations
 from contextlib import nullcontext, redirect_stderr
 import ctypes
+from hashlib import sha256
 import importlib.util
 import inspect
 import io
@@ -14,7 +15,6 @@ import time
 import unittest
 from unittest import mock
 import uuid
-import yaml
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "scripts" / "build_token_win32.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci-pr.yml"
@@ -51,13 +51,14 @@ def wait_path(path: Path, timeout: float = 5.0) -> None:
             return
         time.sleep(0.02)
     raise AssertionError(f"timed out waiting for {path}")
-class _TraceApi:
-    def assign_job(self, _job: object, _child: object, trace: list[str]) -> None:
-        trace.append("assign-job")
-    def resume_primary(self, _child: object, trace: list[str]) -> None:
-        trace.append("resume-primary")
-    def close_primary(self, _child: object, trace: list[str]) -> None:
-        trace.append("close-thread")
+def _workflow_block(text: str, exact_header: str) -> str:
+    lines = text.splitlines()
+    matches = [index for index, line in enumerate(lines) if line == exact_header]
+    assert len(matches) == 1, f"expected one workflow header {exact_header!r}, found {len(matches)}"
+    start, indent = matches[0], len(exact_header) - len(exact_header.lstrip())
+    end = next((index for index in range(start + 1, len(lines)) if lines[index].strip() and len(lines[index]) - len(lines[index].lstrip()) <= indent), len(lines))
+    while end > start + 1 and not lines[end - 1].strip(): end -= 1
+    return "\n".join(lines[start:end])
 class _CoreApi:
     def __init__(self, fail: str | None = None) -> None:
         self.fail, self.closed, self.released = fail, [], 0
@@ -97,8 +98,7 @@ class _CoreApi:
         return 0
     def terminate_job(self, _job: object, _code: int) -> None:
         pass
-    def terminate_process(self, _child: object, _code: int) -> None:
-        pass
+    terminate_process = terminate_job
     def generate_break(self, _pid: int) -> bool:
         return True
 class PortableWin32BuildTokenContractTests(unittest.TestCase):
@@ -144,10 +144,10 @@ class PortableWin32BuildTokenContractTests(unittest.TestCase):
             module._prepare_process_inputs(["cargo"], {"PATH": "a", "Path": "b"})
     def test_suspended_child_is_assigned_before_primary_thread_resumes(self):
         trace = ["create-suspended"]
-        module._assign_and_resume(_TraceApi(), object(), object(), trace)
+        module._assign_and_resume(_CoreApi(), object(), mock.Mock(), trace)
         self.assertEqual(trace, ["create-suspended", "assign-job", "resume-primary", "close-thread"])
         cancelled = ["create-suspended"]
-        self.assertFalse(module._assign_and_resume(_TraceApi(), object(), object(), cancelled, lambda: True))
+        self.assertFalse(module._assign_and_resume(_CoreApi(), object(), mock.Mock(), cancelled, lambda: True))
         self.assertEqual(cancelled, ["create-suspended", "assign-job"])
     def test_create_assign_resume_wait_failures_cleanup_every_handle_once(self):
         prepared = ("dummy.exe", object(), object())
@@ -182,16 +182,16 @@ class PortableWin32BuildTokenContractTests(unittest.TestCase):
                 self.assertEqual(module._supervise_windows(["x"], {}, cancelled, relay=relay, trace=[]), 128 + signal.SIGTERM)
             self.assertEqual(cancelled.closed, [1]); self.assertEqual(cancelled.released, releases)
     def test_helper_only_change_selects_windows_required_lane(self):
-        jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
-        win = jobs["win32_build_token"]
-        self.assertEqual((win["needs"], win["if"], win["runs-on"]),
-                         ("changes", "needs.changes.outputs.win32_build_token == 'true'", "windows-latest"))
-        self.assertEqual(win["steps"], [
-            {"uses": "actions/checkout@v4"}, {"uses": "actions/setup-python@v5", "with": {"python-version": "3.11"}}, {"shell": "pwsh", "run": 'git cat-file -e "HEAD:scripts/build_token_win32.py" && git cat-file -e "HEAD:tests/test_build_token_win32_5663.py" && python -m unittest -v tests.test_build_token_win32_5663'}])
-        mirror = jobs["win32_build_token_required_context"]
-        self.assertEqual((mirror["needs"], mirror.get("if"), mirror["runs-on"]), (["changes", "win32_build_token"], "always()", "ubuntu-latest"))
-        self.assertEqual(mirror["steps"], [
-            {"uses": "actions/checkout@v4"}, {"env": {"CHANGED_PATHS_RESULT": "${{ needs.changes.result }}", "FILTER_NAME": "win32_build_token", "FILTER_OUTPUT": "${{ needs.changes.outputs.win32_build_token }}", "UPSTREAM_JOB_NAME": "win32_build_token", "UPSTREAM_RESULT": "${{ needs.win32_build_token.result }}"}, "run": "./scripts/required-check-mirror.sh"}])
+        text = WORKFLOW.read_text(encoding="utf-8")
+        outputs = _workflow_block(text, "    outputs:")
+        filters = _workflow_block(text, "          filters: |")
+        native = _workflow_block(text, "  win32_build_token:")
+        mirror = _workflow_block(text, "  win32_build_token_required_context:")
+        for block, line in ((outputs, "      win32_build_token: ${{ steps.filter.outputs.win32_build_token }}"), (filters, "            win32_build_token: ['scripts/build_token_win32.py', 'tests/test_build_token_win32_5663.py', '.github/workflows/ci-pr.yml']"), (native, "    runs-on: windows-latest"), (mirror, "    if: always()")):
+            self.assertEqual(block.count(line), 1)
+        self.assertEqual(sha256(native.encode()).hexdigest(), "9967076fc22441fddebb330d21a4f996047147fa4a854cf7e127ab58d97a9753")
+        self.assertEqual(sha256(mirror.encode()).hexdigest(), "d12fa02cb7cbd6b3a72ee4f4df2d148abba62abc9a1ee42f7da1e3bb88e296df")
+        self.assertEqual(sha256((native + "\0" + mirror).encode()).hexdigest(), "c7959d0b8bd23e73c983d3969caf701b3bab283f66b3329f99e29813ddcf80e8")
 @unittest.skipUnless(sys.platform == "win32", "native Win32 contract")
 class NativeWin32BuildTokenContractTests(unittest.TestCase):
     def nonce(self) -> str:
