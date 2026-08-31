@@ -23,12 +23,9 @@ pub(super) struct NormalizedAbsolute(LexicalDialect, Vec<u8>);
 impl NormalizedAbsolute {
     fn contains(&self, candidate: &Self) -> bool {
         self.0 == candidate.0
-            && candidate
-                .1
-                .strip_prefix(self.1.as_slice())
-                .is_some_and(|suffix| {
-                    suffix.is_empty() || self.1.ends_with(b"/") || suffix.starts_with(b"/")
-                })
+            && candidate.1.strip_prefix(&self.1[..]).is_some_and(|suffix| {
+                suffix.is_empty() || self.1.ends_with(b"/") || suffix.starts_with(b"/")
+            })
     }
 }
 
@@ -46,9 +43,12 @@ impl SealedLexicalRoot {
         &self,
         input: &[u8],
     ) -> Result<Option<NormalizedAbsolute>, LexicalError> {
-        std::str::from_utf8(input).map_err(|_| LexicalError::NonUtf8)?;
-        let candidate = NormalizedAbsolute(self.0.0, input.to_vec());
-        Ok(self.contains(&candidate).then_some(candidate))
+        let candidate =
+            normalize_absolute(self.0.0, input, false)?.filter(|value| self.contains(value));
+        match candidate {
+            None if two_separators(input) => Err(LexicalError::UnsupportedLexicalPrefix),
+            candidate => Ok(candidate),
+        }
     }
 
     pub(super) fn contains(&self, candidate: &NormalizedAbsolute) -> bool {
@@ -121,11 +121,9 @@ fn normalize_absolute(
             || components.len() < 2
             || (registering_root && components.len() != 2))
     {
-        let error = if registering_root {
-            LexicalError::MalformedRoot
-        } else {
-            LexicalError::UnsupportedLexicalPrefix
-        };
+        let error = registering_root
+            .then_some(LexicalError::MalformedRoot)
+            .unwrap_or(LexicalError::UnsupportedLexicalPrefix);
         return Err(error);
     }
     let normalized = format!("{prefix}{}", components.join("/")).into_bytes();
