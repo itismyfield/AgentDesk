@@ -11,11 +11,15 @@ pub(super) enum DirHandle {}
 #[cfg(test)]
 pub(super) type DirHandle = ();
 pub(super) type FileHandle = ();
+pub(super) type MutationLock = ();
 pub(super) const MUTATION_SUPPORTED: bool = false;
 pub(super) const REGULAR_READ_SUPPORTED: bool = false;
 pub(super) const SEALED_STAGE_SUPPORTED: bool = false;
 
 pub(in super::super) fn open_runtime_root(_: &Path) -> Result<ConfinedRuntimeRoot, FsError> {
+    Err(FsError::unsupported())
+}
+pub(super) fn lock_mutation(_: &ConfinedRuntimeRoot) -> Result<MutationLock, FsError> {
     Err(FsError::unsupported())
 }
 pub(super) fn open_or_create_child(_: PreparedChild) -> DirectoryMutation {
@@ -28,13 +32,9 @@ pub(super) fn read_bounded(_: FileHandle, _: usize) -> Result<BoundedRead, FsErr
     Err(FsError::unsupported())
 }
 pub(super) fn create_stage(_: PreparedStage) -> Result<PlatformStageCreation, FsError> {
-    #[cfg(test)]
-    UNSUPPORTED_STAGE_CALLERS.with(|callers| callers.set(callers.get() + 1));
     Err(FsError::unsupported())
 }
 pub(super) fn seal_stage(_: PreparedSeal, _: &[u8]) -> Result<PinnedStage, FsError> {
-    #[cfg(test)]
-    UNSUPPORTED_STAGE_CALLERS.with(|callers| callers.set(callers.get() + 1));
     Err(FsError::unsupported())
 }
 pub(super) fn link_stage(
@@ -44,8 +44,6 @@ pub(super) fn link_stage(
     _: &DirectoryLocator,
     _: DirectoryIdentity,
 ) -> Result<SealedLinkFacts, FsError> {
-    #[cfg(test)]
-    UNSUPPORTED_STAGE_CALLERS.with(|callers| callers.set(callers.get() + 1));
     Err(FsError::unsupported())
 }
 pub(super) fn cleanup_stage(
@@ -53,13 +51,8 @@ pub(super) fn cleanup_stage(
     _: &DirectoryLocator,
     _: super::OpenDirectoryFact,
 ) -> StageCleanup {
-    #[cfg(test)]
-    UNSUPPORTED_STAGE_CALLERS.with(|callers| callers.set(callers.get() + 1));
     StageCleanup::Rejected(FsError::unsupported())
 }
-
-#[cfg(test)]
-thread_local! { static UNSUPPORTED_STAGE_CALLERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 #[cfg(test)]
 mod high_risk_recovery {
@@ -98,7 +91,6 @@ mod high_risk_recovery {
             inode: 0,
         };
         super::super::take_preflight_activity();
-        UNSUPPORTED_STAGE_CALLERS.with(|callers| callers.set(0));
         let error =
             super::super::prepare_locator(MUTATION_SUPPORTED, &root, (&foreign, identity), "..")
                 .unwrap_err();
@@ -175,7 +167,17 @@ mod high_risk_recovery {
         assert!(
             matches!(cleanup_stage(&dir, &locator, open), StageCleanup::Rejected(error) if error.kind() == FsErrorKind::UnsupportedPlatform)
         );
-        assert_eq!(UNSUPPORTED_STAGE_CALLERS.with(std::cell::Cell::get), 4);
+        let runtime = ConfinedRuntimeRoot {
+            lineage: super::super::RootLineage {
+                anchor: identity,
+                root: identity,
+            },
+            directory: dir,
+        };
+        assert_eq!(
+            lock_mutation(&runtime).unwrap_err().kind(),
+            FsErrorKind::UnsupportedPlatform
+        );
         assert_eq!(super::super::take_preflight_activity(), 0);
     }
 }

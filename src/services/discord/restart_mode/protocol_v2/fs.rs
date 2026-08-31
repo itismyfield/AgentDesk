@@ -61,8 +61,11 @@ impl ConfinedRuntimeRoot {
         self.directory.open.identity
     }
 
-    fn mutation_session(&mut self) -> MutationSession<'_> {
-        MutationSession(self)
+    fn mutation_session(&mut self) -> Result<MutationSession<'_>, FsError> {
+        Ok(MutationSession {
+            lock: platform::lock_mutation(self)?,
+            root: self,
+        })
     }
 
     fn open_regular(&self, parent: &ConfinedDir, value: &str) -> Result<RegularFile, FsError> {
@@ -186,7 +189,7 @@ impl DirectoryMutation {
     }
 }
 
-struct MutationSession<'root>(&'root mut ConfinedRuntimeRoot);
+#[rustfmt::skip] struct MutationSession<'root> { lock: platform::MutationLock, root: &'root mut ConfinedRuntimeRoot }
 
 impl<'root> MutationSession<'root> {
     fn open_or_create_child(&mut self, parent: &ConfinedDir, value: &str) -> DirectoryMutation {
@@ -204,7 +207,7 @@ impl<'root> MutationSession<'root> {
     ) -> Result<PreparedChild, FsError> {
         let locator = prepare_locator(
             platform::MUTATION_SUPPORTED,
-            &self.0.directory.seal,
+            &self.root.directory.seal,
             (&parent.seal, parent.open.identity),
             value,
         )?;
@@ -218,7 +221,7 @@ impl<'root> MutationSession<'root> {
     ) -> Result<StageCreation<'session, 'root>, FsError> {
         let locator = prepare_locator(
             platform::SEALED_STAGE_SUPPORTED,
-            &self.0.directory.seal,
+            &self.root.directory.seal,
             (&parent.seal, parent.open.identity),
             value,
         )?;
@@ -286,7 +289,7 @@ impl<'session, 'root> SyncedStage<'session, 'root> {
         let mut token = self.token;
         let target_locator = match prepare_locator(
             platform::SEALED_STAGE_SUPPORTED,
-            &token.session.0.directory.seal,
+            &token.session.root.directory.seal,
             (&target_parent.seal, target_parent.open.identity),
             value,
         ) {
@@ -377,7 +380,7 @@ fn reduce_sealed_link(facts: SealedLinkFacts) -> SealedLinkDisposition {
 }
 
 fn cleanup_token(token: StageToken<'_, '_>) -> StageCleanup {
-    if !Arc::ptr_eq(&token.session.0.directory.seal, &token.parent.seal) {
+    if !Arc::ptr_eq(&token.session.root.directory.seal, &token.parent.seal) {
         return StageCleanup::Rejected(FsError::cross_lineage());
     }
     let DirectoryLocator::Child { parent, .. } = &token.locator else {
@@ -497,6 +500,8 @@ pub(super) enum FsOperation {
     SyncFile,
     Link,
     Unlink,
+    LockMutation,
+    Chmod,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -533,6 +538,10 @@ pub(super) enum FsErrorKind {
     DirectoryAlias {
         source: DirectoryIdentity,
         target: DirectoryIdentity,
+    },
+    ModeMismatch {
+        expected: u32,
+        actual: u32,
     },
     ReadLimitOverflow {
         limit: usize,
@@ -604,6 +613,12 @@ impl FsError {
     fn directory_alias(source: DirectoryIdentity, target: DirectoryIdentity) -> Self {
         Self {
             kind: FsErrorKind::DirectoryAlias { source, target },
+        }
+    }
+
+    fn mode_mismatch(expected: u32, actual: u32) -> Self {
+        Self {
+            kind: FsErrorKind::ModeMismatch { expected, actual },
         }
     }
 

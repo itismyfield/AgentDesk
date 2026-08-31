@@ -19,6 +19,7 @@ use std::{
 
 pub(super) type DirHandle = OwnedFd;
 pub(super) type FileHandle = OwnedFd;
+pub(super) type MutationLock = OwnedFd;
 pub(super) const MUTATION_SUPPORTED: bool = true;
 pub(super) const REGULAR_READ_SUPPORTED: bool = true;
 pub(super) const SEALED_STAGE_SUPPORTED: bool = true;
@@ -63,6 +64,15 @@ pub(in super::super) fn open_runtime_root(path: &Path) -> Result<ConfinedRuntime
             locator,
         },
     })
+}
+
+#[rustfmt::skip] pub(super) fn lock_mutation(root: &ConfinedRuntimeRoot) -> Result<MutationLock, FsError> {
+    let (fd, opened) = open_directory(root.directory.fd.as_raw_fd(), c".")?;
+    #[cfg(test)]
+    TRACE.with(|trace| { let mut trace = trace.borrow_mut(); let keep = trace.len().saturating_sub(2); trace.truncate(keep); });
+    if opened.identity != root.directory.open.identity { return Err(FsError::identity_mismatch(root.directory.open.identity, opened.identity)); }
+    if unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == -1 { return Err(FsError::io(FsOperation::LockMutation, last_errno())); }
+    Ok(fd)
 }
 
 fn parse_root(path: &Path) -> Result<RootPlan, FsError> {
@@ -285,8 +295,6 @@ pub(super) fn create_stage(prepared: PreparedStage) -> Result<PlatformStageCreat
     let PreparedStage(parent, locator) = prepared;
     let name = child_component(&locator);
     let parent_fd = parent.fd.as_raw_fd();
-    #[cfg(test)]
-    STAGE_CREATE_MODES.with(|modes| modes.borrow_mut().push(CREATE_STAGE_MODE as u32));
     let (_, errno, fd) = mutation_call(
         FsOperation::Open,
         (parent_fd, name, CREATE_STAGE_FLAGS),
@@ -301,7 +309,21 @@ pub(super) fn create_stage(prepared: PreparedStage) -> Result<PlatformStageCreat
         |raw_fd| (unsafe { OwnedFd::from_raw_fd(raw_fd) }, None),
     );
     if let Some(fd) = fd {
+        let (_, errno, changed) = mutation_call(
+            FsOperation::Chmod,
+            (fd.as_raw_fd(), c"", CREATE_STAGE_MODE as i32),
+            || unsafe { libc::fchmod(fd.as_raw_fd(), CREATE_STAGE_MODE) },
+            |_| ((), None),
+        );
+        if let Some(raw) = errno {
+            return Err(FsError::io(FsOperation::Chmod, raw));
+        }
+        debug_assert!(changed.is_some());
         let opened = verify_regular_fd(&fd)?;
+        let mode = opened.file_type.mode & 0o7777;
+        if mode != CREATE_STAGE_MODE as u32 {
+            return Err(FsError::mode_mismatch(CREATE_STAGE_MODE as u32, mode));
+        }
         return Ok(PlatformStageCreation::Writer(fd, opened));
     }
     let raw = errno.expect("failed stage create has errno");
@@ -413,12 +435,6 @@ pub(super) fn link_stage(
         result,
         reported_errno,
     );
-    #[cfg(test)]
-    POST_LINK.with(|hook| {
-        if let Some(hook) = hook.borrow_mut().take() {
-            hook();
-        }
-    });
     let link = reported_errno.map_or(Attempt::Succeeded(()), |raw_errno| {
         Attempt::Failed(super::IoFact {
             operation: FsOperation::Link,
@@ -779,16 +795,6 @@ pub(super) struct MutationTrace(FsOperation, (RawFd, Box<[u8]>, i32), i32, Optio
 
 #[cfg(test)]
 #[derive(Debug)]
-struct LinkCall {
-    stage_fd: RawFd,
-    stage_component: Box<[u8]>,
-    target_fd: RawFd,
-    target_component: Box<[u8]>,
-    flags: libc::c_int,
-}
-
-#[cfg(test)]
-#[derive(Debug)]
 struct OpenResult {
     parent_fd: RawFd,
     component: Box<[u8]>,
@@ -817,13 +823,10 @@ thread_local! {
     static INJECTED_FSTAT_FACT: std::cell::Cell<Option<OpenDirectoryFact>> = const { std::cell::Cell::new(None) };
     static PANIC_AFTER_OPEN_ADOPTION: std::cell::Cell<Option<RawFd>> = const { std::cell::Cell::new(None) };
     static POST_OBSERVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static STAGE_CREATE_MODES: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
     static STAGE_WRITE_LIMIT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static POST_STAGE_SYNC: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static LINK_REPORTED_ERRNO: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
-    static POST_LINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static POST_UNLINK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    static LINK_CALLS: std::cell::RefCell<Vec<LinkCall>> = const { std::cell::RefCell::new(Vec::new()) };
     static ACTUAL_FSYNC_FDS: std::cell::RefCell<Vec<RawFd>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -895,15 +898,7 @@ fn record_link(
             None,
         ));
     });
-    LINK_CALLS.with(|calls| {
-        calls.borrow_mut().push(LinkCall {
-            stage_fd,
-            stage_component: stage_component.to_bytes().into(),
-            target_fd,
-            target_component: target_component.to_bytes().into(),
-            flags,
-        });
-    });
+    let _ = (target_component, flags);
 }
 
 #[cfg(test)]
@@ -937,13 +932,13 @@ mod high_risk_recovery {
 
         let cwd = std::env::current_dir().unwrap(); let temp = tempfile::tempdir_in(&cwd).unwrap(); let base = temp.path(); let stage_path = base.join("stage"); let target_path = base.join("target"); fs::create_dir_all(&stage_path).unwrap(); fs::create_dir_all(&target_path).unwrap();
         let relative = base.strip_prefix(&cwd).unwrap(); let mut root = open_runtime_root(relative).unwrap(); let other = open_runtime_root(relative).unwrap(); let parent = root.directory.clone(); let foreign = other.directory.clone();
-        let mut setup = root.mutation_session(); let (_, stage) = attempted(setup.open_or_create_child(&parent, "stage")); let (_, target) = attempted(setup.open_or_create_child(&parent, "target")); let stage = stage.unwrap(); let target = target.unwrap(); drop(setup); take_mutation_evidence(); STAGE_CREATE_MODES.with(|modes| modes.borrow_mut().clear()); LINK_CALLS.with(|calls| calls.borrow_mut().clear()); ACTUAL_FSYNC_FDS.with(|fds| fds.borrow_mut().clear());
-        let mut session = root.mutation_session(); let writer = stage_writer(&mut session, &stage, "main"); let writer_fd = writer.writer.as_raw_fd(); STAGE_WRITE_LIMIT.with(|limit| limit.set(Some(2))); let synced = writer.seal(b"abcdef").unwrap(); let sealed = synced.token.sealed; let sealed_fd = synced.token.sealed_fd.as_raw_fd();
-        let (_, trace) = take_mutation_evidence(); assert_eq!(STAGE_CREATE_MODES.with(|modes| std::mem::take(&mut *modes.borrow_mut())), [0o600]); assert_eq!(ACTUAL_FSYNC_FDS.with(|fds| std::mem::take(&mut *fds.borrow_mut())), [writer_fd]); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Open, GetFdFlags, Fstat, Write, Write, SyncFile, Observe, Open, GetFdFlags, Fstat]);
+        let mut setup = root.mutation_session().unwrap(); let (_, stage) = attempted(setup.open_or_create_child(&parent, "stage")); let (_, target) = attempted(setup.open_or_create_child(&parent, "target")); let stage = stage.unwrap(); let target = target.unwrap(); drop(setup); take_mutation_evidence(); ACTUAL_FSYNC_FDS.with(|fds| fds.borrow_mut().clear());
+        let mut session = root.mutation_session().unwrap(); let writer = stage_writer(&mut session, &stage, "main"); let writer_fd = writer.writer.as_raw_fd(); STAGE_WRITE_LIMIT.with(|limit| limit.set(Some(2))); let synced = writer.seal(b"abcdef").unwrap(); let sealed = synced.token.sealed; let sealed_fd = synced.token.sealed_fd.as_raw_fd();
+        let (_, trace) = take_mutation_evidence(); assert_eq!(ACTUAL_FSYNC_FDS.with(|fds| std::mem::take(&mut *fds.borrow_mut())), [writer_fd]); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Open, GetFdFlags, Fstat, Write, Write, SyncFile, Observe, Open, GetFdFlags, Fstat]);
         assert_eq!((trace[0].1.0, &*trace[0].1.1, trace[0].1.2, trace[0].2), (stage.fd.as_raw_fd(), b"main".as_slice(), EXPECTED_STAGE_CREATE_FLAGS, writer_fd)); assert_eq!((trace[3].1.2, trace[3].2, trace[4].1.2, trace[4].2), (2, 2, 4, 4)); assert_closed(writer_fd); assert_ne!(unsafe { libc::fcntl(sealed_fd, libc::F_GETFD) }, -1); assert_eq!(fs::read(stage_path.join("main")).unwrap(), b"abcdef");
         let meta = fs::metadata(stage_path.join("main")).unwrap(); assert_eq!((meta.mode() & 0o777, sealed.identity), (0o600, DirectoryIdentity { device: meta.dev(), inode: meta.ino() })); assert!(matches!(&synced.token.locator, DirectoryLocator::Child { parent, component } if (*parent, component.as_bytes()) == (stage.open.identity, b"main")));
 
-        take_mutation_evidence(); ACTUAL_FSYNC_FDS.with(|fds| fds.borrow_mut().clear()); let LinkOutcome::Durable(durable) = synced.link(&target, "canonical") else { panic!("different-parent link was not durable") }; let (_, trace) = take_mutation_evidence(); let calls = LINK_CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut())); assert_eq!(ACTUAL_FSYNC_FDS.with(|fds| std::mem::take(&mut *fds.borrow_mut())), [target.fd.as_raw_fd()]); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Link, Observe, SyncParent]); assert_eq!(calls.len(), 1); let call = &calls[0]; assert_eq!((call.stage_fd, &*call.stage_component, call.target_fd, &*call.target_component, call.flags), (stage.fd.as_raw_fd(), b"main".as_slice(), target.fd.as_raw_fd(), b"canonical".as_slice(), 0));
+        take_mutation_evidence(); ACTUAL_FSYNC_FDS.with(|fds| fds.borrow_mut().clear()); let LinkOutcome::Durable(durable) = synced.link(&target, "canonical") else { panic!("different-parent link was not durable") }; let (_, trace) = take_mutation_evidence(); assert_eq!(ACTUAL_FSYNC_FDS.with(|fds| std::mem::take(&mut *fds.borrow_mut())), [target.fd.as_raw_fd()]); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Link, Observe, SyncParent]); assert_eq!((trace[0].1.0, &*trace[0].1.1, trace[0].1.2), (stage.fd.as_raw_fd(), b"main".as_slice(), target.fd.as_raw_fd())); assert!(target_path.join("canonical").exists());
         assert_eq!(durable.evidence, LinkedNormally); assert!(matches!(durable.facts.link, Attempt::Succeeded(())) && matches!(durable.facts.target, Attempt::Succeeded(Some(fact)) if fact.identity == sealed.identity) && matches!(durable.facts.parent_sync, Attempt::Succeeded(())));
         take_mutation_evidence(); ACTUAL_FSYNC_FDS.with(|fds| fds.borrow_mut().clear()); let MaintenanceCleanup(cleanup) = durable.cleanup(super::super::post_verification_cleanup_grant()); let cleanup = cleanup_facts(cleanup); let (_, trace) = take_mutation_evidence(); assert_eq!(ACTUAL_FSYNC_FDS.with(|fds| std::mem::take(&mut *fds.borrow_mut())), [stage.fd.as_raw_fd()]); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Observe, Unlink, Observe, SyncParent]); assert_eq!((cleanup.unlink, cleanup.observe, cleanup.parent_sync), (Attempt::Succeeded(()), Attempt::Succeeded(None), Attempt::Succeeded(()))); assert!(!stage_path.join("main").exists() && target_path.join("canonical").exists());
 
@@ -952,7 +947,7 @@ mod high_risk_recovery {
         let writer = stage_writer(&mut session, &stage, "pin-nonregular"); let writer_fd = writer.writer.as_raw_fd(); let injected = OpenDirectoryFact { identity: writer.writer_open.identity, file_type: DirectoryTypeFact { mode: libc::S_IFIFO as u32 | 0o600 } }; take_mutation_evidence(); INJECTED_FSTAT_FACT.with(|fact| fact.set(Some(injected))); MUTATION_FAULT.with(|fault| fault.set(Some((Fstat, 0, None)))); let Err(error) = writer.seal(b"x") else { panic!("nonregular pin was accepted") }; let (_, trace) = take_mutation_evidence(); assert!(matches!(error.kind(), FsErrorKind::NotRegular(fact) if fact == injected.file_type)); assert_closed(writer_fd); assert_closed(trace[3].2); fs::remove_file(stage_path.join("pin-nonregular")).unwrap();
 
         take_mutation_evidence(); MUTATION_FAULT.with(|fault| fault.set(Some((Write, -1, Some(libc::EINTR))))); let alias_synced = synced_stage(&mut session, &stage, "alias", b"retry"); let (_, trace) = take_mutation_evidence(); let writes = trace.iter().filter(|row| row.0 == Write).collect::<Vec<_>>(); assert_eq!((writes.len(), writes[0].3, writes[1].3), (2, Some(libc::EINTR), None)); let mut case_alias = stage.clone(); case_alias.locator = DirectoryLocator::Child { parent: stage.open.identity, component: CString::new("STAGE").unwrap() };
-        take_mutation_evidence(); let LinkOutcome::Prelink(alias) = alias_synced.link(&case_alias, "CANONICAL") else { panic!("directory alias was not pre-link") }; assert!(matches!(alias.error.kind(), FsErrorKind::DirectoryAlias { source, target } if source == target)); let (activity, trace) = take_mutation_evidence(); assert_eq!((activity, trace.is_empty(), LINK_CALLS.with(|calls| calls.borrow().len())), (3, true, 0));
+        take_mutation_evidence(); let LinkOutcome::Prelink(alias) = alias_synced.link(&case_alias, "CANONICAL") else { panic!("directory alias was not pre-link") }; assert!(matches!(alias.error.kind(), FsErrorKind::DirectoryAlias { source, target } if source == target)); let (activity, trace) = take_mutation_evidence(); assert_eq!((activity, trace.is_empty()), (3, true));
         let alias_retired = stage_path.join("alias-retired"); fs::rename(stage_path.join("alias"), &alias_retired).unwrap(); fs::write(stage_path.join("alias"), b"retry").unwrap(); take_mutation_evidence(); assert!(matches!(alias.cleanup(), StageCleanup::Rejected(error) if matches!(error.kind(), FsErrorKind::IdentityMismatch { observed, opened } if observed != opened))); let (_, trace) = take_mutation_evidence(); assert_eq!(trace.iter().map(|row| row.0).collect::<Vec<_>>(), [Observe]); fs::remove_file(stage_path.join("alias")).unwrap(); fs::remove_file(alias_retired).unwrap();
 
         let cross = synced_stage(&mut session, &stage, "cross", b"x"); take_mutation_evidence(); let LinkOutcome::Prelink(cross) = cross.link(&foreign, "..") else { panic!("cross-lineage link was not pre-link") }; assert_eq!(cross.error.kind(), FsErrorKind::CrossLineage); let (activity, trace) = take_mutation_evidence(); assert_eq!((activity, trace.is_empty()), (0, true)); assert!(matches!(cleanup_facts(cross.cleanup()).unlink, Attempt::Succeeded(())));
@@ -999,7 +994,7 @@ mod high_risk_recovery {
         use FsOperation::*; use std::io::Write as _;
         let cwd = std::env::current_dir().unwrap(); let temp = tempfile::tempdir_in(&cwd).unwrap(); let path = temp.path(); let nested_path = path.join("nested"); fs::create_dir(&nested_path).unwrap();
         if fifo_only { fs::write(nested_path.join("fifo-race"), b"regular").unwrap(); }
-        let relative = path.strip_prefix(&cwd).unwrap(); let mut root = open_runtime_root(relative).unwrap(); let parent = root.directory.clone(); let mut session = root.mutation_session(); let (_, nested) = attempted(session.open_or_create_child(&parent, "nested")); let nested = nested.unwrap(); drop(session); take_mutation_evidence();
+        let relative = path.strip_prefix(&cwd).unwrap(); let mut root = open_runtime_root(relative).unwrap(); let parent = root.directory.clone(); let mut session = root.mutation_session().unwrap(); let (_, nested) = attempted(session.open_or_create_child(&parent, "nested")); let nested = nested.unwrap(); drop(session); take_mutation_evidence();
         if fifo_only {
             let fifo_race = nested_path.join("fifo-race"); MUTATION_FAULT.with(|fault| fault.set(Some((GetFdFlags, libc::FD_CLOEXEC, None))));
             POST_OBSERVE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || { fs::remove_file(&fifo_race).unwrap(); make_fifo(&fifo_race); print!("{FIFO_READY}\n"); std::io::stdout().flush().unwrap(); })));
@@ -1043,7 +1038,7 @@ mod high_risk_recovery {
         fs::write(path.join("file"), b"x").unwrap(); std::os::unix::fs::symlink(path, path.join("link")).unwrap();
         let mut root = open_runtime_root(relative).unwrap(); let other = open_runtime_root(relative).unwrap();
         let parent = root.directory.clone(); let foreign = other.directory.clone(); let parent_fd = parent.fd.as_raw_fd();
-        let mut session = root.mutation_session(); let old_umask = unsafe { libc::umask(0o027) };
+        let mut session = root.mutation_session().unwrap(); let old_umask = unsafe { libc::umask(0o027) };
         fs::DirBuilder::new().mode(0o700).create(path.join("control")).unwrap(); fs::DirBuilder::new().mode(0o750).create(path.join("existing")).unwrap();
         take_mutation_evidence(); let (fresh, fresh_child) = attempted(session.open_or_create_child(&parent, "fresh")); unsafe { libc::umask(old_umask) };
         let fresh_child = fresh_child.unwrap(); let (activity, trace) = take_mutation_evidence(); assert_eq!(activity, 15); assert_facts(&fresh, &trace);
@@ -1280,7 +1275,7 @@ mod high_risk_recovery {
         let foreign = other.directory.clone();
         let parent = root.directory.clone();
         let parent_identity = root.identity();
-        let mut session = root.mutation_session();
+        let mut session = root.mutation_session().unwrap();
         super::super::take_preflight_activity();
         let error = session.prepare_child(&foreign, "..").unwrap_err();
         assert_eq!(error.kind(), FsErrorKind::CrossLineage);
@@ -1328,7 +1323,7 @@ mod high_risk_recovery {
         std::os::unix::fs::symlink(&cwd, &nested).unwrap();
         assert!(!cwd.join("pinned-mutation").exists());
         let pinned_parent = root.directory.clone();
-        let mut mutation = root.mutation_session();
+        let mut mutation = root.mutation_session().unwrap();
         let (_, pinned_child) =
             attempted(mutation.open_or_create_child(&pinned_parent, "pinned-mutation"));
         let pinned_child = pinned_child.unwrap();
