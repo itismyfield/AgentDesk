@@ -50,14 +50,18 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                 "case $n in 1) id=$FAKE_ID_1 ;; 2) id=$FAKE_ID_2 ;; 3) id=$FAKE_ID_3 ;; *) exit 9 ;; esac\n"
                 "[ \"$*\" = \"test --lib $id -- --exact --test-threads=1\" ] || exit 9\n"
                 "case \"$FAKE_MODE\" in\n"
-                " zero) echo 'running 0 tests'; echo 'test result: ok. 0 passed; 0 failed; 0 ignored;' ;;\n"
-                " ignored) echo 'running 1 test'; echo 'test result: ok. 0 passed; 0 failed; 1 ignored;' ;;\n"
-                " failed) echo 'running 1 test'; echo 'failures:'; echo 'test x ... FAILED'; echo 'test result: FAILED. 0 passed; 1 failed; 0 ignored;' ;;\n"
-                " multi) echo 'running 2 tests'; echo 'test result: ok. 2 passed; 0 failed; 0 ignored;' ;;\n"
-                " contradictory) echo 'running 2 tests'; echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored;' ;;\n"
-                " interleaved) echo 'running 1 test'; echo 'Doc-tests noise'; echo 'running 0 tests'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored;' ;;\n"
-                " duplicate_result) echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored;'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored;' ;;\n"
-                " *) echo 'Doc-tests agentdesk'; echo 'note: running 2 tests elsewhere'; echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored;' ;;\n"
+                " zero) echo 'running 0 tests'; echo 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
+                " ignored) echo 'running 1 test'; echo 'test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
+                " failed) echo 'running 1 test'; echo 'failures:'; echo 'test x ... FAILED'; echo 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
+                " multi) echo 'running 2 tests'; echo 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
+                " contradictory) echo 'running 2 tests'; echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
+                " interleaved) echo 'running 1 test'; echo 'Doc-tests noise'; echo 'running 0 tests'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
+                " spoof) echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 1 failed; 1 ignored; SPOOF' ;;\n"
+                " measured) echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 1 measured; 3 filtered out; finished in 0.00s' ;;\n"
+                " malformed_time) echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0..00s' ;;\n"
+                " extra_tokens) echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s SPOOF' ;;\n"
+                " duplicate_result) echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
+                " *) case $n in 1) tail='0 filtered out; finished in 0.00s' ;; 2) tail='137 filtered out; finished in 0.7s' ;; 3) tail='9 filtered out; finished in 12.345678s' ;; esac; echo 'Doc-tests agentdesk'; echo 'note: running 2 tests elsewhere'; echo 'running 1 test'; echo \"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; $tail\" ;;\n"
                 "esac\n"
                 "[ \"$FAKE_MODE\" != nonzero ] || exit 7\n"
             )
@@ -82,7 +86,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             self.assertNotEqual(self.run_fixture(active=True, mutation=mutation)[0].returncode, 0)
 
     def test_exact_selection_reducer(self) -> None:
-        for mode in ("zero", "ignored", "failed", "multi", "contradictory", "interleaved", "duplicate_result", "nonzero"):
+        for mode in ("zero", "ignored", "failed", "multi", "contradictory", "interleaved", "spoof", "measured", "malformed_time", "extra_tokens", "duplicate_result", "nonzero"):
             with self.subTest(mode=mode):
                 self.assertNotEqual(self.run_fixture(active=True, mode=mode)[0].returncode, 0)
         success, calls = self.run_fixture(active=True)
