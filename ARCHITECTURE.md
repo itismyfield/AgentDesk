@@ -1143,6 +1143,7 @@ src/
 │   │   │   ├── finalize_context.rs
 │   │   │   ├── guarded_finish_residue.rs
 │   │   │   ├── reconcile.rs
+│   │   │   ├── terminal_handler.rs
 │   │   │   └── watcher_backstop.rs
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── api.rs

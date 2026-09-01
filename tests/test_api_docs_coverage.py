@@ -8,6 +8,7 @@ import textwrap
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "check_api_docs_coverage.py"
@@ -225,11 +226,102 @@ class ApiDocsCoverageTest(unittest.TestCase):
         self.assertIn(pair("GET", "/api/v1/overview"), mounted)
 
     def test_generated_route_inventory_includes_v1_router(self) -> None:
-        route_inventory = CHECKER.inventory.generated_documents()[
-            CHECKER.inventory.GENERATED_DOCS_DIR / "route-inventory.md"
-        ]
+        route_inventory = CHECKER.inventory.generated_route_inventory()
 
         self.assertIn("| `GET` | `/api/v1/overview` |", route_inventory)
+
+    def test_route_inventory_is_isolated_idempotent_and_renders_collector_output(self) -> None:
+        inventory = CHECKER.inventory
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            routes_root = root / "src" / "server" / "routes"
+            domains_root = routes_root / "domains"
+            domains_root.mkdir(parents=True)
+            (routes_root / "mod.rs").write_text(
+                "fn compose_api_router(state: AppState) -> ApiRouter {\n"
+                "    Router::new().merge(domains::synthetic::router(state))\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (domains_root / "synthetic.rs").write_text(
+                "async fn route_fixture_r6_unique_handler() {}\n"
+                "fn router(state: AppState) -> ApiRouter {\n"
+                "    Router::new().route(\n"
+                '        "/route-fixture-r6-unique",\n'
+                "        get(route_fixture_r6_unique_handler),\n"
+                "    )\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            (root / "src" / "server" / "mod.rs").write_text(
+                "fn server_fixture_marker() {}\n", encoding="utf-8"
+            )
+
+            def forbidden_giant_path(*_args: object, **_kwargs: object) -> None:
+                raise AssertionError("route-only generation entered giant-file validation")
+
+            with patch.object(inventory, "REPO_ROOT", root), patch.object(
+                inventory, "collect_modules", forbidden_giant_path
+            ), patch.object(
+                inventory, "build_giant_registrations", forbidden_giant_path
+            ):
+                first = inventory.generated_route_inventory()
+                second = inventory.generated_route_inventory()
+
+        self.assertEqual(first, second)
+        self.assertIn("| `GET` | `/api/route-fixture-r6-unique` |", first)
+        self.assertIn("`route_fixture_r6_unique_handler`", first)
+
+    def test_full_generation_delegates_route_inventory_after_valid_giant_check(self) -> None:
+        inventory = CHECKER.inventory
+        calls: list[str] = []
+
+        def valid_giant_check(
+            _modules: list[object], *, allow_overdue: bool = False
+        ) -> list[object]:
+            self.assertFalse(allow_overdue)
+            calls.append("giant")
+            return []
+
+        def route_inventory_spy() -> str:
+            calls.append("route")
+            return "route-delegation-sentinel\n"
+
+        with patch.object(
+            inventory, "build_giant_registrations", valid_giant_check
+        ), patch.object(inventory, "generated_route_inventory", route_inventory_spy):
+            documents = inventory.generated_documents()
+
+        self.assertEqual(calls, ["giant", "route"])
+        self.assertEqual(
+            documents[inventory.GENERATED_DOCS_DIR / "route-inventory.md"],
+            "route-delegation-sentinel\n",
+        )
+
+    def test_overdue_giant_failure_precedes_route_generation(self) -> None:
+        inventory = CHECKER.inventory
+        calls: list[str] = []
+
+        def overdue_giant_check(
+            _modules: list[object], *, allow_overdue: bool = False
+        ) -> list[object]:
+            self.assertFalse(allow_overdue)
+            calls.append("giant")
+            raise inventory.ParseError("synthetic shrink deadline is overdue")
+
+        def forbidden_route_generation() -> str:
+            calls.append("route")
+            raise AssertionError("route generation ran after an overdue giant failure")
+
+        with patch.object(
+            inventory, "build_giant_registrations", overdue_giant_check
+        ), patch.object(
+            inventory, "generated_route_inventory", forbidden_route_generation
+        ):
+            with self.assertRaisesRegex(inventory.ParseError, "deadline is overdue"):
+                inventory.generated_documents()
+
+        self.assertEqual(calls, ["giant"])
 
     def test_mounted_route_source_paths_follow_compose_api_router(self) -> None:
         with TemporaryDirectory() as tmp:

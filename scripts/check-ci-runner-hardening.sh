@@ -630,6 +630,12 @@ expected_script_check_execution = {
   "step_env" => {
     "BASH_ENV" => "/dev/null",
     "PYTHON" => "python3",
+    "GFP_EVENT_NAME" => "${{ github.event_name }}",
+    "GFP_REPOSITORY" => "${{ github.repository }}",
+    "GFP_HEAD_REPOSITORY" => "${{ github.event.pull_request.head.repo.full_name }}",
+    "GFP_CANDIDATE_SHA" => "${{ github.sha }}",
+    "GFP_BASE_SHA" => "${{ github.event.pull_request.base.sha }}",
+    "GFP_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}",
     "TEST_LANE_BASELINE_REF" => "HEAD^1",
   },
   "runtime_env_writes" => [],
@@ -637,6 +643,12 @@ expected_script_check_execution = {
   "effective_env" => expected_workflow_env.merge(
     "BASH_ENV" => "/dev/null",
     "PYTHON" => "python3",
+    "GFP_EVENT_NAME" => "${{ github.event_name }}",
+    "GFP_REPOSITORY" => "${{ github.repository }}",
+    "GFP_HEAD_REPOSITORY" => "${{ github.event.pull_request.head.repo.full_name }}",
+    "GFP_CANDIDATE_SHA" => "${{ github.sha }}",
+    "GFP_BASE_SHA" => "${{ github.event.pull_request.base.sha }}",
+    "GFP_HEAD_SHA" => "${{ github.event.pull_request.head.sha }}",
     "TEST_LANE_BASELINE_REF" => "HEAD^1",
   ),
 }
@@ -648,6 +660,11 @@ unless execution_contract(script_check_execution, expected_script_check_executio
   expected = JSON.generate(canonical_yaml(expected_script_check_execution))
   found = JSON.generate(canonical_yaml(script_check_execution))
   warn "#{path}: Script checks aggregate effective execution changed; expected #{expected}; found #{found}"
+  exit 1
+end
+evidence_steps = Array(script_checks_job["steps"]).select { |step| step.is_a?(Hash) && step["name"] == "Upload giant-file progress evidence" }
+unless evidence_steps == [{"name" => "Upload giant-file progress evidence", "if" => "always()", "uses" => "actions/upload-artifact@v4", "with" => {"path" => "target/giant-file-progress/evidence.json"}}]
+  warn "#{path}: giant-file progress evidence upload must remain exact and unconditional"
   exit 1
 end
 
@@ -1101,6 +1118,8 @@ RUBY
 
 trusted_workflow=".github/workflows/ci-macos-trusted.yml"
 pr_workflow=".github/workflows/ci-pr.yml"
+main_workflow=".github/workflows/ci-main.yml"
+ruby -ryaml -e 'j=YAML.load_file(ARGV[0]).fetch("jobs").fetch("scripts"); r=j.fetch("steps").find{|s|s["name"]=="Run script checks"}; u=j.fetch("steps").find{|s|s["name"]=="Upload giant-file progress evidence"}; abort unless r.fetch("env")=={"GFP_EVENT_NAME"=>"${{ github.event_name }}","GFP_REPOSITORY"=>"${{ github.repository }}","GFP_CANDIDATE_SHA"=>"${{ github.sha }}","TEST_LANE_BASELINE_REF"=>"HEAD"} && u=={"name"=>"Upload giant-file progress evidence","if"=>"always()","uses"=>"actions/upload-artifact@v4","with"=>{"path"=>"target/giant-file-progress/evidence.json"}}' "$main_workflow" || error "$main_workflow must preserve fail-closed giant-file selector and evidence wiring"
 
 workflow_files() {
   find .github/workflows -maxdepth 1 -type f \

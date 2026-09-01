@@ -842,6 +842,7 @@ class GiantFileIssueMetadataTest(unittest.TestCase):
 
 class RegistryValidationTest(unittest.TestCase):
     def setUp(self) -> None:
+        self._valid_shrink_deadline = (GEN.today_utc() + timedelta(days=1)).isoformat()
         self._original_issue_metadata = GEN.load_giant_file_issue_metadata
         self._original_issue_ratchets = GEN.load_giant_file_issue_ratchets
         self._original_transition_list = GEN.load_giant_file_closed_issue_transition_list
@@ -989,7 +990,7 @@ class RegistryValidationTest(unittest.TestCase):
         entry = {
             "file": "src/a.rs",
             "owner": "team",
-            "deadline": "2026-08-31",
+            "deadline": self._valid_shrink_deadline,
             "decompose_issue": "#1",
         }
         orig = GEN.load_giant_file_registry
@@ -1006,7 +1007,7 @@ class RegistryValidationTest(unittest.TestCase):
             "file": "src/a.rs",
             "decision": "shrink",
             "owner": "team",
-            "deadline": "2026-08-31",
+            "deadline": self._valid_shrink_deadline,
             "decompose_issue": "#1",
         }
         orig = GEN.load_giant_file_registry
@@ -1249,7 +1250,7 @@ class RegistryValidationTest(unittest.TestCase):
             {
                 "file": path,
                 "owner": "team",
-                "deadline": "2026-08-31",
+                "deadline": self._valid_shrink_deadline,
                 "decompose_issue": "#1",
             }
             for path in ("src/a.rs", "src/first.rs")
@@ -1380,7 +1381,7 @@ class RegistryValidationTest(unittest.TestCase):
             {
                 "file": "src/tracked.rs",
                 "owner": "team",
-                "deadline": "2026-08-31",
+                "deadline": self._valid_shrink_deadline,
                 "decompose_issue": "#3036",
             },
         ]
@@ -1392,7 +1393,7 @@ class RegistryValidationTest(unittest.TestCase):
             GEN.load_giant_file_registry = orig
         by_path = {r.file_path: r for r in regs}
         self.assertEqual(by_path["src/first.rs"].decision, "keep")
-        self.assertEqual(by_path["src/tracked.rs"].deadline, "2026-08-31")
+        self.assertEqual(by_path["src/tracked.rs"].deadline, entries[1]["deadline"])
         self.assertEqual(by_path["src/tracked.rs"].owner, "team")
 
 

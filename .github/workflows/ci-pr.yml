@@ -1400,9 +1400,21 @@ jobs:
           # behavior explicit at the protected step boundary.
           BASH_ENV: /dev/null
           PYTHON: python3
+          GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REPOSITORY: ${{ github.repository }}
+          GFP_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          GFP_CANDIDATE_SHA: ${{ github.sha }}
+          GFP_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GFP_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           # Required Script checks only run on protected PR candidates. Their
           # synthetic merge first parent is the exact immutable base snapshot.
           TEST_LANE_BASELINE_REF: HEAD^1
+
+      - name: Upload giant-file progress evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          path: target/giant-file-progress/evidence.json
 
       # Keep high-value relay ratchets as explicit named steps as well as in the
       # aggregate script suite so their failure surface is immediately visible.
@@ -1458,7 +1470,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=14c6b737924d263a1d1ee969df1a4b92669e225aa898d6046978dd83441b88db
+          expected=bea1a256c395af3cc58de233311d3353e058afe66fe094151d410787116f1313
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1565,7 +1577,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=14c6b737924d263a1d1ee969df1a4b92669e225aa898d6046978dd83441b88db
+          expected=bea1a256c395af3cc58de233311d3353e058afe66fe094151d410787116f1313
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"

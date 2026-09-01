@@ -1254,7 +1254,12 @@ def load_giant_file_registry() -> tuple[list[str], list[dict[str, str]], list[st
     return arrays.get("grandfathered", []), entries, baseline_paths
 
 
-def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegistration]:
+def build_giant_registrations(
+    modules: list[ModuleEntry],
+    *,
+    allow_overdue: bool = False,
+    evaluation_date: date | None = None,
+) -> list[GiantFileRegistration]:
     """Validate the registry against measured prod-giants and build rows.
 
     Raises ``ParseError`` (failing generation, and therefore CI) when the
@@ -1280,6 +1285,7 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
         for entry in modules
         if "giant-file" in entry.flags
     }
+    prod_loc = {entry.file_path: entry.prod_line_count for entry in modules}
 
     problems: list[str] = []
     closed_issue_allowed_problems: list[str] = []
@@ -1335,10 +1341,8 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
                 problems.append(
                     f"[[entry]] {path!r} shrink deadline {deadline!r} is not a calendar-valid YYYY-MM-DD"
                 )
-            elif parsed_deadline < today_utc():
-                problems.append(
-                    f"[[entry]] {path!r} shrink deadline {deadline!r} is overdue"
-                )
+            elif parsed_deadline < (evaluation_date or today_utc()) and not allow_overdue:
+                problems.append(f"[[entry]] {path!r} shrink deadline {deadline!r} is overdue")
             if not _is_real_decompose_issue(decompose_issue):
                 problems.append(
                     f"[[entry]] {path!r} shrink decompose_issue {decompose_issue!r} must be a real numeric issue and cannot be #4519"
@@ -1434,11 +1438,15 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
             "to an explicit [[entry]] decision: " + ", ".join(sorted(awaiting_backfill))
         )
 
+    # A progress snapshot retains frozen transition authority after a same-path
+    # root drops below the giant threshold; direct generation still rejects it.
+    retired_transition: set[str] = set()
     # Validate transition list entries exist in registry (no orphans)
     if transition_list:
         registry_paths = {reg.file_path for reg in registrations}
         orphan_entries = transition_list - registry_paths
-        for orphan in sorted(orphan_entries):
+        retired_transition = {path for path in orphan_entries if allow_overdue and 0 <= prod_loc.get(path, GIANT_FILE_THRESHOLD) < GIANT_FILE_THRESHOLD}
+        for orphan in sorted(orphan_entries - retired_transition):
             problems.append(
                 f"transition list entry {orphan!r} is not in the registry or is not a giant file; "
                 "remove it from the transition list or add it to the registry"
@@ -1446,7 +1454,7 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
 
     problems.extend(
         giant_file_issue_ratchet_problems(
-            closed_deadline_entries=closed_deadline_entries,
+            closed_deadline_entries=closed_deadline_entries + len(retired_transition),
             transition_list_entries=len(transition_list),
             baselines=issue_ratchets,
         )
@@ -1470,6 +1478,40 @@ def build_giant_registrations(modules: list[ModuleEntry]) -> list[GiantFileRegis
 
     registrations.sort(key=lambda item: item.file_path)
     return registrations
+
+
+def giant_file_snapshot(root: Path, *, evaluation_date: date | None = None) -> dict[str, object]:
+    """Evaluate structured giant truth; only proven-retirement debt is collected."""
+    root = root.resolve()
+    rooted_paths = {
+        "REPO_ROOT": root,
+        "SRC_ROOT": root / "src",
+        "GIANT_FILE_REGISTRY": root / "scripts" / "giant_file_registry.toml",
+        "GIANT_FILE_ISSUE_METADATA": root / "scripts" / "giant_file_issue_metadata.json",
+        "GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST": root / "scripts" / "giant_file_closed_issue_transition_list.txt",
+    }
+    previous = {name: globals()[name] for name in rooted_paths}
+    try:
+        globals().update(rooted_paths)
+        modules = collect_modules()
+        registrations = build_giant_registrations(modules, allow_overdue=True,
+                                                   evaluation_date=evaluation_date)
+    finally:
+        globals().update(previous)
+    effective_date = evaluation_date or today_utc()
+    metadata = {item.file_path: (item.decision, item.owner, item.deadline,
+                                 item.decompose_issue, item.keep_reason)
+                for item in registrations}
+    return {
+        "modules": {item.file_path: item.prod_line_count for item in modules},
+        "registrations": metadata,
+        "overdue": sorted(
+            item.file_path
+            for item in registrations
+            if item.decision == _DECISION_SHRINK
+            and _parse_deadline(item.deadline) < effective_date
+        ),
+    }
 
 
 def render_giant_file_registry(registrations: list[GiantFileRegistration]) -> str:
@@ -1986,27 +2028,32 @@ def render_worker_inventory(entries: list[WorkerEntry]) -> str:
     return "\n".join(lines)
 
 
-def generated_documents() -> dict[Path, str]:
+def generated_route_inventory() -> str:
+    """Collect and render only the mounted route inventory."""
     function_paths = sorted(
         path
         for path in (REPO_ROOT / "src" / "server").rglob("*.rs")
         if path.is_file() and not is_test_file(path)
     )
     by_file, by_name = build_function_index(function_paths)
-
-    module_entries = collect_modules()
-    giant_registrations = build_giant_registrations(module_entries)
     route_entries = collect_mounted_api_route_entries(function_paths, by_file, by_name)
     route_entries.extend(
         parse_route_file(REPO_ROOT / "src" / "server" / "mod.rs", "", by_file, by_name)
     )
     route_entries.sort(key=lambda entry: (entry.path, entry.method, entry.handler))
+    return render_route_inventory(route_entries)
+
+
+def generated_documents(*, allow_overdue: bool = False) -> dict[Path, str]:
+    module_entries = collect_modules()
+    giant_registrations = build_giant_registrations(module_entries, allow_overdue=allow_overdue)
+    route_inventory = generated_route_inventory()
     worker_entries = collect_workers()
     return {
         ARCHITECTURE_DOC: render_architecture_doc(),
         GENERATED_DOCS_DIR / "module-inventory.md": render_module_inventory(module_entries),
         GIANT_FILE_REGISTRY_DOC: render_giant_file_registry(giant_registrations),
-        GENERATED_DOCS_DIR / "route-inventory.md": render_route_inventory(route_entries),
+        GENERATED_DOCS_DIR / "route-inventory.md": route_inventory,
         GENERATED_DOCS_DIR / "worker-inventory.md": render_worker_inventory(worker_entries),
     }
 

@@ -1819,28 +1819,6 @@ time for diagnostics; neither is a stored approval value.
     `giant-file-registry.md` (owner `discord-relay`, deadline 2026-08-31, issue
     #3405). Keep further controller growth in narrower outbound/controller
     helper modules).
-  - `src/services/discord/turn_finalizer.rs` (frozen giant surface; single-authority
-    turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
-    giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`
-    finalizer messages/handlers on top of #3143's `FinalizeContext::monitor()` +
-    monitor turn-key/ledger-generation logic; tracked decompose target — see
-    `giant-file-registry.md` (owner `discord-finalizer`, deadline 2026-08-31,
-    issue #3016). #3479 r9 split −191 prod lines into the leaf child modules
-    `turn_finalizer/completion_signal.rs` (CompletionSignal enum + pure
-    `completion_signal_from_transcript`), `turn_finalizer/delivery_lease.rs`
-    (dormant `DeliveryLeaseCell` handlers), and
-    `turn_finalizer/watcher_backstop.rs` (watcher far-backstop tunables +
-    terminal-or-defer verdict pair). Bugfix only outside a
-    finalizer-decomposition plan). #4018 round-2 carries synthetic claim
-    snapshots through terminal submissions so relay-ownership-only passive notes
-    skip the backstop reaction fallback, routes stale synthetic release through
-    the finalizer, and demotes expected backstop/reconcile guarded misses while
-    preserving WARN for ordinary submitter misses; #4019 R2 adds the multi-live
-    refusal for channel-only id-0 collapse so ambiguous terminals return the
-    literal no-match key instead of releasing an arbitrary live entry;
-    `turn_finalizer/finalize.rs` is now 246 prod LoC, `turn_finalizer/finalize_context.rs` 113 prod LoC,
-    `turn_finalizer/reconcile.rs` 221 prod LoC, and
-    `turn_finalizer/cleanup.rs` 565 prod LoC. No PG lease/schema change.
   - `src/services/discord/turn_view_reconciler.rs` was decomposed in #4712 D5:
     the root retains reconciler state and transition coordination, while
     `turn_view_reconciler/api.rs`, `apply.rs`, `resolution.rs`, and `store.rs`
