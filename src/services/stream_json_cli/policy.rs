@@ -62,6 +62,25 @@ impl ConfiguredToolPolicy {
         Self::Explicit(ToolPolicy::ProviderDefault)
     }
 
+    /// Preserve the legacy meaning of a materialized bot tool list without
+    /// losing an explicit read-only restriction. Full/default legacy vectors
+    /// remain provider-default because they were not authored as allowlists.
+    pub fn from_legacy_allowed_tools(allowed_tools: &[String]) -> Self {
+        if allowed_tools.is_empty() {
+            return Self::for_new_stream_json_provider();
+        }
+        let tools: Vec<AgentTool> = allowed_tools
+            .iter()
+            .map(|tool| AgentTool::new(tool.trim()))
+            .filter(|tool| !tool.as_str().is_empty())
+            .collect();
+        if is_readonly_tool_names(&tools) {
+            Self::Explicit(ToolPolicy::ReadOnly)
+        } else {
+            Self::LegacyAllowedTools(tools)
+        }
+    }
+
     pub fn effective_for_legacy_provider(&self) -> ToolPolicy {
         match self {
             Self::Explicit(policy) => policy.clone(),
@@ -131,6 +150,15 @@ mod tests {
         assert_eq!(
             policy.effective_for_stream_json(),
             ToolPolicy::ProviderDefault
+        );
+    }
+
+    #[test]
+    fn legacy_readonly_vector_remains_restricted() {
+        let tools = vec!["Read".to_string(), "Grep".to_string(), "Glob".to_string()];
+        assert_eq!(
+            ConfiguredToolPolicy::from_legacy_allowed_tools(&tools),
+            ConfiguredToolPolicy::Explicit(ToolPolicy::ReadOnly)
         );
     }
 }

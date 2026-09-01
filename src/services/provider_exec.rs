@@ -31,7 +31,7 @@ use crate::services::provider::{
 };
 use crate::services::provider_cli::ProviderExecutionContext;
 use crate::services::stream_json_cli::{
-    ConfiguredToolPolicy, ProviderTurnRequest, ToolPolicy, execute_streaming,
+    ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
 };
 use crate::services::{claude, codex, gemini, opencode, qwen};
 
@@ -297,18 +297,7 @@ pub async fn execute_structured_with_context(
 }
 
 fn configured_policy_from_tools(allowed_tools: &[String]) -> ConfiguredToolPolicy {
-    if allowed_tools.is_empty() {
-        return ConfiguredToolPolicy::for_new_stream_json_provider();
-    }
-    if crate::services::provider::is_readonly_tool_policy(Some(allowed_tools)) {
-        return ConfiguredToolPolicy::Explicit(ToolPolicy::ReadOnly);
-    }
-    ConfiguredToolPolicy::LegacyAllowedTools(
-        allowed_tools
-            .iter()
-            .map(crate::services::stream_json_cli::policy::AgentTool::new)
-            .collect(),
-    )
+    ConfiguredToolPolicy::from_legacy_allowed_tools(allowed_tools)
 }
 
 pub(crate) fn simple_timeout_error(stage_label: &str, timeout: Duration) -> String {

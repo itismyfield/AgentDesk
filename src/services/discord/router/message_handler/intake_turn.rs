@@ -2523,8 +2523,8 @@ pub(super) async fn handle_text_message(
                                 provider_for_blocking.clone(),
                                 context_prompt.clone(),
                                 system_prompt_for_turn.map(str::to_string),
-                                crate::services::stream_json_cli::ConfiguredToolPolicy::LegacyAllowedTools(
-                                    allowed_tools.iter().map(crate::services::stream_json_cli::policy::AgentTool::new).collect(),
+                                crate::services::stream_json_cli::ConfiguredToolPolicy::from_legacy_allowed_tools(
+                                    &allowed_tools,
                                 ),
                                 model_for_turn.clone(),
                                 reasoning_effort_for_turn.clone(),
