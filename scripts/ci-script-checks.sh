@@ -410,11 +410,13 @@ echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invar
 # refreshed_at; it resets the freshness clock rather than checking it, and the
 # 30-day staleness gate lives in the generator above. Entries already in the
 # transition list warn but pass; a new dead pointer is fatal.
-"$PYTHON" scripts/generate_inventory_docs.py
+# Giant deadlines have one selector/evaluator. It refreshes inventories only
+# after its fail-closed main or strict PR-progress verdict succeeds.
+GFP_REFRESH_DOCS=1 "$PYTHON" scripts/giant_file_progress.py
 git diff --exit-code -- ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md
 
 echo "=== Inventory prod/test split regression tests (#4394) ==="
-"$PYTHON" -m unittest tests.test_inventory_giant_split
+"$PYTHON" -m unittest tests.test_giant_file_progress tests.test_inventory_giant_split
 
 echo "=== Structural Clippy allow occurrence ratchet (#4519) ==="
 "$PYTHON" scripts/check_clippy_allow_ratchet.py

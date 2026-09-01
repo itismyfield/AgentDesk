@@ -335,9 +335,17 @@ jobs:
       - name: Run script checks
         run: ./scripts/ci-script-checks.sh
         env:
+          GFP_EVENT_NAME: ${{ github.event_name }}
+          GFP_REPOSITORY: ${{ github.repository }}
+          GFP_CANDIDATE_SHA: ${{ github.sha }}
           # Main-push CI verifies current coverage drift, but relative anti-growth
           # authority lives in the protected PR candidate's required context.
           TEST_LANE_BASELINE_REF: HEAD
+      - name: Upload giant-file progress evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          path: target/giant-file-progress/evidence.json
 
       - name: Upload maintainability audit artifact
         if: always()

@@ -613,16 +613,18 @@ def ensure_module_inventory(repo_root: Path) -> Finding | None:
     if not generator.is_file():
         return None
     result = subprocess.run(
-        [sys.executable, str(generator)],
-        cwd=repo_root,
+        [sys.executable, "-c", "import generate_inventory_docs as g; "
+         "g.write_documents({g.GENERATED_DOCS_DIR / 'module-inventory.md': g.render_module_inventory("
+         "g.collect_modules())}, check=False)"],
+        cwd=generator.parent,
         text=True,
-        stdout=subprocess.PIPE,
+        stdout=None,
         stderr=subprocess.PIPE,
         check=False,
     )
     if result.returncode == 0 and (repo_root / MODULE_INVENTORY_DOC).is_file():
         return None
-    detail = (result.stderr or result.stdout).strip()
+    detail = (result.stderr or "").strip()
     return Finding(
         "error",
         MODULE_INVENTORY_DOC,

@@ -18,7 +18,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "14c6b737924d263a1d1ee969df1a4b92669e225aa898d6046978dd83441b88db"
+    "bea1a256c395af3cc58de233311d3353e058afe66fe094151d410787116f1313"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
@@ -594,6 +594,12 @@ class FastCheckCiWiringTests(unittest.TestCase):
             {
                 "BASH_ENV": "/dev/null",
                 "PYTHON": "python3",
+                "GFP_EVENT_NAME": "${{ github.event_name }}",
+                "GFP_REPOSITORY": "${{ github.repository }}",
+                "GFP_HEAD_REPOSITORY": "${{ github.event.pull_request.head.repo.full_name }}",
+                "GFP_CANDIDATE_SHA": "${{ github.sha }}",
+                "GFP_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+                "GFP_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
                 "TEST_LANE_BASELINE_REF": "HEAD^1",
             },
         )
@@ -653,6 +659,34 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn(
             "must run exactly ./scripts/ci-script-checks.sh", result.stderr
         )
+
+    def test_giant_file_progress_selector_wiring(self) -> None:
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        aggregate = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
+        self.assertIn('GFP_REFRESH_DOCS=1 "$PYTHON" scripts/giant_file_progress.py', aggregate)
+        self.assertNotIn('"$PYTHON" scripts/generate_inventory_docs.py\n', aggregate)
+        self.assertIn("tests.test_giant_file_progress tests.test_inventory_giant_split", aggregate)
+        parsed_pr = yaml.safe_load(workflow)
+        run_step = next(step for step in parsed_pr["jobs"]["scripts"]["steps"]
+                        if step.get("name") == "Run script checks")
+        expected_pr_env = {"GFP_EVENT_NAME": "${{ github.event_name }}",
+            "GFP_REPOSITORY": "${{ github.repository }}",
+            "GFP_HEAD_REPOSITORY": "${{ github.event.pull_request.head.repo.full_name }}",
+            "GFP_CANDIDATE_SHA": "${{ github.sha }}",
+            "GFP_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+            "GFP_HEAD_SHA": "${{ github.event.pull_request.head.sha }}"}
+        self.assertLessEqual(expected_pr_env.items(), run_step["env"].items())
+        upload = next(step for step in parsed_pr["jobs"]["scripts"]["steps"] if step.get("name") == "Upload giant-file progress evidence")
+        self.assertEqual(upload["if"], "always()")
+        self.assertEqual(upload["with"]["path"], "target/giant-file-progress/evidence.json")
+        main_steps = yaml.safe_load(MAIN_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["scripts"]["steps"]
+        main_run = next(step for step in main_steps if step.get("name") == "Run script checks")
+        self.assertEqual(main_run["env"]["GFP_CANDIDATE_SHA"], "${{ github.sha }}")
+        self.assertTrue(any(step.get("name") == "Upload giant-file progress evidence" for step in main_steps))
+        for key in ("GFP_BASE_SHA", "GFP_HEAD_REPOSITORY"):
+            mutated = workflow.replace(f"          {key}: {expected_pr_env[key]}\n", "", 1)
+            rejected = self.run_hardening_fixture(mutated)
+            self.assertNotEqual(rejected.returncode, 0, key)
 
     def test_script_checks_effective_execution_contract_covers_all_yaml_scopes(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -1433,12 +1467,10 @@ class FastCheckCiWiringTests(unittest.TestCase):
         for job in (pr_job, main_job):
             self.assertIn("fetch-depth: 0", job)
             self.assertNotIn("origin/main", job)
-            self.assertNotIn("github.event.pull_request.base.sha", job)
         self.assertNotIn("workflow_dispatch:", pr_workflow)
         self.assertRegex(
             pr_job, r"(?m)^          TEST_LANE_BASELINE_REF: HEAD\^1$"
         )
-        self.assertNotIn("github.event_name", pr_job)
         self.assertNotIn("inputs.", pr_job)
         self.assertRegex(
             main_job, r"(?m)^          TEST_LANE_BASELINE_REF: HEAD$"
@@ -1560,6 +1592,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             (workflows / "ci-macos-trusted.yml").write_text(
                 trusted, encoding="utf-8"
             )
+            (workflows / "ci-main.yml").write_text(MAIN_WORKFLOW.read_text(encoding="utf-8"), encoding="utf-8")
             for name, content in (extra_workflows or {}).items():
                 (workflows / name).write_text(content, encoding="utf-8")
             for name, target in (workflow_symlinks or {}).items():
