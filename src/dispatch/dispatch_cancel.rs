@@ -9,7 +9,7 @@ use sqlx::{PgPool, Row as SqlxRow};
 /// `pending`, which would let the next tick re-dispatch the same work.
 const USER_CANCEL_REASONS: &[&str] = &["turn_bridge_cancelled"];
 
-const RUN_OWNERS_FOR_DISPATCH: &str = r#"
+const NORMALIZED_RUN_OWNERS_FOR_DISPATCH: &str = r#"
     SELECT e.run_id
     FROM auto_queue_entries e
     WHERE e.dispatch_id = td.id
@@ -18,17 +18,17 @@ const RUN_OWNERS_FOR_DISPATCH: &str = r#"
     SELECT pg.run_id
     FROM auto_queue_phase_gates pg
     WHERE pg.dispatch_id = td.id
-    UNION ALL
-    SELECT parsed.context_json #>> '{phase_gate,run_id}'
-    FROM LATERAL (
-        SELECT CASE
-            WHEN td.context IS NULL OR BTRIM(td.context) = '' THEN NULL::jsonb
-            WHEN pg_input_is_valid(BTRIM(td.context), 'jsonb') THEN BTRIM(td.context)::jsonb
-            ELSE NULL::jsonb
-        END AS context_json
-    ) parsed
-    WHERE parsed.context_json #>> '{phase_gate,run_id}' IS NOT NULL
 "#;
+
+fn legacy_context_run_owner(raw: Option<&str>) -> Option<String> {
+    crate::db::dispatches::dispatch_context_value(raw)?
+        .get("phase_gate")?
+        .get("run_id")?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
 
 /// Returns true when the supplied cancel reason represents a user /
 /// external explicit stop. Matches either an exact reason in
@@ -232,24 +232,43 @@ pub(crate) async fn cancel_dispatches_for_runs_on_pg_tx_with_meta(
         return Ok(Vec::new());
     }
 
-    // The candidate and foreign-owner veto use the same relation. Repeating the
-    // predicate in the UPDATE keeps the authority check and mutation atomic for
-    // owners represented on the dispatch row, without changing the outer lock order.
+    // Candidate discovery is advisory: normalized owners are checked in SQL,
+    // while arbitrary legacy TEXT is parsed in Rust for PostgreSQL portability.
+    // The sorted order preserves the established per-dispatch lock order. Final
+    // authority is rebuilt from the locked row inside the per-ID helper below.
     let candidate_sql = format!(
-        "SELECT td.id
+        "SELECT td.id, td.context,
+                EXISTS (
+                    SELECT 1
+                    FROM ({NORMALIZED_RUN_OWNERS_FOR_DISPATCH}) owner(run_id)
+                    WHERE run_id = ANY($1)
+                ) AS normalized_target_owner
          FROM task_dispatches td
          WHERE td.status IN ('pending', 'dispatched')
-           AND EXISTS (
-               SELECT 1 FROM ({RUN_OWNERS_FOR_DISPATCH}) owner(run_id)
-               WHERE run_id = ANY($1)
-           )
          ORDER BY td.id"
     );
-    let dispatch_ids = sqlx::query_scalar::<_, String>(&candidate_sql)
+    let candidate_rows = sqlx::query(&candidate_sql)
         .bind(run_ids)
         .fetch_all(&mut **tx)
         .await
         .map_err(|error| format!("load postgres run-owned dispatches: {error}"))?;
+    let mut dispatch_ids = Vec::new();
+    for row in candidate_rows {
+        let dispatch_id: String = row
+            .try_get("id")
+            .map_err(|error| format!("decode postgres run-owned dispatch id: {error}"))?;
+        let context: Option<String> = row.try_get("context").map_err(|error| {
+            format!("decode postgres run-owned dispatch context {dispatch_id}: {error}")
+        })?;
+        let normalized_target_owner: bool = row
+            .try_get("normalized_target_owner")
+            .map_err(|error| format!("decode postgres normalized owner {dispatch_id}: {error}"))?;
+        let legacy_target_owner = legacy_context_run_owner(context.as_deref())
+            .is_some_and(|owner| run_ids.iter().any(|run_id| run_id == &owner));
+        if normalized_target_owner || legacy_target_owner {
+            dispatch_ids.push(dispatch_id);
+        }
+    }
 
     let mut transitions = Vec::with_capacity(dispatch_ids.len());
     for dispatch_id in dispatch_ids {
@@ -280,9 +299,10 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
     let cancel_payload = reason.map(|value| json!({ "reason": value }));
 
     let current = sqlx::query(
-        "SELECT status, kanban_card_id, to_agent_id, dispatch_type, thread_id
+        "SELECT status, kanban_card_id, to_agent_id, dispatch_type, thread_id, context
          FROM task_dispatches
-         WHERE id = $1",
+         WHERE id = $1
+         FOR UPDATE",
     )
     .bind(dispatch_id)
     .fetch_optional(&mut **tx)
@@ -307,6 +327,21 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
         });
     }
 
+    let current_context: Option<String> = current
+        .try_get("context")
+        .map_err(|error| format!("decode postgres dispatch context {dispatch_id}: {error}"))?;
+    let legacy_run_owner = legacy_context_run_owner(current_context.as_deref());
+    let run_owners_for_update = format!(
+        "{NORMALIZED_RUN_OWNERS_FOR_DISPATCH}
+         UNION ALL
+         SELECT $5::text
+         WHERE $5::text IS NOT NULL"
+    );
+
+    // The locked legacy owner and both normalized arms form one symmetric
+    // candidate/veto relation at the mutation point. The advisory scan above
+    // cannot authorize cancellation, and a concurrent context writer cannot
+    // replace this locked legacy value before the UPDATE completes.
     let update_sql = format!(
         "UPDATE task_dispatches td
          SET status = 'cancelled',
@@ -319,11 +354,11 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
                $4::text[] IS NULL
                OR (
                    EXISTS (
-                       SELECT 1 FROM ({RUN_OWNERS_FOR_DISPATCH}) owner(run_id)
+                       SELECT 1 FROM ({run_owners_for_update}) owner(run_id)
                        WHERE run_id = ANY($4)
                    )
                    AND NOT EXISTS (
-                       SELECT 1 FROM ({RUN_OWNERS_FOR_DISPATCH}) owner(run_id)
+                       SELECT 1 FROM ({run_owners_for_update}) owner(run_id)
                        WHERE run_id IS NULL OR run_id <> ALL($4)
                    )
                )
@@ -334,6 +369,7 @@ async fn cancel_dispatch_and_reset_auto_queue_on_pg_tx_inner(
         .bind(dispatch_id)
         .bind(&current_status)
         .bind(run_ids.map(<[String]>::to_vec))
+        .bind(legacy_run_owner)
         .execute(&mut **tx)
         .await
         .map_err(|error| format!("cancel postgres dispatch {dispatch_id}: {error}"))?
@@ -637,6 +673,13 @@ mod pg_observability_tests {
         .await
     }
 
+    async fn run_pg_test_sql(pool: &PgPool, statement: &str) -> Vec<sqlx::postgres::PgRow> {
+        sqlx::query(statement)
+            .fetch_all(pool)
+            .await
+            .expect("execute dispatch-cancel PostgreSQL fixture statement")
+    }
+
     /// #3039 regression guard: the raw cancel writer used to reproduce the
     /// `dispatch_events` row but never fired `emit_dispatch_result`, so
     /// API/queue-driven cancels were invisible to the observability pipeline.
@@ -675,30 +718,60 @@ mod pg_observability_tests {
         pg_db.drop().await;
     }
 
-    /// A legacy `task_dispatches.context` value may be truncated after a
-    /// partial write. The owner lookup is a read-side guard and must ignore
-    /// malformed context instead of aborting the whole cancellation query.
+    /// Proves canonical context ownership, foreign veto, and non-owner shapes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancel_run_lookup_ignores_malformed_legacy_context() {
-        let pg_db = create_test_pg_db("agentdesk_dispatch_cancel_malformed").await;
+    async fn cancel_run_lookup_handles_legacy_context_shape_matrix() {
+        let pg_db = create_test_pg_db("agentdesk_dispatch_cancel_context_shapes").await;
         let pool = pg_db.connect_and_migrate().await;
 
-        let dispatch_id = "dispatch-cancel-malformed-context";
-        crate::dispatch::test_support::seed_pg_dispatch(
+        let cases = [
+            (
+                "ctx-array",
+                r#"[{"phase_gate":{"run_id":"run-target"}}]"#,
+                "pending",
+            ),
+            ("ctx-blank", r#"{"phase_gate":{"run_id":"  "}}"#, "pending"),
+            (
+                "ctx-foreign",
+                r#"{"phase_gate":{"run_id":"run-foreign"}}"#,
+                "pending",
+            ),
+            ("ctx-malformed", "{", "pending"),
+            ("ctx-numeric", r#"{"phase_gate":{"run_id":42}}"#, "pending"),
+            ("ctx-string", r#""run-target""#, "pending"),
+            (
+                "ctx-valid",
+                r#"{"phase_gate":{"run_id":"run-target"}}"#,
+                "cancelled",
+            ),
+        ];
+        for (dispatch_id, context, _) in cases {
+            crate::dispatch::test_support::seed_pg_dispatch(
+                &pool,
+                dispatch_id,
+                "Legacy context shape test",
+            )
+            .await;
+            run_pg_test_sql(
+                &pool,
+                &format!(
+                    "UPDATE task_dispatches SET context = $context${context}$context$ \
+                     WHERE id = '{dispatch_id}'"
+                ),
+            )
+            .await;
+        }
+        run_pg_test_sql(
             &pool,
-            dispatch_id,
-            "Malformed context cancel test",
+            "WITH target_run AS (INSERT INTO auto_queue_runs (id, status)
+                 VALUES ('run-target', 'active') RETURNING id)
+             INSERT INTO auto_queue_entries (id, run_id, status, dispatch_id)
+             SELECT 'entry-context-foreign-target', id, 'dispatched', 'ctx-foreign' FROM target_run",
         )
         .await;
-        sqlx::query("UPDATE task_dispatches SET context = $1 WHERE id = $2")
-            .bind("{")
-            .bind(dispatch_id)
-            .execute(&pool)
-            .await
-            .expect("store malformed legacy context fixture");
 
         let mut tx = pool.begin().await.expect("begin cancellation transaction");
-        let run_ids = vec!["run-not-present".to_string()];
+        let run_ids = vec!["run-target".to_string()];
         let transitions = cancel_dispatches_for_runs_on_pg_tx_with_meta(
             &mut tx,
             &run_ids,
@@ -706,18 +779,126 @@ mod pg_observability_tests {
             true,
         )
         .await
-        .expect("malformed context must not abort owner lookup");
-        assert!(transitions.is_empty());
+        .expect("legacy context shapes must not abort owner lookup");
+        assert_eq!(
+            transitions
+                .iter()
+                .map(|transition| transition.dispatch_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ctx-valid"]
+        );
         tx.commit()
             .await
-            .expect("commit no-op cancellation transaction");
+            .expect("commit context-shape cancellation transaction");
 
-        let status: String = sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id = $1")
-            .bind(dispatch_id)
-            .fetch_one(&pool)
+        let statuses = run_pg_test_sql(
+            &pool,
+            "SELECT id, status FROM task_dispatches WHERE id LIKE 'ctx-%' ORDER BY id",
+        )
+        .await
+        .into_iter()
+        .map(|row| (row.get("id"), row.get("status")))
+        .collect::<Vec<(String, String)>>();
+        assert_eq!(
+            statuses,
+            cases
+                .iter()
+                .map(|(id, _, status)| ((*id).to_string(), (*status).to_string()))
+                .collect::<Vec<_>>()
+        );
+        pool.close().await;
+        pg_db.drop().await;
+    }
+
+    /// The legacy owner bound into the final UPDATE must come from the row
+    /// version protected by the per-ID lock, not from the advisory scan.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_run_lookup_reparses_legacy_context_after_row_lock_wait() {
+        let pg_db = create_test_pg_db("agentdesk_dispatch_cancel_context_lock").await;
+        let pool = pg_db.connect_and_migrate_with_max_connections(4).await;
+        let dispatch_id = "dispatch-context-lock-wait";
+        crate::dispatch::test_support::seed_pg_dispatch(
+            &pool,
+            dispatch_id,
+            "Legacy context lock test",
+        )
+        .await;
+        run_pg_test_sql(&pool, r#"UPDATE task_dispatches SET context = '{"phase_gate":{"run_id":"run-target"}}' WHERE id = 'dispatch-context-lock-wait'"#)
+        .await;
+
+        let mut holder = pool.begin().await.expect("begin context writer");
+        sqlx::query(r#"UPDATE task_dispatches SET context = '{"phase_gate":{"run_id":"run-foreign"}}' WHERE id = 'dispatch-context-lock-wait'"#)
+            .execute(&mut *holder)
             .await
-            .expect("load malformed context dispatch status");
-        assert_eq!(status, "pending");
+            .expect("stage foreign context owner");
+
+        let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+        let cancel_pool = pool.clone();
+        let cancel = tokio::spawn(async move {
+            let mut tx = cancel_pool
+                .begin()
+                .await
+                .expect("begin blocked cancellation");
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await
+                .expect("load cancellation backend pid");
+            pid_sender.send(pid).expect("send cancellation backend pid");
+            let transitions = cancel_dispatches_for_runs_on_pg_tx_with_meta(
+                &mut tx,
+                &["run-target".to_string()],
+                Some("operator_cancelled"),
+                true,
+            )
+            .await
+            .expect("cancel after context lock wait");
+            tx.commit().await.expect("commit blocked cancellation");
+            transitions
+        });
+        let cancel_pid = pid_receiver
+            .await
+            .expect("receive cancellation backend pid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let waiting = run_pg_test_sql(&pool, &format!("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = {cancel_pid} AND wait_event_type = 'Lock') AS waiting"))
+            .await
+            .pop()
+            .expect("load context-lock activity row")
+            .try_get::<bool, _>("waiting")
+            .expect("decode context-lock waiter state");
+            if waiting {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancellation did not wait behind the context writer"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        holder.commit().await.expect("commit foreign context owner");
+
+        let transitions = tokio::time::timeout(std::time::Duration::from_secs(5), cancel)
+            .await
+            .expect("cancellation stayed blocked after writer commit")
+            .expect("join blocked cancellation");
+        assert!(transitions.is_empty());
+        let row = run_pg_test_sql(&pool, "SELECT status, context, (SELECT COUNT(*) FROM dispatch_events WHERE dispatch_id = 'dispatch-context-lock-wait') AS event_count FROM task_dispatches WHERE id = 'dispatch-context-lock-wait'")
+        .await
+        .pop()
+        .expect("load context-lock cancellation result");
+        let state: (String, Option<String>, i64) = (
+            row.get("status"),
+            row.get("context"),
+            row.get("event_count"),
+        );
+        assert_eq!(
+            state,
+            (
+                "pending".to_string(),
+                Some(r#"{"phase_gate":{"run_id":"run-foreign"}}"#.to_string()),
+                0,
+            )
+        );
 
         pool.close().await;
         pg_db.drop().await;
