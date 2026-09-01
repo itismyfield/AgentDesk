@@ -7,7 +7,7 @@ namespace="$root/src/services/writer_protocol/namespace.rs"
 lexical="$root/src/services/writer_protocol/namespace/lexical.rs"
 catalog="$root/src/services/writer_protocol/namespace/catalog.rs"
 manifest="$root/scripts/lib_test_inventory_manifest.txt"
-lexical_ids=(
+ids=(
   services::writer_protocol::namespace::lexical::tests::sealed_portable_roots_normalize_exactly
   services::writer_protocol::namespace::lexical::tests::unsupported_prefixes_and_escape_components_fail_closed
   services::writer_protocol::namespace::lexical::tests::normalized_candidates_preserve_case_separators_and_root_boundaries
@@ -30,7 +30,7 @@ if [ "$activation" -eq 0 ]; then
   [ ! -e "$namespace" ] || partial=1
   [ ! -e "$lexical" ] || partial=1
   [ ! -e "$catalog" ] || partial=1
-  for id in "${lexical_ids[@]}" "${catalog_ids[@]}"; do
+  for id in "${ids[@]}" "${catalog_ids[@]}"; do
     [ "$(count_literal "$manifest" "$id")" -eq 0 ] || partial=1
   done
   if [ "$partial" -ne 0 ]; then
@@ -43,12 +43,11 @@ fi
 [ "$activation" -eq 1 ] || { echo "ERROR: mod namespace; count=$activation, expected=1" >&2; exit 1; }
 [ "$(count_literal "$namespace" "mod lexical;")" -eq 1 ] || { echo "ERROR: mod lexical; must occur exactly once" >&2; exit 1; }
 [ -f "$lexical" ] || { echo "ERROR: missing lexical owner $lexical" >&2; exit 1; }
-for id in "${lexical_ids[@]}"; do
+for id in "${ids[@]}"; do
   name="${id##*::}"
   [ "$(count_literal "$lexical" "fn $name(")" -eq 1 ] || { echo "ERROR: test function $name must occur exactly once" >&2; exit 1; }
   [ "$(count_literal "$manifest" "$id")" -eq 1 ] || { echo "ERROR: manifest ID $id must occur exactly once" >&2; exit 1; }
 done
-ids=("${lexical_ids[@]}")
 catalog_activation="$(count_literal "$namespace" "mod catalog;")"
 if [ "$catalog_activation" -eq 0 ]; then
   [ ! -e "$catalog" ] || { echo "ERROR: catalog owner exists while catalog is inactive" >&2; exit 1; }
@@ -81,9 +80,10 @@ for id in "${ids[@]}"; do
   results="$(awk '/^test result:/ { count++ } END { print count + 0 }' "$output.normalized")"
   passed="$(awk '$0 ~ /^test result: ok[.] 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9]+([.][0-9]+)?s$/ { count++ } END { print count + 0 }' "$output.normalized")"
   failures="$(awk '/^failures:$/ || / FAILED$/ { count++ } END { print count + 0 }' "$output.normalized")"
+  reserved="$(awk '$0 ~ /^WRITER_NAMESPACE_WINDOWS_TARGET PASS/ { count++ } END { print count + 0 }' "$output.normalized")"
   rm -f "$output" "$output.normalized"
-  if [ "$rc" -ne 0 ] || [ "$headers" -ne 1 ] || [ "$running" -ne 1 ] || [ "$results" -ne 1 ] || [ "$passed" -ne 1 ] || [ "$failures" -ne 0 ]; then
-    echo "ERROR: $id rc=$rc headers=$headers running1=$running results=$results passed=$passed failures=$failures" >&2
+  if [ "$rc" -ne 0 ] || [ "$headers" -ne 1 ] || [ "$running" -ne 1 ] || [ "$results" -ne 1 ] || [ "$passed" -ne 1 ] || [ "$failures" -ne 0 ] || [ "$reserved" -ne 0 ]; then
+    echo "ERROR: $id rc=$rc headers=$headers running1=$running results=$results passed=$passed failures=$failures reserved=$reserved" >&2
     exit 1
   fi
   echo "WRITER_NAMESPACE_WINDOWS_TARGET PASS id=$id selected=1 passed=1"

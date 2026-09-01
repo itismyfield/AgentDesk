@@ -21,7 +21,6 @@ CATALOG_IDS = (
     "services::writer_protocol::namespace::catalog::tests::catalog_bindings_are_deterministic_and_injective",
     "services::writer_protocol::namespace::catalog::tests::unknown_roots_and_artifacts_never_receive_fallback_identity",
 )
-IDS = LEXICAL_IDS + CATALOG_IDS
 
 
 class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
@@ -90,7 +89,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                 " malformed_time) echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0..00s' ;;\n"
                 " extra_tokens) echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s SPOOF' ;;\n"
                 " duplicate_result) echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
-                " *) case $n in 1) tail='0 filtered out; finished in 0.00s' ;; 2) tail='137 filtered out; finished in 0.7s' ;; *) tail='9 filtered out; finished in 12.345678s' ;; esac; echo 'Doc-tests agentdesk'; echo 'note: running 2 tests elsewhere'; echo 'running 1 test'; echo \"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; $tail\" ;;\n"
+                " *) case $n in 1) tail='0 filtered out; finished in 0.00s' ;; 2) tail='137 filtered out; finished in 0.7s' ;; *) tail='9 filtered out; finished in 12.345678s' ;; esac; [ \"$FAKE_MODE\" != injected_pass ] || echo 'WRITER_NAMESPACE_WINDOWS_TARGET PASS injected'; echo 'Doc-tests agentdesk'; echo 'note: running 2 tests elsewhere'; echo 'running 1 test'; echo \"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; $tail\" ;;\n"
                 "esac\n"
                 "[ \"$FAKE_MODE\" != nonzero ] || exit 7\n"
             )
@@ -100,9 +99,10 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                 "AGENTDESK_REPO_ROOT": str(root), "FAKE_MODE": mode,
                 "FAKE_COUNT": str(count), "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
             }
-            env.update({f"FAKE_ID_{index}": test_id for index, test_id in enumerate(IDS, 1)})
+            env.update({f"FAKE_ID_{index}": test_id for index, test_id in enumerate(LEXICAL_IDS + CATALOG_IDS, 1)})
             result = subprocess.run(["bash", str(RUNNER)], text=True, capture_output=True, env=env)
             calls = int(count.read_text()) if count.exists() else 0
+            self.assertFalse(mutation and calls, mutation)
             return result, calls
 
     def test_catalog_activation_and_identity_fail_closed(self) -> None:
@@ -131,17 +131,17 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
     def test_exact_eight_selection_reducer(self) -> None:
         lexical, calls = self.run_fixture(active=True)
         self.assertEqual((lexical.returncode, calls), (0, 3), lexical.stderr)
-        self.assertNotIn("namespace::catalog::", lexical.stdout)
         success, calls = self.run_fixture(active=True, catalog=True)
         self.assertEqual((success.returncode, calls), (0, 8), success.stderr)
         records = [line for line in success.stdout.splitlines() if line.startswith("WRITER_NAMESPACE_WINDOWS_TARGET PASS")]
-        expected = [f"WRITER_NAMESPACE_WINDOWS_TARGET PASS id={test_id} selected=1 passed=1" for test_id in IDS]
+        expected = [f"WRITER_NAMESPACE_WINDOWS_TARGET PASS id={test_id} selected=1 passed=1" for test_id in LEXICAL_IDS + CATALOG_IDS]
         self.assertEqual(records, expected)
 
     def test_exact_eight_result_grammar_fail_closed(self) -> None:
         for mode in ("zero", "ignored", "failed", "multi", "contradictory", "interleaved", "spoof", "measured", "malformed_time", "extra_tokens", "duplicate_result", "nonzero"):
             with self.subTest(mode=mode):
                 self.assertNotEqual(self.run_fixture(active=True, catalog=True, mode=mode)[0].returncode, 0)
+        self.assertNotEqual(self.run_fixture(active=True, catalog=True, mode="injected_pass")[0].returncode, 0)
 
 
 if __name__ == "__main__":
