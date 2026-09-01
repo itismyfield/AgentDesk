@@ -446,6 +446,15 @@ pub(super) fn resolve_role_binding(
         })
         .unwrap_or_default();
 
+    let auth_profile = configured_auth_profile(
+        ch_binding.auth_profile.as_deref(),
+        agent_def.auth_profile.as_deref(),
+    )
+    .map(str::to_string)
+    .unwrap_or_else(|| {
+        provider_primary_profile(&schema, provider.as_ref().map(ProviderKind::as_str))
+    });
+
     Some(RoleBinding {
         role_id: ch_binding.agent.clone(),
         prompt_file,
@@ -454,14 +463,7 @@ pub(super) fn resolve_role_binding(
         reasoning_effort: None,
         peer_agents_enabled,
         quality_feedback_injection_enabled: true,
-        auth_profile: configured_auth_profile(
-            ch_binding.auth_profile.as_deref(),
-            agent_def.auth_profile.as_deref(),
-        )
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            provider_primary_profile(&schema, provider.as_ref().map(ProviderKind::as_str))
-        }),
+        auth_profile,
         memory,
     })
 }
