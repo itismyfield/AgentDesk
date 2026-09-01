@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::services::provider::ProviderKind;
+use crate::services::provider::ProviderKind::{Gemini, Grok, OpenCode, Qwen};
 use crate::voice::barge_in::{
     BargeInPlayerStop, BargeInSensitivity, DeferredBargeInBuffer, LiveBargeInCut,
     LiveBargeInMonitor, ProcessingBargeInDecision, run_sensitivity_ttl_reset,
@@ -446,7 +447,7 @@ async fn generate_foreground_ack_text(
                         Some(cancel_for_blocking),
                     )
                 }
-                ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => Err(format!(
+                Gemini | Grok | OpenCode | Qwen => Err(format!(
                     "foreground provider {} does not support model-scoped instant call yet",
                     provider_kind.as_str()
                 )),
@@ -557,7 +558,7 @@ async fn generate_voice_channel_text_reply(
                         Some(cancel_for_blocking),
                     )
                 }
-                ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => Err(format!(
+                Gemini | Grok | OpenCode | Qwen => Err(format!(
                     "voice channel text provider {} does not support model-scoped instant call yet",
                     provider_kind.as_str()
                 )),
@@ -646,7 +647,7 @@ async fn generate_voice_background_result_summary(
                         Some(cancel_for_blocking),
                     )
                 }
-                ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => Err(format!(
+                Gemini | Grok | OpenCode | Qwen => Err(format!(
                     "voice background summary provider {} does not support model-scoped instant call yet",
                     provider_kind.as_str()
                 )),

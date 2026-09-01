@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::session_backend::{StreamLineState, process_stream_line};
+use crate::services::stream_json_cli::runner::NO_OUTPUT_ERROR_MARKER;
 
 pub trait StreamJsonCodec: Send {
     fn push_stdout_line(&mut self, line: &str) -> Result<Vec<StreamMessage>, String>;
@@ -19,16 +20,14 @@ pub trait StreamJsonCodec: Send {
 /// Grok `streaming-messages-json` uses the shared Messages accumulator.
 pub struct MessagesJsonCodec {
     state: StreamLineState,
-    session_id: Option<String>,
-    emitted_done: bool,
+    emitted_terminal: bool,
 }
 
 impl MessagesJsonCodec {
     pub fn new() -> Self {
         Self {
             state: StreamLineState::new(),
-            session_id: None,
-            emitted_done: false,
+            emitted_terminal: false,
         }
     }
 }
@@ -45,25 +44,26 @@ impl StreamJsonCodec for MessagesJsonCodec {
         if trimmed.is_empty() {
             return Ok(Vec::new());
         }
-        let json: Value = serde_json::from_str(trimmed)
+        let _: Value = serde_json::from_str(trimmed)
             .map_err(|error| format!("malformed StreamJson line: {error}"))?;
-        if let Some(session_id) = json
-            .get("session_id")
-            .or_else(|| json.get("sessionId"))
-            .and_then(Value::as_str)
-        {
-            self.session_id = Some(session_id.to_string());
-        }
         let (tx, rx) = mpsc::channel();
         let keep_going = process_stream_line(trimmed, &tx, &mut self.state);
         drop(tx);
-        let emitted: Vec<StreamMessage> = rx.try_iter().collect();
-        if emitted
-            .iter()
-            .any(|message| matches!(message, StreamMessage::Done { .. }))
-        {
-            self.emitted_done = true;
+        let mut emitted: Vec<StreamMessage> = rx.try_iter().collect();
+        if let Some((message, stdout)) = self.state.stdout_error.take() {
+            emitted.push(StreamMessage::Error {
+                message,
+                stdout,
+                stderr: String::new(),
+                exit_code: None,
+            });
         }
+        self.emitted_terminal |= emitted.iter().any(|message| {
+            matches!(
+                message,
+                StreamMessage::Done { .. } | StreamMessage::Error { .. }
+            )
+        });
         if !keep_going && emitted.is_empty() {
             return Err("StreamJson codec stopped without messages".into());
         }
@@ -75,28 +75,23 @@ impl StreamJsonCodec for MessagesJsonCodec {
         exit_code: Option<i32>,
         stderr: &str,
     ) -> Result<Vec<StreamMessage>, String> {
-        if self.emitted_done {
+        if self.emitted_terminal {
             return Ok(Vec::new());
         }
-        if exit_code.unwrap_or(0) != 0 {
-            return Ok(vec![StreamMessage::Error {
-                message: if stderr.trim().is_empty() {
-                    format!("provider exited with status {exit_code:?}")
-                } else {
-                    stderr.trim().to_string()
-                },
-                stdout: String::new(),
-                stderr: stderr.to_string(),
-                exit_code,
-            }]);
-        }
-        let session_id = self.session_id.clone();
-        if session_id.is_none() {
-            return Err("terminal success without a valid session id".into());
-        }
-        Ok(vec![StreamMessage::Done {
-            result: String::new(),
-            session_id,
+        let reason = match exit_code {
+            Some(0) => "provider exited successfully without a terminal result".to_string(),
+            Some(code) => format!("provider exited with status {code} without a terminal result"),
+            None => "provider exited without a status or terminal result".to_string(),
+        };
+        let detail = match stderr.trim() {
+            "" => reason,
+            stderr => format!("{reason}: {stderr}"),
+        };
+        Ok(vec![StreamMessage::Error {
+            message: format!("[{NO_OUTPUT_ERROR_MARKER}] {detail}"),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            exit_code,
         }])
     }
 }
@@ -291,6 +286,61 @@ mod tests {
         assert!(
             done.iter()
                 .any(|message| matches!(message, StreamMessage::Done { .. }))
+        );
+        assert!(codec.finish(Some(0), "").unwrap().is_empty());
+
+        let push_init = |codec: &mut MessagesJsonCodec| {
+            codec
+                .push_stdout_line(
+                    r#"{"type":"system","subtype":"init","session_id":"01234567-89ab-cdef-0123-456789abcdef"}"#,
+                )
+                .unwrap()
+        };
+        let mut error_codec = MessagesJsonCodec::new();
+        push_init(&mut error_codec);
+        let terminal_error = error_codec
+            .push_stdout_line(
+                r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"failed"}"#,
+            )
+            .unwrap();
+        assert!(
+            terminal_error
+                .iter()
+                .any(|message| matches!(message, StreamMessage::Error { .. }))
+        );
+        assert!(
+            terminal_error
+                .iter()
+                .all(|message| !matches!(message, StreamMessage::Done { .. }))
+        );
+        assert!(error_codec.finish(Some(0), "").unwrap().is_empty());
+
+        let assert_incomplete = |exit_code, stderr: &str, expected: &str| {
+            let mut codec = MessagesJsonCodec::new();
+            push_init(&mut codec);
+            let messages = codec.finish(exit_code, stderr).unwrap();
+            let [
+                StreamMessage::Error {
+                    message,
+                    stderr: actual_stderr,
+                    exit_code: actual_exit_code,
+                    ..
+                },
+            ] = messages.as_slice()
+            else {
+                panic!("incomplete stream must emit exactly one error: {messages:?}");
+            };
+            assert!(message.contains(NO_OUTPUT_ERROR_MARKER));
+            assert!(message.contains(expected));
+            assert_eq!(actual_stderr, stderr);
+            assert_eq!(*actual_exit_code, exit_code);
+        };
+        assert_incomplete(Some(0), "", "successfully without a terminal result");
+        assert_incomplete(None, "", "without a status or terminal result");
+        assert_incomplete(
+            Some(17),
+            "fatal",
+            "status 17 without a terminal result: fatal",
         );
     }
 

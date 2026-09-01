@@ -26,8 +26,11 @@ use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::platform::with_provider_execution_context;
-use crate::services::provider::{CancelToken, ProviderExecutionAdapter, ProviderKind};
+use crate::services::provider::{
+    CancelToken, ProviderExecutionAdapter, ProviderKind, StreamJsonDialectId,
+};
 use crate::services::provider_cli::ProviderExecutionContext;
+use crate::services::stream_json_cli::{ConfiguredToolPolicy, ProviderTurnRequest, ToolPolicy};
 use crate::services::{claude, codex, gemini, opencode, qwen};
 
 pub async fn execute_simple_with_timeout(
@@ -99,6 +102,24 @@ fn execute_simple_blocking_inner(
         }
         ProviderExecutionAdapter::Qwen => {
             qwen::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())
+        }
+        ProviderExecutionAdapter::StreamJsonCli(StreamJsonDialectId::Grok) => {
+            let (sender, receiver) = std::sync::mpsc::channel::<StreamMessage>();
+            let request = ProviderTurnRequest {
+                provider: provider.clone(),
+                prompt,
+                system_prompt: None,
+                tool_policy: ConfiguredToolPolicy::for_new_stream_json_provider(),
+                model: None,
+                reasoning_effort: None,
+                working_directory: std::env::current_dir().unwrap_or_else(|_| ".".into()),
+                session: None,
+                remote_profile: None,
+                timeout: Duration::from_secs(300),
+                cancel: cancel_token,
+            };
+            let result = execute_stream_json_provider(StreamJsonDialectId::Grok, request, sender);
+            collect_stream_result(result, receiver)
         }
     }
 }
@@ -234,6 +255,26 @@ pub async fn execute_structured_with_context(
                     model_ref,
                     None,
                 ),
+                ProviderExecutionAdapter::StreamJsonCli(StreamJsonDialectId::Grok) => {
+                    let request = ProviderTurnRequest {
+                        provider: provider.clone(),
+                        prompt: prompt.clone(),
+                        system_prompt: system_prompt.clone(),
+                        tool_policy: configured_stream_json_tool_policy(&allowed_tools),
+                        model: model.clone(),
+                        reasoning_effort: None,
+                        working_directory: std::path::PathBuf::from(&working_dir),
+                        session: None,
+                        remote_profile: None,
+                        timeout: Duration::from_secs(timeout_secs),
+                        cancel: Some(Arc::clone(&cancel_token)),
+                    };
+                    execute_stream_json_provider(
+                        StreamJsonDialectId::Grok,
+                        request,
+                        sender.clone(),
+                    )
+                }
             };
             drop(sender);
             collect_stream_result(result, receiver)
@@ -255,6 +296,34 @@ pub async fn execute_structured_with_context(
             Err(structured_timeout_error(stage_label, timeout_secs))
         }
     }
+}
+
+pub(crate) fn configured_stream_json_tool_policy(allowed_tools: &[String]) -> ConfiguredToolPolicy {
+    if allowed_tools.is_empty() {
+        return ConfiguredToolPolicy::for_new_stream_json_provider();
+    }
+    if crate::services::provider::is_readonly_tool_policy(Some(allowed_tools)) {
+        return ConfiguredToolPolicy::Explicit(ToolPolicy::ReadOnly);
+    }
+    ConfiguredToolPolicy::LegacyAllowedTools(
+        allowed_tools
+            .iter()
+            .map(crate::services::stream_json_cli::policy::AgentTool::new)
+            .collect(),
+    )
+}
+
+pub(crate) fn execute_stream_json_provider(
+    dialect: StreamJsonDialectId,
+    request: ProviderTurnRequest,
+    sender: std::sync::mpsc::Sender<StreamMessage>,
+) -> Result<(), String> {
+    let dialect = match dialect {
+        StreamJsonDialectId::Grok => {
+            crate::services::stream_json_cli::dialects::StreamJsonDialect::Grok
+        }
+    };
+    crate::services::stream_json_cli::dialects::execute(dialect, request, sender)
 }
 
 pub(crate) fn simple_timeout_error(stage_label: &str, timeout: Duration) -> String {

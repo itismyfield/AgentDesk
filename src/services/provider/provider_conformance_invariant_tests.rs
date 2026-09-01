@@ -59,7 +59,8 @@ fn provider_exec_registry_conformance_invariant() {
             }
             ProviderCompactionAdapter::GeminiDisabled
             | ProviderCompactionAdapter::OpenCodeDisabled
-            | ProviderCompactionAdapter::QwenDisabled => {
+            | ProviderCompactionAdapter::QwenDisabled
+            | ProviderCompactionAdapter::StreamJsonDisabled => {
                 assert!(provider.compact_env_vars(80).is_empty());
                 assert!(provider.compact_cli_config(80, 100_000).is_empty());
             }
@@ -92,7 +93,7 @@ fn provider_exec_registry_conformance_invariant() {
     );
     assert_eq!(
         supported_provider_ids(),
-        vec!["claude", "codex", "gemini", "opencode", "qwen"]
+        vec!["claude", "codex", "gemini", "opencode", "qwen", "grok"]
     );
     for provider_id in supported_provider_ids() {
         assert_eq!(
@@ -157,7 +158,14 @@ fn provider_exec_registry_conformance_invariant() {
     assert!(
         catalog
             .iter()
+            .filter(|entry| entry.id != "grok")
             .all(|entry| entry.context_window_tokens.is_some())
+    );
+    assert!(
+        catalog
+            .iter()
+            .find(|entry| entry.id == "grok")
+            .is_some_and(|entry| entry.context_window_tokens.is_none())
     );
     let encoded_catalog = serde_json::to_string(&catalog).unwrap();
     for secret_field in ["credential_paths", "env_keys", "auth_check_argv"] {
@@ -170,6 +178,7 @@ fn provider_exec_registry_conformance_invariant() {
             vec![
                 ProviderKind::Codex,
                 ProviderKind::Gemini,
+                ProviderKind::Grok,
                 ProviderKind::OpenCode,
                 ProviderKind::Qwen,
             ],
@@ -179,6 +188,7 @@ fn provider_exec_registry_conformance_invariant() {
             vec![
                 ProviderKind::Claude,
                 ProviderKind::Gemini,
+                ProviderKind::Grok,
                 ProviderKind::OpenCode,
                 ProviderKind::Qwen,
             ],
@@ -188,6 +198,7 @@ fn provider_exec_registry_conformance_invariant() {
             vec![
                 ProviderKind::Codex,
                 ProviderKind::Claude,
+                ProviderKind::Grok,
                 ProviderKind::OpenCode,
                 ProviderKind::Qwen,
             ],
@@ -198,6 +209,7 @@ fn provider_exec_registry_conformance_invariant() {
                 ProviderKind::Codex,
                 ProviderKind::Claude,
                 ProviderKind::Gemini,
+                ProviderKind::Grok,
                 ProviderKind::Qwen,
             ],
         ),
@@ -207,13 +219,39 @@ fn provider_exec_registry_conformance_invariant() {
                 ProviderKind::Codex,
                 ProviderKind::Claude,
                 ProviderKind::Gemini,
+                ProviderKind::Grok,
                 ProviderKind::OpenCode,
+            ],
+        ),
+        (
+            ProviderKind::Grok,
+            vec![
+                ProviderKind::Codex,
+                ProviderKind::Claude,
+                ProviderKind::Gemini,
+                ProviderKind::OpenCode,
+                ProviderKind::Qwen,
             ],
         ),
     ];
     for (provider, expected) in expected_counterparts {
         assert_eq!(provider.preferred_counterparts(), expected);
     }
+
+    use crate::services::stream_json_cli::{ConfiguredToolPolicy, ToolPolicy};
+    let configured = crate::services::provider_exec::configured_stream_json_tool_policy;
+    assert_eq!(
+        configured(&[]),
+        ConfiguredToolPolicy::Explicit(ToolPolicy::ProviderDefault)
+    );
+    assert_eq!(
+        configured(&[" read ".into(), "GREP".into(), "Glob".into()]),
+        ConfiguredToolPolicy::Explicit(ToolPolicy::ReadOnly)
+    );
+    assert!(matches!(
+        configured(&["Read".into(), "Bash".into()]),
+        ConfiguredToolPolicy::LegacyAllowedTools(_)
+    ));
     assert_scoped_dispatches_have_no_wildcard_arms();
 }
 
@@ -240,6 +278,8 @@ fn unsupported_provider_preserves_generic_readiness_fallback() {
 fn assert_scoped_dispatches_have_no_wildcard_arms() {
     let provider_source = include_str!("../provider.rs");
     let provider_exec_source = include_str!("../provider_exec.rs");
+    let intake_source = include_str!("../discord/router/message_handler/intake_turn.rs");
+    let headless_source = include_str!("../discord/router/message_handler/headless_turn.rs");
 
     for function_name in [
         "compact_env_vars",
@@ -253,6 +293,24 @@ fn assert_scoped_dispatches_have_no_wildcard_arms() {
         "execute_structured_with_context",
     ] {
         assert_function_has_no_wildcard_arm(provider_exec_source, function_name);
+    }
+
+    let dispatch = "execute_stream_json_provider(";
+    assert!(
+        function_source(provider_exec_source, "execute_simple_blocking_inner").contains(dispatch)
+    );
+    let structured = function_source(provider_exec_source, "execute_structured_with_context");
+    assert!(structured.contains(dispatch));
+    assert!(structured.contains("configured_stream_json_tool_policy(&allowed_tools)"));
+    for source in [intake_source, headless_source] {
+        assert_eq!(source.matches(dispatch).count(), 1);
+        assert_eq!(
+            source
+                .matches("configured_stream_json_tool_policy(&allowed_tools)")
+                .count(),
+            1
+        );
+        assert!(!source.contains("ConfiguredToolPolicy::LegacyAllowedTools"));
     }
 }
 
