@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     CODEX_FALLBACK_CONTEXT_WINDOW, ProviderCapabilities, ProviderCompactionAdapter,
     ProviderDefaultBehavior, ProviderExecutionAdapter, ProviderKind, ProviderReadinessAdapter,
-    ProviderRegistryEntry,
+    ProviderRegistryEntry, StreamJsonDialectId,
 };
 
 /// Preserve the historical first counterpart while deriving every remaining
@@ -18,6 +18,7 @@ const FROZEN_FIRST_COUNTERPART: &[(&str, &str)] = &[
     ("gemini", "codex"),
     ("opencode", "codex"),
     ("qwen", "codex"),
+    ("grok", "codex"),
 ];
 
 pub fn frozen_first_counterpart_id(provider_id: &str) -> Option<&'static str> {
@@ -82,6 +83,8 @@ const QWEN_AUTH_ENV: &[&str] = &[
     "OPENAI_API_KEY",
     "BAILIAN_CODING_PLAN_API_KEY",
 ];
+const GROK_AUTH_PATHS: &[&str] = &["~/.grok/auth.json"];
+const GROK_AUTH_ENV: &[&str] = &["XAI_API_KEY"];
 
 const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
     ProviderRegistryEntry {
@@ -254,6 +257,40 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             auth_check_argv: None,
         },
     },
+    ProviderRegistryEntry {
+        id: "grok",
+        aliases: &[],
+        display_name: "Grok",
+        cli_init_label: "grok (xAI)",
+        channel_suffix: Some("-gx"),
+        default_channel_provider: false,
+        capabilities: ProviderCapabilities {
+            binary_name: "grok",
+            supports_structured_output: false,
+            supports_resume: true,
+            supports_tool_stream: true,
+        },
+        execution_adapter: ProviderExecutionAdapter::StreamJsonCli(StreamJsonDialectId::Grok),
+        compaction_adapter: ProviderCompactionAdapter::StreamJsonDisabled,
+        readiness_adapter: ProviderReadinessAdapter::GenericBanner,
+        default_behavior: ProviderDefaultBehavior {
+            resume_without_reset: true,
+            runtime_model: None,
+            source_label: "provider default",
+        },
+        default_context_window: 0,
+        context_window_known: false,
+        supports_restricted_tool_policy: true,
+        supports_tui_hosting: false,
+        system_prompt_transport: "prompt",
+        managed_tmux_backend: false,
+        managed_tmux_wrapper_subcommand: None,
+        auth: ProviderAuthSpec {
+            credential_paths: GROK_AUTH_PATHS,
+            env_keys: GROK_AUTH_ENV,
+            auth_check_argv: None,
+        },
+    },
 ];
 
 pub fn provider_registry() -> &'static [ProviderRegistryEntry] {
@@ -329,6 +366,7 @@ impl ProviderRegistryEntry {
             "gemini" => ProviderKind::Gemini,
             "opencode" => ProviderKind::OpenCode,
             "qwen" => ProviderKind::Qwen,
+            "grok" => ProviderKind::Grok,
             _ => return None,
         })
     }
