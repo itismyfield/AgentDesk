@@ -40,7 +40,7 @@ pub fn execute_command_streaming(
                 Duration::from_secs(300),
                 cancel_token,
                 report_channel_id,
-            ),
+            )?,
             sender,
         );
     }
