@@ -4,6 +4,7 @@ pub(super) fn live_status_panel_shape(content: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "🟢 진행 중",
         "🔧 도구 실행 중",
+        "🔧 마지막 도구",
         "🧵 subagent 실행 중",
         "🧬 workflow 실행 중",
         "💤 monitor 대기",
