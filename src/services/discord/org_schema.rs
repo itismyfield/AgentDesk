@@ -771,6 +771,6 @@ provider_auth_primary_profiles:
 agents: {}
 "#;
         let error = parse_org_schema(yaml).expect_err("provider mismatch must fail");
-        assert!(error.contains("does not match"));
+        assert!(error.contains("belongs to"));
     }
 }
