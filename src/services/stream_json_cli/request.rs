@@ -48,7 +48,7 @@ impl ProviderTurnRequest {
         timeout: Duration,
         cancel: Option<Arc<CancelToken>>,
         channel_id: Option<u64>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let session = if force_fresh {
             None
         } else {
@@ -59,8 +59,8 @@ impl ProviderTurnRequest {
         };
         let auth_overlay =
             crate::services::discord::spawn_auth_overlay(provider.clone(), channel_id)
-                .unwrap_or_else(|_| ProviderAuthOverlay::default_for(provider.clone()));
-        Self {
+                .map_err(|error| format!("provider auth profile resolution failed: {error}"))?;
+        Ok(Self {
             provider,
             prompt,
             system_prompt,
@@ -73,6 +73,6 @@ impl ProviderTurnRequest {
             timeout,
             cancel,
             auth_overlay,
-        }
+        })
     }
 }

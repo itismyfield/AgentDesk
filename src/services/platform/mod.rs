@@ -8,6 +8,7 @@ mod dump_tool;
 pub mod shell;
 pub mod tmux;
 
+pub(crate) use binary_resolver::active_provider_context;
 pub use binary_resolver::{
     BinaryResolution, apply_binary_resolution, async_resolve_binary_with_login_shell,
     augment_exec_path, merged_runtime_path, probe_provider_binary_version, resolve_provider_binary,

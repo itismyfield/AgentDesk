@@ -1709,6 +1709,18 @@ fn execute_streaming_local_tui_tmux(
         "=== execute_streaming_local_tui_tmux START: {} ===",
         tmux_session_name
     ));
+    let auth_overlay = crate::services::discord::overlay_from_tmux_session(
+        ProviderKind::Claude,
+        tmux_session_name,
+    )?;
+    let auth_env_lines =
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+    let session_exists = tmux_session_exists(tmux_session_name);
+    let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    ) || !session_exists;
+    let session_id = profile_matches.then_some(session_id).flatten();
     if let Some(channel_id) = report_channel_id {
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
     }
@@ -1729,8 +1741,7 @@ fn execute_streaming_local_tui_tmux(
     let mut transcript_path_string = transcript_path.display().to_string();
     let mut resume = session_resolution.resume;
 
-    let session_exists = tmux_session_exists(tmux_session_name);
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
     if session_exists
         && has_live_pane
         && !resume
@@ -1794,6 +1805,11 @@ fn execute_streaming_local_tui_tmux(
         model_override,
         hook_endpoint,
         resume,
+        &auth_env_lines,
+    )?;
+    crate::services::tmux_common::write_tmux_session_auth_profile(
+        tmux_session_name,
+        &auth_overlay.profile_id,
     )?;
     if let Some(channel_id) = report_channel_id {
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
@@ -1979,6 +1995,7 @@ fn prepare_and_create_claude_tui_session(
     model_override: Option<&str>,
     hook_endpoint: String,
     resume: bool,
+    auth_env_lines: &str,
 ) -> Result<String, String> {
     crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
     write_tmux_owner_marker(tmux_session_name)?;
@@ -2005,6 +2022,17 @@ fn prepare_and_create_claude_tui_session(
         };
         let session_files =
             crate::services::claude_tui::session::prepare_claude_tui_launch(&launch_config)?;
+        if !auth_env_lines.is_empty() {
+            let script = std::fs::read_to_string(&session_files.launch_script_path)
+                .map_err(|error| format!("read Claude TUI launch script: {error}"))?;
+            let script = script.replacen(
+                "#!/bin/bash\n",
+                &format!("#!/bin/bash\n{auth_env_lines}"),
+                1,
+            );
+            std::fs::write(&session_files.launch_script_path, script)
+                .map_err(|error| format!("update Claude TUI auth launch script: {error}"))?;
+        }
         let launch_script_path = session_files.launch_script_path.clone();
         prepared_session_files = Some(session_files);
         crate::services::platform::tmux::create_session(
@@ -2536,6 +2564,41 @@ fn execute_streaming_local_tmux(
         tmux_session_name
     ));
 
+    let auth_overlay = crate::services::discord::overlay_from_tmux_session(
+        ProviderKind::Claude,
+        tmux_session_name,
+    )?;
+    let auth_env_lines =
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+    let session_exists = tmux_session_exists(tmux_session_name);
+    let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    ) || !session_exists;
+    // A provider session id is account-scoped.  When a named auth profile
+    // replaces a warm tmux wrapper, never pass the old account's `--resume`
+    // token into the fresh process.
+    let fresh_args;
+    let args = if profile_matches {
+        args
+    } else {
+        let mut skip_next = false;
+        fresh_args = args
+            .iter()
+            .filter_map(|arg| {
+                if skip_next {
+                    skip_next = false;
+                    return None;
+                }
+                if arg == "--resume" {
+                    skip_next = true;
+                    return None;
+                }
+                Some(arg.clone())
+            })
+            .collect::<Vec<_>>();
+        &fresh_args
+    };
     let output_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
     let input_fifo_path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, "input");
@@ -2547,8 +2610,7 @@ fn execute_streaming_local_tmux(
     // (under `runtime_root()/runtime/sessions/`) or the legacy `/tmp/` path
     // that older wrappers still hold open fds to — so a dcserver restart
     // that lost its /tmp files does not invalidate a still-alive tmux pane.
-    let session_exists = tmux_session_exists(tmux_session_name);
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
     let resolved_output =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =
@@ -2556,7 +2618,10 @@ fn execute_streaming_local_tmux(
     // Resume id selected for this turn (`--resume <sid>` was pushed by the
     // caller when `session_id` is a valid id). Used to recognise a live pane
     // that was deliberately reused for provider-session continuity.
-    let resume_session_id = session_id.filter(|sid| is_valid_session_id(sid));
+    let resume_session_id = profile_matches
+        .then_some(session_id)
+        .flatten()
+        .filter(|sid| is_valid_session_id(sid));
     let startup_plan = classify_local_tmux_startup_plan(
         session_exists,
         has_live_pane,
@@ -2771,12 +2836,13 @@ fn execute_streaming_local_tmux(
         compact_percent,
         compact_lower_bound_tokens,
     );
-    let env_lines = build_tmux_launch_env_lines(
+    let mut env_lines = build_tmux_launch_env_lines(
         resolution.exec_path.as_deref(),
         report_channel_id,
         report_provider,
         auto_compact_window,
     );
+    env_lines.push_str(&auth_env_lines);
 
     let mut escaped_claude_bin = String::new();
     claude_bin.append_shell_escaped_to(&mut escaped_claude_bin);
@@ -2824,6 +2890,11 @@ fn execute_streaming_local_tmux(
         let _ = std::fs::remove_file(&script_path);
         return Err(format!("tmux error: {}", stderr));
     }
+
+    crate::services::tmux_common::write_tmux_session_auth_profile(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    )?;
 
     // Keep tmux session alive after process exits for post-mortem analysis
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");

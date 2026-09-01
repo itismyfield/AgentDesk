@@ -211,6 +211,14 @@ pub(crate) fn spawn_auth_overlay(
     provider: ProviderKind,
     channel_id: Option<u64>,
 ) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
+    spawn_auth_overlay_for_context(provider, channel_id, None)
+}
+
+fn spawn_auth_overlay_for_context(
+    provider: ProviderKind,
+    channel_id: Option<u64>,
+    agent_id: Option<&str>,
+) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
     use crate::services::provider_auth_profile::resolve;
 
     let schema = load_org_schema();
@@ -218,8 +226,22 @@ pub(crate) fn spawn_auth_overlay(
         .as_ref()
         .and_then(|schema| schema.provider_auth_profiles.clone())
         .unwrap_or_default();
-    let profile = channel_id.and_then(|id| {
+    let channel_binding = channel_id.and_then(|id| {
         resolve_role_binding(ChannelId::new(id), None).map(|binding| binding.auth_profile)
+    });
+    let agent_profile = agent_id.and_then(|agent_id| {
+        schema.as_ref().and_then(|schema| {
+            schema.agents.get(agent_id).map(|agent| {
+                configured_auth_profile(None, agent.auth_profile.as_deref())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| provider_primary_profile(schema, Some(provider.as_str())))
+            })
+        })
+    });
+    let profile = channel_binding.or(agent_profile).or_else(|| {
+        schema
+            .as_ref()
+            .map(|schema| provider_primary_profile(schema, Some(provider.as_str())))
     });
     let overlay = resolve(provider.clone(), profile.as_deref(), None, &catalog)
         .map_err(|error| error.to_string())?;
@@ -248,10 +270,22 @@ pub(crate) fn overlay_from_tmux_session(
     provider: ProviderKind,
     session_name: &str,
 ) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
-    let channel_id =
-        crate::services::provider::parse_provider_and_channel_from_tmux_name(session_name)
-            .and_then(|(_, channel)| channel.parse().ok());
-    spawn_auth_overlay(provider, channel_id)
+    let context = crate::services::platform::active_provider_context(provider.as_str());
+    let channel_id = context
+        .as_ref()
+        .and_then(|context| context.channel_id.as_deref())
+        .and_then(|channel_id| channel_id.parse().ok())
+        .or_else(|| {
+            crate::services::provider::parse_provider_and_channel_from_tmux_name(session_name)
+                .and_then(|(_, channel)| channel.parse().ok())
+        });
+    spawn_auth_overlay_for_context(
+        provider,
+        channel_id,
+        context
+            .as_ref()
+            .and_then(|context| context.agent_id.as_deref()),
+    )
 }
 
 #[derive(Clone, Debug)]

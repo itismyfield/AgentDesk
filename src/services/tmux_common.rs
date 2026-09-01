@@ -1204,6 +1204,38 @@ pub fn resolve_session_temp_path(session_name: &str, extension: &str) -> Option<
     None
 }
 
+const TMUX_AUTH_PROFILE_TEMP_EXT: &str = "auth_profile";
+
+/// Return whether a live tmux wrapper was created for the requested auth
+/// profile.  A legacy wrapper without a marker is safe to reuse only for the
+/// implicit default profile; named profiles must start a fresh provider
+/// session rather than silently continue under another account.
+pub(crate) fn tmux_session_auth_profile_matches(
+    session_name: &str,
+    requested_profile_id: &str,
+) -> bool {
+    let marker = resolve_session_temp_path(session_name, TMUX_AUTH_PROFILE_TEMP_EXT)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|value| value.trim().to_string());
+    match marker.as_deref() {
+        Some(profile_id) => profile_id == requested_profile_id,
+        None => requested_profile_id == crate::services::provider_auth_profile::DEFAULT_PROFILE_ID,
+    }
+}
+
+/// Persist the selected profile beside a newly-created tmux wrapper so warm
+/// follow-ups are never routed across account boundaries.
+pub(crate) fn write_tmux_session_auth_profile(
+    session_name: &str,
+    profile_id: &str,
+) -> Result<(), String> {
+    std::fs::write(
+        session_temp_path(session_name, TMUX_AUTH_PROFILE_TEMP_EXT),
+        profile_id.trim(),
+    )
+    .map_err(|error| format!("write tmux auth profile marker: {error}"))
+}
+
 /// Delete all known session temp files for the given tmux session.
 /// Idempotent — missing files are not errors. Hits both the new persistent
 /// location and the legacy `/tmp/` location so cleanup is total regardless
@@ -1223,6 +1255,7 @@ fn cleanup_session_temp_files_under_source_authority(session_name: &str) {
         "owner",
         "sh",
         "generation",
+        TMUX_AUTH_PROFILE_TEMP_EXT,
         // #3087: the per-spawn status-panel instance nonce. Must be swept on
         // teardown like the other session temp files — otherwise a respawn whose
         // fresh nonce write fails (logged, non-fatal) would leave the PRIOR

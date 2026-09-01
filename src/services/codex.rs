@@ -1609,6 +1609,7 @@ fn prepare_codex_tui_launch_script(
     report_channel_id: Option<u64>,
     report_provider: Option<ProviderKind>,
     warm_followup_enabled: bool,
+    auth_env_lines: &str,
 ) -> Result<CodexTuiLaunchScript, String> {
     write_tmux_owner_marker(tmux_session_name)?;
     crate::services::tmux_common::write_tmux_runtime_kind_marker(
@@ -1623,11 +1624,12 @@ fn prepare_codex_tui_launch_script(
         .clone()
         .ok_or_else(|| "Codex CLI not found".to_string())?;
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
-    let env_lines = build_tmux_launch_env_lines(
+    let mut env_lines = build_tmux_launch_env_lines(
         resolution.exec_path.as_deref(),
         report_channel_id,
         report_provider,
     );
+    env_lines.push_str(auth_env_lines);
     let mut args = build_codex_tui_args(launch_options);
     let codex_hook_overrides = if codex_direct_tui_hook_overrides_enabled() {
         prepare_codex_tui_hook_overrides(
@@ -1768,6 +1770,18 @@ fn execute_streaming_local_tui_tmux(
     let _turn_guard = turn_lock
         .as_ref()
         .map(|lock| lock.lock().unwrap_or_else(|error| error.into_inner()));
+    let auth_overlay = crate::services::discord::overlay_from_tmux_session(
+        ProviderKind::Codex,
+        tmux_session_name,
+    )?;
+    let auth_env_lines =
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+    let session_exists = tmux_session_exists(tmux_session_name);
+    let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    ) || !session_exists;
+    let session_id = profile_matches.then_some(session_id).flatten();
     let session_selection = crate::services::codex_tui::session::resolve_codex_tui_session(
         session_id,
         std::path::Path::new(working_dir),
@@ -1810,8 +1824,7 @@ fn execute_streaming_local_tui_tmux(
         );
     }
 
-    let session_exists = tmux_session_exists(tmux_session_name);
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
     let mut warm_fallback_reason = None;
     let mut warm_fallback_pane_stopped = false;
 
@@ -1872,6 +1885,7 @@ fn execute_streaming_local_tui_tmux(
         report_channel_id,
         report_provider,
         warm_followup_enabled,
+        &auth_env_lines,
     )?;
     if let Some(channel_id) = report_channel_id {
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
@@ -1894,6 +1908,11 @@ fn execute_streaming_local_tui_tmux(
         );
         return Err(format!("tmux error: {}", stderr));
     }
+
+    crate::services::tmux_common::write_tmux_session_auth_profile(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    )?;
 
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
@@ -2227,6 +2246,21 @@ fn execute_streaming_local_tmux(
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
+    let auth_overlay = crate::services::discord::overlay_from_tmux_session(
+        ProviderKind::Codex,
+        tmux_session_name,
+    )?;
+    let auth_env_lines =
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+    let session_exists = tmux_session_exists(tmux_session_name);
+    let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    ) || !session_exists;
+    // Resume tokens are bound to the account that created them.  A profile
+    // change recreates the wrapper and deliberately begins a fresh provider
+    // session instead of leaking that token into another account.
+    let session_id = profile_matches.then_some(session_id).flatten();
     let output_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
     let input_fifo_path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, "input");
@@ -2236,8 +2270,7 @@ fn execute_streaming_local_tmux(
     // Accept either the new persistent location or the legacy /tmp location
     // so that dcserver restarts that lost /tmp files still re-attach to a
     // live tmux pane owned by an older wrapper. See issue #892.
-    let session_exists = tmux_session_exists(tmux_session_name);
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
     let resolved_output =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =
@@ -2369,11 +2402,12 @@ fn execute_streaming_local_tmux(
     // Write launch script to file to avoid tmux "command too long" errors
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
 
-    let env_lines = build_tmux_launch_env_lines(
+    let mut env_lines = build_tmux_launch_env_lines(
         resolution.exec_path.as_deref(),
         report_channel_id,
         report_provider,
     );
+    env_lines.push_str(&auth_env_lines);
 
     let script_content = render_codex_wrapper_tmux_script(
         &env_lines,
@@ -2408,6 +2442,11 @@ fn execute_streaming_local_tmux(
         let _ = std::fs::remove_file(&script_path);
         return Err(format!("tmux error: {}", stderr));
     }
+
+    crate::services::tmux_common::write_tmux_session_auth_profile(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    )?;
 
     // Keep tmux session alive after process exits for post-mortem analysis
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");

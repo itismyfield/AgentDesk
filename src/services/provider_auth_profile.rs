@@ -319,7 +319,17 @@ pub fn validate_profile_def(
 /// process home, executable search path, shell startup, or dynamic loader.
 /// The resolver owns each provider's home variables exclusively.
 pub fn profile_env_key_allowed(provider: &ProviderKind, key: &str) -> bool {
-    let allowed: &[&str] = match provider {
+    provider_credential_env_keys(provider)
+        .iter()
+        .any(|candidate| *candidate == key)
+}
+
+/// Credentials inherited from the AgentDesk service environment must never
+/// silently win over a named account's isolated home. Named profiles start by
+/// clearing every credential key their provider can consume, then explicitly
+/// opt back in only to credentials stored in that profile definition.
+pub fn provider_credential_env_keys(provider: &ProviderKind) -> &'static [&'static str] {
+    match provider {
         ProviderKind::Claude => &["ANTHROPIC_API_KEY"],
         ProviderKind::Codex => &["OPENAI_API_KEY"],
         ProviderKind::Grok => &["XAI_API_KEY"],
@@ -328,8 +338,7 @@ pub fn profile_env_key_allowed(provider: &ProviderKind, key: &str) -> bool {
         ProviderKind::Antigravity => &["NVIDIA_API_KEY"],
         ProviderKind::Gemini => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         ProviderKind::Unsupported(_) => &[],
-    };
-    allowed.iter().any(|candidate| *candidate == key)
+    }
 }
 
 pub fn selected_profile_id<'a>(
@@ -412,7 +421,10 @@ fn resolve_at(
         .as_ref()
         .map(|path| home_env_for(&provider, path))
         .unwrap_or_default();
-    let mut unset = BTreeSet::new();
+    let mut unset: BTreeSet<String> = provider_credential_env_keys(&provider)
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect();
     for (key, value) in &def.env {
         if value.is_empty() {
             env.remove(key);
@@ -694,7 +706,15 @@ pub fn allocate_profile_id(
             continue;
         }
         let home = extra_account_home(provider, &candidate);
-        if existing_homes.iter().any(|path| path == &home) {
+        if home.exists()
+            || existing_homes.iter().any(|path| {
+                path == &home
+                    || path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name == candidate)
+            })
+        {
             continue;
         }
         return Ok(candidate);
@@ -795,6 +815,27 @@ pub fn login_script_contents(overlay: &ProviderAuthOverlay, argv: &[&str]) -> St
     body
 }
 
+/// Render an auth overlay as shell statements for provider-owned launch
+/// scripts.  Unsets are intentionally emitted before exports so a named
+/// profile cannot inherit a service-level API key while still being able to
+/// supply an explicitly configured key of its own.
+pub fn overlay_shell_env_lines(overlay: &ProviderAuthOverlay) -> String {
+    let mut body = String::new();
+    for key in &overlay.unset {
+        body.push_str("unset ");
+        body.push_str(key);
+        body.push('\n');
+    }
+    for (key, value) in &overlay.env {
+        body.push_str("export ");
+        body.push_str(key);
+        body.push('=');
+        body.push_str(&crate::services::process::shell_escape(value));
+        body.push('\n');
+    }
+    body
+}
+
 pub fn write_login_script(
     home: &Path,
     overlay: &ProviderAuthOverlay,
@@ -889,7 +930,12 @@ mod tests {
             )
             .unwrap();
             assert!(!overlay.env.contains_key("HOME"));
-            assert_eq!(overlay.env.get(home_key), Some(&home.display().to_string()));
+            let expected_home_value = if provider == ProviderKind::OpenCode {
+                format!("{}/xdg-config", home.display())
+            } else {
+                home.display().to_string()
+            };
+            assert_eq!(overlay.env.get(home_key), Some(&expected_home_value));
             if provider == ProviderKind::OpenCode {
                 assert_eq!(
                     overlay.env.get("XDG_DATA_HOME"),
@@ -897,6 +943,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn named_profile_clears_inherited_provider_credentials() {
+        let (dir, _) = temp_home();
+        let home = create_empty_profile_home_at(dir.path(), &ProviderKind::Codex, "work")
+            .expect("profile home");
+        let overlay = resolve_at(
+            dir.path(),
+            ProviderKind::Codex,
+            Some("work"),
+            None,
+            &catalog_with(
+                "work",
+                ProviderAuthProfileDef {
+                    provider: "codex".to_string(),
+                    home: Some(home.display().to_string()),
+                    env: BTreeMap::new(),
+                },
+            ),
+        )
+        .expect("named profile");
+
+        assert!(overlay.unset.contains("OPENAI_API_KEY"));
+        let merged = merge_overlay_env(
+            vec![("OPENAI_API_KEY".to_string(), "parent-secret".to_string())],
+            &overlay,
+        );
+        assert!(merged.iter().all(|(key, _)| key != "OPENAI_API_KEY"));
+        assert_eq!(
+            merged
+                .iter()
+                .find(|(key, _)| key == "CODEX_HOME")
+                .map(|(_, value)| value),
+            Some(&home.display().to_string())
+        );
     }
 
     #[test]
@@ -1142,6 +1224,20 @@ mod tests {
         assert!(debug.contains("CODEX_HOME"));
         assert!(!debug.contains("/tmp/x"));
         let _ = fs::metadata("/tmp");
+    }
+
+    #[test]
+    fn named_profile_shell_overlay_clears_parent_key_before_exporting_home() {
+        let mut overlay = ProviderAuthOverlay::default_for(ProviderKind::Codex);
+        overlay.profile_id = "codex-work".to_string();
+        overlay.unset.insert("OPENAI_API_KEY".to_string());
+        overlay
+            .env
+            .insert("CODEX_HOME".to_string(), "/tmp/work home".to_string());
+
+        let lines = overlay_shell_env_lines(&overlay);
+        assert!(lines.starts_with("unset OPENAI_API_KEY\n"));
+        assert!(lines.contains("export CODEX_HOME='/tmp/work home'\n"));
     }
 
     #[test]
