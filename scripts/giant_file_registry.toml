@@ -737,57 +737,25 @@ owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#4712"
 
-[[entry]]
-# Crossed the 1000-prod-LoC threshold when #3017 re-landed the single
-# output-offset relay-dedup authority: the idle-JSONL relay loop now consults
-# `committed_relay_offset` (read-only) with generation-aware watermark resets to
-# de-duplicate inflight-less wake/background relays against the tmux watcher.
-# #5071 T0-S4 moved the terminal outcome fold and RelaySink::deliver to
-# session_relay_sink/terminal_handoff.rs; the root remains giant at 1499 prod LoC.
-# Active relay-dedup surface; decompose the idle-relay loop out once stabilized.
-file = "src/services/discord/session_relay_sink.rs"
-owner = "discord-relay"
-deadline = "2026-08-31"
-decompose_issue = "#4712"
-
-[[entry]]
-# Crossed the 1000-prod-LoC threshold in #3998 E13 when the turn-output
-# controller lease guard moved from `TurnKey` to `DeliveryLeaseKey` so id-0
-# delivery leases can use inflight disambiguators. Keep future controller growth
-# in narrower outbound/controller helper modules once the lease-key rollout
-# stabilizes.
-file = "src/services/discord/outbound/turn_output_controller.rs"
-owner = "discord-relay"
-deadline = "2026-08-31"
-decompose_issue = "#4712"
+# RETIRED 2026-09-01 (#4712): session_relay_sink.rs dropped from 1499 to 825
+# production LoC after terminal delivery orchestration moved to the cohesive
+# session_relay_sink/delivery.rs child (678 production LoC).
+# turn_output_controller.rs dropped to 883
+# production LoC after transport execution, failure classification, and final
+# commit moved to turn_output_controller/transport.rs. Both children remain
+# below the giant threshold.
 
 # NOTE: src/services/discord/relay_recovery.rs previously had an [[entry]] here;
 # #4712 extracted decision, idle-tmux repair, and action apply clusters into
 # child modules, dropping the root below the prod-giant threshold. Its entry and
 # ratchet baseline are removed to avoid a ghost registration.
 
-[[entry]]
-# Crossed the 1000-prod-LoC threshold in #3739: worker-local LoopOwned Tokio
-# tasks now have registry-owned terminal supervision for unexpected future
-# return/panic. #4515 moved restart budget/backoff execution into the sibling
-# worker_recovery.rs module, leaving factory registration and inventory wiring
-# here. Split the remaining worker-status helpers once the registry API stabilizes.
-file = "src/server/worker_registry.rs"
-owner = "server-runtime"
-deadline = "2026-08-31"
-decompose_issue = "#4710"
-
-[[entry]]
-# Crossed the 1000-prod-LoC threshold when #3041 P1-0 landed the dormant
-# `DeliveryLeaseCell` finalizer messages/handlers on top of #3143's
-# `FinalizeContext::monitor()` + monitor turn-key/ledger-generation logic. The
-# dormant lease doc comments were already trimmed; the remaining overage is the
-# single owning finalizer state machine (#3016), not removable prose. Decompose
-# the ledger/actor-loop/reconciler surface out as #3016 lands its wired phases.
-file = "src/services/discord/turn_finalizer.rs"
-owner = "discord-finalizer"
-deadline = "2026-08-31"
-decompose_issue = "#4712"
+# RETIRED 2026-09-01 (#4710/#4712): worker_registry.rs dropped to 483 production
+# LoC after lifecycle/status observation and worker construction/supervision moved
+# to worker_registry/{status,registry}.rs. The declarative WORKER_SPECS table stays
+# in the root for the inventory generator contract. turn_finalizer.rs dropped to
+# 860 production LoC after terminal admission and ledger transition moved to
+# turn_finalizer/terminal_handler.rs.
 
 # RETIRED 2026-07-24 (#4712 D5): turn_view_reconciler.rs dropped below the
 # 1000-production-LoC giant threshold after its API, reaction application,
@@ -827,19 +795,9 @@ decompose_issue = "#4712"
 # the 1000-prod-LoC giant threshold, so its promoted registry entry is removed
 # and cannot remain as a ghost.
 
-[[entry]]
-# Crossed the 1000-prod-LoC giant threshold in #3540: the durable pending
-# synthetic-turn-start worker (#3154) accreted the #3174/#3282/#3296/#3303/#3350
-# reconcile-marker chokepoints plus the #3540 no-evict post-abort queue promote.
-# The file is dominated by the worker FSM (`run_worker_inner`) and its
-# marker-recording guards; decomposition would lift the marker-record cluster
-# (`record_claim_marker_if_watcher_owned` + wrappers) and the durable
-# store/persistence helpers into siblings, leaving the worker loop in the root.
-# Tracked for splitting under the relay-decomposition program.
-file = "src/services/discord/tui_direct_pending_start.rs"
-owner = "discord-relay"
-deadline = "2026-08-31"
-decompose_issue = "#4712"
+# RETIRED 2026-09-01 (#4712): tui_direct_pending_start.rs dropped to 846
+# production LoC after reclaim, cancellation, and worker execution moved to the
+# tui_direct_pending_start/worker.rs child (935 production LoC).
 
 [[entry]]
 # Crossed the 1000-prod-LoC giant threshold in #4081 when the durable delivery

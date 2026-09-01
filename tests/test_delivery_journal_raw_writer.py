@@ -282,21 +282,21 @@ class RawWriterAllowlistTests(unittest.TestCase):
 
     def test_source_contract_sink_direct_begin_is_guarded_after_cutover(self):
         """Source text only: begin appears after the cutover return, behind the predicate."""
-        source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
+        source = (ROOT / "src/services/discord/session_relay_sink/delivery.rs").read_text(encoding="utf-8")
         cutover = source.index("return short_controller::deliver_short_replace_via_controller")
         guard = source.index("journal::journals_sink_direct(&route, cutover_short_replace)")
         begin = source.index("self.journal.begin_fresh(")
         self.assertGreater(begin, cutover)
         self.assertLess(guard, begin)
 
-    def test_source_contract_sink_direct_root_has_one_facade_begin(self):
+    def test_source_contract_sink_direct_delivery_has_one_facade_begin(self):
         """Source text only: pins begin_fresh at exactly 1 occurrence in
-        session_relay_sink.rs, so a second call added to THAT file -- including
+        session_relay_sink/delivery.rs, so a second call added to THAT file -- including
         one that bypasses the journals_sink_direct predicate -- fails here and
         is blocked in CI. It proves nothing about reachability, and it reads
         only this one file: a begin_fresh added in a different module (a new
         helper, say) is outside every check we have."""
-        source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
+        source = (ROOT / "src/services/discord/session_relay_sink/delivery.rs").read_text(encoding="utf-8")
         self.assertEqual(source.count("self.journal.begin_fresh("), 1)
         self.assertEqual(source.count("self.journal.finish_fresh("), 0)
 
@@ -308,13 +308,13 @@ class RawWriterAllowlistTests(unittest.TestCase):
 
     def test_source_contract_sink_direct_success_arms_settle_each_terminal_arm(self):
         """Source text only: pins the literal `journal::settle(` count in
-        session_relay_sink.rs at 3, so deleting one of the three terminal arms
+        session_relay_sink/delivery.rs at 3, so deleting one of the three terminal arms
         makes it 2 and fails here -- this test, not a runtime test, is what
         blocks that edit in CI (no runtime test can see it: begin_fresh is None
         without PG + Shadow). Being a text count is the limit: it cannot tell
         which branch a surviving call sits on, and a call commented out rather
         than deleted still counts toward the 3."""
-        source = (ROOT / "src/services/discord/session_relay_sink.rs").read_text(encoding="utf-8")
+        source = (ROOT / "src/services/discord/session_relay_sink/delivery.rs").read_text(encoding="utf-8")
         self.assertEqual(source.count("journal::settle("), 3)
 
     # #5071 T1 S3a additions.
@@ -741,9 +741,10 @@ class RawWriterAllowlistTests(unittest.TestCase):
         self.assertEqual(
             mentions,
             {
-                "src/services/discord/outbound/turn_output_controller.rs": 3,
+                "src/services/discord/outbound/turn_output_controller.rs": 2,
                 "src/services/discord/outbound/turn_output_controller/fresh_send.rs": 1,
                 "src/services/discord/outbound/turn_output_controller/fresh_send_tests.rs": 2,
+                "src/services/discord/outbound/turn_output_controller/transport.rs": 1,
             },
             "OutputPlan::SendFresh gained or lost a mention; if a production owner now "
             "builds it, this family's map and its durable frontier write both need "

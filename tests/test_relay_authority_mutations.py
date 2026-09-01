@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 MUTATION_SCRIPT = Path("scripts/run_relay_authority_mutations.sh")
 CONTRACT_MANIFEST = Path("scripts/relay_authority_contract_targets.json")
 TERMINAL_HANDOFF = Path("src/services/discord/session_relay_sink/terminal_handoff.rs")
-SESSION_RELAY_SINK = Path("src/services/discord/session_relay_sink.rs")
+SESSION_RELAY_DELIVERY = Path("src/services/discord/session_relay_sink/delivery.rs")
 # #5457 moved the S4 fence layer into this child module, and both S4 fence rows
 # anchor on text that went with it, so the registry root is no longer mutated.
 WATCHER_FENCES = Path("src/services/discord/tmux_watcher_registry/fences.rs")
@@ -23,7 +23,7 @@ DESTRUCTIVE_CANCEL_GATE = Path("src/services/discord/destructive_cancel_gate.rs"
 # every row, so the fixture tree has to carry the whole set.
 MUTATION_FILES = (
     TERMINAL_HANDOFF,
-    SESSION_RELAY_SINK,
+    SESSION_RELAY_DELIVERY,
     WATCHER_FENCES,
     DESTRUCTIVE_CANCEL_GATE,
 )
@@ -316,7 +316,7 @@ exit 101
         lock_dir.mkdir(parents=True)
         before = {
             relative: (root / relative).read_bytes()
-            for relative in (TERMINAL_HANDOFF, SESSION_RELAY_SINK)
+            for relative in (TERMINAL_HANDOFF, SESSION_RELAY_DELIVERY)
         }
 
         result = self.run_script(root, runner)

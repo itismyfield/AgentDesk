@@ -57,7 +57,7 @@ if [[ "$MODE" == "fixture" && ! -x "$FIXTURE_RUNNER" ]]; then
 fi
 
 readonly TERMINAL_HANDOFF="src/services/discord/session_relay_sink/terminal_handoff.rs"
-readonly SESSION_RELAY_SINK="src/services/discord/session_relay_sink.rs"
+readonly SESSION_RELAY_DELIVERY="src/services/discord/session_relay_sink/delivery.rs"
 # #5457 moved the S4 fence layer out of `tmux_watcher_registry.rs` into this
 # child module. Both S4 fence rows below anchor on text that went with it, so
 # they mutate the child; the registry root no longer carries a mutated anchor.
@@ -65,7 +65,7 @@ readonly WATCHER_FENCES="src/services/discord/tmux_watcher_registry/fences.rs"
 readonly DESTRUCTIVE_CANCEL_GATE="src/services/discord/destructive_cancel_gate.rs"
 readonly -a MUTATION_FILES=(
   "$TERMINAL_HANDOFF"
-  "$SESSION_RELAY_SINK"
+  "$SESSION_RELAY_DELIVERY"
   "$WATCHER_FENCES"
   "$DESTRUCTIVE_CANCEL_GATE"
 )
@@ -312,7 +312,7 @@ run_mutation \
   'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_propagates_injected_transport_error'
 
 run_mutation \
-  anchor-drop "$SESSION_RELAY_SINK" \
+  anchor-drop "$SESSION_RELAY_DELIVERY" \
   $'formatting::watcher_completion_footer_anchor(\n                        last_chunk_anchor.as_ref(),\n                        msg_id,\n                        &relay_text,\n                    )' \
   $'formatting::watcher_completion_footer_anchor(\n                        None,\n                        msg_id,\n                        &relay_text,\n                    )' \
   'services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof'

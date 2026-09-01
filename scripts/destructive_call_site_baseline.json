@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "5d59338d07c224dc5e8d389027539dd5baa0961e",
+  "measured_at_sha": "30d0611c80a1fa1c399ce652dfa537311313305d",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {
@@ -49,7 +49,7 @@
         "src/services/discord/tmux_watcher/placeholder_reclaim.rs": 1,
         "src/services/discord/tmux_watcher_registry.rs": 1,
         "src/services/discord/tmux_watcher_registry_restore_tests.rs": 1,
-        "src/services/discord/tui_direct_pending_start.rs": 1,
+        "src/services/discord/tui_direct_pending_start/worker.rs": 1,
         "src/services/discord/turn_bridge/runtime_handoff_loop.rs": 1,
         "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": 2,
         "src/services/discord/turn_finalizer.rs": 2,
@@ -74,7 +74,7 @@
         "src/services/discord/relay_recovery/apply.rs": 2,
         "src/services/discord/task_supervisor.rs": 1,
         "src/services/discord/tmux_watcher/post_stream_exit.rs": 1,
-        "src/services/discord/tui_direct_pending_start.rs": 1,
+        "src/services/discord/tui_direct_pending_start/worker.rs": 1,
         "src/services/discord/turn_bridge/runtime_handoff_loop.rs": 2,
         "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": 3,
         "src/services/discord/watchers/lifecycle/claims.rs": 2
@@ -84,14 +84,14 @@
       "comment": "#5071 relay-tail S4: production `under_identity_fence` binders, excluding the owner file that defines it. These are the ONLY destructive removals that carry the WatcherIdentityFence and TerminalDeliveryFence conjuncts; every other entry in registry_remove reaches an unfenced helper. Pinning this set does not fence those \u2014 it makes adding, moving or dropping a fenced site a reviewed baseline diff.",
       "files": {
         "src/services/discord/relay_recovery/apply.rs": 1,
-        "src/services/discord/tui_direct_pending_start.rs": 1
+        "src/services/discord/tui_direct_pending_start/worker.rs": 1
       }
     },
     "delivery_fence_bind": {
       "comment": "#5071 relay-tail S4 r2: production `with_terminal_delivery_fence` binders, same exclusions as identity_fence_bind. This must be the SAME per-file set: the checker's pairing pass rejects any file where the two counts differ, which is what catches a delivery fence being dropped from a site that keeps its identity fence \u2014 a DECREASE the no-growth ratchet would otherwise wave through.",
       "files": {
         "src/services/discord/relay_recovery/apply.rs": 1,
-        "src/services/discord/tui_direct_pending_start.rs": 1
+        "src/services/discord/tui_direct_pending_start/worker.rs": 1
       }
     },
     "inflight_row_clear_call": {
@@ -116,7 +116,7 @@
         "src/services/discord/tmux_watcher/stall_exit.rs": 1,
         "src/services/discord/tmux_watcher/terminal_commit_epilogue.rs": 1,
         "src/services/discord/tmux_watcher/turn_identity.rs": 2,
-        "src/services/discord/tui_direct_pending_start.rs": 2,
+        "src/services/discord/tui_direct_pending_start/worker.rs": 2,
         "src/services/discord/tui_prompt_relay/synthetic_start.rs": 1,
         "src/services/discord/turn_bridge/completion_postlude.rs": 2,
         "src/services/discord/turn_bridge/guards.rs": 2,

@@ -899,7 +899,7 @@ mod tests {
 
     #[test]
     fn giant_sink_wires_card_gate_before_reference_send() {
-        let source = include_str!("../session_relay_sink.rs");
+        let source = include_str!("delivery.rs");
         let gate = source
             .find("ensure_card_and_route(")
             .expect("sink must invoke task card gate");

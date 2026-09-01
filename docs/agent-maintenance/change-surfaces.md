@@ -1346,14 +1346,12 @@ time for diagnostics; neither is a stored approval value.
     commit + visible-completion consumption, and `sweep.rs` owns the TTL sweep.
     All files are below the giant-file threshold; the #4175 registry entry is
     retired.
-  - `src/services/discord/tui_direct_pending_start.rs` (frozen giant surface;
-    the deferred TUI-direct synthetic turn-start path — the pending-start claim
-    queue, the no-evict promote of a stalled inflight, and the deferred-claim
-    owner handoff. #3540 added the B′ "no-evict promote" path (a stalled inflight
-    is safely promoted off the pending-start queue instead of evicted) plus its
-    regression tests, which pushed the production surface over the 1000-line
-    giant-file threshold, so this file is now a registered giant. Bugfix /
-    queue-safety only; split before adding new pending-start behavior).
+  - `src/services/discord/tui_direct_pending_start.rs` was decomposed in #5676:
+    the root retains pending-claim data, queue ownership, and public coordination,
+    while `tui_direct_pending_start/worker.rs` owns worker execution, deferred
+    promotion, abort handling, and terminal cleanup. Both production modules are
+    below the giant-file threshold; new worker lifecycle behavior belongs in the
+    child instead of re-expanding the coordination facade.
   - `src/services/discord/tmux_placeholder_suppression/{mod,evidence,ops}.rs`
     (348 / 259 / 584 production lines after #4176; formerly
     `tmux_placeholder_suppression.rs` at 1092 production lines. The facade keeps
@@ -1810,28 +1808,22 @@ time for diagnostics; neither is a stored approval value.
     binds here — the `[namespace_size_caps]` entry is, and the file is AT that
     cap with zero headroom. See "At-cap surfaces" under Read This First for the
     measurement and for why the next change of any size has to extract first).
-  - `src/services/discord/outbound/turn_output_controller.rs` (frozen giant surface;
-    #4046 S1r-1 keeps the anchor-less `SendFresh` implementation in the 228-line
-    `turn_output_controller/fresh_send.rs` child while the root owns only the
-    shared verb/outcome contract and routing; crossed the giant threshold in
-    #3998 E13 when the controller-facing lease guard moved from `TurnKey` to
-    `DeliveryLeaseKey` for id-0 disambiguation. Tracked decompose target — see
-    `giant-file-registry.md` (owner `discord-relay`, deadline 2026-08-31, issue
-    #3405). Keep further controller growth in narrower outbound/controller
-    helper modules).
-  - `src/services/discord/turn_finalizer.rs` (frozen giant surface; single-authority
-    turn-finalize state machine — ledger/actor-loop/reconciler. Crossed the
-    giant-file threshold when #3041 P1-0 added the dormant `DeliveryLeaseCell`
-    finalizer messages/handlers on top of #3143's `FinalizeContext::monitor()` +
-    monitor turn-key/ledger-generation logic; tracked decompose target — see
-    `giant-file-registry.md` (owner `discord-finalizer`, deadline 2026-08-31,
-    issue #3016). #3479 r9 split −191 prod lines into the leaf child modules
+  - `src/services/discord/outbound/turn_output_controller.rs` was decomposed in
+    #5676: the root owns the shared verb/outcome contract, policy routing, and
+    orchestration; `turn_output_controller/transport.rs` owns transport execution,
+    failure classification, lease commit, and post-send cleanup. The existing
+    `fresh_send.rs` child remains the anchor-less fresh-send boundary. All three
+    production modules are below the giant-file threshold.
+  - `src/services/discord/turn_finalizer.rs` was decomposed in #5676: the root
+    retains the single-authority ledger, actor loop, and reconciler facade, while
+    `turn_finalizer/terminal_handler.rs` owns terminal admission and ledger
+    transitions. Earlier leaf extractions remain in
     `turn_finalizer/completion_signal.rs` (CompletionSignal enum + pure
     `completion_signal_from_transcript`), `turn_finalizer/delivery_lease.rs`
     (dormant `DeliveryLeaseCell` handlers), and
     `turn_finalizer/watcher_backstop.rs` (watcher far-backstop tunables +
-    terminal-or-defer verdict pair). Bugfix only outside a
-    finalizer-decomposition plan). #4018 round-2 carries synthetic claim
+    terminal-or-defer verdict pair). All production modules are below the
+    giant-file threshold. #4018 round-2 carries synthetic claim
     snapshots through terminal submissions so relay-ownership-only passive notes
     skip the backstop reaction fallback, routes stale synthetic release through
     the finalizer, and demotes expected backstop/reconcile guarded misses while
@@ -2544,14 +2536,18 @@ these contextual numbers to match ordinary LoC churn.
   `identity_fence_bind`/`delivery_fence_bind` pairing pass unchanged with no baseline
   repin. Moving the fenced view too would require teaching that script the owner is now
   a module, not a file. The registry `[[entry]]` was removed as a ghost registration).
-- `src/services/discord/session_relay_sink.rs` (frozen giant surface; #5071 T0-S4
-  moves the 100-physical-line sink-local terminal outcome fold and `RelaySink::deliver`
-  implementation to `session_relay_sink/terminal_handoff.rs` with `continue 0`, one
-  sequential `deliver_response` await, two early returns (`TerminalUnknown`, `Err`),
-  and the four local fold values
+- `src/services/discord/session_relay_sink.rs` was decomposed in #5676: the root
+  retains relay state, routing contracts, helpers, and tests, while
+  `session_relay_sink/delivery.rs` owns session-bound delivery orchestration,
+  transport selection, journaling, durable frontier commit, and lease release.
+  The earlier #5071 T0-S4 extraction keeps the sink-local terminal outcome fold
+  and `RelaySink::deliver` implementation in
+  `session_relay_sink/terminal_handoff.rs` with `continue 0`, one sequential
+  `deliver_response` await, two early returns (`TerminalUnknown`, `Err`), and the
+  four local fold values
   (`fenced_terminal_without_delivery`, `terminal_delivered`,
   `terminal_fresh_delivered`, `terminal_not_delivered`) crossing the handoff; the
-  transport/commit authority remains in root `deliver_response`; #4623
+  transport/commit authority now lives in `delivery.rs`; #4623
   replaces the #4046 provisional fresh-send rejection with typed confirmed-fresh
   provenance carried through the exact-sequence watcher ACK; -59 from #3998 S1-f2
   retiring the A2b rollout getter/cache
@@ -2562,7 +2558,8 @@ these contextual numbers to match ordinary LoC churn.
   the turn parser into `session_relay_sink/turn_parser.rs`, where terminal parse
   atomically hands off completed response/context and clears turn-local state
   before asynchronous Discord delivery; #4536 keeps idle grace ranges pending
-  until a generation-scoped confirmed delivery commits the durable frontier).
+  until a generation-scoped confirmed delivery commits the durable frontier.
+  All production modules are below the giant-file threshold.
 
 Decomposed below the giant-file threshold (no longer frozen; bugfix-scoped but
 normal test growth is allowed): `src/services/cluster/stream_relay.rs` (#4623:

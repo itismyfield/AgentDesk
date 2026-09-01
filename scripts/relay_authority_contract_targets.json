@@ -20,7 +20,7 @@
     },
     {
       "name": "anchor-drop",
-      "file": "src/services/discord/session_relay_sink.rs",
+      "file": "src/services/discord/session_relay_sink/delivery.rs",
       "target": "services::discord::session_relay_sink::delivery_orchestration_tests::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof"
     },
     {

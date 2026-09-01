@@ -81,7 +81,7 @@ BARE_REFERENCES = {
 # production code, the second if the stripper or the call regex changes at all.
 #
 # Rows 1-4 are the shape that motivated this table. A `#[cfg(test)]` STRUCT
-# FIELD in session_relay_sink.rs makes the resolver ported from
+# FIELD in the former monolithic session_relay_sink.rs made the resolver ported from
 # check_inflight_blind_save_ratchet.py swallow the production impl block that
 # follows it, which would report the first three of these as 0. Row 5 is the
 # opposite direction: tmux.rs's only `write_confirmed_delivery(` really is
@@ -89,10 +89,10 @@ BARE_REFERENCES = {
 # turns that 0 into a 1. Row 7 pins the widest prod/test gap in the tree
 # (3 of 12), and row 9 pins the file where one spelling covers two functions.
 MANUAL_CLASSIFICATION = [
-    ("src/services/discord/session_relay_sink.rs", "commit_ordered_jsonl_range", 1, 1),
-    ("src/services/discord/session_relay_sink.rs", "record_delivered_content_fingerprint", 1, 3),
-    ("src/services/discord/session_relay_sink.rs", "advance_watcher_confirmed_end", 1, 1),
-    ("src/services/discord/session_relay_sink.rs", "finish_sink_delivery", 3, 4),
+    ("src/services/discord/session_relay_sink/delivery.rs", "commit_ordered_jsonl_range", 1, 1),
+    ("src/services/discord/session_relay_sink/delivery.rs", "record_delivered_content_fingerprint", 1, 1),
+    ("src/services/discord/session_relay_sink/delivery.rs", "advance_watcher_confirmed_end", 1, 1),
+    ("src/services/discord/session_relay_sink/delivery.rs", "finish_sink_delivery", 3, 3),
     ("src/services/discord/tmux.rs", "write_confirmed_delivery", 0, 1),
     ("src/services/discord/tmux.rs", "advance_watcher_confirmed_end", 1, 1),
     ("src/services/discord/outbound/delivery_record.rs", "shadow_mirror_delivered_frontier", 3, 12),

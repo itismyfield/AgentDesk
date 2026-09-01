@@ -340,6 +340,9 @@ src/
 │   │   ├── termination_events.rs
 │   │   ├── v1.rs
 │   │   └── voice_config.rs
+│   ├── worker_registry/
+│   │   ├── registry.rs
+│   │   └── status.rs
 │   ├── cluster.rs
 │   ├── cluster_session_routing.rs
 │   ├── cron_catalog.rs
@@ -654,7 +657,8 @@ src/
 │   │   │   │   └── production_nonce_tests.rs
 │   │   │   ├── turn_output_controller/
 │   │   │   │   ├── fresh_send.rs
-│   │   │   │   └── fresh_send_tests.rs
+│   │   │   │   ├── fresh_send_tests.rs
+│   │   │   │   └── transport.rs
 │   │   │   ├── completed_turn_ledger.rs
 │   │   │   ├── confirmation.rs
 │   │   │   ├── decision.rs
@@ -872,6 +876,7 @@ src/
 │   │   │   │   ├── pg_store.rs
 │   │   │   │   ├── recovery.rs
 │   │   │   │   └── watcher.rs
+│   │   │   ├── delivery.rs
 │   │   │   ├── delivery_commit.rs
 │   │   │   ├── delivery_frontier.rs
 │   │   │   ├── delivery_orchestration_tests.rs
@@ -992,7 +997,8 @@ src/
 │   │   │   ├── tombstone.rs
 │   │   │   └── warning_tests.rs
 │   │   ├── tui_direct_pending_start/
-│   │   │   └── watcher_cancel.rs
+│   │   │   ├── watcher_cancel.rs
+│   │   │   └── worker.rs
 │   │   ├── tui_prompt_relay/
 │   │   │   ├── synthetic_start/
 │   │   │   │   └── stale_reclaim.rs
@@ -1143,6 +1149,7 @@ src/
 │   │   │   ├── finalize_context.rs
 │   │   │   ├── guarded_finish_residue.rs
 │   │   │   ├── reconcile.rs
+│   │   │   ├── terminal_handler.rs
 │   │   │   └── watcher_backstop.rs
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── api.rs

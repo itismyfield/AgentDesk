@@ -19,7 +19,7 @@ ALLOWLIST = Counter({"src/services/discord/session_relay_sink/journal.rs": 1})
 BASELINE = 1
 FAMILY_REGISTRY = (
     ("fresh sink vertical slice", "src/services/discord/session_relay_sink/task_notification_context.rs", "deliver_new_message_with_task_authority"),
-    ("sink direct family (referenced / edit / split / long-chunk receipt)", "src/services/discord/session_relay_sink.rs", "deliver_response"),
+    ("sink direct family (referenced / edit / split / long-chunk receipt)", "src/services/discord/session_relay_sink/delivery.rs", "deliver_response"),
     ("watcher terminal family (무전송 5곳 포함)", "src/services/discord/tmux_watcher.rs", "tmux_output_watcher_with_restore"),
     ("turn_bridge / controller family", "src/services/discord/turn_bridge/terminal_controller_cutover.rs", "deliver_short_replace_via_controller"),
     ("recovery / fresh-send / orphan family", "src/services/discord/recovery_engine/terminal_text_idempotency.rs", "record_successful_fresh_send"),

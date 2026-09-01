@@ -656,7 +656,9 @@
 # #3610 PR-1: 1731 -> 1738 — pass terminal anchor (current_msg_id) explicitly to
 # shadow_mirror_delivered_frontier at the sink delivery call site (Phase B prereq;
 # irreducible 6-arg rustfmt-wrapped call). panel_msg_id has 0 prod readers -> dedup unchanged.
-"src/services/discord/session_relay_sink.rs" = 1499 # 2026-08-03 #5071 T0-S4: measured prod LoC 1599 -> 1499 (-100), while the prior ratchet value 1690 -> 1499 also removes 91 lines of accumulated slack; moved the sink-local terminal outcome fold and RelaySink::deliver implementation to session_relay_sink/terminal_handoff.rs; deliver_response stays in root. # 2026-07-08 #4164: 1679 -> 1690 (+11 prod LoC), reviewable admission — idle JSONL now gates the producer send on dedup SharedData availability, logging provider/channel/range and retrying without cursor consumption when the offset authority is unavailable after boot. # 2026-07-03 #3998 S1-f2: 1738 -> 1679 (-59 prod LoC), ratchet down after retiring the A2b rollout getter/cache and flag-OFF pin tests.
+# session_relay_sink.rs decomposed in #4712 (1499 -> 825 prod LoC); its terminal
+# delivery orchestration now lives in session_relay_sink/delivery.rs (677 prod
+# LoC), so the root's giant-only ratchet entry is retired.
 # #3635: placeholder_sweeper.rs crossed the 1000-prod-LoC giant threshold (993 ->
 # 1004) when the dead-watcher rebind-origin reap branch was added to the
 # rebind-origin arm of the sweep loop (the watcher-owned #897 orphan the #3581
@@ -727,7 +729,9 @@
 # rewriting bare `super::` discord-module references to absolute
 # `crate::services::discord::` paths because the module depth changed. Each child
 # is well under the 1000-prod-LoC giant threshold (tracked below at landed LoC).
-"src/services/discord/turn_finalizer.rs" = 1048 # 2026-07-02 #4019 R2: 1044 -> 1048 (+4 prod LoC), reviewable admission — channel-only id-0 terminals now refuse HashMap-order collapse when multiple live ledger entries exist, returning the literal no-match orphan key instead of risking a wrong live turn release. # 2026-07-02 #4018 round-2: +6 prod LoC, reviewable admission — terminal submissions carry the existing synthetic claim snapshot through the actor so relay-ownership-only passive notes can suppress the backstop reaction fallback without changing the finalizer side-effect authority.
+# turn_finalizer.rs decomposed in #4712 (1048 -> 860 prod LoC); terminal event
+# admission and ledger transition now live in terminal_handler.rs (181 prod LoC),
+# so the root's giant-only ratchet entry is retired.
 # #3894: the three new turn_finalizer/ child modules landed below the 1000-prod-LoC
 # giant threshold; tracked here at their landed production LoC so the decomposition
 # cannot silently re-inflate any child toward giant-hood (the ratchet only fails

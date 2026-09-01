@@ -187,6 +187,13 @@
 >
 > Last refreshed: 2026-08-12 (#5177 r2 — `decide_policy_with_limits` in `outbound/decision.rs` now uses `discord_message_units()` for all length gates (`decide_length`) instead of `chars().count()`, unifying the outbound policy planner on shared UTF-16 code-unit conservative policy. `outbound/delivery.rs` routes the policy decision through this unified gate unchanged; no delivery API shape, dedup semantics, or direct-send callsite coverage changed. Outbound policy coverage map and production callsite inventory below remain unchanged).
 >
+> Last refreshed: 2026-09-01 (#5676 — turn-output transport execution,
+> failure classification, lease commit, and post-send cleanup moved from
+> `outbound/turn_output_controller.rs` to the cohesive
+> `outbound/turn_output_controller/transport.rs` child. The root retains the
+> public verb/outcome contract, policy routing, and orchestration. No delivery
+> API, owner cutover, retained exclusion, or production callsite coverage changed).
+>
 > Companion docs: [`docs/discord-outbound-remaining-producers.md`](../discord-outbound-remaining-producers.md) (#1175 closure), [`docs/source-of-truth.md`](../source-of-truth.md).
 
 This is the single source of truth for "where is each Discord outbound callsite
@@ -195,7 +202,8 @@ on the v3 migration path?". The former compatibility facade
 production producers moved to direct v3 envelopes. The outbound API now lives
 in `src/services/discord/outbound/{message, policy, decision, result, delivery,
 transport}.rs`, plus the #3089 A1 turn-output controller skeleton in
-`outbound/turn_output_controller.rs` (pure add, no live owner yet).
+`outbound/turn_output_controller.rs`, with execution in
+`outbound/turn_output_controller/transport.rs` (pure add, no live owner yet).
 
 As of #2535, "migrated_v3" means the callsite builds a v3
 `DiscordOutboundMessage` and calls `outbound::delivery::deliver_outbound`
@@ -666,8 +674,8 @@ changing runtime behavior.
 
 | owner / arm | code condition | decision / rationale | blocker / re-eval | pin test |
 |---|---|---|---|---|
-| A2b sink `NoRange` / `cutover_range == None` short-replace | `src/services/discord/session_relay_sink.rs:884-895` requires `cutover_range.is_some()` before controller routing; the legacy replace arm starts at `session_relay_sink.rs:990`. | **RETAIN.** This is the no-advance class: without a real ordered `[start,end)` range, the controller has no offset authority to commit. | #4048 advance-authority work / #3998 legacy-retirement follow-up. | `structural_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path` |
-| A2b sink empty body | `src/services/discord/session_relay_sink.rs:891-895` requires `!relay_text.is_empty()` before controller routing. | **RETAIN.** Legacy zero-chunk replace is committed/advanced; the controller returns `Skipped`, so migrating would flip Skipped-vs-advance semantics. | #4047 / #4048 semantics re-eval. | `controller_skips_empty_body_so_cutover_gate_keeps_it_legacy`; `structural_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path` |
+| A2b sink `NoRange` / `cutover_range == None` short-replace | `src/services/discord/session_relay_sink/delivery.rs:283-287` requires `cutover_range.is_some()` before controller routing; the retained replace transport starts at `delivery.rs:423`. | **RETAIN.** This is the no-advance class: without a real ordered `[start,end)` range, the controller has no offset authority to commit. | #4048 advance-authority work / #3998 legacy-retirement follow-up. | `structural_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path` |
+| A2b sink empty body | `src/services/discord/session_relay_sink/delivery.rs:283-287` requires `!relay_text.is_empty()` before controller routing. | **RETAIN.** Legacy zero-chunk replace is committed/advanced; the controller returns `Skipped`, so migrating would flip Skipped-vs-advance semantics. | #4047 / #4048 semantics re-eval. | `controller_skips_empty_body_so_cutover_gate_keeps_it_legacy`; `structural_exclusion_gate_keeps_no_range_and_empty_body_on_legacy_path` |
 | A3 standby empty body | `src/services/discord/standby_relay.rs:77-79` gates short-replace on `!formatted.is_empty()`; legacy replace starts at `standby_relay.rs:814`. | **RETAIN.** Same empty-body parity class as A2b/A4/A5: controller `Skipped` would not match legacy committed replace. | #4047 / #4048 semantics re-eval. | `standby_short_replace_should_cutover_pins_both_conditions` |
 | A3 standby transport-only `NoLease` | `src/services/discord/standby_relay.rs:672-725` uses `toc::NoLease`, `lease_key: None`, `advance: None`, and `heartbeat: None`. | **RETAIN.** Standby has no lease, no offset authority, and no heartbeat to unify; this is intentionally transport-only instead of inventing a lease. | #3998 legacy-retirement follow-up. | `edited_original_returns_true_and_does_not_delete_original`; `fallback_after_edit_failure_returns_true_and_preserves_original` |
 | A3 standby `placeholder_msg_id == None` new-message send | `src/services/discord/standby_relay.rs:893-895` calls legacy `formatting::send_long_message_raw`. | **RETAIN.** Anchor-less fresh-send is not a controller verb yet, same class as watcher no-placeholder (#4053) and A6a `None`-placeholder fresh-send. | #3998 legacy-retirement follow-up after an anchor-less fresh-send verb exists. | `none_placeholder_new_message_stays_legacy` |

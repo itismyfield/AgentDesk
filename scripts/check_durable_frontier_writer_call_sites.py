@@ -209,7 +209,7 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
         "src/services/discord/outbound/turn_output_controller/fresh_send.rs": 1,
     },
     "commit_ordered_jsonl_range": {
-        "src/services/discord/session_relay_sink.rs": 1,
+        "src/services/discord/session_relay_sink/delivery.rs": 1,
     },
     "reanchor_current_generation_frontier": {
         "src/services/discord/tui_prompt_relay/claude_idle_runtime.rs": 1,
@@ -218,7 +218,7 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
         "src/services/discord/inflight/model.rs": 1,
     },
     "record_delivered_content_fingerprint": {
-        "src/services/discord/session_relay_sink.rs": 1,
+        "src/services/discord/session_relay_sink/delivery.rs": 1,
     },
     "record_fresh_send_content_fingerprint": {
         "src/services/discord/outbound/turn_output_controller/fresh_send.rs": 1,
@@ -290,7 +290,7 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
         "src/services/discord/session_relay_sink/short_controller.rs": 1,
     },
     "finish_sink_delivery": {
-        "src/services/discord/session_relay_sink.rs": 3,
+        "src/services/discord/session_relay_sink/delivery.rs": 3,
         "src/services/discord/session_relay_sink/task_notification_context.rs": 1,
     },
     # -- store 2: completed-turn ledger --------------------------------------
@@ -303,7 +303,7 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     },
     # -- store 3: in-memory watermark CAS ------------------------------------
     "advance_watcher_confirmed_end": {
-        "src/services/discord/session_relay_sink.rs": 1,
+        "src/services/discord/session_relay_sink/delivery.rs": 1,
         "src/services/discord/session_relay_sink/delivery_commit.rs": 1,
         "src/services/discord/tmux.rs": 1,
         "src/services/discord/tmux_watcher.rs": 1,
