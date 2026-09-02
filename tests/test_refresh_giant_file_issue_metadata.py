@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "refresh_giant_file_issue_metadata.py"
+sys.path.insert(0, str(SCRIPT_PATH.parent))
 
 _SPEC = importlib.util.spec_from_file_location(
     "refresh_giant_file_issue_metadata", SCRIPT_PATH
@@ -95,7 +96,10 @@ class RefreshGiantFileIssueMetadataTest(unittest.TestCase):
         ]
 
         lowered = REFRESH.lower_ratchet_baselines(
-            payload, entries, {"src/closed.rs"}
+            payload,
+            entries,
+            {"src/closed.rs"},
+            {"src/closed.rs": 1500, "src/open.rs": 1500},
         )
 
         self.assertEqual(
@@ -103,7 +107,38 @@ class RefreshGiantFileIssueMetadataTest(unittest.TestCase):
             {"closed_deadline_entries": 1, "transition_list_entries": 1},
         )
 
-    def test_writer_never_raises_ratchets(self) -> None:
+    def test_writer_counts_retired_transition_in_closed_deadline_ratchet(self) -> None:
+        payload = {
+            "schema_version": 2,
+            "refreshed_at": "2026-08-12T10:30:00Z",
+            "ratchets": {
+                "closed_deadline_entries": 2,
+                "transition_list_entries": 2,
+            },
+            "issues": [{"number": 1, "state": "closed"}],
+        }
+        entries = [
+            {
+                "file": "src/closed.rs",
+                "owner": "team",
+                "deadline": "2026-12-31",
+                "decompose_issue": "#1",
+            }
+        ]
+
+        lowered = REFRESH.lower_ratchet_baselines(
+            payload,
+            entries,
+            {"src/closed.rs", "src/retired.rs"},
+            {"src/closed.rs": 1500, "src/retired.rs": 860},
+        )
+
+        self.assertEqual(
+            lowered["ratchets"],
+            {"closed_deadline_entries": 2, "transition_list_entries": 2},
+        )
+
+    def test_writer_never_raises_for_newly_closed_registry_deadline(self) -> None:
         payload = {
             "schema_version": 2,
             "refreshed_at": "2026-08-12T10:30:00Z",
@@ -123,7 +158,10 @@ class RefreshGiantFileIssueMetadataTest(unittest.TestCase):
         ]
 
         unchanged = REFRESH.lower_ratchet_baselines(
-            payload, entries, {"src/closed.rs"}
+            payload,
+            entries,
+            {"src/closed.rs"},
+            {"src/closed.rs": 1500},
         )
 
         self.assertEqual(
