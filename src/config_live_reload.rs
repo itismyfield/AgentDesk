@@ -78,6 +78,19 @@ pub fn current() -> Option<Arc<Config>> {
     })
 }
 
+/// Safe fallback for transient invalid or missing on-disk configuration.
+pub(crate) fn graceful_fallback_config(path_display: &str, reason: String) -> Config {
+    if let Some(live) = current() {
+        tracing::warn!(
+            "  ⚠ {reason} — keeping the last validated live config (source: {path_display})"
+        );
+        return (*live).clone();
+    }
+
+    tracing::warn!("  ⚠ {reason} — using defaults");
+    Config::default()
+}
+
 pub(crate) fn subscribe() -> tokio::sync::watch::Receiver<Option<Arc<Config>>> {
     LIVE_UPDATES
         .get_or_init(|| tokio::sync::watch::channel(None).0)
