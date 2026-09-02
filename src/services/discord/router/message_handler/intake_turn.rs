@@ -1866,6 +1866,9 @@ pub(super) async fn handle_text_message(
 
     let model_for_turn =
         super::super::super::commands::resolve_model_for_turn(shared, channel_id, &provider).await;
+    let reasoning_effort_for_turn = role_binding
+        .as_ref()
+        .and_then(|binding| binding.reasoning_effort.clone());
     let adk_session_name = channel_name.clone();
     let adk_session_info = derive_adk_session_info(
         Some(user_text),
@@ -2503,6 +2506,26 @@ pub(super) async fn handle_text_message(
                             model_for_turn.as_deref(),
                             None, // Qwen: compact not supported
                             force_fresh_provider_session,
+                        ),
+                        ProviderKind::Grok => crate::services::stream_json_cli::execute_streaming(
+                            crate::services::provider::StreamJsonDialectId::Grok,
+                            crate::services::stream_json_cli::ProviderTurnRequest::for_discord_turn(
+                                provider_for_blocking.clone(),
+                                context_prompt.clone(),
+                                system_prompt_for_turn.map(str::to_string),
+                                crate::services::stream_json_cli::ConfiguredToolPolicy::from_legacy_allowed_tools(
+                                    &allowed_tools,
+                                ),
+                                model_for_turn.clone(),
+                                reasoning_effort_for_turn.clone(),
+                                std::path::PathBuf::from(&current_path_clone),
+                                session_id_clone.as_deref(),
+                                force_fresh_provider_session,
+                                remote_profile.clone(),
+                                std::time::Duration::from_secs(300),
+                                Some(cancel_token_clone),
+                            ),
+                            tx.clone(),
                         ),
                         ProviderKind::OpenCode => opencode::execute_command_streaming(
                             &context_prompt,
