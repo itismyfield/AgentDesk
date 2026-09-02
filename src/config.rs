@@ -3705,11 +3705,7 @@ fn resolve_graceful_config_path(
         .unwrap_or_else(|| std::path::PathBuf::from("config").join("agentdesk.yaml"))
 }
 
-/// Load config gracefully — returns the last validated live snapshot when one
-/// is installed and the on-disk file is missing/invalid; otherwise returns
-/// `Config::default()` instead of panicking. Keeping the live snapshot prevents
-/// a transient editor write or malformed hot-reload candidate from silently
-/// disabling the operator's provider, routine, and fallback settings.
+/// Load config gracefully; invalid or missing files use the live snapshot or defaults.
 /// Searches:
 /// $AGENTDESK_CONFIG →
 /// $AGENTDESK_ROOT_DIR/config/agentdesk.yaml →
@@ -3749,7 +3745,6 @@ pub fn load_graceful() -> Config {
         ),
     };
 
-    // Ensure data dir exists (best effort)
     let _ = std::fs::create_dir_all(&config.data.dir);
 
     config
