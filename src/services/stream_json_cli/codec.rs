@@ -90,14 +90,10 @@ impl StreamJsonCodec for MessagesJsonCodec {
                 exit_code,
             }]);
         }
-        let session_id = self.session_id.clone();
-        if session_id.is_none() {
+        if self.session_id.is_none() {
             return Err("terminal success without a valid session id".into());
         }
-        Ok(vec![StreamMessage::Done {
-            result: String::new(),
-            session_id,
-        }])
+        Err("StreamJson stream ended without a terminal result".into())
     }
 }
 
@@ -292,6 +288,19 @@ mod tests {
             done.iter()
                 .any(|message| matches!(message, StreamMessage::Done { .. }))
         );
+    }
+
+    #[test]
+    fn grok_messages_codec_rejects_clean_eof_after_init() {
+        let mut codec = MessagesJsonCodec::new();
+        let init = codec
+            .push_stdout_line(
+                r#"{"type":"system","subtype":"init","session_id":"01234567-89ab-cdef-0123-456789abcdef"}"#,
+            )
+            .unwrap();
+        assert!(matches!(init.first(), Some(StreamMessage::Init { .. })));
+        let error = codec.finish(Some(0), "").unwrap_err();
+        assert_eq!(error, "StreamJson stream ended without a terminal result");
     }
 
     #[test]
