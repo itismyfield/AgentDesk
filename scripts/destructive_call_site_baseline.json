@@ -31,7 +31,7 @@
         "src/services/discord/watchers/lifecycle/restore.rs": 1,
         "src/services/dispatched_sessions.rs": 1,
         "src/services/provider/cancel_token_cleanup/executor.rs": 1,
-        "src/services/qwen.rs": 3,
+        "src/services/qwen/session_lifecycle.rs": 3,
         "src/services/session_resume.rs": 1,
         "src/services/turn_lifecycle.rs": 1
       }
@@ -81,14 +81,14 @@
       }
     },
     "identity_fence_bind": {
-      "comment": "#5071 relay-tail S4: production `under_identity_fence` binders, excluding the owner file that defines it. These are the ONLY destructive removals that carry the WatcherIdentityFence and TerminalDeliveryFence conjuncts; every other entry in registry_remove reaches an unfenced helper. Pinning this set does not fence those \u2014 it makes adding, moving or dropping a fenced site a reviewed baseline diff.",
+      "comment": "#5071 relay-tail S4: production `under_identity_fence` binders, excluding the owner file that defines it. These are the ONLY destructive removals that carry the WatcherIdentityFence and TerminalDeliveryFence conjuncts; every other entry in registry_remove reaches an unfenced helper. Pinning this set does not fence those — it makes adding, moving or dropping a fenced site a reviewed baseline diff.",
       "files": {
         "src/services/discord/relay_recovery/apply.rs": 1,
         "src/services/discord/tui_direct_pending_start.rs": 1
       }
     },
     "delivery_fence_bind": {
-      "comment": "#5071 relay-tail S4 r2: production `with_terminal_delivery_fence` binders, same exclusions as identity_fence_bind. This must be the SAME per-file set: the checker's pairing pass rejects any file where the two counts differ, which is what catches a delivery fence being dropped from a site that keeps its identity fence \u2014 a DECREASE the no-growth ratchet would otherwise wave through.",
+      "comment": "#5071 relay-tail S4 r2: production `with_terminal_delivery_fence` binders, same exclusions as identity_fence_bind. This must be the SAME per-file set: the checker's pairing pass rejects any file where the two counts differ, which is what catches a delivery fence being dropped from a site that keeps its identity fence — a DECREASE the no-growth ratchet would otherwise wave through.",
       "files": {
         "src/services/discord/relay_recovery/apply.rs": 1,
         "src/services/discord/tui_direct_pending_start.rs": 1
