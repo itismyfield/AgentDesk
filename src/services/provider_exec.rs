@@ -233,6 +233,7 @@ pub async fn execute_structured_with_context(
                     None,
                     model_ref,
                     None,
+                    false,
                 ),
             };
             drop(sender);

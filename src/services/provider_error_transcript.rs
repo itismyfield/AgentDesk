@@ -74,16 +74,13 @@ fn is_explicit_provider_error_line(lower: &str) -> bool {
         return false;
     };
     let rest = rest.trim_start();
-    rest.chars().count() <= 2_000
-        && (has_rate_limit_marker(rest)
-            // A bare error class name can appear in ordinary prose. Require a
-            // status/429 marker before treating it as a provider transcript.
-            || (rest.contains("ai_apicallerror")
-                && (rest.contains("429") || rest.contains("statuscode"))))
+    rest.chars().count() <= 2_000 && has_provider_error_marker_at_start(rest)
 }
 
 fn has_rate_limit_marker(lower: &str) -> bool {
     [
+        "apierror",
+        "ai_apicallerror",
         "too many requests",
         "rate limit",
         "rate-limit",
@@ -94,6 +91,31 @@ fn has_rate_limit_marker(lower: &str) -> bool {
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+}
+
+fn has_provider_error_marker_at_start(lower: &str) -> bool {
+    [
+        "apierror",
+        "ai_apicallerror",
+        "too many requests",
+        "rate limit",
+        "rate-limit",
+        "status code (429)",
+        "status code: 429",
+        "http 429",
+        "statuscode: 429",
+    ]
+    .iter()
+    .any(|marker| {
+        let Some(suffix) = lower.strip_prefix(marker) else {
+            return false;
+        };
+        suffix.is_empty()
+            || matches!(
+                suffix.chars().next(),
+                Some(':' | '(' | '[' | '{' | ';' | ' ')
+            )
+    })
 }
 
 #[cfg(test)]
@@ -112,7 +134,10 @@ mod tests {
             "Error: Unknown Gemini error",
             "Error: Unknown Claude error",
             "Error: AI_APICallError: Too Many Requests (429)",
+            "Error: APIError",
+            "Error: APIError: upstream request failed",
             "⚠️ provider가 응답을 완료하지 못했어요.\n||**상세**\n```text\nError: Unknown OpenCode error\n```||",
+            "⚠️ provider가 응답을 완료하지 못했어요.\n||**상세**\n```text\nError: APIError\n```||",
             "⚠️ provider가 응답을 완료하지 못했어요.\n||**상세**\n```text\nAI_APICallError: statusCode: 429\n```||",
         ] {
             assert!(
@@ -127,6 +152,7 @@ mod tests {
         for message in [
             "Error summary: CI failed in lint; the fix is ready.",
             "Error: Unknown Codex error handling is documented here.",
+            "Error: a report about an APIError is ready.",
             "[API Error: 400 status code (no body)] follow-up explanation",
             "[API Error: 400 status code (no body)]\nretry succeeded",
             "[API Error: 400 status code (no body)",

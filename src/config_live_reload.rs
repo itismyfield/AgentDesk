@@ -668,6 +668,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn load_graceful_uses_live_snapshot_when_file_is_invalid() {
+        let _guard = global_test_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        let mut config = crate::config::Config::default();
+        config.server.port = 8797;
+        crate::config::save_to_path(&path, &config).unwrap();
+        install(crate::config::load_from_path(&path).unwrap());
+
+        let _config_path = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
+        write(&path, "server:\n  port: : invalid yaml\n");
+
+        let loaded = crate::config::load_graceful();
+        assert_eq!(loaded.server.port, 8797);
+    }
+
     // Infra-section changes are surfaced as restart-required.
     #[test]
     fn restart_required_changes_flags_infra_sections() {

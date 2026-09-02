@@ -329,6 +329,9 @@ pub(crate) enum Commands {
         /// Optional resume session id for the first turn
         #[arg(long)]
         resume_session_id: Option<String>,
+        /// Force the first turn to start without reusing provider session state
+        #[arg(long)]
+        fresh_session: bool,
         /// Working directory (defaults to ".")
         #[arg(long, default_value = ".")]
         cwd: String,
