@@ -6,8 +6,6 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-mod graceful_fallback;
-
 mod agent_channels;
 pub use agent_channels::AgentChannels;
 
@@ -3734,12 +3732,12 @@ pub fn load_graceful() -> Config {
                 cfg.apply_runtime_defaults()
                     .resolve_runtime_relative_paths(runtime_root.as_deref())
             }
-            Err(e) => graceful_fallback::graceful_fallback_config(
+            Err(e) => crate::config_live_reload::graceful_fallback_config(
                 &path_display,
                 format!("Failed to parse {path_display}: {e}"),
             ),
         },
-        Err(_) => graceful_fallback::graceful_fallback_config(
+        Err(_) => crate::config_live_reload::graceful_fallback_config(
             &path_display,
             format!("{path_display} not found"),
         ),
