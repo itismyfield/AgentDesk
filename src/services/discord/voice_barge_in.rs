@@ -446,7 +446,10 @@ async fn generate_foreground_ack_text(
                         Some(cancel_for_blocking),
                     )
                 }
-                _ => Err(format!(
+                ProviderKind::Gemini
+                | ProviderKind::OpenCode
+                | ProviderKind::Qwen
+                | ProviderKind::Grok => Err(format!(
                     "foreground provider {} does not support model-scoped instant call yet",
                     provider_kind.as_str()
                 )),
@@ -557,7 +560,10 @@ async fn generate_voice_channel_text_reply(
                         Some(cancel_for_blocking),
                     )
                 }
-                _ => Err(format!(
+                ProviderKind::Gemini
+                | ProviderKind::OpenCode
+                | ProviderKind::Qwen
+                | ProviderKind::Grok => Err(format!(
                     "voice channel text provider {} does not support model-scoped instant call yet",
                     provider_kind.as_str()
                 )),
@@ -646,7 +652,10 @@ async fn generate_voice_background_result_summary(
                         Some(cancel_for_blocking),
                     )
                 }
-                _ => Err(format!(
+                ProviderKind::Gemini
+                | ProviderKind::OpenCode
+                | ProviderKind::Qwen
+                | ProviderKind::Grok => Err(format!(
                     "voice background summary provider {} does not support model-scoped instant call yet",
                     provider_kind.as_str()
                 )),
