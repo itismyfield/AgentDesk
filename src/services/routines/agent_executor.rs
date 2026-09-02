@@ -83,7 +83,6 @@ struct AgentTurnCompletion {
     terminal_status: Option<String>,
 }
 
-
 impl RoutineAgentExecutor {
     pub fn new(
         pool: Arc<PgPool>,
@@ -1372,10 +1371,6 @@ impl RoutineAgentExecutor {
         }
     }
 
-
-
-
-
     fn timeout_secs_for_run(&self, run: &RunningAgentRoutineRun) -> u64 {
         timeout_secs_for_run(run, self.default_completion_timeout_secs)
     }
@@ -1621,8 +1616,6 @@ fn timeout_secs_for_run(run: &RunningAgentRoutineRun, default_completion_timeout
         .filter(|value| *value > 0)
         .unwrap_or(default_completion_timeout_secs)
 }
-
-
 
 async fn fail_claimed_agent_run(
     store: &RoutineStore,
@@ -2093,10 +2086,6 @@ fn assistant_preview(message: &str) -> String {
     }
     preview
 }
-
-
-
-
 
 fn completion_last_result(completion: &AgentTurnCompletion) -> String {
     match completion.evidence {
