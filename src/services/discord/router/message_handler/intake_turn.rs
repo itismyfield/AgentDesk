@@ -2504,8 +2504,7 @@ pub(super) async fn handle_text_message(
                             None, // Qwen: compact not supported
                             force_fresh_provider_session,
                         ),
-                        ProviderKind::OpenCode | ProviderKind::Grok => {
-                            opencode::execute_command_streaming(
+                        ProviderKind::OpenCode | ProviderKind::Grok => opencode::execute_command_streaming(
                                 &context_prompt,
                                 session_id_clone.as_deref(),
                                 &current_path_clone,
@@ -2520,7 +2519,6 @@ pub(super) async fn handle_text_message(
                                 model_for_turn.as_deref(),
                                 None,
                             )
-                        }
                         ProviderKind::Unsupported(name) => {
                             let _ = tx.send(StreamMessage::Error {
                                 message: format!("Provider '{}' is not installed", name),
