@@ -236,6 +236,12 @@ impl ProviderKind {
             .collect()
     }
 
+    pub fn cli_init_label(&self) -> &'static str {
+        self.registry_entry()
+            .map(|entry| entry.cli_init_label)
+            .unwrap_or("claude")
+    }
+
     pub fn provider_for_cli_init_index(index: usize) -> Option<Self> {
         provider_registry()
             .get(index)
