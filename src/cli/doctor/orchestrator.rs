@@ -892,6 +892,7 @@ fn provider_check_id(provider: &ProviderKind) -> &'static str {
         ProviderKind::Gemini => "provider_gemini",
         ProviderKind::OpenCode => "provider_opencode",
         ProviderKind::Qwen => "provider_qwen",
+        ProviderKind::Grok => "provider_grok",
         ProviderKind::Unsupported(_) => "provider_unsupported",
     }
 }
@@ -2658,6 +2659,7 @@ fn check_provider_cli(
         ProviderKind::Gemini => "gemini CLI",
         ProviderKind::OpenCode => "opencode CLI",
         ProviderKind::Qwen => "qwen CLI",
+        ProviderKind::Grok => "grok CLI",
         ProviderKind::Unsupported(_) => "provider CLI",
     };
     let capability_summary = provider_capability_summary(&provider);
