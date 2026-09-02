@@ -13,9 +13,9 @@ pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 use cancel_watchdog::{current_unix_millis, enforce_watchdog_deadline};
 pub use registry::{
     ProviderCatalogEntry, ProviderCompactionAdapter, ProviderExecutionAdapter,
-    ProviderReadinessAdapter, ProviderRegistryEntry, StreamJsonDialectId,
-    derived_counterpart_ids, frozen_first_counterpart_id, intern_provider_id, provider_registry,
-    public_provider_catalog, supported_provider_ids,
+    ProviderReadinessAdapter, ProviderRegistryEntry, StreamJsonDialectId, derived_counterpart_ids,
+    frozen_first_counterpart_id, intern_provider_id, provider_registry, public_provider_catalog,
+    supported_provider_ids,
 };
 
 /// Tmux session name prefix — always "AgentDesk".
