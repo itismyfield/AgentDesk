@@ -2,10 +2,7 @@ use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 
 mod reliability;
-use reliability::{
-    FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS, current_attempt_started_at,
-    fresh_provider_session_probe_allowed, provider_error_from_completion,
-};
+use reliability::{current_attempt_started_at, provider_error_from_completion};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -1378,8 +1375,6 @@ impl RoutineAgentExecutor {
     async fn has_timed_out(&self, run: &RunningAgentRoutineRun, timeout_secs: u64) -> Result<bool> {
         let timeout_secs = i64::try_from(timeout_secs)
             .map_err(|_| anyhow!("routine agent completion timeout exceeds i64 seconds"))?;
-        // The timeout is per provider attempt. A fallback must receive a full
-        // budget after the primary attempt has timed out or failed.
         sqlx::query_scalar(
             r#"
             SELECT $1::timestamptz + ($2::bigint * INTERVAL '1 second') <= NOW()
@@ -1798,10 +1793,7 @@ fn merge_pending_result(
 }
 
 fn with_started_run_routing_metadata(mut result: Value, started_result: Option<&Value>) -> Value {
-    // #730: also propagate `provider` so a routine headless turn carries the
-    // routine agent's resolved provider identity through to the merged result,
-    // alongside the `agent_id`/`attempt_kind` routing keys that upstream now
-    // produces for the durable fallback-retry path.
+    // #730: propagate the resolved provider through the durable fallback result.
     const ROUTING_KEYS: &[&str] = &[
         "channel_id",
         "parent_channel_id",
@@ -2147,7 +2139,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    fn running_run(timeout_secs: Option<i32>) -> RunningAgentRoutineRun {
+    pub(crate) fn running_run(timeout_secs: Option<i32>) -> RunningAgentRoutineRun {
         RunningAgentRoutineRun {
             run_id: "run-1".to_string(),
             routine_id: "routine-1".to_string(),
@@ -2192,7 +2184,7 @@ mod tests {
         }
     }
 
-    fn completion_with_evidence(evidence: AgentTurnCompletionEvidence) -> AgentTurnCompletion {
+    pub(crate) fn completion_with_evidence(evidence: AgentTurnCompletionEvidence) -> AgentTurnCompletion {
         AgentTurnCompletion {
             assistant_message: match evidence {
                 AgentTurnCompletionEvidence::AssistantTranscript => Some("done".to_string()),
@@ -2205,58 +2197,6 @@ mod tests {
             terminal_status: matches!(evidence, AgentTurnCompletionEvidence::TerminalTurn)
                 .then(|| "empty_response".to_string()),
         }
-    }
-
-    #[test]
-    fn provider_error_from_completion_detects_known_error_only_transcript() {
-        let mut completion =
-            completion_with_evidence(AgentTurnCompletionEvidence::AssistantTranscript);
-        completion.assistant_message =
-            Some("Error: AI_APICallError: Too Many Requests (429)".to_string());
-
-        assert_eq!(
-            provider_error_from_completion(&completion).as_deref(),
-            Some("Error: AI_APICallError: Too Many Requests (429)")
-        );
-    }
-
-    #[test]
-    fn provider_error_from_completion_allows_normal_error_reports() {
-        let mut completion =
-            completion_with_evidence(AgentTurnCompletionEvidence::AssistantTranscript);
-        completion.assistant_message =
-            Some("Error summary: the PR check failed, and the remediation is ready.".to_string());
-
-        assert_eq!(provider_error_from_completion(&completion), None);
-    }
-
-    #[test]
-    fn provider_error_from_completion_ignores_terminal_evidence() {
-        let completion = completion_with_evidence(AgentTurnCompletionEvidence::TerminalTurn);
-
-        assert_eq!(provider_error_from_completion(&completion), None);
-    }
-
-    #[test]
-    fn fresh_provider_session_probe_waits_for_grace_period() {
-        let mut run = running_run(None);
-        run.turn_id = Some("discord:123:456".to_string());
-        run.started_at = DateTime::parse_from_rfc3339("2026-08-30T04:00:00Z")
-            .expect("valid start")
-            .with_timezone(&Utc);
-        run.attempts = json!([{
-            "event": "started",
-            "at": "2026-08-30T04:00:00Z"
-        }]);
-
-        assert!(!fresh_provider_session_probe_allowed(
-            &run,
-            run.started_at + Duration::seconds(FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS - 1)
-        ));
-        assert!(fresh_provider_session_probe_allowed(
-            &run,
-            run.started_at + Duration::seconds(FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS)
-        ));
     }
 
     #[test]
@@ -2536,63 +2476,6 @@ mod tests {
         assert_eq!(timeout_secs_for_run(&running_run(None), 1800), 1800);
         assert_eq!(timeout_secs_for_run(&running_run(Some(0)), 1800), 1800);
         assert_eq!(timeout_secs_for_run(&running_run(Some(-5)), 1800), 1800);
-    }
-
-    #[test]
-    fn current_attempt_started_at_uses_latest_started_attempt() {
-        let mut run = running_run(None);
-        run.started_at = DateTime::parse_from_rfc3339("2026-08-30T04:00:00Z")
-            .expect("valid start")
-            .with_timezone(&Utc);
-        run.attempts = json!([
-            {
-                "event": "started",
-                "kind": "primary",
-                "at": "2026-08-30T04:05:00Z"
-            },
-            {
-                "event": "started",
-                "kind": "fallback",
-                "at": "2026-08-30T05:10:00+00:00"
-            }
-        ]);
-
-        assert_eq!(
-            current_attempt_started_at(&run),
-            DateTime::parse_from_rfc3339("2026-08-30T05:10:00Z")
-                .expect("valid attempt start")
-                .with_timezone(&Utc)
-        );
-    }
-
-    #[test]
-    fn current_attempt_started_at_ignores_malformed_attempts_and_falls_back() {
-        let mut run = running_run(None);
-        run.started_at = DateTime::parse_from_rfc3339("2026-08-30T04:00:00Z")
-            .expect("valid start")
-            .with_timezone(&Utc);
-        run.attempts = json!([
-            {
-                "event": "started",
-                "kind": "primary",
-                "at": "2026-08-30T04:05:00Z"
-            },
-            {
-                "event": "started",
-                "kind": "fallback",
-                "at": "not-a-timestamp"
-            }
-        ]);
-
-        assert_eq!(
-            current_attempt_started_at(&run),
-            DateTime::parse_from_rfc3339("2026-08-30T04:05:00Z")
-                .expect("valid attempt start")
-                .with_timezone(&Utc)
-        );
-
-        run.attempts = json!([]);
-        assert_eq!(current_attempt_started_at(&run), run.started_at);
     }
 
     #[test]
