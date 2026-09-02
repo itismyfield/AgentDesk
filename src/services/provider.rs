@@ -43,6 +43,7 @@ pub enum ProviderKind {
     Gemini,
     OpenCode,
     Qwen,
+    Grok,
     Unsupported(String),
 }
 
@@ -54,6 +55,12 @@ pub struct ProviderCapabilities {
     pub supports_tool_stream: bool,
 }
 
+/// Wire-format dialect used by providers whose CLI emits line-delimited JSON.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamJsonDialectId {
+    Grok,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderExecutionAdapter {
     Claude,
@@ -61,6 +68,7 @@ pub enum ProviderExecutionAdapter {
     Gemini,
     OpenCode,
     Qwen,
+    StreamJsonCli(StreamJsonDialectId),
 }
 
 impl ProviderExecutionAdapter {
@@ -71,6 +79,7 @@ impl ProviderExecutionAdapter {
             Self::Gemini => "gemini",
             Self::OpenCode => "opencode_http",
             Self::Qwen => "managed_tmux_wrapper",
+            Self::StreamJsonCli(_) => "stream_json_cli",
         }
     }
 
@@ -81,6 +90,7 @@ impl ProviderExecutionAdapter {
             Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
             Self::Qwen => "qwen",
+            Self::StreamJsonCli(StreamJsonDialectId::Grok) => "grok",
         }
     }
 
@@ -116,6 +126,12 @@ impl ProviderExecutionAdapter {
                 supports_resume: true,
                 supports_tool_stream: true,
             },
+            Self::StreamJsonCli(StreamJsonDialectId::Grok) => ProviderCapabilities {
+                binary_name: "grok",
+                supports_structured_output: false,
+                supports_resume: true,
+                supports_tool_stream: true,
+            },
         }
     }
 }
@@ -127,6 +143,7 @@ pub enum ProviderCompactionAdapter {
     GeminiDisabled,
     OpenCodeDisabled,
     QwenDisabled,
+    StreamJsonDisabled,
 }
 
 impl ProviderCompactionAdapter {
@@ -137,6 +154,7 @@ impl ProviderCompactionAdapter {
             Self::GeminiDisabled => "gemini",
             Self::OpenCodeDisabled => "opencode",
             Self::QwenDisabled => "qwen",
+            Self::StreamJsonDisabled => "grok",
         }
     }
 }
@@ -148,6 +166,7 @@ pub enum ProviderReadinessAdapter {
     Gemini,
     OpenCode,
     Qwen,
+    GenericBanner,
 }
 
 impl ProviderReadinessAdapter {
@@ -158,6 +177,7 @@ impl ProviderReadinessAdapter {
             Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
             Self::Qwen => "qwen",
+            Self::GenericBanner => "grok",
         }
     }
 }
@@ -218,6 +238,7 @@ impl ProviderKind {
             Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
             Self::Qwen => "qwen",
+            Self::Grok => "grok",
             Self::Unsupported(s) => s.as_str(),
         }
     }
@@ -275,6 +296,13 @@ impl ProviderKind {
         self.registry_entry().map(|entry| entry.execution_adapter)
     }
 
+    pub fn stream_json_dialect(&self) -> Option<StreamJsonDialectId> {
+        match self.execution_adapter()? {
+            ProviderExecutionAdapter::StreamJsonCli(dialect) => Some(dialect),
+            _ => None,
+        }
+    }
+
     pub fn compaction_adapter(&self) -> Option<ProviderCompactionAdapter> {
         self.registry_entry().map(|entry| entry.compaction_adapter)
     }
@@ -305,6 +333,7 @@ impl ProviderKind {
             Self::Gemini => crate::services::gemini::resolve_gemini_path(),
             Self::OpenCode => crate::services::opencode::resolve_opencode_path(),
             Self::Qwen => crate::services::qwen::resolve_qwen_path(),
+            Self::Grok => crate::services::stream_json_cli::dialects::grok::resolve_grok_path(),
             Self::Unsupported(_) => None,
         }
     }
@@ -401,7 +430,8 @@ impl ProviderKind {
             ProviderCompactionAdapter::CodexCli
             | ProviderCompactionAdapter::GeminiDisabled
             | ProviderCompactionAdapter::OpenCodeDisabled
-            | ProviderCompactionAdapter::QwenDisabled => Vec::new(),
+            | ProviderCompactionAdapter::QwenDisabled
+            | ProviderCompactionAdapter::StreamJsonDisabled => Vec::new(),
         }
     }
 
@@ -458,7 +488,8 @@ impl ProviderKind {
             ProviderCompactionAdapter::ClaudeEnvironment
             | ProviderCompactionAdapter::GeminiDisabled
             | ProviderCompactionAdapter::OpenCodeDisabled
-            | ProviderCompactionAdapter::QwenDisabled => Vec::new(),
+            | ProviderCompactionAdapter::QwenDisabled
+            | ProviderCompactionAdapter::StreamJsonDisabled => Vec::new(),
         }
     }
 
@@ -1325,6 +1356,10 @@ pub(crate) fn tmux_capture_indicates_ready_for_input(
                 || tmux_capture_contains_wrapper_ready_marker(capture, provider)
         }
         ProviderReadinessAdapter::OpenCode => {
+            crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
+                || tmux_capture_contains_wrapper_ready_marker(capture, provider)
+        }
+        ProviderReadinessAdapter::GenericBanner => {
             crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
                 || tmux_capture_contains_wrapper_ready_marker(capture, provider)
         }
