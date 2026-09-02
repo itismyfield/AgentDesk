@@ -49,6 +49,15 @@ use crate::services::tmux_diagnostics::{
     tmux_session_exists, tmux_session_has_live_pane,
 };
 
+#[cfg(unix)]
+pub(super) fn stamp_qwen_spawn_markers(tmux_session_name: &str) {
+    // Keep the provider-specific spawn marker contract at the Qwen facade while
+    // the Unix lifecycle implementation owns the surrounding process flow.
+    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name) {
+        tracing::warn!("failed to write spawn nonce for {tmux_session_name}: {e}");
+    }
+}
+
 const QWEN_CANCELLED_MESSAGE: &str = "Qwen request cancelled";
 const QWEN_SESSION_DEAD_MESSAGE: &str = "Qwen stream ended without a terminal result";
 pub(crate) const QWEN_STREAM_POLL_TIMEOUT: Duration = Duration::from_secs(5);
