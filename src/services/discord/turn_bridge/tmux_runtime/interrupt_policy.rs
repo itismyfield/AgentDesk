@@ -78,7 +78,10 @@ pub(super) fn provider_turn_interrupt_plan(
         ProviderKind::Claude => Some(ProviderTurnInterruptPlan { keys: &[] }),
         ProviderKind::Codex => Some(ProviderTurnInterruptPlan { keys: &["Escape"] }),
         ProviderKind::Qwen => Some(ProviderTurnInterruptPlan { keys: &["C-c"] }),
-        ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Unsupported(_) => None,
+        ProviderKind::Gemini
+        | ProviderKind::Grok
+        | ProviderKind::OpenCode
+        | ProviderKind::Unsupported(_) => None,
     }
 }
 
@@ -168,7 +171,10 @@ pub(super) fn fallback_sigint_pid_for_provider(
         // `ready_for_input`. Always deliver the fallback when we have the child
         // PID, matching base-branch behavior (#1260).
         ProviderKind::Codex | ProviderKind::Qwen => provider_pid,
-        ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Unsupported(_) => None,
+        ProviderKind::Gemini
+        | ProviderKind::Grok
+        | ProviderKind::OpenCode
+        | ProviderKind::Unsupported(_) => None,
     }
 }
 
