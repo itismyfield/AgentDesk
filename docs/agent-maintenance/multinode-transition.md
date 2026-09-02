@@ -170,7 +170,16 @@
 >
 > Last refreshed: 2026-07-21 (#4515 — worker-local restart budgets and the node-local fatal-exit ledger do not change worker ownership. The ledger serializes in-process read-modify-write operations and atomically replaces a node-local runtime-root file; it is deliberately not cluster-shared authority. Leader-only workers and PostgreSQL lease assumptions remain unchanged.)
 >
-> PR #3456 made the `src/server/worker_registry.rs` worker-lifecycle log fields
+> Last refreshed: 2026-09-01 (#5676 — the declarative `WORKER_SPECS`
+> ownership/scope inventory remains in `server/worker_registry.rs` for the
+> generator contract; worker construction, startup staging, restart supervision,
+> and shutdown moved to `server/worker_registry/registry.rs`, while read-only
+> worker status moved to `server/worker_registry/status.rs`. This is a structural
+> split only; leader/worker classifications, lease assumptions, and runtime
+> ownership are unchanged.)
+>
+> PR #3456 made the worker-lifecycle log fields now housed in
+> `src/server/worker_registry/registry.rs`
 > consistent: every started / stopped / future-exited / self-fenced /
 > supervisor-shutdown tracing event now emits the same structured spec fields
 > (stage, order, restart, shutdown, owner, health, responsibility, notes), so
@@ -239,9 +248,11 @@
 ### `multinode / supervised_workers_singleton`
 
 - feature: `multinode / supervised_workers_singleton`
-- canonical_modules: `src/server/worker_registry.rs:134` defines the supervised
-  worker inventory, with `dispatch_outbox_loop` at
-  `src/server/worker_registry.rs:206`. `src/server/mod.rs:201` creates the
+- canonical_modules: `src/server/worker_registry.rs:193` defines the supervised
+  worker inventory; `src/server/worker_registry/registry.rs` owns construction,
+  startup staging, and supervision, including the `dispatch_outbox_loop` worker
+  arm. `src/server/worker_registry/status.rs` owns read-only active-worker status.
+  `src/server/mod.rs:201` creates the
   registry, `src/server/mod.rs:207` runs boot-only steps, and
   `src/server/mod.rs:208` starts workers after boot reconcile. The
   `ScheduledMessages` spec registers `scheduled_message_loop` as
@@ -250,16 +261,20 @@
   `src/db/scheduled_messages.rs`.
 - legacy_modules: none. Workers are centrally registered, but most entries still
   assume that every server process may start its local loop.
-- do_not_edit_without_migration_plan: `src/server/worker_registry.rs` and the
-  worker starts in `src/server/mod.rs`. Scheduled-message ownership changes must
+- do_not_edit_without_migration_plan: the inventory in
+  `src/server/worker_registry.rs`, lifecycle execution in
+  `src/server/worker_registry/registry.rs`, status exposure in
+  `src/server/worker_registry/status.rs`, and the worker starts in
+  `src/server/mod.rs`. Scheduled-message ownership changes must
   review `src/services/scheduled_messages.rs`,
   `src/db/scheduled_messages.rs`, and the `ScheduledMessages` registry spec
   together; do not make the loop worker-local without a replacement ownership
   and Discord side-effect plan.
 - active_callsite_coverage: partial. Cluster identity and heartbeat are persisted
-  through `src/server/cluster.rs`, and `src/server/worker_registry.rs` now
-  classifies supervised workers as `leader_only` or `worker_local` before
-  startup. `policy_tick_loop` already uses a PG advisory lock at
+  through `src/server/cluster.rs`; `src/server/worker_registry.rs` classifies
+  supervised workers as `leader_only` or `worker_local`, and
+  `src/server/worker_registry/registry.rs` applies that scope before startup.
+  `policy_tick_loop` already uses a PG advisory lock at
   `src/server/mod.rs:297`, and `github_sync_loop` uses one at
   `src/server/mod.rs:2798`; leader lease loss still needs per-loop self-fencing
   before every side effect is considered failover-safe. Scheduled messages are
