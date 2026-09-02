@@ -1392,7 +1392,11 @@ src/
 │   │   ├── channel.rs
 │   │   ├── mod.rs
 │   │   └── provider.rs
+│   ├── opencode/
+│   │   └── streaming_entry.rs
 │   ├── platform/
+│   │   ├── binary_resolver/
+│   │   │   └── grok.rs
 │   │   ├── tmux/
 │   │   │   └── availability.rs
 │   │   ├── binary_resolver.rs
