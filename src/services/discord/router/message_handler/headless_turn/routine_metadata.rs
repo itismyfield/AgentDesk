@@ -1,7 +1,9 @@
 //! Routine metadata and session identity helpers for headless turns.
 use super::*;
 
-pub(super) fn valid_routine_metadata(metadata: Option<&serde_json::Value>) -> Option<&serde_json::Value> {
+pub(super) fn valid_routine_metadata(
+    metadata: Option<&serde_json::Value>,
+) -> Option<&serde_json::Value> {
     let metadata = metadata?;
     metadata
         .get("routine_id")
@@ -21,7 +23,9 @@ pub(super) fn routine_metadata_agent_id(metadata: Option<&serde_json::Value>) ->
 /// present, the turn (a) derives its ADK session key from this label instead of
 /// the channel name and (b) severs provider/transcript continuity so the frozen
 /// snapshot is the only conversation context. Absent for every other caller.
-pub(super) fn scheduled_snapshot_session_label(metadata: Option<&serde_json::Value>) -> Option<String> {
+pub(super) fn scheduled_snapshot_session_label(
+    metadata: Option<&serde_json::Value>,
+) -> Option<String> {
     metadata?
         .get("scheduled_snapshot_session_label")
         .and_then(|value| value.as_str())
