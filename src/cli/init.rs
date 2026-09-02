@@ -142,8 +142,8 @@ fn cli_init_provider_labels() -> Vec<&'static str> {
 fn cli_init_provider_from_index(index: usize) -> &'static str {
     ProviderKind::provider_for_cli_init_index(index)
         .or_else(ProviderKind::default_channel_provider)
-        .unwrap_or(ProviderKind::Claude)
-        .cli_init_label()
+        .and_then(|provider| provider.registry_entry())
+        .map_or("claude", |entry| entry.id)
 }
 
 fn cli_init_provider_readiness_line(provider: &str) -> Option<String> {
@@ -1189,6 +1189,55 @@ pub(crate) fn handle_emit_launchd_plist(args: &EmitLaunchdPlistArgs) -> Result<(
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn handle_emit_launchd_plist(_args: &EmitLaunchdPlistArgs) -> Result<(), String> {
     Err("emit-launchd-plist is only supported on macOS".to_string())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_init_provider_indices_resolve_to_canonical_provider_ids() {
+        for index in 0..ProviderKind::cli_init_labels().len() {
+            let expected = ProviderKind::provider_for_cli_init_index(index).unwrap();
+            assert_eq!(
+                ProviderKind::from_str(cli_init_provider_from_index(index)),
+                Some(expected),
+                "CLI init provider index {index} must resolve to a canonical provider id"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_init_config_persists_canonical_provider_ids() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let labels = cli_init_provider_labels();
+
+        for index in 0..labels.len() {
+            let root = temp_dir.path().join(index.to_string());
+            let provider = cli_init_provider_from_index(index);
+            let expected = ProviderKind::provider_for_cli_init_index(index).unwrap();
+            let config_path = write_agentdesk_discord_config(
+                &root,
+                "12345678901234567",
+                "test-token",
+                provider,
+                None,
+                &[],
+                &crate::config::DatabaseConfig::default(),
+                false,
+            )
+            .unwrap();
+            let rendered = fs::read_to_string(config_path).unwrap();
+            let config: crate::config::Config = serde_yaml::from_str(&rendered).unwrap();
+            let persisted = config
+                .discord
+                .bots
+                .get("command")
+                .and_then(|bot| bot.provider.as_deref());
+
+            assert_eq!(persisted, Some(expected.as_str()));
+            assert_ne!(persisted, Some(labels[index]));
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
