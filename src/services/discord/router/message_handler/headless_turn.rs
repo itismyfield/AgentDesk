@@ -6,16 +6,6 @@ use routine_metadata::{
     scheduled_snapshot_session_label, session_key_basis_override, valid_routine_metadata,
 };
 
-
-
-
-
-
-
-
-
-
-
 async fn persist_boundary_before_provider_clear<B, BFut, C, CFut, E>(
     persist_boundary: bool,
     clear_provider: bool,
@@ -100,8 +90,6 @@ pub(in crate::services::discord) async fn start_reserved_headless_turn(
     )
     .await
 }
-
-
 
 #[allow(dead_code)] // #3034: exported voice entry point, wired-but-dormant (no live dispatch yet).
 #[allow(clippy::too_many_arguments)]
