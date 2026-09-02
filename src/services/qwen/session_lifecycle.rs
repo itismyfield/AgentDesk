@@ -2,7 +2,6 @@
 use super::*;
 
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn execute_streaming_local_tmux(
     prompt: &str,
     model: Option<&str>,
@@ -286,7 +285,6 @@ pub(super) fn execute_streaming_local_tmux(
 
     Ok(())
 }
-#[allow(clippy::too_many_arguments)]
 pub(super) fn execute_streaming_local_process(
     prompt: &str,
     model: Option<&str>,
