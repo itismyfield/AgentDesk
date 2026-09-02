@@ -2434,7 +2434,7 @@ pub(super) async fn handle_text_message(
                             &system_prompt_owned,
                         );
                     match provider_for_blocking.legacy_streaming_dispatch_kind() {
-                        crate::services::provider::LegacyDispatchKind::Claude => claude::execute_command_streaming(
+                        LegacyDispatchKind::Claude => claude::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -2453,7 +2453,7 @@ pub(super) async fn handle_text_message(
                             cache_ttl_minutes,
                             dispatch_type_for_mcp.as_deref(),
                         ),
-                        crate::services::provider::LegacyDispatchKind::Codex => codex::execute_command_streaming(
+                        LegacyDispatchKind::Codex => codex::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -2471,7 +2471,7 @@ pub(super) async fn handle_text_message(
                             compact_token_limit_for_codex,
                             force_fresh_provider_session,
                         ),
-                        crate::services::provider::LegacyDispatchKind::Gemini => gemini::execute_command_streaming(
+                        LegacyDispatchKind::Gemini => gemini::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -2486,7 +2486,7 @@ pub(super) async fn handle_text_message(
                             model_for_turn.as_deref(),
                             None, // Gemini: compact not supported
                         ),
-                        crate::services::provider::LegacyDispatchKind::Qwen => qwen::execute_command_streaming(
+                        LegacyDispatchKind::Qwen => qwen::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -2502,7 +2502,7 @@ pub(super) async fn handle_text_message(
                             None, // Qwen: compact not supported
                             force_fresh_provider_session,
                         ),
-                        crate::services::provider::LegacyDispatchKind::OpenCode => opencode::execute_command_streaming(
+                        LegacyDispatchKind::OpenCode => opencode::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -2517,7 +2517,7 @@ pub(super) async fn handle_text_message(
                             model_for_turn.as_deref(),
                             None,
                         ),
-                        crate::services::provider::LegacyDispatchKind::Unsupported(name) => {
+                        LegacyDispatchKind::Unsupported(name) => {
                             let _ = tx.send(StreamMessage::Error {
                                 message: format!("Provider '{}' is not installed", name),
                                 stdout: String::new(),
