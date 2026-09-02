@@ -7786,6 +7786,7 @@ services::stale_turn_reconciler::tests::transport_unknown_warrant_vetoes_the_des
 services::stale_turn_reconciler::tests::unreadable_inflight_provider_maps_unknown_and_preserves_busy_session_pg
 services::stream_json_cli::codec::tests::agy_codec_does_not_duplicate_aggregate_after_delta
 services::stream_json_cli::codec::tests::grok_messages_codec_emits_init_and_done
+services::stream_json_cli::codec::tests::grok_messages_codec_rejects_clean_eof_after_init
 services::stream_json_cli::dialects::agy::tests::default_argv_uses_conversation_not_continue
 services::stream_json_cli::dialects::agy::tests::envelope_preserves_lengths
 services::stream_json_cli::dialects::agy::tests::restricted_policy_fails_before_prepare
@@ -7794,6 +7795,7 @@ services::stream_json_cli::dialects::grok::tests::provider_default_argv_has_no_r
 services::stream_json_cli::dialects::grok::tests::readonly_mapping_is_fail_closed_for_write_tools
 services::stream_json_cli::dialects::grok::tests::resume_requires_uuid
 services::stream_json_cli::policy::tests::empty_allowlist_mode_is_error
+services::stream_json_cli::policy::tests::legacy_readonly_vector_remains_restricted
 services::stream_json_cli::policy::tests::mode_less_vector_is_legacy
 services::stream_json_cli::policy::tests::omitted_mode_and_tools_are_provider_default
 services::stream_json_cli::policy::tests::stream_json_legacy_vector_does_not_become_allowlist
