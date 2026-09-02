@@ -136,6 +136,8 @@ cli::doctor::startup::tests::skipped_startup_doctor_writes_current_boot_artifact
 cli::init::launchd_plist_tests::clamp_launchd_nofile_soft_limit_never_exceeds_host_hard_limit
 cli::init::launchd_plist_tests::generate_launchd_plist_release_sets_clamped_soft_number_of_files_limit
 cli::init::launchd_plist_tests::generate_launchd_plist_uses_requested_fresh_home_and_root_only
+cli::init::tests::cli_init_config_persists_canonical_provider_ids
+cli::init::tests::cli_init_provider_indices_resolve_to_canonical_provider_ids
 cli::intake_outbox::tests::tsv_fields_escape_row_delimiters_and_distinguish_null
 cli::json_output::tests::advance_issue_number_falls_back_to_string_when_non_numeric
 cli::json_output::tests::advance_outcomes
