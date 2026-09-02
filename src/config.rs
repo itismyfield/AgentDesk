@@ -3703,8 +3703,7 @@ fn resolve_graceful_config_path(
         .unwrap_or_else(|| std::path::PathBuf::from("config").join("agentdesk.yaml"))
 }
 
-/// Load config gracefully — returns Config::default() if the file doesn't exist
-/// or fails to parse, instead of panicking.
+/// Load config gracefully; invalid or missing files use the live snapshot or defaults.
 /// Searches:
 /// $AGENTDESK_CONFIG →
 /// $AGENTDESK_ROOT_DIR/config/agentdesk.yaml →
@@ -3733,18 +3732,17 @@ pub fn load_graceful() -> Config {
                 cfg.apply_runtime_defaults()
                     .resolve_runtime_relative_paths(runtime_root.as_deref())
             }
-            Err(e) => {
-                tracing::warn!("  ⚠ Failed to parse {path_display}: {e} — using defaults");
-                Config::default()
-            }
+            Err(e) => crate::config_live_reload::graceful_fallback_config(
+                &path_display,
+                format!("Failed to parse {path_display}: {e}"),
+            ),
         },
-        Err(_) => {
-            tracing::warn!("  ⚠ {path_display} not found — using defaults");
-            Config::default()
-        }
+        Err(_) => crate::config_live_reload::graceful_fallback_config(
+            &path_display,
+            format!("{path_display} not found"),
+        ),
     };
 
-    // Ensure data dir exists (best effort)
     let _ = std::fs::create_dir_all(&config.data.dir);
 
     config

@@ -6,6 +6,9 @@ use super::super::super::turn_view_reconciler::{
 use super::voice_announcement_route::route_voice_transcript_announcement_once;
 use super::*;
 
+mod intake_dispatch;
+use intake_dispatch::build_intake_inflight_state;
+
 mod adk_thread;
 mod claim_bootstrap;
 mod dispatch_runtime;
@@ -43,20 +46,6 @@ pub(in crate::services::discord) struct IntakeDeps<'a> {
     pub ctx_for_chained_dispatch: Option<&'a serenity::Context>,
     pub shared: &'a Arc<SharedData>,
     pub token: &'a str,
-}
-
-fn build_intake_inflight_state(
-    intake_outbox_id: Option<i64>,
-    source_message_ids: Vec<serenity::MessageId>,
-    construct: impl FnOnce() -> InflightTurnState,
-) -> InflightTurnState {
-    let mut state = construct();
-    state.adopt_intake_outbox(intake_outbox_id);
-    state.source_message_ids = source_message_ids
-        .into_iter()
-        .map(serenity::MessageId::get)
-        .collect();
-    state
 }
 
 #[cfg(test)]
@@ -2513,6 +2502,7 @@ pub(super) async fn handle_text_message(
                             Some(provider_for_blocking.clone()),
                             model_for_turn.as_deref(),
                             None, // Qwen: compact not supported
+                            force_fresh_provider_session,
                         ),
                         ProviderKind::OpenCode => opencode::execute_command_streaming(
                             &context_prompt,

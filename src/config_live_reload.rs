@@ -78,6 +78,19 @@ pub fn current() -> Option<Arc<Config>> {
     })
 }
 
+/// Safe fallback for transient invalid or missing on-disk configuration.
+pub(crate) fn graceful_fallback_config(path_display: &str, reason: String) -> Config {
+    if let Some(live) = current() {
+        tracing::warn!(
+            "  ⚠ {reason} — keeping the last validated live config (source: {path_display})"
+        );
+        return (*live).clone();
+    }
+
+    tracing::warn!("  ⚠ {reason} — using defaults");
+    Config::default()
+}
+
 pub(crate) fn subscribe() -> tokio::sync::watch::Receiver<Option<Arc<Config>>> {
     LIVE_UPDATES
         .get_or_init(|| tokio::sync::watch::channel(None).0)
@@ -666,6 +679,23 @@ mod tests {
             before,
             "rejected reload must not mutate the live snapshot"
         );
+    }
+
+    #[test]
+    fn load_graceful_uses_live_snapshot_when_file_is_invalid() {
+        let _guard = global_test_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        let mut config = crate::config::Config::default();
+        config.server.port = 8797;
+        crate::config::save_to_path(&path, &config).unwrap();
+        install(crate::config::load_from_path(&path).unwrap());
+
+        let _config_path = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
+        write(&path, "server:\n  port: : invalid yaml\n");
+
+        let loaded = crate::config::load_graceful();
+        assert_eq!(loaded.server.port, 8797);
     }
 
     // Infra-section changes are surfaced as restart-required.

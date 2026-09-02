@@ -793,6 +793,8 @@ src/
 │   │   │   │   ├── queue_effects.rs
 │   │   │   │   └── stale_turn.rs
 │   │   │   ├── message_handler/
+│   │   │   │   ├── headless_turn/
+│   │   │   │   │   └── routine_metadata.rs
 │   │   │   │   ├── intake_turn/
 │   │   │   │   │   ├── dispatch_stamp/
 │   │   │   │   │   │   └── tests.rs
@@ -806,6 +808,7 @@ src/
 │   │   │   │   │   ├── dispatch_runtime.rs
 │   │   │   │   │   ├── dispatch_stamp.rs
 │   │   │   │   │   ├── inflight_create_log.rs
+│   │   │   │   │   ├── intake_dispatch.rs
 │   │   │   │   │   ├── placeholder_handoff.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   ├── runtime_transition.rs
@@ -1421,6 +1424,9 @@ src/
 │   │   ├── smoke.rs
 │   │   ├── snapshot.rs
 │   │   └── upgrade.rs
+│   ├── qwen/
+│   │   ├── fresh_session.rs
+│   │   └── session_lifecycle.rs
 │   ├── review_decision/
 │   │   ├── accept.rs
 │   │   ├── adapters.rs
@@ -1433,6 +1439,8 @@ src/
 │   │   ├── tuning_aggregate.rs
 │   │   └── worktree_stale.rs
 │   ├── routines/
+│   │   ├── agent_executor/
+│   │   │   └── reliability.rs
 │   │   ├── loader/
 │   │   │   └── discovery.rs
 │   │   ├── action.rs
