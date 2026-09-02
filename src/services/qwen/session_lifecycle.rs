@@ -229,12 +229,8 @@ pub(super) fn execute_streaming_local_tmux(
 
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
-    // #3087: stamp a per-spawn nonce in a SEPARATE marker (see claude.rs). The
-    // status-panel session-instance key reads this unique nonce instead of the
-    // `.generation` mtime, eliminating mtime missing/duplicate collisions.
-    if let Err(e) = crate::services::discord::stamp_spawn_markers(tmux_session_name) {
-        tracing::warn!("failed to write spawn nonce for {tmux_session_name}: {e}");
-    }
+    // #3087: stamp the provider spawn markers before reading the session output.
+    super::stamp_qwen_spawn_markers(tmux_session_name);
 
     if let Some(ref token) = cancel_token {
         token.bind_unmanaged_session_name(tmux_session_name);
