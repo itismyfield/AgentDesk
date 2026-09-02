@@ -147,7 +147,7 @@ fn allowed_output_roots(provider: &ProviderKind) -> Vec<PathBuf> {
                 .chain(crate::services::tmux_common::persistent_sessions_dir())
                 .collect()
         }
-        ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => {
+        ProviderKind::Gemini | ProviderKind::Grok | ProviderKind::OpenCode | ProviderKind::Qwen => {
             crate::services::tmux_common::persistent_sessions_dir()
                 .into_iter()
                 .collect()
@@ -476,6 +476,7 @@ mod tests {
 
         for provider in [
             ProviderKind::Gemini,
+            ProviderKind::Grok,
             ProviderKind::OpenCode,
             ProviderKind::Qwen,
         ] {
