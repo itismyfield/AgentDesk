@@ -8,7 +8,7 @@
 > [`docs/generated/giant-file-registry.md`](../generated/giant-file-registry.md);
 > the rows below project the operational meaning of each entry.
 >
-> Last refreshed: 2026-08-12 (against #5280/#5284 near-threshold health surfaces and stable symbol references).
+> Last refreshed: 2026-09-02 (manual: #5679 transport extraction and ghost freeze removal).
 >
 > — the dead-tmux tail drain in `tmux.rs`
 > (`drain_missing_inflight_dead_tmux_tail_to_eof`) now records itself in
@@ -363,7 +363,7 @@ time for diagnostics; neither is a stored approval value.
 
 ### `discord_outbound`
 
-- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery,transport,send_to_agent,send_target,send_gate,send_api,manual_delivery,source_registry}.rs`
+- canonical_modules: `src/services/discord/outbound/{message,policy,result,decision,delivery,transport,send_to_agent,send_target,send_gate,send_api,manual_delivery,source_registry}.rs`; `src/services/discord/outbound/turn_output_controller/{fresh_send,transport}.rs`
   (#1006 v3 domain types, pure planner, delivery implementation, shared
   transport/dedup primitives, and the #3038 send-to-agent/manual outbound
   dispatch surface).
@@ -1810,15 +1810,6 @@ time for diagnostics; neither is a stored approval value.
     binds here — the `[namespace_size_caps]` entry is, and the file is AT that
     cap with zero headroom. See "At-cap surfaces" under Read This First for the
     measurement and for why the next change of any size has to extract first).
-  - `src/services/discord/outbound/turn_output_controller.rs` (frozen giant surface;
-    #4046 S1r-1 keeps the anchor-less `SendFresh` implementation in the 228-line
-    `turn_output_controller/fresh_send.rs` child while the root owns only the
-    shared verb/outcome contract and routing; crossed the giant threshold in
-    #3998 E13 when the controller-facing lease guard moved from `TurnKey` to
-    `DeliveryLeaseKey` for id-0 disambiguation. Tracked decompose target — see
-    `giant-file-registry.md` (owner `discord-relay`, deadline 2026-08-31, issue
-    #3405). Keep further controller growth in narrower outbound/controller
-    helper modules).
   - `src/services/discord/turn_view_reconciler.rs` was decomposed in #4712 D5:
     the root retains reconciler state and transition coordination, while
     `turn_view_reconciler/api.rs`, `apply.rs`, `resolution.rs`, and `store.rs`
