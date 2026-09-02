@@ -12,8 +12,10 @@ mod registry;
 pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 use cancel_watchdog::{current_unix_millis, enforce_watchdog_deadline};
 pub use registry::{
-    ProviderCatalogEntry, derived_counterpart_ids, frozen_first_counterpart_id, intern_provider_id,
-    provider_registry, public_provider_catalog, supported_provider_ids,
+    ProviderCatalogEntry, ProviderCompactionAdapter, ProviderExecutionAdapter,
+    ProviderReadinessAdapter, ProviderRegistryEntry, StreamJsonDialectId,
+    derived_counterpart_ids, frozen_first_counterpart_id, intern_provider_id, provider_registry,
+    public_provider_catalog, supported_provider_ids,
 };
 
 /// Tmux session name prefix — always "AgentDesk".
@@ -55,133 +57,6 @@ pub struct ProviderCapabilities {
     pub supports_tool_stream: bool,
 }
 
-/// Wire-format dialect used by providers whose CLI emits line-delimited JSON.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StreamJsonDialectId {
-    Grok,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProviderExecutionAdapter {
-    Claude,
-    Codex,
-    Gemini,
-    OpenCode,
-    Qwen,
-    StreamJsonCli(StreamJsonDialectId),
-}
-
-impl ProviderExecutionAdapter {
-    pub const fn execution_surface(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Gemini => "gemini",
-            Self::OpenCode => "opencode_http",
-            Self::Qwen => "managed_tmux_wrapper",
-            Self::StreamJsonCli(_) => "stream_json_cli",
-        }
-    }
-
-    pub const fn provider_id(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Gemini => "gemini",
-            Self::OpenCode => "opencode",
-            Self::Qwen => "qwen",
-            Self::StreamJsonCli(StreamJsonDialectId::Grok) => "grok",
-        }
-    }
-
-    pub const fn supported_capabilities(self) -> ProviderCapabilities {
-        match self {
-            Self::Claude => ProviderCapabilities {
-                binary_name: "claude",
-                supports_structured_output: true,
-                supports_resume: true,
-                supports_tool_stream: true,
-            },
-            Self::Codex => ProviderCapabilities {
-                binary_name: "codex",
-                supports_structured_output: true,
-                supports_resume: true,
-                supports_tool_stream: true,
-            },
-            Self::Gemini => ProviderCapabilities {
-                binary_name: "gemini",
-                supports_structured_output: true,
-                supports_resume: true,
-                supports_tool_stream: true,
-            },
-            Self::OpenCode => ProviderCapabilities {
-                binary_name: "opencode",
-                supports_structured_output: true,
-                supports_resume: false,
-                supports_tool_stream: true,
-            },
-            Self::Qwen => ProviderCapabilities {
-                binary_name: "qwen",
-                supports_structured_output: true,
-                supports_resume: true,
-                supports_tool_stream: true,
-            },
-            Self::StreamJsonCli(StreamJsonDialectId::Grok) => ProviderCapabilities {
-                binary_name: "grok",
-                supports_structured_output: false,
-                supports_resume: true,
-                supports_tool_stream: true,
-            },
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProviderCompactionAdapter {
-    ClaudeEnvironment,
-    CodexCli,
-    GeminiDisabled,
-    OpenCodeDisabled,
-    QwenDisabled,
-    StreamJsonDisabled,
-}
-
-impl ProviderCompactionAdapter {
-    pub const fn provider_id(self) -> &'static str {
-        match self {
-            Self::ClaudeEnvironment => "claude",
-            Self::CodexCli => "codex",
-            Self::GeminiDisabled => "gemini",
-            Self::OpenCodeDisabled => "opencode",
-            Self::QwenDisabled => "qwen",
-            Self::StreamJsonDisabled => "grok",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProviderReadinessAdapter {
-    Claude,
-    Codex,
-    Gemini,
-    OpenCode,
-    Qwen,
-    GenericBanner,
-}
-
-impl ProviderReadinessAdapter {
-    pub const fn provider_id(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-            Self::Gemini => "gemini",
-            Self::OpenCode => "opencode",
-            Self::Qwen => "qwen",
-            Self::GenericBanner => "grok",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderRuntimeProbe {
     pub provider: ProviderKind,
@@ -201,29 +76,6 @@ pub struct ProviderDefaultBehavior {
     pub source_label: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProviderRegistryEntry {
-    pub id: &'static str,
-    pub aliases: &'static [&'static str],
-    pub display_name: &'static str,
-    pub cli_init_label: &'static str,
-    pub channel_suffix: Option<&'static str>,
-    pub default_channel_provider: bool,
-    pub capabilities: ProviderCapabilities,
-    pub execution_adapter: ProviderExecutionAdapter,
-    pub compaction_adapter: ProviderCompactionAdapter,
-    pub readiness_adapter: ProviderReadinessAdapter,
-    pub default_behavior: ProviderDefaultBehavior,
-    pub default_context_window: u64,
-    pub context_window_known: bool,
-    pub supports_restricted_tool_policy: bool,
-    pub supports_tui_hosting: bool,
-    pub system_prompt_transport: &'static str,
-    pub managed_tmux_backend: bool,
-    pub managed_tmux_wrapper_subcommand: Option<&'static str>,
-    pub auth: ProviderAuthSpec,
-}
-
 impl ProviderKind {
     pub fn registry_entry(&self) -> Option<&'static ProviderRegistryEntry> {
         provider_registry()
@@ -240,6 +92,18 @@ impl ProviderKind {
             Self::Qwen => "qwen",
             Self::Grok => "grok",
             Self::Unsupported(s) => s.as_str(),
+        }
+    }
+
+    pub fn doctor_check_id(&self) -> &'static str {
+        match self {
+            Self::Claude => "provider_claude",
+            Self::Codex => "provider_codex",
+            Self::Gemini => "provider_gemini",
+            Self::OpenCode => "provider_opencode",
+            Self::Qwen => "provider_qwen",
+            Self::Grok => "provider_grok",
+            Self::Unsupported(_) => "provider_unsupported",
         }
     }
 
