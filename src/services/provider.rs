@@ -49,6 +49,16 @@ pub enum ProviderKind {
     Unsupported(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LegacyDispatchKind {
+    Claude,
+    Codex,
+    Gemini,
+    OpenCode,
+    Qwen,
+    Unsupported(String),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProviderCapabilities {
     pub binary_name: &'static str,
@@ -242,10 +252,14 @@ impl ProviderKind {
             .unwrap_or("claude")
     }
 
-    pub(crate) fn legacy_streaming_dispatch_kind(&self) -> Self {
+    pub(crate) fn legacy_streaming_dispatch_kind(&self) -> LegacyDispatchKind {
         match self {
-            Self::Grok => Self::OpenCode,
-            _ => self.clone(),
+            Self::Claude => LegacyDispatchKind::Claude,
+            Self::Codex => LegacyDispatchKind::Codex,
+            Self::Gemini => LegacyDispatchKind::Gemini,
+            Self::OpenCode | Self::Grok => LegacyDispatchKind::OpenCode,
+            Self::Qwen => LegacyDispatchKind::Qwen,
+            Self::Unsupported(name) => LegacyDispatchKind::Unsupported(name.clone()),
         }
     }
 
