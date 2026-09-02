@@ -192,6 +192,7 @@ config::secret_bearing_config_file_tests::load_from_path_rejects_invalid_escalat
 config::secret_bearing_config_file_tests::save_and_load_harden_secret_bearing_config_file
 config::shared_test_env_lock_tests::acquire_shared_test_env_lock_panics_on_same_thread_reentry_before_deadlock
 config_live_reload::tests::intake_owner_authority_allowlist_change_needs_no_restart
+config_live_reload::tests::load_graceful_uses_live_snapshot_when_file_is_invalid
 config_live_reload::tests::reload_applies_valid_config
 config_live_reload::tests::reload_rejects_invalid_config_and_keeps_current
 config_live_reload::tests::restart_required_changes_detects_discord_token_only_rotation
@@ -4407,9 +4408,13 @@ services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::explicit_fresh_routine_is_fresh_for_every_channel_path
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::fresh_routine_path_does_not_clear_provider_when_boundary_fails
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::fresh_routine_path_records_durable_boundary_before_provider_clear
+services::discord::router::message_handler::headless_turn::fresh_routine_tests::fresh_routine_uses_its_synthetic_label_for_the_session_key
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::legacy_routine_without_strategy_is_fresh
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::malformed_routine_metadata_cannot_enter_routine_paths
+services::discord::router::message_handler::headless_turn::fresh_routine_tests::persistent_routine_does_not_change_its_session_key_basis
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::persistent_routine_keeps_provider_continuity
+services::discord::router::message_handler::headless_turn::fresh_routine_tests::routine_model_resolution_uses_configured_parent_channel
+services::discord::router::message_handler::headless_turn::fresh_routine_tests::scheduled_snapshot_basis_takes_precedence
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::scheduled_snapshot_session_label_reads_metadata_marker
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::scheduled_snapshot_skips_channel_session_key_refresh
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::scheduled_snapshot_turn_stays_out_of_channel_mutating_severance
@@ -7373,6 +7378,7 @@ services::provider_output_guard_tests::invariant_4371_tool_wrapper_terminal_comp
 services::queue::tests::force_purge_channel_mailbox_drains_queue_without_session_key
 services::queue::tests::force_purge_reaches_queue_hydrated_by_dedup_replay
 services::qwen::qwen_provider_lifecycle_tests::default_startup_watchdog_allows_four_minutes_before_retry
+services::qwen::qwen_provider_lifecycle_tests::forced_fresh_turn_does_not_resume_cached_or_invalid_session
 services::qwen::qwen_provider_lifecycle_tests::live_reused_provider_session_is_preserved_when_wrapper_io_is_missing
 services::release_source::tests::release_source_module_docs_define_release_fact_scope
 services::release_source::tests::release_source_passes_through_every_written_repo_dirty_verdict
@@ -7419,6 +7425,12 @@ services::routines::action::tests::validates_agent_action_with_last_result
 services::routines::action::tests::validates_agent_dm_user_id_aliases
 services::routines::action::tests::validates_agent_prompt_contract
 services::routines::action::tests::validates_complete_action_with_checkpoint
+services::routines::agent_executor::reliability::tests::current_attempt_started_at_ignores_malformed_attempts_and_falls_back
+services::routines::agent_executor::reliability::tests::current_attempt_started_at_uses_latest_started_attempt
+services::routines::agent_executor::reliability::tests::fresh_provider_session_probe_waits_for_grace_period
+services::routines::agent_executor::reliability::tests::provider_error_from_completion_allows_normal_error_reports
+services::routines::agent_executor::reliability::tests::provider_error_from_completion_detects_known_error_only_transcript
+services::routines::agent_executor::reliability::tests::provider_error_from_completion_ignores_terminal_evidence
 services::routines::agent_executor::tests::assistant_preview_caps_long_messages
 services::routines::agent_executor::tests::attempts_include_fallback_detects_kind
 services::routines::agent_executor::tests::claimed_failure_plan_falls_back_when_retry_disabled
