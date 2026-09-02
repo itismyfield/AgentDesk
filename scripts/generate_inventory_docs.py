@@ -1092,6 +1092,31 @@ def giant_file_issue_ratchet_problems(
     return problems
 
 
+def giant_file_closed_deadline_ratchet_paths(
+    closed_registry_paths: set[str],
+    *,
+    registered_paths: set[str],
+    transition_paths: set[str],
+    prod_loc: dict[str, int],
+    retain_transition_only: bool,
+) -> set[str]:
+    """Return the paths governed by the closed-deadline count ratchet.
+
+    Progress snapshots retain frozen transition authority for a same-path root
+    after it drops below the giant threshold. Those transition-only retired
+    paths therefore remain closed-deadline debt until the transition list is
+    changed by a separately authorized follow-up.
+    """
+    measured = set(closed_registry_paths)
+    if retain_transition_only:
+        measured.update(
+            path
+            for path in transition_paths - registered_paths
+            if 0 <= prod_loc.get(path, GIANT_FILE_THRESHOLD) < GIANT_FILE_THRESHOLD
+        )
+    return measured
+
+
 def validate_decompose_issue_metadata(
     path: str,
     owner: str,
@@ -1290,7 +1315,7 @@ def build_giant_registrations(
     problems: list[str] = []
     closed_issue_allowed_problems: list[str] = []
     closed_issue_forbidden_problems: list[str] = []
-    closed_deadline_entries = 0
+    closed_registry_paths: set[str] = set()
     seen: set[str] = set()
 
     # Closed baseline: `grandfathered` must be a subset of the frozen
@@ -1357,7 +1382,7 @@ def build_giant_registrations(
                     path, decompose_issue, issue_metadata
                 )
                 if closed_issue_problem:
-                    closed_deadline_entries += 1
+                    closed_registry_paths.add(path)
                     is_allowed, categorized_problem = categorize_closed_issue_problem(
                         path, closed_issue_problem, transition_list
                     )
@@ -1440,12 +1465,18 @@ def build_giant_registrations(
 
     # A progress snapshot retains frozen transition authority after a same-path
     # root drops below the giant threshold; direct generation still rejects it.
-    retired_transition: set[str] = set()
+    registry_paths = {reg.file_path for reg in registrations}
+    closed_deadline_paths = giant_file_closed_deadline_ratchet_paths(
+        closed_registry_paths,
+        registered_paths=registry_paths,
+        transition_paths=transition_list,
+        prod_loc=prod_loc,
+        retain_transition_only=allow_overdue,
+    )
+    retired_transition = closed_deadline_paths - closed_registry_paths
     # Validate transition list entries exist in registry (no orphans)
     if transition_list:
-        registry_paths = {reg.file_path for reg in registrations}
         orphan_entries = transition_list - registry_paths
-        retired_transition = {path for path in orphan_entries if allow_overdue and 0 <= prod_loc.get(path, GIANT_FILE_THRESHOLD) < GIANT_FILE_THRESHOLD}
         for orphan in sorted(orphan_entries - retired_transition):
             problems.append(
                 f"transition list entry {orphan!r} is not in the registry or is not a giant file; "
@@ -1454,7 +1485,7 @@ def build_giant_registrations(
 
     problems.extend(
         giant_file_issue_ratchet_problems(
-            closed_deadline_entries=closed_deadline_entries + len(retired_transition),
+            closed_deadline_entries=len(closed_deadline_paths),
             transition_list_entries=len(transition_list),
             baselines=issue_ratchets,
         )
@@ -1466,7 +1497,7 @@ def build_giant_registrations(
         for problem in sorted(closed_issue_allowed_problems):
             print(f"giant-file registry: {problem}", file=sys.stderr)
         print(
-            f"giant-file: {closed_deadline_entries} registry entries have closed "
+            f"giant-file: {len(closed_registry_paths)} registry entries have closed "
             "decompose_issue deadlines and remain on the checked-in transition list",
             file=sys.stderr,
         )

@@ -14,6 +14,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import generate_inventory_docs as inventory
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SNAPSHOT_PATH = REPO_ROOT / "scripts" / "giant_file_issue_metadata.json"
@@ -112,6 +114,7 @@ def lower_ratchet_baselines(
     payload: dict[str, object],
     registry_entries: list[dict[str, str]],
     transition_paths: set[str],
+    prod_loc: dict[str, int],
 ) -> dict[str, object]:
     """Lower checked-in baselines to current counts, never raise them."""
     records = payload.get("issues")
@@ -132,7 +135,7 @@ def lower_ratchet_baselines(
             raise RefreshError(f"snapshot issue record is invalid: {record!r}")
         states[number] = state
 
-    closed_deadline_entries = 0
+    closed_registry_paths: set[str] = set()
     for entry in registry_entries:
         if entry.get("decision", "shrink") != "shrink":
             continue
@@ -147,10 +150,23 @@ def lower_ratchet_baselines(
                 f"registry entry references issue #{issue_number}, absent from snapshot"
             )
         if states[issue_number] == "closed":
-            closed_deadline_entries += 1
+            closed_registry_paths.add(entry.get("file", ""))
+
+    registered_paths = {
+        entry.get("file", "")
+        for entry in registry_entries
+        if prod_loc.get(entry.get("file", ""), 0) >= inventory.GIANT_FILE_THRESHOLD
+    }
+    closed_deadline_paths = inventory.giant_file_closed_deadline_ratchet_paths(
+        closed_registry_paths,
+        registered_paths=registered_paths,
+        transition_paths=transition_paths,
+        prod_loc=prod_loc,
+        retain_transition_only=True,
+    )
 
     measured = {
-        "closed_deadline_entries": closed_deadline_entries,
+        "closed_deadline_entries": len(closed_deadline_paths),
         "transition_list_entries": len(transition_paths),
     }
     lowered: dict[str, int] = {}
@@ -178,8 +194,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        import generate_inventory_docs as inventory
-
         payload = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
         refreshed = refreshed_snapshot(payload, args.repo, datetime.now(timezone.utc))
         try:
@@ -187,10 +201,12 @@ def main() -> int:
                 inventory.load_giant_file_registry()
             )
             transition_paths = inventory.load_giant_file_closed_issue_transition_list()
+            modules = inventory.collect_modules()
         except inventory.ParseError as error:
             raise RefreshError(str(error)) from error
+        prod_loc = {entry.file_path: entry.prod_line_count for entry in modules}
         refreshed = lower_ratchet_baselines(
-            refreshed, registry_entries, transition_paths
+            refreshed, registry_entries, transition_paths, prod_loc
         )
         SNAPSHOT_PATH.write_text(
             json.dumps(refreshed, indent=2, ensure_ascii=False) + "\n",
