@@ -242,8 +242,11 @@ impl ProviderKind {
             .unwrap_or("claude")
     }
 
-    pub fn uses_opencode_streaming_entrypoint(&self) -> bool {
-        matches!(self, Self::OpenCode | Self::Grok)
+    pub fn legacy_streaming_dispatch_kind(&self) -> Self {
+        match self {
+            Self::Grok => Self::OpenCode,
+            _ => self.clone(),
+        }
     }
 
     pub fn provider_for_cli_init_index(index: usize) -> Option<Self> {
