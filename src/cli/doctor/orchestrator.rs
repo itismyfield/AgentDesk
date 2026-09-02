@@ -886,15 +886,7 @@ fn stale_zero_byte_db_candidates(
 }
 
 fn provider_check_id(provider: &ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Claude => "provider_claude",
-        ProviderKind::Codex => "provider_codex",
-        ProviderKind::Gemini => "provider_gemini",
-        ProviderKind::OpenCode => "provider_opencode",
-        ProviderKind::Qwen => "provider_qwen",
-        ProviderKind::Grok => "provider_grok",
-        ProviderKind::Unsupported(_) => "provider_unsupported",
-    }
+    provider.doctor_check_id()
 }
 
 fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Check> {
