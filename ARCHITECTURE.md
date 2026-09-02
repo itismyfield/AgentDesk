@@ -340,6 +340,9 @@ src/
 │   │   ├── termination_events.rs
 │   │   ├── v1.rs
 │   │   └── voice_config.rs
+│   ├── worker_registry/
+│   │   ├── registry.rs
+│   │   └── status.rs
 │   ├── cluster.rs
 │   ├── cluster_session_routing.rs
 │   ├── cron_catalog.rs
