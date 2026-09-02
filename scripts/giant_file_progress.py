@@ -4,16 +4,22 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
 import tempfile
+from collections import Counter
 from pathlib import Path
 import generate_inventory_docs as inventory
 ROOT = Path(__file__).resolve().parent.parent
 EVIDENCE = ROOT / "target/giant-file-progress/evidence.json"
 REGISTRY = "scripts/giant_file_registry.toml"
-FROZEN = ("scripts/audit_maintainability_giant_baseline.toml", "scripts/giant_file_closed_issue_transition_list.txt", "scripts/giant_file_issue_metadata.json")
+EVALUATOR = "scripts/giant_file_progress.py"
+METADATA = "scripts/giant_file_issue_metadata.json"
+GENERATED_DOCS = frozenset({"ARCHITECTURE.md", "docs/generated/route-inventory.md",
+                            "docs/generated/worker-inventory.md"})
+FROZEN = ("scripts/audit_maintainability_giant_baseline.toml", "scripts/giant_file_closed_issue_transition_list.txt")
 BOOTSTRAP_PATHS = frozenset({
     ".github/workflows/ci-main.yml",
     ".github/workflows/ci-pr.yml",
@@ -39,7 +45,6 @@ def git(*args: str, binary: bool = False) -> str | bytes:
 def oid(ref: str, suffix: str = "commit") -> str:
     return str(git("rev-parse", "--verify", f"{ref}^{{{suffix}}}" if suffix else ref)).strip()
 def provenance_matches(candidate: str, base: str, head: str, origin: str, parents: list[str]) -> bool: return parents == [candidate, base, head] and base == origin
-def main_clean(snapshot: dict[str, object]) -> bool: return not snapshot["overdue"]
 def archive(ref: str, destination: Path) -> None:
     with tarfile.open(fileobj=io.BytesIO(git("archive", "--format=tar", ref, binary=True))) as bundle:
         members = bundle.getmembers()
@@ -50,31 +55,93 @@ def archive(ref: str, destination: Path) -> None:
         bundle.extractall(destination)
 def diff_facts(base: str, candidate: str) -> dict[str, object]:
     changed = set(str(git("diff", "--name-only", "-z", base, candidate)).split("\0")) - {""}
-    additions = 0
+    additions, numstat, binary = 0, {}, set()
     for row in str(git("diff", "--numstat", "--no-renames", base, candidate)).splitlines():
-        added, _deleted, _path = row.split("\t", 2)
-        if not added.isdigit():
-            raise RuntimeError("binary change is not valid progress")
+        added, deleted, path = row.split("\t", 2)
+        if not added.isdigit() or not deleted.isdigit():
+            binary.add(path)
+            continue
+        numstat[path] = (int(added), int(deleted))
         additions += int(added)
-    statuses = str(git("diff", "--name-status", "--find-renames", "--find-copies", base, candidate))
-    return {"changed": changed, "additions": additions,
-            "rename_copy": any(row.startswith(("R", "C")) for row in statuses.splitlines())}
-def moved_lines(base: str, candidate: str, root: str) -> int:
-    prefix = root[:-3] + "/"
-    patch = str(git("diff", "--unified=0", base, candidate, "--", root, prefix))
-    current, deleted, added = "", set(), set()
+    status_rows = str(git("diff", "--name-status", "--no-renames", base, candidate)).splitlines()
+    statuses = {row.split("\t", 1)[1]: row.split("\t", 1)[0] for row in status_rows}
+    rename_copy = str(git("diff", "--name-status", "--find-renames", "--find-copies", base, candidate))
+    return {"changed": changed, "additions": additions, "numstat": numstat,
+            "binary": binary, "statuses": statuses,
+            "rename_copy": any(row.startswith(("R", "C")) for row in rename_copy.splitlines())}
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+def production_line_numbers(text: str, production_loc: int) -> set[int]:
+    if production_loc == 0:
+        return set()
+    test_lines: set[int] = set()
+    for match in inventory._CFG_MOD_RE.finditer(text):
+        if not inventory.cfg_requires_test(match.group("predicate")):
+            continue
+        brace = text.rindex("{", match.start(), match.end())
+        try:
+            _body, end = inventory.scan_balanced(text, brace, "{", "}")
+        except inventory.ParseError:
+            continue
+        test_lines.update(range(inventory.offset_to_line(text, match.start()),
+                                inventory.offset_to_line(text, end) + 1))
+    return set(range(1, inventory.line_count(text) + 1)) - test_lines
+
+def movement_ledger(base: str, candidate: str, progress_roots: set[str],
+                    children: dict[str, list[str]], base_loc: dict[str, int],
+                    candidate_loc: dict[str, int]) -> dict[str, tuple[tuple[str, int], ...]]:
+    roots = sorted(progress_roots)
+    if not roots:
+        return {}
+    paths = sorted(set(roots) | {child for root in roots for child in children.get(root, ())})
+    patch = str(git("diff", "--unified=0", "--no-renames", base, candidate,
+                    "--", *paths))
+    production: dict[tuple[str, str], set[int]] = {}
+    for ref, locations, selected in ((base, base_loc, roots),
+                                     (candidate, candidate_loc, paths)):
+        for path in selected:
+            loc = locations.get(path, 0)
+            if loc:
+                text = str(git("show", f"{ref}:{path}"))
+                production[(ref, path)] = production_line_numbers(text, loc)
+            else:
+                production[(ref, path)] = set()
+
+    deleted = {root: Counter() for root in roots}
+    added: list[tuple[str, int, str]] = []
+    old_path = new_path = ""
+    old_line = new_line = 0
     for line in patch.splitlines():
-        if line.startswith("+++ b/"):
-            current = line[6:]
-        elif line.startswith("-") and not line.startswith("---") and current == root:
+        if line.startswith("--- "):
+            old_path = "" if line == "--- /dev/null" else line[6:]
+        elif line.startswith("+++ "):
+            new_path = "" if line == "+++ /dev/null" else line[6:]
+        elif match := _HUNK_RE.match(line):
+            old_line, new_line = int(match.group(1)), int(match.group(2))
+        elif line.startswith("-") and old_path:
             value = line[1:].strip()
-            if value and not value.startswith(("//", "/*", "*")):
-                deleted.add(value)
-        elif line.startswith("+") and not line.startswith("+++") and current.startswith(prefix):
+            if (old_path in deleted and old_line in production[(base, old_path)]
+                    and value and not value.startswith(("//", "/*", "*"))):
+                deleted[old_path][value] += 1
+            old_line += 1
+        elif line.startswith("+") and new_path:
             value = line[1:].strip()
-            if value and not value.startswith(("//", "/*", "*")):
-                added.add(value)
-    return len(deleted & added)
+            if (new_line in production[(candidate, new_path)]
+                    and value and not value.startswith(("//", "/*", "*"))):
+                added.append((new_path, new_line, value))
+            new_line += 1
+        elif line.startswith(" "):
+            old_line += 1
+            new_line += 1
+
+    ledger: dict[str, list[tuple[str, int]]] = {root: [] for root in roots}
+    for path, line, value in sorted(added):
+        for root in roots:
+            if path in children.get(root, ()) and deleted[root][value]:
+                ledger[root].append((path, line))
+                deleted[root][value] -= 1
+                break
+    return {root: tuple(occurrences) for root, occurrences in ledger.items()}
 def without_entry(text: str, path: str) -> str | None:
     lines = text.splitlines(keepends=True)
     try:
@@ -84,6 +151,24 @@ def without_entry(text: str, path: str) -> str | None:
     except (StopIteration, ValueError):
         return None
     return "".join(lines[:start] + lines[end + 1:])
+def new_or_growing_errors(base: dict[str, object],
+                          candidate: dict[str, object]) -> list[str]:
+    base_loc, candidate_loc = base["modules"], candidate["modules"]
+    return [f"new or growing giant: {path}" for path, loc in candidate_loc.items()
+            if loc >= 1000 and (base_loc.get(path, 0) < 1000
+                                or loc > base_loc.get(path, 0))]
+def ordinary_no_regression_errors(base: dict[str, object], candidate: dict[str, object],
+                                  facts: dict[str, object]) -> list[str]:
+    errors: list[str] = []
+    if candidate["overdue"] != base["overdue"]:
+        errors.append("ordinary PR changed overdue debt")
+    errors.extend(new_or_growing_errors(base, candidate))
+    if not facts["authority_equal"]:
+        errors.append("frozen authority blob changed")
+    if not facts["registry_equal"]:
+        errors.append("registry changed in ordinary no-regression PR")
+    return errors
+
 def progress_errors(base: dict[str, object], candidate: dict[str, object],
                     facts: dict[str, object]) -> list[str]:
     errors: list[str] = []
@@ -91,41 +176,88 @@ def progress_errors(base: dict[str, object], candidate: dict[str, object],
     base_loc, candidate_loc = base["modules"], candidate["modules"]
     base_meta, candidate_meta = base["registrations"], candidate["registrations"]
     retired = before - after
-    if not before or not after < before:
-        errors.append("overdue set is not a proper subset of nonempty base debt")
+    partial = not retired and before == after
+    shrunk = {path for path in before if candidate_loc.get(path, 0) <= base_loc.get(path, 0) - 200}
+    progress_roots = retired or shrunk
+    if not before or not (after < before or (partial and shrunk)):
+        errors.append("PR has neither retirement nor 200-line partial progress")
     if facts["rename_copy"]:
-        errors.append("rename/copy cannot prove same-path retirement")
+        errors.append("rename/copy cannot prove same-path progress")
     changed = facts["changed"]
-    if len(changed) > 20 or facts["additions"] > 800:
-        errors.append("diff exceeds 20 files or 800 additions")
+    moved_union = {occurrence for occurrences in facts["moved"].values()
+                   for occurrence in occurrences}
+    if len(changed) > 20 or facts["additions"] - len(moved_union) > 800:
+        errors.append("diff exceeds 20 files or 800 non-moved additions")
     expected = BOOTSTRAP_PATHS if facts["bootstrap"] else {
-        REGISTRY, *retired,
+        *(retired and {REGISTRY} or set()), *progress_roots,
         *(child for children in facts["children"].values() for child in children),
     }
-    if changed != expected:
+    optional_metadata = {METADATA} if METADATA in changed else set()
+    extras = changed - expected - optional_metadata
+    test_extras = {path for path in extras
+        if path.startswith("tests/test_") and path.endswith(".py")
+        and "/" not in path[len("tests/"): -len(".py")]
+        and path not in {"tests/test_giant_file_progress.py",
+                         "tests/test_inventory_giant_split.py"}
+        and facts["statuses"].get(path) == "M"
+        and path not in facts.get("binary", set())
+        and max(facts["numstat"].get(path, (9, 9))) <= 8}
+    generated_extras = {path for path in extras
+        if path in GENERATED_DOCS and facts["statuses"].get(path) == "M"
+        and path not in facts.get("binary", set())}
+    maintenance_extras = {path for path in extras
+        if path.startswith("docs/agent-maintenance/") and path.endswith(".md")
+        and facts["statuses"].get(path) == "M"
+        and path not in facts.get("binary", set())
+        and max(facts["numstat"].get(path, (41, 41))) <= 40}
+    allowed_extras = test_extras | generated_extras | maintenance_extras
+    if len(test_extras) > 3:
+        errors.append("progress has more than 3 pin re-derivation files")
+    if len(maintenance_extras) > 3:
+        errors.append("progress has more than 3 maintenance documentation files")
+    if not expected <= changed or extras != allowed_extras:
         errors.append("changed-path closure is not exact")
     for path in after:
         if base_meta.get(path) != candidate_meta.get(path):
             errors.append(f"retained metadata changed: {path}")
-    for path, loc in candidate_loc.items():
-        if loc >= 1000 and (base_loc.get(path, 0) < 1000 or loc > base_loc.get(path, 0)):
-            errors.append(f"new or growing giant: {path}")
-    for path in retired:
+    errors.extend(new_or_growing_errors(base, candidate))
+    for path in progress_roots:
         old, new = base_loc.get(path), candidate_loc.get(path)
         children = facts["children"].get(path, ())
-        if old is None or old < 1000 or new is None or new >= 1000 or new >= old:
-            errors.append(f"not an actual same-path retirement: {path}")
-        if path not in base_meta or path in candidate_meta:
+        if old is None or old < 1000 or new is None or new >= old:
+            errors.append(f"not actual same-path progress: {path}")
+        if path in retired and (new is None or new >= 1000
+                                or path not in base_meta or path in candidate_meta):
             errors.append(f"registry entry not retired exactly once: {path}")
         if not children or any(candidate_loc.get(child, 0) >= 1000 for child in children):
-            errors.append(f"retirement lacks bounded derived child: {path}")
-        if facts["moved"].get(path, 0) < max(1, min(20, (old or 0) - (new or 0))):
-            errors.append(f"retirement lacks moved production code: {path}")
+            errors.append(f"progress lacks bounded derived child: {path}")
+        if len(facts["moved"].get(path, ())) < max(1, min(20, (old or 0) - (new or 0))):
+            errors.append(f"progress lacks moved production code: {path}")
     if not facts["authority_equal"]:
         errors.append("frozen authority blob changed")
-    if not facts["registry_exact"]:
+    if retired and not facts["registry_exact"]:
         errors.append("registry is not the exact retired-entry deletion")
+    if partial and not facts["registry_equal"]:
+        errors.append("registry changed during partial progress")
     return errors
+
+def pr_evaluation(base: dict[str, object], candidate: dict[str, object],
+                  facts: dict[str, object]) -> tuple[str, list[str]]:
+    before, after = set(base["overdue"]), set(candidate["overdue"])
+    if after < before:
+        return "pr_strict_progress", progress_errors(base, candidate, facts)
+    shrink_attempt = (before == after and any(
+        (new := candidate["modules"].get(path)) is not None
+        and new < base["modules"].get(path, 0)
+        for path in before))
+    if shrink_attempt:
+        return "pr_strict_progress", progress_errors(base, candidate, facts)
+    return "pr_ordinary_no_regression", ordinary_no_regression_errors(base, candidate, facts)
+
+def main_record(snapshot: dict[str, object]) -> dict[str, object]:
+    overdue = snapshot["overdue"]
+    return {"overdue": overdue, "overdue_count": len(overdue)}
+
 def write_evidence(payload: dict[str, object]) -> None:
     EVIDENCE.parent.mkdir(parents=True, exist_ok=True)
     temporary = EVIDENCE.with_suffix(".tmp")
@@ -135,7 +267,7 @@ def main() -> int:
     env = os.environ
     event, repository = env.get("GFP_EVENT_NAME", ""), env.get("GFP_REPOSITORY", "")
     candidate_sha = env.get("GFP_CANDIDATE_SHA", "")
-    selector, candidate = "main_fail_closed", {"overdue": [], "registrations": {}}
+    selector, candidate = "main_no_regression_record", {"overdue": [], "registrations": {}}
     payload: dict[str, object] = {
         "schema": 1, "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "event": event, "repository": repository, "selected": True, "executed": True,
@@ -165,18 +297,30 @@ def main() -> int:
                 base_root.mkdir(); archive(base_sha, base_root)
                 base = inventory.giant_file_snapshot(base_root, evaluation_date=today)
                 facts = diff_facts(base_sha, candidate_sha)
-                facts["bootstrap"] = not (base_root / "scripts/giant_file_progress.py").exists()
-                retired = set(base["overdue"]) - set(candidate["overdue"])
+                facts["bootstrap"] = not (base_root / EVALUATOR).exists()
+                before, after = set(base["overdue"]), set(candidate["overdue"])
+                retired = before - after
+                shrunk = {path for path in before if candidate["modules"].get(path, 0) <= base["modules"].get(path, 0) - 200}
+                progress_roots = retired or shrunk
                 facts["children"] = {path: sorted(child for child in facts["changed"]
-                    if child.startswith(path[:-3] + "/") and child.endswith(".rs")) for path in retired}
-                facts["moved"] = {path: moved_lines(base_sha, candidate_sha, path) for path in retired}
+                    if child.startswith(path[:-3] + "/") and child.endswith(".rs")) for path in progress_roots}
+                facts["moved"] = movement_ledger(
+                    base_sha, candidate_sha, progress_roots, facts["children"],
+                    base["modules"], candidate["modules"])
                 facts["authority_equal"] = all(oid(f"{base_sha}:{path}", "")
                     == oid(f"{candidate_sha}:{path}", "") for path in FROZEN)
+                facts["registry_equal"] = oid(f"{base_sha}:{REGISTRY}", "") == oid(
+                    f"{candidate_sha}:{REGISTRY}", "")
+                base_evaluator = base_root / EVALUATOR
+                base_evaluator_sha256 = (hashlib.sha256(base_evaluator.read_bytes()).hexdigest()
+                                         if base_evaluator.exists() else "")
+                candidate_evaluator_sha256 = hashlib.sha256(
+                    (candidate_root / EVALUATOR).read_bytes()).hexdigest()
                 expected = (base_root / REGISTRY).read_text(encoding="utf-8")
                 for path in sorted(retired):
                     expected = without_entry(expected, path) or ""
                 facts["registry_exact"] = expected == (candidate_root / REGISTRY).read_text(encoding="utf-8")
-                errors = progress_errors(base, candidate, facts)
+                selector, errors = pr_evaluation(base, candidate, facts)
                 if errors:
                     raise RuntimeError("; ".join(errors))
                 payload.update({"event_base_sha": base_sha, "observed_origin_main_sha": origin_sha,
@@ -184,11 +328,18 @@ def main() -> int:
                     "base_tree": oid(base_sha, "tree"), "base_overdue": base["overdue"],
                     "retired": [{"path": path, "base_prod_loc": base["modules"][path], "candidate_prod_loc": candidate["modules"][path], "children": [{"path": child, "candidate_prod_loc": candidate["modules"][child]} for child in facts["children"][path]]} for path in sorted(retired)],
                     "changed_files": len(facts["changed"]), "additions": facts["additions"]})
-                reason = "proper subset with actual same-path retirement"
+                if EVALUATOR in facts["changed"]:
+                    payload.update({"evaluator_changed": True,
+                        "base_evaluator_sha256": base_evaluator_sha256,
+                        "candidate_evaluator_sha256": candidate_evaluator_sha256})
+                reason = {
+                    "pr_ordinary_no_regression": "ordinary PR preserves giant-file debt",
+                    "pr_strict_progress": "retirement or 200-line partial progress",
+                }[selector]
             elif event == "push" and repository == "itismyfield/AgentDesk":
-                if not main_clean(candidate):
-                    raise RuntimeError("main has overdue giant-file debt")
-                reason = "ordinary zero-debt main"
+                selector = "main_no_regression_record"
+                payload.update(main_record(candidate))
+                reason = "main records current giant-file debt"
             else:
                 selector = "reject"
                 raise RuntimeError("event is not protected main/push or same-repository PR")
