@@ -452,7 +452,7 @@ async fn generate_foreground_ack_text(
                 _ => Err(format!(
                     "foreground provider {} does not support model-scoped instant call yet",
                     provider_kind.as_str()
-                ))
+                )),
             }
         }),
     )
@@ -563,7 +563,7 @@ async fn generate_voice_channel_text_reply(
                 _ => Err(format!(
                     "voice channel text provider {} does not support model-scoped instant call yet",
                     provider_kind.as_str()
-                ))
+                )),
             }
         }),
     )
@@ -652,7 +652,7 @@ async fn generate_voice_background_result_summary(
                 _ => Err(format!(
                     "voice background summary provider {} does not support model-scoped instant call yet",
                     provider_kind.as_str()
-                ))
+                )),
             }
         }),
     )
