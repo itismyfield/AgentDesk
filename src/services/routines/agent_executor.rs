@@ -2119,10 +2119,8 @@ fn is_no_deliverable_quality_event(event_type: &str, outcome: Option<&str>) -> b
 }
 
 /// Whether a started fresh-turn `result_json` describes a DM-bound turn (#3022).
-/// DM sessions are named `dm-<user_id>` in a DM channel without a
-/// `thread_channel_id`, so the thread-based ownership resolver cannot target
-/// them; such turns are excluded from boot-recovery ownership recording. Treats
-/// either an explicit `is_dm: true` or a non-null `dm_user_id` as a DM turn.
+/// DM sessions are not thread-resolvable and are excluded from boot recovery.
+/// Treats explicit `is_dm: true` or non-null `dm_user_id` as a DM turn.
 fn started_turn_is_dm(result_json: &Value) -> bool {
     result_json
         .get("is_dm")
@@ -2184,7 +2182,9 @@ mod tests {
         }
     }
 
-    pub(crate) fn completion_with_evidence(evidence: AgentTurnCompletionEvidence) -> AgentTurnCompletion {
+    pub(crate) fn completion_with_evidence(
+        evidence: AgentTurnCompletionEvidence,
+    ) -> AgentTurnCompletion {
         AgentTurnCompletion {
             assistant_message: match evidence {
                 AgentTurnCompletionEvidence::AssistantTranscript => Some("done".to_string()),
