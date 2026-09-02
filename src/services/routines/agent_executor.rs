@@ -1,11 +1,11 @@
 use anyhow::{Result, anyhow};
+use chrono::{DateTime, Duration, Utc};
 
 mod reliability;
 use reliability::{
-    current_attempt_started_at, fresh_provider_session_probe_allowed,
-    provider_error_from_completion, FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS,
+    FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS, current_attempt_started_at,
+    fresh_provider_session_probe_allowed, provider_error_from_completion,
 };
-use chrono::{DateTime, Duration, Utc};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
