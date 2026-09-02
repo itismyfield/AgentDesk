@@ -2330,7 +2330,6 @@ pub(super) async fn handle_text_message(
     let session_id_clone = session_id.clone();
     let current_path_clone = current_path.clone();
     let cancel_token_clone = cancel_token.clone();
-
     // Pause the tmux-session owner watcher before writing to the provider
     // FIFO. In thread follow-ups, the watcher may be owned by the parent
     // channel rather than the requested thread channel.
@@ -2418,7 +2417,6 @@ pub(super) async fn handle_text_message(
         execution_mode: Some("discord_turn".to_string()),
     };
     let dispatch_type_for_mcp = dispatch_type_str.clone();
-
     // Run the provider in a blocking thread
     if is_voice_announcement {
         crate::voice::metrics::mark_agent_start(channel_id.get());
@@ -2504,21 +2502,23 @@ pub(super) async fn handle_text_message(
                             None, // Qwen: compact not supported
                             force_fresh_provider_session,
                         ),
-                        ProviderKind::OpenCode => opencode::execute_command_streaming(
-                            &context_prompt,
-                            session_id_clone.as_deref(),
-                            &current_path_clone,
-                            tx.clone(),
-                            system_prompt_for_turn,
-                            Some(&allowed_tools),
-                            Some(cancel_token_clone),
-                            remote_profile.as_ref(),
-                            tmux_session_name.as_deref(),
-                            Some(channel_id.get()),
-                            Some(provider_for_blocking.clone()),
-                            model_for_turn.as_deref(),
-                            None,
-                        ),
+                        ProviderKind::OpenCode | ProviderKind::Grok => {
+                            opencode::execute_command_streaming(
+                                &context_prompt,
+                                session_id_clone.as_deref(),
+                                &current_path_clone,
+                                tx.clone(),
+                                system_prompt_for_turn,
+                                Some(&allowed_tools),
+                                Some(cancel_token_clone),
+                                remote_profile.as_ref(),
+                                tmux_session_name.as_deref(),
+                                Some(channel_id.get()),
+                                Some(provider_for_blocking.clone()),
+                                model_for_turn.as_deref(),
+                                None,
+                            )
+                        },
                         ProviderKind::Unsupported(name) => {
                             let _ = tx.send(StreamMessage::Error {
                                 message: format!("Provider '{}' is not installed", name),
