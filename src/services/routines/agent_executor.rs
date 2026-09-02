@@ -1,5 +1,8 @@
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
+
+mod reliability;
+use reliability::{current_attempt_started_at, provider_error_from_completion};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -10,6 +13,8 @@ use crate::services::discord::health::{
     resolve_bot_http, start_reserved_headless_agent_turn_in_dm,
     start_reserved_headless_agent_turn_with_owner_channel,
 };
+use crate::services::provider::ProviderKind;
+use crate::services::provider_error_transcript::is_strong_provider_error_transcript;
 
 use super::fresh_context_guaranteed;
 use super::runtime::RoutineRunOutcome;
@@ -369,6 +374,46 @@ impl RoutineAgentExecutor {
             }
 
             if let Some(completion) = self.find_turn_completion(&run).await? {
+                if let Some(provider_error) = provider_error_from_completion(&completion) {
+                    let message = format!(
+                        "routine provider returned an error-only response: {provider_error}"
+                    );
+                    let result_json = Some(merge_pending_result(
+                        &run,
+                        "provider_error",
+                        Some(&message),
+                        Some(&completion),
+                    ));
+                    self.teardown_fresh_agent_session(
+                        store,
+                        &run.routine_id,
+                        result_json.as_ref(),
+                        "routine provider error response",
+                    )
+                    .await;
+                    let failed_agent_id = current_agent_id_from_result(run.result_json.as_ref())
+                        .or(run.agent_id.as_deref())
+                        .map(str::to_string);
+                    let attempt_kind = current_attempt_kind_from_result(run.result_json.as_ref())
+                        .unwrap_or("primary")
+                        .to_string();
+                    if let Some(outcome) = self
+                        .handle_running_agent_failure(
+                            store,
+                            run,
+                            &message,
+                            result_json,
+                            failed_agent_id.as_deref(),
+                            &attempt_kind,
+                            pause_on_terminal_failure,
+                        )
+                        .await?
+                    {
+                        outcomes.push(outcome);
+                    }
+                    continue;
+                }
+
                 let checkpoint =
                     pending_checkpoint_for_completion(run.result_json.as_ref(), &completion);
                 let next_due_at = pending_next_due_at(run.result_json.as_ref());
@@ -406,6 +451,43 @@ impl RoutineAgentExecutor {
                     error: None,
                     fresh_context_guaranteed,
                 });
+                continue;
+            }
+
+            if let Some(message) = self.fresh_provider_session_failure(&run).await {
+                let result_json = Some(merge_pending_result(
+                    &run,
+                    "provider_session_dead",
+                    Some(&message),
+                    None,
+                ));
+                self.teardown_fresh_agent_session(
+                    store,
+                    &run.routine_id,
+                    result_json.as_ref(),
+                    "routine fresh provider session ended before completion",
+                )
+                .await;
+                let failed_agent_id = current_agent_id_from_result(run.result_json.as_ref())
+                    .or(run.agent_id.as_deref())
+                    .map(str::to_string);
+                let attempt_kind = current_attempt_kind_from_result(run.result_json.as_ref())
+                    .unwrap_or("primary")
+                    .to_string();
+                if let Some(outcome) = self
+                    .handle_running_agent_failure(
+                        store,
+                        run,
+                        &message,
+                        result_json,
+                        failed_agent_id.as_deref(),
+                        &attempt_kind,
+                        pause_on_terminal_failure,
+                    )
+                    .await?
+                {
+                    outcomes.push(outcome);
+                }
                 continue;
             }
 
@@ -1286,85 +1368,6 @@ impl RoutineAgentExecutor {
         }
     }
 
-    async fn find_turn_completion(
-        &self,
-        run: &RunningAgentRoutineRun,
-    ) -> Result<Option<AgentTurnCompletion>> {
-        let Some(turn_id) = run.turn_id.as_deref() else {
-            return Ok(None);
-        };
-        let transcript = sqlx::query_as::<_, AgentTranscriptCompletionRow>(
-            r#"
-            SELECT assistant_message, duration_ms::bigint AS duration_ms, created_at
-            FROM session_transcripts
-            WHERE turn_id = $1
-              AND created_at >= $2
-              AND BTRIM(assistant_message) <> ''
-            ORDER BY created_at ASC
-            LIMIT 1
-            "#,
-        )
-        .bind(turn_id)
-        .bind(run.started_at)
-        .fetch_optional(&*self.pool)
-        .await
-        .map_err(|error| {
-            anyhow!(
-                "lookup routine agent transcript {} for run {}: {error}",
-                turn_id,
-                run.run_id
-            )
-        })?;
-        if let Some(transcript) = transcript {
-            let evidence = if assistant_message_is_no_reply(&transcript.assistant_message) {
-                AgentTurnCompletionEvidence::NoReplyTranscript
-            } else {
-                AgentTurnCompletionEvidence::AssistantTranscript
-            };
-            return Ok(Some(AgentTurnCompletion {
-                assistant_message: Some(transcript.assistant_message),
-                duration_ms: transcript.duration_ms,
-                created_at: transcript.created_at,
-                evidence,
-                terminal_status: None,
-            }));
-        }
-
-        let terminal = sqlx::query_as::<_, AgentQualityCompletionRow>(
-            r#"
-            SELECT event_type::text AS event_type,
-                   payload #>> '{details,outcome}' AS outcome,
-                   CASE
-                       WHEN payload #>> '{details,duration_ms}' ~ '^-?[0-9]+$'
-                       THEN (payload #>> '{details,duration_ms}')::bigint
-                       ELSE NULL
-                   END AS duration_ms,
-                   created_at
-            FROM agent_quality_event
-            WHERE correlation_id = $1
-              AND source_event_id = $1
-              AND created_at >= $2
-              AND event_type = 'turn_error'::agent_quality_event_type
-              AND payload #>> '{details,outcome}' = 'empty_response'
-            ORDER BY created_at ASC, id ASC
-            LIMIT 1
-            "#,
-        )
-        .bind(turn_id)
-        .bind(run.started_at)
-        .fetch_optional(&*self.pool)
-        .await
-        .map_err(|error| {
-            anyhow!(
-                "lookup routine agent terminal turn {} for run {}: {error}",
-                turn_id,
-                run.run_id
-            )
-        })?;
-
-        Ok(terminal.and_then(terminal_completion_from_quality_event))
-    }
-
     fn timeout_secs_for_run(&self, run: &RunningAgentRoutineRun) -> u64 {
         timeout_secs_for_run(run, self.default_completion_timeout_secs)
     }
@@ -1377,7 +1380,7 @@ impl RoutineAgentExecutor {
             SELECT $1::timestamptz + ($2::bigint * INTERVAL '1 second') <= NOW()
             "#,
         )
-        .bind(run.started_at)
+        .bind(current_attempt_started_at(run))
         .bind(timeout_secs)
         .fetch_one(&*self.pool)
         .await
@@ -1790,10 +1793,7 @@ fn merge_pending_result(
 }
 
 fn with_started_run_routing_metadata(mut result: Value, started_result: Option<&Value>) -> Value {
-    // #730: also propagate `provider` so a routine headless turn carries the
-    // routine agent's resolved provider identity through to the merged result,
-    // alongside the `agent_id`/`attempt_kind` routing keys that upstream now
-    // produces for the durable fallback-retry path.
+    // #730: propagate the resolved provider through the durable fallback result.
     const ROUTING_KEYS: &[&str] = &[
         "channel_id",
         "parent_channel_id",
@@ -2119,10 +2119,8 @@ fn is_no_deliverable_quality_event(event_type: &str, outcome: Option<&str>) -> b
 }
 
 /// Whether a started fresh-turn `result_json` describes a DM-bound turn (#3022).
-/// DM sessions are named `dm-<user_id>` in a DM channel without a
-/// `thread_channel_id`, so the thread-based ownership resolver cannot target
-/// them; such turns are excluded from boot-recovery ownership recording. Treats
-/// either an explicit `is_dm: true` or a non-null `dm_user_id` as a DM turn.
+/// DM sessions are not thread-resolvable and are excluded from boot recovery.
+/// Treats explicit `is_dm: true` or non-null `dm_user_id` as a DM turn.
 fn started_turn_is_dm(result_json: &Value) -> bool {
     result_json
         .get("is_dm")
@@ -2139,7 +2137,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    fn running_run(timeout_secs: Option<i32>) -> RunningAgentRoutineRun {
+    pub(crate) fn running_run(timeout_secs: Option<i32>) -> RunningAgentRoutineRun {
         RunningAgentRoutineRun {
             run_id: "run-1".to_string(),
             routine_id: "routine-1".to_string(),
@@ -2184,7 +2182,9 @@ mod tests {
         }
     }
 
-    fn completion_with_evidence(evidence: AgentTurnCompletionEvidence) -> AgentTurnCompletion {
+    pub(crate) fn completion_with_evidence(
+        evidence: AgentTurnCompletionEvidence,
+    ) -> AgentTurnCompletion {
         AgentTurnCompletion {
             assistant_message: match evidence {
                 AgentTurnCompletionEvidence::AssistantTranscript => Some("done".to_string()),
