@@ -149,6 +149,7 @@ fn cli_init_provider_from_index(index: usize) -> &'static str {
         ProviderKind::Gemini => "gemini",
         ProviderKind::OpenCode => "opencode",
         ProviderKind::Qwen => "qwen",
+        ProviderKind::Grok => "grok",
         ProviderKind::Unsupported(_) => "claude",
     }
 }
