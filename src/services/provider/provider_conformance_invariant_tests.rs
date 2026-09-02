@@ -59,7 +59,8 @@ fn provider_exec_registry_conformance_invariant() {
             }
             ProviderCompactionAdapter::GeminiDisabled
             | ProviderCompactionAdapter::OpenCodeDisabled
-            | ProviderCompactionAdapter::QwenDisabled => {
+            | ProviderCompactionAdapter::QwenDisabled
+            | ProviderCompactionAdapter::StreamJsonDisabled => {
                 assert!(provider.compact_env_vars(80).is_empty());
                 assert!(provider.compact_cli_config(80, 100_000).is_empty());
             }
@@ -92,7 +93,7 @@ fn provider_exec_registry_conformance_invariant() {
     );
     assert_eq!(
         supported_provider_ids(),
-        vec!["claude", "codex", "gemini", "opencode", "qwen"]
+        vec!["claude", "codex", "gemini", "opencode", "qwen", "grok"]
     );
     for provider_id in supported_provider_ids() {
         assert_eq!(
@@ -157,7 +158,14 @@ fn provider_exec_registry_conformance_invariant() {
     assert!(
         catalog
             .iter()
+            .filter(|entry| entry.id != "grok")
             .all(|entry| entry.context_window_tokens.is_some())
+    );
+    assert!(
+        catalog
+            .iter()
+            .find(|entry| entry.id == "grok")
+            .is_some_and(|entry| entry.context_window_tokens.is_none())
     );
     let encoded_catalog = serde_json::to_string(&catalog).unwrap();
     for secret_field in ["credential_paths", "env_keys", "auth_check_argv"] {
@@ -170,6 +178,7 @@ fn provider_exec_registry_conformance_invariant() {
             vec![
                 ProviderKind::Codex,
                 ProviderKind::Gemini,
+                ProviderKind::Grok,
                 ProviderKind::OpenCode,
                 ProviderKind::Qwen,
             ],
@@ -179,6 +188,7 @@ fn provider_exec_registry_conformance_invariant() {
             vec![
                 ProviderKind::Claude,
                 ProviderKind::Gemini,
+                ProviderKind::Grok,
                 ProviderKind::OpenCode,
                 ProviderKind::Qwen,
             ],
@@ -188,6 +198,7 @@ fn provider_exec_registry_conformance_invariant() {
             vec![
                 ProviderKind::Codex,
                 ProviderKind::Claude,
+                ProviderKind::Grok,
                 ProviderKind::OpenCode,
                 ProviderKind::Qwen,
             ],
@@ -198,6 +209,7 @@ fn provider_exec_registry_conformance_invariant() {
                 ProviderKind::Codex,
                 ProviderKind::Claude,
                 ProviderKind::Gemini,
+                ProviderKind::Grok,
                 ProviderKind::Qwen,
             ],
         ),
@@ -207,7 +219,18 @@ fn provider_exec_registry_conformance_invariant() {
                 ProviderKind::Codex,
                 ProviderKind::Claude,
                 ProviderKind::Gemini,
+                ProviderKind::Grok,
                 ProviderKind::OpenCode,
+            ],
+        ),
+        (
+            ProviderKind::Grok,
+            vec![
+                ProviderKind::Codex,
+                ProviderKind::Claude,
+                ProviderKind::Gemini,
+                ProviderKind::OpenCode,
+                ProviderKind::Qwen,
             ],
         ),
     ];
