@@ -3743,7 +3743,10 @@ pub fn load_graceful() -> Config {
                 format!("Failed to parse {path_display}: {e}"),
             ),
         },
-        Err(_) => graceful_fallback::graceful_fallback_config(&path_display, format!("{path_display} not found")),
+        Err(_) => graceful_fallback::graceful_fallback_config(
+            &path_display,
+            format!("{path_display} not found"),
+        ),
     };
 
     // Ensure data dir exists (best effort)
@@ -3751,8 +3754,6 @@ pub fn load_graceful() -> Config {
 
     config
 }
-
-
 
 /// The process-global mutex serialising tests that mutate process environment
 /// variables.
