@@ -1,7 +1,9 @@
 //! Fresh-session strategy and resume-token validation.
 use super::*;
 
-pub(super) fn validated_resume_session_id(session_id: Option<&str>) -> Result<Option<&str>, String> {
+pub(super) fn validated_resume_session_id(
+    session_id: Option<&str>,
+) -> Result<Option<&str>, String> {
     let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
