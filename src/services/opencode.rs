@@ -639,6 +639,28 @@ pub fn execute_command_streaming(
     model: Option<&str>,
     _compact_percent: Option<u64>,
 ) -> Result<(), String> {
+    if matches!(_report_provider.as_ref(), Some(ProviderKind::Grok)) {
+        return crate::services::stream_json_cli::execute_streaming(
+            crate::services::provider::StreamJsonDialectId::Grok,
+            crate::services::stream_json_cli::ProviderTurnRequest::for_discord_turn(
+                ProviderKind::Grok,
+                prompt.to_string(),
+                system_prompt.map(str::to_string),
+                crate::services::stream_json_cli::ConfiguredToolPolicy::from_legacy_allowed_tools(
+                    allowed_tools.unwrap_or(&[]),
+                ),
+                model.map(str::to_string),
+                None,
+                std::path::PathBuf::from(working_dir),
+                _session_id,
+                false,
+                remote_profile.cloned(),
+                std::time::Duration::from_secs(300),
+                cancel_token,
+            ),
+            sender,
+        );
+    }
     execute_command_streaming_inner(
         prompt,
         _session_id,
