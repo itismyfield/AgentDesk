@@ -864,3 +864,13 @@ file = "src/services/discord/catch_up.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
 decompose_issue = "#4712"
+
+[[entry]]
+# Crossed the 1000-production-LoC threshold in #5686 when provider voice
+# routing gained the explicit Grok/legacy error arms. Decomposition should
+# split provider-specific voice adapters from the shared barge-in state machine.
+file = "src/services/discord/voice_barge_in.rs"
+decision = "shrink"
+owner = "discord-relay"
+deadline = "2026-10-31"
+decompose_issue = "#4712"
