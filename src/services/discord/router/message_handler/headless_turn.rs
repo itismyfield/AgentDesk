@@ -1116,7 +1116,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             &system_prompt_owned,
                         );
                     match provider_for_blocking.legacy_streaming_dispatch_kind() {
-                        ProviderKind::Claude => claude::execute_command_streaming(
+                        crate::services::provider::LegacyDispatchKind::Claude => claude::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -1135,7 +1135,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             cache_ttl_minutes,
                             None,
                         ),
-                        ProviderKind::Codex => codex::execute_command_streaming(
+                        crate::services::provider::LegacyDispatchKind::Codex => codex::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -1153,7 +1153,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             compact_token_limit_for_codex,
                             force_fresh_provider_session,
                         ),
-                        ProviderKind::Gemini => gemini::execute_command_streaming(
+                        crate::services::provider::LegacyDispatchKind::Gemini => gemini::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -1168,7 +1168,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             model_for_turn.as_deref(),
                             None,
                         ),
-                        ProviderKind::Qwen => qwen::execute_command_streaming(
+                        crate::services::provider::LegacyDispatchKind::Qwen => qwen::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -1184,24 +1184,22 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             None,
                             force_fresh_provider_session,
                         ),
-                        ProviderKind::OpenCode | ProviderKind::Grok => {
-                            opencode::execute_command_streaming(
-                                &context_prompt,
-                                session_id_clone.as_deref(),
-                                &current_path_clone,
-                                tx.clone(),
-                                system_prompt_for_turn,
-                                Some(&allowed_tools),
-                                Some(cancel_token_clone),
-                                remote_profile.as_ref(),
-                                tmux_session_name.as_deref(),
-                                Some(channel_id.get()),
-                                Some(provider_for_blocking.clone()),
-                                model_for_turn.as_deref(),
-                                None,
-                            )
-                        }
-                        ProviderKind::Unsupported(name) => {
+                        crate::services::provider::LegacyDispatchKind::OpenCode => opencode::execute_command_streaming(
+                            &context_prompt,
+                            session_id_clone.as_deref(),
+                            &current_path_clone,
+                            tx.clone(),
+                            system_prompt_for_turn,
+                            Some(&allowed_tools),
+                            Some(cancel_token_clone),
+                            remote_profile.as_ref(),
+                            tmux_session_name.as_deref(),
+                            Some(channel_id.get()),
+                            Some(provider_for_blocking.clone()),
+                            model_for_turn.as_deref(),
+                            None,
+                        ),
+                        crate::services::provider::LegacyDispatchKind::Unsupported(name) => {
                             let _ = tx.send(StreamMessage::Error {
                                 message: format!("Provider '{}' is not installed", name),
                                 stdout: String::new(),
