@@ -1071,10 +1071,32 @@ fn provider_fallback_dirs(provider: &str) -> Vec<PathBuf> {
     for dir in provider_app_bundle_dirs(provider) {
         push_unique_path(dir, &mut dirs, &mut seen);
     }
+    for dir in provider_specific_fallback_dirs(provider) {
+        push_unique_path(dir, &mut dirs, &mut seen);
+    }
     for dir in standard_fallback_dirs() {
         push_unique_path(dir, &mut dirs, &mut seen);
     }
 
+    dirs
+}
+
+fn provider_specific_fallback_dirs(provider: &str) -> Vec<PathBuf> {
+    if normalize_name(provider) != "grok" {
+        return Vec::new();
+    }
+
+    let mut dirs = Vec::new();
+    let mut seen = BTreeSet::new();
+    if let Some(bin_dir) = std::env::var_os("GROK_BIN_DIR") {
+        push_unique_path(PathBuf::from(bin_dir), &mut dirs, &mut seen);
+    }
+    if let Some(grok_home) = std::env::var_os("GROK_HOME") {
+        push_unique_path(PathBuf::from(grok_home).join("bin"), &mut dirs, &mut seen);
+    }
+    if let Some(home) = dirs::home_dir() {
+        push_unique_path(home.join(".grok").join("bin"), &mut dirs, &mut seen);
+    }
     dirs
 }
 
