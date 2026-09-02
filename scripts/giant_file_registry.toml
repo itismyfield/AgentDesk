@@ -750,17 +750,6 @@ owner = "discord-relay"
 deadline = "2026-08-31"
 decompose_issue = "#4712"
 
-[[entry]]
-# Crossed the 1000-prod-LoC threshold in #3998 E13 when the turn-output
-# controller lease guard moved from `TurnKey` to `DeliveryLeaseKey` so id-0
-# delivery leases can use inflight disambiguators. Keep future controller growth
-# in narrower outbound/controller helper modules once the lease-key rollout
-# stabilizes.
-file = "src/services/discord/outbound/turn_output_controller.rs"
-owner = "discord-relay"
-deadline = "2026-08-31"
-decompose_issue = "#4712"
-
 # NOTE: src/services/discord/relay_recovery.rs previously had an [[entry]] here;
 # #4712 extracted decision, idle-tmux repair, and action apply clusters into
 # child modules, dropping the root below the prod-giant threshold. Its entry and
