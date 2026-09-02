@@ -13,11 +13,13 @@ use uuid::Uuid;
 mod fresh_session;
 mod session_lifecycle;
 
-pub(crate) use fresh_session::{build_stream_exec_args, normalize_resume_strategy, normalize_resume_strategy_for_turn};
+pub(crate) use fresh_session::{
+    build_stream_exec_args, normalize_resume_strategy, normalize_resume_strategy_for_turn,
+};
 use fresh_session::{should_preserve_live_reused_provider_session, validated_resume_session_id};
+use session_lifecycle::execute_streaming_local_process;
 #[cfg(unix)]
 use session_lifecycle::execute_streaming_local_tmux;
-use session_lifecycle::execute_streaming_local_process;
 
 use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
 use crate::services::claude;
@@ -1168,12 +1170,6 @@ fn remote_profile_not_supported_message() -> String {
     "NotSupported: Qwen provider does not support remote execution yet. Remove `remote_profile` or use a provider with remote support.".to_string()
 }
 
-
-
-
-
-
-
 #[cfg(unix)]
 fn send_followup_to_tmux(
     prompt: &str,
@@ -1340,8 +1336,6 @@ fn send_followup_to_tmux(
     }
 }
 
-
-
 fn compose_qwen_prompt(
     prompt: &str,
     system_prompt: Option<&str>,
@@ -1463,12 +1457,6 @@ fn build_simple_exec_args(prompt: &str) -> Vec<String> {
         "false".to_string(),
     ]
 }
-
-
-
-
-
-
 
 fn has_prior_qwen_chat_cache(working_dir: &str) -> bool {
     let Some(chats_dir) = qwen_chat_cache_dir_for_working_dir(working_dir) else {
