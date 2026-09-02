@@ -1,6 +1,6 @@
 # Discord Outbound Migration — Coverage Map (#1006 v3 / #1280 / #1436 / #1457)
 
-> Last refreshed: 2026-08-08 (against #5071 T1 S5b).
+> Last refreshed: 2026-09-02 (manual: #5679 transport extraction and coverage-map refresh).>\n> `#5679` extracted the non-fresh transport implementation from\n> `src/services/discord/outbound/turn_output_controller.rs` into\n> `src/services/discord/outbound/turn_output_controller/transport.rs`. The parent\n> remains the public planner/facade and the dormant `SendFresh` path remains in\n> `turn_output_controller/fresh_send.rs`; no production owner or direct Discord\n> callsite was added, so the delivery callsite counts and migration categories\n> below are unchanged.\n
 >
 > — **on unix**, the recovery / fresh-send / orphan family joined the shadow
 > journal, at the anchor S5a corrected. Its three confirmed-delivery entry points
