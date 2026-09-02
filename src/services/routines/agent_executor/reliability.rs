@@ -152,7 +152,7 @@ impl RoutineAgentExecutor {
             | crate::services::platform::tmux::PaneLiveness::ProbeError => None,
         }
     }
-
+}
 
 #[cfg(test)]
 mod tests {
