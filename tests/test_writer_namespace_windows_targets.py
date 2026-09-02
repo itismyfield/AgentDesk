@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -21,7 +22,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "src/services/writer_protocol/namespace").mkdir(parents=True)
-            (root / "scripts").mkdir()
+            (root / "scripts/ci").mkdir(parents=True)
             (root / "bin").mkdir()
             protocol = "mod namespace;\n" if active else ""
             namespace = "mod lexical;\n" if active else ""
@@ -66,15 +67,43 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                 "[ \"$FAKE_MODE\" != nonzero ] || exit 7\n"
             )
             fake.chmod(0o755)
+            fixture_runner = root / "scripts/ci/run-writer-namespace-windows-targets.sh"
+            shutil.copy2(RUNNER, fixture_runner)
+            fixture_runner.chmod(0o755)
+            self.assertEqual(fixture_runner.read_bytes(), RUNNER.read_bytes())
             count = root / "count"
             env = os.environ | {
-                "AGENTDESK_REPO_ROOT": str(root), "FAKE_MODE": mode,
+                "FAKE_MODE": mode,
                 "FAKE_COUNT": str(count), "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
                 "FAKE_ID_1": IDS[0], "FAKE_ID_2": IDS[1], "FAKE_ID_3": IDS[2],
             }
-            result = subprocess.run(["bash", str(RUNNER)], text=True, capture_output=True, env=env)
+            env.pop("AGENTDESK_REPO_ROOT", None)
+            result = subprocess.run(["bash", str(fixture_runner)], text=True, capture_output=True, env=env)
             calls = int(count.read_text()) if count.exists() else 0
             return result, calls
+
+    def test_caller_selected_root_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "bin").mkdir()
+            count = root / "count"
+            fake = root / "bin/cargo"
+            fake.write_text("#!/usr/bin/env bash\necho 1 >\"$FAKE_COUNT\"\n")
+            fake.chmod(0o755)
+            for selected_root in (str(root), ""):
+                with self.subTest(selected_root=selected_root):
+                    count.unlink(missing_ok=True)
+                    env = os.environ | {
+                        "AGENTDESK_REPO_ROOT": selected_root,
+                        "FAKE_COUNT": str(count),
+                        "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+                    }
+                    result = subprocess.run(["bash", str(RUNNER)], text=True, capture_output=True, env=env)
+                    calls = int(count.read_text()) if count.exists() else 0
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("AGENTDESK_REPO_ROOT", result.stderr)
+                    self.assertNotIn("NOT_APPLICABLE", result.stdout)
+                    self.assertEqual(calls, 0)
 
     def test_activation_and_identity_fail_closed(self) -> None:
         clean, calls = self.run_fixture()

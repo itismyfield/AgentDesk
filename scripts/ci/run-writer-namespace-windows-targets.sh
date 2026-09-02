@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-root="${AGENTDESK_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+if [ -n "${AGENTDESK_REPO_ROOT+x}" ]; then echo "ERROR: AGENTDESK_REPO_ROOT is not honored; the runner validates only the checkout that contains it" >&2; exit 1; fi
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 protocol="$root/src/services/writer_protocol.rs"
 namespace="$root/src/services/writer_protocol/namespace.rs"
 lexical="$root/src/services/writer_protocol/namespace/lexical.rs"
