@@ -21,6 +21,7 @@ pub(crate) enum ProviderDomain {
     Gemini,
     OpenCode,
     Qwen,
+    Grok,
     Unsupported,
 }
 
@@ -32,6 +33,7 @@ impl From<&ProviderKind> for ProviderDomain {
             ProviderKind::Gemini => Self::Gemini,
             ProviderKind::OpenCode => Self::OpenCode,
             ProviderKind::Qwen => Self::Qwen,
+            ProviderKind::Grok => Self::Grok,
             ProviderKind::Unsupported(_) => Self::Unsupported,
         }
     }
@@ -45,6 +47,7 @@ impl ProviderDomain {
             Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
             Self::Qwen => "qwen",
+            Self::Grok => "grok",
             Self::Unsupported => "unsupported",
         }
     }
@@ -331,7 +334,7 @@ mod tests {
     };
 
     #[rustfmt::skip]
-    const PROVIDER_SLUGS: [(ProviderDomain, &str); 6] = [(ProviderDomain::Claude, "claude"), (ProviderDomain::Codex, "codex"), (ProviderDomain::Gemini, "gemini"), (ProviderDomain::OpenCode, "opencode"), (ProviderDomain::Qwen, "qwen"), (ProviderDomain::Unsupported, "unsupported")];
+    const PROVIDER_SLUGS: [(ProviderDomain, &str); 7] = [(ProviderDomain::Claude, "claude"), (ProviderDomain::Codex, "codex"), (ProviderDomain::Gemini, "gemini"), (ProviderDomain::OpenCode, "opencode"), (ProviderDomain::Qwen, "qwen"), (ProviderDomain::Grok, "grok"), (ProviderDomain::Unsupported, "unsupported")];
     #[rustfmt::skip]
     const ORIGINS: [ArtifactOrigin; 4] = [ArtifactOrigin::AgentDeskManaged, ArtifactOrigin::ProviderNative, ArtifactOrigin::SessionAuxiliary, ArtifactOrigin::Unsupported];
     #[rustfmt::skip]
@@ -347,7 +350,7 @@ mod tests {
     #[rustfmt::skip]
     #[test]
     fn provider_kind_mapping_is_total() {
-        let cases = [(ProviderKind::Claude, ProviderDomain::Claude), (ProviderKind::Codex, ProviderDomain::Codex), (ProviderKind::Gemini, ProviderDomain::Gemini), (ProviderKind::OpenCode, ProviderDomain::OpenCode), (ProviderKind::Qwen, ProviderDomain::Qwen), (ProviderKind::Unsupported("future".into()), ProviderDomain::Unsupported)];
+        let cases = [(ProviderKind::Claude, ProviderDomain::Claude), (ProviderKind::Codex, ProviderDomain::Codex), (ProviderKind::Gemini, ProviderDomain::Gemini), (ProviderKind::OpenCode, ProviderDomain::OpenCode), (ProviderKind::Qwen, ProviderDomain::Qwen), (ProviderKind::Grok, ProviderDomain::Grok), (ProviderKind::Unsupported("future".into()), ProviderDomain::Unsupported)];
         for (kind, expected) in cases { assert_eq!(ProviderDomain::from(&kind), expected); }
     }
 
