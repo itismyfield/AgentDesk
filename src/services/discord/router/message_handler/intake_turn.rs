@@ -48,8 +48,6 @@ pub(in crate::services::discord) struct IntakeDeps<'a> {
     pub token: &'a str,
 }
 
-
-
 #[cfg(test)]
 mod intake_outbox_state_builder_tests {
     use super::*;
