@@ -1065,7 +1065,6 @@ fn exec_path_entries(resolved_path: &Path, canonical_path: Option<&Path>) -> Vec
 fn provider_fallback_dirs(provider: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut seen = BTreeSet::new();
-
     for dir in windows_provider_subdirs(provider) {
         push_unique_path(dir, &mut dirs, &mut seen);
     }
