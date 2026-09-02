@@ -8,7 +8,6 @@ use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::remote::RemoteProfile;
 use crate::services::stream_json_cli::{ConfiguredToolPolicy, ProviderTurnRequest};
 
-#[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,
     session_id: Option<&str>,

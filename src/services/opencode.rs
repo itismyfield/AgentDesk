@@ -24,6 +24,7 @@ use crate::services::process::{configure_child_process_group, kill_pid_tree};
 use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
 use crate::services::remote::RemoteProfile;
 
+#[allow(clippy::too_many_arguments)]
 mod streaming_entry;
 pub use streaming_entry::execute_command_streaming;
 
