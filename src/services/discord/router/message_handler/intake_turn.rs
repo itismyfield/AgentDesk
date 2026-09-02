@@ -2504,7 +2504,7 @@ pub(super) async fn handle_text_message(
                             None, // Qwen: compact not supported
                             force_fresh_provider_session,
                         ),
-                        ProviderKind::OpenCode | ProviderKind::Grok => opencode::execute_command_streaming(
+                        provider if provider.uses_opencode_streaming_entrypoint() => opencode::execute_command_streaming(
                                 &context_prompt,
                                 session_id_clone.as_deref(),
                                 &current_path_clone,
