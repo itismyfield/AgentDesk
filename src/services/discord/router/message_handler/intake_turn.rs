@@ -2506,21 +2506,21 @@ pub(super) async fn handle_text_message(
                         ),
                         ProviderKind::OpenCode | ProviderKind::Grok => {
                             opencode::execute_command_streaming(
-                            &context_prompt,
-                            session_id_clone.as_deref(),
-                            &current_path_clone,
-                            tx.clone(),
-                            system_prompt_for_turn,
-                            Some(&allowed_tools),
-                            Some(cancel_token_clone),
-                            remote_profile.as_ref(),
-                            tmux_session_name.as_deref(),
-                            Some(channel_id.get()),
-                            Some(provider_for_blocking.clone()),
-                            model_for_turn.as_deref(),
-                            None,
-                        )
-                        },
+                                &context_prompt,
+                                session_id_clone.as_deref(),
+                                &current_path_clone,
+                                tx.clone(),
+                                system_prompt_for_turn,
+                                Some(&allowed_tools),
+                                Some(cancel_token_clone),
+                                remote_profile.as_ref(),
+                                tmux_session_name.as_deref(),
+                                Some(channel_id.get()),
+                                Some(provider_for_blocking.clone()),
+                                model_for_turn.as_deref(),
+                                None,
+                            )
+                        }
                         ProviderKind::Unsupported(name) => {
                             let _ = tx.send(StreamMessage::Error {
                                 message: format!("Provider '{}' is not installed", name),
