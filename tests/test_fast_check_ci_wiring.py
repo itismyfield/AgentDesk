@@ -18,7 +18,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "bea1a256c395af3cc58de233311d3353e058afe66fe094151d410787116f1313"
+    "6b71e5c674b9c77a6acac2e7026159883653bcaaa90f5a2609daaf54be9f8ba1"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
@@ -372,6 +372,22 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "check_fast_cross_os"
         ]
         steps = parsed["steps"]
+        python_step_name = (
+            "Provision Python 3.11 (tomllib owner for "
+            "check_test_target_integrity, a2a-C PR-1)"
+        )
+        python_steps = [
+            (i, step)
+            for i, step in enumerate(steps)
+            if step.get("name") == python_step_name
+        ]
+        self.assertEqual(len(python_steps), 1)
+        python_index, python_step = python_steps[0]
+        rust = next(
+            i
+            for i, step in enumerate(steps)
+            if step.get("name") == "Install Rust toolchain"
+        )
         cargo_check = next(i for i, step in enumerate(steps) if step.get("name") == "cargo check")
         writer = next(i for i, step in enumerate(steps) if step.get("name") == "Writer namespace exact Windows targets")
 
@@ -379,6 +395,9 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertIn("os: [windows-latest]", job)
         self.assertIn("- name: cargo check", job)
         self.assertEqual(parsed["strategy"]["matrix"]["os"], ["windows-latest"])
+        self.assertEqual(python_step["uses"], "actions/setup-python@v5")
+        self.assertEqual(python_step["with"]["python-version"], "3.11")
+        self.assertLess(python_index, rust)
         self.assertLess(cargo_check, writer)
         self.assertEqual(steps[writer]["if"], "runner.os == 'Windows'")
         self.assertEqual(steps[writer]["timeout-minutes"], 30)

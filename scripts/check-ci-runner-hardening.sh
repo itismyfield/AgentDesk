@@ -784,7 +784,7 @@ targets = {
     "if" => "needs.changes.outputs.rust_compile == 'true' && needs.changes.outputs.cross_os_rust == 'true'",
     "runs_on" => '${{ matrix.os }}',
     # #5670 adds one bounded Windows owner runner; broad runtime remains nightly.
-    "job_sha256" => "22cddee02d1a98616ad0eeeef7c362600574c66509775cf13c3cba57decb69b2",
+    "job_sha256" => "58d905a59149419525d3dcc7fece3019ed652ff7d758c236f1cc10fbc307f94d",
     "cargo_steps" => {
       "cargo check" => {
         "commands" => ["cargo check --workspace --all-targets"],
