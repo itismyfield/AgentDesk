@@ -2518,7 +2518,7 @@ pub(super) async fn handle_text_message(
                                 model_for_turn.as_deref(),
                                 None,
                             )
-                        },
+                        }
                         ProviderKind::Unsupported(name) => {
                             let _ = tx.send(StreamMessage::Error {
                                 message: format!("Provider '{}' is not installed", name),
