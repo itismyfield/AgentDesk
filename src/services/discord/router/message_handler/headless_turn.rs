@@ -875,6 +875,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         ProviderKind::Gemini => "gemini",
         ProviderKind::OpenCode => "opencode",
         ProviderKind::Qwen => "qwen",
+        ProviderKind::Grok => "grok",
         ProviderKind::Unsupported(_) => "unsupported",
     };
     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -943,6 +944,9 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         &provider,
     )
     .await;
+    let reasoning_effort_for_turn = role_binding
+        .as_ref()
+        .and_then(|binding| binding.reasoning_effort.clone());
     let adk_session_name = channel_name.clone();
     let adk_session_info =
         derive_adk_session_info(Some(prompt), channel_name.as_deref(), Some(&current_path));
@@ -1190,6 +1194,26 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             model_for_turn.as_deref(),
                             None,
                             force_fresh_provider_session,
+                        ),
+                        ProviderKind::Grok => crate::services::stream_json_cli::execute_streaming(
+                            crate::services::provider::StreamJsonDialectId::Grok,
+                            crate::services::stream_json_cli::ProviderTurnRequest::for_discord_turn(
+                                provider_for_blocking.clone(),
+                                context_prompt.clone(),
+                                system_prompt_for_turn.map(str::to_string),
+                                crate::services::stream_json_cli::ConfiguredToolPolicy::from_legacy_allowed_tools(
+                                    &allowed_tools,
+                                ),
+                                model_for_turn.clone(),
+                                reasoning_effort_for_turn.clone(),
+                                std::path::PathBuf::from(&current_path_clone),
+                                session_id_clone.as_deref(),
+                                force_fresh_provider_session,
+                                remote_profile.clone(),
+                                std::time::Duration::from_secs(300),
+                                Some(cancel_token_clone),
+                            ),
+                            tx.clone(),
                         ),
                         ProviderKind::OpenCode => opencode::execute_command_streaming(
                             &context_prompt,
