@@ -157,7 +157,6 @@ pub struct ProviderRegistryEntry {
     pub auth: ProviderAuthSpec,
 }
 
-
 /// Preserve the historical first counterpart while deriving every remaining
 /// counterpart from the registry. Adding a provider then requires one row, not
 /// edits to every existing provider's counterpart list.
