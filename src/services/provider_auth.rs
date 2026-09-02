@@ -197,12 +197,14 @@ fn detect_grok_auth_source() -> Option<String> {
     let path = expanded_auth_path("~/.grok/auth.json")?;
     let value = read_json_path(&path)?;
     let has_credential = value.as_object()?.values().any(|entry| {
-        ["key", "access_token", "refresh_token"].iter().any(|field| {
-            entry
-                .get(*field)
-                .and_then(|value| value.as_str())
-                .is_some_and(|value| !value.trim().is_empty())
-        })
+        ["key", "access_token", "refresh_token"]
+            .iter()
+            .any(|field| {
+                entry
+                    .get(*field)
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
     });
     has_credential.then(|| "file:~/.grok/auth.json".to_string())
 }
