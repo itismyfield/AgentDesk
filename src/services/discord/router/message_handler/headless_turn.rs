@@ -1198,7 +1198,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                                 Some(provider_for_blocking.clone()),
                                 model_for_turn.as_deref(),
                                 None,
-                            )
+                            ),
                         ProviderKind::Unsupported(name) => {
                             let _ = tx.send(StreamMessage::Error {
                                 message: format!("Provider '{}' is not installed", name),
