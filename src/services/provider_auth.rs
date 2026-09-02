@@ -79,6 +79,7 @@ fn detect_provider_file_auth(provider: &str, spec: &ProviderAuthSpec) -> Option<
         "gemini" => detect_gemini_oauth_source(),
         "opencode" => detect_opencode_file_auth(),
         "qwen" => detect_qwen_file_auth(spec),
+        "grok" => detect_grok_auth_source(),
         _ => None,
     }
 }
@@ -190,6 +191,22 @@ fn detect_qwen_file_auth(spec: &ProviderAuthSpec) -> Option<String> {
             None
         }
     })
+}
+
+fn detect_grok_auth_source() -> Option<String> {
+    let path = expanded_auth_path("~/.grok/auth.json")?;
+    let value = read_json_path(&path)?;
+    let has_credential = value.as_object()?.values().any(|entry| {
+        ["key", "access_token", "refresh_token"]
+            .iter()
+            .any(|field| {
+                entry
+                    .get(*field)
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+    });
+    has_credential.then(|| "file:~/.grok/auth.json".to_string())
 }
 
 /// qwen-code stores headless credentials in settings.json: the `env` block is

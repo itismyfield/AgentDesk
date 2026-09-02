@@ -446,13 +446,13 @@ async fn generate_foreground_ack_text(
                         Some(cancel_for_blocking),
                     )
                 }
-                ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => Err(format!(
-                    "foreground provider {} does not support model-scoped instant call yet",
-                    provider_kind.as_str()
-                )),
                 ProviderKind::Unsupported(value) => {
                     Err(format!("unsupported foreground provider: {value}"))
                 }
+                _ => Err(format!(
+                    "foreground provider {} does not support model-scoped instant call yet",
+                    provider_kind.as_str()
+                )),
             }
         }),
     )
@@ -557,13 +557,13 @@ async fn generate_voice_channel_text_reply(
                         Some(cancel_for_blocking),
                     )
                 }
-                ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => Err(format!(
-                    "voice channel text provider {} does not support model-scoped instant call yet",
-                    provider_kind.as_str()
-                )),
                 ProviderKind::Unsupported(value) => {
                     Err(format!("unsupported voice channel text provider: {value}"))
                 }
+                _ => Err(format!(
+                    "voice channel text provider {} does not support model-scoped instant call yet",
+                    provider_kind.as_str()
+                )),
             }
         }),
     )
@@ -646,13 +646,13 @@ async fn generate_voice_background_result_summary(
                         Some(cancel_for_blocking),
                     )
                 }
-                ProviderKind::Gemini | ProviderKind::OpenCode | ProviderKind::Qwen => Err(format!(
-                    "voice background summary provider {} does not support model-scoped instant call yet",
-                    provider_kind.as_str()
-                )),
                 ProviderKind::Unsupported(value) => {
                     Err(format!("unsupported voice background summary provider: {value}"))
                 }
+                _ => Err(format!(
+                    "voice background summary provider {} does not support model-scoped instant call yet",
+                    provider_kind.as_str()
+                )),
             }
         }),
     )

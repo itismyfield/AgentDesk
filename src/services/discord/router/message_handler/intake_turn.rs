@@ -2330,7 +2330,6 @@ pub(super) async fn handle_text_message(
     let session_id_clone = session_id.clone();
     let current_path_clone = current_path.clone();
     let cancel_token_clone = cancel_token.clone();
-
     // Pause the tmux-session owner watcher before writing to the provider
     // FIFO. In thread follow-ups, the watcher may be owned by the parent
     // channel rather than the requested thread channel.
@@ -2418,7 +2417,6 @@ pub(super) async fn handle_text_message(
         execution_mode: Some("discord_turn".to_string()),
     };
     let dispatch_type_for_mcp = dispatch_type_str.clone();
-
     // Run the provider in a blocking thread
     if is_voice_announcement {
         crate::voice::metrics::mark_agent_start(channel_id.get());
@@ -2435,8 +2433,8 @@ pub(super) async fn handle_text_message(
                             session_id_clone.as_deref(),
                             &system_prompt_owned,
                         );
-                    match &provider_for_blocking {
-                        ProviderKind::Claude => claude::execute_command_streaming(
+                    match provider_for_blocking.legacy_streaming_dispatch_kind() {
+                        LegacyDispatchKind::Claude => claude::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -2455,7 +2453,7 @@ pub(super) async fn handle_text_message(
                             cache_ttl_minutes,
                             dispatch_type_for_mcp.as_deref(),
                         ),
-                        ProviderKind::Codex => codex::execute_command_streaming(
+                        LegacyDispatchKind::Codex => codex::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -2473,7 +2471,7 @@ pub(super) async fn handle_text_message(
                             compact_token_limit_for_codex,
                             force_fresh_provider_session,
                         ),
-                        ProviderKind::Gemini => gemini::execute_command_streaming(
+                        LegacyDispatchKind::Gemini => gemini::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -2488,7 +2486,7 @@ pub(super) async fn handle_text_message(
                             model_for_turn.as_deref(),
                             None, // Gemini: compact not supported
                         ),
-                        ProviderKind::Qwen => qwen::execute_command_streaming(
+                        LegacyDispatchKind::Qwen => qwen::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -2504,7 +2502,7 @@ pub(super) async fn handle_text_message(
                             None, // Qwen: compact not supported
                             force_fresh_provider_session,
                         ),
-                        ProviderKind::OpenCode => opencode::execute_command_streaming(
+                        LegacyDispatchKind::OpenCode => opencode::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -2519,7 +2517,7 @@ pub(super) async fn handle_text_message(
                             model_for_turn.as_deref(),
                             None,
                         ),
-                        ProviderKind::Unsupported(name) => {
+                        LegacyDispatchKind::Unsupported(name) => {
                             let _ = tx.send(StreamMessage::Error {
                                 message: format!("Provider '{}' is not installed", name),
                                 stdout: String::new(),

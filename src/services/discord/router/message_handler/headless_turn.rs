@@ -869,14 +869,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     }
     let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
     let memory_backend_label = memory_settings.backend.as_str();
-    let provider_label = match &provider {
-        ProviderKind::Claude => "claude",
-        ProviderKind::Codex => "codex",
-        ProviderKind::Gemini => "gemini",
-        ProviderKind::OpenCode => "opencode",
-        ProviderKind::Qwen => "qwen",
-        ProviderKind::Unsupported(_) => "unsupported",
-    };
+    let provider_label = provider.as_str();
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] [prompt-prep] headless channel={} provider={} dispatch={} memory_backend={} reused_session={} duration_ms={}",
@@ -1122,8 +1115,8 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             session_id_clone.as_deref(),
                             &system_prompt_owned,
                         );
-                    match &provider_for_blocking {
-                        ProviderKind::Claude => claude::execute_command_streaming(
+                    match provider_for_blocking.legacy_streaming_dispatch_kind() {
+                        LegacyDispatchKind::Claude => claude::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -1142,7 +1135,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             cache_ttl_minutes,
                             None,
                         ),
-                        ProviderKind::Codex => codex::execute_command_streaming(
+                        LegacyDispatchKind::Codex => codex::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -1160,7 +1153,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             compact_token_limit_for_codex,
                             force_fresh_provider_session,
                         ),
-                        ProviderKind::Gemini => gemini::execute_command_streaming(
+                        LegacyDispatchKind::Gemini => gemini::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -1175,7 +1168,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             model_for_turn.as_deref(),
                             None,
                         ),
-                        ProviderKind::Qwen => qwen::execute_command_streaming(
+                        LegacyDispatchKind::Qwen => qwen::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -1191,7 +1184,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             None,
                             force_fresh_provider_session,
                         ),
-                        ProviderKind::OpenCode => opencode::execute_command_streaming(
+                        LegacyDispatchKind::OpenCode => opencode::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
@@ -1206,7 +1199,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             model_for_turn.as_deref(),
                             None,
                         ),
-                        ProviderKind::Unsupported(name) => {
+                        LegacyDispatchKind::Unsupported(name) => {
                             let _ = tx.send(StreamMessage::Error {
                                 message: format!("Provider '{}' is not installed", name),
                                 stdout: String::new(),

@@ -26,8 +26,13 @@ use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::platform::with_provider_execution_context;
-use crate::services::provider::{CancelToken, ProviderExecutionAdapter, ProviderKind};
+use crate::services::provider::{
+    CancelToken, ProviderExecutionAdapter, ProviderKind, StreamJsonDialectId,
+};
 use crate::services::provider_cli::ProviderExecutionContext;
+use crate::services::stream_json_cli::{
+    ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
+};
 use crate::services::{claude, codex, gemini, opencode, qwen};
 
 pub async fn execute_simple_with_timeout(
@@ -99,6 +104,24 @@ fn execute_simple_blocking_inner(
         }
         ProviderExecutionAdapter::Qwen => {
             qwen::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())
+        }
+        ProviderExecutionAdapter::StreamJsonCli(StreamJsonDialectId::Grok) => {
+            let (sender, receiver) = std::sync::mpsc::channel::<StreamMessage>();
+            let request = ProviderTurnRequest {
+                provider: provider.clone(),
+                prompt,
+                system_prompt: None,
+                tool_policy: ConfiguredToolPolicy::for_new_stream_json_provider(),
+                model: None,
+                reasoning_effort: None,
+                working_directory: std::env::current_dir().unwrap_or_else(|_| ".".into()),
+                session: None,
+                remote_profile: None,
+                timeout: Duration::from_secs(300),
+                cancel: cancel_token,
+            };
+            let result = execute_streaming(StreamJsonDialectId::Grok, request, sender);
+            collect_stream_result(result, receiver)
         }
     }
 }
@@ -235,6 +258,22 @@ pub async fn execute_structured_with_context(
                     None,
                     false,
                 ),
+                ProviderExecutionAdapter::StreamJsonCli(StreamJsonDialectId::Grok) => {
+                    let request = ProviderTurnRequest {
+                        provider: provider.clone(),
+                        prompt: prompt.clone(),
+                        system_prompt: system_prompt.clone(),
+                        tool_policy: configured_policy_from_tools(&allowed_tools),
+                        model: model.clone(),
+                        reasoning_effort: None,
+                        working_directory: std::path::PathBuf::from(&working_dir),
+                        session: None,
+                        remote_profile: None,
+                        timeout: Duration::from_secs(timeout_secs),
+                        cancel: Some(Arc::clone(&cancel_token)),
+                    };
+                    execute_streaming(StreamJsonDialectId::Grok, request, sender.clone())
+                }
             };
             drop(sender);
             collect_stream_result(result, receiver)
@@ -256,6 +295,10 @@ pub async fn execute_structured_with_context(
             Err(structured_timeout_error(stage_label, timeout_secs))
         }
     }
+}
+
+fn configured_policy_from_tools(allowed_tools: &[String]) -> ConfiguredToolPolicy {
+    ConfiguredToolPolicy::from_legacy_allowed_tools(allowed_tools)
 }
 
 pub(crate) fn simple_timeout_error(stage_label: &str, timeout: Duration) -> String {

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::runtime_layout::expand_user_path;
 
+mod grok;
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_PROBE_MAX_OUTPUT_BYTES: usize = 8 * 1024;
@@ -1064,13 +1065,13 @@ fn exec_path_entries(resolved_path: &Path, canonical_path: Option<&Path>) -> Vec
 fn provider_fallback_dirs(provider: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut seen = BTreeSet::new();
-
     for dir in windows_provider_subdirs(provider) {
         push_unique_path(dir, &mut dirs, &mut seen);
     }
     for dir in provider_app_bundle_dirs(provider) {
         push_unique_path(dir, &mut dirs, &mut seen);
     }
+    grok::append_provider_specific_fallback_dirs(provider, &mut dirs, &mut seen);
     for dir in standard_fallback_dirs() {
         push_unique_path(dir, &mut dirs, &mut seen);
     }
@@ -1079,10 +1080,9 @@ fn provider_fallback_dirs(provider: &str) -> Vec<PathBuf> {
 }
 
 fn provider_app_bundle_dirs(provider: &str) -> Vec<PathBuf> {
-    if normalize_name(provider) != "codex" {
-        return Vec::new();
-    }
-    codex_app_bundle_resource_dirs()
+    (normalize_name(provider) == "codex")
+        .then(codex_app_bundle_resource_dirs)
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "macos")]

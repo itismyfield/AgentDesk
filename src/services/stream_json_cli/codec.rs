@@ -78,6 +78,14 @@ impl StreamJsonCodec for MessagesJsonCodec {
         if self.emitted_done {
             return Ok(Vec::new());
         }
+        if let Some((message, stdout)) = self.state.stdout_error.take() {
+            return Ok(vec![StreamMessage::Error {
+                message,
+                stdout,
+                stderr: stderr.to_string(),
+                exit_code,
+            }]);
+        }
         if exit_code.unwrap_or(0) != 0 {
             return Ok(vec![StreamMessage::Error {
                 message: if stderr.trim().is_empty() {
@@ -90,14 +98,10 @@ impl StreamJsonCodec for MessagesJsonCodec {
                 exit_code,
             }]);
         }
-        let session_id = self.session_id.clone();
-        if session_id.is_none() {
+        if self.session_id.is_none() {
             return Err("terminal success without a valid session id".into());
         }
-        Ok(vec![StreamMessage::Done {
-            result: String::new(),
-            session_id,
-        }])
+        Err("StreamJson stream ended without a terminal result".into())
     }
 }
 
@@ -292,6 +296,40 @@ mod tests {
             done.iter()
                 .any(|message| matches!(message, StreamMessage::Done { .. }))
         );
+    }
+
+    #[test]
+    fn grok_messages_codec_rejects_clean_eof_after_init() {
+        let mut codec = MessagesJsonCodec::new();
+        let init = codec
+            .push_stdout_line(
+                r#"{"type":"system","subtype":"init","session_id":"01234567-89ab-cdef-0123-456789abcdef"}"#,
+            )
+            .unwrap();
+        assert!(matches!(init.first(), Some(StreamMessage::Init { .. })));
+        let error = codec.finish(Some(0), "").unwrap_err();
+        assert_eq!(error, "StreamJson stream ended without a terminal result");
+    }
+
+    #[test]
+    fn grok_messages_codec_preserves_terminal_error() {
+        let mut codec = MessagesJsonCodec::new();
+        let _ = codec
+            .push_stdout_line(
+                r#"{"type":"system","subtype":"init","session_id":"01234567-89ab-cdef-0123-456789abcdef"}"#,
+            )
+            .unwrap();
+        let emitted = codec
+            .push_stdout_line(
+                r#"{"type":"result","subtype":"error","is_error":true,"result":"provider rejected the turn","session_id":"01234567-89ab-cdef-0123-456789abcdef"}"#,
+            )
+            .unwrap();
+        assert!(emitted.is_empty());
+        let error = codec.finish(Some(0), "").unwrap();
+        assert!(matches!(
+            error.as_slice(),
+            [StreamMessage::Error { message, .. }] if message == "provider rejected the turn"
+        ));
     }
 
     #[test]

@@ -24,6 +24,10 @@ use crate::services::process::{configure_child_process_group, kill_pid_tree};
 use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
 use crate::services::remote::RemoteProfile;
 
+#[allow(clippy::too_many_arguments)]
+mod streaming_entry;
+pub use streaming_entry::execute_command_streaming;
+
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_POLL_MS: u64 = 250;
 const SSE_READ_TIMEOUT: Duration = Duration::from_secs(120);
@@ -621,39 +625,6 @@ pub fn execute_command_simple_cancellable(
         return Ok(text);
     }
     Err("Empty response from OpenCode".to_string())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn execute_command_streaming(
-    prompt: &str,
-    _session_id: Option<&str>,
-    working_dir: &str,
-    sender: Sender<StreamMessage>,
-    system_prompt: Option<&str>,
-    allowed_tools: Option<&[String]>,
-    cancel_token: Option<Arc<CancelToken>>,
-    remote_profile: Option<&RemoteProfile>,
-    _tmux_session_name: Option<&str>,
-    _report_channel_id: Option<u64>,
-    _report_provider: Option<ProviderKind>,
-    model: Option<&str>,
-    _compact_percent: Option<u64>,
-) -> Result<(), String> {
-    execute_command_streaming_inner(
-        prompt,
-        _session_id,
-        working_dir,
-        sender,
-        system_prompt,
-        allowed_tools,
-        cancel_token.as_deref(),
-        remote_profile,
-        _tmux_session_name,
-        _report_channel_id,
-        _report_provider,
-        model,
-        _compact_percent,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
