@@ -495,6 +495,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Provision Python 3.11 (tomllib owner for check_test_target_integrity, a2a-C PR-1)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -1470,7 +1475,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=bea1a256c395af3cc58de233311d3353e058afe66fe094151d410787116f1313
+          expected=6b71e5c674b9c77a6acac2e7026159883653bcaaa90f5a2609daaf54be9f8ba1
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1577,7 +1582,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=bea1a256c395af3cc58de233311d3353e058afe66fe094151d410787116f1313
+          expected=6b71e5c674b9c77a6acac2e7026159883653bcaaa90f5a2609daaf54be9f8ba1
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
