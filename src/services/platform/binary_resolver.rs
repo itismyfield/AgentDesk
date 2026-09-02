@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 use crate::runtime_layout::expand_user_path;
 
+mod grok;
+
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(3);
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_PROBE_MAX_OUTPUT_BYTES: usize = 8 * 1024;
@@ -1071,28 +1073,13 @@ fn provider_fallback_dirs(provider: &str) -> Vec<PathBuf> {
     for dir in provider_app_bundle_dirs(provider) {
         push_unique_path(dir, &mut dirs, &mut seen);
     }
-    for dir in provider_specific_fallback_dirs(provider) {
+    for dir in grok::provider_specific_fallback_dirs(provider) {
         push_unique_path(dir, &mut dirs, &mut seen);
     }
     for dir in standard_fallback_dirs() {
         push_unique_path(dir, &mut dirs, &mut seen);
     }
 
-    dirs
-}
-
-fn provider_specific_fallback_dirs(provider: &str) -> Vec<PathBuf> {
-    if normalize_name(provider) != "grok" {
-        return Vec::new();
-    }
-
-    let mut dirs = Vec::new();
-    let mut seen = BTreeSet::new();
-    push_env_dir("GROK_BIN_DIR", None, &mut dirs, &mut seen);
-    push_env_dir("GROK_HOME", Some("bin"), &mut dirs, &mut seen);
-    if let Some(home) = dirs::home_dir() {
-        push_unique_path(home.join(".grok").join("bin"), &mut dirs, &mut seen);
-    }
     dirs
 }
 
