@@ -242,6 +242,10 @@ impl ProviderKind {
             .unwrap_or("claude")
     }
 
+    pub fn uses_opencode_streaming_entrypoint(&self) -> bool {
+        matches!(self, Self::OpenCode | Self::Grok)
+    }
+
     pub fn provider_for_cli_init_index(index: usize) -> Option<Self> {
         provider_registry()
             .get(index)
