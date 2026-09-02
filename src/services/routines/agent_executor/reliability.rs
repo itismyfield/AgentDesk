@@ -152,4 +152,121 @@ impl RoutineAgentExecutor {
             | crate::services::platform::tmux::PaneLiveness::ProbeError => None,
         }
     }
+
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{completion_with_evidence, running_run};
+    use super::*;
+    use chrono::{DateTime, Duration, Utc};
+    use serde_json::json;
+
+    #[test]
+    fn provider_error_from_completion_detects_known_error_only_transcript() {
+        let mut completion =
+            completion_with_evidence(AgentTurnCompletionEvidence::AssistantTranscript);
+        completion.assistant_message =
+            Some("Error: AI_APICallError: Too Many Requests (429)".to_string());
+
+        assert_eq!(
+            provider_error_from_completion(&completion).as_deref(),
+            Some("Error: AI_APICallError: Too Many Requests (429)")
+        );
+    }
+
+    #[test]
+    fn provider_error_from_completion_allows_normal_error_reports() {
+        let mut completion =
+            completion_with_evidence(AgentTurnCompletionEvidence::AssistantTranscript);
+        completion.assistant_message =
+            Some("Error summary: the PR check failed, and the remediation is ready.".to_string());
+
+        assert_eq!(provider_error_from_completion(&completion), None);
+    }
+
+    #[test]
+    fn provider_error_from_completion_ignores_terminal_evidence() {
+        let completion = completion_with_evidence(AgentTurnCompletionEvidence::TerminalTurn);
+
+        assert_eq!(provider_error_from_completion(&completion), None);
+    }
+
+    #[test]
+    fn fresh_provider_session_probe_waits_for_grace_period() {
+        let mut run = running_run(None);
+        run.turn_id = Some("discord:123:456".to_string());
+        run.started_at = DateTime::parse_from_rfc3339("2026-08-30T04:00:00Z")
+            .expect("valid start")
+            .with_timezone(&Utc);
+        run.attempts = json!([{
+            "event": "started",
+            "at": "2026-08-30T04:00:00Z"
+        }]);
+
+        assert!(!fresh_provider_session_probe_allowed(
+            &run,
+            run.started_at + Duration::seconds(FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS - 1)
+        ));
+        assert!(fresh_provider_session_probe_allowed(
+            &run,
+            run.started_at + Duration::seconds(FRESH_PROVIDER_SESSION_LIVENESS_GRACE_SECS)
+        ));
+    }
+
+    #[test]
+    fn current_attempt_started_at_uses_latest_started_attempt() {
+        let mut run = running_run(None);
+        run.started_at = DateTime::parse_from_rfc3339("2026-08-30T04:00:00Z")
+            .expect("valid start")
+            .with_timezone(&Utc);
+        run.attempts = json!([
+            {
+                "event": "started",
+                "kind": "primary",
+                "at": "2026-08-30T04:05:00Z"
+            },
+            {
+                "event": "started",
+                "kind": "fallback",
+                "at": "2026-08-30T05:10:00+00:00"
+            }
+        ]);
+
+        assert_eq!(
+            current_attempt_started_at(&run),
+            DateTime::parse_from_rfc3339("2026-08-30T05:10:00Z")
+                .expect("valid attempt start")
+                .with_timezone(&Utc)
+        );
+    }
+
+    #[test]
+    fn current_attempt_started_at_ignores_malformed_attempts_and_falls_back() {
+        let mut run = running_run(None);
+        run.started_at = DateTime::parse_from_rfc3339("2026-08-30T04:00:00Z")
+            .expect("valid start")
+            .with_timezone(&Utc);
+        run.attempts = json!([
+            {
+                "event": "started",
+                "kind": "primary",
+                "at": "2026-08-30T04:05:00Z"
+            },
+            {
+                "event": "started",
+                "kind": "fallback",
+                "at": "not-a-timestamp"
+            }
+        ]);
+
+        assert_eq!(
+            current_attempt_started_at(&run),
+            DateTime::parse_from_rfc3339("2026-08-30T04:05:00Z")
+                .expect("valid attempt start")
+                .with_timezone(&Utc)
+        );
+
+        run.attempts = json!([]);
+        assert_eq!(current_attempt_started_at(&run), run.started_at);
+    }
 }
