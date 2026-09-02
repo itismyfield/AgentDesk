@@ -869,15 +869,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
     }
     let prompt_prep_duration_ms = prompt_prep_started.elapsed().as_millis();
     let memory_backend_label = memory_settings.backend.as_str();
-    let provider_label = match &provider {
-        ProviderKind::Claude => "claude",
-        ProviderKind::Codex => "codex",
-        ProviderKind::Gemini => "gemini",
-        ProviderKind::OpenCode => "opencode",
-        ProviderKind::Qwen => "qwen",
-        ProviderKind::Grok => "grok",
-        ProviderKind::Unsupported(_) => "unsupported",
-    };
+    let provider_label = provider.as_str();
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!(
         "  [{ts}] [prompt-prep] headless channel={} provider={} dispatch={} memory_backend={} reused_session={} duration_ms={}",
@@ -944,9 +936,6 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
         &provider,
     )
     .await;
-    let reasoning_effort_for_turn = role_binding
-        .as_ref()
-        .and_then(|binding| binding.reasoning_effort.clone());
     let adk_session_name = channel_name.clone();
     let adk_session_info =
         derive_adk_session_info(Some(prompt), channel_name.as_deref(), Some(&current_path));
@@ -1195,27 +1184,7 @@ pub(super) async fn start_reserved_headless_turn_with_owner(
                             None,
                             force_fresh_provider_session,
                         ),
-                        ProviderKind::Grok => crate::services::stream_json_cli::execute_streaming(
-                            crate::services::provider::StreamJsonDialectId::Grok,
-                            crate::services::stream_json_cli::ProviderTurnRequest::for_discord_turn(
-                                provider_for_blocking.clone(),
-                                context_prompt.clone(),
-                                system_prompt_for_turn.map(str::to_string),
-                                crate::services::stream_json_cli::ConfiguredToolPolicy::from_legacy_allowed_tools(
-                                    &allowed_tools,
-                                ),
-                                model_for_turn.clone(),
-                                reasoning_effort_for_turn.clone(),
-                                std::path::PathBuf::from(&current_path_clone),
-                                session_id_clone.as_deref(),
-                                force_fresh_provider_session,
-                                remote_profile.clone(),
-                                std::time::Duration::from_secs(300),
-                                Some(cancel_token_clone),
-                            ),
-                            tx.clone(),
-                        ),
-                        ProviderKind::OpenCode => opencode::execute_command_streaming(
+                        ProviderKind::OpenCode | ProviderKind::Grok => opencode::execute_command_streaming(
                             &context_prompt,
                             session_id_clone.as_deref(),
                             &current_path_clone,
