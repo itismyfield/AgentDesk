@@ -299,6 +299,7 @@ jobs:
               - 'build.rs'
               - '.github/workflows/ci-pr.yml'
               - 'scripts/ci/run-writer-namespace-windows-targets.sh'
+              - 'scripts/exact_rust_test_proof.py'
               # defaults.json is embedded into the Rust binary via
               # `include_str!("../defaults.json")` in src/config.rs.
               - 'defaults.json'
@@ -316,6 +317,7 @@ jobs:
             # sync with `rust_compile` and document every relay exception.
             cross_os_rust:
               - 'scripts/ci/run-writer-namespace-windows-targets.sh'
+              - 'scripts/exact_rust_test_proof.py'
               - 'src/*'
               - 'src/cli/**'
               - 'src/compat/**'
@@ -1475,7 +1477,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=6b71e5c674b9c77a6acac2e7026159883653bcaaa90f5a2609daaf54be9f8ba1
+          expected=2f6a3d2d6260c546608052819be383115bf979df948e6ca3a16e5a45d2231ca0
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1582,7 +1584,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=6b71e5c674b9c77a6acac2e7026159883653bcaaa90f5a2609daaf54be9f8ba1
+          expected=2f6a3d2d6260c546608052819be383115bf979df948e6ca3a16e5a45d2231ca0
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
