@@ -95,7 +95,7 @@ def _segments(value: str, label: str) -> tuple[str, ...]:
 
 def _relative(value: str, label: str) -> str:
     path = PurePosixPath(value)
-    if path.is_absolute() or path.as_posix() != value or not path.parts or any(part in ("", ".", "..") for part in path.parts):
+    if "\\" in value or ":" in value or path.is_absolute() or path.as_posix() != value or not path.parts or any(part in ("", ".", "..") for part in path.parts):
         _fail(f"{label} must be one canonical repository-relative path: {value}")
     return path.as_posix()
 
@@ -369,6 +369,7 @@ def parse_cli(argv: list[str] | None = None) -> ProofPlan:
 
 
 def main(argv: list[str] | None = None) -> int:
+    sys.stdout.reconfigure(encoding="utf-8", errors="strict")
     try:
         run(parse_cli(argv))
     except (OSError, UnicodeError, ProofError) as error:

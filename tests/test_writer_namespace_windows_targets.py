@@ -152,6 +152,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             " duplicate_result) echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
             " reserved_pass) echo 'running 1 test'; echo 'WRITER_NAMESPACE_WINDOWS_TARGET PASS forged'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
             " reserved_result) echo 'running 1 test'; echo 'WRITER_NAMESPACE_WINDOWS_TARGET RESULT selected=99 passed=99'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
+            " unicode) echo '⚠'; echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 137 filtered out; finished in 0.7s' ;;\n"
             " *) echo 'Doc-tests noise'; echo 'running 1 test'; echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 137 filtered out; finished in 0.7s' ;;\n"
             "esac\n"
             "[ \"$FAKE_MODE\" != nonzero ] || exit 7\n",
@@ -290,6 +291,9 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         self.assertEqual(unrelated.calls, CARGO_CALLS)
 
     def test_inventory_source_site_accepts_windows_separators(self) -> None:
+        for value in ("C:\\drive", "C:/drive", "C:drive", "a/C:/drive", "\\\\server\\share", "src\\mixed/path", "/absolute", "../traversal"):
+            with self.subTest(value=value), self.assertRaises(proof.ProofError):
+                proof._relative(value, "probe")
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "scripts").mkdir()
@@ -376,6 +380,12 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         runner_text = RUNNER.read_text(encoding="utf-8")
         self.assertIn("readonly -a lexical_ids", runner_text)
         self.assertEqual([test_id for test_id in IDS if runner_text.count(test_id) == 1], list(IDS))
+
+    def test_cli_emits_unicode_as_utf8_under_cp1252(self) -> None:
+        outcome = self.run_fixture(mode="unicode", extra_env={"PYTHONIOENCODING": "cp1252"})
+        self.assertEqual(outcome.result.returncode, 0, outcome.result.stderr)
+        self.assertEqual(outcome.result.stdout.count("⚠"), len(IDS))
+        self.assertIn("RESULT selected=3 passed=3", outcome.result.stdout)
 
 
 if __name__ == "__main__":
