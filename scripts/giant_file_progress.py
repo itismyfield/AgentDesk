@@ -19,6 +19,12 @@ EVALUATOR = "scripts/giant_file_progress.py"
 METADATA = "scripts/giant_file_issue_metadata.json"
 GENERATED_DOCS = frozenset({"ARCHITECTURE.md", "docs/generated/route-inventory.md",
                             "docs/generated/worker-inventory.md"})
+GUARD_REPIN_ALLOWED = frozenset({
+    "scripts/check_delivery_journal_raw_writer.py",
+    "scripts/check_durable_frontier_writer_call_sites.py",
+    "scripts/run_relay_authority_mutations.sh",
+    "scripts/relay_authority_contract_targets.json",
+})
 FROZEN = ("scripts/audit_maintainability_giant_baseline.toml", "scripts/giant_file_closed_issue_transition_list.txt")
 BOOTSTRAP_PATHS = frozenset({
     ".github/workflows/ci-main.yml",
@@ -69,6 +75,114 @@ def diff_facts(base: str, candidate: str) -> dict[str, object]:
     return {"changed": changed, "additions": additions, "numstat": numstat,
             "binary": binary, "statuses": statuses,
             "rename_copy": any(row.startswith(("R", "C")) for row in rename_copy.splitlines())}
+_GUARD_HUNK_RE = re.compile(rb"^@@ -\d+(?:,(?P<old_count>\d+))? \+\d+(?:,(?P<new_count>\d+))? @@(?: .*)?$")
+
+def guard_repin_candidate(path: str, facts: dict[str, object]) -> bool:
+    stat = facts["numstat"].get(path)
+    return (path in GUARD_REPIN_ALLOWED and facts["statuses"].get(path) == "M"
+            and path not in facts.get("binary", set()) and stat is not None
+            and stat[0] == stat[1] and stat[0] <= 8)
+
+def guard_repin_candidates(paths: set[str], facts: dict[str, object]) -> set[str]:
+    try:
+        return {path for path in paths if guard_repin_candidate(path, facts)}
+    except Exception as error:
+        raise RuntimeError("guard repin candidate classification failed") from error
+
+def guard_repin_patches(base: str, candidate: str,
+                        facts: dict[str, object]) -> dict[str, bytes]:
+    try:
+        patches = {}
+        for path in sorted(guard_repin_candidates(facts["changed"], facts)):
+            patch = git("diff", "-U0", "--no-renames", base, candidate,
+                        "--", path, binary=True)
+            if not isinstance(patch, bytes):
+                raise TypeError("binary Git wrapper returned text")
+            patches[path] = patch
+        return patches
+    except Exception as error:
+        raise RuntimeError("guard repin patch capture failed") from error
+
+def whole_quoted_literal_pattern(root: bytes) -> re.Pattern[bytes]:
+    return re.compile(rb'(?P<q>["\'])' + re.escape(root) + rb'(?P=q)')
+
+def _guard_repin_pairs(patch: bytes) -> list[tuple[bytes, bytes]] | None:
+    lines = patch.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+    first = next((index for index, line in enumerate(lines)
+                  if line.startswith(b"@@ ")), -1)
+    if first < 0 or len(lines[:first]) != 4:
+        return None
+    prefix = lines[:first]
+    if not (prefix[0].startswith(b"diff --git ")
+            and prefix[1].startswith(b"index ")
+            and prefix[2].startswith(b"--- ")
+            and prefix[3].startswith(b"+++ ")):
+        return None
+    blocks, current, phase = [], None, "removed"
+    for line in lines[first:]:
+        match = _GUARD_HUNK_RE.match(line)
+        if match:
+            if current is not None:
+                blocks.append(current)
+            current = [int(match.group("old_count") or b"1"),
+                       int(match.group("new_count") or b"1"), [], []]
+            phase = "removed"
+        elif current is None:
+            return None
+        elif line.startswith(b"-"):
+            if phase == "added":
+                return None
+            current[2].append(line[1:])
+        elif line.startswith(b"+"):
+            phase = "added"
+            current[3].append(line[1:])
+        else:
+            return None
+    if current is not None:
+        blocks.append(current)
+    pairs = []
+    for old_count, new_count, removed, added in blocks:
+        if (old_count < 1 or old_count != new_count
+                or len(removed) != old_count or len(added) != new_count):
+            return None
+        pairs.extend(zip(removed, added))
+    return pairs or None
+
+def pure_guard_repin(patch: bytes, root: bytes, child: bytes) -> bool:
+    try:
+        pairs = _guard_repin_pairs(patch)
+        if not pairs or not root or not child:
+            return False
+        pattern = whole_quoted_literal_pattern(root)
+        for removed, added in pairs:
+            rewritten, count = pattern.subn(
+                lambda match: match.group("q") + child + match.group("q"), removed)
+            if count < 1 or added != rewritten or root in added:
+                return False
+        return True
+    except Exception as error:
+        raise RuntimeError("guard repin byte proof failed") from error
+
+def matching_guard_repin_destinations(
+        path: str, patch: bytes, retired: set[str],
+        children: dict[str, list[str]], statuses: dict[str, str],
+        candidate_loc: dict[str, int], registered_giant_roots: set[str],
+) -> list[tuple[str, str]]:
+    try:
+        matches = []
+        for root in sorted(retired):
+            for child in sorted(set(children.get(root, ()))):
+                if (statuses.get(child) != "A" or child in retired
+                        or child in registered_giant_roots
+                        or child not in candidate_loc or candidate_loc[child] >= 1000):
+                    continue
+                if pure_guard_repin(patch, root.encode(), child.encode()):
+                    matches.append((root, child))
+        return matches
+    except Exception as error:
+        raise RuntimeError(f"guard repin proof failed: {path}") from error
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 def production_line_numbers(text: str, production_loc: int) -> set[int]:
@@ -210,7 +324,21 @@ def progress_errors(base: dict[str, object], candidate: dict[str, object],
         and facts["statuses"].get(path) == "M"
         and path not in facts.get("binary", set())
         and max(facts["numstat"].get(path, (41, 41))) <= 40}
-    allowed_extras = test_extras | generated_extras | maintenance_extras
+    guard_candidates = (guard_repin_candidates(extras, facts)
+                        if retired and not facts["bootstrap"] else set())
+    guard_extras: set[str] = set()
+    registered_giant_roots = set(base_meta) | set(candidate_meta)
+    for path in sorted(guard_candidates):
+        patch = facts.get("guard_repin_patches", {}).get(path, b"")
+        destinations = matching_guard_repin_destinations(
+            path, patch, retired, facts["children"], facts["statuses"],
+            candidate_loc, registered_giant_roots)
+        if len(destinations) == 1:
+            guard_extras.add(path)
+        else:
+            errors.append(
+                f"guard repin is not a pure root→child path substitution: {path}")
+    allowed_extras = test_extras | generated_extras | maintenance_extras | guard_extras
     if len(test_extras) > 3:
         errors.append("progress has more than 3 pin re-derivation files")
     if len(maintenance_extras) > 3:
@@ -304,6 +432,9 @@ def main() -> int:
                 progress_roots = retired or shrunk
                 facts["children"] = {path: sorted(child for child in facts["changed"]
                     if child.startswith(path[:-3] + "/") and child.endswith(".rs")) for path in progress_roots}
+                facts["guard_repin_patches"] = (guard_repin_patches(
+                    base_sha, candidate_sha, facts)
+                    if retired and not facts["bootstrap"] else {})
                 facts["moved"] = movement_ledger(
                     base_sha, candidate_sha, progress_roots, facts["children"],
                     base["modules"], candidate["modules"])
