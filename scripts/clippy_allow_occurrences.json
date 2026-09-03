@@ -193,11 +193,6 @@
       "count": 1
     },
     {
-      "path": "src/services/discord/adk_session.rs",
-      "lint": "too_many_arguments",
-      "count": 1
-    },
-    {
       "path": "src/services/discord/agent_handoff.rs",
       "lint": "too_many_arguments",
       "count": 3
@@ -228,14 +223,14 @@
       "count": 1
     },
     {
-      "path": "src/services/discord/formatting/streaming_status.rs",
-      "lint": "too_many_arguments",
-      "count": 2
-    },
-    {
       "path": "src/services/discord/formatting/long_send_rollback.rs",
       "lint": "too_many_arguments",
       "count": 1
+    },
+    {
+      "path": "src/services/discord/formatting/streaming_status.rs",
+      "lint": "too_many_arguments",
+      "count": 2
     },
     {
       "path": "src/services/discord/health/headless_turn.rs",
@@ -458,14 +453,14 @@
       "count": 1
     },
     {
-      "path": "src/services/discord/session_relay_sink.rs",
+      "path": "src/services/discord/session_relay_sink/task_notification_context.rs",
       "lint": "too_many_arguments",
       "count": 2
     },
     {
-      "path": "src/services/discord/session_relay_sink/task_notification_context.rs",
+      "path": "src/services/discord/session_relay_sink/tests.rs",
       "lint": "too_many_arguments",
-      "count": 2
+      "count": 1
     },
     {
       "path": "src/services/discord/standby_relay.rs",
@@ -586,11 +581,6 @@
       "path": "src/services/discord/tmux_watcher/terminal_send.rs",
       "lint": "too_many_arguments",
       "count": 5
-    },
-    {
-      "path": "src/services/discord/tmux_watcher/turn_identity.rs",
-      "lint": "too_many_arguments",
-      "count": 1
     },
     {
       "path": "src/services/discord/tmux_watcher/turn_stream_collector.rs",
@@ -815,7 +805,7 @@
     {
       "path": "src/services/qwen.rs",
       "lint": "too_many_arguments",
-      "count": 4
+      "count": 3
     },
     {
       "path": "src/services/qwen_tmux_wrapper.rs",
