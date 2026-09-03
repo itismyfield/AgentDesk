@@ -2279,16 +2279,17 @@ fn session_sink_short_replace_raw_body_fingerprint_refuses_watcher_rerelay_4081(
         "the regression pin needs formatted/raw divergence"
     );
     let module_src = include_str!("../session_relay_sink.rs");
+    let relay_format_src = include_str!("relay_format.rs");
     assert!(
-        module_src.contains("let raw_response_text = delivery.response_text.clone();"),
+        relay_format_src.contains("let raw_response_text = delivery.response_text.clone();"),
         "session sink must preserve raw response bytes before Discord formatting"
     );
     assert!(
-        module_src.contains("format_for_discord_with_provider(&raw_response_text"),
+        relay_format_src.contains("format_for_discord_with_provider(&raw_response_text"),
         "session sink must format from the preserved raw body, not derive raw from formatted text"
     );
     assert!(
-        module_src.contains("format_for_discord_with_status_panel(&raw_response_text"),
+        relay_format_src.contains("format_for_discord_with_status_panel(&raw_response_text"),
         "session sink status-panel formatting must also use the preserved raw body"
     );
     assert!(
