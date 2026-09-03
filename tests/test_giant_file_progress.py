@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -395,5 +396,253 @@ class GiantFileProgressTest(unittest.TestCase):
         self.assertEqual(pairs, [("schema", 1), ("verdict", "progress-pass")])
 
 
+class GuardRepinTest(unittest.TestCase):
+    PY = "scripts/check_delivery_journal_raw_writer.py"; MAP = "scripts/check_durable_frontier_writer_call_sites.py"
+    SH = "scripts/run_relay_authority_mutations.sh"; JSON = "scripts/relay_authority_contract_targets.json"
+    C = "changed-path closure is not exact"
+
+    def _patch(self, path, old, new):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            def run(*args):
+                return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+            run("init", "-q"); run("config", "user.email", "guard@example.invalid")
+            run("config", "user.name", "Guard Repin Test")
+            target = repo / path; target.parent.mkdir(parents=True); target.write_bytes(old)
+            run("add", "-A"); run("commit", "-qm", "base"); base = run("rev-parse", "HEAD")
+            target.write_bytes(new); run("add", "-A"); run("commit", "-qm", "candidate")
+            candidate, original = run("rev-parse", "HEAD"), PROGRESS.ROOT
+            try:
+                PROGRESS.ROOT = repo
+                facts = PROGRESS.diff_facts(base, candidate); patch = PROGRESS.git(
+                    "diff", "-U0", "--no-renames", base, candidate, "--", path, binary=True)
+            finally:
+                PROGRESS.ROOT = original
+        return patch, facts
+    def _case(self, changes, root=ROOT_FILE, child=CHILD_FILE):
+        base = {"overdue": [root, SURVIVOR], "modules": {root: 1048, SURVIVOR: 1200}, "registrations": {root: META_ROOT, SURVIVOR: META_SURVIVOR}}
+        candidate = {"overdue": [SURVIVOR], "modules": {root: 860, child: 178, SURVIVOR: 1200}, "registrations": {SURVIVOR: META_SURVIVOR}}
+        facts = {"changed": {PROGRESS.REGISTRY, root, child, *changes}, "additions": 200,
+                 "numstat": {}, "binary": set(), "statuses": {child: "A"}, "rename_copy": False,
+                 "bootstrap": False, "children": {root: [child]}, "moved": {root: occurrences(child, 100)},
+                 "authority_equal": True, "registry_equal": False, "registry_exact": True, "guard_repin_patches": {}}
+        for path, (old, new) in changes.items():
+            patch, observed = self._patch(path, old, new)
+            facts["numstat"][path] = observed["numstat"].get(path); facts["statuses"][path] = observed["statuses"].get(path)
+            facts["binary"].update(observed["binary"]); facts["guard_repin_patches"][path] = patch
+        return base, candidate, facts
+    def _expect(self, changes, expected=None, root=ROOT_FILE, child=CHILD_FILE, tweak=None):
+        base, candidate, facts = self._case(changes, root, child)
+        if tweak: tweak(base, candidate, facts)
+        if expected is None:
+            path = next(iter(changes))
+            expected = [f"guard repin is not a pure root→child path substitution: {path}", self.C]
+        self.assertEqual(PROGRESS.pr_evaluation(base, candidate, facts), ("pr_strict_progress", expected))
+    def _line(self, root, child, prefix=b'X="', suffix=b'"\n'):
+        return (prefix + root + suffix, prefix + child + suffix)
+    def test_guard_repin_accepts_giant2_normalized_replay(self):
+        root = b"src/services/discord/session_relay_sink.rs"
+        child = b"src/services/discord/session_relay_sink/delivery.rs"
+        py = (b'    ("sink direct family (referenced / edit / split / long-chunk receipt)", "' + root + b'", "deliver_response"),\n', b'    ("sink direct family (referenced / edit / split / long-chunk receipt)", "' + child + b'", "deliver_response"),\n')
+        rows = b"".join(b'        "' + root + b'": ' + n + b',\n' for n in (b"1", b"1", b"3", b"1"))
+        moved = b"".join(b'        "' + child + b'": ' + n + b',\n' for n in (b"1", b"1", b"3", b"1"))
+        changes = {self.PY: py, self.MAP: (rows, moved),
+                   self.SH: self._line(root, child, b'readonly SESSION_RELAY_SINK="'),
+                   self.JSON: self._line(root, child, b'      "file": "', b'",\n')}
+        self._expect(changes, [], root.decode(), child.decode())
+    def test_guard_repin_accepts_standalone_json(self):
+        self._expect({self.JSON: self._line(ROOT_FILE.encode(), CHILD_FILE.encode(), b'      "file": "', b'",\n')}, [])
+    def test_guard_repin_accepts_byte_and_f_string_prefixes(self):
+        for prefix in (b'b"', b'f"', b'r"'):
+            with self.subTest(prefix=prefix):
+                self._expect({self.PY: self._line(ROOT_FILE.encode(), CHILD_FILE.encode(), prefix)}, [])
+        root, child = "src/quo'te.rs", "src/quo'te/child.rs"
+        self._expect({self.PY: self._line(root.encode(), child.encode())}, [], root, child)
+    def test_guard_repin_accepts_triple_quoted_inner_pair(self):
+        self._expect({self.PY: self._line(ROOT_FILE.encode(), CHILD_FILE.encode(), b'X="""', b'"""\n')}, [])
+    def test_guard_repin_accepts_multiple_occurrences_to_one_child(self):
+        root, child = ROOT_FILE.encode(), CHILD_FILE.encode()
+        self._expect({self.PY: (b'A="' + root + b'" B="' + root + b'"\n',
+                               b'A="' + child + b'" B="' + child + b'"\n')}, [])
+    def test_guard_repin_accepts_unchanged_crlf_terminator(self):
+        self._expect({self.JSON: self._line(ROOT_FILE.encode(), CHILD_FILE.encode(), suffix=b'"\r\n')}, [])
+    def test_guard_repin_rejects_composite_quoted_contents(self):
+        root, child = ROOT_FILE.encode(), CHILD_FILE.encode()
+        composites = [b"@rev", b"~", b"+tail", b"%tail", b"\\tail", b"*", b"?",
+                      b"=tail", b":12", "é".encode(), b"\r", b".bak", b"_old"]
+        cases = [(b'"' + root + extra + b'"\n', b'"' + child + extra + b'"\n') for extra in composites]
+        cases += [(b'"' + root.replace(b"/", b"\\/") + b'"\n', b'"' + child.replace(b"/", b"\\/") + b'"\n'),
+                  (b'"' + root.replace(b"/", b"%2F") + b'"\n', b'"' + child.replace(b"/", b"%2F") + b'"\n'),
+                  self._line(root, child + b"*"),
+                  (b'X="' + root + b'" E="old%2Froot"\n',
+                   b'X="' + child + b'" E="new%2Fchild"\n')]
+        for old, new in cases:
+            with self.subTest(old=old): self._expect({self.JSON: (old, new)})
+    def test_guard_repin_rejects_mismatched_and_escaped_quotes(self):
+        root, child = ROOT_FILE.encode(), CHILD_FILE.encode()
+        for old, new in ((b'"' + root + b"'\n", b'"' + child + b"'\n"),
+                         (b'\\"' + root + b'\\"\n', b'\\"' + child + b'\\"\n')):
+            with self.subTest(old=old): self._expect({self.SH: (old, new)})
+    def test_guard_repin_rejects_residual_unquoted_root_on_same_line(self):
+        root, child = ROOT_FILE.encode(), CHILD_FILE.encode()
+        cases = [(b'X="' + root + b'" ' + root + b'\n', b'X="' + child + b'" ' + root + b'\n'),
+                 (b'X="' + root + b'"\n', b'X="' + child + b'" Y="' + child + b'"\n'),
+                 (b'X="' + root + b'" E="old%2Froot"\n',
+                  b'X="' + child + b'" E="new%2Fchild"\n')]
+        for old, new in cases:
+            with self.subTest(new=new): self._expect({self.SH: (old, new)})
+    def test_guard_repin_rejects_unquoted_pin(self):
+        self._expect({self.SH: (b"PIN=" + ROOT_FILE.encode() + b"\n",
+                                b"PIN=" + CHILD_FILE.encode() + b"\n")})
+    def test_guard_repin_rejects_lf_to_crlf(self):
+        old, new = self._line(ROOT_FILE.encode(), CHILD_FILE.encode())
+        self._expect({self.JSON: (old, new[:-1] + b"\r\n")})
+    def test_guard_repin_rejects_no_final_newline_marker(self):
+        self._expect({self.JSON: self._line(ROOT_FILE.encode(), CHILD_FILE.encode(), suffix=b'"')})
+    def test_guard_repin_rejects_non_allowed_perfect_substitutions(self):
+        pair = self._line(ROOT_FILE.encode(), CHILD_FILE.encode())
+        for path in ("scripts/clippy_allow_occurrences.json", "scripts/check_log_key_drift.py"):
+            with self.subTest(path=path): self._expect({path: pair}, [self.C])
+    def test_guard_repin_rejects_preexisting_modified_child(self):
+        changes = {self.PY: self._line(ROOT_FILE.encode(), CHILD_FILE.encode())}
+        self._expect(changes, tweak=lambda _b, _c, f: f["statuses"].update({CHILD_FILE: "M"}))
+        base, candidate, facts = self._case(changes)
+        for loc, present in ((999, False), (1000, True)):
+            with self.subTest(loc=loc, present=present):
+                locations = dict(candidate["modules"])
+                if not present: locations.pop(CHILD_FILE)
+                else: locations[CHILD_FILE] = loc
+                self.assertEqual(PROGRESS.matching_guard_repin_destinations(self.PY,
+                    facts["guard_repin_patches"][self.PY], {ROOT_FILE}, facts["children"], facts["statuses"], locations, set()), [])
+    def test_guard_repin_rejects_retiring_destination(self):
+        changes = {self.PY: self._line(ROOT_FILE.encode(), CHILD_FILE.encode())}
+        base, candidate, facts = self._case(changes); leaf = CHILD_FILE[:-3] + "/leaf.rs"
+        base["overdue"].insert(1, CHILD_FILE); base["modules"][CHILD_FILE] = 1200
+        base["registrations"][CHILD_FILE] = META_ROOT; candidate["modules"].update({CHILD_FILE: 800, leaf: 100})
+        facts["changed"].add(leaf); facts["statuses"][leaf] = "A"
+        facts["children"] = {ROOT_FILE: [CHILD_FILE], CHILD_FILE: [leaf]}
+        facts["moved"][CHILD_FILE] = occurrences(leaf, 100)
+        self.assertEqual(PROGRESS.matching_guard_repin_destinations(self.PY, facts["guard_repin_patches"][self.PY],
+            {ROOT_FILE, CHILD_FILE}, facts["children"], facts["statuses"], candidate["modules"], set()), [])
+        self.assertEqual(PROGRESS.progress_errors(base, candidate, facts), [f"guard repin is not a pure root→child path substitution: {self.PY}", self.C])
+    def test_guard_repin_rejects_registered_destination(self):
+        def registered(base, _candidate, _facts): base["registrations"][CHILD_FILE] = META_ROOT
+        self._expect({self.PY: self._line(ROOT_FILE.encode(), CHILD_FILE.encode())}, tweak=registered)
+    def test_guard_repin_rejects_child_owned_by_other_root(self):
+        root2, child2 = SURVIVOR, SURVIVOR_CHILD
+        changes = {self.PY: self._line(ROOT_FILE.encode(), child2.encode())}
+        base, candidate, facts = self._case(changes); base["overdue"] = [ROOT_FILE, root2]
+        candidate["overdue"] = []; candidate["modules"].update({root2: 800, child2: 200})
+        facts["changed"].update({root2, child2}); facts["statuses"][child2] = "A"
+        facts["children"] = {ROOT_FILE: [CHILD_FILE], root2: [child2]}
+        facts["moved"][root2] = occurrences(child2, 100); candidate["registrations"] = {}
+        self.assertEqual(PROGRESS.progress_errors(base, candidate, facts), [f"guard repin is not a pure root→child path substitution: {self.PY}", self.C])
+    def test_guard_repin_rejects_two_destinations_in_one_file(self):
+        root, a, b = ROOT_FILE.encode(), CHILD_FILE.encode(), b"src/services/discord/turn_finalizer/other.rs"
+        changes = {self.MAP: (b'A="' + root + b'"\nB="' + root + b'"\n',
+                              b'A="' + a + b'"\nB="' + b + b'"\n')}
+        def two(_base, candidate, facts):
+            name = b.decode(); candidate["modules"][name] = 10
+            facts["children"][ROOT_FILE].append(name); facts["statuses"][name] = "A"; facts["changed"].add(name)
+        self._expect(changes, tweak=two)
+    def test_guard_repin_rejects_reordered_k_by_k_hunk(self):
+        root, child = ROOT_FILE.encode(), CHILD_FILE.encode()
+        self._expect({self.MAP: (b'A="' + root + b'"\nB="' + root + b'"\n',
+                                 b'B="' + child + b'"\nA="' + child + b'"\n')})
+    def test_guard_repin_rejects_context_record(self):
+        changes = {self.PY: self._line(ROOT_FILE.encode(), CHILD_FILE.encode())}
+        base, candidate, facts = self._case(changes); patch = facts["guard_repin_patches"][self.PY]
+        lines = patch.split(b"\n"); index = next(i for i, line in enumerate(lines) if line.startswith(b"@@ "))
+        lines.insert(index + 1, b" context"); facts["guard_repin_patches"][self.PY] = b"\n".join(lines)
+        self.assertEqual(PROGRESS.pr_evaluation(base, candidate, facts)[1], [f"guard repin is not a pure root→child path substitution: {self.PY}", self.C])
+    def test_guard_repin_rejects_more_than_eight_pairs(self):
+        root, child = ROOT_FILE.encode(), CHILD_FILE.encode()
+        lines = lambda value: b"".join(str(i).encode() + b'="' + value + b'"\n' for i in range(9))
+        changes = {self.JSON: (lines(root), lines(child))}
+        self._expect(changes, [self.C])
+        base, candidate, facts = self._case({self.PY: self._line(root, child)})
+        for name, mutate in (("deleted", lambda f: f["statuses"].update({self.PY: "D"})), ("added", lambda f: f["statuses"].update({self.PY: "A"})),
+                             ("binary", lambda f: f["binary"].add(self.PY)), ("unequal", lambda f: f["numstat"].update({self.PY: (2, 1)})),
+                             ("missing", lambda f: f["numstat"].pop(self.PY))):
+            with self.subTest(name=name):
+                clone = copy.deepcopy(facts); mutate(clone)
+                self.assertEqual(PROGRESS.pr_evaluation(base, candidate, clone)[1], [self.C])
+    def test_guard_repin_invalid_bytes_fail_closed_and_write_evidence(self):
+        old, new = self._line(ROOT_FILE.encode(), CHILD_FILE.encode())
+        patch, _ = self._patch(self.SH, old, new[:-1] + b"\xff\n")
+        rc, payload = self._main_failure(patch)
+        self.assertEqual(rc, 2); self.assertEqual(payload["selector"], "pr_strict_progress")
+        self.assertEqual(payload["verdict"], "fail")
+        self.assertEqual(payload["reason"], f"guard repin is not a pure root→child path substitution: {self.SH}; {self.C}")
+    def test_guard_repin_rejects_nonretirement_partial_progress(self):
+        changes = {self.SH: self._line(ROOT_FILE.encode(), CHILD_FILE.encode())}
+        base, candidate, facts = self._case(changes)
+        candidate["overdue"] = list(base["overdue"]); candidate["registrations"] = dict(base["registrations"])
+        candidate["modules"][ROOT_FILE] = 848
+        facts["changed"].discard(PROGRESS.REGISTRY); facts["registry_equal"] = True
+        self.assertEqual(PROGRESS.pr_evaluation(base, candidate, facts)[1], [self.C])
+    def test_guard_repin_rejects_bootstrap(self):
+        pair = self._line(ROOT_FILE.encode(), CHILD_FILE.encode())
+        self._expect({self.SH: pair}, [self.C], tweak=lambda _b, _c, f: f.update(bootstrap=True))
+    def test_guard_repin_rejects_variable_rename_with_repin(self):
+        root, child = ROOT_FILE.encode(), CHILD_FILE.encode()
+        self._expect({self.SH: (b'OLD="' + root + b'"\necho "$OLD"\n',
+                                b'NEW="' + child + b'"\necho "$NEW"\n')})
+    def test_guard_repin_rejects_root_plus_child_balanced_rewrite(self):
+        root, child = ROOT_FILE.encode(), CHILD_FILE.encode()
+        self._expect({self.PY: (b'X="' + root + b'"\n', b'X="' + root + b'" "' + child + b'"\n')})
+    def test_guard_repin_rejects_only_one_of_two_occurrences(self):
+        root, child = ROOT_FILE.encode(), CHILD_FILE.encode()
+        self._expect({self.SH: (b'A="' + root + b'" B="' + root + b'"\n',
+                                b'A="' + child + b'" B="' + root + b'"\n')})
+    def test_guard_repin_rejects_path_plus_count_change(self):
+        root, child = ROOT_FILE.encode(), CHILD_FILE.encode()
+        self._expect({self.MAP: (b'"' + root + b'": 1,\n', b'"' + child + b'": 2,\n')})
+    def test_guard_repin_wraps_unexpected_helper_exception(self):
+        path = self.PY; patch, _ = self._patch(path, *self._line(ROOT_FILE.encode(), CHILD_FILE.encode()))
+        with mock.patch.object(PROGRESS, "whole_quoted_literal_pattern", side_effect=ValueError("injected")):
+            with self.assertRaisesRegex(RuntimeError, "^guard repin byte proof failed$") as direct:
+                PROGRESS.pure_guard_repin(patch, ROOT_FILE.encode(), CHILD_FILE.encode())
+            self.assertIsInstance(direct.exception.__cause__, ValueError)
+            with self.assertRaisesRegex(RuntimeError, f"^guard repin proof failed: {path}$") as outer:
+                PROGRESS.matching_guard_repin_destinations(path, patch, {ROOT_FILE},
+                    {ROOT_FILE: [CHILD_FILE]}, {CHILD_FILE: "A"}, {CHILD_FILE: 178}, set())
+            self.assertIsInstance(outer.exception.__cause__, RuntimeError)
+            self.assertIsInstance(outer.exception.__cause__.__cause__, ValueError)
+            rc, payload = self._main_failure(patch, path)
+        self.assertEqual(rc, 2); self.assertEqual(payload["reason"], f"guard repin proof failed: {path}")
+    def _main_failure(self, patch, path=None):
+        path = path or self.SH; changes = {path: self._line(ROOT_FILE.encode(), CHILD_FILE.encode())}
+        base, candidate, facts = self._case(changes)
+        facts["numstat"] = {path: (1, 1)}; facts["statuses"][path] = "M"
+        def archive(ref, destination):
+            scripts = destination / "scripts"; scripts.mkdir()
+            (destination / PROGRESS.EVALUATOR).write_bytes(Path(PROGRESS.__file__).read_bytes())
+            registry = f'[[entry]]\nfile = "{ROOT_FILE}"\n\n' if ref == "base" else ""
+            (destination / PROGRESS.REGISTRY).write_text(registry, encoding="utf-8")
+        def oid(ref, suffix="commit"):
+            if ref == "HEAD" or ref == "merge": return "merge"
+            if ref == "origin/main" or ref == "base": return "base"
+            if ref == "head": return "head"
+            if ref.endswith(":" + PROGRESS.REGISTRY): return "base-reg" if ref.startswith("base") else "merge-reg"
+            return "same"
+        def git(*args, binary=False):
+            if args[0] == "status" or args[0] == "fetch": return b"" if binary else ""
+            if args[0] == "rev-list": return "merge base head\n"
+            if args[0] == "diff" and binary: return patch
+            raise AssertionError(args)
+        def snapshot(root, evaluation_date=None): return candidate if root.name == "candidate" else base
+        env = {"GFP_EVENT_NAME": "pull_request", "GFP_REPOSITORY": "itismyfield/AgentDesk",
+               "GFP_HEAD_REPOSITORY": "itismyfield/AgentDesk", "GFP_CANDIDATE_SHA": "merge",
+               "GFP_BASE_SHA": "base", "GFP_HEAD_SHA": "head"}
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence.json"
+            with mock.patch.dict(PROGRESS.os.environ, env, clear=True), mock.patch.multiple(
+                    PROGRESS, EVIDENCE=evidence, archive=archive, oid=oid, git=git,
+                    diff_facts=lambda _b, _c: copy.deepcopy(facts),
+                    movement_ledger=lambda *_a: facts["moved"]), mock.patch.object(
+                    PROGRESS.inventory, "giant_file_snapshot", side_effect=snapshot):
+                rc = PROGRESS.main()
+            return rc, json.loads(evidence.read_text(encoding="utf-8"))
 if __name__ == "__main__":
     unittest.main()
