@@ -90,9 +90,10 @@ BARE_REFERENCES = {
 # (3 of 12), and row 9 pins the file where one spelling covers two functions.
 MANUAL_CLASSIFICATION = [
     ("src/services/discord/session_relay_sink.rs", "commit_ordered_jsonl_range", 1, 1),
-    ("src/services/discord/session_relay_sink.rs", "record_delivered_content_fingerprint", 1, 3),
+    # 2026-09-03: the root's inline tests moved to session_relay_sink/tests.rs, so the cfg(test)-blind counts equal the production counts here; delivery_record.rs and tmux.rs rows keep the blind/production divergence this test exists for.
+    ("src/services/discord/session_relay_sink.rs", "record_delivered_content_fingerprint", 1, 1),
     ("src/services/discord/session_relay_sink.rs", "advance_watcher_confirmed_end", 1, 1),
-    ("src/services/discord/session_relay_sink.rs", "finish_sink_delivery", 3, 4),
+    ("src/services/discord/session_relay_sink.rs", "finish_sink_delivery", 3, 3),
     ("src/services/discord/tmux.rs", "write_confirmed_delivery", 0, 1),
     ("src/services/discord/tmux.rs", "advance_watcher_confirmed_end", 1, 1),
     ("src/services/discord/outbound/delivery_record.rs", "shadow_mirror_delivered_frontier", 3, 12),
