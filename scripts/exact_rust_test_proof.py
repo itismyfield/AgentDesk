@@ -293,6 +293,8 @@ def run(plan: ProofPlan) -> ProofResult:
     transcripts: list[str] = []
     pass_records: list[str] = []
     for index, test_id in enumerate(sealed.execution_ids):
+        if _identity(plan) != sealed.identity:
+            _fail(f"sealed identity changed before credited child {test_id}")
         with tempfile.TemporaryDirectory(prefix=f"exact-rust-{index}-") as scratch:
             raw = Path(scratch) / "raw"
             normalized = Path(scratch) / "normalized"
@@ -303,6 +305,8 @@ def run(plan: ProofPlan) -> ProofResult:
                 stderr=subprocess.STDOUT,
                 check=False,
             )
+            if _identity(plan) != sealed.identity:
+                _fail(f"sealed identity changed after credited child {test_id}")
             raw.write_bytes(completed.stdout)
             normalized.write_bytes(completed.stdout.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
             text = normalized.read_text("utf-8")

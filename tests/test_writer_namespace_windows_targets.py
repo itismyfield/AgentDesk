@@ -136,6 +136,10 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$*\" >>\"$FAKE_CALLS\"\n"
             "[ \"$FAKE_MODE\" != identity ] || printf '# changed\\n' >>\"$FAKE_MANIFEST\"\n"
+            "calls=$(wc -l <\"$FAKE_CALLS\")\n"
+            "[ \"$FAKE_MODE\" != identity_race ] || [ \"$calls\" -ne 1 ] || printf '# changed\\n' >>\"$FAKE_IDENTITY\"\n"
+            "[ \"$FAKE_MODE\" != identity_race ] || [ \"$calls\" -ne 3 ] || cp \"$FAKE_ORIGINAL\" \"$FAKE_IDENTITY\"\n"
+            "[ \"$FAKE_MODE\" != unrelated_race ] || printf '# changed\\n' >>\"$FAKE_UNRELATED\"\n"
             "case \"$FAKE_MODE\" in\n"
             " zero) echo 'running 0 tests'; echo 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
             " ignored) echo 'running 1 test'; echo 'test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
@@ -178,6 +182,12 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             shutil.copy2(RUNNER, root / "scripts/ci/run-writer-namespace-windows-targets.sh")
             self.assertEqual(RUNNER.read_bytes(), (root / "scripts/ci/run-writer-namespace-windows-targets.sh").read_bytes())
             self.write_graph(root, active=active, optional_active=optional_active, mutation=mutation)
+            governed = root / LEXICAL.source
+            original = root / "lexical.original"
+            if governed.exists():
+                shutil.copy2(governed, original)
+            unrelated = root / "README.probe"
+            unrelated.write_text("unrelated\n", encoding="utf-8")
             self.fake_cargo(root)
             selected_owners = owners or ((LEXICAL, OPTIONAL) if optional else (LEXICAL,))
             command = ["bash", str(root / "scripts/ci/run-writer-namespace-windows-targets.sh")] if runner else self.command(root, selected_owners)
@@ -191,6 +201,9 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                 "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
                 "TMPDIR": str(scratch),
                 "FAKE_MANIFEST": str(root / "scripts/lib_test_inventory_manifest.txt"),
+                "FAKE_IDENTITY": str(governed),
+                "FAKE_ORIGINAL": str(original),
+                "FAKE_UNRELATED": str(unrelated),
             } | (extra_env or {})
             if not extra_env or "AGENTDESK_REPO_ROOT" not in extra_env:
                 env.pop("AGENTDESK_REPO_ROOT", None)
@@ -305,7 +318,15 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         changed = self.run_fixture(mode="identity")
         self.assertEqual(changed.result.returncode, 1)
         self.assertNotIn("RESULT selected=", changed.result.stdout)
-        self.assertIn("sealed source/manifest/inventory identity changed during execution", changed.result.stderr)
+        self.assertIn("sealed identity changed after credited child", changed.result.stderr)
+        raced = self.run_fixture(mode="identity_race")
+        self.assertEqual(raced.result.returncode, 1)
+        self.assertEqual(raced.calls, (CARGO_CALLS[0],))
+        self.assertNotIn("RESULT selected=", raced.result.stdout)
+        self.assertIn("sealed identity changed after credited child", raced.result.stderr)
+        unrelated = self.run_fixture(mode="unrelated_race")
+        self.assertEqual(unrelated.result.returncode, 0, unrelated.result.stderr)
+        self.assertEqual(unrelated.calls, CARGO_CALLS)
 
     def test_every_registered_optional_owner_absent_clean(self) -> None:
         registered = (OPTIONAL,)
