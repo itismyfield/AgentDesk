@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed ownership and execution proof for exact Rust library tests."""
+"""Ownership and endpoint-checked source identity for exact Rust library tests."""
 from __future__ import annotations
 
 import argparse
@@ -113,6 +113,15 @@ def _path(plan: ProofPlan, value: str, label: str) -> Path:
 def _plan_digest(plan: ProofPlan) -> str:
     return hashlib.sha256(repr(plan).encode("utf-8")).hexdigest()
 def _identity(plan: ProofPlan) -> str:
+    """Hash governed checkout bytes at a point in time.
+
+    The CI runner checkout is the trusted boundary. ``run`` checks identity at
+    seal and immediately before and after every credited child. On the
+    applicable path, it checks once more after transcript normalization,
+    reduction, and result construction but before proof records are emitted. A
+    governed-source change and restore wholly within one child window is not
+    detected and is outside this engine's guarantee.
+    """
     paths = [plan.manifest, "src/lib.rs", plan.gate.parent_source, plan.gate.child_source]
     paths += [value for owner in plan.owners for value in (owner.parent_source, owner.owner_source)]
     digest = hashlib.sha256()
@@ -279,7 +288,15 @@ def _reduce(test_id: str, rc: int, output: str, prefix: str) -> None:
 
 
 def run(plan: ProofPlan) -> ProofResult:
-    """Seal, execute serially, clean scratch, then emit owned proof records."""
+    """Execute with point-in-time governed-identity checks.
+
+    Identity is checked at seal and immediately before and after every credited
+    child. On the applicable path, it is checked once more after transcript
+    normalization, reduction, and result construction but before proof records
+    are emitted. The CI runner checkout is the trusted boundary. A
+    governed-source change and restore wholly within one child window is not
+    detected and is outside this engine's guarantee.
+    """
     digest = _plan_digest(plan)
     sealed = seal(plan)
     if _plan_digest(plan) != digest:
