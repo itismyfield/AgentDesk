@@ -1000,6 +1000,7 @@ src/
 │   │   │   ├── tombstone.rs
 │   │   │   └── warning_tests.rs
 │   │   ├── tui_direct_pending_start/
+│   │   │   ├── tests.rs
 │   │   │   └── watcher_cancel.rs
 │   │   ├── tui_prompt_relay/
 │   │   │   ├── synthetic_start/

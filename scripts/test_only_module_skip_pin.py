@@ -102,6 +102,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_watcher/utf8_chunk_decoder_tests.rs",
         "src/services/discord/tmux_watcher_registry_restore_tests.rs",
         "src/services/discord/tui_direct_abort_marker/warning_tests.rs",
+        "src/services/discord/tui_direct_pending_start/tests.rs",
         "src/services/discord/tui_prompt_relay/tests.rs",
         "src/services/discord/turn_bridge/chunk_compose_tests.rs",
         "src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs",

@@ -26,7 +26,7 @@ from pathlib import Path
 # 34 → 36 (#3982): the two backstop regression tests
 # `backstop_orphan_reclaim_downgrades_then_claims` and
 # `backstop_failed_reclaim_falls_back_to_bounded_abort`
-# (src/services/discord/tui_direct_pending_start.rs) hold `worker_test_lock()`
+# (src/services/discord/tui_direct_pending_start/tests.rs) hold `worker_test_lock()`
 # across `tokio::time::advance` awaits that drive `run_worker`. The guard
 # serializes tests mutating the process-wide PRESENT index / durable-store root;
 # releasing it before the awaits would let concurrent tests stomp the statics.
