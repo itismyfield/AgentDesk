@@ -82,6 +82,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs",
         "src/services/discord/runtime_bootstrap/spawns_tests.rs",
         "src/services/discord/session_relay_sink/delivery_orchestration_tests.rs",
+        "src/services/discord/session_relay_sink/tests.rs",
         "src/services/discord/status_panel_orphan_store_tests.rs",
         "src/services/discord/task_notification_delivery/tests.rs",
         "src/services/discord/tmux/task_notification_kind_restart_roundtrip_tests.rs",
