@@ -264,6 +264,9 @@ def seal(plan: ProofPlan) -> SealedProof:
             _fail(f"owner {owner.key} inventory/manifest closure differs from its immutable IDs")
         for test_id in owner.ids:
             site = inventory.tests.get(test_id, "").rsplit(":", 1)[0]
+            if re.match(r"^[A-Za-z]:", site):
+                _fail(f"inventory source site must not be a drive path: {site}")
+            site = _relative(site.replace("\\", "/"), "inventory source site")
             if site != owner.owner_source:
                 _fail(f"owner {owner.key} source site differs for {test_id}: {site}")
         candidates.extend(owner.ids)

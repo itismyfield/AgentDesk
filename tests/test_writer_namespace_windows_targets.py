@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
 
@@ -287,6 +288,21 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         unrelated = self.run_fixture(mutation="unrelated_family")
         self.assertEqual(unrelated.result.returncode, 0, unrelated.result.stderr)
         self.assertEqual(unrelated.calls, CARGO_CALLS)
+
+    def test_inventory_source_site_accepts_windows_separators(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "scripts").mkdir()
+            self.write_graph(root, active=True, optional_active=False, mutation="")
+            plan = proof.parse_cli(self.command(root, (LEXICAL,))[2:])
+            inventory = proof.collect_static_tests(root / "src/lib.rs", root)
+            windows_inventory = type(inventory)(
+                {test_id: site.replace("/", "\\") for test_id, site in inventory.tests.items()},
+                inventory.module_errors,
+                inventory.duplicate_tests,
+            )
+            with mock.patch.object(proof, "collect_static_tests", return_value=windows_inventory):
+                self.assertEqual(proof.seal(plan).execution_ids, IDS)
 
     def test_owner_sets_are_frozen_globally_disjoint_and_transactional(self) -> None:
         with self.assertRaises(FrozenInstanceError):
