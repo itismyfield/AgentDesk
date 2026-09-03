@@ -28,6 +28,14 @@ IDS = (
 CARGO_CALLS = tuple(f"test --lib {test_id} -- --exact --test-threads=1" for test_id in IDS)
 OPTIONAL_FAMILY = "services::writer_protocol::namespace::neutral::tests"
 OPTIONAL_ID = f"{OPTIONAL_FAMILY}::synthetic_optional_owner_proof"
+CATALOG_FAMILY = "services::writer_protocol::namespace::catalog::tests"
+CATALOG_IDS = (
+    f"{CATALOG_FAMILY}::canonical_and_legacy_session_aliases_share_exact_authority_key",
+    f"{CATALOG_FAMILY}::sealed_roots_issue_only_exact_reviewed_artifact_bindings",
+    f"{CATALOG_FAMILY}::duplicate_and_overlapping_catalog_bindings_are_rejected_atomically",
+    f"{CATALOG_FAMILY}::catalog_bindings_are_deterministic_and_injective",
+    f"{CATALOG_FAMILY}::unknown_roots_and_artifacts_never_receive_fallback_identity",
+)
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,7 @@ class Outcome:
 
 LEXICAL = OwnerFixture("lexical", "lexical", "src/services/writer_protocol/namespace/lexical.rs", FAMILY, "required", IDS)
 OPTIONAL = OwnerFixture("neutral", "neutral", "src/services/writer_protocol/namespace/neutral.rs", OPTIONAL_FAMILY, "optional", (OPTIONAL_ID,))
+CATALOG = OwnerFixture("catalog", "catalog", "src/services/writer_protocol/namespace/catalog.rs", CATALOG_FAMILY, "optional", CATALOG_IDS)
 
 
 class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
@@ -81,6 +90,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         *,
         active: bool,
         optional_active: bool,
+        catalog_active: bool = False,
         mutation: str,
     ) -> None:
         source = root / "src/services/writer_protocol/namespace"
@@ -95,6 +105,27 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             namespace += "mod neutral;\n"
             (source / "neutral.rs").write_text("#[cfg(test)]\nmod tests { #[test] fn synthetic_optional_owner_proof() {} }\n", encoding="utf-8")
             manifest_ids.add(OPTIONAL_ID)
+        if catalog_active:
+            namespace += "mod catalog;\n"
+            catalog = "#[cfg(test)]\nmod tests {\n" + "".join(f"#[test]\nfn {test_id.rsplit('::', 1)[1]}() {{}}\n" for test_id in CATALOG_IDS) + "}\n"
+            if mutation == "catalog_wrong_owner":
+                lexical = lexical[:-2] + catalog.split("{\n", 1)[1]
+                catalog = "#[cfg(test)]\nmod tests {}\n"
+            elif mutation == "catalog_duplicate":
+                catalog = catalog[:-2] + f"#[test]\nfn {CATALOG_IDS[0].rsplit('::', 1)[1]}() {{}}\n}}\n"
+            elif mutation == "catalog_partial":
+                catalog = catalog.replace(f"#[test]\nfn {CATALOG_IDS[-1].rsplit('::', 1)[1]}() {{}}\n", "")
+            elif mutation == "catalog_spoof":
+                catalog = catalog.replace("#[test]\nfn ", "// #[test] fn ", 1)
+            elif mutation == "catalog_extra":
+                catalog = catalog[:-2] + "#[test]\nfn unregistered_catalog() {}\n}\n"
+                manifest_ids.add(f"{CATALOG_FAMILY}::unregistered_catalog")
+            elif mutation == "catalog_redirected":
+                catalog = '#[path = "catalog_body.rs"]\nmod tests;\n'
+            elif mutation == "catalog_include":
+                catalog = 'include!("catalog_body.rs");\n'
+            (source / "catalog.rs").write_text(catalog, encoding="utf-8")
+            manifest_ids.update(CATALOG_IDS)
         if mutation == "inactive_residue":
             namespace = "mod lexical;\n"
         elif mutation == "duplicate_gate":
@@ -129,6 +160,8 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         if active and mutation != "missing_owner":
             (source / "lexical.rs").write_text(lexical, encoding="utf-8")
         manifest = render_lib_inventory_manifest(manifest_ids)
+        if mutation == "catalog_commented_manifest":
+            manifest = manifest.replace(CATALOG_IDS[0], "commented_" + CATALOG_IDS[0])
         (root / "scripts/lib_test_inventory_manifest.txt").write_text(manifest, encoding="utf-8")
 
     def fake_cargo(self, root: Path) -> None:
@@ -166,6 +199,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         active: bool = True,
         optional: bool = False,
         optional_active: bool = False,
+        catalog_active: bool = False,
         mutation: str = "",
         mode: str = "success",
         owners: tuple[OwnerFixture, ...] | None = None,
@@ -184,6 +218,9 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             shutil.copy2(RUNNER, root / "scripts/ci/run-writer-namespace-windows-targets.sh")
             self.assertEqual(RUNNER.read_bytes(), (root / "scripts/ci/run-writer-namespace-windows-targets.sh").read_bytes())
             self.write_graph(root, active=active, optional_active=optional_active, mutation=mutation)
+            if catalog_active:
+                shutil.rmtree(root / "src")
+                self.write_graph(root, active=active, optional_active=optional_active, catalog_active=True, mutation=mutation)
             governed = root / LEXICAL.source
             original = root / "lexical.original"
             if governed.exists():
@@ -380,6 +417,41 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         runner_text = RUNNER.read_text(encoding="utf-8")
         self.assertIn("readonly -a lexical_ids", runner_text)
         self.assertEqual([test_id for test_id in IDS if runner_text.count(test_id) == 1], list(IDS))
+
+    def test_exact_eight_selection_reducer(self) -> None:
+        outcome = self.run_fixture(owners=(LEXICAL, CATALOG), catalog_active=True)
+        expected = CARGO_CALLS + tuple(f"test --lib {test_id} -- --exact --test-threads=1" for test_id in CATALOG_IDS)
+        self.assertEqual(outcome.result.returncode, 0, outcome.result.stderr)
+        self.assertEqual(outcome.calls, expected)
+        self.assertEqual(outcome.result.stdout.count(" PASS id="), 8)
+        self.assertEqual(outcome.result.stdout.count("RESULT selected=8 passed=8"), 1)
+        self.assertEqual(outcome.temp_before, outcome.temp_after, ())
+        runner = self.run_fixture(runner=True, catalog_active=True)
+        self.assertEqual(runner.result.returncode, 0, runner.result.stderr)
+        self.assertEqual(runner.calls, expected)
+        self.assertEqual([line.split(" PASS id=", 1)[1].split(" selected=", 1)[0] for line in runner.result.stdout.splitlines() if " PASS id=" in line], list(IDS + CATALOG_IDS))
+
+    def test_every_registered_catalog_owner_absent_clean(self) -> None:
+        outcome = self.run_fixture(runner=True)
+        self.assertEqual(outcome.result.returncode, 0, outcome.result.stderr)
+        self.assertEqual(outcome.calls, CARGO_CALLS)
+        self.assertEqual((outcome.result.stdout.count(" PASS id="), outcome.result.stdout.count("RESULT selected=3 passed=3")), (3, 1))
+        self.assertIn(f"{proof.ABSENT_PREFIX} owner=catalog selected=3 passed=3 absent_selected=0 temp=empty", outcome.result.stdout)
+        self.assertEqual(outcome.temp_before, outcome.temp_after, ())
+
+    def test_catalog_owner_symmetry_counts_and_fail_closed_shapes(self) -> None:
+        runner_text = RUNNER.read_text(encoding="utf-8")
+        self.assertEqual([test_id for test_id in CATALOG_IDS if runner_text.count(test_id) == 1], list(CATALOG_IDS))
+        for mutation in ("catalog_wrong_owner", "catalog_duplicate", "catalog_partial", "catalog_spoof", "catalog_extra", "catalog_redirected", "catalog_include", "catalog_commented_manifest"):
+            with self.subTest(mutation=mutation):
+                self.assert_structural_failure(self.run_fixture(owners=(LEXICAL, CATALOG), catalog_active=True, mutation=mutation), "owner")
+        collision = OwnerFixture("catalog", "catalog", CATALOG.source, CATALOG_FAMILY, "optional", (CATALOG_IDS[0], IDS[0]))
+        self.assert_structural_failure(self.run_fixture(owners=(LEXICAL, collision), catalog_active=True), "does not belong exactly")
+        absent = self.run_fixture(runner=True)
+        self.assertEqual(absent.result.returncode, 0, absent.result.stderr)
+        self.assertEqual(absent.calls, CARGO_CALLS)
+        self.assertNotIn(CATALOG_FAMILY, "\n".join(line for line in absent.result.stdout.splitlines() if " PASS id=" in line))
+        self.assertIn(f"{proof.ABSENT_PREFIX} owner=catalog selected=3 passed=3 absent_selected=0 temp=empty", absent.result.stdout)
 
     def test_cli_emits_unicode_as_utf8_under_cp1252(self) -> None:
         outcome = self.run_fixture(mode="unicode", extra_env={"PYTHONIOENCODING": "cp1252"})
