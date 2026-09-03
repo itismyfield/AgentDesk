@@ -18,7 +18,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "6b71e5c674b9c77a6acac2e7026159883653bcaaa90f5a2609daaf54be9f8ba1"
+    "2f6a3d2d6260c546608052819be383115bf979df948e6ca3a16e5a45d2231ca0"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
@@ -410,13 +410,25 @@ class FastCheckCiWiringTests(unittest.TestCase):
         self.assertNotRegex(job, r"(?m)^\s*cargo test\b")
         self.assertNotIn("- name: cargo test", job)
         filters = paths_filter_definitions(workflow)
-        runner_path = "scripts/ci/run-writer-namespace-windows-targets.sh"
+        proof_paths = (
+            "scripts/ci/run-writer-namespace-windows-targets.sh",
+            "scripts/exact_rust_test_proof.py",
+        )
         for selector in ("rust_compile", "cross_os_rust"):
-            self.assertEqual(filters[selector].count(runner_path), 1)
+            for proof_path in proof_paths:
+                self.assertEqual(filters[selector].count(proof_path), 1)
         self.assertEqual(filters["cross_os_rust"].count("src/services/writer_protocol/**"), 1)
-        filter_line = f"              - '{runner_path}'"
-        for mutated in (workflow.replace(filter_line, "", 1), replace_last(workflow, filter_line, "")):
-            self.assertNotEqual(self.run_hardening_fixture(mutated).returncode, 0)
+        self.assertNotIn(proof_paths[1], job)
+        for proof_path in proof_paths:
+            filter_line = f"              - '{proof_path}'"
+            mutations = (
+                workflow.replace(filter_line, "", 1),
+                replace_last(workflow, filter_line, ""),
+                workflow.replace(filter_line, f"{filter_line}\n{filter_line}", 1),
+                replace_last(workflow, filter_line, f"{filter_line}\n{filter_line}"),
+            )
+            for mutated in mutations:
+                self.assertNotEqual(self.run_hardening_fixture(mutated).returncode, 0)
 
     def test_inflight_lock_primitive_triggers_required_native_windows_lane(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")

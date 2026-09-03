@@ -995,11 +995,14 @@ protected_step_env = {
   "CARGO_PROFILE_TEST_DEBUG" => "0",
 }
 errors = []
-runner_owner = "scripts/ci/run-writer-namespace-windows-targets.sh"
+proof_owners = [
+  "scripts/ci/run-writer-namespace-windows-targets.sh",
+  "scripts/exact_rust_test_proof.py",
+]
 filter_step = Array(jobs.dig("changes", "steps")).find { |step| step.is_a?(Hash) && step["uses"] == "dorny/paths-filter@v3" }
 path_filters = YAML.safe_load(filter_step&.dig("with", "filters").to_s) || {}
-%w[rust_compile cross_os_rust].each do |filter|
-  errors << "writer namespace runner must select #{filter} exactly once" unless Array(path_filters[filter]).count(runner_owner) == 1
+proof_owners.product(%w[rust_compile cross_os_rust]).each do |owner, filter|
+  errors << "exact Rust proof owner #{owner} must select #{filter} exactly once" unless Array(path_filters[filter]).count(owner) == 1
 end
 
 targets.each do |job_id, spec|
