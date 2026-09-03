@@ -81,6 +81,7 @@ class AbsentCleanExpectation:
 class SealedProof:
     execution_ids: tuple[str, ...]
     absent: tuple[AbsentCleanExpectation, ...]
+    identity: str
 def _fail(message: str) -> None:
     raise ProofError(message)
 
@@ -111,6 +112,14 @@ def _path(plan: ProofPlan, value: str, label: str) -> Path:
 
 def _plan_digest(plan: ProofPlan) -> str:
     return hashlib.sha256(repr(plan).encode("utf-8")).hexdigest()
+def _identity(plan: ProofPlan) -> str:
+    paths = [plan.manifest, "src/lib.rs", plan.gate.parent_source, plan.gate.child_source]
+    paths += [value for owner in plan.owners for value in (owner.parent_source, owner.owner_source)]
+    digest = hashlib.sha256()
+    for value in sorted(set(paths)):
+        path = _path(plan, value, "identity path")
+        digest.update(value.encode() + b"\0" + (path.read_bytes() if path.is_file() else b"<absent>") + b"\0")
+    return digest.hexdigest()
 def _module_count(source: Path, module: str) -> int:
     if not source.is_file():
         return 0
@@ -221,7 +230,8 @@ def seal(plan: ProofPlan) -> SealedProof:
             residue |= bool(_family_ids(manifest_ids, owner.owner_family))
         if residue or plan.gate.policy == "required":
             _fail(f"gate {plan.gate.key} is absent but required or has residue")
-        return SealedProof((), ())
+        absent = tuple(AbsentCleanExpectation(owner.key) for owner in plan.owners if owner.policy == "optional")
+        return SealedProof((), absent, _identity(plan))
     if not gate_child.is_file():
         _fail(f"gate {plan.gate.key} child is missing")
     candidates: list[str] = []
@@ -253,7 +263,7 @@ def seal(plan: ProofPlan) -> SealedProof:
     execution_ids = tuple(candidates)
     if any(execution_ids is owner.ids for owner in plan.owners):
         _fail("execution tuple must not alias owner state")
-    return SealedProof(execution_ids, tuple(absent))
+    return SealedProof(execution_ids, tuple(absent), _identity(plan))
 
 
 def _reduce(test_id: str, rc: int, output: str, prefix: str) -> None:
@@ -275,8 +285,11 @@ def run(plan: ProofPlan) -> ProofResult:
     if _plan_digest(plan) != digest:
         _fail("immutable proof plan changed while sealing")
     if not sealed.execution_ids:
+        result = ProofResult(False, (), 0, 0)
         print(f"{plan.pass_prefix} NOT_APPLICABLE")
-        return ProofResult(False, (), 0, 0)
+        for expectation in sealed.absent:
+            print(expectation.render(result))
+        return result
     transcripts: list[str] = []
     pass_records: list[str] = []
     for index, test_id in enumerate(sealed.execution_ids):
@@ -299,6 +312,8 @@ def run(plan: ProofPlan) -> ProofResult:
     result = ProofResult(True, sealed.execution_ids, len(sealed.execution_ids), len(pass_records))
     if _plan_digest(plan) != digest or result.execution_ids != sealed.execution_ids:
         _fail("proof plan or transactional execution tuple changed")
+    if _identity(plan) != sealed.identity:
+        _fail("sealed source/manifest/inventory identity changed during execution")
     for text in transcripts:
         print(text, end="" if text.endswith("\n") else "\n")
     for record in pass_records:

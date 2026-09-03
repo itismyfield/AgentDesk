@@ -24,6 +24,7 @@ IDS = (
     f"{FAMILY}::unsupported_prefixes_and_escape_components_fail_closed",
     f"{FAMILY}::normalized_candidates_preserve_case_separators_and_root_boundaries",
 )
+CARGO_CALLS = tuple(f"test --lib {test_id} -- --exact --test-threads=1" for test_id in IDS)
 OPTIONAL_FAMILY = "services::writer_protocol::namespace::neutral::tests"
 OPTIONAL_ID = f"{OPTIONAL_FAMILY}::synthetic_optional_owner_proof"
 
@@ -133,7 +134,8 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         fake = root / "bin/cargo"
         fake.write_text(
             "#!/usr/bin/env bash\n"
-            "printf '%s\\n' \"$3\" >>\"$FAKE_CALLS\"\n"
+            "printf '%s\\n' \"$*\" >>\"$FAKE_CALLS\"\n"
+            "[ \"$FAKE_MODE\" != identity ] || printf '# changed\\n' >>\"$FAKE_MANIFEST\"\n"
             "case \"$FAKE_MODE\" in\n"
             " zero) echo 'running 0 tests'; echo 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
             " ignored) echo 'running 1 test'; echo 'test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 3 filtered out; finished in 0.00s' ;;\n"
@@ -174,6 +176,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             shutil.copy2(ENGINE, root / "scripts/exact_rust_test_proof.py")
             shutil.copy2(INVENTORY, root / "scripts/check_test_target_integrity.py")
             shutil.copy2(RUNNER, root / "scripts/ci/run-writer-namespace-windows-targets.sh")
+            self.assertEqual(RUNNER.read_bytes(), (root / "scripts/ci/run-writer-namespace-windows-targets.sh").read_bytes())
             self.write_graph(root, active=active, optional_active=optional_active, mutation=mutation)
             self.fake_cargo(root)
             selected_owners = owners or ((LEXICAL, OPTIONAL) if optional else (LEXICAL,))
@@ -187,8 +190,10 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                 "FAKE_MODE": mode,
                 "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
                 "TMPDIR": str(scratch),
+                "FAKE_MANIFEST": str(root / "scripts/lib_test_inventory_manifest.txt"),
             } | (extra_env or {})
-            env.pop("AGENTDESK_REPO_ROOT", None)
+            if not extra_env or "AGENTDESK_REPO_ROOT" not in extra_env:
+                env.pop("AGENTDESK_REPO_ROOT", None)
             temp_before = tuple(item.name for item in scratch.iterdir())
             result = subprocess.run(command, text=True, capture_output=True, env=env, check=False)
             calls = tuple(calls_path.read_text(encoding="utf-8").splitlines()) if calls_path.exists() else ()
@@ -205,11 +210,30 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         self.assertEqual(outcome.temp_after, ())
 
     def test_caller_selected_root_is_rejected(self) -> None:
-        env = os.environ | {"AGENTDESK_REPO_ROOT": "", "PATH": os.environ["PATH"]}
-        result = subprocess.run(["bash", str(RUNNER)], text=True, capture_output=True, env=env, check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("AGENTDESK_REPO_ROOT", result.stderr)
-        self.assertNotIn("NOT_APPLICABLE", result.stdout)
+        for value in ("", "/caller/selected"):
+            with self.subTest(value=value):
+                outcome = self.run_fixture(runner=True, extra_env={"AGENTDESK_REPO_ROOT": value})
+                self.assertNotEqual(outcome.result.returncode, 0)
+                self.assertIn("AGENTDESK_REPO_ROOT", outcome.result.stderr)
+                self.assertEqual(outcome.calls, ())
+
+    def test_wrapper_selects_only_supported_path_interpreter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bindir = Path(temp)
+            (bindir / "python").symlink_to(sys.executable)
+            (bindir / "dirname").symlink_to(shutil.which("dirname"))
+            env = os.environ | {"PATH": str(bindir), "PYTHON": "forbidden", "AGENTDESK_PYTHON": "forbidden"}
+            result = subprocess.run(["/bin/bash", str(RUNNER)], text=True, capture_output=True, env=env, check=False)
+            self.assertNotEqual(result.returncode, 127, result.stderr)
+            (bindir / "python").unlink()
+            result = subprocess.run(["/bin/bash", str(RUNNER)], text=True, capture_output=True, env=env, check=False)
+            self.assertEqual(result.returncode, 86)
+            self.assertIn("requires python3 or python", result.stderr)
+            (bindir / "python").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            (bindir / "python").chmod(0o755)
+            result = subprocess.run(["/bin/bash", str(RUNNER)], text=True, capture_output=True, env=env, check=False)
+            self.assertEqual(result.returncode, 87)
+            self.assertIn("must be >= 3.11", result.stderr)
 
     def test_only_unconditional_run_is_exposed(self) -> None:
         rejected = self.run_fixture(extra_args=("--validate-only",))
@@ -217,13 +241,15 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         self.assertEqual(rejected.calls, ())
         executed = self.run_fixture(extra_env={"EXACT_RUST_TEST_PROOF_MODE": "skip"})
         self.assertEqual(executed.result.returncode, 0, executed.result.stderr)
-        self.assertEqual(executed.calls, IDS)
+        self.assertEqual(executed.calls, CARGO_CALLS)
 
     def test_token_activation_and_inactive_residue_fail_closed(self) -> None:
         inactive = self.run_fixture(active=False)
         self.assertEqual(inactive.result.returncode, 0, inactive.result.stderr)
         self.assertIn("NOT_APPLICABLE", inactive.result.stdout)
         self.assertEqual(inactive.calls, ())
+        optional_inactive = self.run_fixture(active=False, optional=True)
+        self.assertIn(f"{proof.ABSENT_PREFIX} owner=neutral selected=0 passed=0 absent_selected=0 temp=empty", optional_inactive.result.stdout)
         spoof = self.run_fixture(active=False, mutation="comment_gate")
         self.assertEqual(spoof.result.returncode, 0, spoof.result.stderr)
         self.assertIn("NOT_APPLICABLE", spoof.result.stdout)
@@ -247,7 +273,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                 self.assert_structural_failure(self.run_fixture(mutation=mutation, owners=owners), target)
         unrelated = self.run_fixture(mutation="unrelated_family")
         self.assertEqual(unrelated.result.returncode, 0, unrelated.result.stderr)
-        self.assertEqual(unrelated.calls, IDS)
+        self.assertEqual(unrelated.calls, CARGO_CALLS)
 
     def test_owner_sets_are_frozen_globally_disjoint_and_transactional(self) -> None:
         with self.assertRaises(FrozenInstanceError):
@@ -272,10 +298,14 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 outcome = self.run_fixture(mode=mode)
                 self.assertNotEqual(outcome.result.returncode, 0)
-                self.assertEqual(outcome.calls, (IDS[0],))
+                self.assertEqual(outcome.calls, (CARGO_CALLS[0],))
                 self.assertEqual(outcome.temp_before, ())
                 self.assertEqual(outcome.temp_after, ())
                 self.assertNotIn(" PASS id=", outcome.result.stdout)
+        changed = self.run_fixture(mode="identity")
+        self.assertEqual(changed.result.returncode, 1)
+        self.assertNotIn("RESULT selected=", changed.result.stdout)
+        self.assertIn("sealed source/manifest/inventory identity changed during execution", changed.result.stderr)
 
     def test_every_registered_optional_owner_absent_clean(self) -> None:
         registered = (OPTIONAL,)
@@ -286,7 +316,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             with self.subTest(owner=optional.key):
                 outcome = self.run_fixture(optional=True)
                 self.assertEqual(outcome.result.returncode, 0, outcome.result.stderr)
-                self.assertEqual(outcome.calls, IDS)
+                self.assertEqual(outcome.calls, CARGO_CALLS)
                 self.assertEqual(outcome.result.stdout.count(" PASS id="), 3)
                 self.assertNotIn(OPTIONAL_ID, outcome.result.stdout)
                 self.assertIn("RESULT selected=3 passed=3", outcome.result.stdout)
@@ -299,10 +329,10 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
     def test_optional_active_and_real_runner_preserve_exact_order(self) -> None:
         active_optional = self.run_fixture(optional=True, optional_active=True)
         self.assertEqual(active_optional.result.returncode, 0, active_optional.result.stderr)
-        self.assertEqual(active_optional.calls, IDS + (OPTIONAL_ID,))
+        self.assertEqual(active_optional.calls, CARGO_CALLS + (f"test --lib {OPTIONAL_ID} -- --exact --test-threads=1",))
         real = self.run_fixture(runner=True)
         self.assertEqual(real.result.returncode, 0, real.result.stderr)
-        self.assertEqual(real.calls, IDS)
+        self.assertEqual(real.calls, CARGO_CALLS)
         passes = [line for line in real.result.stdout.splitlines() if " PASS id=" in line]
         self.assertEqual(passes, [f"WRITER_NAMESPACE_WINDOWS_TARGET PASS id={test_id} selected=1 passed=1" for test_id in IDS])
         self.assertEqual(real.result.stdout.count("RESULT selected=3 passed=3"), 1)
