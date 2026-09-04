@@ -655,7 +655,8 @@ fi
 # Fixed index-only retention uses the existing 3600-second grace.
 rm -f "$CANONICAL_ROOT"/restart_*
 printf 'nonce=fresh-index\n' >"$CANONICAL_ROOT/restart_persisted"
-set_phase2_file_age "$CANONICAL_ROOT/restart_persisted" 3599
+# A 600-second margin avoids wall-clock scheduling races while still testing a fresh index.
+set_phase2_file_age "$CANONICAL_ROOT/restart_persisted" 3000
 _restart_sweep_terminal_indexes "$CANONICAL_ROOT" >/dev/null 2>&1
 [ -e "$CANONICAL_ROOT/restart_persisted" ] \
   && pass "fresh fixed index survives terminal sweep grace" \
