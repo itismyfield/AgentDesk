@@ -1346,14 +1346,14 @@ time for diagnostics; neither is a stored approval value.
     commit + visible-completion consumption, and `sweep.rs` owns the TTL sweep.
     All files are below the giant-file threshold; the #4175 registry entry is
     retired.
-  - `src/services/discord/tui_direct_pending_start.rs` (frozen giant surface;
-    the deferred TUI-direct synthetic turn-start path — the pending-start claim
-    queue, the no-evict promote of a stalled inflight, and the deferred-claim
-    owner handoff. #3540 added the B′ "no-evict promote" path (a stalled inflight
-    is safely promoted off the pending-start queue instead of evicted) plus its
-    regression tests, which pushed the production surface over the 1000-line
-    giant-file threshold, so this file is now a registered giant. Bugfix /
-    queue-safety only; split before adding new pending-start behavior).
+  - `src/services/discord/tui_direct_pending_start{.rs,/state.rs}` (933 / 877
+    production lines): the root owns channel serialization, destructive async
+    flows, the worker FSM, marker wrappers, and no-evict post-abort promotion;
+    `state.rs` owns pending-start models, presence and durable persistence,
+    prior-turn/stale/restart policy, and the shared watcher-owned marker recorder.
+    The normal `mod state;` edge and explicit minimal facade re-exports preserve
+    caller paths while keeping both files below the giant threshold; the #3540
+    registry entry is retired.
   - `src/services/discord/tmux_placeholder_suppression/{mod,evidence,ops}.rs`
     (348 / 259 / 584 production lines after #4176; formerly
     `tmux_placeholder_suppression.rs` at 1092 production lines. The facade keeps
