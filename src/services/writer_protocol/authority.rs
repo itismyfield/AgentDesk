@@ -4,7 +4,7 @@
 //! cross-process coordination, writer census, and production activation belong
 //! to later W0b slices.
 
-use super::ProviderDomain;
+use super::{ProviderDomain, namespace::catalog::CatalogAuthoritySet};
 use std::sync::{Mutex, MutexGuard};
 
 macro_rules! semantic_id {
@@ -13,7 +13,7 @@ macro_rules! semantic_id {
         pub(crate) struct $name(u64);
 
         impl $name {
-            pub(crate) const fn new(value: u64) -> Self {
+            pub(in crate::services::writer_protocol) const fn new(value: u64) -> Self {
                 Self(value)
             }
 
@@ -35,7 +35,7 @@ semantic_id!(HolderInstance);
 pub(crate) struct RuntimeNamespaceId(u64);
 
 impl RuntimeNamespaceId {
-    pub(crate) const fn from_catalog(value: u64) -> Self {
+    pub(in crate::services::writer_protocol) const fn from_catalog(value: u64) -> Self {
         Self(value)
     }
 }
@@ -45,7 +45,7 @@ impl RuntimeNamespaceId {
 pub(crate) struct AliasGroupId(u64);
 
 impl AliasGroupId {
-    pub(crate) const fn from_catalog(value: u64) -> Self {
+    pub(in crate::services::writer_protocol) const fn from_catalog(value: u64) -> Self {
         Self(value)
     }
 }
@@ -172,7 +172,7 @@ pub(crate) struct AuthorityKey {
 }
 
 impl AuthorityKey {
-    pub(crate) fn new(
+    pub(in crate::services::writer_protocol) fn new(
         runtime_namespace: RuntimeNamespaceId,
         conflict_domain: ConflictDomain,
         alias_group: AliasGroupId,
@@ -248,7 +248,7 @@ impl AuthorityActor {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct AuthorityRequest {
     set_id: AuthoritySetId,
     actor: AuthorityActor,
@@ -256,7 +256,29 @@ pub(crate) struct AuthorityRequest {
 }
 
 impl AuthorityRequest {
-    pub(crate) fn new(
+    pub(in crate::services::writer_protocol) fn from_catalog(
+        issued: CatalogAuthoritySet,
+    ) -> Result<Self, AuthorityRequestError> {
+        let (set_id, actor, session, artifacts) = issued.into_parts();
+        let keys = artifacts.into_iter().map(|(namespace, alias, artifact)| {
+            AuthorityKey::new(
+                RuntimeNamespaceId::from_catalog(namespace),
+                ConflictDomain::try_new(
+                    [
+                        ConflictSegment::RuntimeSessions,
+                        ConflictSegment::Session(session),
+                        ConflictSegment::Artifact(artifact),
+                    ],
+                    ConflictCoverage::Exact,
+                )
+                .expect("fixed catalog lineage is nonempty"),
+                AliasGroupId::from_catalog(alias),
+            )
+        });
+        Self::new(set_id, actor, keys)
+    }
+
+    pub(in crate::services::writer_protocol) fn new(
         set_id: AuthoritySetId,
         actor: AuthorityActor,
         keys: impl IntoIterator<Item = AuthorityKey>,

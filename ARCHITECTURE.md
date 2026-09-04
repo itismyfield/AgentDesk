@@ -1517,6 +1517,7 @@ src/
 │   │   └── turn_finished_signal.rs
 │   ├── writer_protocol/
 │   │   ├── namespace/
+│   │   │   ├── catalog.rs
 │   │   │   └── lexical.rs
 │   │   ├── authority.rs
 │   │   └── namespace.rs
