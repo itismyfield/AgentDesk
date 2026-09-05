@@ -28,6 +28,19 @@ pub const PAUSE_REASON_FAILURE: &str = "failure";
 pub const PAUSE_REASON_MANUAL: &str = "manual";
 pub const PAUSE_REASON_MIGRATION_INVALID: &str = "migration_invalid";
 
+/// Every `script_ref` attached in the `routines` table, regardless of status
+/// (enabled/paused/detached all count as "registered"). Used by the boot
+/// warning and `agentdesk doctor` to spot scripts on disk nobody attached.
+pub async fn registered_routine_script_refs(
+    pool: &PgPool,
+) -> Result<std::collections::HashSet<String>> {
+    let refs: Vec<String> = sqlx::query_scalar("SELECT DISTINCT script_ref FROM routines")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| anyhow!("list registered routine script refs: {e}"))?;
+    Ok(refs.into_iter().collect())
+}
+
 pub(crate) fn terminal_failure_should_pause(pause_on_terminal_failure: bool) -> bool {
     terminal_failure_pause_reason(pause_on_terminal_failure).is_some()
 }

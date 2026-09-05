@@ -325,11 +325,18 @@ async fn sync_loaded_github_issues_for_repo_pg(
                 );
             } else if issue.state == "OPEN" && is_terminal {
                 result.inconsistency_count += 1;
-                tracing::warn!(
-                    "[github-sync] {repo}#{}: card {} is terminal but issue is OPEN",
-                    issue.number,
-                    card.id
+                // Same (repo, issue, card) recurs every sync cycle until an
+                // operator acts; WARN once per process lifetime, DEBUG after.
+                let warn_key = terminal_open_warn_key(issue.number, &card.id);
+                super::warn_dedupe::warn_once_else_debug(
+                    &super::warn_dedupe::sync_scope(repo),
+                    &warn_key,
+                    &format!(
+                        "[github-sync] {repo}#{}: card {} is terminal but issue is OPEN",
+                        issue.number, card.id
+                    ),
                 );
+                result.repeat_warn_keys.insert(warn_key);
                 // #1946 (codex C — observability promotion): the OPEN/terminal
                 // mismatch was previously only counted in the result and
                 // emitted as a tracing warning, so production retros for the
@@ -425,6 +432,14 @@ async fn sync_loaded_github_issues_for_repo_pg(
         .execute(pool)
         .await
         .map_err(|error| format!("update last_synced_at: {error}"))?;
+
+    // Cycle completed: forget deduped warnings whose condition was not seen
+    // this cycle so a recurrence warns again. Error paths above skip this on
+    // purpose — an aborted cycle proves nothing about resolution.
+    super::warn_dedupe::GITHUB_REPEAT_WARNINGS.retain(
+        &super::warn_dedupe::sync_scope(repo),
+        &result.repeat_warn_keys,
+    );
 
     Ok(result)
 }
@@ -874,11 +889,29 @@ fn apply_stale_reconcile_fetch_report(
     result.stale_card_issue_error_count += report.error_count;
 
     if report.error_count > 0 {
-        tracing::warn!(
+        // Each distinct error string (e.g. "Could not resolve … Issue 4303")
+        // recurs every cycle while the referenced issue stays unresolvable.
+        // WARN only when at least one error is new for this process; the
+        // repeat case drops to DEBUG.
+        let scope = super::warn_dedupe::sync_scope(repo);
+        let mut any_new = false;
+        for error in &report.errors {
+            let key = stale_reconcile_warn_key(error);
+            if super::warn_dedupe::GITHUB_REPEAT_WARNINGS.first_occurrence(&scope, &key) {
+                any_new = true;
+            }
+            result.repeat_warn_keys.insert(key);
+        }
+        let message = format!(
             "[github-sync] {repo}: stale card reconcile had {} non-fatal GraphQL error(s): {}",
             report.error_count,
             report.errors.join("; ")
         );
+        if any_new {
+            tracing::warn!("{message}");
+        } else {
+            tracing::debug!("{message} (repeat; first occurrence already warned)");
+        }
     }
 
     let stale_closed_issue_count = report
@@ -1425,6 +1458,22 @@ pub struct SyncResult {
     pub stale_card_issue_check_count: usize,
     pub stale_card_issue_batch_count: usize,
     pub stale_card_issue_error_count: usize,
+    /// Repeat-warning keys observed during this sync cycle. Handed to
+    /// `warn_dedupe::GITHUB_REPEAT_WARNINGS::retain` when the cycle completes
+    /// so conditions that resolved warn again if they recur.
+    pub(crate) repeat_warn_keys: HashSet<String>,
+}
+
+/// Dedupe key for the "card is terminal but issue is OPEN" warning.
+fn terminal_open_warn_key(issue_number: i64, card_id: &str) -> String {
+    format!("terminal-open:#{issue_number}:{card_id}")
+}
+
+/// Dedupe key for one stale-reconcile GraphQL error string. The error text
+/// carries the issue number (`Could not resolve … number of 4303`), so the
+/// key is effectively `(repo, issue, reason)`.
+fn stale_reconcile_warn_key(error: &str) -> String {
+    format!("stale-reconcile:{error}")
 }
 
 /// Reason code attached to terminal-card / OPEN-issue mismatch alerts so the
@@ -1677,6 +1726,54 @@ mod terminal_open_alert_tests {
         assert_eq!(result.stale_card_issue_check_count, 3);
         assert_eq!(result.stale_card_issue_batch_count, 1);
         assert_eq!(result.stale_card_issue_error_count, 1);
+        assert!(
+            result
+                .repeat_warn_keys
+                .contains(&stale_reconcile_warn_key("GraphQL unavailable"))
+        );
+    }
+
+    #[test]
+    fn stale_reconcile_errors_are_deduped_per_repo_until_they_clear() {
+        use super::super::warn_dedupe::{GITHUB_REPEAT_WARNINGS, sync_scope};
+
+        let repo = "owner/dedupe-repo";
+        let error = "Could not resolve to an issue or pull request with the number of 4303.";
+        let key = stale_reconcile_warn_key(error);
+        let scope = sync_scope(repo);
+        let mut issues = Vec::new();
+
+        let mut first = SyncResult::default();
+        let report = StaleIssueFetchReport {
+            batch_count: 1,
+            error_count: 1,
+            errors: vec![error.to_string()],
+            ..StaleIssueFetchReport::default()
+        };
+        apply_stale_reconcile_fetch_report(repo, &mut first, &mut issues, 1, report);
+        assert!(first.repeat_warn_keys.contains(&key));
+        assert!(GITHUB_REPEAT_WARNINGS.is_tracked(&scope, &key));
+        // Second cycle with the same error: still tracked (would log DEBUG).
+        assert!(!GITHUB_REPEAT_WARNINGS.first_occurrence(&scope, &key));
+
+        // Cycle without the error completes: the key is released.
+        GITHUB_REPEAT_WARNINGS.retain(&scope, &SyncResult::default().repeat_warn_keys);
+        assert!(!GITHUB_REPEAT_WARNINGS.is_tracked(&scope, &key));
+        // Recurrence warns again (first occurrence after release).
+        assert!(GITHUB_REPEAT_WARNINGS.first_occurrence(&scope, &key));
+        GITHUB_REPEAT_WARNINGS.retain(&scope, &HashSet::new());
+    }
+
+    #[test]
+    fn terminal_open_warn_key_is_scoped_by_issue_and_card() {
+        assert_eq!(
+            terminal_open_warn_key(5490, "3be9c9ee"),
+            "terminal-open:#5490:3be9c9ee"
+        );
+        assert_ne!(
+            terminal_open_warn_key(5490, "card-a"),
+            terminal_open_warn_key(5490, "card-b")
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 pub mod sync;
 pub mod triage;
+pub(crate) mod warn_dedupe;
 
 use crate::services::platform::binary_resolver::{
     apply_runtime_path, resolve_binary_with_login_shell,
