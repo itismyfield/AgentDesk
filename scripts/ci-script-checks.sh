@@ -413,7 +413,21 @@ echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invar
 # Giant deadlines have one selector/evaluator. It refreshes inventories only
 # after its fail-closed main or strict PR-progress verdict succeeds.
 GFP_REFRESH_DOCS=1 "$PYTHON" scripts/giant_file_progress.py
-git diff --exit-code -- ARCHITECTURE.md docs/generated/route-inventory.md docs/generated/worker-inventory.md
+
+echo "=== Generate env + CLI reference docs (README source-of-truth tables) ==="
+# README links to these instead of carrying hand-written tables. Both
+# generators are pure source parsers (no cargo build), so they run on every
+# pass and share the tracked-doc drift gate below: regenerate, then fail the
+# PR when the committed docs/generated/*.md differ from the regenerated view.
+"$PYTHON" scripts/generate_env_reference.py
+"$PYTHON" scripts/generate_cli_reference.py
+"$PYTHON" -m unittest tests.test_generate_env_reference tests.test_generate_cli_reference
+git diff --exit-code -- \
+  ARCHITECTURE.md \
+  docs/generated/route-inventory.md \
+  docs/generated/worker-inventory.md \
+  docs/generated/env-reference.md \
+  docs/generated/cli-reference.md
 
 echo "=== Inventory prod/test split regression tests (#4394) ==="
 "$PYTHON" -m unittest tests.test_giant_file_progress tests.test_inventory_giant_split

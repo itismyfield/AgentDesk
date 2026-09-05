@@ -30,6 +30,13 @@ about the generated report or its generator.
   source-of-truth invariants such as giant-file registry drift, missing required
   registry metadata, or top-level architecture map parse errors. Those are not
   generic generated-doc markdown freshness failures.
+- `env-reference.md` and `cli-reference.md` are the exception: README links to
+  them in place of hand-written tables, so `scripts/ci-script-checks.sh`
+  regenerates both (`scripts/generate_env_reference.py`,
+  `scripts/generate_cli_reference.py`) and fails on drift. They are cheap
+  source parsers (no cargo build) and only change when an env read site or a
+  clap definition changes, so the churn cost that motivated the warning-only
+  policy does not apply.
 - Do not re-introduce a hard PR gate solely because generated docs drifted.
 
 ## Rationale
@@ -70,6 +77,8 @@ generator, maintainability rules, baselines, or report wording.
 Commands:
 
 - `python3 scripts/generate_inventory_docs.py`
+- `python3 scripts/generate_env_reference.py`
+- `python3 scripts/generate_cli_reference.py`
 - `python3 scripts/audit_maintainability.py --write-report`
 - `python3 scripts/audit_legacy_sqlite_sunset.py --root . --format markdown --top 20`
 
