@@ -29,10 +29,13 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime as dt
+import errno
+import http.client
 import json
 import math
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -158,6 +161,10 @@ REPORT_RECORD_KEYS: tuple[str, ...] = (
 
 class PhaseDeadlineExpired(BaseException):
     """Hard wall-clock deadline; bypass scenario cleanup and preserve residue."""
+
+
+class HarnessEvidenceError(assertions.AssertionError):
+    """Required evidence could not be read; not a product root-cause verdict."""
 
 
 def _arm_phase_deadline(seconds: float):
@@ -734,6 +741,8 @@ def _failure_attribution(
         "source": source,
         "raw_reason": reason,
     }
+    if source == "harness":
+        attribution["classification"] = "unevaluable"
     if record:
         wait_timeouts = record.get("wait_timeouts")
         if isinstance(wait_timeouts, list) and wait_timeouts:
@@ -1774,20 +1783,38 @@ def _read_api_json(base_url: str, path: str, *, timeout: float = 5.0) -> tuple[i
         headers={"Connection": "close"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", "replace")
-            status = int(getattr(response, "status", 200))
-    except urllib.error.HTTPError as error:
-        raw = error.read().decode("utf-8", "replace")
-        status = int(error.code)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read().decode("utf-8", "replace")
+                status = int(getattr(response, "status", 200))
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode("utf-8", "replace")
+            status = int(error.code)
+    except (OSError, http.client.HTTPException) as error:
+        raise HarnessEvidenceError(f"unable to read {path}: {type(error).__name__}: {error}") from error
     if not raw.strip():
-        return status, {}
+        raise HarnessEvidenceError(f"{path} returned empty HTTP {status} body")
     try:
-        return status, json.loads(raw)
+        payload = json.loads(raw)
     except json.JSONDecodeError as error:
-        raise assertions.AssertionError(
+        raise HarnessEvidenceError(
             f"{path} returned non-JSON HTTP {status}: {raw[:240]!r}"
         ) from error
+    # These health routes use 503 for readable degradation; their existing
+    # consumers must still evaluate busy/counter/recovery predicates.
+    readable_health_503 = (
+        status == 503 and isinstance(payload, dict)
+        and isinstance(payload.get("status"), str)
+        and payload.get("status") in {"healthy", "degraded", "unhealthy"}
+        and all(type(payload.get(key)) is bool for key in ("ok", "fully_recovered"))
+        and (path == "/api/health" or (path == "/api/health/detail"
+             and isinstance(payload.get("mailboxes"), list)
+             and all(isinstance(row, dict) for row in payload["mailboxes"])
+             and all(type(payload.get(key)) is int for key in ("global_active", "global_finalizing"))))
+    )
+    if not 200 <= status < 300 and not readable_health_503:
+        raise HarnessEvidenceError(f"{path} unavailable HTTP {status}: {raw[:240]!r}")
+    return status, payload
 
 
 def _payload_summary(payload: Any, *, max_chars: int = 500) -> str:
@@ -1953,10 +1980,10 @@ def assert_health(
             time.sleep(poll_interval_s)
 
     if last_error is not None:
-        raise assertions.AssertionError(
-            f"assert_health did not pass within {timeout_s}s: {last_error}"
-        ) from last_error
-    raise assertions.AssertionError("assert_health failed without a captured error")
+        if not isinstance(last_error, HarnessEvidenceError):
+            last_error.args = (f"assert_health did not pass within {timeout_s}s: {last_error}",)
+        raise last_error
+    raise HarnessEvidenceError("assert_health failed without a captured observation")
 
 
 def _assert_health_once(
@@ -2222,11 +2249,17 @@ def durable_probe_safety_gate(
         sessions_status, sessions_payload = _read_api_json(
             base_url, "/api/sessions", timeout=5
         )
+        queue_reasons = _runtime_queue_violations(
+            runtime_root=runtime_root, provider=cell_provider(cell), channel_id=str(channel_id)
+        )
     except Exception as error:  # noqa: BLE001 - unreadable safety state forbids injection
+        source = "safety" if isinstance(error, assertions.AssertionError) and not isinstance(error, HarnessEvidenceError) else "harness"
+        reason = f"safety state refused: {type(error).__name__}: {error}"
         return {
             "status": "unevaluable",
             "dirty_active_residue": True,
-            "reasons": [f"safety state unreadable: {type(error).__name__}: {error}"],
+            "reasons": [reason],
+            "failure_attribution": _failure_attribution(source, reason),
         }
     if status >= 400 or not isinstance(health, dict) or health.get("cluster_standby") is not False:
         reasons.append("cluster_standby is true or unreadable")
@@ -2262,14 +2295,13 @@ def durable_probe_safety_gate(
                 session_channel == str(channel_id) or workspace in session_key
             ):
                 reasons.append(f"active target session={session_key or session_channel}")
-    reasons.extend(_runtime_queue_violations(
-        runtime_root=runtime_root, provider=provider, channel_id=str(channel_id)
-    ))
+    reasons.extend(queue_reasons)
     held = lease._read_lease(lease.lease_path_for(cell))  # noqa: SLF001
     if not held or held.get("run_id") != lease_run_id:
         reasons.append("E2E cell lease is not held by this probe")
     if reasons:
-        return {"status": "unevaluable", "dirty_active_residue": True, "reasons": reasons}
+        return {"status": "unevaluable", "dirty_active_residue": True, "reasons": reasons,
+                "failure_attribution": _failure_attribution("safety", "; ".join(reasons))}
     return {"status": "idle", "dirty_active_residue": False}
 
 
@@ -2317,23 +2349,36 @@ def _runtime_payload_has_entries(payload: Any) -> bool:
 def _runtime_queue_violations(
     *, runtime_root: Path, provider: str, channel_id: str
 ) -> list[str]:
+    def optional_stat(path: Path):
+        try:
+            return path.stat()
+        except OSError as error:
+            if error.errno == errno.ENOENT:
+                return None
+            raise
+
     violations: list[str] = []
-    for label, subdir in RUNTIME_QUEUE_DIRS:
-        provider_dir = runtime_root / subdir / provider
-        if not provider_dir.is_dir():
-            continue
-        for token_dir in provider_dir.iterdir():
-            target = token_dir / f"{channel_id}.json"
-            if not target.exists():
+    try:
+        for label, subdir in RUNTIME_QUEUE_DIRS:
+            provider_dir = runtime_root / subdir / provider
+            directory_stat = optional_stat(provider_dir)
+            if directory_stat is None:
                 continue
-            try:
+            if not stat.S_ISDIR(directory_stat.st_mode):
+                raise HarnessEvidenceError(f"queue provider path is not a directory: {provider_dir}")
+            for token_dir in provider_dir.iterdir():
+                target = token_dir / f"{channel_id}.json"
+                target_stat = optional_stat(target)
+                if target_stat is None:
+                    continue
+                if not stat.S_ISREG(target_stat.st_mode):
+                    raise HarnessEvidenceError(f"queue target is not a regular file: {target}")
                 raw = target.read_text(encoding="utf-8").strip()
                 payload = json.loads(raw) if raw else []
-            except (OSError, json.JSONDecodeError) as error:
-                violations.append(f"{label}:{target}: unreadable:{error}")
-                continue
-            if _runtime_payload_has_entries(payload):
-                violations.append(f"{label}:{target}: nonempty")
+                if _runtime_payload_has_entries(payload):
+                    violations.append(f"{label}:{target}: nonempty")
+    except (OSError, ValueError) as error:
+        raise HarnessEvidenceError(f"runtime queue unreadable: {error}") from error
     return violations
 
 
@@ -2358,6 +2403,7 @@ def assert_cell_idle(
     last_violations: list[str] = []
     last_error: str | None = None
     last_mailbox_count = 0
+    observation = "none"
 
     while time.monotonic() < deadline:
         try:
@@ -2370,6 +2416,7 @@ def assert_cell_idle(
                 )
             last_error = None
         except Exception as error:  # noqa: BLE001 - poll through transient health errors
+            observation = "readable" if isinstance(error, assertions.AssertionError) and not isinstance(error, HarnessEvidenceError) else "unreadable"
             last_error = f"{type(error).__name__}: {error}"
             time.sleep(poll_interval_s)
             continue
@@ -2390,13 +2437,17 @@ def assert_cell_idle(
         for mailbox in target_mailboxes:
             for reason in _mailbox_busy_reasons(mailbox):
                 last_violations.append(f"{_mailbox_label(mailbox)} {reason}")
-        last_violations.extend(
-            _runtime_queue_violations(
-                runtime_root=runtime_root,
-                provider=provider,
-                channel_id=str(channel_id),
+        try:
+            last_violations.extend(
+                _runtime_queue_violations(
+                    runtime_root=runtime_root, provider=provider, channel_id=str(channel_id),
+                )
             )
-        )
+        except HarnessEvidenceError as error:
+            observation, last_error = "unreadable", str(error)
+            time.sleep(poll_interval_s)
+            continue
+        observation = "readable"
 
         if not last_violations:
             return {
@@ -2409,7 +2460,8 @@ def assert_cell_idle(
             }
         time.sleep(poll_interval_s)
 
-    raise assertions.AssertionError(
+    error_type = assertions.AssertionError if observation == "readable" else HarnessEvidenceError
+    raise error_type(
         f"post-scenario idle check failed for {cell} channel={channel_id}: "
         f"{last_violations}; mailboxes_seen={last_mailbox_count}; "
         f"last_error={last_error or '<none>'}"
@@ -2784,6 +2836,7 @@ def run_scenario(
     args: argparse.Namespace,
     run_id: str,
     client: discord.DiscordClient,
+    partial_result_sink: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scenario_id = str(scenario.get("id"))
     cell = args.cell
@@ -2835,6 +2888,9 @@ def run_scenario(
         "real_provider_contacted": False,
         "failure_attribution": None,
     }
+    partial_record_holder: dict[str, Any] = {}
+    if partial_result_sink is not None:
+        partial_result_sink["result"] = result
 
     target_channel_id = scenario_channel_id(scenario, args)
     if target_channel_id is None:
@@ -2972,6 +3028,7 @@ def run_scenario(
             result["reason"] = "E-35 safety gate refused injection"
             result["durable_record_probe"] = {"status": "unevaluable", "reason": result["reason"]}
             result["dirty_active_residue"] = safety
+            result["failure_attribution"] = safety.get("failure_attribution") or _failure_attribution("safety", str(result["reason"]))
             return result
     if args.reset_before_each and not durable_probe and not args.dry_run and not is_local_fixture_scenario(scenario):
         runtime_root = Path(args.queue_runtime_root)
@@ -2997,7 +3054,6 @@ def run_scenario(
         time.sleep(2.0)
 
     try:
-        partial_record_holder: dict[str, Any] = {}
         window = run_one_cell(
             scenario=scenario,
             cell=cell,
@@ -3009,7 +3065,10 @@ def run_scenario(
             partial_record_sink=partial_record_holder,
         )
         _merge_record_into_result(result, window)
-        if not args.dry_run and _apply_observed_required_agent_mode_gate(
+        if (result.get("failure_attribution") or {}).get("source") in {"harness", "safety"}:
+            result["status"] = "fail"
+            result["reason"] = result["failure_attribution"]["raw_reason"]
+        elif not args.dry_run and _apply_observed_required_agent_mode_gate(
             result,
             required=getattr(args, "required_agent_mode", None),
             declared=declared_agent_mode,
@@ -3053,7 +3112,16 @@ def run_scenario(
             )
         else:
             result["status"] = "pass"
+    except HarnessEvidenceError as error:
+        partial = partial_record_holder.get("record")
+        if isinstance(partial, dict):
+            _refresh_agent_mode_record(partial, scenario=scenario, declared_agent_mode=declared_agent_mode, dry_run=args.dry_run)
+            _refresh_coverage_class_record(partial, scenario=scenario, declared_coverage_class=declared_coverage_class, dry_run=args.dry_run)
+            _merge_record_into_result(result, partial)
+        result["status"], result["reason"] = "fail", str(error)
+        result["failure_attribution"] = _failure_attribution("harness", str(error), record=partial)
     except ScenarioStepAssertionError as error:
+        partial_record_holder["record"] = error.record
         result["status"] = "fail"
         result["reason"] = f"assertion: {error}"
         _merge_record_into_result(result, error.record)
@@ -3147,6 +3215,21 @@ def run_scenario(
                 result["teardown_error"] = (
                     f"{type(teardown_error).__name__}: {teardown_error}"
                 )
+    finally:
+        phase_error = sys.exc_info()[1]
+        if isinstance(phase_error, PhaseDeadlineExpired):
+            prior_reason = result.get("reason")
+            partial = partial_record_holder.get("record")
+            if isinstance(partial, dict):
+                _refresh_agent_mode_record(partial, scenario=scenario, declared_agent_mode=declared_agent_mode, dry_run=args.dry_run)
+                _refresh_coverage_class_record(partial, scenario=scenario, declared_coverage_class=declared_coverage_class, dry_run=args.dry_run)
+                if "assertions" in partial:
+                    result["assertions"] = []
+                _merge_record_into_result(result, partial)
+            result["status"] = "fail"
+            result["reason"] = str(phase_error) + (f"; prior: {prior_reason}" if prior_reason else "")
+            result["failure_attribution"] = _failure_attribution("harness", result["reason"], record=partial)
+            result["completed_at"] = dt.datetime.now().isoformat(timespec="seconds")
 
     result["completed_at"] = dt.datetime.now().isoformat(timespec="seconds")
     return result
@@ -3270,6 +3353,7 @@ def run_one_cell(
                 )
                 if safety["status"] != "idle":
                     record["dirty_active_residue"] = safety
+                    record["failure_attribution"] = safety.get("failure_attribution") or _failure_attribution("safety", "E-35 safety gate refused injection")
                     return record
             window.mark_prompt_sent()
             last_sent_prompt = str(step["send_discord_prompt"]).replace("{run_id}", run_id)
@@ -3785,6 +3869,8 @@ def run_one_cell(
             declared_coverage_class=declared_coverage_class,
             dry_run=dry_run,
         )
+        if isinstance(error, HarnessEvidenceError):
+            raise
         raise ScenarioStepAssertionError(str(error), record=record) from error
 
     send_teardown_marker(
@@ -3925,9 +4011,11 @@ def wait_for_health(
     last_payload: dict[str, Any] | None = None
     last_violations: list[str] = []
     last_error: str | None = None
+    observation = "none"
     while time.monotonic() < deadline:
         try:
             http_status, payload = _read_api_json(base_url, "/api/health", timeout=5)
+            observation = "readable"
             last_http_status = http_status
             if isinstance(payload, dict):
                 last_payload = payload
@@ -3943,9 +4031,11 @@ def wait_for_health(
                 last_violations = [f"non-object health payload: {payload!r}"]
             last_error = None
         except Exception as error:  # noqa: BLE001 - preserve last transport/parse failure
+            observation = "readable" if isinstance(error, assertions.AssertionError) and not isinstance(error, HarnessEvidenceError) else "unreadable"
             last_error = f"{type(error).__name__}: {error}"
         time.sleep(poll_interval_s)
-    raise assertions.AssertionError(
+    error_type = assertions.AssertionError if observation == "readable" else HarnessEvidenceError
+    raise error_type(
         f"dcserver did not become healthy within {timeout_s}s; last="
         f"{_health_summary(http_status=last_http_status, payload=last_payload, violations=last_violations, last_error=last_error)}"
     )
@@ -3969,6 +4059,8 @@ def _guard_no_foreign_active_turns(
     while True:
         try:
             detail = _read_health_detail(base_url)
+        except HarnessEvidenceError:
+            raise
         except Exception as error:  # noqa: BLE001 - fail closed before destructive restart
             raise assertions.AssertionError(
                 "refusing to restart dcserver: unable to read /api/health/detail "
@@ -4364,28 +4456,47 @@ def main() -> int:
 
     lease_token = f"{cell}-{run_id}"
     results: list[dict[str, Any]] = []
+    partial_result_sink: dict[str, Any] = {}
+    active_scenario: dict[str, Any] | None = None
+    deferred_failure: dict[str, Any] | None = None
     previous_alarm = _arm_phase_deadline(args.phase_deadline_s) if args.phase_deadline_s else None
     try:
         with lease.acquire(lease_token, cell=cell) if not args.dry_run else _null_lease(run_id):
             for scenario in scenarios:
+                active_scenario, partial_result_sink = scenario, {}
                 print(f"[e2e] running {scenario.get('id')} cell={cell}")
-                result = run_scenario(scenario, args=args, run_id=run_id, client=client)
-                print(f"[e2e]   → {result['status']} {result.get('reason') or ''}")
+                result = run_scenario(scenario, args=args, run_id=run_id, client=client, partial_result_sink=partial_result_sink)
                 results.append(result)
+                if (result.get("failure_attribution") or {}).get("classification") == "unevaluable":
+                    deferred_failure = result
+                    break
+                print(f"[e2e]   → {result['status']} {result.get('reason') or ''}")
+                active_scenario, partial_result_sink = None, {}
     except PhaseDeadlineExpired as error:
-        results.append({
-            "id": "E-35", "cell": cell, "provider": cell_provider(cell),
+        partial = partial_result_sink.get("result")
+        result = partial if isinstance(partial, dict) and not any(partial is row for row in results) else {
+            "id": str((active_scenario or {}).get("id", "E-35")), "cell": cell, "provider": cell_provider(cell),
             "runtime": cell_runtime(cell), "status": "fail", "reason": str(error),
             "durable_record_probe": {"status": "unevaluable", "reason": str(error)},
             "dirty_active_residue": {"possible": True, "cleanup_attempted": False},
-        })
+        }
+        result["status"] = "fail"
+        result["reason"] = result.get("reason") or str(error)
+        if (result.get("failure_attribution") or {}).get("classification") != "unevaluable":
+            result["failure_attribution"] = _failure_attribution("harness", result["reason"])
+        result.setdefault("completed_at", dt.datetime.now().isoformat(timespec="seconds"))
+        results.append(result)
+        deferred_failure = result
     except Exception as error:  # lease/safety setup failed before an artifact existed
         if not args.phase_deadline_s:
             raise
-        reason = f"E-35 phase unevaluable: {type(error).__name__}: {error}"
+        partial = partial_result_sink.get("result") or {}
+        scenario_id = str((partial or active_scenario or {}).get("id", "E-35"))
+        reason = f"{scenario_id} phase unevaluable: {type(error).__name__}: {error}"
         results.append({
-            "id": "E-35", "cell": cell, "provider": cell_provider(cell),
-            "runtime": cell_runtime(cell), "status": "fail", "reason": reason,
+            **partial,
+            "id": scenario_id, "cell": partial.get("cell", cell), "provider": partial.get("provider", cell_provider(cell)),
+            "runtime": partial.get("runtime", cell_runtime(cell)), "status": "fail", "reason": reason,
             "durable_record_probe": {"status": "unevaluable", "reason": reason},
             "dirty_active_residue": {"possible": True, "cleanup_attempted": False},
         })
@@ -4417,6 +4528,8 @@ def main() -> int:
         },
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    if deferred_failure is not None:
+        print(f"[e2e]   → fail {deferred_failure.get('reason') or ''}")
     print(f"[e2e] report → {summary_path}")
     return 0 if summary["totals"]["fail"] == 0 else 1
 
