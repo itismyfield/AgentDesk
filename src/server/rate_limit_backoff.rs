@@ -100,10 +100,9 @@ impl ClaudeSyncBackoff {
 
     /// Remaining hold-off from `now`, for log lines. Zero when not backing off.
     pub(crate) fn remaining(&self, now: Instant) -> Duration {
-        self.not_before
-            .map_or(Duration::ZERO, |not_before| {
-                not_before.saturating_duration_since(now)
-            })
+        self.not_before.map_or(Duration::ZERO, |not_before| {
+            not_before.saturating_duration_since(now)
+        })
     }
 
     pub(crate) fn consecutive_rate_limits(&self) -> u32 {
