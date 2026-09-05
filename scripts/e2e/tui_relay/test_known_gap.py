@@ -89,7 +89,7 @@ class E22KnownGapContract(unittest.TestCase):
         self.assertEqual(gap.evaluate_e22_known_gap(captures, run_id=RUN, **BINDING)["classification"], "FAIL")
 
     def _pending_pipeline(self, *, resolve_on=None, initial=4.1, late=False, third=False,
-                          restored=False, completion=True):
+                          restored=False, completion=True, recheck_change=None, change_on=1):
         pending = pending_fixture()
         final = copy.deepcopy(fixture()[-1]["pages"][0]["messages"])
         final[1]["edited_timestamp"] = datetime.fromtimestamp(BASE + 4.5, timezone.utc).isoformat()
@@ -112,6 +112,15 @@ class E22KnownGapContract(unittest.TestCase):
                 messages.append(row(102, gap.PRE))
             if not completion:
                 messages = [m for m in messages if m["id"] != "104"]
+            if index >= 4 + change_on and recheck_change == "completion":
+                chrome = next(m for m in messages if m["id"] == "104")
+                chrome.update(content="ordinary status text", edited_timestamp=
+                    datetime.fromtimestamp(BASE + 4.7, timezone.utc).isoformat())
+            if index >= 4 + change_on and recheck_change == "raw_count":
+                for mid in range(105, 141):
+                    extra = row(mid, f"unique ordinary filler {mid}")
+                    extra["timestamp"] = datetime.fromtimestamp(BASE + 4.9, timezone.utc).isoformat()
+                    messages.append(extra)
             return _Response(messages)
         def sleep(seconds):
             if len(requests) >= 5:
@@ -152,6 +161,55 @@ class E22KnownGapContract(unittest.TestCase):
                 driver._merge_record_into_result(result, record)
                 self.assertEqual(result["known_gap_rechecks"], record["known_gap_rechecks"])
 
+    def _assert_recheck_invalidates_prior_assertion(self, change, name, reason):
+        for resolve_on, change_on in ((1, 1), (2, 1), (2, 2), (None, 1), (None, 2)):
+            with self.subTest(resolve_on=resolve_on, change_on=change_on):
+                record, error, requests, _ = self._pending_pipeline(
+                    resolve_on=resolve_on, recheck_change=change, change_on=change_on)
+                self.assertIsInstance(error, driver.ScenarioStepAssertionError)
+                self.assertIn(reason, str(error))
+                self.assertEqual(len(requests), 5 + change_on)
+                trace = record["known_gap_rechecks"][0]
+                self.assertEqual((trace["refetches"], trace["outcome"]), (change_on, "FAIL"))
+                self.assertNotIn("known_gaps", record)
+                self.assertTrue(any(name in item["spec"] and item["passed"] for item in record["assertions"]))
+                revalidated = record["revalidated_after_recheck"]
+                self.assertEqual(len(revalidated), change_on)
+                self.assertTrue(all(item["passed"] for item in revalidated[:-1]))
+                self.assertFalse(revalidated[-1]["passed"])
+                self.assertEqual(revalidated[-1]["failed_assertion"], name)
+                if change == "raw_count":
+                    self.assertEqual(record["raw_count"], 39)
+                result = {"assertions": []}
+                driver._merge_record_into_result(result, record)
+                self.assertEqual(result["revalidated_after_recheck"], revalidated)
+
+    def test_recheck_overwritten_completion_fails_scenario(self):
+        self._assert_recheck_invalidates_prior_assertion(
+            "completion", "completion_chrome_after_body", "completion chrome not found")
+
+    def test_recheck_raw_count_overflow_fails_scenario(self):
+        self._assert_recheck_invalidates_prior_assertion(
+            "raw_count", "raw_message_count_between_markers", "raw message count 39 outside [1, 36]")
+
+    def test_normal_rechecks_revalidate_every_prior_assertion_and_report(self):
+        prefix = []
+        for spec in yaml.safe_load(YAML.read_text())["assertions"]:
+            if "no_duplicate_marker_with_known_gap" in spec:
+                break
+            prefix.append(spec)
+        self.assertEqual(len(prefix), 10)
+        for attempt in (1, 2):
+            with self.subTest(attempt=attempt):
+                record, error, requests, _ = self._pending_pipeline(resolve_on=attempt)
+                self.assertIsNone(error, str(error))
+                self.assertEqual(len(requests), 5 + attempt)
+                self.assertEqual(record.get("revalidated_after_recheck"),
+                                 [{"assertions": prefix, "passed": True}] * attempt)
+                result = {"assertions": []}
+                driver._merge_record_into_result(result, record)
+                self.assertEqual(result["revalidated_after_recheck"], record["revalidated_after_recheck"])
+
     def test_pending_refetch_budget_and_deadline_never_extend(self):
         for options, expected in (({}, 2), ({"initial": 7.5}, 0), ({"resolve_on": 1, "late": True}, 1)):
             with self.subTest(options=options):
@@ -179,6 +237,7 @@ class E22KnownGapContract(unittest.TestCase):
         self.assertEqual(len(requests), 5)
         self.assertEqual(sleeps, [])
         self.assertNotIn("known_gap_rechecks", record)
+        self.assertNotIn("revalidated_after_recheck", record)
 
     def test_pending_still_requires_all_identity_and_raw_guards(self):
         for name in ("author", "channel", "setup", "history_third", "same_body", "new_edit", "missing"):
@@ -331,6 +390,7 @@ class E22KnownGapContract(unittest.TestCase):
         self.assertTrue(all("after=99" in url for url in requests))
         self.assertEqual(record["known_gaps"][0]["message_ids"], ["101", "103"])
         self.assertEqual(record["message_updates"], 1)
+        self.assertNotIn("revalidated_after_recheck", record)
         self.assertIsNone(client.captures)  # per-scenario replacement never contaminates the next scenario
         self.assertEqual(record["coverage_class_actual"], "live")  # declared fixture, not actual live execution
 

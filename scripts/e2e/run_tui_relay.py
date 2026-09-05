@@ -123,6 +123,7 @@ DIRECT_INPUT_NOTIFICATION_MARKER = "터미널에 직접 주입된 입력"
 REPORT_RECORD_KEYS: tuple[str, ...] = (
     "known_gaps",
     "known_gap_rechecks",
+    "revalidated_after_recheck",
     "relay_count",
     "raw_count",
     "message_updates",
@@ -3328,6 +3329,23 @@ def run_one_cell(
     def _pending_refetch() -> None:
         _ingest_observed(client.fetch_messages(channel_id, after_id=after_id, limit=100))
         _update_record_window_snapshot(record, window)
+        revalidation = {"assertions": [], "passed": False}
+        record.setdefault("revalidated_after_recheck", []).append(revalidation)
+        for previous in record["assertions"]:
+            spec = previous["spec"]
+            try:
+                run_assertion(
+                    spec,
+                    window=window,
+                    record=record,
+                    enabled_features=enabled_features,
+                    run_id=run_id,
+                )
+            except assertions.AssertionError:
+                revalidation["failed_assertion"] = next(iter(spec))
+                raise
+            revalidation["assertions"].append(spec)
+        revalidation["passed"] = True
 
     first_send_done = False
 
