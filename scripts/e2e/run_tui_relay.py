@@ -1926,8 +1926,11 @@ def _counter_from_payloads(
 def assert_health(
     base_url: str,
     params: dict[str, Any] | None = None,
+    *,
+    channel_id: str | None = None,
+    cell: str | None = None,
 ) -> dict[str, Any]:
-    """Scenario-level health probe with explicit status/reason/counter checks."""
+    """Health probe; zero global bounds require the resolved target to be idle."""
 
     options = params or {}
     timeout_s = float(options.get("timeout_s") or 0)
@@ -1943,7 +1946,7 @@ def assert_health(
     while attempts < max_attempts:
         attempts += 1
         try:
-            return _assert_health_once(base_url, options)
+            return _assert_health_once(base_url, options, channel_id=channel_id, cell=cell)
         except assertions.AssertionError as error:
             last_error = error
             if timeout_s <= 0 or time.monotonic() >= deadline:
@@ -1960,6 +1963,9 @@ def assert_health(
 def _assert_health_once(
     base_url: str,
     options: dict[str, Any],
+    *,
+    channel_id: str | None = None,
+    cell: str | None = None,
 ) -> dict[str, Any]:
     """Single health probe attempt for assert_health polling."""
 
@@ -2003,9 +2009,15 @@ def _assert_health_once(
         key in options for key in ("global_active_max", "global_finalizing_max")
     )
     detail: dict[str, Any] | None = None
+    target_idle = None
     if needs_detail:
         detail = _read_health_detail(base_url)
         counter_payloads.insert(0, detail)
+        if any(
+            type(options[key]) is int and options[key] == 0
+            for key in ("global_active_max", "global_finalizing_max") if key in options
+        ):
+            target_idle = _assert_health_target_idle(detail, channel_id=channel_id, cell=cell)
 
     counter_values: dict[str, int] = {}
     for counter_name, option_name in (
@@ -2025,7 +2037,8 @@ def _assert_health_once(
         if actual < 0:
             violations.append(f"{source_key}={actual} < 0")
         maximum = int(options[option_name])
-        if actual > maximum:
+        target_zero = type(options[option_name]) is int and options[option_name] == 0
+        if not target_zero and actual > maximum:
             violations.append(f"{source_key}={actual} > {maximum}")
 
     if status_code < 200 or status_code >= 300:
@@ -2047,6 +2060,71 @@ def _assert_health_once(
         "status": health.get("status"),
         "degraded_reasons": degraded_reasons,
         **counter_values,
+        **({"target_mailbox_idle": target_idle} if target_idle is not None else {}),
+    }
+
+
+def _assert_health_target_idle(
+    detail: dict[str, Any], *, channel_id: str | None, cell: str | None
+) -> dict[str, Any]:
+    """Validate existing busy witnesses, without inferring a target finalizer count."""
+    if (
+        not isinstance(channel_id, str) or not channel_id.isdecimal()
+        or not channel_id.isascii() or int(channel_id) <= 0
+        or cell not in SUPPORTED_CELLS
+    ):
+        raise assertions.AssertionError("assert_health requires a resolved channel_id and cell")
+    provider = cell_provider(cell)
+    mailboxes = detail.get("mailboxes")
+    if not isinstance(mailboxes, list) or any(not isinstance(box, dict) for box in mailboxes):
+        raise assertions.AssertionError("assert_health target mailboxes must be a list of objects")
+    targets = [
+        box for box in mailboxes
+        if _mailbox_channel_id(box) == channel_id and _mailbox_provider(box) == provider
+    ]
+    if len(targets) != 1:
+        raise assertions.AssertionError(
+            f"assert_health requires exactly one target mailbox for {provider}:{channel_id}; "
+            f"got {len(targets)}"
+        )
+    mailbox = targets[0]
+    relay = mailbox.get("relay_health")
+    if not isinstance(relay, dict):
+        raise assertions.AssertionError("assert_health target relay_health must be an object")
+    if (
+        type(relay.get("provider")) is not str or relay["provider"] != provider
+        or type(relay.get("channel_id")) is not int
+        or relay["channel_id"] != int(channel_id)
+    ):
+        raise assertions.AssertionError("assert_health target relay identity missing/invalid/mismatched")
+    for payload, bool_fields, identity_fields, text_fields in (
+        (mailbox, ("has_cancel_token", "inflight_state_present", "recovery_started",
+                   "active_dispatch_present"),
+         ("active_user_message_id",), ("agent_turn_status", "relay_stall_state")),
+        (relay, ("bridge_inflight_present", "mailbox_has_cancel_token", "pending_thread_proof",
+                 "stale_thread_proof", "desynced"),
+         ("mailbox_active_user_msg_id", "pending_discord_callback_msg_id"), ("active_turn",)),
+    ):
+        invalid = [key for key in bool_fields if type(payload.get(key)) is not bool]
+        invalid += [
+            key for key in identity_fields if key not in payload or not (
+                payload[key] is None or (type(payload[key]) is int and payload[key] >= 0)
+            )
+        ]
+        invalid += [
+            key for key in text_fields
+            if not isinstance(payload.get(key), str) or not payload[key]
+        ]
+        if type(payload.get("queue_depth")) is not int or payload["queue_depth"] < 0:
+            invalid.append("queue_depth")
+        if invalid:
+            raise assertions.AssertionError(f"assert_health target missing/invalid witnesses: {invalid}")
+    reasons = _mailbox_busy_reasons(mailbox)
+    if reasons:
+        raise assertions.AssertionError(f"assert_health target {provider}:{channel_id} busy: {reasons}")
+    return {
+        "channel_id": channel_id, "provider": provider, "mailboxes_seen": 1,
+        "status": "idle", "mailbox_idle_evidence": _mailbox_idle_evidence(mailbox),
     }
 
 
@@ -3549,7 +3627,7 @@ def run_one_cell(
         elif "assert_health" in step:
             params = step["assert_health"] or {}
             record.setdefault("health_assertions", []).append(
-                assert_health(client.base_url, params)
+                assert_health(client.base_url, params, channel_id=channel_id, cell=cell)
             )
         elif "kill_pane" in step:
             thread_channel_id = channel_id if scenario.get("requires_thread_channel") else None
@@ -3674,6 +3752,7 @@ def run_one_cell(
                 window=window,
                 record=record,
                 enabled_features=enabled_features,
+                run_id=run_id,
             )
             record["assertions"].append({"spec": assertion_spec, "passed": True})
 
@@ -4035,7 +4114,11 @@ def run_assertion(
     window: assertions.Window,
     record: dict[str, Any] | None = None,
     enabled_features: frozenset[str] = frozenset(),
+    run_id: str | None = None,
 ) -> None:
+    def expand_marker(value: str) -> str:
+        return value.replace("{run_id}", run_id) if run_id is not None else value
+
     if not isinstance(spec, dict):
         raise assertions.AssertionError(f"bad assertion spec: {spec!r}")
     required_feature = spec.get("requires_feature")
@@ -4060,7 +4143,7 @@ def run_assertion(
     elif spec.get("no_duplicate_content"):
         assertions.no_duplicate_content(window)
     elif "text_present" in spec:
-        assertions.text_present(window, needle=spec["text_present"])
+        assertions.text_present(window, needle=expand_marker(spec["text_present"]))
     elif "provider_hold_marker_seen" in spec:
         marker = spec["provider_hold_marker_seen"]
         if isinstance(marker, dict):
@@ -4114,7 +4197,7 @@ def run_assertion(
     elif "no_duplicate_marker" in spec:
         # #2838 (P0-2): catches duplicate-with-differing-header re-emit (e.g.
         # restart-induced or ACK-timeout re-relay) that no_duplicate_content misses.
-        assertions.no_duplicate_marker(window, marker=spec["no_duplicate_marker"])
+        assertions.no_duplicate_marker(window, marker=expand_marker(spec["no_duplicate_marker"]))
     elif "body_complete" in spec:
         # #2838 (P0-2): catches a truncated-tail relay on long responses.
         params = spec["body_complete"]
@@ -4174,7 +4257,7 @@ def run_assertion(
         required = bool(params.get("required", False)) if isinstance(params, dict) else False
         assertions.completion_chrome_after_body(
             window,
-            body_marker=str(body_marker),
+            body_marker=expand_marker(str(body_marker)),
             required=required,
         )
     elif "body_not_overwritten" in spec:

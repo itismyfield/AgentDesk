@@ -12,4 +12,9 @@ steps:
   - wait_for_discord_text: "[E2E:E35:{run_id}:OK]"
     timeout_s: 240
 assertions:
-  - text_present: "[E2E:E35:"
+  - text_present: "[E2E:E35:{run_id}:OK]"
+  - no_duplicate_marker: "[E2E:E35:{run_id}:OK]"
+  - no_duplicate_content: true
+  - completion_chrome_after_body:
+      body_marker: "[E2E:E35:{run_id}:OK]"
+      required: true

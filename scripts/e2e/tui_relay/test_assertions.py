@@ -7,6 +7,7 @@ primitives that close the presence-only blind spot of the legacy contract.
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
 import subprocess
@@ -16,7 +17,7 @@ import unittest
 import datetime as dt
 from argparse import Namespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts" / "e2e"))
@@ -24,6 +25,9 @@ sys.path.insert(0, str(ROOT / "scripts" / "e2e"))
 import run_tui_relay as driver  # noqa: E402
 import run_multi_provider_matrix as matrix  # noqa: E402
 from tui_relay import assertions  # noqa: E402
+from tui_relay.test_driver_health import (  # noqa: E402
+    _busy_mailbox, _fake_urlopen_for, _health_detail, _idle_mailbox,
+)
 # ci-script-checks.sh runs this module; expose the offline fetch regressions too.
 from tui_relay.test_discord_client import DiscordClientFetchMessages  # noqa: E402, F401
 
@@ -964,6 +968,232 @@ class ScenarioFilterFailClosed(unittest.TestCase):
         restart = [row for row in report["results"] if row["kind"] == "foreign_active_restart_guard"]
         self.assertEqual([(row["id"], row["status"], row["ok"]) for row in restart],
                          [("E-17", "pass", True)])
+
+
+class TargetHealthContract(unittest.TestCase):
+    """Loaded by the existing CI assertion entry, including the real step caller."""
+
+    def probe(self, mailboxes=None, *, options=None, health=None, counters=None, **target):
+        detail = _health_detail(*(mailboxes if mailboxes is not None else [_idle_mailbox()]))
+        detail.update(counters or {"global_active": 1, "global_finalizing": 1})
+        public = {"status": "healthy", "ok": True, "fully_recovered": True, **(health or {})}
+        params = {"global_active_max": 0, "global_finalizing_max": 0, **(options or {})}
+        binding = {"channel_id": "42", "cell": "codex-tui", **target}
+        with patch.object(driver.urllib.request, "urlopen", _fake_urlopen_for({
+            "/api/health": [(200, public)], "/api/health/detail": [(200, detail)],
+        })):
+            return driver.assert_health("http://agentdesk.test", params, **binding)
+
+    def test_foreign_occupancy_preserves_global_evidence(self):
+        result = self.probe([_idle_mailbox(), _busy_mailbox()])
+        self.assertEqual((result["global_active"], result["global_finalizing"]), (1, 1))
+        self.assertEqual(result["target_mailbox_idle"]["channel_id"], "42")
+        self.assertEqual(result["target_mailbox_idle"]["provider"], "codex")
+
+    def test_target_busy_witnesses_refuse(self):
+        mutations = [
+            ("agent_turn_status", value) for value in ("active", "residual", "residual_held")
+        ] + [(key, True) for key in (
+            "has_cancel_token", "inflight_state_present", "recovery_started", "active_dispatch_present",
+        )] + [("queue_depth", 1), ("active_user_message_id", 7), ("relay_stall_state", "tmux_alive_relay_dead")]
+        relay_mutations = [("active_turn", "foreground"), ("active_turn", "explicit_background")]
+        relay_mutations += [(key, True) for key in (
+            "bridge_inflight_present", "mailbox_has_cancel_token", "pending_thread_proof", "stale_thread_proof", "desynced",
+        )] + [("queue_depth", 1), ("mailbox_active_user_msg_id", 7), ("pending_discord_callback_msg_id", 7)]
+        for nested, changes in ((False, mutations), (True, relay_mutations)):
+            for key, value in changes:
+                with self.subTest(relay=nested, key=key, value=value):
+                    box = _idle_mailbox()
+                    (box["relay_health"] if nested else box)[key] = value
+                    with self.assertRaisesRegex(assertions.AssertionError, "target .* busy"):
+                        self.probe([box, _busy_mailbox()])
+
+    def test_every_required_witness_rejects_missing_or_malformed_values(self):
+        for nested in (False, True):
+            fields = _idle_mailbox()["relay_health"] if nested else _idle_mailbox()
+            for key, value in fields.items():
+                if key in {"provider", "channel_id", "relay_health"}:
+                    continue
+                for missing in (False, True):
+                    with self.subTest(relay=nested, key=key, missing=missing):
+                        box = _idle_mailbox()
+                        payload = box["relay_health"] if nested else box
+                        if missing:
+                            del payload[key]
+                        else:
+                            payload[key] = "false" if type(value) is bool else {}
+                        with self.assertRaisesRegex(assertions.AssertionError, "missing/invalid witnesses"):
+                            self.probe([box])
+
+    def test_missing_duplicate_malformed_and_wrong_target_refuse(self):
+        for boxes in ([], [_idle_mailbox(), _idle_mailbox()], [None],
+                      [_idle_mailbox("84")], [_idle_mailbox(provider="claude")],
+                      [{**_idle_mailbox(), "relay_health": None}]):
+            with self.subTest(boxes=boxes), self.assertRaises(assertions.AssertionError):
+                self.probe(boxes)
+        for binding in ({"channel_id": None}, {"channel_id": ""}, {"channel_id": "0"},
+                        {"channel_id": "٤٢"}, {"cell": None}, {"cell": "invalid"}):
+            with self.subTest(binding=binding), self.assertRaises(assertions.AssertionError):
+                self.probe(**binding)
+        with patch.object(driver, "_read_health_detail", return_value={"mailboxes": {}}):
+            with self.assertRaisesRegex(assertions.AssertionError, "list of objects"):
+                self.probe()
+
+    def test_public_health_recovery_and_forbidden_reasons_remain_guards(self):
+        for health in ({"status": "unhealthy"}, {"ok": False}, {"fully_recovered": False},
+                       {"degraded": True}, {"degraded_reasons": ["global_active_counter_out_of_bounds"]}):
+            with self.subTest(health=health), self.assertRaises(assertions.AssertionError):
+                self.probe(health=health, options={"forbid_degraded_reasons": ["global_active_counter_out_of_bounds"]})
+
+    def test_positive_and_mixed_global_bounds_keep_numeric_limits(self):
+        positive = {"global_active_max": 1, "global_finalizing_max": 1}
+        result = self.probe([], options=positive, channel_id=None, cell=None)
+        self.assertNotIn("target_mailbox_idle", result)
+        for active_bound, final_bound in ((1, 1), (0, 1), (1, 0)):
+            options = {"global_active_max": active_bound, "global_finalizing_max": final_bound}
+            self.probe(options=options)
+            counters = {"global_active": 2 if active_bound else 1,
+                        "global_finalizing": 2 if final_bound else 1}
+            with self.subTest(options=options), self.assertRaisesRegex(assertions.AssertionError, "> 1"):
+                self.probe(options=options, counters=counters)
+
+    def test_all_nine_zero_bound_consumers_bind_thread_and_provider_in_real_runner(self):
+        consumers = []
+        for path in (ROOT / "tests/e2e/tui_relay/scenarios").glob("*.yaml"):
+            scenario = driver.yaml.safe_load(path.read_text(encoding="utf-8"))
+            for step in scenario.get("steps", []):
+                params = step.get("assert_health", {})
+                if params.get("global_active_max") == params.get("global_finalizing_max") == 0:
+                    consumers.append((scenario["id"], step))
+        self.assertEqual({sid for sid, _ in consumers}, {"E-8", "E-9", "E-10", "E-12", "E-14", "E-16", "E-18", "E-19", "E-20"})
+        self.assertEqual(len(consumers), 9)
+        for sid, step in consumers:
+            for cell in driver.SUPPORTED_CELLS:
+                with self.subTest(scenario=sid, cell=cell):
+                    provider = driver.cell_provider(cell)
+                    foreign = "claude" if provider == "codex" else "codex"
+                    detail = _health_detail(_idle_mailbox("84", provider),
+                                           _busy_mailbox("42", provider), _busy_mailbox("84", foreign))
+                    detail.update(global_active=1, global_finalizing=1)
+                    client = MagicMock(base_url="http://agentdesk.test")
+                    client.send_control.return_value = {"id": "1"}
+                    client.fetch_messages.return_value = []
+                    args = Namespace(cell=cell, channel_id="42", thread_channel_id="84", dry_run=False,
+                                     reset_before_each=False, allow_destructive=False, queue_runtime_root="unused")
+                    scenario = {"id": sid, "agent_mode": "controlled", "coverage_class": "live",
+                                "requires_thread_channel": True, "steps": [step], "assertions": []}
+                    with patch.object(driver.urllib.request, "urlopen", _fake_urlopen_for({
+                        "/api/health": [(200, {"status": "healthy", "ok": True, "fully_recovered": True})],
+                        "/api/health/detail": [(200, detail)],
+                    })), patch.object(driver.time, "sleep"), patch.object(driver, "assert_cell_idle", return_value={"status": "idle"}):
+                        result = driver.run_scenario(scenario, args=args, run_id="target-binding", client=client)
+                    self.assertEqual(result["status"], "pass", result)
+                    evidence = result["health_assertions"][0]
+                    self.assertEqual((evidence["global_active"], evidence["global_finalizing"]), (1, 1))
+                    self.assertEqual((evidence["target_mailbox_idle"]["channel_id"], evidence["target_mailbox_idle"]["provider"]), ("84", provider))
+
+
+class TargetHealthR2Contract(unittest.TestCase):
+    def run_health(self, options, *, mutation=None):
+        box = _idle_mailbox("84")
+        if mutation:
+            key, value = mutation
+            if value == "<missing>":
+                del box["relay_health"][key]
+            else:
+                box["relay_health"][key] = value
+        detail = _health_detail(box, _busy_mailbox("42", "codex"), _busy_mailbox("84", "claude"))
+        detail.update(global_active=1, global_finalizing=1)
+        client = MagicMock(base_url="http://agentdesk.test")
+        client.send_control.return_value = {"id": "1"}
+        client.fetch_messages.return_value = []
+        scenario = {"id": "offline-health-r2", "agent_mode": "controlled", "coverage_class": "live",
+                    "requires_thread_channel": True, "steps": [{"assert_health": options}], "assertions": []}
+        args = Namespace(cell="codex-tui", channel_id="42", thread_channel_id="84", dry_run=False,
+                         reset_before_each=False, allow_destructive=False, queue_runtime_root="unused")
+        with patch.object(driver.urllib.request, "urlopen", _fake_urlopen_for({
+            "/api/health": [(200, {"status": "healthy", "ok": True, "fully_recovered": True})],
+            "/api/health/detail": [(200, detail)],
+        })), patch.object(driver.time, "sleep"), patch.object(driver, "_runtime_queue_violations", return_value=[]):
+            # Keep the real post-scenario assert_cell_idle, as in the independent counterexample.
+            return driver.run_scenario(scenario, args=args, run_id="identity-and-bounds", client=client)
+
+    def test_nested_serialized_identity_must_match_resolved_thread_and_provider(self):
+        options = {"global_active_max": 0, "global_finalizing_max": 0}
+        valid = self.run_health(options)
+        self.assertEqual(valid["status"], "pass", valid["reason"])
+        self.assertEqual(valid["post_scenario_idle"]["channel_id"], "84")
+        for mutation in (("provider", "claude"), ("provider", []), ("provider", None),
+                         ("channel_id", 42), ("channel_id", "84"), ("channel_id", 84.0),
+                         ("channel_id", True), ("channel_id", {}),
+                         ("provider", "<missing>"), ("channel_id", "<missing>")):
+            with self.subTest(mutation=mutation):
+                result = self.run_health(options, mutation=mutation)
+                self.assertEqual(result["status"], "fail", result["reason"])
+                self.assertIn("target relay identity", result["reason"])
+
+    def test_only_original_integer_zero_selects_target_policy(self):
+        for key, other in (("global_active_max", "global_finalizing_max"),
+                           ("global_finalizing_max", "global_active_max")):
+            for value in (0.5, 0.0, False, "0"):
+                for other_bound in (None, 0, 1):
+                    with self.subTest(key=key, value=value, other=other_bound):
+                        options = {key: value}
+                        if other_bound is not None:
+                            options[other] = other_bound
+                        result = self.run_health(options)
+                        self.assertEqual(result["status"], "fail", result["reason"])
+                        self.assertIn(f"{key.removesuffix('_max')}=1 > 0", result["reason"])
+            for value in (0, 1, 1.5):
+                result = self.run_health({key: value, other: 0})
+                self.assertEqual(result["status"], "pass", result["reason"])
+                observed = result["health_assertions"][0]
+                self.assertEqual((observed["global_active"], observed["global_finalizing"]), (1, 1))
+
+
+class E35CurrentRunContract(unittest.TestCase):
+    def test_actual_yaml_through_real_runner_checks_final_body_and_completion(self):
+        path = ROOT / "tests/e2e/tui_relay/scenarios/E-35-durable-delivery-record.yaml"
+        scenario = driver.yaml.safe_load(path.read_text(encoding="utf-8"))
+        original = copy.deepcopy(scenario)
+        marker = "[E2E:E35:current-run:OK]"
+        body, completion = _relay_msg(3, marker), _raw_bot_msg(6, "✅ 응답 완료")
+        cases = {
+            "current": ([body, completion], "pass"),
+            "stale": ([_relay_msg(3, "[E2E:E35:old-run:OK]"), completion], "fail"),
+            "missing": ([_relay_msg(3, "unrelated response"), completion], "fail"),
+            "duplicate marker": ([body, _relay_msg(4, marker + " resent"), completion], "fail"),
+            "duplicate content": ([body, _relay_msg(4, "same body"), _relay_msg(5, "same body"), completion], "fail"),
+            "missing completion": ([body], "fail"),
+            "early completion": ([_raw_bot_msg(2, "✅ 응답 완료"), body], "fail"),
+        }
+        for cell in scenario["cells"]:
+            for label, (messages, expected) in cases.items():
+                with self.subTest(cell=cell, case=label):
+                    client = MagicMock(base_url="http://agentdesk.test")
+                    client.send_control.return_value = {"id": "1"}
+                    client.send.return_value = {"id": "2"}
+                    # The real wait first sees the current marker; final edits must still pass assertions.
+                    client.fetch_messages.side_effect = [[], [body], messages]
+                    args = Namespace(base_url=client.base_url, cell=cell, channel_id="42", thread_channel_id=None,
+                                     dry_run=False, reset_before_each=True, hard_reset_session_each=True,
+                                     allow_destructive=False, queue_runtime_root="unused", final_refetches=1)
+                    with patch.object(driver, "durable_probe_safety_gate", return_value={"status": "idle"}) as safety, \
+                         patch.object(driver.durable_delivery, "poll_records", return_value={"status": "evaluated"}) as receipt, \
+                         patch.object(driver, "assert_cell_idle", return_value={"status": "idle"}), \
+                         patch.object(driver, "reset_channel_state") as reset, \
+                         patch.object(driver, "hard_reset_provider_session") as hard_reset, patch.object(driver.time, "sleep"):
+                        result = driver.run_scenario(scenario, args=args, run_id="current-run", client=client)
+                    self.assertEqual(result["status"], expected, result)
+                    if expected == "fail":
+                        self.assertEqual(result["failure_attribution"]["source"], "assertion")
+                    client.send.assert_called_once_with("42", original["steps"][0]["send_discord_prompt"].replace("{run_id}", "current-run"))
+                    client.send_prompt.assert_not_called()
+                    receipt.assert_called_once_with(Path("unused"), provider="claude", channel_id="42", message_id="3")
+                    self.assertEqual(safety.call_count, 2)
+                    reset.assert_not_called()
+                    hard_reset.assert_not_called()
+        self.assertEqual(scenario, original)
 
 
 if __name__ == "__main__":
