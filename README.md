@@ -446,21 +446,16 @@ AgentDesk keeps settings in multiple surfaces on purpose. The contract is per-su
 
 ### Environment Variables
 
-| Variable | Purpose |
-|----------|---------|
-| `AGENTDESK_ROOT_DIR` | Override runtime directory (default: `~/.adk/release`) |
-| `AGENTDESK_CONFIG` | Override config file path |
-| `AGENTDESK_REPO_DIR` | Override resolved AgentDesk repo path used by `git`/`gh` exec helpers |
-| `AGENTDESK_SERVER_PORT` | Override HTTP server port (default: 8791) |
-| `AGENTDESK_INSTALL_PORT` | Override the macOS installer-created config port; sandbox install roots derive a non-8791 loopback port by default |
-| `AGENTDESK_API_URL` | Override base URL the CLI client uses to reach the local API |
-| `AGENTDESK_TOKEN` | Optional Discord bot token forwarded to `dcserver` at startup. **Not** used by `discord-send*` CLI commands (those load configured bot tokens via the wizard, or require `--key`) and **not** used for `/api/*` auth — that comes from `server.auth_token` in `agentdesk.yaml` |
-| `AGENTDESK_DCSERVER_LABEL` | Override launchd service label |
-| `AGENTDESK_STATUS_INTERVAL_SECS` | Status polling interval (default: 5) |
-| `AGENTDESK_TURN_TIMEOUT_SECS` | Turn watchdog timeout in seconds (default: 3600) |
-| `AGENTDESK_HEADLESS_DISCORD_NONCE` | Opt in (`1` or `true`) to an enforced Discord nonce for trusted durable `headless_turn` outbox rows on the <=2,000-character manual/v3 inline path. Default is off. Retries of one parsed positive row ID reuse the same nonce, but Discord applies duplicate suppression only within its bounded recent-nonce retention window; this is not indefinite deduplication, and oversize attachment/chunk paths are outside this rollout. |
-| `AGENTDESK_GH_PATH` / `AGENTDESK_CODEX_PATH` / `AGENTDESK_GEMINI_PATH` | Override resolved provider/CLI binary paths |
-| `RUST_LOG` | Standard tracing filter (default: `agentdesk=info`) |
+The full list of environment variables the binary reads is generated from the
+source tree: see [docs/generated/env-reference.md](docs/generated/env-reference.md)
+(regenerate with `python3 scripts/generate_env_reference.py`; CI fails when it
+drifts). The most commonly used ones:
+
+- `AGENTDESK_ROOT_DIR` — runtime directory (default: `~/.adk/release`)
+- `AGENTDESK_CONFIG` — config file path
+- `AGENTDESK_API_URL` — base URL the CLI client uses to reach the local API
+- `AGENTDESK_TOKEN` — optional Discord bot token forwarded to `dcserver` at startup. **Not** used by `discord-send*` CLI commands and **not** used for `/api/*` auth (that comes from `server.auth_token` in `agentdesk.yaml`)
+- `RUST_LOG` — standard tracing filter (default: `agentdesk=info`)
 
 ## Customization
 
@@ -631,72 +626,29 @@ Each agent maps to a Discord channel where it receives and responds to tasks.
 
 ## CLI Reference
 
+Every subcommand, nested subcommand, flag, and positional argument is generated
+from the clap definitions in `src/cli/args.rs`: see
+[docs/generated/cli-reference.md](docs/generated/cli-reference.md) (regenerate
+with `python3 scripts/generate_cli_reference.py`; CI fails when it drifts).
+`agentdesk --help` and `agentdesk <command> --help` print the same information
+at runtime.
+
+Frequently used entry points:
+
 ```
-# Server
 agentdesk dcserver                               # Start Discord control plane
 agentdesk init                                   # Interactive setup wizard
-agentdesk reconfigure                            # Re-run setup (preserves data)
-agentdesk restart-dcserver                       # Graceful restart with crash context
-agentdesk doctor [--json] [--profile quick|deep|security]
-agentdesk doctor --fix --allow-restart           # Explicit service restart repair
-agentdesk doctor --fix --repair-sqlite-cache     # Explicit legacy SQLite cache repair
-agentdesk emit-launchd-plist --flavor release|dev [--label <LABEL>] [--output <PATH>]
-
-# Discord messaging
-agentdesk discord-sendfile <PATH> --channel <ID> --key <HASH>
-agentdesk discord-sendmessage --channel <ID> --message <TEXT>
-agentdesk discord-senddm --user <ID> --message <TEXT>
-agentdesk send --target channel:<ID> --content <TEXT> [--bot announce|notify|<provider>]
-agentdesk discord read <CHANNEL_ID> [--limit <N>] [--before <ID>] [--after <ID>]
-agentdesk monitoring start --channel <ID> --key <KEY> --description <TEXT>
-agentdesk monitoring stop --channel <ID> --key <KEY>
-
-# Review / docs / sessions
-agentdesk review-verdict --dispatch <ID> --verdict pass|improve|rework|reject|approved
-agentdesk review-decision --card <CARD_ID> --decision approve|rework|escalate|accept|dispute|dismiss|requeue|resume
-agentdesk docs [CATEGORY] [--flat]
-agentdesk force-kill --session-key <KEY> [--retry]
-
-# Kanban / dispatch / auto-queue
-agentdesk cards [--status <STATUS>]              # List kanban cards
-agentdesk card create --from-issue <NUMBER> [--status ready] [--agent <ID>] [--repo <OWNER/REPO>]
-agentdesk card status <CARD_ID|ISSUE_NUMBER> [--repo <OWNER/REPO>]
-agentdesk dispatch <ISSUE_GROUPS...> [--agent <ID>] [--concurrent <N>] [--no-activate]
-agentdesk dispatch list
-agentdesk dispatch retry <CARD_ID>
-agentdesk dispatch redispatch <CARD_ID>
-agentdesk resume <CARD_ID> [--force] [--reason <TEXT>]
-agentdesk advance <ISSUE_NUMBER>                 # Promote card to review
-agentdesk queue                                  # Auto-queue status with thread links
-agentdesk auto-queue activate [--run <ID>] [--agent <ID>] [--repo <OWNER/REPO>] [--active-only]
-agentdesk auto-queue add <CARD_ID> [--run <ID>] [--priority <N>] [--phase <N>] [--thread-group <N>] [--agent <ID>]
-agentdesk auto-queue config --max-concurrent <N> [--run <ID>] [--repo <OWNER/REPO>] [--agent <ID>]
-
-# Git / runtime / migrations
-agentdesk github-sync [--repo <OWNER/REPO>]
-agentdesk cherry-merge <BRANCH> [--close-issue]
+agentdesk doctor [--fix] [--profile quick|deep|security]
 agentdesk status                                 # Runtime health summary
-agentdesk config get                             # Read runtime config
-agentdesk config set '<JSON>'                    # Set runtime config
-agentdesk config audit [--dry-run]               # Reconcile yaml/DB drift
-agentdesk agents                                 # List agents
-agentdesk diag <AGENT_ID|CHANNEL_ID> [--json]    # Turn/session diagnostics
-agentdesk terminations [--card-id <ID>] [--dispatch-id <ID>] [--session <KEY>] [--limit <N>]
-agentdesk api GET /api/health                    # Public safe health summary
-agentdesk api GET /api/health/detail             # Authenticated/local detailed health
+agentdesk query [queue|dispatches|phase-gate]    # Queue + dispatch + phase-gate snapshot
+agentdesk send --target channel:<ID> --content <TEXT>
+agentdesk api GET /api/health                    # Call any API endpoint
 agentdesk deploy                                 # Build workspace + promote to release
-agentdesk migrate openclaw <ARGS>                # Import OpenClaw durable state
-# `migrate postgres-cutover` was retired (production cutover landed 2026-04-19) and the
-# subcommand has been removed. Restore src/cli/migrate/postgres_cutover.rs from history
-# for an explicitly approved emergency re-cutover.
-agentdesk provider-cli <SUBCOMMAND>              # Provider CLI safe-migration ops (status/plan/upgrade/canary/promote/rollback/cleanup/run/resume/smoke)
-
-# Process wrappers (internal — invoked by tmux session lifecycle)
-agentdesk tmux-wrapper                           # Claude session wrapper
-agentdesk codex-tmux-wrapper                     # Codex session wrapper
-agentdesk qwen-tmux-wrapper                      # Qwen session wrapper
-agentdesk reset-tmux                             # Kill AgentDesk-* tmux sessions and clean temp files
 ```
+
+`migrate postgres-cutover` was retired after the production cutover landed
+(2026-04-19); restore `src/cli/migrate/postgres_cutover.rs` from history only
+for an explicitly approved emergency re-cutover.
 
 ## API Overview
 
