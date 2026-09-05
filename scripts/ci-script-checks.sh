@@ -185,12 +185,12 @@ node --test policies/__tests__/merge-automation.test.js
 echo "=== Timeout shadow aggregation gate tests (#3950) ==="
 node --test scripts/__tests__/timeout-shadow-gate.test.mjs
 
-echo "=== Daily log-digest routine tests (#4263) ==="
-node --test policies/__tests__/daily-log-digest.test.js
-"$PYTHON" -m unittest tests.test_daily_log_digest
-
-echo "=== Weekly regression-churn audit tests (#4265) ==="
-"$PYTHON" -m unittest tests.test_weekly_churn_audit
+echo "=== Operator routine scripts must stay out of git (docs/source-of-truth.md) ==="
+if tracked_routines="$(git ls-files routines)" && [ -n "$tracked_routines" ]; then
+  echo "✗ routines/ is operator-private and must not be tracked; found:" >&2
+  printf '  %s\n' $tracked_routines >&2
+  exit 1
+fi
 
 echo "=== External toolchain draft/approval/smoke tests (#4555) ==="
 "$PYTHON" -m unittest tests.test_toolchain_update

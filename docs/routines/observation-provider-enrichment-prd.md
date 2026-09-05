@@ -11,6 +11,8 @@ updated_at: "2026-05-02"
 p0_pr: "https://github.com/itismyfield/AgentDesk/pull/1497"
 ---
 
+> **2026-09-05 status note:** the QuickJS routine scripts this document describes (`routines/monitoring/*.js`) were removed from the repository — they were never attached as production routines. The Rust automation-candidate API/DB surface remains; treat the routine-side sections below as historical.
+
 # PRD: AgentDesk Observation Provider Enrichment
 
 > status: `p0-implemented` — PR #1497 merged. P1/P2 미착수.
