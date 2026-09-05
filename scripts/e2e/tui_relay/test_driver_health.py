@@ -95,6 +95,8 @@ def _idle_mailbox(channel_id: str = "42", provider: str = "codex") -> dict:
         "active_dispatch_present": False,
         "relay_stall_state": "healthy",
         "relay_health": {
+            "provider": provider,
+            "channel_id": int(channel_id),
             "active_turn": "none",
             "bridge_inflight_present": False,
             "mailbox_has_cancel_token": False,

@@ -1093,6 +1093,64 @@ class TargetHealthContract(unittest.TestCase):
                     self.assertEqual((evidence["target_mailbox_idle"]["channel_id"], evidence["target_mailbox_idle"]["provider"]), ("84", provider))
 
 
+class TargetHealthR2Contract(unittest.TestCase):
+    def run_health(self, options, *, mutation=None):
+        box = _idle_mailbox("84")
+        if mutation:
+            key, value = mutation
+            if value == "<missing>":
+                del box["relay_health"][key]
+            else:
+                box["relay_health"][key] = value
+        detail = _health_detail(box, _busy_mailbox("42", "codex"), _busy_mailbox("84", "claude"))
+        detail.update(global_active=1, global_finalizing=1)
+        client = MagicMock(base_url="http://agentdesk.test")
+        client.send_control.return_value = {"id": "1"}
+        client.fetch_messages.return_value = []
+        scenario = {"id": "offline-health-r2", "agent_mode": "controlled", "coverage_class": "live",
+                    "requires_thread_channel": True, "steps": [{"assert_health": options}], "assertions": []}
+        args = Namespace(cell="codex-tui", channel_id="42", thread_channel_id="84", dry_run=False,
+                         reset_before_each=False, allow_destructive=False, queue_runtime_root="unused")
+        with patch.object(driver.urllib.request, "urlopen", _fake_urlopen_for({
+            "/api/health": [(200, {"status": "healthy", "ok": True, "fully_recovered": True})],
+            "/api/health/detail": [(200, detail)],
+        })), patch.object(driver.time, "sleep"), patch.object(driver, "_runtime_queue_violations", return_value=[]):
+            # Keep the real post-scenario assert_cell_idle, as in the independent counterexample.
+            return driver.run_scenario(scenario, args=args, run_id="identity-and-bounds", client=client)
+
+    def test_nested_serialized_identity_must_match_resolved_thread_and_provider(self):
+        options = {"global_active_max": 0, "global_finalizing_max": 0}
+        valid = self.run_health(options)
+        self.assertEqual(valid["status"], "pass", valid["reason"])
+        self.assertEqual(valid["post_scenario_idle"]["channel_id"], "84")
+        for mutation in (("provider", "claude"), ("provider", []), ("provider", None),
+                         ("channel_id", 42), ("channel_id", "84"), ("channel_id", 84.0),
+                         ("channel_id", True), ("channel_id", {}),
+                         ("provider", "<missing>"), ("channel_id", "<missing>")):
+            with self.subTest(mutation=mutation):
+                result = self.run_health(options, mutation=mutation)
+                self.assertEqual(result["status"], "fail", result["reason"])
+                self.assertIn("target relay identity", result["reason"])
+
+    def test_only_original_integer_zero_selects_target_policy(self):
+        for key, other in (("global_active_max", "global_finalizing_max"),
+                           ("global_finalizing_max", "global_active_max")):
+            for value in (0.5, 0.0, False, "0"):
+                for other_bound in (None, 0, 1):
+                    with self.subTest(key=key, value=value, other=other_bound):
+                        options = {key: value}
+                        if other_bound is not None:
+                            options[other] = other_bound
+                        result = self.run_health(options)
+                        self.assertEqual(result["status"], "fail", result["reason"])
+                        self.assertIn(f"{key.removesuffix('_max')}=1 > 0", result["reason"])
+            for value in (0, 1, 1.5):
+                result = self.run_health({key: value, other: 0})
+                self.assertEqual(result["status"], "pass", result["reason"])
+                observed = result["health_assertions"][0]
+                self.assertEqual((observed["global_active"], observed["global_finalizing"]), (1, 1))
+
+
 class E35CurrentRunContract(unittest.TestCase):
     def test_actual_yaml_through_real_runner_checks_final_body_and_completion(self):
         path = ROOT / "tests/e2e/tui_relay/scenarios/E-35-durable-delivery-record.yaml"

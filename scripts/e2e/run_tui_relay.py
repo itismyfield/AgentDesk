@@ -2014,7 +2014,7 @@ def _assert_health_once(
         detail = _read_health_detail(base_url)
         counter_payloads.insert(0, detail)
         if any(
-            int(options[key]) == 0
+            type(options[key]) is int and options[key] == 0
             for key in ("global_active_max", "global_finalizing_max") if key in options
         ):
             target_idle = _assert_health_target_idle(detail, channel_id=channel_id, cell=cell)
@@ -2037,7 +2037,8 @@ def _assert_health_once(
         if actual < 0:
             violations.append(f"{source_key}={actual} < 0")
         maximum = int(options[option_name])
-        if maximum != 0 and actual > maximum:
+        target_zero = type(options[option_name]) is int and options[option_name] == 0
+        if not target_zero and actual > maximum:
             violations.append(f"{source_key}={actual} > {maximum}")
 
     if status_code < 200 or status_code >= 300:
@@ -2090,6 +2091,12 @@ def _assert_health_target_idle(
     relay = mailbox.get("relay_health")
     if not isinstance(relay, dict):
         raise assertions.AssertionError("assert_health target relay_health must be an object")
+    if (
+        type(relay.get("provider")) is not str or relay["provider"] != provider
+        or type(relay.get("channel_id")) is not int
+        or relay["channel_id"] != int(channel_id)
+    ):
+        raise assertions.AssertionError("assert_health target relay identity missing/invalid/mismatched")
     for payload, bool_fields, identity_fields, text_fields in (
         (mailbox, ("has_cancel_token", "inflight_state_present", "recovery_started",
                    "active_dispatch_present"),
