@@ -50,7 +50,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_DELIVERY_RECORD_AUTHORITY` | `src/services/discord/outbound/delivery_record.rs:1320` | #3089 B2b read-authority flag (`AGENTDESK_DELIVERY_RECORD_AUTHORITY`, OnceLock, compiled default ON since #5071 T1 S8-2). |
 | `AGENTDESK_DELIVERY_RECORD_SHADOW` | `src/services/discord/outbound/delivery_record.rs:1249` | #3089 B1 shadow-write flag (`AGENTDESK_DELIVERY_RECORD_SHADOW`, OnceLock, default OFF), with its provenance. |
 | `AGENTDESK_DISCORD_API_BASE_URL` | `src/services/dispatches/discord_delivery/transport.rs:192` |  |
-| `AGENTDESK_DISCORD_HIGH_RISK_ENABLED` | `src/services/discord/commands/command_policy.rs:147` | Issue #2653 recovery commands also run curated bash pipelines (launchctl + ssh + git push --force-with-lease) so they share the same tier: owner-only AND defau… |
+| `AGENTDESK_DISCORD_HIGH_RISK_ENABLED` | `src/services/discord/commands/command_policy.rs:272` | - `high_risk_enabled_via_env` — explicit opt-in via `AGENTDESK_DISCORD_HIGH_RISK_ENABLED=1`. |
 | `AGENTDESK_E2E_CHANNEL_IDS` | `src/services/discord/e2e_control.rs:22` (+1 more) | The HTTP route subtree is mounted only when `AGENTDESK_E2E_CONTROL=1` was present when dcserver started, and every operation is restricted to channel IDs captu… |
 | `AGENTDESK_E2E_CONTROL` | `src/services/discord/e2e_control.rs:21` (+1 more) | The HTTP route subtree is mounted only when `AGENTDESK_E2E_CONTROL=1` was present when dcserver started, and every operation is restricted to channel IDs captu… |
 | `AGENTDESK_GH_PATH` | `src/github/mod.rs:17` (+1 more) |  |

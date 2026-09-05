@@ -5,6 +5,7 @@ use std::sync::Arc;
 use super::super::router::{IntakeDeps, IntakeOrigin, LocalAdmissionPermit, dispatch_skill_intake};
 use super::super::*;
 use super::build_provider_skill_prompt;
+use super::command_policy::{TextCommandId, TextCommandSelection, select_text_command};
 use crate::services::provider::CancelToken;
 
 enum TextStopLookup {
@@ -151,33 +152,41 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
     // by risk tier and apply the owner guard. This runs BEFORE the allow_all
     // branch inside individual arms so that high-risk commands are never
     // unlocked by `allow_all_users=true`.
+    let classified = TextCommandId::from_str(cmd);
     let risk = super::command_risk(cmd, arg1);
-    if risk.is_high_risk() {
+    let (is_owner, high_risk_enabled) = if classified.is_some() && risk.is_high_risk() {
         let is_owner = check_owner(msg.author.id, &data.shared).await;
         let high_risk_enabled = super::high_risk_enabled_via_env();
-        let decision = super::evaluate_policy(risk, is_owner, high_risk_enabled);
-        if let Some(reply) = decision.denial_message(cmd) {
-            tracing::warn!(
-                event = "discord_command_denied",
-                channel_id = channel_id.get(),
-                user_id = msg.author.id.get(),
-                user_name = %msg.author.name,
-                command = cmd,
-                reason = "command_policy",
-                risk = ?risk,
-                "discord_command_denied"
-            );
-            let _ = msg.reply(&ctx.http, reply).await;
+        (is_owner, high_risk_enabled)
+    } else {
+        (false, false)
+    };
+    let selected = match select_text_command(classified, is_owner, high_risk_enabled) {
+        TextCommandSelection::Dispatch(id) => id,
+        denied => {
+            if let Some(reply) = denied.denial_message(cmd) {
+                tracing::warn!(
+                    event = "discord_command_denied",
+                    channel_id = channel_id.get(),
+                    user_id = msg.author.id.get(),
+                    user_name = %msg.author.name,
+                    command = cmd,
+                    reason = "command_policy",
+                    risk = ?risk,
+                    "discord_command_denied"
+                );
+                let _ = msg.reply(&ctx.http, reply).await;
+            }
             return Ok(true);
         }
-    }
+    };
 
-    match cmd {
-        "!vc" => {
+    match selected {
+        TextCommandId::Vc => {
             super::handle_vc_text_command(ctx, msg, data, arg1).await?;
             return Ok(true);
         }
-        "!start" => {
+        TextCommandId::Start => {
             let path_str = if arg1.is_empty() { "." } else { arg1 };
 
             let effective_path = if path_str == "." || path_str.is_empty() {
@@ -259,7 +268,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             return Ok(true);
         }
 
-        "!meeting" => {
+        TextCommandId::Meeting => {
             let action = if arg1.is_empty() { "start" } else { arg1 };
             let agenda = if arg2.is_empty() { arg1 } else { arg2 };
 
@@ -386,7 +395,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             }
         }
 
-        "!stop" => {
+        TextCommandId::Stop => {
             let stop_lookup =
                 cancel_text_stop_token_mailbox(&data.shared, &data.provider, channel_id).await;
             match stop_lookup {
@@ -431,7 +440,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             return Ok(true);
         }
 
-        "!clear" => {
+        TextCommandId::Clear => {
             super::clear_channel_session_state(
                 &ctx.http,
                 &data.shared,
@@ -445,7 +454,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             return Ok(true);
         }
 
-        "!pwd" => {
+        TextCommandId::Pwd => {
             log_command_received!(channel_id.get(), msg.author.name, "!pwd");
 
             auto_restore_session(&data.shared, channel_id, ctx).await;
@@ -463,7 +472,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             return Ok(true);
         }
 
-        "!health" => {
+        TextCommandId::Health => {
             log_command_received!(channel_id.get(), msg.author.name, "!health");
 
             let text = super::build_health_report(&data.shared, &data.provider, channel_id).await;
@@ -471,7 +480,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             return Ok(true);
         }
 
-        "!status" => {
+        TextCommandId::Status => {
             log_command_received!(channel_id.get(), msg.author.name, "!status");
 
             let text = super::build_status_report(&data.shared, &data.provider, channel_id).await;
@@ -479,7 +488,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             return Ok(true);
         }
 
-        "!inflight" => {
+        TextCommandId::Inflight => {
             log_command_received!(channel_id.get(), msg.author.name, "!inflight");
 
             let text = super::build_inflight_report(&data.shared, &data.provider, channel_id).await;
@@ -487,7 +496,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             return Ok(true);
         }
 
-        "!queue" => {
+        TextCommandId::Queue => {
             log_command_received!(channel_id.get(), msg.author.name, "!queue");
 
             let show_all = *arg1 == "all";
@@ -497,7 +506,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             return Ok(true);
         }
 
-        "!metrics" => {
+        TextCommandId::Metrics => {
             log_command_received!(channel_id.get(), msg.author.name, "!metrics");
 
             let metrics_data = if arg1.is_empty() {
@@ -511,7 +520,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             return Ok(true);
         }
 
-        "!debug" => {
+        TextCommandId::Debug => {
             log_command_received!(channel_id.get(), msg.author.name, "!debug");
 
             let new_state = crate::services::claude::toggle_debug();
@@ -527,7 +536,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             return Ok(true);
         }
 
-        "!escalation" => {
+        TextCommandId::Escalation => {
             let rest = text.strip_prefix("!escalation").unwrap_or("").trim();
             log_command_received!(channel_id.get(), msg.author.name, "!escalation", action = %rest);
 
@@ -660,7 +669,7 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             return Ok(true);
         }
 
-        "!help" => {
+        TextCommandId::Help => {
             log_command_received!(channel_id.get(), msg.author.name, "!help");
 
             let provider_name = data.provider.display_name();
@@ -676,69 +685,16 @@ pub(in crate::services::discord) async fn handle_text_command_with_uploads(
             } else {
                 "Claude TUI-only passthrough commands are hidden for non-Claude providers."
             };
-            let help = format!(
-                "\
-**AgentDesk Discord Bot**
-Manage server files & chat with {p}.
-Each channel gets its own independent {p} session.
-
-**Session**
-`!start <path>` — Start session at directory
-`!pwd` — Show current working directory
-`!health` — Show runtime health summary
-`!status` — Show this channel session status
-`!inflight` — Show saved inflight turn state
-`!clear` — Clear AI conversation history
-`!stop` — Stop current AI request
-
-**File Transfer**
-`!down <file>` — Download file from server
-Send a file/photo — Upload to session directory
-
-**Shell**
-`!shell <command>` — Run shell command directly
-
-**AI Chat**
-Any other message is sent to {p}.
-
-**Tool Management**
-`!allowedtools` — Show currently allowed tools
-`!allowed +name` — Add tool (e.g. `!allowed +Bash`)
-`!allowed -name` — Remove tool
-
-**Skills**
-`!skill <skill>` — Run a provider skill
-`!cc <skill>` — Legacy alias for `!skill`
-
-**Settings**
-`/model` — Open the interactive model picker
-{claude_tui_settings}
-`!debug` — Toggle debug logging
-`!metrics [date]` — Show turn metrics
-`!queue [all]` — Show pending queue
-`!escalation status` — Show escalation routing mode
-
-**User Management** (owner only)
-`!allowall on|off|status` — Allow everyone or restrict to authorized users
-`!adduser <user_id>` — Allow a user to use the bot
-`!removeuser <user_id>` — Remove a user's access
-`!escalation pm|user|scheduled` — Change escalation routing mode
-`!escalation schedule <HH:MM-HH:MM>` — Set PM hours and switch to scheduled mode
-`!escalation timezone <IANA>` — Set scheduled timezone
-`!escalation owner <user_id>` — Override fallback owner user id
-`!escalation pm-channel <channel_id>` — Override PM channel
-`!help` — Show this help
-
-{risk_block}",
-                p = provider_name,
-                claude_tui_settings = claude_tui_settings,
-                risk_block = super::risk_tier_summary_for_help(super::high_risk_enabled_via_env()),
+            let help = super::command_policy::text_command_help(
+                provider_name,
+                claude_tui_settings,
+                &super::risk_tier_summary_for_help(super::high_risk_enabled_via_env()),
             );
             send_long_message_raw(&ctx.http, channel_id, &help, &data.shared).await?;
             return Ok(true);
         }
 
-        "!allowedtools" => {
+        TextCommandId::AllowedTools => {
             log_command_received!(channel_id.get(), msg.author.name, "!allowedtools");
 
             let tools = {
@@ -765,7 +721,7 @@ Any other message is sent to {p}.
             return Ok(true);
         }
 
-        "!allowed" => {
+        TextCommandId::Allowed => {
             log_command_received!(channel_id.get(), msg.author.name, "!allowed", action = %arg1);
 
             let arg = arg1.trim();
@@ -827,7 +783,7 @@ Any other message is sent to {p}.
             return Ok(true);
         }
 
-        "!adduser" => {
+        TextCommandId::AddUser => {
             log_command_received!(channel_id.get(), msg.author.name, "!adduser", target_user = %arg1);
 
             if !check_owner(msg.author.id, &data.shared).await {
@@ -877,7 +833,7 @@ Any other message is sent to {p}.
             return Ok(true);
         }
 
-        "!allowall" => {
+        TextCommandId::AllowAll => {
             log_command_received!(channel_id.get(), msg.author.name, "!allowall", enabled = %arg1);
 
             if !check_owner(msg.author.id, &data.shared).await {
@@ -941,7 +897,7 @@ Any other message is sent to {p}.
             return Ok(true);
         }
 
-        "!removeuser" => {
+        TextCommandId::RemoveUser => {
             log_command_received!(channel_id.get(), msg.author.name, "!removeuser", target_user = %arg1);
 
             if !check_owner(msg.author.id, &data.shared).await {
@@ -1000,7 +956,7 @@ Any other message is sent to {p}.
             return Ok(true);
         }
 
-        "!down" => {
+        TextCommandId::Down => {
             let file_arg = text.strip_prefix("!down").unwrap_or("").trim();
             log_command_received!(channel_id.get(), msg.author.name, "!down", path = %file_arg);
 
@@ -1059,7 +1015,7 @@ Any other message is sent to {p}.
             return Ok(true);
         }
 
-        "!shell" => {
+        TextCommandId::Shell => {
             let cmd_str = text.strip_prefix("!shell").unwrap_or("").trim();
             let preview = truncate_str(cmd_str, 60);
             log_command_received!(channel_id.get(), msg.author.name, "!shell", command_preview = %preview);
@@ -1157,7 +1113,9 @@ Any other message is sent to {p}.
         // produce byte-identical bash payloads. Risk-tier gate ran at the
         // top of this function so by the time we reach this arm the caller
         // is already owner + high_risk_enabled.
-        "!deadlock-recover" | "!machine-flip" | "!stuck-pr-rebase" => {
+        TextCommandId::DeadlockRecover
+        | TextCommandId::MachineFlip
+        | TextCommandId::StuckPrRebase => {
             use super::recovery_ops::{RecoveryKind, build_recovery_script, validate_safe_token};
             let arg = arg1.trim();
             let kind = match cmd {
@@ -1270,7 +1228,7 @@ Any other message is sent to {p}.
             return Ok(true);
         }
 
-        "!cc" | "!skill" => {
+        TextCommandId::Cc | TextCommandId::Skill => {
             let invoked_as = cmd;
             let skill = arg1.to_string();
             let args_str = text
@@ -1477,8 +1435,106 @@ Any other message is sent to {p}.
             return Ok(true);
         }
 
-        _ => {}
+        TextCommandId::Sessions
+        | TextCommandId::Receipt
+        | TextCommandId::Usage
+        | TextCommandId::Model
+        | TextCommandId::Fast
+        | TextCommandId::Goals
+        | TextCommandId::DeleteSession
+        | TextCommandId::Restart => {
+            // Defensive arm: selection never dispatches an unavailable surface.
+            if let Some(reply) = TextCommandSelection::Unavailable.denial_message(cmd) {
+                let _ = msg.reply(&ctx.http, reply).await;
+            }
+            Ok(true)
+        }
+    }
+}
+
+#[cfg(test)]
+mod command_dispatch_contract_tests {
+    fn dispatcher() -> &'static str {
+        include_str!("text_commands.rs")
+            .split_once(
+                "pub(in crate::services::discord) async fn handle_text_command_with_uploads(",
+            )
+            .expect("actual async dispatcher exists")
+            .1
+            .split_once("\n}")
+            .expect("dispatcher ends before test module")
+            .0
     }
 
-    Ok(false)
+    #[test]
+    fn production_selection_drives_the_same_exhaustive_dispatch_id() {
+        let body = dispatcher();
+        let anchors = [
+            "let classified = TextCommandId::from_str(cmd);",
+            "if classified.is_some() && risk.is_high_risk()",
+            "let is_owner = check_owner(msg.author.id, &data.shared).await;",
+            "let high_risk_enabled = super::high_risk_enabled_via_env();",
+            "(is_owner, high_risk_enabled)",
+            "let selected = match select_text_command(classified, is_owner, high_risk_enabled)",
+            "TextCommandSelection::Dispatch(id) => id,",
+            "denied.denial_message(cmd)",
+            "return Ok(true);",
+            "match selected {",
+        ];
+        let mut remaining = body;
+        for anchor in anchors {
+            remaining = remaining.split_once(anchor).expect(anchor).1;
+        }
+        assert!(!body.contains("Ok(false)"));
+        // Nested subcommand wildcards are legitimate; only the outer match is forbidden.
+        assert!(
+            !remaining
+                .lines()
+                .any(|line| line.starts_with("        _ =>"))
+        );
+        assert!(
+            remaining.contains("TextCommandId::Vc => {\n            super::handle_vc_text_command")
+        );
+        assert!(remaining.contains("TextCommandId::Cc | TextCommandId::Skill => {"));
+    }
+
+    #[test]
+    fn skill_alias_branches_match_intake_and_preserve_canonical_actions() {
+        let body = dispatcher();
+        let aliases = body
+            .split_once("match skill.as_str() {")
+            .unwrap()
+            .1
+            .split_once("\n            auto_restore_session(")
+            .unwrap()
+            .0;
+        let names: std::collections::BTreeSet<_> = aliases
+            .lines()
+            .filter_map(|line| line.strip_prefix("                \""))
+            .filter_map(|line| line.split_once("\" => {").map(|pair| pair.0))
+            .collect();
+        let intake = include_str!("../router/intake_gate.rs")
+            .split_once("let is_skill_command =")
+            .unwrap()
+            .1
+            .split_once("if !is_skill_command {")
+            .unwrap()
+            .0;
+        let intake_aliases = intake.split_once("skill_name,\n").unwrap().1;
+        let intake_names: std::collections::BTreeSet<_> = intake_aliases
+            .split('"')
+            .enumerate()
+            .filter_map(|(i, name)| (i % 2 == 1).then_some(name))
+            .collect();
+        assert_eq!(names, intake_names);
+        assert_eq!(names.len(), 7);
+        assert!(aliases.contains("Use `!clear` instead."));
+        assert!(aliases.contains("cancel_text_stop_token_mailbox("));
+        assert!(aliases.contains("super::CommandRisk::Mutating,"));
+        for name in ["pwd", "health", "status", "inflight", "help"] {
+            assert!(aliases.contains(&format!(
+                "handle_text_command(ctx, msg, data, channel_id, \"!{name}\")"
+            )));
+        }
+    }
 }

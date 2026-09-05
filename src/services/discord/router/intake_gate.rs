@@ -970,8 +970,8 @@ pub(in crate::services::discord) async fn handle_event(
                         let _ =
                             append_pending_uploads(&data.shared, channel_id, &upload_records).await;
                     }
-                    return Ok(());
                 }
+                return Ok(());
             }
 
             // Auto-restore session (for threads, fall back to parent channel's session)
@@ -1556,14 +1556,11 @@ pub(in crate::services::discord) async fn handle_event(
                 }
             }
 
-            // Shell command shortcut
+            // Legacy command boundary: deny only; never reinterpret text as execution.
             if text.starts_with('!') {
                 if !upload_records_appended_to_session {
                     let _ = append_pending_uploads(&data.shared, channel_id, &upload_records).await;
                 }
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                let preview = truncate_str(text, 60);
-                tracing::info!("  [{ts}] ◀ [{user_name}] Shell: {preview}");
                 super::message_handler::handle_shell_command_raw(
                     ctx,
                     channel_id,
@@ -1796,5 +1793,50 @@ mod live_intake_preserve_wiring_tests {
             0,
             "queue branches must not make sender decisions independently"
         );
+    }
+}
+
+#[cfg(test)]
+mod command_recognition_tests {
+    #[test]
+    fn command_outcomes_end_before_restore_and_preserve_upload_conditions() {
+        let production = include_str!("intake_gate.rs")
+            .split_once("#[cfg(test)]\nmod reply_context_tests")
+            .unwrap()
+            .0;
+        let command = production
+            .split_once("let cmd_text = strip_leading_bot_mention(text);")
+            .unwrap()
+            .1
+            .split_once("// Auto-restore session")
+            .unwrap()
+            .0;
+        let anchors = [
+            "if cmd_text.starts_with('!')",
+            "let handled = super::message_handler::handle_text_command(",
+            "&mut attachment_local_permit,",
+            ".await?;",
+            "if handled {",
+            "if (!is_skill_command || attachment_local_permit.is_some())",
+            "&& !upload_records_appended_to_session",
+        ];
+        let mut remaining = command;
+        for anchor in anchors {
+            remaining = remaining.split_once(anchor).expect(anchor).1;
+        }
+        assert!(
+            remaining
+                .trim_end()
+                .ends_with("}\n                return Ok(());\n            }")
+        );
+        let legacy = production
+            .split_once("// Legacy command boundary:")
+            .unwrap()
+            .1
+            .split_once("// Regular text")
+            .unwrap()
+            .0;
+        assert!(legacy.contains("super::message_handler::handle_shell_command_raw("));
+        assert!(legacy.trim_end().ends_with("return Ok(());\n            }"));
     }
 }

@@ -2267,6 +2267,10 @@ services::discord::catch_up::classification_order_tests::unconfigured_utility_id
 services::discord::catch_up::too_old_notice::tests::default_adapter_preserves_outbox_contract_and_pg_dedupe_pg
 services::discord::catch_up::too_old_notice::tests::persistent_dedupe_suppresses_too_old_notice_across_restart_gap_pg
 services::discord::commands::command_policy::command_policy_tests::cancel_queued_is_registered_as_mutating_and_not_high_risk
+services::discord::commands::command_policy::command_policy_tests::common_registered_slash_surfaces_keep_the_same_risk
+services::discord::commands::command_policy::command_policy_tests::help_formatter_preserves_provider_settings_and_risk_placeholders
+services::discord::commands::command_policy::command_policy_tests::registered_surface_and_principal_matrix_preserves_exact_ids
+services::discord::commands::command_policy::command_policy_tests::unknown_selection_is_denied_for_every_principal
 services::discord::commands::config::session_override_cluster_characterization_tests::codex_goals_toggle_round_trip_marks_and_clears_reset
 services::discord::commands::config::session_override_cluster_characterization_tests::fast_mode_reset_entries_stay_provider_scoped
 services::discord::commands::config::session_override_cluster_characterization_tests::fast_mode_toggle_round_trip_marks_and_clears_provider_reset
@@ -2304,6 +2308,8 @@ services::discord::commands::recovery_ops::tests::validate_rejects_too_long
 services::discord::commands::response_wording_tests::bare_shell_command_error_uses_shared_folded_korean_rendering
 services::discord::commands::response_wording_tests::owner_error_detail_is_folded_and_markdown_safe
 services::discord::commands::response_wording_tests::shared_command_states_use_korean_responses
+services::discord::commands::text_commands::command_dispatch_contract_tests::production_selection_drives_the_same_exhaustive_dispatch_id
+services::discord::commands::text_commands::command_dispatch_contract_tests::skill_alias_branches_match_intake_and_preserve_canonical_actions
 services::discord::commands::tui_passthrough::tests::local_only_whitelist_matches_passthrough_command_set
 services::discord::commands::tui_passthrough::tests::model_command_is_observation_only_local
 services::discord::commands::voice::auto_join_tests::disabled_voice_guidance_is_stable
@@ -4356,6 +4362,7 @@ services::discord::router::intake_dispatch::tests::telemetry_only_unopted_unknow
 services::discord::router::intake_gate::busy_duplicate_notice::tests::keeps_queue_error_notice_visible
 services::discord::router::intake_gate::busy_duplicate_notice::tests::keeps_recent_resend_duplicate_notice_visible
 services::discord::router::intake_gate::busy_duplicate_notice::tests::silences_already_queued_source_id_duplicate_notice
+services::discord::router::intake_gate::command_recognition_tests::command_outcomes_end_before_restore_and_preserve_upload_conditions
 services::discord::router::intake_gate::gate::tests::live_human_preservation_requires_determinate_non_utility_identity
 services::discord::router::intake_gate::gate::tests::live_known_automation_is_excluded_even_with_false_bot_flag
 services::discord::router::intake_gate::gate::tests::operational_alert_is_not_admitted_but_announce_handoff_is
@@ -4404,6 +4411,8 @@ services::discord::router::message_handler::attachments::attachment_tests::attac
 services::discord::router::message_handler::attachments::attachment_tests::attachment_persistence_seam_preserves_path_record_and_bytes
 services::discord::router::message_handler::attachments::attachment_tests::discord_attachment_url_guard_allows_discord_cdn_hosts
 services::discord::router::message_handler::attachments::attachment_tests::discord_attachment_url_guard_rejects_ssrf_shapes
+services::discord::router::message_handler::control::command_boundary_tests::legacy_boundary_is_only_a_fixed_denial
+services::discord::router::message_handler::control::command_boundary_tests::wrapper_consumes_unhandled_dispatch_results_with_denial
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::goal_fresh_intake_and_headless_paths_record_durable_boundary_before_clear
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_are_classified_precisely
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_have_consumed_notices
