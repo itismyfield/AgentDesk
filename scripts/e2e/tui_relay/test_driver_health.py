@@ -994,6 +994,7 @@ class ScenarioHealthProbe(unittest.TestCase):
                     "global_active_max": 0,
                     "global_finalizing_max": 0,
                 },
+                channel_id="42", cell="codex-tui",
             )
 
         self.assertEqual(result["status"], "healthy")
@@ -1008,7 +1009,7 @@ class ScenarioHealthProbe(unittest.TestCase):
                     {
                         **_health_detail(_busy_mailbox("42", provider="codex")),
                         "global_active": 2,
-                        "global_finalizing": 1,
+                        "global_finalizing": 2,
                     },
                 )
             ],
@@ -1036,15 +1037,15 @@ class ScenarioHealthProbe(unittest.TestCase):
                         "forbid_degraded_reasons": [
                             "global_active_counter_out_of_bounds"
                         ],
-                        "global_active_max": 0,
-                        "global_finalizing_max": 0,
+                        "global_active_max": 1,
+                        "global_finalizing_max": 1,
                     },
                 )
 
         message = str(ctx.exception)
         self.assertIn("forbidden_degraded_reasons", message)
-        self.assertIn("global_active=2 > 0", message)
-        self.assertIn("global_finalizing=1 > 0", message)
+        self.assertIn("global_active=2 > 1", message)
+        self.assertIn("global_finalizing=2 > 1", message)
 
     def test_assert_health_fails_on_negative_global_counter(self):
         payloads = {
@@ -1078,11 +1079,12 @@ class ScenarioHealthProbe(unittest.TestCase):
                         "global_active_max": 0,
                         "global_finalizing_max": 0,
                     },
+                    channel_id="42", cell="codex-tui",
                 )
 
         self.assertIn("global_active=-1 < 0", str(ctx.exception))
 
-    def test_assert_health_polls_until_global_counters_drain(self):
+    def test_assert_health_polls_until_public_health_recovers(self):
         payloads = {
             "/api/health/detail": [
                 (
@@ -1130,19 +1132,21 @@ class ScenarioHealthProbe(unittest.TestCase):
                     "global_active_max": 0,
                     "global_finalizing_max": 0,
                 },
+                channel_id="42", cell="codex-tui",
             )
 
         self.assertEqual(result["global_active"], 0)
         self.assertEqual(result["global_finalizing"], 0)
         sleep.assert_called_once_with(0.0)
 
-    def test_assert_health_polls_healthy_status_until_same_cell_finalizing_drains(self):
+    def test_assert_health_polls_healthy_status_until_target_residue_clears(self):
         payloads = {
             "/api/health/detail": [
                 (
                     200,
                     {
-                        **_health_detail(_idle_mailbox("42", provider="codex")),
+                        **_health_detail({**_idle_mailbox("42", provider="codex"),
+                                          "agent_turn_status": "residual"}),
                         "global_finalizing": 1,
                     },
                 ),
@@ -1182,6 +1186,7 @@ class ScenarioHealthProbe(unittest.TestCase):
                     "global_active_max": 0,
                     "global_finalizing_max": 0,
                 },
+                channel_id="42", cell="codex-tui",
             )
 
         self.assertEqual(result["status"], "healthy")
@@ -1189,7 +1194,7 @@ class ScenarioHealthProbe(unittest.TestCase):
         self.assertEqual(result["global_finalizing"], 0)
         sleep.assert_called_once_with(0.0)
 
-    def test_assert_health_times_out_when_healthy_status_finalizing_persists(self):
+    def test_assert_health_times_out_when_healthy_status_target_residue_persists(self):
         healthy_payload = {
             "status": "healthy",
             "ok": True,
@@ -1197,7 +1202,8 @@ class ScenarioHealthProbe(unittest.TestCase):
             "degraded_reasons": [],
         }
         stuck_detail = {
-            **_health_detail(_idle_mailbox("42", provider="codex")),
+            **_health_detail({**_idle_mailbox("42", provider="codex"),
+                              "agent_turn_status": "residual"}),
             "global_finalizing": 1,
         }
         payloads = {
@@ -1218,11 +1224,12 @@ class ScenarioHealthProbe(unittest.TestCase):
                         "global_active_max": 0,
                         "global_finalizing_max": 0,
                     },
+                    channel_id="42", cell="codex-tui",
                 )
 
         message = str(ctx.exception)
         self.assertIn("assert_health did not pass within 0.2s", message)
-        self.assertIn("global_finalizing=1 > 0", message)
+        self.assertIn("agent_turn_status=residual", message)
 
     def test_assert_health_forbid_only_allows_unrelated_transitional_reasons(self):
         payloads = {
