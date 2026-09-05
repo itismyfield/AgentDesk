@@ -1,0 +1,212 @@
+"""Offline consumer/fetch tests: synthetic capture clocks, never live proof."""
+
+import copy
+from datetime import datetime, timezone
+from argparse import Namespace
+from pathlib import Path
+import sys
+import unittest
+from unittest.mock import patch
+
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import run_tui_relay as driver
+from tui_relay import assertions, discord, known_gap as gap
+from tui_relay.test_discord_client import _Response
+
+RUN = "offline-c5"
+BASE = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+SPEC = {"no_duplicate_marker_with_known_gap": {"marker": gap.PRE, "known_gap": gap.PROFILE}}
+BINDING = dict(scenario="E-22", cell="claude-tui", channel_id=gap.CHANNEL_ID,
+               bot_id=gap.BOT_ID, after_id="99")
+YAML = Path(__file__).resolve().parents[3] / "tests/e2e/tui_relay/scenarios/E-22-tool-use-text-completeness.yaml"
+
+
+def row(mid, content, *, edited=None, author=gap.BOT_ID):
+    return {"id": str(mid), "content": content, "channel_id": gap.CHANNEL_ID,
+            "author": {"id": author, "bot": True}, "type": 0,
+            "timestamp": datetime.fromtimestamp(BASE + mid - 100, timezone.utc).isoformat(),
+            "edited_timestamp": edited, "attachments": [], "embeds": [], "components": []}
+
+
+def fixture():
+    setup = row(100, f"### E2E SETUP E-22 cell=claude-tui run={RUN}", author=gap.SETUP_BOT_ID)
+    before = row(101, gap.PRE + "\n\n⠋ ⚙ Bash: Sleep 20 seconds then print marker: " + gap.COMMAND + "\n• [Bash] 실행")
+    after = row(101, gap.PRE, edited=datetime.fromtimestamp(BASE + 4, timezone.utc).isoformat())
+    body, chrome = row(103, gap.BODY), row(104, "-# ✅ 완료")
+    return [{"pages": [{"channel_id": gap.CHANNEL_ID, "after_id": "99", "limit": 100,
+                        "observed_at": BASE + 10 + index, "messages": messages}]}
+            for index, messages in enumerate(([setup], [setup, before], [setup, after, body, chrome]))]
+
+
+def consumer(captures, *, binding=None, spec=None, final=None):
+    window = assertions.Window(setup_marker_id="100")
+    for capture in captures or []:
+        for message in capture.get("pages", [{}])[0].get("messages", []):
+            if int(message["id"]) > 100:
+                window.add(copy.deepcopy(message))
+    if final is not None:
+        window = assertions.Window(setup_marker_id="100")
+        for message in final:
+            window.add(copy.deepcopy(message))
+    record = {"_known_gap_captures": captures, "_known_gap_binding": BINDING if binding is None else binding}
+    driver.run_assertion(SPEC if spec is None else spec, window=window, record=record, run_id=RUN)
+    return window, record
+
+
+class E22KnownGapContract(unittest.TestCase):
+    def setUp(self):
+        for target in ("socket.socket", "subprocess.Popen"):
+            blocker = patch(target, side_effect=AssertionError("offline test attempted external I/O"))
+            blocker.start()
+            self.addCleanup(blocker.stop)
+
+    def test_unique_marker_needs_no_exception_or_binding(self):
+        window, record = consumer(None, final=[row(101, gap.BODY)])
+        self.assertNotIn("known_gaps", record)
+        self.assertEqual(len(window.messages), 1)
+
+    def test_observed_edit_is_reported_and_original_guards_remain(self):
+        window, record = consumer(fixture())
+        decision = record["known_gaps"][0]
+        self.assertEqual((decision["classification"], decision["known_gap"]), ("KNOWN_GAP", "#5731"))
+        self.assertEqual(decision["message_ids"], ["101", "103"])
+        self.assertEqual(decision["witness"]["after"], gap.PRE)
+        self.assertEqual(len(window.message_updates), 1)
+        with self.assertRaises(assertions.AssertionError):
+            assertions.no_duplicate_marker(window, marker=gap.PRE)
+        record["provider_hold_states"] = [{"ok_marker": gap.PRE, "ok_marker_seen": True}]
+        for spec in yaml.safe_load(YAML.read_text())["assertions"]:
+            driver.run_assertion(spec, window=window, record=record, run_id=RUN)
+        result = {"assertions": []}
+        driver._merge_record_into_result(result, record)
+        self.assertEqual(result["known_gaps"], record["known_gaps"])
+        self.assertNotIn("_known_gap_captures", result)
+        window.raw_messages = [m for m in window.raw_messages if m["id"] != "104"]
+        with self.assertRaises(assertions.AssertionError):
+            assertions.completion_chrome_after_body(window, body_marker=gap.MARKERS[-1], required=True)
+
+    def test_closed_dynamic_preview_alphabet(self):
+        for spinner in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏":
+            for caption in ("", "Wait for E22: ", "도구 완료 기다리기: ", "a" * 45 + ": "):
+                captures = fixture()
+                preview = gap.PRE + "\n\n" + spinner + " ⚙ Bash: " + caption + gap.COMMAND + "\n• [Bash] 실행 · 2회"
+                with self.subTest(preview=preview):
+                    captures[1]["pages"][0]["messages"][1]["content"] = preview
+                    consumer(captures)
+        for caption in ("a" * 46, "가" * 16, "line\nbreak", "`injected`"):
+            captures = fixture()
+            captures[1]["pages"][0]["messages"][1]["content"] = gap.PRE + "\n\n⠋ ⚙ Bash: " + caption + ": " + gap.COMMAND + "\n• [Bash] 실행"
+            with self.subTest(caption=caption), self.assertRaises(assertions.AssertionError):
+                consumer(captures)
+
+    def test_duplicate_counterexamples_refuse_in_actual_consumer(self):
+        cases = {}
+        for name in ("unedited", "missing_before", "retained_preview", "third_current", "third_history",
+                     "same_body", "wrong_author", "wrong_channel", "unsupported_preview", "footer",
+                     "double_token", "backward_edit", "future_edit", "changed_creation", "wrong_setup"):
+            captures = copy.deepcopy(fixture())
+            before = captures[1]["pages"][0]["messages"][1]
+            final = captures[-1]["pages"][0]["messages"]
+            if name == "unedited": final[1]["edited_timestamp"] = None
+            if name == "missing_before": captures.pop(1)
+            if name == "retained_preview": final[1]["content"] = before["content"]
+            if name == "third_current": final.append(row(105, gap.PRE))
+            if name == "third_history": captures[1]["pages"][0]["messages"].append(row(105, gap.PRE))
+            if name == "same_body": final[1]["content"] = gap.BODY
+            if name == "wrong_author": before["author"]["id"] = "999"
+            if name == "wrong_channel": before["channel_id"] = "999"
+            if name == "unsupported_preview": before["content"] = gap.PRE + " arbitrary progress"
+            if name == "footer": final[2]["content"] += "\n\n-# ✅ 완료"
+            if name == "double_token": final[2]["content"] += gap.PRE
+            if name == "backward_edit": before["edited_timestamp"] = final[1]["edited_timestamp"]
+            if name == "future_edit": final[1]["edited_timestamp"] = "2099-01-01T00:00:00+00:00"
+            if name == "changed_creation": before["timestamp"] = "2026-01-01T00:00:00+00:00"
+            if name == "wrong_setup": final[0]["content"] += "-other"
+            cases[name] = captures
+        for name, captures in cases.items():
+            with self.subTest(case=name), self.assertRaises(assertions.AssertionError):
+                consumer(captures)
+
+    def test_missing_binding_capture_and_wrong_window_refuse(self):
+        final = fixture()[-1]["pages"][0]["messages"][1:]
+        for captures, binding in ((None, {}), ([], {}), (fixture(), {})):
+            with self.subTest(captures=captures, binding=binding), self.assertRaises(assertions.AssertionError):
+                consumer(captures, binding=binding, final=final)
+        for key, value in (("cell", "claude-pipe"), ("scenario", "E-1"), ("channel_id", "999"),
+                           ("bot_id", "999"), ("after_id", "98")):
+            with self.subTest(key=key), self.assertRaises(assertions.AssertionError):
+                consumer(fixture(), binding={**BINDING, key: value})
+        final[0]["content"] += " "
+        with self.assertRaisesRegex(assertions.AssertionError, "capture/window mismatch"):
+            consumer(fixture(), final=final)
+
+    def test_unknown_key_profile_or_options_never_ignored(self):
+        for spec in ({"new_unknown_assertion": True}, {**SPEC, "extra": True},
+                     {**SPEC, "requires_feature": "skip-me"},
+                     {"no_duplicate_marker_with_known_gap": {"marker": gap.PRE, "known_gap": "unknown"}},
+                     {"no_duplicate_marker_with_known_gap": {**SPEC["no_duplicate_marker_with_known_gap"], "extra": True}}):
+            with self.subTest(spec=spec), self.assertRaises(assertions.AssertionError):
+                consumer(None, spec=spec, final=[row(101, gap.BODY)])
+
+    def test_capture_completeness_and_malformed_evidence_fail_closed(self):
+        for captures in (None, [], [{"pages": []}], [{"pages": [{}, {}]}]):
+            self.assertEqual(gap.evaluate_e22_known_gap(captures, run_id=RUN, **BINDING)["classification"], "NOT_EVALUABLE")
+        for field, value in (("limit", True), ("observed_at", float("nan")), ("messages", {}),
+                             ("after_id", "98"), ("channel_id", "999")):
+            captures = fixture()
+            captures[-1]["pages"][0][field] = value
+            self.assertEqual(gap.evaluate_e22_known_gap(captures, run_id=RUN, **BINDING)["classification"], "FAIL")
+        captures = fixture()
+        captures[-1]["pages"][0]["messages"] *= 25
+        self.assertEqual(gap.evaluate_e22_known_gap(captures, run_id=RUN, **BINDING)["classification"], "NOT_EVALUABLE")
+        captures = fixture()
+        captures.insert(0, {"pages": [{**captures[0]["pages"][0], "messages": [], "observed_at": BASE + 9}]})
+        consumer(captures)
+
+    def test_fetch_captures_unfiltered_response_without_extra_get_or_mutation(self):
+        captures, requests = [], []
+        def fetch(request, **_kwargs):
+            requests.append(request.full_url)
+            return _Response({"messages": fixture()[-1]["pages"][0]["messages"]})
+        client = discord.DiscordClient("http://offline.invalid", captures=captures, capture_after_id="99")
+        with patch("urllib.request.urlopen", side_effect=fetch):
+            returned = client.fetch_messages(gap.CHANNEL_ID, after_id="100", limit=100)
+        self.assertEqual(len(requests), 1)
+        self.assertIn("after=99", requests[0])
+        self.assertEqual(len(returned), 3)
+        self.assertEqual(len(captures[0]["pages"][0]["messages"]), 4)
+        returned[0]["content"] = "mutated by consumer"
+        self.assertEqual(captures[0]["pages"][0]["messages"][1]["content"], gap.PRE)
+
+    def test_run_one_cell_real_fetch_wait_consumer_and_report_pipeline(self):
+        captures = fixture()
+        pages = [c["pages"][0]["messages"] for c in captures]
+        requests = []
+        def fetch(request, **_kwargs):
+            requests.append(request.full_url)
+            return _Response(pages[min(len(requests) - 1, 2)])
+        scenario = yaml.safe_load(YAML.read_text())
+        original_mark = assertions.Window.mark_prompt_sent
+        def mark(window):
+            original_mark(window, datetime.fromtimestamp(BASE + 0.5, timezone.utc))
+        client = discord.DiscordClient("http://offline.invalid")
+        with patch("urllib.request.urlopen", side_effect=fetch), patch.object(driver.time, "sleep"), \
+             patch.object(discord.DiscordClient, "send_control", return_value={"id": "100"}), \
+             patch.object(discord.DiscordClient, "send_prompt", return_value={"message_id": "102"}), \
+             patch.object(driver, "wait_for_provider_hold_state", return_value={"ok_marker": gap.PRE, "ok_marker_seen": True}), \
+             patch.object(driver, "assert_cell_idle", return_value={"status": "idle"}), \
+             patch.object(assertions.Window, "mark_prompt_sent", mark):
+            record = driver.run_one_cell(scenario=scenario, cell="claude-tui", channel_id=gap.CHANNEL_ID,
+                client=client, run_id=RUN, dry_run=False, args=Namespace(queue_runtime_root="/offline-denied"))
+        self.assertEqual(len(requests), 5)  # setup echo + two existing wait polls + two final refetches
+        self.assertTrue(all("after=99" in url for url in requests))
+        self.assertEqual(record["known_gaps"][0]["message_ids"], ["101", "103"])
+        self.assertEqual(record["message_updates"], 1)
+        self.assertIsNone(client.captures)  # per-scenario replacement never contaminates the next scenario
+        self.assertEqual(record["coverage_class_actual"], "live")  # declared fixture, not actual live execution
+
+
+if __name__ == "__main__":
+    unittest.main()

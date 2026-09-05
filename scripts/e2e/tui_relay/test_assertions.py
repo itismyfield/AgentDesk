@@ -31,6 +31,7 @@ from tui_relay.test_driver_health import (  # noqa: E402
 )
 # ci-script-checks.sh runs this module; expose the offline fetch regressions too.
 from tui_relay.test_discord_client import DiscordClientFetchMessages  # noqa: E402, F401
+from tui_relay.test_known_gap import E22KnownGapContract  # noqa: E402, F401
 
 
 def _relay_msg(msg_id: int, content: str, ts: str | None = None) -> dict:

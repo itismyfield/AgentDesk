@@ -41,6 +41,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +49,7 @@ import yaml  # type: ignore[import-untyped]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tui_relay import assertions, discord, durable_delivery, fixtures, lease, tmux  # noqa: E402
+from tui_relay import assertions, discord, durable_delivery, fixtures, known_gap, lease, tmux  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -120,6 +121,7 @@ TUI_IDLE_DRAFT_GUARD_POLL_S = float(
 )
 DIRECT_INPUT_NOTIFICATION_MARKER = "터미널에 직접 주입된 입력"
 REPORT_RECORD_KEYS: tuple[str, ...] = (
+    "known_gaps",
     "relay_count",
     "raw_count",
     "message_updates",
@@ -3303,6 +3305,16 @@ def run_one_cell(
     setup_marker_id = str(setup_resp.get("message_id") or setup_resp.get("id") or "")
     after_id = setup_marker_id
     window = assertions.Window(setup_marker_id=setup_marker_id)
+    if scenario_id == "E-22" and any(
+        "no_duplicate_marker_with_known_gap" in spec for spec in scenario.get("assertions", [])
+    ):
+        record["_known_gap_captures"] = []
+        record["_known_gap_binding"] = {
+            "scenario": scenario_id, "cell": cell, "channel_id": channel_id,
+            "bot_id": known_gap.BOT_ID, "after_id": str(int(setup_marker_id) - 1),
+        }
+        client = replace(client, captures=record["_known_gap_captures"],
+                         capture_after_id=record["_known_gap_binding"]["after_id"])
     time.sleep(8.0)
 
     def _ingest_observed(messages: list[dict[str, Any]]) -> None:
@@ -4212,6 +4224,9 @@ def run_assertion(
 
     if not isinstance(spec, dict):
         raise assertions.AssertionError(f"bad assertion spec: {spec!r}")
+    gap_key = "no_duplicate_marker_with_known_gap"
+    if gap_key in spec and set(spec) != {gap_key}:
+        raise assertions.AssertionError(f"unknown known-gap assertion options: {spec!r}")
     required_feature = spec.get("requires_feature")
     if required_feature is not None:
         required_feature = str(required_feature)
@@ -4285,6 +4300,25 @@ def run_assertion(
                 f"ordered_text_present must be a list of needles: {spec!r}"
             )
         assertions.ordered_text_present(window, needles=needles)
+    elif gap_key in spec:
+        params = spec[gap_key]
+        if not isinstance(params, dict) or params != {"marker": known_gap.PRE, "known_gap": known_gap.PROFILE}:
+            raise assertions.AssertionError(f"unknown known-gap profile/options: {spec!r}")
+        try:
+            assertions.no_duplicate_marker(window, marker=known_gap.PRE)
+        except assertions.AssertionError:
+            captures = (record or {}).get("_known_gap_captures")
+            binding = (record or {}).get("_known_gap_binding") or {}
+            decision = known_gap.evaluate_e22_known_gap(
+                captures, run_id=run_id, **{key: binding.get(key) for key in
+                    ("scenario", "cell", "channel_id", "bot_id", "after_id")})
+            if decision["classification"] != "KNOWN_GAP":
+                raise assertions.AssertionError(f"E22 duplicate refused: {decision}") from None
+            current = {m["id"]: m for m in window.raw_messages if known_gap.PRE in m.get("content", "")}
+            captured = {m["id"]: m for m in captures[-1]["pages"][0]["messages"] if m["id"] in decision["message_ids"]}
+            if window.setup_marker_id != decision["setup_id"] or current != captured:
+                raise assertions.AssertionError("E22 duplicate capture/window mismatch")
+            record.setdefault("known_gaps", []).append(decision)
     elif "no_duplicate_marker" in spec:
         # #2838 (P0-2): catches duplicate-with-differing-header re-emit (e.g.
         # restart-induced or ACK-timeout re-relay) that no_duplicate_content misses.
