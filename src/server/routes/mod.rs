@@ -84,18 +84,54 @@ pub use crate::app_state::AppState;
 
 pub(crate) type ApiRouter = Router<AppState>;
 
+/// One mutation route that gates itself with `require_explicit_bearer_token`.
+///
+/// Handlers pass `.operation` to `require_explicit_bearer_token`, so the
+/// boot-audit inventory below and the actual gating label share a single
+/// definition: retiring a handler means deleting its constant, which removes
+/// it from the inventory at compile time. (The removed
+/// `/api/kanban-cards/batch-transition` route lingered in the old
+/// string-literal list and inflated the audit count by one.)
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ExplicitAuthMutationRoute {
+    /// Route domain used only for the boot-audit log (`kanban`, `auto-queue`).
+    pub domain: &'static str,
+    /// Operation label passed to `require_explicit_bearer_token` and echoed
+    /// in its 401 error body.
+    pub operation: &'static str,
+}
+
+impl ExplicitAuthMutationRoute {
+    const fn new(domain: &'static str, operation: &'static str) -> Self {
+        Self { domain, operation }
+    }
+
+    pub const KANBAN_REREVIEW: Self = Self::new("kanban", "rereview");
+    pub const KANBAN_BATCH_REREVIEW: Self = Self::new("kanban", "batch rereview");
+    pub const KANBAN_REOPEN: Self = Self::new("kanban", "reopen");
+    pub const KANBAN_FORCE_TRANSITION: Self = Self::new("kanban", "force-transition");
+    pub const AUTO_QUEUE_SUBMIT_ORDER: Self = Self::new("auto-queue", "submit_order");
+}
+
+impl std::fmt::Debug for ExplicitAuthMutationRoute {
+    // Renders as the quoted `"domain: operation"` string the audit log has
+    // always emitted, so log consumers see an unchanged format.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "\"{}: {}\"", self.domain, self.operation)
+    }
+}
+
 /// Mutation routes that gate themselves with `require_explicit_bearer_token`.
 /// Kept in one place so the boot-time audit emits a complete inventory.
 /// Order matches code-grep order for stable log output.
 /// (#2257 concern 1 — operators need to see at startup which write
 /// endpoints are mounted on a fail-open auth config.)
-pub const EXPLICIT_AUTH_MUTATION_ROUTES: &[&str] = &[
-    "kanban: rereview",
-    "kanban: batch rereview",
-    "kanban: reopen",
-    "kanban: batch-transition",
-    "kanban: force-transition",
-    "auto-queue: submit_order",
+pub const EXPLICIT_AUTH_MUTATION_ROUTES: &[ExplicitAuthMutationRoute] = &[
+    ExplicitAuthMutationRoute::KANBAN_REREVIEW,
+    ExplicitAuthMutationRoute::KANBAN_BATCH_REREVIEW,
+    ExplicitAuthMutationRoute::KANBAN_REOPEN,
+    ExplicitAuthMutationRoute::KANBAN_FORCE_TRANSITION,
+    ExplicitAuthMutationRoute::AUTO_QUEUE_SUBMIT_ORDER,
 ];
 
 /// Mutation routes that fail closed unless an operator auth mechanism is
@@ -267,6 +303,31 @@ mod audit_explicit_auth_routes_tests {
             sorted.len(),
             FAIL_CLOSED_OPERATOR_MUTATION_ROUTES.len(),
             "duplicate label in FAIL_CLOSED_OPERATOR_MUTATION_ROUTES — audit log will report misleading counts"
+        );
+    }
+
+    #[test]
+    fn route_inventory_has_no_retired_batch_transition_entry() {
+        // The bulk /api/kanban-cards/batch-transition endpoint was removed
+        // (see the docs inventory); its label must not linger in the audit.
+        assert!(
+            !EXPLICIT_AUTH_MUTATION_ROUTES
+                .iter()
+                .any(|route| route.operation.contains("batch-transition")),
+            "retired batch-transition route still listed in EXPLICIT_AUTH_MUTATION_ROUTES"
+        );
+        assert_eq!(EXPLICIT_AUTH_MUTATION_ROUTES.len(), 5);
+    }
+
+    #[test]
+    fn route_debug_format_matches_legacy_audit_string() {
+        assert_eq!(
+            format!("{:?}", ExplicitAuthMutationRoute::KANBAN_REOPEN),
+            "\"kanban: reopen\""
+        );
+        assert_eq!(
+            format!("{:?}", &EXPLICIT_AUTH_MUTATION_ROUTES[..2]),
+            "[\"kanban: rereview\", \"kanban: batch rereview\"]"
         );
     }
 

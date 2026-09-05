@@ -10,6 +10,7 @@ pub(crate) mod maintenance;
 pub(crate) mod multinode_regression;
 mod outbox_actionable_delivery;
 mod outbox_delivery_alert;
+mod rate_limit_backoff;
 pub(crate) mod resource_locks;
 pub mod routes;
 mod startup_preflight;
@@ -992,12 +993,35 @@ async fn upsert_rate_limit_cache_entry(
     }
 }
 
-async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
-    use std::time::Duration;
+/// Classifies one Claude sync result for the backoff schedule.
+fn classify_claude_sync_result(
+    result: &Result<usize, anyhow::Error>,
+) -> rate_limit_backoff::ClaudeSyncOutcome {
+    use rate_limit_backoff::{ClaudeSyncOutcome, ClaudeUsageRateLimited};
+    match result {
+        Ok(_) => ClaudeSyncOutcome::Success,
+        Err(error) => match error.downcast_ref::<ClaudeUsageRateLimited>() {
+            Some(rate_limited) => ClaudeSyncOutcome::RateLimited {
+                retry_after: rate_limited.retry_after,
+            },
+            None => ClaudeSyncOutcome::OtherError,
+        },
+    }
+}
 
-    let interval = Duration::from_secs(120);
-    // Run immediately on startup, then every 2 minutes
+async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
+    use rate_limit_backoff::{
+        ClaudeSyncBackoff, ClaudeSyncOutcome, RATE_LIMIT_SYNC_BASE_INTERVAL,
+        RATE_LIMIT_SYNC_MAX_BACKOFF,
+    };
+    use std::time::Instant;
+
+    let interval = RATE_LIMIT_SYNC_BASE_INTERVAL;
+    // Run immediately on startup, then every 2 minutes. The Claude leg
+    // additionally backs off after 429s (Retry-After or exponential up to
+    // 30 min) while the other providers keep the 2-minute cadence.
     let mut first = true;
+    let mut claude_backoff = ClaudeSyncBackoff::new(interval, RATE_LIMIT_SYNC_MAX_BACKOFF);
 
     loop {
         if !first {
@@ -1005,7 +1029,36 @@ async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
         }
         first = false;
 
-        let _ = sync_claude_rate_limit_cache_once_serialized(pg_pool.as_ref()).await;
+        let now = Instant::now();
+        if claude_backoff.should_attempt(now) {
+            let claude_result =
+                sync_claude_rate_limit_cache_once_serialized(pg_pool.as_ref()).await;
+            let outcome = classify_claude_sync_result(&claude_result);
+            let is_rate_limited = matches!(outcome, ClaudeSyncOutcome::RateLimited { .. });
+            let delay = claude_backoff.record(outcome, Instant::now());
+            if is_rate_limited {
+                // First 429 of a streak is WARN; the rest are INFO so a
+                // sustained rate limit does not flood the log every tick.
+                let consecutive = claude_backoff.consecutive_rate_limits();
+                if consecutive <= 1 {
+                    tracing::warn!(
+                        backoff_secs = delay.as_secs(),
+                        "[rate-limit-sync] Claude rate_limit fetch rate limited (429); backing off"
+                    );
+                } else {
+                    tracing::info!(
+                        backoff_secs = delay.as_secs(),
+                        consecutive_429 = consecutive,
+                        "[rate-limit-sync] Claude rate_limit fetch still rate limited (429); backing off"
+                    );
+                }
+            }
+        } else {
+            tracing::debug!(
+                remaining_secs = claude_backoff.remaining(now).as_secs(),
+                "[rate-limit-sync] Claude fetch skipped: 429 backoff in effect"
+            );
+        }
 
         // --- Codex rate limits ---
         // Priority: 1) ~/.codex/auth.json (Codex CLI subscription), 2) OPENAI_API_KEY
@@ -1225,10 +1278,31 @@ async fn sync_claude_rate_limit_cache_once(pg_pool: &PgPool) -> Result<usize, an
             Ok(bucket_count)
         }
         Err(e) => {
-            tracing::warn!("[rate-limit-sync] Claude rate_limit fetch failed: {e}");
+            // 429s are logged by the periodic loop with backoff context
+            // (WARN on the first of a streak, INFO afterwards); everything
+            // else stays a WARN here so dashboard-triggered refreshes and the
+            // loop share one message.
+            if e.downcast_ref::<rate_limit_backoff::ClaudeUsageRateLimited>()
+                .is_some()
+            {
+                tracing::debug!("[rate-limit-sync] Claude rate_limit fetch failed: {e}");
+            } else {
+                tracing::warn!("[rate-limit-sync] Claude rate_limit fetch failed: {e}");
+            }
             Err(e)
         }
     }
+}
+
+/// Builds the typed 429 error from a rate-limited response's headers.
+fn claude_usage_rate_limited_error(
+    headers: &reqwest::header::HeaderMap,
+) -> rate_limit_backoff::ClaudeUsageRateLimited {
+    let retry_after = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| rate_limit_backoff::parse_retry_after(value, chrono::Utc::now()));
+    rate_limit_backoff::ClaudeUsageRateLimited { retry_after }
 }
 
 /// Rebuild the in-memory snapshots consumed by
@@ -1297,6 +1371,12 @@ async fn fetch_anthropic_rate_limits(
         }))
         .send()
         .await?;
+
+    if resp.status() == 429 {
+        return Err(anyhow::Error::new(claude_usage_rate_limited_error(
+            resp.headers(),
+        )));
+    }
 
     let headers = resp.headers().clone();
     let mut buckets = Vec::new();
@@ -1450,7 +1530,53 @@ fn parse_rate_limit_duration_seconds(value: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod rate_limit_header_tests {
-    use super::{parse_rate_limit_duration_seconds, parse_rate_limit_reset_value};
+    use super::rate_limit_backoff::{ClaudeSyncOutcome, ClaudeUsageRateLimited};
+    use super::{
+        classify_claude_sync_result, claude_usage_rate_limited_error,
+        parse_rate_limit_duration_seconds, parse_rate_limit_reset_value,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn classifies_claude_sync_results_for_backoff() {
+        assert_eq!(
+            classify_claude_sync_result(&Ok(2)),
+            ClaudeSyncOutcome::Success
+        );
+        assert_eq!(
+            classify_claude_sync_result(&Err(anyhow::anyhow!("no Claude credentials found"))),
+            ClaudeSyncOutcome::OtherError
+        );
+        let rate_limited = anyhow::Error::new(ClaudeUsageRateLimited {
+            retry_after: Some(Duration::from_secs(90)),
+        });
+        assert_eq!(
+            classify_claude_sync_result(&Err(rate_limited)),
+            ClaudeSyncOutcome::RateLimited {
+                retry_after: Some(Duration::from_secs(90)),
+            }
+        );
+        // Context wrapping must not hide the typed 429.
+        let wrapped = anyhow::Error::new(ClaudeUsageRateLimited { retry_after: None })
+            .context("forced refresh");
+        assert_eq!(
+            classify_claude_sync_result(&Err(wrapped)),
+            ClaudeSyncOutcome::RateLimited { retry_after: None }
+        );
+    }
+
+    #[test]
+    fn rate_limited_error_reads_retry_after_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert_eq!(claude_usage_rate_limited_error(&headers).retry_after, None);
+        headers.insert(reqwest::header::RETRY_AFTER, "45".parse().unwrap());
+        assert_eq!(
+            claude_usage_rate_limited_error(&headers).retry_after,
+            Some(Duration::from_secs(45))
+        );
+        headers.insert(reqwest::header::RETRY_AFTER, "garbage".parse().unwrap());
+        assert_eq!(claude_usage_rate_limited_error(&headers).retry_after, None);
+    }
 
     #[test]
     fn parses_openai_relative_reset_duration() {
@@ -1484,7 +1610,9 @@ async fn fetch_claude_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>,
         .await?;
 
     if resp.status() == 429 {
-        return Err(anyhow::anyhow!("Claude OAuth usage API rate limited (429)"));
+        return Err(anyhow::Error::new(claude_usage_rate_limited_error(
+            resp.headers(),
+        )));
     }
     if !resp.status().is_success() {
         return Err(anyhow::anyhow!(
@@ -3212,6 +3340,47 @@ async fn dm_reply_retry_loop(pg_pool: Arc<PgPool>) {
     }
 }
 
+/// Boot-time (once per process) WARN listing `*.js` files present under the
+/// configured routine script directories that have no `routines` row. Hot
+/// reloads do not repeat it; `agentdesk doctor` carries the same finding as
+/// the `routine_scripts_registered` check.
+async fn warn_once_about_unregistered_routine_scripts(
+    pg_pool: &PgPool,
+    script_dirs: &[std::path::PathBuf],
+) {
+    use crate::services::routines::{
+        discover_routine_script_refs, registered_routine_script_refs,
+        unregistered_routine_script_refs,
+    };
+
+    let registered = match registered_routine_script_refs(pg_pool).await {
+        Ok(registered) => registered,
+        Err(error) => {
+            tracing::debug!(error = %error, "unregistered routine script check skipped");
+            return;
+        }
+    };
+    let dirs = script_dirs.to_vec();
+    let discovered =
+        match tokio::task::spawn_blocking(move || discover_routine_script_refs(&dirs)).await {
+            Ok(discovered) => discovered,
+            Err(error) => {
+                tracing::debug!(error = %error, "unregistered routine script scan failed");
+                return;
+            }
+        };
+    let unregistered = unregistered_routine_script_refs(&discovered, &registered);
+    if unregistered.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        count = unregistered.len(),
+        scripts = %unregistered.join(", "),
+        dirs = ?script_dirs,
+        "routine scripts present in routines.dir but not registered in the routines table; attach them via POST /api/routines or remove the files"
+    );
+}
+
 async fn routine_runtime_loop(
     pg_pool: Arc<PgPool>,
     health_registry: Option<Arc<HealthRegistry>>,
@@ -3259,6 +3428,7 @@ async fn routine_runtime_loop(
         routines_config.default_timezone.clone(),
         routines_config.max_checkpoint_bytes,
     );
+    warn_once_about_unregistered_routine_scripts(pg_pool.as_ref(), &routine_script_dirs).await;
     let discord_logger = RoutineDiscordLogger::new_with_health_registry(
         pg_pool.clone(),
         health_registry.clone(),
