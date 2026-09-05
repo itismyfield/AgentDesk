@@ -7,7 +7,7 @@ against a single (provider, runtime) cell — e.g. ``claude-pipe`` against the
 ``adk-e2e-orchestrator`` agent, which invokes this script once per cell.
 
 Cell format: ``<provider>-<runtime>`` (e.g. ``claude-pipe``, ``claude-tui``,
-``claude-e``, ``codex-pipe``, ``codex-tui``). A scenario is executed only when
+``codex-pipe``, ``codex-tui``). A scenario is executed only when
 its ``cells:`` list includes the requested cell.
 
 Safety guards:
@@ -51,7 +51,6 @@ from tui_relay import assertions, discord, durable_delivery, fixtures, lease, tm
 SUPPORTED_CELLS: tuple[str, ...] = (
     "claude-pipe",
     "claude-tui",
-    "claude-e",
     "codex-pipe",
     "codex-tui",
 )
@@ -4395,7 +4394,7 @@ def main() -> int:
             _disarm_phase_deadline(previous_alarm)
 
     # Always cell-tag the report filename so an orchestrator that passes a
-    # shared --output dir for all 5 cells never overwrites a sibling report.
+    # shared --output dir for all 4 cells never overwrites a sibling report.
     summary_path = output_dir / f"report.{cell}.json"
     summary = {
         "run_id": run_id,

@@ -27,9 +27,6 @@ agents:
   - id: adk-claude-tui-e2e
     channels:
       claude: {id: "222"}
-  - id: adk-claude-e-e2e
-    channels:
-      claude: {id: "333"}
   - id: adk-codex-pipe-e2e
     channels:
       codex: {id: "444"}
@@ -37,20 +34,34 @@ agents:
     channels:
       codex: {id: "555"}
 """
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "agentdesk.yaml"
-            path.write_text(yaml, encoding="utf-8")
-            resolved = matrix.load_channel_ids(path)
+        # A pre-ops config may still contain the retired worker; ignore it.
+        legacy_extra = """
+  - id: adk-claude-e-e2e
+    channels:
+      claude: {id: "333"}
+"""
+        expected = {"claude-pipe": "111", "claude-tui": "222",
+                    "codex-pipe": "444", "codex-tui": "555"}
+        for extra in ("", legacy_extra):
+            with self.subTest(legacy_extra=bool(extra)), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "agentdesk.yaml"
+                path.write_text(yaml + extra, encoding="utf-8")
+                self.assertEqual(matrix.load_channel_ids(path), expected)
 
-        self.assertEqual(resolved["claude-pipe"], "111")
-        self.assertEqual(resolved["claude-tui"], "222")
-        self.assertEqual(resolved["claude-e"], "333")
-        self.assertEqual(resolved["codex-pipe"], "444")
-        self.assertEqual(resolved["codex-tui"], "555")
+    def test_default_cells_are_the_four_supported_workers(self):
+        self.assertEqual(
+            matrix.parse_cells(",".join(matrix.DEFAULT_CELLS)),
+            ["claude-pipe", "claude-tui", "codex-pipe", "codex-tui"],
+        )
 
     def test_parse_cells_rejects_unknown_cell(self):
         with self.assertRaises(ValueError):
             matrix.parse_cells("claude-pipe,unknown")
+
+    def test_parse_cells_rejects_retired_cell(self):
+        for raw in ("claude-e", "claude-tui,claude-e"):
+            with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, "claude-e"):
+                matrix.parse_cells(raw)
 
     def test_reset_before_each_boolean_flags(self):
         with patch("run_multi_provider_matrix.sys.argv", ["matrix"]):
@@ -232,7 +243,6 @@ class CrossChannelMatrix(unittest.TestCase):
         self.channel_ids = {
             "claude-pipe": "101",
             "claude-tui": "111",
-            "claude-e": "102",
             "codex-pipe": "201",
             "codex-tui": "222",
         }
@@ -688,7 +698,6 @@ class RestartGuardOrchestration(unittest.TestCase):
         self.channel_ids = {
             "claude-pipe": "101",
             "claude-tui": "111",
-            "claude-e": "102",
             "codex-pipe": "201",
             "codex-tui": "222",
         }

@@ -2,7 +2,7 @@ id: E-32
 title: two-message follow-up turn keeps older completion off the newer panel
 agent_mode: real_live
 coverage_class: live
-cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
+cells: [claude-pipe, claude-tui, codex-pipe, codex-tui]
 isolation: required
 destructive: true
 requires_features: [two_message_panel, e2e_discord_control]

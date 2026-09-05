@@ -10,12 +10,11 @@ dedicated Discord channel. The legacy single-pair smoke against
 | -------------- | -------- | ---------- | ----------------------- | ------------------------ |
 | `claude-pipe`  | claude   | `pipe`     | `adk-claude-pipe-e2e`   | `adk-claude-pipe-e2e`    |
 | `claude-tui`   | claude   | `tui`      | `adk-claude-tui-e2e`    | `adk-claude-tui-e2e`     |
-| `claude-e`     | claude   | `claude-e` | `adk-claude-e-e2e`      | `adk-claude-e-e2e`       |
 | `codex-pipe`   | codex    | `pipe`     | `adk-codex-pipe-e2e`    | `adk-codex-pipe-e2e`     |
 | `codex-tui`    | codex    | `tui`      | `adk-codex-tui-e2e`     | `adk-codex-tui-e2e`      |
 
-The five worker channels above plus the orchestrator channel
-`adk-e2e-orchestrator` (six channels total) all live under the dedicated
+The four worker channels above plus the orchestrator channel
+`adk-e2e-orchestrator` (five channels total) all live under the dedicated
 `ADK E2E` Discord category. Channel IDs are looked up from `agentdesk.yaml`
 — no hard-coded ids in scripts or docs.
 
@@ -29,7 +28,7 @@ is in that list.
 id: E-1
 agent_mode: real_live
 coverage_class: live
-cells: [claude-pipe, claude-tui, claude-e, codex-pipe, codex-tui]
+cells: [claude-pipe, claude-tui, codex-pipe, codex-tui]
 steps:
   - send_prompt: ...
 assertions:
@@ -74,9 +73,9 @@ narrow the list. TUI-keystroke-only scenarios (`E-4`, `E-10`, `E-12`) include
 only the two `*-tui` cells. `E-13` covers the Claude Code pipe/headless
 scheduled wakeup/monitor path: the first turn must call `ScheduleWakeup`, and
 the automatic wake turn must relay `[E2E:E13:WAKE]` to Discord. It intentionally
-runs only on `claude-pipe`; `claude-tui` and `claude-e` keep normal relay
+runs only on `claude-pipe`; `claude-tui` keeps normal relay
 coverage because this matrix does not create a persistent Claude Code wake
-session for those cells. `E-16` and `E-17` close the #2935 live regression gap
+session for that cell. `E-16` and `E-17` close the #2935 live regression gap
 (#3797). `E-16` is an executable `claude-tui` `real_live`/`live` scenario: it
 delivers a first response and then sends a second prompt immediately at the
 first response marker — the completion-quiescence release window after delivery
@@ -100,8 +99,8 @@ invokes the real restart/kickstart, so even a regressed guard cannot harm
 unrelated active production work; the foreign hold is released (`cancel_turn`) and
 both channels asserted idle on teardown. `E-18` is an executable
 but destructive-gated `cancel_turn` stop-mid-turn scenario for relay-backed
-pipe/TUI cells; it uses the provider hold witness primitive and omits
-`claude-e` because the stop/cancel path under test is relay-backed lifecycle.
+pipe/TUI cells; it uses the provider hold witness primitive to exercise the
+relay-backed stop/cancel lifecycle.
 `E-19` captures tmux pane identity across dcserver restart for TUI cells and
 requires the post-restart turn to recall a pre-restart secret token. `E-20`
 uses same-session near-concurrent prompt fan-out to pressure dispatch
@@ -121,10 +120,10 @@ they run through the YAML harness without Discord, tmux, or live dcserver state.
 result-text relay plus clean finalization. `E-25` replays modern Codex
 `response_item` plus `event_msg/task_complete` frames and asserts final text
 relay, task-complete finalization, follow-up readiness, and no stale
-health/queue degradation. `E-26` through `E-29` are explicit
+health/queue degradation. `E-26` through `E-28` are explicit
 `unsupported-known-gap` rows for live coverage not yet implemented: exact
 CronCreate live creation, Codex modern-schema production-parser/live stream,
-Codex live tool-command coverage, and `claude-e` tool-use-to-text completeness.
+and Codex live tool-command coverage.
 
 `E-35` preserves the headless `E-1` and adds one normal Discord short-response
 turn. It passes only when the newly observed outbound Discord response ID has
@@ -232,10 +231,6 @@ Remaining exact gaps:
 - Live tool-command coverage is not claimed for `codex-pipe` or `codex-tui`;
   `E-28` is the `unsupported-known-gap` row because those worker roles cannot
   execute shell/tool commands in the current E2E contract.
-- `tool_use->text completeness` for `claude-e` is not claimed by `E-22`; `E-29`
-  is the `unsupported-known-gap` row until the harness has a live witness or
-  fixture proving the same `any_tool_used=true` and
-  `has_post_tool_text=false` inflight state before post-tool text.
 
 ## Driver
 
@@ -264,7 +259,7 @@ scripts/e2e/run_tui_relay.py \
     [--dry-run]
 ```
 
-The driver writes `report.<cell>.json` so an orchestrator that aims all 5 cells
+The driver writes `report.<cell>.json` so an orchestrator that aims all 4 cells
 at one `--output` directory does not overwrite sibling reports. Per-cell lease
 files (`/tmp/agentdesk-e2e-relay.<cell>.lease`) let cells run in parallel from
 separate operator sessions. The top-level report includes `agent_mode_totals`
@@ -366,8 +361,8 @@ unless a scenario opts into `include_our_send`.
 The orchestrator agent owns the dedicated channel and parses natural-language
 commands:
 
-- `전체 e2e 시작` → runs all 5 cells sequentially (claude-pipe → claude-tui →
-  claude-e → codex-pipe → codex-tui).
+- `전체 e2e 시작` → runs all 4 cells sequentially (claude-pipe → claude-tui →
+  codex-pipe → codex-tui).
 - `claude의 tui 테스트 시작`, `codex의 pipe 테스트 시작`, ... → single cell.
 - `claude-pipe 시작` (explicit cell name) → single cell.
 
