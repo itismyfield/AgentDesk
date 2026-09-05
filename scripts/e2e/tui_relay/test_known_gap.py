@@ -40,6 +40,14 @@ def fixture():
             for index, messages in enumerate(([setup], [setup, before], [setup, after, body, chrome]))]
 
 
+def pending_fixture():
+    captures = fixture()
+    for capture, observed in zip(captures, (BASE + 0.5, BASE + 2, BASE + 4.1)):
+        capture["pages"][0]["observed_at"] = observed
+    captures[-1]["pages"][0]["messages"][1] = copy.deepcopy(captures[1]["pages"][0]["messages"][1])
+    return captures
+
+
 def consumer(captures, *, binding=None, spec=None, final=None):
     window = assertions.Window(setup_marker_id="100")
     for capture in captures or []:
@@ -66,6 +74,125 @@ class E22KnownGapContract(unittest.TestCase):
         window, record = consumer(None, final=[row(101, gap.BODY)])
         self.assertNotIn("known_gaps", record)
         self.assertEqual(len(window.messages), 1)
+
+    def test_pending_is_bound_original_preview_transition(self):
+        decision = gap.evaluate_e22_known_gap(pending_fixture(), run_id=RUN, **BINDING)
+        self.assertEqual(decision["classification"], "PENDING")
+        self.assertEqual(decision["message_ids"], ["101", "103"])
+        self.assertEqual(decision["deadline_at"], BASE + 8)
+
+    def test_pending_deadline_is_not_extended_by_late_first_capture(self):
+        captures = pending_fixture()
+        captures[-1]["pages"][0]["observed_at"] = BASE + 7.9
+        self.assertEqual(gap.evaluate_e22_known_gap(captures, run_id=RUN, **BINDING)["classification"], "PENDING")
+        captures[-1]["pages"][0]["observed_at"] = BASE + 8
+        self.assertEqual(gap.evaluate_e22_known_gap(captures, run_id=RUN, **BINDING)["classification"], "FAIL")
+
+    def _pending_pipeline(self, *, resolve_on=None, initial=4.1, late=False, third=False,
+                          restored=False, completion=True):
+        pending = pending_fixture()
+        final = copy.deepcopy(fixture()[-1]["pages"][0]["messages"])
+        final[1]["edited_timestamp"] = datetime.fromtimestamp(BASE + 4.5, timezone.utc).isoformat()
+        pages = [c["pages"][0]["messages"] for c in pending]
+        clock, requests, sleeps = [BASE + initial], [], []
+        def fetch(request, **_kwargs):
+            index = len(requests)
+            requests.append(clock[0])
+            self.assertIn("after=99", request.full_url)
+            if index >= 5 and late:
+                clock[0] += 3
+            messages = copy.deepcopy(pages[min(index, 2)])
+            if (resolve_on is not None and index >= 4 + resolve_on) or (restored and index == 3):
+                messages = copy.deepcopy(final)
+                if restored:
+                    messages[1]["edited_timestamp"] = datetime.fromtimestamp(BASE + 4, timezone.utc).isoformat()
+            if restored and index >= 4:
+                messages[1]["edited_timestamp"] = datetime.fromtimestamp(BASE + 4.05, timezone.utc).isoformat()
+            if third and index >= 5:
+                messages.append(row(102, gap.PRE))
+            if not completion:
+                messages = [m for m in messages if m["id"] != "104"]
+            return _Response(messages)
+        def sleep(seconds):
+            if len(requests) >= 5:
+                sleeps.append(seconds)
+                clock[0] += seconds
+        original_mark = assertions.Window.mark_prompt_sent
+        def mark(window):
+            original_mark(window, datetime.fromtimestamp(BASE + 0.5, timezone.utc))
+        with patch("urllib.request.urlopen", side_effect=fetch), patch.object(driver.time, "sleep", side_effect=sleep), \
+             patch.object(driver.time, "time", side_effect=lambda: clock[0]), \
+             patch.object(driver.time, "monotonic", side_effect=lambda: clock[0] - BASE), \
+             patch.object(discord.DiscordClient, "send_control", return_value={"id": "100"}), \
+             patch.object(discord.DiscordClient, "send_prompt", return_value={"message_id": "102"}), \
+             patch.object(driver, "wait_for_provider_hold_state", return_value={"ok_marker": gap.PRE, "ok_marker_seen": True}), \
+             patch.object(driver, "assert_cell_idle", return_value={"status": "idle"}), \
+             patch.object(assertions.Window, "mark_prompt_sent", mark):
+            try:
+                record = driver.run_one_cell(scenario=yaml.safe_load(YAML.read_text()), cell="claude-tui",
+                    channel_id=gap.CHANNEL_ID, client=discord.DiscordClient("http://offline.invalid"),
+                    run_id=RUN, dry_run=False, args=Namespace(queue_runtime_root="/offline-denied"))
+            except driver.ScenarioStepAssertionError as error:
+                return error.record, error, requests, sleeps
+        return record, None, requests, sleeps
+
+    def test_pending_resolves_with_one_or_two_existing_client_refetches(self):
+        for attempt in (1, 2):
+            with self.subTest(attempt=attempt):
+                record, error, requests, sleeps = self._pending_pipeline(resolve_on=attempt)
+                self.assertIsNone(error, str(error))
+                trace = record["known_gap_rechecks"][0]
+                self.assertEqual(trace["refetches"], attempt)
+                self.assertEqual(trace["outcome"], "KNOWN_GAP")
+                self.assertEqual([d["classification"] for d in trace["decisions"]], ["PENDING"] * attempt + ["KNOWN_GAP"])
+                self.assertEqual(len(requests), 5 + attempt)
+                self.assertEqual(sleeps, [1.0] * attempt)
+                self.assertEqual([round(t - (BASE + 4.1), 2) for t in requests[5:]], list(range(1, attempt + 1)))
+                result = {"assertions": []}
+                driver._merge_record_into_result(result, record)
+                self.assertEqual(result["known_gap_rechecks"], record["known_gap_rechecks"])
+
+    def test_pending_refetch_budget_and_deadline_never_extend(self):
+        for options, expected in (({}, 2), ({"initial": 7.5}, 0), ({"resolve_on": 1, "late": True}, 1)):
+            with self.subTest(options=options):
+                record, error, requests, _ = self._pending_pipeline(**options)
+                self.assertIsNotNone(error)
+                trace = record["known_gap_rechecks"][0]
+                self.assertEqual((trace["refetches"], trace["outcome"]), (expected, "FAIL"))
+                self.assertEqual(trace["deadline_at"], BASE + 8)
+                self.assertEqual(len(requests), 5 + expected)
+                self.assertNotIn("known_gaps", record)
+                if options:
+                    self.assertEqual(trace["decisions"][-1]["reason"], "pending_expired")
+
+    def test_restored_preview_or_third_id_cannot_use_pending_grace(self):
+        for options, count in (({"restored": True}, 0), ({"third": True}, 1)):
+            with self.subTest(options=options):
+                record, error, requests, _ = self._pending_pipeline(**options)
+                self.assertIsNotNone(error)
+                self.assertEqual(len(requests), 5 + count)
+                self.assertNotIn("known_gaps", record)
+
+    def test_required_completion_failure_precedes_pending_refetch(self):
+        record, error, requests, sleeps = self._pending_pipeline(resolve_on=1, completion=False)
+        self.assertIn("completion chrome not found", str(error))
+        self.assertEqual(len(requests), 5)
+        self.assertEqual(sleeps, [])
+        self.assertNotIn("known_gap_rechecks", record)
+
+    def test_pending_still_requires_all_identity_and_raw_guards(self):
+        for name in ("author", "channel", "setup", "history_third", "same_body", "new_edit", "missing"):
+            captures = pending_fixture()
+            rows = captures[-1]["pages"][0]["messages"]
+            if name == "author": rows[1]["author"]["id"] = "999"
+            if name == "channel": rows[1]["channel_id"] = "999"
+            if name == "setup": rows[0]["content"] += "-wrong"
+            if name == "history_third": captures[1]["pages"][0]["messages"].append(row(102, gap.PRE))
+            if name == "same_body": rows[1]["content"] = gap.BODY
+            if name == "new_edit": rows[2]["edited_timestamp"] = rows[3]["timestamp"]
+            if name == "missing": captures = None
+            with self.subTest(name=name):
+                self.assertIn(gap.evaluate_e22_known_gap(captures, run_id=RUN, **BINDING)["classification"], {"FAIL", "NOT_EVALUABLE"})
 
     def test_observed_edit_is_reported_and_original_guards_remain(self):
         window, record = consumer(fixture())

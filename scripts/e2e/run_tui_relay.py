@@ -43,7 +43,7 @@ import urllib.error
 import urllib.request
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml  # type: ignore[import-untyped]
 
@@ -122,6 +122,7 @@ TUI_IDLE_DRAFT_GUARD_POLL_S = float(
 DIRECT_INPUT_NOTIFICATION_MARKER = "터미널에 직접 주입된 입력"
 REPORT_RECORD_KEYS: tuple[str, ...] = (
     "known_gaps",
+    "known_gap_rechecks",
     "relay_count",
     "raw_count",
     "message_updates",
@@ -3324,6 +3325,10 @@ def run_one_cell(
                 continue
             window.add(message)
 
+    def _pending_refetch() -> None:
+        _ingest_observed(client.fetch_messages(channel_id, after_id=after_id, limit=100))
+        _update_record_window_snapshot(record, window)
+
     first_send_done = False
 
     def _advance_window_past_setup_echo() -> None:
@@ -3848,6 +3853,7 @@ def run_one_cell(
                 record=record,
                 enabled_features=enabled_features,
                 run_id=run_id,
+                pending_refetch=_pending_refetch,
             )
             record["assertions"].append({"spec": assertion_spec, "passed": True})
 
@@ -4218,6 +4224,7 @@ def run_assertion(
     record: dict[str, Any] | None = None,
     enabled_features: frozenset[str] = frozenset(),
     run_id: str | None = None,
+    pending_refetch: Callable[[], None] | None = None,
 ) -> None:
     def expand_marker(value: str) -> str:
         return value.replace("{run_id}", run_id) if run_id is not None else value
@@ -4309,15 +4316,44 @@ def run_assertion(
         except assertions.AssertionError:
             captures = (record or {}).get("_known_gap_captures")
             binding = (record or {}).get("_known_gap_binding") or {}
-            decision = known_gap.evaluate_e22_known_gap(
-                captures, run_id=run_id, **{key: binding.get(key) for key in
-                    ("scenario", "cell", "channel_id", "bot_id", "after_id")})
+            def classify_gap() -> dict[str, Any]:
+                decision = known_gap.evaluate_e22_known_gap(
+                    captures, run_id=run_id, **{key: binding.get(key) for key in
+                        ("scenario", "cell", "channel_id", "bot_id", "after_id")})
+                if decision["classification"] in {"KNOWN_GAP", "PENDING"}:
+                    current = {m["id"]: m for m in window.raw_messages if known_gap.PRE in m.get("content", "")}
+                    captured = {m["id"]: m for m in captures[-1]["pages"][0]["messages"] if m["id"] in decision["message_ids"]}
+                    if window.setup_marker_id != decision["setup_id"] or current != captured:
+                        raise assertions.AssertionError("E22 duplicate capture/window mismatch")
+                return decision
+            decision = classify_gap()
+            if decision["classification"] == "PENDING":
+                deadline, started = decision["deadline_at"], time.monotonic()
+                trace = {"refetches": 0, "decisions": [decision], "deadline_at": deadline, "outcome": "FAIL"}
+                record.setdefault("known_gap_rechecks", []).append(trace)
+                for attempt in (1, 2):
+                    if decision["classification"] != "PENDING" or pending_refetch is None:
+                        break
+                    delay = max(0.0, started + attempt - time.monotonic())
+                    if time.time() + delay >= deadline:
+                        decision = {"classification": "FAIL", "reason": "pending_expired"}
+                        trace["decisions"].append(decision)
+                        break
+                    time.sleep(delay)
+                    if time.time() >= deadline:
+                        decision = {"classification": "FAIL", "reason": "pending_expired"}
+                        trace["decisions"].append(decision)
+                        break
+                    trace["refetches"] += 1
+                    pending_refetch()
+                    # The existing transport is not a total-read deadline. A
+                    # late response cannot retroactively resolve this grace.
+                    decision = ({"classification": "FAIL", "reason": "pending_expired"}
+                                if time.time() >= deadline else classify_gap())
+                    trace["decisions"].append(decision)
+                trace["outcome"] = "KNOWN_GAP" if decision["classification"] == "KNOWN_GAP" else "FAIL"
             if decision["classification"] != "KNOWN_GAP":
                 raise assertions.AssertionError(f"E22 duplicate refused: {decision}") from None
-            current = {m["id"]: m for m in window.raw_messages if known_gap.PRE in m.get("content", "")}
-            captured = {m["id"]: m for m in captures[-1]["pages"][0]["messages"] if m["id"] in decision["message_ids"]}
-            if window.setup_marker_id != decision["setup_id"] or current != captured:
-                raise assertions.AssertionError("E22 duplicate capture/window mismatch")
             record.setdefault("known_gaps", []).append(decision)
     elif "no_duplicate_marker" in spec:
         # #2838 (P0-2): catches duplicate-with-differing-header re-emit (e.g.

@@ -42,7 +42,7 @@ def _supported_preview(content):
 
 
 def evaluate_e22_known_gap(captures, *, run_id, cell, scenario, channel_id, bot_id, after_id):
-    """Return KNOWN_GAP/#5731, FAIL, or NOT_EVALUABLE; never normal PASS.
+    """Return KNOWN_GAP/#5731, bounded PENDING, FAIL, or NOT_EVALUABLE.
 
     Each capture is {pages: [{channel_id, after_id, limit, messages, observed_at}]}.
     Request metadata and UTC epoch response time must be supplied by the fetch
@@ -104,9 +104,10 @@ def evaluate_e22_known_gap(captures, *, run_id, cell, scenario, channel_id, bot_
         pair = sorted((row for row in current if PRE in row["content"]), key=lambda row: int(row["id"]))
         _need(len(pair) == 2, "exactly_two_current_PRE_ids")
         old, new = pair
-        _need(old["content"] == PRE and new["content"] == BODY, "exact_raw_bodies")
+        pending = _supported_preview(old["content"])
+        _need((old["content"] == PRE or pending) and new["content"] == BODY, "exact_raw_bodies")
         _need(_utc(setup["timestamp"]) < _utc(old["timestamp"]) < _utc(new["timestamp"]), "creation_order")
-        _need(old["edited_timestamp"] is not None and new["edited_timestamp"] is None, "final_edit_shape")
+        _need((pending or old["edited_timestamp"] is not None) and new["edited_timestamp"] is None, "final_edit_shape")
         for marker in MARKERS:
             hits = {row["id"] for row in past if marker in row["content"]}
             _need(len(hits) == (2 if marker == PRE else 1), "historical_marker_ids")
@@ -131,11 +132,19 @@ def evaluate_e22_known_gap(captures, *, run_id, cell, scenario, channel_id, bot_
                 states.append((row, page["observed_at"]))
             _need(bool(states) and states[-1][0] == final, "latest_history_mismatch")
             if final is old:
-                _need(len(states) >= 2, "missing_before_edit_witness")
-                _need(all(_supported_preview(row["content"]) for row, _ in states[:-1]), "unsupported_preview")
+                _need(pending or len(states) >= 2, "missing_before_edit_witness")
+                previews = states if pending else states[:-1]
+                _need(all(_supported_preview(row["content"]) for row, _ in previews), "unsupported_preview")
             else:
                 _need(len(states) == 1, "new_body_history_changed")
             histories[final["id"]] = states
+        if pending:
+            deadline = _utc(new["timestamp"]) + 5.0
+            _need(pages[-1]["observed_at"] < deadline, "pending_expired")
+            return {"classification": "PENDING", "known_gap": "#5731", "profile": PROFILE,
+                    "message_ids": [old["id"], new["id"]], "setup_id": setup["id"],
+                    "deadline_at": deadline, "observed_at": pages[-1]["observed_at"],
+                    "raw_duplicate_preserved": True}
         before, after = histories[old["id"]][-2:]
         return {"classification": "KNOWN_GAP", "known_gap": "#5731", "profile": PROFILE,
                 "message_ids": [old["id"], new["id"]], "setup_id": setup["id"],
