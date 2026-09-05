@@ -30,6 +30,7 @@ import argparse
 import concurrent.futures
 import datetime as dt
 import errno
+import http.client
 import json
 import math
 import os
@@ -1782,13 +1783,14 @@ def _read_api_json(base_url: str, path: str, *, timeout: float = 5.0) -> tuple[i
         headers={"Connection": "close"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8", "replace")
-            status = int(getattr(response, "status", 200))
-    except urllib.error.HTTPError as error:
-        raw = error.read().decode("utf-8", "replace")
-        status = int(error.code)
-    except OSError as error:
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read().decode("utf-8", "replace")
+                status = int(getattr(response, "status", 200))
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode("utf-8", "replace")
+            status = int(error.code)
+    except (OSError, http.client.HTTPException) as error:
         raise HarnessEvidenceError(f"unable to read {path}: {type(error).__name__}: {error}") from error
     if not raw.strip():
         raise HarnessEvidenceError(f"{path} returned empty HTTP {status} body")
@@ -1802,6 +1804,7 @@ def _read_api_json(base_url: str, path: str, *, timeout: float = 5.0) -> tuple[i
     # consumers must still evaluate busy/counter/recovery predicates.
     readable_health_503 = (
         status == 503 and isinstance(payload, dict)
+        and isinstance(payload.get("status"), str)
         and payload.get("status") in {"healthy", "degraded", "unhealthy"}
         and all(type(payload.get(key)) is bool for key in ("ok", "fully_recovered"))
         and (path == "/api/health" or (path == "/api/health/detail"
@@ -3195,7 +3198,7 @@ def run_scenario(
             )
             _merge_record_into_result(result, partial_record)
         result["failure_attribution"] = _failure_attribution(
-            "harness",
+            "exception",
             str(result["reason"]),
             record=partial_record if isinstance(partial_record, dict) else None,
         )
@@ -4487,10 +4490,13 @@ def main() -> int:
     except Exception as error:  # lease/safety setup failed before an artifact existed
         if not args.phase_deadline_s:
             raise
-        reason = f"E-35 phase unevaluable: {type(error).__name__}: {error}"
+        partial = partial_result_sink.get("result") or {}
+        scenario_id = str((partial or active_scenario or {}).get("id", "E-35"))
+        reason = f"{scenario_id} phase unevaluable: {type(error).__name__}: {error}"
         results.append({
-            "id": "E-35", "cell": cell, "provider": cell_provider(cell),
-            "runtime": cell_runtime(cell), "status": "fail", "reason": reason,
+            **partial,
+            "id": scenario_id, "cell": partial.get("cell", cell), "provider": partial.get("provider", cell_provider(cell)),
+            "runtime": partial.get("runtime", cell_runtime(cell)), "status": "fail", "reason": reason,
             "durable_record_probe": {"status": "unevaluable", "reason": reason},
             "dirty_active_residue": {"possible": True, "cleanup_attempted": False},
         })

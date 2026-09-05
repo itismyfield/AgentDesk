@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import http.client
 import io
 import json
 import stat
@@ -2747,7 +2748,7 @@ class ScenarioTeardown(unittest.TestCase):
         self.assertTrue(result["real_provider_contacted"])
         self.assertEqual(result["agent_mode_actual"], "real_live")
         self.assertTrue(result["agent_mode_contract"]["satisfied"])
-        self.assertEqual(result["failure_attribution"]["source"], "harness")
+        self.assertEqual(result["failure_attribution"]["source"], "exception")
         self.assertIn("RuntimeError: discord history read failed", result["reason"])
         self.assertTrue(
             any(message.startswith("### E2E TEARDOWN") for message in client.control_messages),
@@ -2802,7 +2803,7 @@ class ScenarioTeardown(unittest.TestCase):
         self.assertFalse(result["real_provider_contacted"])
         self.assertEqual(result["agent_mode_actual"], "none")
         self.assertFalse(result["agent_mode_contract"]["satisfied"])
-        self.assertEqual(result["failure_attribution"]["source"], "harness")
+        self.assertEqual(result["failure_attribution"]["source"], "exception")
         self.assertIn("dispatch refused before provider contact", result["reason"])
         self.assertTrue(
             any(message.startswith("### E2E TEARDOWN") for message in client.control_messages),
@@ -3166,6 +3167,84 @@ class _OutcomeFixture:
 
 
 class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
+    def test_generic_failure_continues_but_required_unreadability_stops(self):
+        for stage in ("dispatch", "history"):
+            with self.subTest(stage=stage):
+                self.client.send_prompt.reset_mock(side_effect=True)
+                self.client.fetch_messages.reset_mock(side_effect=True)
+                if stage == "dispatch":
+                    self.client.send_prompt.side_effect = [RuntimeError("dispatch failed"), {"id": "111"}]
+                else:
+                    self.client.fetch_messages.side_effect = [[], RuntimeError("history failed"), [], []]
+                rc, report, output = self.main_result(self.scenario("E-GENERIC"), self.scenario("E-NEXT"))
+                self.assertEqual((rc, [(r["id"], r["status"]) for r in report["scenarios"]]), (1, [("E-GENERIC", "fail"), ("E-NEXT", "pass")]))
+                self.assertEqual(report["scenarios"][0]["failure_attribution"]["source"], "exception")
+                self.assertNotIn("classification", report["scenarios"][0]["failure_attribution"])
+                self.assertIn("running E-NEXT", output)
+        self.client.send_prompt.reset_mock(side_effect=True)
+        self.client.fetch_messages.reset_mock(side_effect=True)
+        self.idle.side_effect = driver.HarnessEvidenceError("required idle unreadable")
+        rc, report, output = self.main_result(self.scenario("E-REQUIRED"), self.scenario("E-NEXT"))
+        self.assertEqual((rc, len(report["scenarios"])), (1, 1))
+        self.assert_unevaluable(report["scenarios"][0])
+        self.assertNotIn("running E-NEXT", output)
+
+    def _assert_unreadable_restart_response(self, response):
+        self.client.send_prompt.reset_mock()
+        with patch.object(driver, "_read_api_json", side_effect=self.real_api), patch.object(driver, "_read_health_detail", side_effect=self.real_detail), patch.object(driver.urllib.request, "urlopen", side_effect=response if isinstance(response, Exception) else None, return_value=response):
+            rc, report, output = self.main_result(self.scenario("E-RESTART", [{"restart_dcserver": {"target": "release"}}]), self.scenario("E-NEXT"))
+        self.assert_unevaluable(report["scenarios"][0])
+        self.assertEqual((rc, len(report["scenarios"]), self.client.send_prompt.call_count), (1, 1, 0))
+        self.assertNotIn("running E-NEXT", output)
+
+    def test_http_error_body_failures_are_typed_through_actual_restart(self):
+        for error in (TimeoutError("body timeout"), OSError("body read"), http.client.IncompleteRead(b"{", 8), http.client.HTTPException("body protocol")):
+            with self.subTest(error=type(error).__name__):
+                class BrokenBody(io.BytesIO):
+                    def read(self, *a, **k): raise error
+                self._assert_unreadable_restart_response(urllib.error.HTTPError(self.args.base_url + "/api/health/detail", 503, "unavailable", {}, BrokenBody()))
+
+    def test_success_body_http_failures_are_typed_through_actual_restart(self):
+        for error in (TimeoutError("body timeout"), http.client.IncompleteRead(b"{", 8), http.client.HTTPException("body protocol")):
+            with self.subTest(error=type(error).__name__):
+                class BrokenResponse(FakeResponse):
+                    def read(self): raise error
+                self._assert_unreadable_restart_response(BrokenResponse(200, {}))
+
+    def test_wrong_type_503_status_is_unreadable_through_actual_restart(self):
+        for status in ([], {}, None, 1, False, 3.5):
+            with self.subTest(status=status):
+                payload = {**_health_detail(_idle_mailbox("99", "claude")), "status": status}
+                self._assert_unreadable_restart_response(FakeResponse(503, payload))
+
+    def test_http_body_interrupts_still_propagate(self):
+        for error in (KeyboardInterrupt(), SystemExit(4)):
+            for http_error in (False, True):
+                with self.subTest(error=type(error).__name__, http_error=http_error):
+                    class BrokenResponse(FakeResponse):
+                        def read(self, *a, **k): raise error
+                    response = urllib.error.HTTPError(self.args.base_url, 503, "unavailable", {}, BrokenResponse(503, {})) if http_error else BrokenResponse(200, {})
+                    with patch.object(driver.urllib.request, "urlopen", side_effect=response if http_error else None, return_value=response):
+                        with self.assertRaises(type(error)): self.real_api(self.args.base_url, "/api/health/detail")
+        self.blocked.assert_not_called()
+
+    def test_selected_prebody_exception_identity_and_legacy_bounds(self):
+        self.args.reset_before_each = True
+        with patch.object(driver, "reset_channel_state", side_effect=RuntimeError("inert prebody failure")):
+            with self.assertRaises(RuntimeError): self.main_result(self.scenario("E-SELECTED"))
+            self.args.phase_deadline_s = 1
+            rc, report, output = self.main_result(self.scenario("E-SELECTED"), self.scenario("E-NEXT"))
+        self.assertEqual((rc, [row["id"] for row in report["scenarios"]]), (1, ["E-SELECTED"]))
+        row = report["scenarios"][0]
+        self.assertEqual((row["cell"], row["provider"], row["runtime"]), ("claude-tui", "claude", "tui"))
+        self.assertIn("E-SELECTED phase unevaluable", row["reason"])
+        self.assertNotIn("running E-NEXT", output)
+        with patch.object(driver.lease, "acquire", side_effect=RuntimeError("inert lease setup failure")):
+            rc, report, _ = self.main_result(self.scenario("E-SELECTED"))
+        self.assertEqual((rc, [row["id"] for row in report["scenarios"]]), (1, ["E-35"]))
+        self.client.send_control.assert_not_called()
+        self.client.send_prompt.assert_not_called()
+
     def test_idle_unreadable_survives_run_one_wrap(self):
         self.idle.side_effect = driver.HarnessEvidenceError("required idle read unavailable")
         rc, report, output = self.main_result(self.scenario(), self.scenario("E-NEXT"))
@@ -3203,6 +3282,8 @@ class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
                 with self.subTest(source=source, required=required):
                     self.args.required_agent_mode = required
                     self.client.send_control.reset_mock()
+                    self.client.send.reset_mock()
+                    self.client.send_prompt.reset_mock()
                     refusal = {"status": "unevaluable", "dirty_active_residue": True,
                                "failure_attribution": driver._failure_attribution(source, "refused recheck")}
                     with patch.object(driver, "durable_probe_safety_gate", side_effect=[{"status": "idle"}, refusal]):
