@@ -1,72 +1,24 @@
 use super::*;
 
+/// Compatibility entry point for a legacy command boundary. Denial only.
 pub(in crate::services::discord::router) async fn handle_shell_command_raw(
     ctx: &serenity::Context,
     channel_id: ChannelId,
-    text: &str,
+    _text: &str,
     shared: &Arc<SharedData>,
 ) -> Result<(), Error> {
-    let cmd_str = text.strip_prefix('!').unwrap_or("").trim();
-    if cmd_str.is_empty() {
-        rate_limit_wait(shared, channel_id).await;
-        let _ = channel_id
-            .say(&ctx.http, "사용법: `!<command>`\n예: `!ls -la`")
-            .await;
-        return Ok(());
-    }
-
-    let working_dir = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|s| s.current_path.clone())
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .map(|h| h.display().to_string())
-                    .unwrap_or_else(|| "/".to_string())
-            })
-    };
-
-    let cmd_owned = cmd_str.to_string();
-    let working_dir_clone = working_dir.clone();
-
-    let result = tokio::task::spawn_blocking(move || {
-        let child = crate::services::platform::shell::shell_command_builder(&cmd_owned)
-            .current_dir(&working_dir_clone)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
-        match child {
-            Ok(child) => child.wait_with_output(),
-            Err(e) => Err(e),
-        }
-    })
-    .await;
-
-    let response = match result {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let exit_code = output.status.code().unwrap_or(-1);
-            crate::services::discord::commands::shell_command_output_response(
-                &stdout, &stderr, exit_code,
-            )
-        }
-        Ok(Err(e)) => crate::services::discord::commands::shell_command_execution_error_response(
-            &e.to_string(),
-        ),
-        Err(e) => {
-            crate::services::discord::commands::shell_command_task_error_response(&e.to_string())
-        }
-    };
-
-    send_long_message_raw(&ctx.http, channel_id, &response, shared).await?;
+    rate_limit_wait(shared, channel_id).await;
+    let _ = channel_id
+        .say(
+            &ctx.http,
+            "Unknown or unavailable text command. Use `!help` for supported commands.",
+        )
+        .await;
     Ok(())
 }
 
 /// Handle text-based commands (!start, !meeting, !stop, !clear, etc.).
-/// Returns true if the command was handled, false otherwise.
+/// Consumes every command, including an unexpected unhandled dispatcher result.
 pub(in crate::services::discord::router) async fn handle_text_command(
     ctx: &serenity::Context,
     msg: &serenity::Message,
@@ -76,7 +28,7 @@ pub(in crate::services::discord::router) async fn handle_text_command(
     preloaded_uploads: &[String],
     admitted_attachment_permit: &mut Option<super::super::LocalAdmissionPermit>,
 ) -> Result<bool, Error> {
-    super::super::super::commands::handle_text_command_with_uploads(
+    let handled = super::super::super::commands::handle_text_command_with_uploads(
         ctx,
         msg,
         data,
@@ -85,5 +37,61 @@ pub(in crate::services::discord::router) async fn handle_text_command(
         preloaded_uploads,
         admitted_attachment_permit,
     )
-    .await
+    .await?;
+    if !handled {
+        handle_shell_command_raw(ctx, channel_id, text, &data.shared).await?;
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod command_boundary_tests {
+    #[test]
+    fn wrapper_consumes_unhandled_dispatch_results_with_denial() {
+        let body = include_str!("control.rs")
+            .split_once("pub(in crate::services::discord::router) async fn handle_text_command(")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(body.contains(
+            "let handled = super::super::super::commands::handle_text_command_with_uploads("
+        ));
+        assert!(body.contains("if !handled {\n        handle_shell_command_raw(ctx, channel_id, text, &data.shared).await?;\n    }\n    Ok(true)"));
+    }
+
+    #[test]
+    fn legacy_boundary_is_only_a_fixed_denial() {
+        let body = include_str!("control.rs")
+            .split_once(
+                "pub(in crate::services::discord::router) async fn handle_shell_command_raw(",
+            )
+            .expect("legacy entry exists")
+            .1
+            .split_once("\n}")
+            .expect("legacy entry ends before wrapper and tests")
+            .0;
+        for forbidden in [
+            "shell_command_builder",
+            "spawn_blocking",
+            "Command::",
+            ".spawn()",
+            ".output()",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "legacy boundary must not construct execution"
+            );
+        }
+        assert!(body.contains("_text: &str"));
+        assert!(body.contains("rate_limit_wait(shared, channel_id).await;"));
+        assert!(
+            body.contains(
+                "Unknown or unavailable text command. Use `!help` for supported commands."
+            )
+        );
+        assert_eq!(body.matches(".say(").count(), 1);
+        assert!(body.trim_end().ends_with("Ok(())"));
+    }
 }
