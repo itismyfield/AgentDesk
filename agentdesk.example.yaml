@@ -86,11 +86,8 @@ providers:
     #                           Also enabled implicitly when only
     #                           `tui_hosting: true` is set and no
     #                           `runtime` field is present (back-compat).
-    #   - `runtime: claude-e` → per-turn `claude-e` PTY adapter.
-    #                           Requires `npm install -g claude-e`
-    #                           on the host.
-    # See `docs/claude-e-rollout/operator-guide.md` for toggle
-    # mechanics and rollback contract.
+    # The claude-e E2E cell is retired; production adapter and live opt-in
+    # config retirement remain pending. See `docs/claude-e-rollout/README.md`.
     runtime: pipe
     tui_hosting: true
     #
@@ -274,20 +271,6 @@ agents:
         prompt_file: "~/.adk/release/config/agents/adk-claude-tui-e2e.prompt.md"
         runtime: tui
     keywords: ["e2e", "claude", "tui"]
-    department: devsecops
-
-  - id: adk-claude-e-e2e
-    name: "ADK Claude-e E2E"
-    name_ko: "ADK Claude-e E2E"
-    provider: claude
-    channels:
-      claude:
-        id: "PLACEHOLDER_ADK_CLAUDE_E_E2E"
-        name: "adk-claude-e-e2e"
-        workspace: "~/.adk/release/workspaces/adk-claude-e-e2e"
-        prompt_file: "~/.adk/release/config/agents/adk-claude-e-e2e.prompt.md"
-        runtime: claude-e
-    keywords: ["e2e", "claude", "claude-e"]
     department: devsecops
 
   - id: adk-codex-pipe-e2e

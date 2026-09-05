@@ -871,7 +871,7 @@ class RunAssertionDispatch(unittest.TestCase):
 
 class ScenarioFilterFailClosed(unittest.TestCase):
     def test_direct_main_rejects_invalid_filters_before_side_effects(self):
-        for raw in ("E-999", "E-1,E-999", "E-1-extra", " , "):
+        for raw in ("E-999", "E-1,E-999", "E-1-extra", " , ", "E-29", "E-1,E-29"):
             with self.subTest(raw=raw):
                 args = Namespace(
                     base_url="http://agentdesk.test", cell="claude-tui", channel_id="222",
@@ -904,7 +904,7 @@ class ScenarioFilterFailClosed(unittest.TestCase):
 
     def test_matrix_main_rejects_invalid_filters_before_side_effects(self):
         with tempfile.TemporaryDirectory() as tmp:
-            for raw in ("E-999", "E-1,E-999", "E-1-extra", " , "):
+            for raw in ("E-999", "E-1,E-999", "E-1-extra", " , ", "E-29", "E-1,E-29"):
                 with self.subTest(raw=raw):
                     args = Namespace(
                         base_url="http://agentdesk.test", config="/unused/config.yaml",
@@ -939,7 +939,7 @@ class ScenarioFilterFailClosed(unittest.TestCase):
             root = Path(tmp)
             config = root / "agentdesk.yaml"
             agents = (("claude-pipe", "claude", "111"), ("claude-tui", "claude", "222"),
-                      ("claude-e", "claude", "333"), ("codex-pipe", "codex", "444"),
+                      ("codex-pipe", "codex", "444"),
                       ("codex-tui", "codex", "555"))
             config.write_text("agents:\n" + "".join(
                 f"  - {{id: adk-{cell}-e2e, channels: {{{provider}: {{id: '{channel}'}}}}}}\n"
@@ -1194,6 +1194,48 @@ class E35CurrentRunContract(unittest.TestCase):
                     reset.assert_not_called()
                     hard_reset.assert_not_called()
         self.assertEqual(scenario, original)
+
+
+class RetiredCellAdmission(unittest.TestCase):
+    def test_direct_cli_rejects_retired_cell_before_side_effects(self):
+        stderr = io.StringIO()
+        with (
+            patch.object(sys, "argv", ["driver", "--cell", "claude-e", "--channel-id", "333"]),
+            patch.object(driver, "load_scenarios") as scenarios,
+            patch("pathlib.Path.mkdir") as mkdir,
+            patch("pathlib.Path.write_text") as report,
+            patch.object(driver.discord, "DiscordClient") as client,
+            patch.object(driver.subprocess, "run") as child,
+            patch.object(driver.lease, "acquire") as acquire,
+            patch.object(driver, "run_scenario") as run,
+            contextlib.redirect_stderr(stderr),
+        ):
+            with self.assertRaises(SystemExit) as error:
+                driver.main()
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("invalid choice: 'claude-e'", stderr.getvalue())
+        for side_effect in (scenarios, mkdir, report, client, child, acquire, run):
+            side_effect.assert_not_called()
+
+    def test_matrix_cli_rejects_retired_cell_before_side_effects(self):
+        for cells in ("claude-e", "claude-tui,claude-e"):
+            with (
+                self.subTest(cells=cells),
+                patch.object(sys, "argv", ["matrix", "--cells", cells, "--scenarios",
+                                          str(ROOT / "tests/e2e/tui_relay/scenarios")]),
+                patch.object(matrix, "load_channel_ids") as config,
+                patch.object(matrix, "load_cross_channel_scenarios") as cross,
+                patch.object(matrix, "load_restart_guard_scenarios") as restart,
+                patch("pathlib.Path.mkdir") as mkdir,
+                patch("pathlib.Path.write_text") as report,
+                patch.object(matrix.cell_driver.discord, "DiscordClient") as client,
+                patch.object(matrix.subprocess, "run") as child,
+                patch.object(matrix, "run_cell") as run,
+            ):
+                with self.assertRaisesRegex(ValueError, "claude-e"):
+                    matrix.main()
+            for side_effect in (config, cross, restart, mkdir, report, client, child, run):
+                side_effect.assert_not_called()
 
 
 if __name__ == "__main__":

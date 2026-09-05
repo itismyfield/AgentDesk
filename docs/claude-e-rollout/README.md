@@ -1,12 +1,20 @@
-# claude-e Runtime Rollout
+# claude-e Runtime Rollout (Historical)
 
-This directory tracks the work to introduce `claude-e` (https://github.com/lidge-jun/claude-e)
+> Historical directory: #5706 c1 retires the `claude-e` E2E cell, its dedicated
+> E-29 gap row, and the example E2E worker. The production adapter and live
+> opt-in config remain until the later ops/c2 retirement steps. These rollout
+> documents record the original rollout; their config instructions are not
+> current guidance. Use [Source Of Truth](../source-of-truth.md) for canonical
+> config paths. The linked documents, including shared TUI requeue guidance,
+> remain here pending c4 documentation cleanup.
+
+This directory records the work to introduce `claude-e` (https://github.com/lidge-jun/claude-e)
 as a third Claude runtime option alongside the existing tmux wrapper (pipe mode)
 and Claude TUI hosting.
 
-## Goal
+## Historical goal
 
-Let operators flip between three Claude runtimes per-channel and globally:
+The original rollout let operators flip between three Claude runtimes per-channel and globally:
 
 | Mode | Selector value | What it runs |
 |---|---|---|
@@ -14,7 +22,9 @@ Let operators flip between three Claude runtimes per-channel and globally:
 | `tui` | `tui_hosting: true` or `runtime: tui` | Long-lived interactive Claude in tmux with keystroke relay (current "TuiHosting" driver) |
 | `claude-e` | `runtime: claude-e` | Per-turn `claude-e run` spawn (PTY-backed `claude -p`-shape wrapper) |
 
-All three modes must remain reachable via config — no mode is deleted.
+The original rollout required all three modes to remain reachable via config,
+with no mode deleted. That was the rollout constraint, not a requirement for
+the later #5706 retirement.
 
 ## Documents
 

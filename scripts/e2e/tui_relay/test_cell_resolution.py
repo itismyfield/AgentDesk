@@ -20,20 +20,18 @@ class CellHelpers(unittest.TestCase):
     def test_supported_cells_cover_provider_runtime_matrix(self):
         self.assertEqual(
             set(driver.SUPPORTED_CELLS),
-            {"claude-pipe", "claude-tui", "claude-e", "codex-pipe", "codex-tui"},
+            {"claude-pipe", "claude-tui", "codex-pipe", "codex-tui"},
         )
 
     def test_cell_provider(self):
         self.assertEqual(driver.cell_provider("claude-pipe"), "claude")
         self.assertEqual(driver.cell_provider("claude-tui"), "claude")
-        self.assertEqual(driver.cell_provider("claude-e"), "claude")
         self.assertEqual(driver.cell_provider("codex-pipe"), "codex")
         self.assertEqual(driver.cell_provider("codex-tui"), "codex")
 
     def test_cell_runtime(self):
         self.assertEqual(driver.cell_runtime("claude-pipe"), "pipe")
         self.assertEqual(driver.cell_runtime("claude-tui"), "tui")
-        self.assertEqual(driver.cell_runtime("claude-e"), "e")
         self.assertEqual(driver.cell_runtime("codex-pipe"), "pipe")
         self.assertEqual(driver.cell_runtime("codex-tui"), "tui")
 
@@ -54,7 +52,6 @@ class CellHelpers(unittest.TestCase):
     def test_channel_kind_matches_provider(self):
         self.assertEqual(driver.cell_channel_kind("claude-pipe"), "cc")
         self.assertEqual(driver.cell_channel_kind("claude-tui"), "cc")
-        self.assertEqual(driver.cell_channel_kind("claude-e"), "cc")
         self.assertEqual(driver.cell_channel_kind("codex-pipe"), "cdx")
         self.assertEqual(driver.cell_channel_kind("codex-tui"), "cdx")
 
@@ -115,17 +112,18 @@ class ScenarioFilter(unittest.TestCase):
         self.assertTrue(e16.get("steps"))
         self.assertNotIn("E-7", ids)
 
-    def test_claude_e_scenarios(self):
-        scenarios = driver.load_scenarios(self.scenarios_dir, cell="claude-e")
-        ids = {str(s.get("id")) for s in scenarios}
-        self.assertIn("E-1", ids)
-        self.assertIn("E-20", ids)
-        self.assertIn("E-23", ids)
-        self.assertNotIn("E-13", ids)
-        self.assertNotIn("E-4", ids)
-        self.assertNotIn("E-7", ids)
-        self.assertNotIn("E-22", ids)
-        self.assertNotIn("E-18", ids)
+    def test_retired_claude_e_has_no_scenarios(self):
+        self.assertEqual(
+            driver.load_scenarios(self.scenarios_dir, cell="claude-e"), [],
+        )
+
+    def test_all_scenario_cells_are_supported(self):
+        paths = sorted(self.scenarios_dir.glob("*.yaml"))
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(path=path.name):
+                scenario = driver.yaml.safe_load(path.read_text(encoding="utf-8"))
+                self.assertLessEqual(set(scenario["cells"]), set(driver.SUPPORTED_CELLS))
 
     def test_codex_pipe_scenarios(self):
         scenarios = driver.load_scenarios(self.scenarios_dir, cell="codex-pipe")
@@ -161,14 +159,11 @@ class ScenarioFilter(unittest.TestCase):
         self.assertNotIn("skip_reason", e18)
         self.assertIn("acceptance_criteria", e18)
 
-    def test_e18_cancel_turn_scope_is_relay_backed_non_claude_e(self):
+    def test_e18_cancel_turn_scope_covers_supported_cells(self):
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
             ids = {str(s.get("id")) for s in scenarios}
-            if cell in {"claude-pipe", "claude-tui", "codex-pipe", "codex-tui"}:
-                self.assertIn("E-18", ids)
-            else:
-                self.assertNotIn("E-18", ids)
+            self.assertIn("E-18", ids)
 
     def test_e18_is_unskipped_and_uses_provider_hold_fixture(self):
         for cell in {"claude-pipe", "claude-tui", "codex-pipe", "codex-tui"}:
@@ -222,7 +217,6 @@ class ScenarioFilter(unittest.TestCase):
         expected_e8_cells = {
             "claude-pipe",
             "claude-tui",
-            "claude-e",
             "codex-pipe",
             "codex-tui",
         }
@@ -346,7 +340,7 @@ class ScenarioFilter(unittest.TestCase):
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
             ids = {str(s.get("id")) for s in scenarios}
-            if cell not in {"claude-pipe", "claude-tui", "claude-e"}:
+            if cell not in {"claude-pipe", "claude-tui"}:
                 self.assertNotIn("E-23", ids)
                 continue
             e23 = next(s for s in scenarios if s.get("id") == "E-23")
@@ -412,7 +406,6 @@ class ScenarioFilter(unittest.TestCase):
             "E-26": {"claude-pipe"},
             "E-27": {"codex-pipe", "codex-tui"},
             "E-28": {"codex-pipe", "codex-tui"},
-            "E-29": {"claude-e"},
         }
         for cell in driver.SUPPORTED_CELLS:
             scenarios = driver.load_scenarios(self.scenarios_dir, cell=cell)
