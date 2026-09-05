@@ -24,6 +24,8 @@ sys.path.insert(0, str(ROOT / "scripts" / "e2e"))
 import run_tui_relay as driver  # noqa: E402
 import run_multi_provider_matrix as matrix  # noqa: E402
 from tui_relay import assertions  # noqa: E402
+# ci-script-checks.sh runs this module; expose the offline fetch regressions too.
+from tui_relay.test_discord_client import DiscordClientFetchMessages  # noqa: E402, F401
 
 
 def _relay_msg(msg_id: int, content: str, ts: str | None = None) -> dict:
