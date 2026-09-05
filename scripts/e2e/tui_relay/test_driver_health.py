@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import io
 import json
+import stat
 import sys
 import tempfile
 import threading
@@ -10,7 +14,8 @@ import unittest
 import urllib.error
 from argparse import Namespace
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts" / "e2e"))
@@ -2742,7 +2747,7 @@ class ScenarioTeardown(unittest.TestCase):
         self.assertTrue(result["real_provider_contacted"])
         self.assertEqual(result["agent_mode_actual"], "real_live")
         self.assertTrue(result["agent_mode_contract"]["satisfied"])
-        self.assertEqual(result["failure_attribution"]["source"], "exception")
+        self.assertEqual(result["failure_attribution"]["source"], "harness")
         self.assertIn("RuntimeError: discord history read failed", result["reason"])
         self.assertTrue(
             any(message.startswith("### E2E TEARDOWN") for message in client.control_messages),
@@ -2797,7 +2802,7 @@ class ScenarioTeardown(unittest.TestCase):
         self.assertFalse(result["real_provider_contacted"])
         self.assertEqual(result["agent_mode_actual"], "none")
         self.assertFalse(result["agent_mode_contract"]["satisfied"])
-        self.assertEqual(result["failure_attribution"]["source"], "exception")
+        self.assertEqual(result["failure_attribution"]["source"], "harness")
         self.assertIn("dispatch refused before provider contact", result["reason"])
         self.assertTrue(
             any(message.startswith("### E2E TEARDOWN") for message in client.control_messages),
@@ -3097,6 +3102,297 @@ class Issue3797E16QuiescenceRelease(unittest.TestCase):
         self.assertEqual(
             idle_specs[0]["details"]["mailbox_idle_evidence"]["queue_depth"], 0
         )
+
+
+class _OutcomeFixture:
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.args = Namespace(
+            cell="claude-tui", channel_id="99", thread_channel_id=None,
+            base_url="http://agentdesk.test", scenarios=str(self.root), filter=None,
+            output=str(self.root / "run"), phase_deadline_s=None, dry_run=False,
+            reset_before_each=False, hard_reset_session_each=False, allow_destructive=True,
+            required_agent_mode=None, required_coverage_class=None,
+            queue_runtime_root=str(self.root / "runtime"), restart_target_override=None,
+            restart_script=None, handoff_to_agent=None, handoff_from_agent=None,
+            turn_start_timeout_s=1, final_refetches=1, final_refetch_interval_s=0,
+        )
+        self.client = SimpleNamespace(
+            base_url=self.args.base_url, send=Mock(return_value={"id": "111"}),
+            send_prompt=Mock(return_value={"id": "111"}),
+            send_control=Mock(return_value={"id": "100"}), fetch_messages=Mock(return_value=[]),
+        )
+        self.real_idle = driver.assert_cell_idle
+        self.real_api = driver._read_api_json
+        self.real_detail = driver._read_health_detail
+        self.blocked = self.stub(driver.subprocess, "run", side_effect=AssertionError("real process forbidden"))
+        self.stub(driver.urllib.request, "urlopen", side_effect=AssertionError("real network forbidden"))
+        self.stub(driver.lease, "acquire", side_effect=lambda *a, **k: contextlib.nullcontext())
+        self.stub(driver.lease, "_read_lease", return_value={"run_id": "claude-tui-run"})
+        self.stub(driver, "_arm_phase_deadline", return_value="inert")
+        self.stub(driver, "_disarm_phase_deadline")
+        self.stub(driver.time, "sleep")
+        self.stub(driver, "reset_channel_state", side_effect=AssertionError("reset forbidden"))
+        self.stub(driver, "hard_reset_provider_session", side_effect=AssertionError("hard reset forbidden"))
+        self.idle = self.stub(driver, "assert_cell_idle", return_value={"status": "idle"})
+        self.detail = self.stub(driver, "_read_health_detail", return_value=_health_detail(_idle_mailbox("99", "claude")))
+        self.api = self.stub(driver, "_read_api_json", side_effect=lambda base, path, **k: (200, {"cluster_standby": False, "status": "healthy", "ok": True, "fully_recovered": True}) if path == "/api/health" else (200, {"sessions": []}))
+        self.stub(driver, "parse_args", return_value=self.args)
+        self.stub(driver.discord, "DiscordClient", return_value=self.client)
+        self.stack.enter_context(patch.dict(driver.os.environ, {"AGENTDESK_E2E_ALLOW_DESTRUCTIVE": "1"}))
+
+    def stub(self, obj, name, **kwargs):
+        return self.stack.enter_context(patch.object(obj, name, **kwargs))
+
+    def scenario(self, name="E-X", steps=None, *, durable=False):
+        return {"id": name, "agent_mode": "real_live", "coverage_class": "live",
+                "steps": steps if steps is not None else [{"send_prompt": "hello"}],
+                "assertions": [], "durable_delivery_probe": durable}
+
+    def main_result(self, *scenarios):
+        output = io.StringIO()
+        with patch.object(driver, "load_scenarios", return_value=list(scenarios)), contextlib.redirect_stdout(output):
+            rc = driver.main()
+        report = json.loads((self.root / "run/report.claude-tui.json").read_text())
+        self.blocked.assert_not_called()
+        return rc, report, output.getvalue()
+
+    def assert_unevaluable(self, row):
+        self.assertEqual(row["status"], "fail")
+        self.assertEqual(row["failure_attribution"]["source"], "harness")
+        self.assertEqual(row["failure_attribution"]["classification"], "unevaluable")
+
+
+class HarnessOutcomeContract(_OutcomeFixture, unittest.TestCase):
+    def test_idle_unreadable_survives_run_one_wrap(self):
+        self.idle.side_effect = driver.HarnessEvidenceError("required idle read unavailable")
+        rc, report, output = self.main_result(self.scenario(), self.scenario("E-NEXT"))
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(report["scenarios"]), 1)
+        self.assert_unevaluable(report["scenarios"][0])
+        self.idle.assert_called_once()
+        self.assertIn("required idle read unavailable", report["scenarios"][0]["reason"])
+        self.assertTrue(report["scenarios"][0]["real_provider_contacted"])
+        self.assertEqual(self.client.send_prompt.call_count, 1)
+        self.assertNotIn("running E-NEXT", output)
+
+    def test_restart_guard_type_and_valid_foreign_busy(self):
+        restart = self.scenario(steps=[{"restart_dcserver": {"target": "release"}}])
+        for typed in (True, False):
+            with self.subTest(typed=typed):
+                self.client.send_control.reset_mock()
+                self.detail.side_effect = driver.HarnessEvidenceError("required health unreadable") if typed else None
+                self.detail.return_value = _health_detail(_busy_mailbox("88", "codex"))
+                rc, report, output = self.main_result(restart, self.scenario("E-NEXT"))
+                self.assertEqual(rc, 1)
+                if typed:
+                    self.assert_unevaluable(report["scenarios"][0])
+                    self.assertEqual(len(report["scenarios"]), 1)
+                    self.assertNotIn("running E-NEXT", output)
+                else:
+                    self.assertEqual(report["scenarios"][0]["failure_attribution"]["source"], "assertion")
+                    self.assertEqual(len(report["scenarios"]), 2)
+                    self.assertIn("live mailbox state outside cell", report["scenarios"][0]["reason"])
+                    self.assertTrue(any("TEARDOWN" in call.args[1] for call in self.client.send_control.call_args_list))
+
+    def test_safety_recheck_precedes_mode_gates_without_teardown(self):
+        for source in ("harness", "safety"):
+            for required in (None, "real_live"):
+                with self.subTest(source=source, required=required):
+                    self.args.required_agent_mode = required
+                    self.client.send_control.reset_mock()
+                    refusal = {"status": "unevaluable", "dirty_active_residue": True,
+                               "failure_attribution": driver._failure_attribution(source, "refused recheck")}
+                    with patch.object(driver, "durable_probe_safety_gate", side_effect=[{"status": "idle"}, refusal]):
+                        planned = [self.scenario(steps=[{"send_discord_prompt": "probe"}], durable=True)]
+                        rc, report, _ = self.main_result(*(planned + ([self.scenario("E-NEXT")] if source == "harness" else [])))
+                    row = report["scenarios"][0]
+                    self.assertEqual((rc, row["status"], row["reason"]), (1, "fail", "refused recheck"))
+                    self.assertEqual(row["failure_attribution"]["source"], source)
+                    self.assertEqual(len(report["scenarios"]), 1)
+                    self.assertEqual(self.client.send_control.call_count, 1)  # existing setup only
+                    self.client.send.assert_not_called()
+                    self.client.send_prompt.assert_not_called()
+
+    def test_queue_absence_and_read_errors_reach_classified_first_guard(self):
+        provider = Path(self.args.queue_runtime_root) / driver.RUNTIME_QUEUE_DIRS[0][1] / "claude"
+        target = provider / "token/99.json"
+        target.parent.mkdir(parents=True)
+        original_stat, original_iter, original_read = Path.stat, Path.iterdir, Path.read_text
+        cases = ("absent-dir", "absent-file", "permission", "io", "wrong-kind",
+                 "iter-create", "iter-consume", "read", "json", "nonempty", "empty")
+        for case in cases:
+            with self.subTest(case=case):
+                target.write_text("{" if case == "json" else "[1]" if case == "nonempty" else "[]")
+                self.client.send_control.reset_mock()
+                def get_stat(path, *a, **k):
+                    if path == provider:
+                        if case == "absent-dir": raise FileNotFoundError(errno.ENOENT, "fixture")
+                        if case in {"permission", "io"}: raise OSError(errno.EACCES if case == "permission" else errno.EIO, "fixture")
+                        if case == "wrong-kind": return SimpleNamespace(st_mode=stat.S_IFREG)
+                    if path == target and case == "absent-file": raise FileNotFoundError(errno.ENOENT, "fixture")
+                    return original_stat(path, *a, **k)
+                def iterate(path):
+                    if path == provider and case == "iter-create": raise OSError(errno.EIO, "iterate")
+                    if path == provider and case == "iter-consume":
+                        def failed():
+                            yield target.parent
+                            raise OSError(errno.EIO, "consume")
+                        return failed()
+                    return original_iter(path)
+                def read(path, *a, **k):
+                    if path == target and case == "read": raise OSError(errno.EIO, "read")
+                    return original_read(path, *a, **k)
+                with patch.object(Path, "stat", get_stat), patch.object(Path, "iterdir", iterate), patch.object(Path, "read_text", read):
+                    rc, report, output = self.main_result(self.scenario(steps=[{"send_discord_prompt": "probe"}], durable=True), self.scenario("E-NEXT"))
+                first = report["scenarios"][0]
+                if case in {"absent-dir", "absent-file", "empty"}:
+                    self.assertEqual(first["status"], "pass")
+                elif case == "nonempty":
+                    self.assertEqual(first["failure_attribution"]["source"], "safety")
+                    self.assertEqual(first["status"], "fail")
+                else:
+                    self.assert_unevaluable(first)
+                    self.assertEqual((rc, len(report["scenarios"])), (1, 1))
+                    self.client.send_control.assert_not_called()
+                    self.assertNotIn("running E-NEXT", output)
+
+    def test_required_api_unreadability_and_readable_product_shape(self):
+        for response in (FakeRawResponse(200, "bad-json"), FakeResponse(503, {}), urllib.error.URLError("offline")):
+            with self.subTest(response=type(response).__name__), patch.object(driver.urllib.request, "urlopen", side_effect=response if isinstance(response, Exception) else None, return_value=response):
+                with self.assertRaises(driver.HarnessEvidenceError): self.real_api(self.args.base_url, "/api/health")
+        with patch.object(driver, "_read_api_json", return_value=(200, {})):
+            with self.assertRaises(assertions.AssertionError) as caught: self.real_detail(self.args.base_url)
+            self.assertNotIsInstance(caught.exception, driver.HarnessEvidenceError)
+
+    def test_readable_503_health_keeps_product_and_restart_guards(self):
+        busy = _health_detail(_busy_mailbox("88", "codex"), status="unhealthy")
+        idle = _health_detail(_idle_mailbox("99", "claude"))
+        for detail, refused in ((busy, True), ({**idle, "global_finalizing": 1}, True), (idle, False)):
+            with self.subTest(refused=refused, finalizing=detail["global_finalizing"]), patch.object(driver, "_read_health_detail", side_effect=self.real_detail), patch.object(driver, "_read_api_json", side_effect=self.real_api), patch.object(driver.urllib.request, "urlopen", _fake_urlopen_for({"/api/health/detail": [(503, detail)], "/api/sessions": [(200, {"sessions": []})]})):
+                if refused:
+                    with self.assertRaises(assertions.AssertionError) as caught:
+                        driver._guard_no_foreign_active_turns(self.args.base_url, "99", "claude-tui", finalizing_drain_timeout_s=0)
+                    self.assertNotIsInstance(caught.exception, driver.HarnessEvidenceError)
+                else: driver._guard_no_foreign_active_turns(self.args.base_url, "99", "claude-tui")
+        for status, payload, path in ((503, {"error": "offline"}, "/api/health"), (503, {"status": "healthy", "ok": True, "fully_recovered": True}, "/api/health/detail"), (502, idle, "/api/health/detail"), (503, idle, "/api/sessions")):
+            with self.subTest(status=status, path=path), patch.object(driver.urllib.request, "urlopen", return_value=FakeResponse(status, payload)):
+                with self.assertRaises(driver.HarnessEvidenceError): self.real_api(self.args.base_url, path)
+
+    def test_terminal_observation_and_attempt_exhaustion_preserve_type(self):
+        bad = driver.HarnessEvidenceError("last read failed")
+        product = assertions.AssertionError("valid busy")
+        for probe in ("health", "idle"):
+            for sequence, expected in (([product, bad], driver.HarnessEvidenceError), ([bad, product], assertions.AssertionError), ([], driver.HarnessEvidenceError)):
+                with self.subTest(probe=probe, sequence=len(sequence)):
+                    ticks = iter([0, 0, 0.5, 2]) if sequence else iter([0, 2])
+                    with patch.object(driver.time, "monotonic", side_effect=lambda: next(ticks)), patch.object(driver, "_read_api_json", side_effect=sequence), patch.object(driver, "_read_health_detail", side_effect=sequence):
+                        with self.assertRaises(expected) as caught:
+                            if probe == "health": driver.wait_for_health(self.args.base_url, timeout_s=1, poll_interval_s=0)
+                            else: self.real_idle(base_url=self.args.base_url, channel_id="99", cell="claude-tui", runtime_root=Path(self.args.queue_runtime_root), timeout_s=1, poll_interval_s=0)
+                        self.assertEqual(isinstance(caught.exception, driver.HarnessEvidenceError), expected is driver.HarnessEvidenceError)
+        with patch.object(driver.time, "monotonic", return_value=0), patch.object(driver, "_assert_health_once", side_effect=bad) as attempt:
+            with self.assertRaises(assertions.AssertionError) as caught: driver.assert_health(self.args.base_url, {"timeout_s": 1, "poll_interval_s": 0})
+            self.assertIsInstance(caught.exception, driver.HarnessEvidenceError)
+            self.assertIs(caught.exception, bad)
+            self.assertEqual(attempt.call_count, 12)
+        for probe in ("health", "idle"):
+            with patch.object(driver, "_read_api_json", side_effect=[bad, (200, {"status": "healthy", "ok": True, "fully_recovered": True})]), patch.object(driver, "_read_health_detail", side_effect=[bad, _health_detail(_idle_mailbox("99", "claude"))]):
+                if probe == "health": driver.wait_for_health(self.args.base_url, timeout_s=1, poll_interval_s=0)
+                else: self.real_idle(base_url=self.args.base_url, channel_id="99", cell="claude-tui", runtime_root=Path(self.args.queue_runtime_root), timeout_s=1, poll_interval_s=0)
+
+
+class PhasePartialEvidenceContract(_OutcomeFixture, unittest.TestCase):
+    def test_deadline_normalizes_body_and_existing_handlers_once(self):
+        for failure in ("body", "step", "assertion", "exception"):
+            with self.subTest(failure=failure):
+                self.args.phase_deadline_s = 1
+                self.client.send_control.side_effect = lambda channel, text: {"id": "100"} if "SETUP" in text else (_ for _ in ()).throw(driver.PhaseDeadlineExpired("phase"))
+                if failure == "step":
+                    self.idle.side_effect = assertions.AssertionError("valid idle failure")
+                    self.client.fetch_messages.side_effect = None
+                else:
+                    self.idle.side_effect = None
+                    error = driver.PhaseDeadlineExpired("phase") if failure == "body" else assertions.AssertionError("valid assertion") if failure == "assertion" else RuntimeError("history failed")
+                    self.client.fetch_messages.side_effect = [[], error]
+                scenario = self.scenario(steps=[{"send_discord_prompt": "probe"}], durable=True)
+                scenario["assertions"] = [{"raw_message_count_between_markers": {"min": 0, "max": 2}}]
+                rc, report, _ = self.main_result(scenario)
+                row = report["scenarios"][0]
+                self.assertEqual((rc, report["totals"]["fail"], len(report["scenarios"])), (1, 1, 1))
+                self.assert_unevaluable(row)
+                self.assertIn("durable_record_probe", row)
+                self.assertEqual(row["durable_record_probe"]["inbound_prompt_id"], "111")
+                self.assertTrue(row["real_provider_contacted"])
+                self.assertEqual(row["agent_mode_actual"], "real_live")
+                self.assertIn("completed_at", row)
+                self.assertEqual(len(row["assertions"]), len({json.dumps(x, sort_keys=True) for x in row["assertions"]}))
+                if failure == "step": self.assertEqual(len(row["assertions"]), 1)
+
+    def test_deadline_inside_handler_refresh_preserves_ack(self):
+        self.client.fetch_messages.side_effect = [[], assertions.AssertionError("already failed")]
+        original = driver._refresh_agent_mode_record
+        calls = []
+        def once(*args, **kwargs):
+            calls.append(True)
+            if len(calls) == 1: raise driver.PhaseDeadlineExpired("handler refresh")
+            return original(*args, **kwargs)
+        with patch.object(driver, "_refresh_agent_mode_record", side_effect=once):
+            rc, report, _ = self.main_result(self.scenario(steps=[{"send_discord_prompt": "probe"}], durable=True))
+        row = report["scenarios"][0]
+        self.assertIn("durable_record_probe", row)
+        self.assertEqual((rc, row["durable_record_probe"]["inbound_prompt_id"]), (1, "111"))
+        self.assertEqual(row["agent_mode_actual"], "real_live")
+        self.assertIn("already failed", row["reason"])
+
+    def test_deadline_before_ack_and_controlled_facts_are_honest(self):
+        self.args.phase_deadline_s = 1
+        self.client.send.side_effect = driver.PhaseDeadlineExpired("pre-ack")
+        rc, report, _ = self.main_result(self.scenario(steps=[{"send_discord_prompt": "probe"}], durable=True))
+        row = report["scenarios"][0]
+        self.assertEqual(rc, 1)
+        self.assertIn("durable_record_probe", row)
+        self.assertFalse(row["real_provider_contacted"])
+        self.assertNotIn("inbound_prompt_id", row["durable_record_probe"])
+        self.detail.side_effect = driver.PhaseDeadlineExpired("controlled")
+        rc, report, _ = self.main_result(self.scenario(steps=[{"restart_dcserver": {"target": "release"}}]))
+        row = report["scenarios"][0]
+        self.assertEqual(rc, 1)
+        self.assertIn("controlled_harness_evidence", row)
+        self.assertTrue(row["controlled_harness_evidence"])
+        self.assertEqual(row["agent_mode_actual"], "controlled")
+        self.assertEqual(row["coverage_class_actual"], "live")
+
+    def test_ack_only_deadline_does_not_invent_contact(self):
+        with patch.object(driver, "_mark_real_provider_contacted", side_effect=driver.PhaseDeadlineExpired("ack-only")):
+            rc, report, _ = self.main_result(self.scenario(steps=[{"send_discord_prompt": "probe"}], durable=True))
+        row = report["scenarios"][0]
+        self.assertIn("durable_record_probe", row)
+        self.assertEqual((rc, row["durable_record_probe"]["inbound_prompt_id"]), (1, "111"))
+        self.assertFalse(row["real_provider_contacted"])
+
+    def test_prior_completed_result_and_terminal_report_order(self):
+        self.client.fetch_messages.side_effect = [[], [], [], driver.PhaseDeadlineExpired("second")]
+        original_print = print
+        def observe(*parts, **kwargs):
+            if "→ fail" in " ".join(map(str, parts)):
+                self.assertEqual(json.loads((self.root / "run/report.claude-tui.json").read_text())["totals"]["fail"], 1)
+            original_print(*parts, **kwargs)
+        with patch("builtins.print", side_effect=observe):
+            rc, report, _ = self.main_result(self.scenario("E-FIRST"), self.scenario("E-SECOND"))
+        self.assertEqual((rc, [r["id"] for r in report["scenarios"]]), (1, ["E-FIRST", "E-SECOND"]))
+        self.assertEqual(report["scenarios"][0]["status"], "pass")
+        self.assert_unevaluable(report["scenarios"][1])
+
+    def test_general_interrupts_propagate_without_cleanup(self):
+        for error in (KeyboardInterrupt(), SystemExit(2)):
+            with self.subTest(error=type(error).__name__):
+                self.client.send_control.reset_mock()
+                self.client.fetch_messages.side_effect = error
+                with self.assertRaises(type(error)): self.main_result(self.scenario())
+                self.assertEqual(self.client.send_control.call_count, 1)
 
 
 if __name__ == "__main__":

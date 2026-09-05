@@ -27,6 +27,7 @@ import run_multi_provider_matrix as matrix  # noqa: E402
 from tui_relay import assertions  # noqa: E402
 from tui_relay.test_driver_health import (  # noqa: E402
     _busy_mailbox, _fake_urlopen_for, _health_detail, _idle_mailbox,
+    HarnessOutcomeContract, PhasePartialEvidenceContract,  # noqa: F401
 )
 # ci-script-checks.sh runs this module; expose the offline fetch regressions too.
 from tui_relay.test_discord_client import DiscordClientFetchMessages  # noqa: E402, F401
