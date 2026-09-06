@@ -393,6 +393,13 @@ echo "=== Relay watchdog + PG tunnel supervisor tests (#4381/#4378) ==="
 # silently fall out of the deploy again (the 06-29 relay-gap-watch failure).
 "$PYTHON" -m unittest tests.test_relay_watchdog tests.test_pg_tunnel
 
+echo "=== Build token serialization tests (#5663) ==="
+# scripts/build_token.py serializes both release cargo sites. It is Python,
+# so neither shellcheck nor cargo covers it; this unittest run is its ONLY CI
+# gate, and it also pins the two shell wiring sites so the wrapper cannot
+# silently fall back out of the release path.
+"$PYTHON" -m unittest tests.test_build_token_serialization_5663
+
 echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036) ==="
 # Inventory snapshots are untracked, so generate them in the CI workspace
 # before checks consume their source-of-truth data. The generator hard-fails
