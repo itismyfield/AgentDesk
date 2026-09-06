@@ -44,6 +44,9 @@ __pycache__/
 # /loop scheduling lockfile (per-session)
 /.claude/scheduled_tasks.lock
 
+# Automatically created Claude Code workspace settings
+/.claude/settings.json
+
 # Transient ops playbooks (campaign prompts, incident runbooks)
 /docs/ops/
 
