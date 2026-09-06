@@ -60,7 +60,7 @@ fn provider_exec_registry_conformance_invariant() {
             ProviderCompactionAdapter::GeminiDisabled
             | ProviderCompactionAdapter::OpenCodeDisabled
             | ProviderCompactionAdapter::QwenDisabled
-            | ProviderCompactionAdapter::StreamJsonDisabled => {
+            | ProviderCompactionAdapter::StreamJsonDisabled(_) => {
                 assert!(provider.compact_env_vars(80).is_empty());
                 assert!(provider.compact_cli_config(80, 100_000).is_empty());
             }
@@ -93,7 +93,15 @@ fn provider_exec_registry_conformance_invariant() {
     );
     assert_eq!(
         supported_provider_ids(),
-        vec!["claude", "codex", "gemini", "opencode", "qwen", "grok"]
+        vec![
+            "claude",
+            "codex",
+            "gemini",
+            "opencode",
+            "qwen",
+            "grok",
+            "antigravity"
+        ]
     );
     for provider_id in supported_provider_ids() {
         assert_eq!(
@@ -153,12 +161,12 @@ fn provider_exec_registry_conformance_invariant() {
     assert!(
         catalog
             .iter()
-            .all(|entry| entry.supports_restricted_tool_policy)
+            .all(|entry| entry.supports_restricted_tool_policy == (entry.id != "antigravity"))
     );
     assert!(
         catalog
             .iter()
-            .filter(|entry| entry.id != "grok")
+            .filter(|entry| entry.id != "grok" && entry.id != "antigravity")
             .all(|entry| entry.context_window_tokens.is_some())
     );
     assert!(
@@ -234,9 +242,40 @@ fn provider_exec_registry_conformance_invariant() {
             ],
         ),
     ];
-    for (provider, expected) in expected_counterparts {
+    for (provider, mut expected) in expected_counterparts {
+        expected.insert(1, ProviderKind::Antigravity);
         assert_eq!(provider.preferred_counterparts(), expected);
     }
+    assert_eq!(
+        ProviderKind::from_str(" AGY "),
+        Some(ProviderKind::Antigravity)
+    );
+    assert_eq!(
+        ProviderKind::from_channel_suffix("dev-ag"),
+        Some(ProviderKind::Antigravity)
+    );
+    assert_eq!(
+        ProviderKind::Antigravity.preferred_counterparts(),
+        vec![
+            ProviderKind::Codex,
+            ProviderKind::Claude,
+            ProviderKind::Gemini,
+            ProviderKind::Grok,
+            ProviderKind::OpenCode,
+            ProviderKind::Qwen,
+        ]
+    );
+    let agy = catalog
+        .iter()
+        .find(|entry| entry.id == "antigravity")
+        .unwrap();
+    assert_eq!(agy.binary_name, "agy");
+    assert_eq!(agy.execution_surface, "stream_json_cli");
+    assert_eq!(agy.system_prompt_transport, "envelope");
+    assert!(agy.supports_resume);
+    assert!(!agy.supports_tool_stream);
+    assert!(!agy.supports_tui_hosting);
+    assert!(agy.context_window_tokens.is_none());
     assert_scoped_dispatches_have_no_wildcard_arms();
 }
 

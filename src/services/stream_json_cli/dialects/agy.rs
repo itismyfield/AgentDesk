@@ -130,7 +130,9 @@ pub fn resolve_agy_binary() -> crate::services::platform::BinaryResolution {
             let path = candidate.to_string_lossy().into_owned();
             resolution.resolved_path = Some(path.clone());
             resolution.canonical_path = Some(path.clone());
-            resolution.exec_path = Some(path);
+            // exec_path is a PATH search list, not the executable path. Let
+            // apply_binary_resolution augment PATH from resolved_path.
+            resolution.exec_path = None;
             resolution.source = Some("localappdata_agy_bin".into());
         }
     }
@@ -149,7 +151,7 @@ mod tests {
 
     fn request() -> ProviderTurnRequest {
         ProviderTurnRequest {
-            provider: crate::services::provider::ProviderKind::Unsupported("antigravity".into()),
+            provider: crate::services::provider::ProviderKind::Antigravity,
             prompt: "hello".into(),
             system_prompt: Some("sys".into()),
             tool_policy: ConfiguredToolPolicy::for_new_stream_json_provider(),

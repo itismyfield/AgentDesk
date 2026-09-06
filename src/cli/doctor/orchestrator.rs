@@ -2647,15 +2647,7 @@ fn check_provider_cli(
     snapshot: &HealthSnapshot,
 ) -> Check {
     let id = provider_check_id(&provider);
-    let name = match provider {
-        ProviderKind::Claude => "claude CLI",
-        ProviderKind::Codex => "codex CLI",
-        ProviderKind::Gemini => "gemini CLI",
-        ProviderKind::OpenCode => "opencode CLI",
-        ProviderKind::Qwen => "qwen CLI",
-        ProviderKind::Grok => "grok CLI",
-        ProviderKind::Unsupported(_) => "provider CLI",
-    };
+    let name = super::provider_cli_name::provider_cli_check_name(&provider);
     let capability_summary = provider_capability_summary(&provider);
     let connected = provider_connected(snapshot, &provider);
     let log_hint = dcserver_log_hint();

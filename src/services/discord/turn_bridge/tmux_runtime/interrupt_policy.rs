@@ -80,6 +80,7 @@ pub(super) fn provider_turn_interrupt_plan(
         ProviderKind::Qwen => Some(ProviderTurnInterruptPlan { keys: &["C-c"] }),
         ProviderKind::Gemini
         | ProviderKind::Grok
+        | ProviderKind::Antigravity
         | ProviderKind::OpenCode
         | ProviderKind::Unsupported(_) => None,
     }
@@ -173,6 +174,7 @@ pub(super) fn fallback_sigint_pid_for_provider(
         ProviderKind::Codex | ProviderKind::Qwen => provider_pid,
         ProviderKind::Gemini
         | ProviderKind::Grok
+        | ProviderKind::Antigravity
         | ProviderKind::OpenCode
         | ProviderKind::Unsupported(_) => None,
     }
