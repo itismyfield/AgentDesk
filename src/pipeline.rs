@@ -28,8 +28,13 @@ const PIPELINE_OVERRIDE_AUDIT_ACTOR: &str = "pipeline";
 pub fn load(path: &Path) -> Result<()> {
     let content =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let config: PipelineConfig =
-        serde_yaml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
+    // #5718 review r2: flatten serde's message into this error's `Display`
+    // instead of leaving it in the `source()` chain. Every operator-facing
+    // consumer prints this with plain `Display` — dcserver startup, `cli/direct.rs`,
+    // the `ensure_loaded()` warning below — so a `with_context` wrapper would
+    // print "parsing <path>" and hide which key was rejected.
+    let config: PipelineConfig = serde_yaml::from_str(&content)
+        .map_err(|error| anyhow::anyhow!("parsing {}: {error}", path.display()))?;
     config.validate()?;
     PIPELINE
         .set(config)
@@ -79,8 +84,12 @@ pub fn parse_override(json_str: &str) -> Result<Option<PipelineOverride>> {
     if trimmed.is_empty() || trimmed == "null" || trimmed == "{}" {
         return Ok(None);
     }
-    let ovr: PipelineOverride =
-        serde_json::from_str(trimmed).with_context(|| "parsing pipeline override JSON")?;
+    // #5718 review r2: same reason as `load()`. The resolver warning, the health
+    // report's `parse_failures[].error` and the 400 body from the override write
+    // API all format this with plain `Display`, so the rejected key has to be in
+    // the message itself rather than in the `source()` chain.
+    let ovr: PipelineOverride = serde_json::from_str(trimmed)
+        .map_err(|error| anyhow::anyhow!("parsing pipeline override JSON: {error}"))?;
     Ok(Some(ovr))
 }
 
@@ -606,7 +615,9 @@ pub async fn resolve_for_card_pg(
 /// declare is a typo or a retired field, and silently dropping it makes the
 /// stored override look applied when it is not. Rejecting it surfaces the key
 /// in `PipelineOverrideHealthReport::parse_failures` and in the 400 returned by
-/// the pipeline-override write API instead.
+/// the pipeline-override write API instead. Metadata a supported client really
+/// does produce is declared as a field (see `fsm_edge_bindings`) so it survives
+/// the round trip — the deny stays, the known producer stops being collateral.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipelineOverride {
@@ -626,6 +637,18 @@ pub struct PipelineOverride {
     pub timeouts: Option<HashMap<String, TimeoutConfig>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_gate: Option<PhaseGateConfig>,
+    /// Visual-editor edge metadata (#5718 review r2). The dashboard FSM editor
+    /// binds an explicit event name to a `from->to` edge and carries the map in
+    /// the override it PUTs (`updateFsmTransitionEvent` in
+    /// `dashboard/src/components/agent-manager/usePipelineVisualEditorActions.ts`,
+    /// re-emitted by `buildOverridePayload` in `pipeline-visual-editor-model.ts`).
+    /// No Rust reader consumes it, but `deny_unknown_fields` would otherwise 400
+    /// every save the supported editor makes, so it is declared here and stored
+    /// verbatim. Raw JSON rather than a typed map on purpose: the editor
+    /// round-trips whatever the stored row already held, and a typed shape would
+    /// reject an older row for the same reason `deny_unknown_fields` did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fsm_edge_bindings: Option<serde_json::Value>,
 }
 
 // ── Schema ───────────────────────────────────────────────────────
@@ -656,6 +679,14 @@ pub struct PipelineConfig {
     pub timeouts: HashMap<String, TimeoutConfig>,
     #[serde(default)]
     pub phase_gate: PhaseGateConfig,
+    /// Visual-editor edge metadata carried up from the override layers (#5718
+    /// review r2). `merge()` propagates `PipelineOverride::fsm_edge_bindings`
+    /// into the resolved config, so `to_json()` — what
+    /// `agentdesk.pipeline.getConfig()` hands policy JS and what
+    /// `previewTimeoutDecision` (src/engine/ops/timeouts_ops.rs) deserializes
+    /// straight back into this type — has to declare it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fsm_edge_bindings: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -991,6 +1022,10 @@ impl PipelineConfig {
                 .phase_gate
                 .clone()
                 .unwrap_or_else(|| self.phase_gate.clone()),
+            fsm_edge_bindings: ovr
+                .fsm_edge_bindings
+                .clone()
+                .or_else(|| self.fsm_edge_bindings.clone()),
         }
     }
 
@@ -1412,6 +1447,7 @@ mod state_slug_contract_tests {
             clocks: HashMap::new(),
             timeouts: HashMap::new(),
             phase_gate: PhaseGateConfig::default(),
+            fsm_edge_bindings: None,
         };
 
         let err = config.validate().unwrap_err();
@@ -1447,6 +1483,7 @@ mod gate_validation_tests {
             clocks: HashMap::new(),
             timeouts: HashMap::new(),
             phase_gate: PhaseGateConfig::default(),
+            fsm_edge_bindings: None,
         }
     }
 
@@ -1665,6 +1702,211 @@ mod schema_strictness_tests {
         assert!(
             message.contains("stage_failure_policy"),
             "the parse error must name the rejected key, got: {message}"
+        );
+    }
+
+    /// The exact body the dashboard's visual pipeline editor PUTs after an
+    /// operator picks `on_error` for the `review -> failed` edge, transcribed from
+    /// `buildOverridePayload` (dashboard/src/components/agent-manager/
+    /// pipeline-visual-editor-model.ts): the eight visual sections it always
+    /// emits, the preserved `fsm_edge_bindings` extra, and the `events` entry
+    /// `updateFsmTransitionEvent` creates alongside the binding.
+    fn dashboard_fsm_editor_save_payload() -> &'static str {
+        r#"{
+            "fsm_edge_bindings": { "review->failed": { "event": "on_error" } },
+            "states": [
+                { "id": "backlog", "label": "Backlog", "terminal": false },
+                { "id": "review", "label": "Review", "terminal": false },
+                { "id": "failed", "label": "Failed", "terminal": false }
+            ],
+            "transitions": [
+                { "from": "backlog", "to": "review", "type": "free", "gates": [] },
+                { "from": "review", "to": "failed", "type": "free", "gates": [] }
+            ],
+            "gates": {
+                "review_pass": {
+                    "type": "builtin",
+                    "check": "review_verdict_pass",
+                    "description": "review approved"
+                }
+            },
+            "hooks": { "review": { "on_enter": ["OnReviewEnter"], "on_exit": [] } },
+            "events": { "on_error": [] },
+            "clocks": { "review": { "set": "on_enter", "mode": "reset" } },
+            "timeouts": {
+                "review": {
+                    "duration": "2h",
+                    "clock": "review",
+                    "max_retries": null,
+                    "on_exhaust": "failed",
+                    "condition": null
+                }
+            },
+            "phase_gate": {
+                "dispatch_to": "reviewer",
+                "dispatch_type": "phase-gate",
+                "pass_verdict": "pass",
+                "checks": ["build"]
+            }
+        }"#
+    }
+
+    /// #5718 review r2 (P1): `deny_unknown_fields` must not reject a save the
+    /// supported FSM editor makes. `fsm_edge_bindings` is dashboard-owned
+    /// metadata with no Rust reader, so it has to survive parse *and*
+    /// re-serialization — a row this server wrote must still parse on the next
+    /// save.
+    #[test]
+    fn dashboard_fsm_editor_save_payload_round_trips_as_an_override() {
+        let payload = dashboard_fsm_editor_save_payload();
+        let parsed = parse_override(payload)
+            .expect("the dashboard FSM editor save payload must parse")
+            .expect("the payload must not be treated as empty");
+
+        let bindings = parsed
+            .fsm_edge_bindings
+            .as_ref()
+            .expect("fsm_edge_bindings must be preserved, not dropped");
+        assert_eq!(
+            bindings
+                .pointer("/review->failed/event")
+                .and_then(serde_json::Value::as_str),
+            Some("on_error"),
+            "the binding must survive verbatim, got: {bindings}"
+        );
+        assert!(
+            parsed
+                .events
+                .as_ref()
+                .is_some_and(|events| events.contains_key("on_error")),
+            "the events entry the same editor action creates must parse too"
+        );
+
+        let reserialized = serde_json::to_value(&parsed).expect("override must re-serialize");
+        let original: serde_json::Value =
+            serde_json::from_str(payload).expect("fixture must be valid JSON");
+        assert_eq!(
+            reserialized["fsm_edge_bindings"], original["fsm_edge_bindings"],
+            "re-serialization must hand the metadata back unchanged"
+        );
+        let round_tripped = parse_override(&reserialized.to_string())
+            .expect("the re-serialized override must parse again")
+            .expect("the re-serialized override must not be empty");
+        assert_eq!(round_tripped.fsm_edge_bindings, parsed.fsm_edge_bindings);
+    }
+
+    /// Declaring `fsm_edge_bindings` must not loosen the deny for anything else:
+    /// the same payload with one extra undeclared key is still rejected, with the
+    /// key named.
+    #[test]
+    fn declaring_fsm_edge_bindings_does_not_admit_other_unknown_keys() {
+        let mut payload: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(dashboard_fsm_editor_save_payload())
+                .expect("fixture must be a JSON object");
+        payload.insert(
+            "stage_failure_policy".to_string(),
+            serde_json::json!({ "default": "fail" }),
+        );
+
+        let error = parse_override(&serde_json::Value::Object(payload).to_string())
+            .expect_err("an unknown override key must still be rejected");
+        assert!(
+            error.to_string().contains("stage_failure_policy"),
+            "the parse error must name the rejected key, got: {error}"
+        );
+    }
+
+    /// #5718 review r2 (P1): the metadata must also survive the resolver. A layer
+    /// carrying it must not be warned-and-dropped, which would take that layer's
+    /// valid sections down with it.
+    #[test]
+    fn resolver_keeps_a_layer_that_carries_fsm_edge_bindings() {
+        let payload = dashboard_fsm_editor_save_payload();
+        assert!(
+            parse_override_for_resolve("repo", "acme/widgets", payload).is_some(),
+            "the resolver must not drop the whole layer over editor metadata"
+        );
+
+        let base: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let report = build_override_health_report(
+            &base,
+            &[OverrideSourceRow {
+                layer: "repo",
+                target_id: "acme/widgets".to_string(),
+                json: payload.to_string(),
+            }],
+        );
+        assert!(
+            report.parse_failures.is_empty(),
+            "editor metadata must not register as a parse failure, got: {:?}",
+            report.parse_failures
+        );
+    }
+
+    /// #5718 review r2 (P1): `merge()` carries the metadata into the resolved
+    /// config, so `PipelineConfig` must declare it too — `getConfig()` serializes
+    /// the resolved config and `previewTimeoutDecision` deserializes that same
+    /// JSON back into `PipelineConfig` on the live timeout sweep.
+    #[test]
+    fn merged_config_round_trips_fsm_edge_bindings_through_to_json() {
+        let base: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let ovr = parse_override(dashboard_fsm_editor_save_payload())
+            .expect("payload parses")
+            .expect("payload is not empty");
+
+        let merged = base.merge(&ovr);
+        assert_eq!(
+            merged.fsm_edge_bindings, ovr.fsm_edge_bindings,
+            "merge must propagate the override's editor metadata"
+        );
+
+        let restored: PipelineConfig = serde_json::from_value(merged.to_json())
+            .expect("resolved config JSON must deserialize back under deny_unknown_fields");
+        assert_eq!(restored.fsm_edge_bindings, merged.fsm_edge_bindings);
+    }
+
+    /// #5718 review r2 (P2): the operator-facing surfaces print the parse error
+    /// with plain `Display` — `tracing::warn!` in the resolver, `error.to_string()`
+    /// in the health report, and the 400 body from the override write API. The
+    /// rejected key has to survive that formatting, otherwise the report says a
+    /// row failed without saying which key to remove.
+    #[test]
+    fn parse_failure_names_the_rejected_key_under_plain_display() {
+        let error = parse_override(r#"{"stage_failure_policy":{"default":"fail"}}"#)
+            .expect_err("an unknown override key must be rejected");
+        assert!(
+            error.to_string().contains("stage_failure_policy"),
+            "plain Display must name the rejected key, got: {error}"
+        );
+
+        let base: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let report = build_override_health_report(
+            &base,
+            &[OverrideSourceRow {
+                layer: "repo",
+                target_id: "acme/widgets".to_string(),
+                json: r#"{"stage_failure_policy":{"default":"fail"}}"#.to_string(),
+            }],
+        );
+        let failure = report
+            .parse_failures
+            .first()
+            .expect("the malformed row must register a parse failure");
+        assert!(
+            failure.error.contains("stage_failure_policy"),
+            "parse_failures[].error must name the rejected key, got: {}",
+            failure.error
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("stage_failure_policy")),
+            "the health warning must name the rejected key, got: {:?}",
+            report.warnings
         );
     }
 }
