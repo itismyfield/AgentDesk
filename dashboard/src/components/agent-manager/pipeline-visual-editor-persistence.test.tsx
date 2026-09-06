@@ -127,6 +127,21 @@ function seedDraft(entry: PersistedFsmDraftEntry) {
   );
 }
 
+function seedCachedSnapshot(rawOverride: unknown) {
+  window.localStorage.setItem(
+    STORAGE_KEYS.settingsPipelineVisualCache,
+    JSON.stringify({ version: 1, entries: { [SCOPE_KEY]: {
+      repo: REPO, level: "repo", agentId: null, updatedAtMs: 0,
+      snapshot: {
+        pipeline: makePipeline(),
+        layers: { default: true, repo: true, agent: false },
+        rawOverride,
+        repoStages: [],
+      },
+    } } }),
+  );
+}
+
 function mockApi(rawOverride: unknown) {
   vi.spyOn(api, "getEffectivePipeline").mockResolvedValue({
     pipeline: makePipeline(),
@@ -182,7 +197,7 @@ beforeEach(() => {
   view.current = null;
 });
 
-afterEach(async () => {
+async function unmountEditor() {
   if (root) {
     await act(async () => {
       root?.unmount();
@@ -191,10 +206,68 @@ afterEach(async () => {
   }
   container?.remove();
   container = null;
+  view.current = null;
+}
+
+afterEach(async () => {
+  await unmountEditor();
   vi.restoreAllMocks();
 });
 
 describe("restored draft extras vs. fetched override", () => {
+  it("preserves persisted extras when stages refresh fails after displaying a stale cache", async () => {
+    const draft = historicalDraft();
+    seedDraft(draft);
+    seedCachedSnapshot(buildOverridePayload(makePipeline()));
+    mockApi(normalizedGet());
+    vi.mocked(api.getPipelineStages).mockRejectedValueOnce(new Error("transient stages failure"));
+
+    await mountEditor();
+
+    expect(api.getRepoPipeline).toHaveResolvedWith({ repo: REPO, pipeline_config: normalizedGet() });
+    expect(view.current?.ctx.error).toBe("transient stages failure");
+    expect(view.current?.ctx.loading).toBe(false);
+    expect(persistedDraftExtras()).toEqual(draft.overrideExtras);
+  });
+
+  it("saves edited bindings after a failed cached refresh and a successful reload", async () => {
+    seedDraft(historicalDraft());
+    seedCachedSnapshot(buildOverridePayload(makePipeline()));
+    mockApi(normalizedGet());
+    vi.mocked(api.getPipelineStages).mockRejectedValueOnce(new Error("transient stages failure"));
+
+    await mountEditor();
+    expect(view.current?.ctx.error).toBe("transient stages failure");
+    await unmountEditor();
+    await mountEditor();
+    expect(view.current?.ctx.error).toBe(null);
+    expect(view.current?.ctx.loading).toBe(false);
+    const payload = await saveAndReadPayload();
+
+    expect(payload.fsm_edge_bindings).toEqual({ "ready->done": { event: "on_error" } });
+    expect(payload.retry_budget).toEqual({ max: 7 });
+    expect(Object.hasOwn(payload, "stage_failure_policy")).toBe(false);
+    expect((payload as unknown as PipelineConfigFull).states[0].label).toBe(EDITED_LABEL);
+  });
+
+  it("keeps edited extras and transition gates when a cached refresh returns no document", async () => {
+    const draft = historicalDraft();
+    draft.pipeline.transitions[0].gates = ["draft_gate"];
+    draft.pipeline.gates.draft_gate = { type: "builtin" };
+    seedDraft(draft);
+    seedCachedSnapshot(buildOverridePayload(makePipeline()));
+    mockApi(null);
+
+    await mountEditor();
+    expect(persistedDraftExtras()).toEqual(draft.overrideExtras);
+    const payload = await saveAndReadPayload();
+
+    expect(payload.fsm_edge_bindings).toEqual({ "ready->done": { event: "on_error" } });
+    expect(payload.retry_budget).toEqual({ max: 7 });
+    expect(payload.stage_failure_policy).toEqual({ default: "fail" });
+    expect((payload as unknown as PipelineConfigFull).transitions[0].gates).toEqual(["draft_gate"]);
+  });
+
   it("drops only the key the normalized GET no longer returns", async () => {
     seedDraft(historicalDraft());
     mockApi(normalizedGet());

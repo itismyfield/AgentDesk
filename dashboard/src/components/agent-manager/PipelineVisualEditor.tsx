@@ -169,6 +169,7 @@ export default function PipelineVisualEditor({
 
   function applySnapshot(
     snapshot: EditorSnapshot,
+    source: "cache" | "fetch",
     persistedDraft: PersistedFsmDraftEntry | null = null,
   ) {
     const visibleStages = filterVisibleStages(snapshot.repoStages, selectedAgentId).map(stageDraftFromApi);
@@ -183,7 +184,10 @@ export default function PipelineVisualEditor({
     setLayers(snapshot.layers);
     setOverrideExtras(
       persistedDraft
-        ? reconcileDraftOverrideExtras(persistedDraft.overrideExtras, snapshot.rawOverride)
+        ? source === "fetch"
+          ? reconcileDraftOverrideExtras(persistedDraft.overrideExtras, snapshot.rawOverride)
+          // Cached key absence cannot authorize deleting persisted edits.
+          : { ...persistedDraft.overrideExtras }
         : extractOverrideExtras(snapshot.rawOverride),
     );
     setOverrideExists(hasRawOverride(snapshot.rawOverride));
@@ -241,7 +245,7 @@ export default function PipelineVisualEditor({
     setLoading(true);
     setError(null);
     if (cachedSnapshot) {
-      applySnapshot(cloneEditorSnapshot(cachedSnapshot), persistedDraft);
+      applySnapshot(cloneEditorSnapshot(cachedSnapshot), "cache", persistedDraft);
     } else {
       resetEditorState();
     }
@@ -255,7 +259,7 @@ export default function PipelineVisualEditor({
         if (fsmDraftScopeKey) {
           persistSnapshot(fsmDraftScopeKey, level, snapshot);
         }
-        applySnapshot(snapshot, persistedDraft);
+        applySnapshot(snapshot, "fetch", persistedDraft);
       } catch (cause) {
         if (!cancelled) {
           setError(
@@ -454,7 +458,7 @@ export default function PipelineVisualEditor({
     if (nextScopeKey) {
       persistSnapshot(nextScopeKey, nextLevel, snapshot);
     }
-    applySnapshot(snapshot);
+    applySnapshot(snapshot, "fetch");
   }
 
   const actions = usePipelineVisualEditorActions({
