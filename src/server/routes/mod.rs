@@ -320,6 +320,10 @@ mod audit_explicit_auth_routes_tests {
         let config_path = temp.path().join("agentdesk.yaml");
         let _config_guard =
             crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &config_path);
+        let _e2e_guard = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
+            "AGENTDESK_E2E_CONTROL",
+            std::ffi::OsStr::new("0"),
+        );
         let mut config = test_config();
         config.data.dir = temp.path().join("data");
         config.policies.dir = temp.path().join("empty-policies");
