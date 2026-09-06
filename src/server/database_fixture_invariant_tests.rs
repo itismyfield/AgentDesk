@@ -257,9 +257,10 @@ mod tests {
             return false;
         }
         let tokens = fixture_code_tokens(source);
-        tokens.windows(2).enumerate().any(|(index, pair)| {
-            pair == [name, "("] && (index == 0 || tokens[index - 1] != "fn")
-        })
+        tokens
+            .windows(2)
+            .enumerate()
+            .any(|(index, pair)| pair == [name, "("] && (index == 0 || tokens[index - 1] != "fn"))
     }
 
     /// This is a bounded lexical inventory, not a Rust call graph: it checks
@@ -274,10 +275,22 @@ mod tests {
         let delegated = fixture_code_tokens(include_str!("../engine/ops/config_ops.rs"));
         for helper in ["postgres_base_database_url", "postgres_admin_database_url"] {
             let qualified = [
-                "crate", ":", ":", "dispatch", ":", ":", "test_support", ":", ":", helper, "(",
+                "crate",
+                ":",
+                ":",
+                "dispatch",
+                ":",
+                ":",
+                "test_support",
+                ":",
+                ":",
+                helper,
+                "(",
             ];
             assert!(
-                delegated.windows(qualified.len()).any(|call| call == qualified),
+                delegated
+                    .windows(qualified.len())
+                    .any(|call| call == qualified),
                 "config_ops must keep delegating to dispatch::test_support::{helper}"
             );
         }
@@ -342,11 +355,16 @@ mod tests {
         for source in [
             format!("{name}(url);"),
             format!("crate::db::r#{name}(url);"),
-            format!("fn fixture<'a>() {{ let quote = '\"'; crate::db::{name} /* call */\n(url); }}"),
+            format!(
+                "fn fixture<'a>() {{ let quote = '\"'; crate::db::{name} /* call */\n(url); }}"
+            ),
             format!("fn {name}() {{}} fn fixture() {{ {name}(); }}"),
             format!(r####"let note = r###"quoted " ()"###; {name}(url);"####),
         ] {
-            assert!(has_named_fixture_call(&source, &name), "missed call: {source}");
+            assert!(
+                has_named_fixture_call(&source, &name),
+                "missed call: {source}"
+            );
         }
     }
 
