@@ -336,6 +336,8 @@ src/
 │   │   ├── settings.rs
 │   │   ├── skill_usage_analytics.rs
 │   │   ├── skills_api.rs
+│   │   ├── skills_manifest_audit.rs
+│   │   ├── skills_manifest_audit_tests.rs
 │   │   ├── stats.rs
 │   │   ├── termination_events.rs
 │   │   ├── v1.rs
