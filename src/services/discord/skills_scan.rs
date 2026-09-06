@@ -59,7 +59,7 @@ pub(in crate::services) fn scan_skills(
                 &mut skills,
             );
         }
-        ProviderKind::Unsupported(_) => {}
+        ProviderKind::Antigravity | ProviderKind::Unsupported(_) => {}
     }
 
     skills.sort_by(|a, b| a.0.cmp(&b.0));
@@ -175,7 +175,7 @@ fn provider_home_skill_dir(provider: &ProviderKind, home: &Path) -> Option<std::
         ProviderKind::OpenCode => Some(home.join(".opencode").join("skills")),
         ProviderKind::Qwen => Some(home.join(".qwen").join("skills")),
         ProviderKind::Grok => Some(home.join(".grok").join("skills")),
-        ProviderKind::Unsupported(_) => None,
+        ProviderKind::Antigravity | ProviderKind::Unsupported(_) => None,
     }
 }
 
@@ -191,7 +191,7 @@ fn provider_project_skill_dir(
         ProviderKind::OpenCode => Some(project_root.join(".opencode").join("skills")),
         ProviderKind::Qwen => Some(project_root.join(".qwen").join("skills")),
         ProviderKind::Grok => Some(project_root.join(".grok").join("skills")),
-        ProviderKind::Unsupported(_) => None,
+        ProviderKind::Antigravity | ProviderKind::Unsupported(_) => None,
     }
 }
 

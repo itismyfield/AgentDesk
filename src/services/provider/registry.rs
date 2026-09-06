@@ -11,6 +11,16 @@ use super::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamJsonDialectId {
     Grok,
+    Agy,
+}
+
+impl StreamJsonDialectId {
+    pub const fn provider_id(self) -> &'static str {
+        match self {
+            Self::Grok => "grok",
+            Self::Agy => "antigravity",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +52,7 @@ impl ProviderExecutionAdapter {
             Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
             Self::Qwen => "qwen",
-            Self::StreamJsonCli(StreamJsonDialectId::Grok) => "grok",
+            Self::StreamJsonCli(dialect) => dialect.provider_id(),
         }
     }
 
@@ -84,6 +94,12 @@ impl ProviderExecutionAdapter {
                 supports_resume: true,
                 supports_tool_stream: true,
             },
+            Self::StreamJsonCli(StreamJsonDialectId::Agy) => ProviderCapabilities {
+                binary_name: "agy",
+                supports_structured_output: false,
+                supports_resume: true,
+                supports_tool_stream: false,
+            },
         }
     }
 }
@@ -95,7 +111,7 @@ pub enum ProviderCompactionAdapter {
     GeminiDisabled,
     OpenCodeDisabled,
     QwenDisabled,
-    StreamJsonDisabled,
+    StreamJsonDisabled(StreamJsonDialectId),
 }
 
 impl ProviderCompactionAdapter {
@@ -106,7 +122,7 @@ impl ProviderCompactionAdapter {
             Self::GeminiDisabled => "gemini",
             Self::OpenCodeDisabled => "opencode",
             Self::QwenDisabled => "qwen",
-            Self::StreamJsonDisabled => "grok",
+            Self::StreamJsonDisabled(dialect) => dialect.provider_id(),
         }
     }
 }
@@ -118,7 +134,7 @@ pub enum ProviderReadinessAdapter {
     Gemini,
     OpenCode,
     Qwen,
-    GenericBanner,
+    GenericBanner(StreamJsonDialectId),
 }
 
 impl ProviderReadinessAdapter {
@@ -129,7 +145,7 @@ impl ProviderReadinessAdapter {
             Self::Gemini => "gemini",
             Self::OpenCode => "opencode",
             Self::Qwen => "qwen",
-            Self::GenericBanner => "grok",
+            Self::GenericBanner(dialect) => dialect.provider_id(),
         }
     }
 }
@@ -167,6 +183,7 @@ const FROZEN_FIRST_COUNTERPART: &[(&str, &str)] = &[
     ("opencode", "codex"),
     ("qwen", "codex"),
     ("grok", "codex"),
+    ("antigravity", "codex"),
 ];
 
 pub fn frozen_first_counterpart_id(provider_id: &str) -> Option<&'static str> {
@@ -419,8 +436,10 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
             supports_tool_stream: true,
         },
         execution_adapter: ProviderExecutionAdapter::StreamJsonCli(StreamJsonDialectId::Grok),
-        compaction_adapter: ProviderCompactionAdapter::StreamJsonDisabled,
-        readiness_adapter: ProviderReadinessAdapter::GenericBanner,
+        compaction_adapter: ProviderCompactionAdapter::StreamJsonDisabled(
+            StreamJsonDialectId::Grok,
+        ),
+        readiness_adapter: ProviderReadinessAdapter::GenericBanner(StreamJsonDialectId::Grok),
         default_behavior: ProviderDefaultBehavior {
             resume_without_reset: true,
             runtime_model: None,
@@ -436,6 +455,36 @@ const PROVIDER_REGISTRY: &[ProviderRegistryEntry] = &[
         auth: ProviderAuthSpec {
             credential_paths: GROK_AUTH_PATHS,
             env_keys: GROK_AUTH_ENV,
+            auth_check_argv: None,
+        },
+    },
+    ProviderRegistryEntry {
+        id: "antigravity",
+        aliases: &["agy"],
+        display_name: "Antigravity",
+        cli_init_label: "antigravity (agy)",
+        channel_suffix: Some("-ag"),
+        default_channel_provider: false,
+        capabilities: ProviderExecutionAdapter::StreamJsonCli(StreamJsonDialectId::Agy)
+            .supported_capabilities(),
+        execution_adapter: ProviderExecutionAdapter::StreamJsonCli(StreamJsonDialectId::Agy),
+        compaction_adapter: ProviderCompactionAdapter::StreamJsonDisabled(StreamJsonDialectId::Agy),
+        readiness_adapter: ProviderReadinessAdapter::GenericBanner(StreamJsonDialectId::Agy),
+        default_behavior: ProviderDefaultBehavior {
+            resume_without_reset: true,
+            runtime_model: None,
+            source_label: "provider default",
+        },
+        default_context_window: 0,
+        context_window_known: false,
+        supports_restricted_tool_policy: false,
+        supports_tui_hosting: false,
+        system_prompt_transport: "envelope",
+        managed_tmux_backend: false,
+        managed_tmux_wrapper_subcommand: None,
+        auth: ProviderAuthSpec {
+            credential_paths: &[],
+            env_keys: &[],
             auth_check_argv: None,
         },
     },
@@ -502,6 +551,23 @@ pub fn intern_provider_id(raw: &str) -> Option<&'static str> {
         .map(|entry| entry.id)
 }
 
+pub(super) fn resolve_kind_runtime_path(kind: &ProviderKind) -> Option<String> {
+    match kind {
+        ProviderKind::Claude => {
+            crate::services::platform::resolve_provider_binary("claude").resolved_path
+        }
+        ProviderKind::Codex => crate::services::codex::resolve_codex_path(),
+        ProviderKind::Gemini => crate::services::gemini::resolve_gemini_path(),
+        ProviderKind::OpenCode => crate::services::opencode::resolve_opencode_path(),
+        ProviderKind::Qwen => crate::services::qwen::resolve_qwen_path(),
+        ProviderKind::Grok => crate::services::stream_json_cli::dialects::grok::resolve_grok_path(),
+        ProviderKind::Antigravity => {
+            crate::services::stream_json_cli::dialects::agy::resolve_agy_path()
+        }
+        ProviderKind::Unsupported(_) => None,
+    }
+}
+
 impl ProviderRegistryEntry {
     pub fn matches_id_or_alias(&self, normalized: &str) -> bool {
         self.id == normalized || self.aliases.iter().any(|alias| *alias == normalized)
@@ -515,6 +581,7 @@ impl ProviderRegistryEntry {
             "opencode" => ProviderKind::OpenCode,
             "qwen" => ProviderKind::Qwen,
             "grok" => ProviderKind::Grok,
+            "antigravity" => ProviderKind::Antigravity,
             _ => return None,
         })
     }
