@@ -42,6 +42,14 @@ mod tests {
     /// must be added here before it can create a database. The tunnel test and
     /// `db::fixture_target` are intentionally out of scope: they test the
     /// environment contract itself rather than selecting a test fixture.
+    ///
+    /// The list is maintained by hand: `include_str!` needs a compile-time
+    /// literal, so nothing compares it against the tree, and it has already
+    /// drifted — the five entries added for #5510 called `create_test_database`
+    /// while sitting outside every assertion below. `engine::ops::config_ops`
+    /// is a sixth caller left out on purpose: it reaches the base only through
+    /// `dispatch::test_support::postgres_base_database_url` (listed here), so
+    /// its own source carries none of the tokens these assertions read.
     const PG_FIXTURE_SOURCES: &[(&str, &str)] = &[
         (
             "db::auto_queue::test_support",
@@ -52,8 +60,16 @@ mod tests {
             include_str!("../db/dispatched_sessions.rs"),
         ),
         (
+            "db::dispatched_sessions::canonical_identity_pg_tests",
+            include_str!("../db/dispatched_sessions/canonical_identity_pg_tests.rs"),
+        ),
+        (
             "db::dispatches::delivery_events",
             include_str!("../db/dispatches/delivery_events.rs"),
+        ),
+        (
+            "db::prompt_manifests::tests",
+            include_str!("../db/prompt_manifests/tests.rs"),
         ),
         (
             "dispatch::test_support",
@@ -76,6 +92,11 @@ mod tests {
             "server::routes::escalation",
             include_str!("routes/escalation.rs"),
         ),
+        (
+            "server::routes::memory_api",
+            include_str!("routes/memory_api.rs"),
+        ),
+        ("server::routes::stats", include_str!("routes/stats.rs")),
         (
             "services::discord",
             include_str!("../services/discord/mod.rs"),
@@ -103,6 +124,10 @@ mod tests {
         (
             "services::pipeline_override",
             include_str!("../services/pipeline_override.rs"),
+        ),
+        (
+            "services::settings",
+            include_str!("../services/settings.rs"),
         ),
         ("voice::turn_link", include_str!("../voice/turn_link.rs")),
     ];
