@@ -311,10 +311,11 @@ export default function AgentFormModal({
             )}
             <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 md:grid-cols-[72px_minmax(0,1fr)_minmax(0,1fr)]">
               <div>
-                <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                <label htmlFor="agent-emoji" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                   {tr("이모지", "Emoji")}
                 </label>
                 <EmojiPicker
+                  id="agent-emoji"
                   value={formValues.avatar_emoji}
                   onChange={(emoji) => setValue("avatar_emoji", emoji, { shouldDirty: true, shouldValidate: true })}
                   aria-label={
