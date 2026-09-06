@@ -419,7 +419,7 @@ impl<'a> PipelineOverrideService<'a> {
 
 fn parse_stored_config(config: Option<&str>) -> Value {
     config
-        .and_then(|raw| serde_json::from_str(raw).ok())
+        .and_then(|raw| serde_json::to_value(crate::pipeline::parse_override(raw).ok()).ok())
         .unwrap_or(Value::Null)
 }
 
@@ -500,6 +500,8 @@ mod cross_layer_read_tests {
             readable.gates.is_some(),
             "the readable sections must still take part in the conflict check"
         );
+        let served = parse_stored_config(Some(with_undeclared_key));
+        parse_pipeline_override_config(Some(&served)).expect("GET body must be accepted by PUT");
 
         let unreadable =
             existing_override_for_cross_check("repo", "acme/widgets", r#"{"gates": 5}"#)
