@@ -77,93 +77,6 @@ pub fn ensure_loaded() {
     tracing::warn!("No pipeline YAML found — pipeline features disabled");
 }
 
-/// Strict parse of a pipeline override — the **write** boundary (#5718 r3).
-/// Returns None if the input is empty/null.
-///
-/// An undeclared key is an error here, and that is what keeps bad data from
-/// landing: `parse_pipeline_override_config`
-/// (src/services/pipeline_override.rs) turns it into the 400 the override write
-/// API returns, and `build_override_health_report` uses it to keep an
-/// already-stored row in `parse_failures[]`. Reading a stored row goes through
-/// `parse_override` below, which tolerates the key.
-pub fn parse_override_strict(json_str: &str) -> Result<Option<PipelineOverride>> {
-    let trimmed = json_str.trim();
-    if trimmed.is_empty() || trimmed == "null" || trimmed == "{}" {
-        return Ok(None);
-    }
-    // #5718 review r2: same reason as `load()`. The resolver warning, the health
-    // report's `parse_failures[].error` and the 400 body from the override write
-    // API all format this with plain `Display`, so the rejected key has to be in
-    // the message itself rather than in the `source()` chain.
-    let ovr: PipelineOverride = serde_json::from_str(trimmed)
-        .map_err(|error| anyhow::anyhow!("parsing pipeline override JSON: {error}"))?;
-    Ok(Some(ovr))
-}
-
-/// Read a stored pipeline override, tolerating keys this build does not
-/// declare (#5718 r3).
-///
-/// Every reader of a stored row goes through here — the dispatch resolver
-/// (`parse_override_for_resolve`), the transition resolver
-/// (`kanban::state_machine::resolve_pipeline_with_pg`), the kanban transaction
-/// resolver, the auto-queue view and the GitHub sync — so one stored row cannot
-/// be read two different ways: it used to abort a transition while dispatch
-/// quietly fell back to the parent pipeline. Rejecting the row on read also
-/// discards its valid sections, which is the pre-#5718 behaviour this PR must
-/// not regress. The retry is not silent: `parse_override_strict` still rejects
-/// the same row on write and in the health scan, so it keeps its
-/// `parse_failures[]` entry, and the drop is logged here.
-///
-/// Anything else — malformed JSON, a declared key holding the wrong shape —
-/// still returns `Err`, and each caller keeps its existing handling of that.
-pub fn parse_override(json_str: &str) -> Result<Option<PipelineOverride>> {
-    let strict_error = match parse_override_strict(json_str) {
-        Ok(parsed) => return Ok(parsed),
-        Err(error) => error,
-    };
-    let Some((declared, dropped)) = split_undeclared_override_keys(json_str) else {
-        return Err(strict_error);
-    };
-    let ovr: PipelineOverride = serde_json::from_value(serde_json::Value::Object(declared))
-        .map_err(|error| anyhow::anyhow!("parsing pipeline override JSON: {error}"))?;
-    tracing::warn!(
-        "[pipeline] stored override applied with undeclared key(s) dropped [{}]: {strict_error}",
-        dropped.join(", ")
-    );
-    Ok(Some(ovr))
-}
-
-/// Split a stored override object into the top-level keys `PipelineOverride`
-/// declares and the ones it does not. `None` when the payload is not a JSON
-/// object or when every key is declared — the strict error is then about
-/// something else and has to stand.
-fn split_undeclared_override_keys(
-    json_str: &str,
-) -> Option<(serde_json::Map<String, serde_json::Value>, Vec<String>)> {
-    let serde_json::Value::Object(object) = serde_json::from_str(json_str).ok()? else {
-        return None;
-    };
-    let mut declared = serde_json::Map::new();
-    let mut dropped = Vec::new();
-    for (key, value) in object {
-        // Probe each key on its own with a null value. Every declared field is
-        // an `Option`, so null is accepted for all of them, which separates
-        // "this build does not declare the key" (dropped) from "declared key
-        // holding the wrong shape" (kept — and still fatal in the re-parse
-        // above). Asking serde rather than keeping a second list of field names
-        // here means a field added to `PipelineOverride` later cannot be
-        // dropped by a list nobody updated.
-        let mut probe = serde_json::Map::new();
-        probe.insert(key.clone(), serde_json::Value::Null);
-        if serde_json::from_value::<PipelineOverride>(serde_json::Value::Object(probe)).is_ok() {
-            declared.insert(key, value);
-        } else {
-            dropped.push(key);
-        }
-    }
-    (!dropped.is_empty()).then_some((declared, dropped))
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct PipelineOverrideParseFailure {
@@ -682,53 +595,11 @@ pub async fn resolve_for_card_pg(
     resolve(repo_ovr.as_ref(), agent_ovr.as_ref())
 }
 
-// ── Override Schema ──────────────────────────────────────────────
-
-/// A partial pipeline config used for repo/agent-level overrides.
-/// Only non-None fields replace the parent's values.
-///
-/// `deny_unknown_fields` (#5718): an override key that this struct does not
-/// declare is a typo or a retired field, and silently dropping it makes the
-/// stored override look applied when it is not. Rejecting it surfaces the key
-/// in `PipelineOverrideHealthReport::parse_failures` and in the 400 returned by
-/// the pipeline-override write API instead. A row that is *already stored* is
-/// read back through `parse_override`, which drops the undeclared key and
-/// applies the rest (#5718 r3) — refusing it there would take the row's valid
-/// sections down with it. Metadata a supported client really
-/// does produce is declared as a field (see `fsm_edge_bindings`) so it survives
-/// the round trip — the deny stays, the known producer stops being collateral.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PipelineOverride {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub states: Option<Vec<StateConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transitions: Option<Vec<TransitionConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gates: Option<HashMap<String, GateConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hooks: Option<HashMap<String, HookBindings>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub events: Option<HashMap<String, Vec<String>>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub clocks: Option<HashMap<String, ClockConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeouts: Option<HashMap<String, TimeoutConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase_gate: Option<PhaseGateConfig>,
-    /// Visual-editor edge metadata (#5718 review r2). The dashboard FSM editor
-    /// binds an explicit event name to a `from->to` edge and carries the map in
-    /// the override it PUTs (`updateFsmTransitionEvent` in
-    /// `dashboard/src/components/agent-manager/usePipelineVisualEditorActions.ts`,
-    /// re-emitted by `buildOverridePayload` in `pipeline-visual-editor-model.ts`).
-    /// No Rust reader consumes it, but `deny_unknown_fields` would otherwise 400
-    /// every save the supported editor makes, so it is declared here and stored
-    /// verbatim. Raw JSON rather than a typed map on purpose: the editor
-    /// round-trips whatever the stored row already held, and a typed shape would
-    /// reject an older row for the same reason `deny_unknown_fields` did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fsm_edge_bindings: Option<serde_json::Value>,
-}
+/// `PipelineOverride` and its strict/lenient parsers moved to the write boundary
+/// that owns them (#5718); every reader still names them through `crate::pipeline::`.
+pub use crate::services::pipeline_override::{
+    PipelineOverride, parse_override, parse_override_strict,
+};
 
 // ── Schema ───────────────────────────────────────────────────────
 
