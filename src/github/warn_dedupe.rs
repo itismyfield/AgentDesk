@@ -340,6 +340,10 @@ mod tests {
 
     #[test]
     fn first_and_changed_warnings_are_warn_and_repeats_remain_debug() {
+        // With one live dispatcher, tracing-core can cache no interest when
+        // another test first registers our shared callsites without a local
+        // subscriber. Keep two dispatchers alive during this parallel capture.
+        let _other_dispatch = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let output = Arc::new(Mutex::new(Vec::new()));
         let writer = LogBuffer(output.clone());
         let subscriber = tracing_subscriber::fmt()
