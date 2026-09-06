@@ -170,6 +170,7 @@ pub async fn triage_new_issues_pg(
 
     for issue in issues {
         if issue.state != "OPEN" {
+            super::warn_dedupe::unknown_agent(repo, issue.number, None, "closed issue");
             continue;
         }
 
@@ -280,6 +281,9 @@ async fn validate_agent_routing_pg(
     issue: &GhIssue,
     routing: &AgentRoutingResolution,
 ) -> Result<ValidatedAgentRouting, String> {
+    if matches!(routing, AgentRoutingResolution::Unrouted { .. }) {
+        super::warn_dedupe::unknown_agent(repo, issue.number, None, "unrouted");
+    }
     let (agent_id, source) = match routing {
         AgentRoutingResolution::Explicit(agent_id) => (agent_id.as_str(), "explicit label"),
         AgentRoutingResolution::Inferred { agent_id, matches } => {
@@ -331,18 +335,14 @@ async fn validate_agent_routing_pg(
         .map_err(|error| format!("resolve agent label {agent_id}: {error}"))?;
 
     if exists.is_none() {
-        tracing::warn!(
-            "[triage] Ignoring unknown agent '{}' from {} for issue #{}",
-            agent_id,
-            source,
-            issue.number
-        );
+        super::warn_dedupe::unknown_agent(repo, issue.number, Some(agent_id), source);
         return Ok(ValidatedAgentRouting {
             assigned_agent_id: None,
             unknown_agent_id: Some(agent_id.to_string()),
         });
     }
 
+    super::warn_dedupe::unknown_agent(repo, issue.number, None, source);
     Ok(ValidatedAgentRouting {
         assigned_agent_id: exists,
         unknown_agent_id: None,

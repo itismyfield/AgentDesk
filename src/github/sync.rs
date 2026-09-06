@@ -314,6 +314,12 @@ async fn sync_loaded_github_issues_for_repo_pg(
             )
             .await?;
             let is_terminal = pipeline.is_terminal(&card.status);
+            super::warn_dedupe::terminal_open(
+                repo,
+                issue.number,
+                &card.id,
+                issue.state == "OPEN" && is_terminal,
+            );
 
             if issue.state == "CLOSED" && !is_terminal {
                 close_pg_card_for_issue(pool, &card, &pipeline).await?;
@@ -325,11 +331,6 @@ async fn sync_loaded_github_issues_for_repo_pg(
                 );
             } else if issue.state == "OPEN" && is_terminal {
                 result.inconsistency_count += 1;
-                tracing::warn!(
-                    "[github-sync] {repo}#{}: card {} is terminal but issue is OPEN",
-                    issue.number,
-                    card.id
-                );
                 // #1946 (codex C — observability promotion): the OPEN/terminal
                 // mismatch was previously only counted in the result and
                 // emitted as a tracing warning, so production retros for the
@@ -874,11 +875,7 @@ fn apply_stale_reconcile_fetch_report(
     result.stale_card_issue_error_count += report.error_count;
 
     if report.error_count > 0 {
-        tracing::warn!(
-            "[github-sync] {repo}: stale card reconcile had {} non-fatal GraphQL error(s): {}",
-            report.error_count,
-            report.errors.join("; ")
-        );
+        super::warn_dedupe::stale_reconcile(repo, report.error_count, &report.errors);
     }
 
     let stale_closed_issue_count = report
