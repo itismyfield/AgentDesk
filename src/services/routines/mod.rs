@@ -16,16 +16,20 @@ pub mod loader;
 pub mod migrated;
 pub mod runtime;
 pub mod runtime_config;
+pub mod script_refs;
 pub mod session_control;
 pub mod store;
 
 pub use action::{RoutineAction, validate_routine_action};
 pub use agent_executor::RoutineAgentExecutor;
 pub use discord_log::{RoutineDiscordLogger, RoutineLifecycleEvent};
-pub use loader::RoutineScriptLoader;
+pub use loader::{
+    RoutineScriptLoader, discover_routine_script_refs, unregistered_routine_script_refs,
+};
 pub use migrated::{is_migrated_launchd_script_ref, validate_migrated_launchd_activation};
 pub use runtime::{execute_claimed_script_run, poll_agent_turns, run_due_tick};
 pub use runtime_config::validate_routine_runtime_config;
+pub use script_refs::registered_routine_script_refs;
 pub use session_control::{RoutineSessionCommand, RoutineSessionController};
 pub use store::{
     DeleteRoutineResult, NewRoutine, RoutinePatch, RoutineStore,

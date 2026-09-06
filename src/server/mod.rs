@@ -12,6 +12,7 @@ mod outbox_actionable_delivery;
 mod outbox_delivery_alert;
 pub(crate) mod resource_locks;
 pub mod routes;
+mod routine_script_audit;
 mod startup_preflight;
 pub(crate) mod task_dispatch_claims;
 pub(crate) mod test_phase_runs;
@@ -3259,6 +3260,7 @@ async fn routine_runtime_loop(
         routines_config.default_timezone.clone(),
         routines_config.max_checkpoint_bytes,
     );
+    routine_script_audit::warn_once_unregistered(pg_pool.as_ref(), &routine_script_dirs).await;
     let discord_logger = RoutineDiscordLogger::new_with_health_registry(
         pg_pool.clone(),
         health_registry.clone(),
