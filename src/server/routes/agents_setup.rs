@@ -1139,7 +1139,7 @@ fn is_safe_skill_name(value: &str) -> bool {
 }
 
 fn resolve_setup_path(root: &Path, raw: &str) -> PathBuf {
-    let expanded = expand_tilde(raw);
+    let expanded = crate::utils::format::expand_tilde_string(raw);
     let candidate = PathBuf::from(&expanded);
     if candidate.is_absolute() {
         return candidate;
@@ -1149,15 +1149,6 @@ fn resolve_setup_path(root: &Path, raw: &str) -> PathBuf {
         return root_candidate;
     }
     crate::runtime_layout::config_dir(root).join(candidate)
-}
-
-fn expand_tilde(raw: &str) -> String {
-    if raw == "~" || raw.starts_with("~/") {
-        if let Some(expanded) = crate::runtime_layout::expand_user_path(raw) {
-            return expanded.to_string_lossy().into_owned();
-        }
-    }
-    raw.to_string()
 }
 
 fn parent_can_be_created(path: &Path) -> bool {
