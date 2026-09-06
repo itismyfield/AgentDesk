@@ -24,6 +24,8 @@ src/
 │   ├── client/
 │   │   └── runtime_config.rs
 │   ├── doctor/
+│   │   ├── orchestrator/
+│   │   │   └── config_dir_checks.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
@@ -200,7 +202,8 @@ src/
 ├── github/
 │   ├── mod.rs
 │   ├── sync.rs
-│   └── triage.rs
+│   ├── triage.rs
+│   └── warn_dedupe.rs
 ├── kanban/
 │   ├── audit.rs
 │   ├── github_sync.rs
@@ -353,7 +356,10 @@ src/
 │   ├── multinode_regression.rs
 │   ├── outbox_actionable_delivery.rs
 │   ├── outbox_delivery_alert.rs
+│   ├── rate_limit_backoff.rs
+│   ├── rate_limit_sync.rs
 │   ├── resource_locks.rs
+│   ├── routine_script_audit.rs
 │   ├── startup_preflight.rs
 │   ├── state.rs
 │   ├── task_dispatch_claims.rs
@@ -1462,6 +1468,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── runtime.rs
 │   │   ├── runtime_config.rs
+│   │   ├── script_refs.rs
 │   │   ├── session_control.rs
 │   │   └── store.rs
 │   ├── scheduled_messages/
