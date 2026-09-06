@@ -171,6 +171,16 @@ class PrAnalyzerNoChangeVerificationGuardTests(unittest.TestCase):
 
         self.assertTrue(has_no_change_verification_ack(body))
 
+    def test_unchecked_template_no_change_without_hyphen_is_not_acknowledgement(self):
+        body = "- [ ] **No change verification:** If this PR claims no change..."
+
+        self.assertFalse(has_no_change_verification_ack(body))
+
+    def test_checked_template_no_change_without_hyphen_is_acknowledgement(self):
+        body = "- [x] **No change verification:** If this PR claims no change..."
+
+        self.assertTrue(has_no_change_verification_ack(body))
+
     def test_filled_no_change_field_is_acknowledgement(self):
         body = "- no-change verification: checked using gh pr view --json files"
 
