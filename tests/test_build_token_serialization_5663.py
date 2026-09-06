@@ -164,8 +164,8 @@ class DerivationTests(unittest.TestCase):
 
     def test_the_set_is_recomputed_from_signal_signals(self) -> None:
         excluded = bt.excluded_signal_names()
-        expected = sorted({int(s) for s in signal.Signals if s.name not in excluded
-                           and signal.getsignal(s) is not signal.SIG_IGN})
+        expected = sorted({num for num, name in bt.signal_domain(signal) if name not in excluded
+                           and signal.getsignal(num) is not signal.SIG_IGN})
         self.assertEqual(list(bt.supervised_signals()), expected)
         self.assertTrue(expected, "platform reported no terminating signals")
 
