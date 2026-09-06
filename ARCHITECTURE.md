@@ -24,6 +24,8 @@ src/
 │   ├── client/
 │   │   └── runtime_config.rs
 │   ├── doctor/
+│   │   ├── orchestrator/
+│   │   │   └── config_dir_checks.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
@@ -356,6 +358,7 @@ src/
 │   ├── outbox_actionable_delivery.rs
 │   ├── outbox_delivery_alert.rs
 │   ├── resource_locks.rs
+│   ├── routine_script_audit.rs
 │   ├── startup_preflight.rs
 │   ├── state.rs
 │   ├── task_dispatch_claims.rs
@@ -1464,6 +1467,7 @@ src/
 │   │   ├── mod.rs
 │   │   ├── runtime.rs
 │   │   ├── runtime_config.rs
+│   │   ├── script_refs.rs
 │   │   ├── session_control.rs
 │   │   └── store.rs
 │   ├── scheduled_messages/

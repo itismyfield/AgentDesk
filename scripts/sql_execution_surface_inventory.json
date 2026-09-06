@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "07dcdd4322bd6898ac3c7c151253b2d616a71bd7",
+  "measured_at_sha": "b23edebf86f7cde6e67986187a1a7accc1df68d3",
   "records": [
     {
       "root": "migrations/postgres",
@@ -30016,6 +30016,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:095f2be564281d9fadfaf7e3db581220f7c4ce02faa5bd7a97e9daf3aaac6ca8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/routines/script_refs.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7fb86d34b3894a869f18e51238ecda95c6340d7a37b080e834dfe1aa4d24fd85"
     },
     {
       "root": "src",
