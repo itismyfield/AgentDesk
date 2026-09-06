@@ -5,6 +5,7 @@ Uses stdlib urllib so the driver runs on a vanilla Python 3 with no pip install.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 import math
@@ -73,6 +74,8 @@ class DiscordClient:
     # worker even when the provider bot is not currently watching the channel.
     handoff_to_agent: str | None = None
     handoff_from_agent: str | None = None
+    captures: list[dict[str, Any]] | None = None
+    capture_after_id: str | None = None
 
     def send(self, channel_id: int | str, content: str) -> dict[str, Any]:
         body = json.dumps({"channel_id": str(channel_id), "content": content}).encode("utf-8")
@@ -261,6 +264,9 @@ class DiscordClient:
         limit: int = 50,
         after_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        requested_after = after_id
+        if self.captures is not None:
+            after_id = self.capture_after_id
         params: dict[str, Any] = {"limit": limit}
         if after_id:
             params["after"] = after_id
@@ -310,6 +316,14 @@ class DiscordClient:
                     raise _fetch_error(status, payload, "expected message array or messages envelope")
                 if not all(isinstance(message, Mapping) for message in messages):
                     raise _fetch_error(status, payload, "message array contains a non-object element")
+                if self.captures is not None:
+                    self.captures.append({"pages": [{"channel_id": str(channel_id),
+                        "after_id": after_id, "limit": limit, "observed_at": time.time(),
+                        "messages": copy.deepcopy(messages)}]})
+                    # Capture includes setup; normal assertion windows still start
+                    # at their original cursor. No extra request or wait is added.
+                    return [message for message in messages if requested_after is None
+                            or int(message["id"]) > int(requested_after)]
                 return messages
 
             reason = "rate limit inferred from wrapped retry_after" if wrapped_rate_limit else "rate limit"

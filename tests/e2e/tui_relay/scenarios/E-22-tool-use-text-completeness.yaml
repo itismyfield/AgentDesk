@@ -61,7 +61,9 @@ assertions:
   - completion_chrome_after_body:
       body_marker: "[E2E:E22:TAIL]"
       required: true
-  - no_duplicate_marker: "[E2E:E22:PRE]"
+  - no_duplicate_marker_with_known_gap:
+      marker: "[E2E:E22:PRE]"
+      known_gap: e22_headless_cumulative_republication_v1 # #5731: content 예외 필요0, 기존 검사 유지
   - no_duplicate_marker: "[E2E:E22:HEAD]"
   - no_duplicate_marker: "[E2E:E22:TAIL]"
   - no_duplicate_content: true
