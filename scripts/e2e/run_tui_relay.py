@@ -3318,8 +3318,10 @@ def run_one_cell(
         }
         client = replace(client, captures=record["_known_gap_captures"],
                          capture_after_id=record["_known_gap_binding"]["after_id"])
-    record["_body_observations"] = {}
-    client = replace(client, body_observations=record["_body_observations"]) if hasattr(client, "__dataclass_fields__") else client
+    try:
+        client = replace(client, body_observations=record.setdefault("_body_observations", {}))
+    except TypeError:
+        pass
     time.sleep(8.0)
 
     def _ingest_observed(messages: list[dict[str, Any]]) -> None:
@@ -4440,7 +4442,6 @@ def run_assertion(
         body_marker = expand_marker(str(body_marker))
         trace = None
         for attempt in range(4):
-            assertions.completion_chrome_after_body(window, body_marker=body_marker)
             try:
                 assertions.completion_chrome_after_body(
                     window,
@@ -4449,11 +4450,12 @@ def run_assertion(
                 )
                 break
             except assertions.AssertionError:
-                if pending_refetch is None:
+                first = min((at for body, at in (record or {}).get("_body_observations", {}).items()
+                             if body_marker in body), default=None)
+                if pending_refetch is None or first is None:
                     raise
+                assertions.completion_chrome_after_body(window, body_marker=body_marker)
                 if trace is None:
-                    first = min((at for body, at in record["_body_observations"].items()
-                                 if body_marker in body), default=float("-inf"))
                     trace = {"refetches": 0, "deadline_at": first + 10,
                              "elapsed_s": time.monotonic() - first, "outcome": "FAIL"}
                     record.setdefault("completion_rechecks", []).append(trace)

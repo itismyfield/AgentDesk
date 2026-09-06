@@ -16,6 +16,7 @@ import tempfile
 import unittest
 import datetime as dt
 from argparse import Namespace
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1247,7 +1248,7 @@ class RequiredCompletionWait(unittest.TestCase):
     MARKER = "[E2E:E35:offline-c6:OK]"
 
     def _run(self, *, arrival=4.649, initial_delay=0, return_delay=0, retry_after=None,
-             before=False, optional=False, mutation=None, other_failure=False):
+             before=False, optional=False, mutation=None, other_failure=False, client_kind="default"):
         scenario = driver.yaml.safe_load((ROOT / "tests/e2e/tui_relay/scenarios/"
                                          "E-35-durable-delivery-record.yaml").read_text())
         scenario["assertions"][-1]["completion_chrome_after_body"]["required"] = not optional
@@ -1283,6 +1284,23 @@ class RequiredCompletionWait(unittest.TestCase):
             clock[0] += initial_delay
             return {"status": "evaluated"}
         client = driver.discord.DiscordClient("http://offline.invalid")
+        original_client = client
+        class FixedConstructorClient(driver.discord.DiscordClient):
+            def __init__(self):
+                super().__init__("http://offline.invalid")
+        @dataclass
+        class DataclassAdapter:
+            base_url: str = "http://offline.invalid"
+            def send_control(self, *args, **kwargs):
+                return original_client.send_control(*args, **kwargs)
+            def send(self, *args, **kwargs):
+                return original_client.send(*args, **kwargs)
+            def fetch_messages(self, *args, **kwargs):
+                return original_client.fetch_messages(*args, **kwargs)
+        if client_kind == "fixed_constructor":
+            client = FixedConstructorClient()
+        elif client_kind == "dataclass_adapter":
+            client = DataclassAdapter()
         with (
             patch("socket.socket", side_effect=AssertionError("network forbidden")),
             patch("subprocess.Popen", side_effect=AssertionError("process forbidden")),
@@ -1388,6 +1406,69 @@ class RequiredCompletionWait(unittest.TestCase):
             driver.run_assertion({"unknown_completion_wait": True}, window=assertions.Window("100"),
                                  pending_refetch=callback)
         callback.assert_not_called()
+
+    def _check_unsupported_client(self, **options):
+        for kind in ("fixed_constructor", "dataclass_adapter"):
+            with self.subTest(client_kind=kind, options=options):
+                try:
+                    record, error, requests, sleeps = self._run(client_kind=kind, **options)
+                except TypeError as error:
+                    self.fail(f"client reconstruction escaped: {error}")
+                missing = options.get("arrival") is None and not options.get("optional", False)
+                self.assertEqual(error is not None, missing)
+                if missing:
+                    self.assertIsInstance(error, driver.ScenarioStepAssertionError)
+                    self.assertIn("completion chrome not found", str(error))
+                self.assertEqual(len(requests), 4)
+                self.assertEqual(sleeps, [1.0])
+                self.assertNotIn("completion_rechecks", record)
+                self.assertNotIn("revalidated_after_recheck", record)
+                result = {"assertions": []}
+                driver._merge_record_into_result(result, record)
+                json.dumps(result, allow_nan=False)
+
+    def test_unsupported_constructors_preserve_completed_required_scenario(self):
+        self._check_unsupported_client(arrival=0)
+
+    def test_unsupported_constructors_preserve_optional_scenario(self):
+        self._check_unsupported_client(arrival=None, optional=True)
+
+    def test_unsupported_constructors_refuse_unanchored_required_without_refetch(self):
+        self._check_unsupported_client(arrival=None)
+
+    def test_missing_matching_anchor_never_emits_nonfinite_trace(self):
+        for record in (None, {}, {"_body_observations": {}}, {"_body_observations": {"other body": 100}}):
+            with self.subTest(record=record):
+                callback = MagicMock()
+                try:
+                    driver.run_assertion({"completion_chrome_after_body": {
+                        "body_marker": self.MARKER, "required": True}},
+                        window=_window(_relay_msg(201, self.MARKER)), record=record, pending_refetch=callback)
+                except assertions.AssertionError as error:
+                    self.assertIn("completion chrome not found", str(error))
+                except Exception as error:
+                    self.fail(f"unexpected unanchored error: {type(error).__name__}: {error}")
+                else:
+                    self.fail("missing required completion was accepted")
+                callback.assert_not_called()
+                self.assertNotIn("completion_rechecks", record or {})
+                json.dumps(record or {}, allow_nan=False)
+
+    def test_immediate_paths_evaluate_completion_once(self):
+        for options in ({"arrival": 0}, {"arrival": None, "optional": True}):
+            with self.subTest(options=options), patch.object(
+                assertions, "completion_chrome_after_body", wraps=assertions.completion_chrome_after_body
+            ) as primitive:
+                record, error, requests, _ = self._run(**options)
+                self.assertIsNone(error, str(error))
+                self.assertEqual(primitive.call_count, 1)
+                self.assertEqual(len(requests), 4)
+                self.assertNotIn("completion_rechecks", record)
+
+    def test_non_typeerror_reconstruction_failure_is_not_swallowed(self):
+        with patch.object(driver, "replace", side_effect=ValueError("unrelated reconstruction error")):
+            with self.assertRaisesRegex(ValueError, "unrelated reconstruction error"):
+                self._run(arrival=0)
 
 
 if __name__ == "__main__":
