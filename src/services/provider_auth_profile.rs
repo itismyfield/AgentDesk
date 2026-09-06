@@ -114,6 +114,7 @@ pub enum AuthProfileError {
         profile_id: String,
         home: String,
     },
+    UserHomeUnavailable,
     Io(String),
 }
 
@@ -190,6 +191,12 @@ impl fmt::Display for AuthProfileError {
                 f,
                 "auth_profile '{profile_id}' home '{home}' has no provider credentials yet"
             ),
+            Self::UserHomeUnavailable => {
+                write!(
+                    f,
+                    "cannot resolve extra-account root: user home directory is unavailable"
+                )
+            }
             Self::Io(error) => write!(f, "{error}"),
         }
     }
@@ -363,7 +370,7 @@ pub fn resolve(
     catalog: &HashMap<String, ProviderAuthProfileDef>,
 ) -> Result<ProviderAuthOverlay, AuthProfileError> {
     resolve_at(
-        &extra_accounts_root(),
+        &extra_accounts_root()?,
         provider,
         channel_auth_profile,
         agent_auth_profile,
@@ -426,6 +433,13 @@ fn resolve_at(
         .map(|key| (*key).to_string())
         .collect();
     for (key, value) in &def.env {
+        if !profile_env_key_allowed(&provider, key) {
+            return Err(AuthProfileError::UnsupportedEnvironmentKey {
+                profile_id: profile_id.to_string(),
+                provider: provider.as_str().to_string(),
+                key: key.clone(),
+            });
+        }
         if value.is_empty() {
             env.remove(key);
             unset.insert(key.clone());
@@ -504,15 +518,21 @@ pub fn default_home_path(provider: &ProviderKind) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-pub fn extra_accounts_root() -> PathBuf {
+pub fn extra_accounts_root() -> Result<PathBuf, AuthProfileError> {
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".adk")
-        .join("profiles")
+        .map(|home| home.join(".adk").join("profiles"))
+        .ok_or(AuthProfileError::UserHomeUnavailable)
 }
 
-pub fn extra_account_home(provider: &ProviderKind, profile_id: &str) -> PathBuf {
-    extra_account_home_at(&extra_accounts_root(), provider, profile_id)
+pub fn extra_account_home(
+    provider: &ProviderKind,
+    profile_id: &str,
+) -> Result<PathBuf, AuthProfileError> {
+    Ok(extra_account_home_at(
+        &extra_accounts_root()?,
+        provider,
+        profile_id,
+    ))
 }
 
 /// Returns true only for the deterministic, AgentDesk-managed home assigned to
@@ -543,7 +563,7 @@ pub fn validate_managed_profile_home(
     home: &Path,
     mode: ManagedHomeValidationMode,
 ) -> Result<PathBuf, AuthProfileError> {
-    validate_managed_profile_home_at(&extra_accounts_root(), provider, profile_id, home, mode)
+    validate_managed_profile_home_at(&extra_accounts_root()?, provider, profile_id, home, mode)
 }
 
 pub fn validate_managed_profile_home_at(
@@ -622,7 +642,7 @@ pub fn validate_managed_profile_home_at(
 pub fn list_existing_profile_homes(
     provider: &ProviderKind,
 ) -> Result<Vec<PathBuf>, AuthProfileError> {
-    let provider_root = extra_accounts_root().join(provider.as_str());
+    let provider_root = extra_accounts_root()?.join(provider.as_str());
     match std::fs::read_dir(&provider_root) {
         Ok(entries) => Ok(entries
             .filter_map(Result::ok)
@@ -654,7 +674,10 @@ pub fn overlay_for_home(
         profile_id: profile_id.to_string(),
         provider: provider.clone(),
         env: home_env_for(&provider, home),
-        unset: BTreeSet::new(),
+        unset: provider_credential_env_keys(&provider)
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect(),
         home: Some(home.to_path_buf()),
     }
 }
@@ -705,7 +728,7 @@ pub fn allocate_profile_id(
         if catalog.contains_key(&candidate) {
             continue;
         }
-        let home = extra_account_home(provider, &candidate);
+        let home = extra_account_home(provider, &candidate)?;
         if home.exists()
             || existing_homes.iter().any(|path| {
                 path == &home
@@ -727,7 +750,7 @@ pub fn create_empty_profile_home(
     provider: &ProviderKind,
     profile_id: &str,
 ) -> Result<PathBuf, AuthProfileError> {
-    create_empty_profile_home_at(&extra_accounts_root(), provider, profile_id)
+    create_empty_profile_home_at(&extra_accounts_root()?, provider, profile_id)
 }
 
 pub fn create_empty_profile_home_at(
@@ -792,16 +815,16 @@ pub fn create_empty_profile_home_at(
 
 pub fn login_script_contents(overlay: &ProviderAuthOverlay, argv: &[&str]) -> String {
     let mut body = String::from("#!/bin/bash\nset -euo pipefail\n");
+    for key in &overlay.unset {
+        body.push_str("unset ");
+        body.push_str(key);
+        body.push('\n');
+    }
     for (key, value) in &overlay.env {
         body.push_str("export ");
         body.push_str(key);
         body.push('=');
         body.push_str(&crate::services::process::shell_escape(value));
-        body.push('\n');
-    }
-    for key in &overlay.unset {
-        body.push_str("unset ");
-        body.push_str(key);
         body.push('\n');
     }
     let command = argv
@@ -1090,7 +1113,6 @@ mod tests {
             create_empty_profile_home_at(dir.path(), &ProviderKind::Grok, "grok-alt").unwrap();
         let mut extra = BTreeMap::new();
         extra.insert("XAI_API_KEY".into(), String::new());
-        extra.insert("GROK_EXTRA".into(), "1".into());
         let overlay = resolve_at(
             dir.path(),
             ProviderKind::Grok,
@@ -1107,8 +1129,30 @@ mod tests {
         )
         .unwrap();
         assert!(overlay.unset.contains("XAI_API_KEY"));
-        assert_eq!(overlay.env.get("GROK_EXTRA"), Some(&"1".to_string()));
+        assert!(!overlay.env.contains_key("XAI_API_KEY"));
         assert!(overlay.env.contains_key("GROK_HOME"));
+
+        let mut unknown = BTreeMap::new();
+        unknown.insert("GROK_EXTRA".into(), "1".into());
+        let err = resolve_at(
+            dir.path(),
+            ProviderKind::Grok,
+            Some("grok-alt"),
+            None,
+            &catalog_with(
+                "grok-alt",
+                ProviderAuthProfileDef {
+                    provider: "grok".into(),
+                    home: Some(home.display().to_string()),
+                    env: unknown,
+                },
+            ),
+        )
+        .expect_err("unknown env keys fail closed at resolve");
+        assert!(matches!(
+            err,
+            AuthProfileError::UnsupportedEnvironmentKey { .. }
+        ));
     }
 
     #[test]
@@ -1145,7 +1189,7 @@ mod tests {
     #[test]
     fn catalog_accepts_only_its_managed_home_and_credential_env_keys() {
         let profile_id = "work";
-        let managed_home = extra_account_home(&ProviderKind::Codex, profile_id);
+        let managed_home = extra_account_home(&ProviderKind::Codex, profile_id).unwrap();
         let catalog = catalog_with(
             profile_id,
             ProviderAuthProfileDef {
@@ -1283,6 +1327,7 @@ mod tests {
             &overlay_for_home(ProviderKind::Codex, "work", &home),
             vendor_login_argv(&ProviderKind::Codex).unwrap(),
         );
+        assert!(script.contains("unset OPENAI_API_KEY"));
         assert!(script.contains("CODEX_HOME="));
         assert!(script.contains("codex"));
         assert!(script.contains("login"));

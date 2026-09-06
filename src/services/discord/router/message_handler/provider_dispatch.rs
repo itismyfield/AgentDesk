@@ -123,7 +123,7 @@ pub(super) fn execute(
             None,
         ),
         LegacyDispatchKind::StreamJsonCli(dialect) => {
-            execute_streaming(dialect, stream_json_request(&turn), sender)
+            execute_streaming(dialect, stream_json_request(&turn)?, sender)
         }
         LegacyDispatchKind::Unsupported(name) => {
             let _ = sender.send(StreamMessage::Error {
@@ -137,7 +137,7 @@ pub(super) fn execute(
     }
 }
 
-fn stream_json_request(turn: &StreamingTurn<'_>) -> ProviderTurnRequest {
+fn stream_json_request(turn: &StreamingTurn<'_>) -> Result<ProviderTurnRequest, String> {
     ProviderTurnRequest::for_discord_turn(
         turn.provider.clone(),
         turn.prompt.to_string(),
@@ -151,6 +151,7 @@ fn stream_json_request(turn: &StreamingTurn<'_>) -> ProviderTurnRequest {
         turn.remote_profile.cloned(),
         Duration::from_secs(300),
         Some(Arc::clone(&turn.cancel)),
+        Some(turn.channel_id),
     )
 }
 
@@ -188,7 +189,7 @@ mod tests {
             provider.legacy_streaming_dispatch_kind(),
             LegacyDispatchKind::StreamJsonCli(crate::services::provider::StreamJsonDialectId::Agy)
         ));
-        let request = stream_json_request(&turn);
+        let request = stream_json_request(&turn).expect("stream json request");
         assert_eq!(request.provider, ProviderKind::Antigravity);
         assert_eq!(request.prompt, "question");
         assert_eq!(request.system_prompt.as_deref(), Some("role"));
@@ -207,6 +208,11 @@ mod tests {
         );
         assert!(Arc::ptr_eq(request.cancel.as_ref().unwrap(), &cancel));
         turn.force_fresh = true;
-        assert!(stream_json_request(&turn).session.is_none());
+        assert!(
+            stream_json_request(&turn)
+                .expect("fresh stream json request")
+                .session
+                .is_none()
+        );
     }
 }

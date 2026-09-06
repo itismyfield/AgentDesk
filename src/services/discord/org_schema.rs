@@ -125,14 +125,25 @@ pub(super) struct SummaryRuleDef {
 // ─── Loading ────────────────────────────────────────────────────────────────
 
 fn load_org_schema() -> Option<OrgSchema> {
-    let path = org_schema_path()?;
-    let content = fs::read_to_string(path).ok()?;
-    match parse_org_schema(&content) {
-        Ok(schema) => Some(schema),
+    match load_org_schema_for_auth() {
+        Ok(schema) => schema,
         Err(error) => {
-            tracing::error!("org schema rejected: {error}");
+            tracing::error!("{error}");
             None
         }
+    }
+}
+
+fn load_org_schema_for_auth() -> Result<Option<OrgSchema>, String> {
+    let Some(path) = org_schema_path() else {
+        return Ok(None);
+    };
+    match fs::read_to_string(&path) {
+        Ok(content) => parse_org_schema(&content)
+            .map(Some)
+            .map_err(|error| format!("org schema rejected: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("read org schema '{}': {error}", path.display())),
     }
 }
 
@@ -211,7 +222,10 @@ pub(crate) fn spawn_auth_overlay(
     provider: ProviderKind,
     channel_id: Option<u64>,
 ) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
-    spawn_auth_overlay_for_context(provider, channel_id, None)
+    let agent_id = channel_id.and_then(|id| {
+        resolve_role_binding(ChannelId::new(id), None).map(|binding| binding.role_id)
+    });
+    spawn_auth_overlay_for_context(provider, channel_id, agent_id.as_deref())
 }
 
 fn spawn_auth_overlay_for_context(
@@ -221,28 +235,32 @@ fn spawn_auth_overlay_for_context(
 ) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
     use crate::services::provider_auth_profile::resolve;
 
-    let schema = load_org_schema();
+    let schema = load_org_schema_for_auth()?;
     let catalog = schema
         .as_ref()
         .and_then(|schema| schema.provider_auth_profiles.clone())
         .unwrap_or_default();
-    let channel_binding = channel_id.and_then(|id| {
-        resolve_role_binding(ChannelId::new(id), None).map(|binding| binding.auth_profile)
+    let channel_profile = channel_id.and_then(|id| {
+        schema.as_ref().and_then(|schema| {
+            resolve_channel_binding(schema, ChannelId::new(id), None)
+                .and_then(|(binding, _)| binding.auth_profile.clone())
+        })
     });
     let agent_profile = agent_id.and_then(|agent_id| {
         schema.as_ref().and_then(|schema| {
-            schema.agents.get(agent_id).map(|agent| {
-                configured_auth_profile(None, agent.auth_profile.as_deref())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| provider_primary_profile(schema, Some(provider.as_str())))
-            })
+            schema
+                .agents
+                .get(agent_id)
+                .and_then(|agent| agent.auth_profile.clone())
         })
     });
-    let profile = channel_binding.or(agent_profile).or_else(|| {
-        schema
-            .as_ref()
-            .map(|schema| provider_primary_profile(schema, Some(provider.as_str())))
-    });
+    let profile = configured_auth_profile(channel_profile.as_deref(), agent_profile.as_deref())
+        .map(str::to_string)
+        .or_else(|| {
+            schema
+                .as_ref()
+                .map(|schema| provider_primary_profile(schema, Some(provider.as_str())))
+        });
     let overlay = resolve(provider.clone(), profile.as_deref(), None, &catalog)
         .map_err(|error| error.to_string())?;
     if let Some(binding) = channel_id.and_then(|id| resolve_role_binding(ChannelId::new(id), None))

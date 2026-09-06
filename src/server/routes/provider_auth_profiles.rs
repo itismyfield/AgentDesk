@@ -240,7 +240,7 @@ pub async fn login_complete(
     }
     let profile_id = body.profile_id.trim();
     validate_profile_id(profile_id).map_err(profile_error)?;
-    let expected_home = extra_account_home(&kind, profile_id);
+    let expected_home = extra_account_home(&kind, profile_id).map_err(profile_error)?;
     let home = match body
         .home
         .as_deref()
