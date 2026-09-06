@@ -745,9 +745,15 @@ decompose_issue = "#4712"
 # #5071 T0-S4 moved the terminal outcome fold and RelaySink::deliver to
 # session_relay_sink/terminal_handoff.rs; the root remains giant at 1499 prod LoC.
 # Active relay-dedup surface; decompose the idle-relay loop out once stabilized.
+# #5742 (2026-09-07): canonical production count is still 1498. Reset the missed
+# 2026-08-31 deadline to 2026-09-14: one week from this scheduling decision,
+# fourteen days after the original deadline, to restore nightly/docs generation.
+# This is scheduling relief, not shrink evidence or retirement; the threshold
+# remains 1000 production lines. #4712 is closed/FOLD; its unresolved
+# decomposition debt belongs to the still-open #5071, not this metadata repair.
 file = "src/services/discord/session_relay_sink.rs"
 owner = "discord-relay"
-deadline = "2026-08-31"
+deadline = "2026-09-14"
 decompose_issue = "#4712"
 
 # NOTE: src/services/discord/relay_recovery.rs previously had an [[entry]] here;
