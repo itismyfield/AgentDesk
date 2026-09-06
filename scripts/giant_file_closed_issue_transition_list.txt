@@ -11,9 +11,23 @@ reclassified in a follow-up.
 When entries are removed, run the snapshot writer to lower the checked-in
 baseline. Growth above that baseline is rejected; the writer never raises it.
 
+2026-09-07 (#5742): four paths were removed because their decompositions had
+already landed while this list kept naming them, which failed the inventory
+gate for three consecutive nightly runs. None of them is a giant any more --
+measured production LoC against the 1000-line threshold:
+  - server/worker_registry.rs                             483  (#5688)
+  - services/discord/outbound/turn_output_controller.rs   996  (#5679)
+  - services/discord/tui_direct_pending_start.rs          933  (#5699)
+  - services/discord/turn_finalizer.rs                    860
+(paths above are relative to src/, so that this prose is not parsed as entries)
+See the TRANSITION-LIST CLEANUP note in scripts/giant_file_registry.toml: it
+records that turn_output_controller.rs clears the threshold by only 4
+production lines. The #4711 header count was also corrected from a stale 23 to
+the actual 22.
+
 ---
 
-# Issue #4710 (36 entries)
+# Issue #4710 (35 entries)
 
 src/cli/client.rs
 src/cli/dcserver.rs
@@ -36,7 +50,6 @@ src/server/routes/kanban.rs
 src/server/routes/meetings.rs
 src/server/routes/resume.rs
 src/server/routes/v1.rs
-src/server/worker_registry.rs
 src/services/claude.rs
 src/services/claude_tui/input.rs
 src/services/codex.rs
@@ -52,7 +65,7 @@ src/services/qwen.rs
 src/services/settings.rs
 src/services/turn_orchestrator.rs
 
-# Issue #4711 (23 entries)
+# Issue #4711 (22 entries)
 
 src/db/auto_queue/entries.rs
 src/db/auto_queue/phase_gates.rs
@@ -77,7 +90,7 @@ src/services/routines/agent_executor.rs
 src/services/routines/discord_log.rs
 src/services/routines/store.rs
 
-# Issue #4712 (21 entries)
+# Issue #4712 (18 entries)
 
 src/services/codex_tui/rollout_tail.rs
 src/services/discord/catch_up.rs
@@ -85,7 +98,6 @@ src/services/discord/commands/text_commands.rs
 src/services/discord/health/recovery.rs
 src/services/discord/mod.rs
 src/services/discord/outbound/delivery_record.rs
-src/services/discord/outbound/turn_output_controller.rs
 src/services/discord/recovery_engine/restore_inflight.rs
 src/services/discord/router/intake_gate.rs
 src/services/discord/router/message_handler/headless_turn.rs
@@ -94,9 +106,7 @@ src/services/discord/session_relay_sink.rs
 src/services/discord/tmux.rs
 src/services/discord/tmux_watcher.rs
 src/services/discord/tmux_watcher/turn_stream_collector.rs
-src/services/discord/tui_direct_pending_start.rs
 src/services/discord/tui_prompt_relay/synthetic_start.rs
 src/services/discord/turn_bridge/stream_tick.rs
-src/services/discord/turn_finalizer.rs
 src/services/discord_config_audit.rs
 src/services/tmux_common.rs
