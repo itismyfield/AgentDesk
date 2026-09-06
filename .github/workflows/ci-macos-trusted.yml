@@ -113,7 +113,7 @@ jobs:
       - name: Install Opus on macOS
         shell: bash
         run: |
-          brew install opus pkg-config
+          brew install opus pkg-config tmux
           echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Cache Cargo dependencies
@@ -240,7 +240,7 @@ jobs:
       - name: Install Opus on macOS
         shell: bash
         run: |
-          brew install opus pkg-config
+          brew install opus pkg-config tmux
           echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       # Do not attach GitHub cache actions to the persistent self-hosted path:
