@@ -77,9 +77,16 @@ pub fn ensure_loaded() {
     tracing::warn!("No pipeline YAML found — pipeline features disabled");
 }
 
-/// Parse a pipeline override from JSON (stored in DB).
+/// Strict parse of a pipeline override — the **write** boundary (#5718 r3).
 /// Returns None if the input is empty/null.
-pub fn parse_override(json_str: &str) -> Result<Option<PipelineOverride>> {
+///
+/// An undeclared key is an error here, and that is what keeps bad data from
+/// landing: `parse_pipeline_override_config`
+/// (src/services/pipeline_override.rs) turns it into the 400 the override write
+/// API returns, and `build_override_health_report` uses it to keep an
+/// already-stored row in `parse_failures[]`. Reading a stored row goes through
+/// `parse_override` below, which tolerates the key.
+pub fn parse_override_strict(json_str: &str) -> Result<Option<PipelineOverride>> {
     let trimmed = json_str.trim();
     if trimmed.is_empty() || trimmed == "null" || trimmed == "{}" {
         return Ok(None);
@@ -91,6 +98,70 @@ pub fn parse_override(json_str: &str) -> Result<Option<PipelineOverride>> {
     let ovr: PipelineOverride = serde_json::from_str(trimmed)
         .map_err(|error| anyhow::anyhow!("parsing pipeline override JSON: {error}"))?;
     Ok(Some(ovr))
+}
+
+/// Read a stored pipeline override, tolerating keys this build does not
+/// declare (#5718 r3).
+///
+/// Every reader of a stored row goes through here — the dispatch resolver
+/// (`parse_override_for_resolve`), the transition resolver
+/// (`kanban::state_machine::resolve_pipeline_with_pg`), the kanban transaction
+/// resolver, the auto-queue view and the GitHub sync — so one stored row cannot
+/// be read two different ways: it used to abort a transition while dispatch
+/// quietly fell back to the parent pipeline. Rejecting the row on read also
+/// discards its valid sections, which is the pre-#5718 behaviour this PR must
+/// not regress. The retry is not silent: `parse_override_strict` still rejects
+/// the same row on write and in the health scan, so it keeps its
+/// `parse_failures[]` entry, and the drop is logged here.
+///
+/// Anything else — malformed JSON, a declared key holding the wrong shape —
+/// still returns `Err`, and each caller keeps its existing handling of that.
+pub fn parse_override(json_str: &str) -> Result<Option<PipelineOverride>> {
+    let strict_error = match parse_override_strict(json_str) {
+        Ok(parsed) => return Ok(parsed),
+        Err(error) => error,
+    };
+    let Some((declared, dropped)) = split_undeclared_override_keys(json_str) else {
+        return Err(strict_error);
+    };
+    let ovr: PipelineOverride = serde_json::from_value(serde_json::Value::Object(declared))
+        .map_err(|error| anyhow::anyhow!("parsing pipeline override JSON: {error}"))?;
+    tracing::warn!(
+        "[pipeline] stored override applied with undeclared key(s) dropped [{}]: {strict_error}",
+        dropped.join(", ")
+    );
+    Ok(Some(ovr))
+}
+
+/// Split a stored override object into the top-level keys `PipelineOverride`
+/// declares and the ones it does not. `None` when the payload is not a JSON
+/// object or when every key is declared — the strict error is then about
+/// something else and has to stand.
+fn split_undeclared_override_keys(
+    json_str: &str,
+) -> Option<(serde_json::Map<String, serde_json::Value>, Vec<String>)> {
+    let serde_json::Value::Object(object) = serde_json::from_str(json_str).ok()? else {
+        return None;
+    };
+    let mut declared = serde_json::Map::new();
+    let mut dropped = Vec::new();
+    for (key, value) in object {
+        // Probe each key on its own with a null value. Every declared field is
+        // an `Option`, so null is accepted for all of them, which separates
+        // "this build does not declare the key" (dropped) from "declared key
+        // holding the wrong shape" (kept — and still fatal in the re-parse
+        // above). Asking serde rather than keeping a second list of field names
+        // here means a field added to `PipelineOverride` later cannot be
+        // dropped by a list nobody updated.
+        let mut probe = serde_json::Map::new();
+        probe.insert(key.clone(), serde_json::Value::Null);
+        if serde_json::from_value::<PipelineOverride>(serde_json::Value::Object(probe)).is_ok() {
+            declared.insert(key, value);
+        } else {
+            dropped.push(key);
+        }
+    }
+    (!dropped.is_empty()).then_some((declared, dropped))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -191,6 +262,11 @@ pub async fn refresh_override_health_report(
     report
 }
 
+/// Read one layer of the resolve chain, falling back to the parent pipeline
+/// when the stored row cannot be read at all. `parse_override` keeps a row that
+/// only carries an undeclared key (#5718 r3); a row that fails even that still
+/// warns here and drops the layer, and either way the row stays visible in
+/// `build_override_health_report`, which parses strictly.
 fn parse_override_for_resolve(
     layer: &str,
     target_id: &str,
@@ -253,7 +329,7 @@ fn build_override_health_report(
     };
 
     for row in rows {
-        match parse_override(&row.json) {
+        match parse_override_strict(&row.json) {
             Ok(Some(ovr)) => {
                 for warning in build_replace_warnings(base, &ovr, row.layer, &row.target_id) {
                     report.warnings.push(format_replace_warning(&warning));
@@ -615,7 +691,10 @@ pub async fn resolve_for_card_pg(
 /// declare is a typo or a retired field, and silently dropping it makes the
 /// stored override look applied when it is not. Rejecting it surfaces the key
 /// in `PipelineOverrideHealthReport::parse_failures` and in the 400 returned by
-/// the pipeline-override write API instead. Metadata a supported client really
+/// the pipeline-override write API instead. A row that is *already stored* is
+/// read back through `parse_override`, which drops the undeclared key and
+/// applies the rest (#5718 r3) — refusing it there would take the row's valid
+/// sections down with it. Metadata a supported client really
 /// does produce is declared as a field (see `fsm_edge_bindings`) so it survives
 /// the round trip — the deny stays, the known producer stops being collateral.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1696,7 +1775,7 @@ mod schema_strictness_tests {
     /// override health report) instead of being dropped.
     #[test]
     fn override_with_unknown_section_is_rejected() {
-        let error = parse_override(r#"{"stage_failure_policy":{"default":"fail"}}"#)
+        let error = parse_override_strict(r#"{"stage_failure_policy":{"default":"fail"}}"#)
             .expect_err("an unknown override key must be rejected");
         let message = format!("{error:#}");
         assert!(
@@ -1759,7 +1838,7 @@ mod schema_strictness_tests {
     #[test]
     fn dashboard_fsm_editor_save_payload_round_trips_as_an_override() {
         let payload = dashboard_fsm_editor_save_payload();
-        let parsed = parse_override(payload)
+        let parsed = parse_override_strict(payload)
             .expect("the dashboard FSM editor save payload must parse")
             .expect("the payload must not be treated as empty");
 
@@ -1789,7 +1868,7 @@ mod schema_strictness_tests {
             reserialized["fsm_edge_bindings"], original["fsm_edge_bindings"],
             "re-serialization must hand the metadata back unchanged"
         );
-        let round_tripped = parse_override(&reserialized.to_string())
+        let round_tripped = parse_override_strict(&reserialized.to_string())
             .expect("the re-serialized override must parse again")
             .expect("the re-serialized override must not be empty");
         assert_eq!(round_tripped.fsm_edge_bindings, parsed.fsm_edge_bindings);
@@ -1808,7 +1887,7 @@ mod schema_strictness_tests {
             serde_json::json!({ "default": "fail" }),
         );
 
-        let error = parse_override(&serde_json::Value::Object(payload).to_string())
+        let error = parse_override_strict(&serde_json::Value::Object(payload).to_string())
             .expect_err("an unknown override key must still be rejected");
         assert!(
             error.to_string().contains("stage_failure_policy"),
@@ -1867,6 +1946,101 @@ mod schema_strictness_tests {
         assert_eq!(restored.fsm_edge_bindings, merged.fsm_edge_bindings);
     }
 
+    /// A stored row from before a key was retired: one undeclared key alongside
+    /// sections this build does understand.
+    fn row_with_an_undeclared_key() -> &'static str {
+        r#"{"stage_failure_policy":{"default":"fail"},"gates":{"r3_gate":{"type":"builtin","check":"review_verdict_pass","description":"r3"}}}"#
+    }
+
+    /// #5718 r3 (R1): reading such a row must keep its valid sections. Dropping
+    /// the layer instead silently resolved the card against the parent pipeline
+    /// — every gate, timeout and transition the operator had configured gone,
+    /// with only a log line to say so.
+    #[test]
+    fn stored_override_with_an_undeclared_key_keeps_its_valid_sections() {
+        let payload = row_with_an_undeclared_key();
+        let parsed = parse_override_for_resolve("repo", "acme/widgets", payload)
+            .expect("the layer must survive an undeclared key instead of being dropped");
+        assert!(
+            parsed
+                .gates
+                .as_ref()
+                .is_some_and(|gates| gates.contains_key("r3_gate")),
+            "the row's valid sections must still be applied"
+        );
+
+        // The write boundary is untouched: the same row is still rejected there,
+        // and the health scan still reports it.
+        assert!(
+            parse_override_strict(payload).is_err(),
+            "writes must stay strict"
+        );
+        let base: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let report = build_override_health_report(
+            &base,
+            &[OverrideSourceRow {
+                layer: "repo",
+                target_id: "acme/widgets".to_string(),
+                json: payload.to_string(),
+            }],
+        );
+        assert!(
+            report
+                .parse_failures
+                .iter()
+                .any(|failure| failure.error.contains("stage_failure_policy")),
+            "the lenient read must not hide the row from the health report, got: {:?}",
+            report.parse_failures
+        );
+    }
+
+    /// #5718 r3 (R1): leniency covers undeclared keys only. A row that is broken
+    /// for any other reason — malformed JSON, or a declared key holding the
+    /// wrong shape — must still fail, so a half-understood override is never
+    /// applied.
+    #[test]
+    fn lenient_read_still_rejects_a_row_broken_for_any_other_reason() {
+        assert!(
+            parse_override(r#"{"gates": 5}"#).is_err(),
+            "a declared key holding the wrong shape must still fail"
+        );
+        assert!(
+            parse_override("{not json").is_err(),
+            "malformed JSON must still fail"
+        );
+        assert!(
+            parse_override(r#"{"stage_failure_policy":{},"gates": 5}"#).is_err(),
+            "dropping the undeclared key must not rescue the wrong-shaped one"
+        );
+        assert!(
+            parse_override_for_resolve("repo", "acme/widgets", r#"{"gates": 5}"#).is_none(),
+            "the resolver still falls back to the parent for an unreadable row"
+        );
+    }
+
+    /// #5718 r3 (R2): the transition resolver
+    /// (`kanban::state_machine::resolve_pipeline_with_pg`, which propagates a
+    /// parse error and aborts the transition) and the dispatch resolver
+    /// (`parse_override_for_resolve`, which falls back to the parent) read the
+    /// same stored row through `parse_override`. One row must not stop a
+    /// transition while dispatch applies a different pipeline to the same card.
+    #[test]
+    fn transition_and_dispatch_reads_agree_on_a_row_with_an_undeclared_key() {
+        let payload = row_with_an_undeclared_key();
+        let transition_side = parse_override(payload)
+            .expect("the transition path must not abort on an undeclared key")
+            .expect("the row must not be treated as empty");
+        let dispatch_side = parse_override_for_resolve("repo", "acme/widgets", payload)
+            .expect("the dispatch path must keep the layer");
+
+        assert_eq!(
+            serde_json::to_value(&transition_side).expect("override serializes"),
+            serde_json::to_value(&dispatch_side).expect("override serializes"),
+            "both resolvers must apply the same stored row identically"
+        );
+    }
+
     /// #5718 review r2 (P2): the operator-facing surfaces print the parse error
     /// with plain `Display` — `tracing::warn!` in the resolver, `error.to_string()`
     /// in the health report, and the 400 body from the override write API. The
@@ -1874,7 +2048,7 @@ mod schema_strictness_tests {
     /// row failed without saying which key to remove.
     #[test]
     fn parse_failure_names_the_rejected_key_under_plain_display() {
-        let error = parse_override(r#"{"stage_failure_policy":{"default":"fail"}}"#)
+        let error = parse_override_strict(r#"{"stage_failure_policy":{"default":"fail"}}"#)
             .expect_err("an unknown override key must be rejected");
         assert!(
             error.to_string().contains("stage_failure_policy"),
