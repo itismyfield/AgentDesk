@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use super::skills_manifest_audit::{audit_skill_manifest_agents, manifest_audit_request};
 use super::{
     AppState,
     skill_usage_analytics::{
@@ -20,7 +21,6 @@ use super::{
         collect_direct_skill_usage_summary_pg,
     },
 };
-use super::skills_manifest_audit::{audit_skill_manifest_agents, manifest_audit_request};
 use crate::error::{AppError, AppResult, ErrorCode};
 
 fn skill_description_from_markdown(content: &str) -> String {

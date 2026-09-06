@@ -38,13 +38,19 @@ fn only_the_bare_wildcard_is_reserved() {
         .collect();
     // `ch-*` is a glob the Python distributor expands; this audit must not
     // reinterpret it, and blanks follow the existing trim/drop handling.
-    assert_eq!(pinned_agent_ids(&raw), ids(&["agentdesk", "ch-*", "claude"]));
+    assert_eq!(
+        pinned_agent_ids(&raw),
+        ids(&["agentdesk", "ch-*", "claude"])
+    );
 }
 
 #[test]
 fn union_covers_db_only_ids_and_a_failed_source_stops_grading() {
     let temp = tempfile::tempdir().unwrap();
-    let manifest = manifest_at(temp.path(), r#"{"skills":{"s":{"workspaces":["db-only"]}}}"#);
+    let manifest = manifest_at(
+        temp.path(),
+        r#"{"skills":{"s":{"workspaces":["db-only"]}}}"#,
+    );
     let walked = Some(&["db-only"][..]);
 
     // Config alone does not know `db-only`; the db half of the union does.
@@ -78,7 +84,10 @@ fn union_covers_db_only_ids_and_a_failed_source_stops_grading() {
 #[test]
 fn an_empty_roster_skips_instead_of_reporting_a_clean_manifest() {
     let temp = tempfile::tempdir().unwrap();
-    let manifest = manifest_at(temp.path(), r#"{"skills":{"s":{"workspaces":["agentdesk"]}}}"#);
+    let manifest = manifest_at(
+        temp.path(),
+        r#"{"skills":{"s":{"workspaces":["agentdesk"]}}}"#,
+    );
 
     // MX-G: a roster that came back empty must never read as audited-clean.
     let report = audit(
@@ -165,7 +174,12 @@ fn the_four_manifest_read_states_stay_distinguishable() {
     assert_eq!(skips(&missing), vec![NO_MANIFEST]);
 
     // A path that resolves to a directory reads as unreadable, not missing.
-    let unreadable = audit(&["agentdesk"], roster, walked, vec![temp.path().to_path_buf()]);
+    let unreadable = audit(
+        &["agentdesk"],
+        roster,
+        walked,
+        vec![temp.path().to_path_buf()],
+    );
     assert_eq!(skips(&unreadable), vec![UNREADABLE_MANIFEST]);
 
     let broken = manifest_at(&temp.path().join("broken"), "{ not json");
@@ -279,5 +293,8 @@ fn manifest_paths_read_the_runtime_root_and_the_process_home() {
     assert_eq!(Some(&home), dirs::home_dir().as_ref());
     let home_roots = skill_roots(None, Some(home.clone()));
     assert_eq!(home_roots.len(), 4, "{home_roots:?}");
-    assert_eq!(default_manifest_paths(), skill_manifest_paths(root, Some(home)));
+    assert_eq!(
+        default_manifest_paths(),
+        skill_manifest_paths(root, Some(home))
+    );
 }
