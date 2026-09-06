@@ -17,6 +17,7 @@ the fixture itself rather than reaching the real file.
 
 from __future__ import annotations
 
+import fcntl
 import functools
 import os
 import signal
@@ -24,8 +25,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "scripts"
@@ -38,6 +41,9 @@ SUPERVISED_NAMES_UNDER_TEST = (
     "SIGHUP", "SIGINT", "SIGQUIT", "SIGEMT", "SIGALRM", "SIGTERM",
     "SIGXCPU", "SIGVTALRM", "SIGPROF", "SIGUSR1", "SIGUSR2",
 )
+# Outside the wrapper by design, as build_token.py says (install.sh matches its
+# source install plus the two help texts that print the command for an operator).
+UNWIRED_BY_DESIGN = ("Makefile", "scripts/install.sh")
 
 _SEAL = f"""
 import functools, os, resource, signal, sys, time
@@ -110,6 +116,21 @@ def joined_lines(text: str) -> list[str]:
     return out
 
 
+def release_cargo_sites() -> dict[str, list[str]]:
+    """Release cargo invocations per tracked build script, discovered by scanning."""
+    tracked = subprocess.run(["git", "-C", str(REPO), "ls-files"], check=True,
+                             capture_output=True, text=True).stdout.split()
+    found: dict[str, list[str]] = {}
+    for rel in tracked:
+        if rel.endswith(".sh") or Path(rel).name == "Makefile":
+            hits = [s for s in map(str.strip, joined_lines((REPO / rel).read_text("utf-8")))
+                    if "cargo build" in s and not s.startswith(("#", "echo"))
+                    and ("--release" in s or "--profile" in s)]
+            if hits:
+                found[rel] = hits
+    return found
+
+
 class TokenTestCase(unittest.TestCase):
     """Gives every test its own temporary token; the canonical path is untouched."""
 
@@ -121,6 +142,11 @@ class TokenTestCase(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.assertNotEqual(str(self.token), CANONICAL)
 
+    def open_token(self) -> int:
+        fd = os.open(self.token, os.O_RDWR)
+        self.addCleanup(os.close, fd)
+        return fd
+
     def driver(self, body: str, *args: str, env: dict[str, str] | None = None):
         merged = dict(os.environ)
         merged.update(env or {})
@@ -129,8 +155,7 @@ class TokenTestCase(unittest.TestCase):
             env=merged, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         for pipe in (proc.stdout, proc.stderr):
-            if pipe is not None:
-                self.addCleanup(pipe.close)
+            self.addCleanup(pipe.close)
         return proc
 
 
@@ -139,15 +164,27 @@ class DerivationTests(unittest.TestCase):
 
     def test_the_set_is_recomputed_from_signal_signals(self) -> None:
         excluded = bt.excluded_signal_names()
-        expected = sorted(
-            {
-                int(s)
-                for s in signal.Signals
-                if s.name not in excluded and signal.getsignal(s) is not signal.SIG_IGN
-            }
-        )
+        expected = sorted({int(s) for s in signal.Signals if s.name not in excluded
+                           and signal.getsignal(s) is not signal.SIG_IGN})
         self.assertEqual(list(bt.supervised_signals()), expected)
         self.assertTrue(expected, "platform reported no terminating signals")
+
+    def test_the_domain_spans_the_realtime_range_not_just_named_members(self) -> None:
+        # Linux names only the ends of its realtime range -- the numbers between
+        # default to Term with no enum member -- and Darwin has none to skip on.
+        realtime = type("Rt", (), {"Signals": (signal.SIGTERM,), "SIGRTMIN": 34, "SIGRTMAX": 38})
+        self.assertEqual(bt.supervised_signals(source=realtime), (int(signal.SIGTERM), *range(34, 39)))
+        enum_only = type("NoRt", (), {"Signals": (signal.SIGTERM,)})
+        self.assertEqual(bt.signal_domain(enum_only), ((int(signal.SIGTERM), "SIGTERM"),))
+        if hasattr(signal, "SIGRTMIN"):  # Linux CI: the same hole, for real
+            self.assertIn(int(signal.SIGRTMIN) + 1, bt.supervised_signals())
+
+    def test_the_darwin_discard_set_stays_platform_scoped(self) -> None:
+        # Linux signal(7) gives SIGIO the Term default, so a wider scope here would
+        # reintroduce the original class of miss.
+        darwin_only = set(bt._DEFAULT_NOT_TERMINATE_DARWIN)
+        self.assertEqual(darwin_only & bt.excluded_signal_names(),
+                         darwin_only if sys.platform == "darwin" else set())
 
     def test_no_supervised_signal_is_named_as_a_literal_target(self) -> None:
         source = (SCRIPTS / "build_token.py").read_text(encoding="utf-8")
@@ -188,17 +225,19 @@ class DerivationTests(unittest.TestCase):
 
 
 class WiringTests(unittest.TestCase):
-    def test_every_release_cargo_site_runs_through_the_wrapper(self) -> None:
-        sites = 0
-        for name in ("build-release.sh", "deploy-release.sh"):
-            for line in joined_lines((SCRIPTS / name).read_text(encoding="utf-8")):
-                stripped = line.strip()
-                if "cargo build" not in stripped or stripped.startswith(("#", "echo")):
-                    continue
-                sites += 1
-                self.assertIn("build_token.py", stripped,
-                              f"{name}: unserialized cargo build: {stripped}")
-        self.assertGreaterEqual(sites, 3, "expected the known release cargo sites")
+    def test_every_release_cargo_site_in_the_tree_is_wired_or_declared_unwired(self) -> None:
+        sites = release_cargo_sites()
+        self.assertGreaterEqual(len(sites), 4, sites)
+        doc = (SCRIPTS / "build_token.py").read_text(encoding="utf-8")
+        for rel, lines in sites.items():
+            wired = rel not in UNWIRED_BY_DESIGN
+            for line in lines:
+                self.assertEqual("build_token.py" in line, wired, f"{rel}: wiring: {line}")
+                if wired and "| tail -" in line:
+                    self.assertIn("3>&2", line, "a log pipe must not swallow the notices")
+        for rel in UNWIRED_BY_DESIGN:
+            self.assertIn(rel, sites, f"{rel} stopped building a release; fix the disclosure")
+            self.assertIn(Path(rel).name, doc, f"{rel} builds a release undisclosed")
 
     def test_the_win32_backend_has_a_production_caller(self) -> None:
         source = (SCRIPTS / "build_token.py").read_text(encoding="utf-8")
@@ -210,7 +249,7 @@ class WiringTests(unittest.TestCase):
         self.assertIn("tests.test_build_token_serialization_5663", checks)
 
 
-class WaitTimeoutTests(unittest.TestCase):
+class WaitTimeoutTests(TokenTestCase):
     def test_unusable_overrides_fall_back_to_the_default(self) -> None:
         for raw in ("", "nope", "0", "-5", "nan", "inf"):
             self.assertEqual(bt.wait_timeout_secs({bt.WAIT_TIMEOUT_ENV: raw}),
@@ -219,6 +258,22 @@ class WaitTimeoutTests(unittest.TestCase):
 
     def test_a_usable_override_is_honored(self) -> None:
         self.assertEqual(bt.wait_timeout_secs({bt.WAIT_TIMEOUT_ENV: "1.5"}), 1.5)
+
+    def test_the_first_blocked_wait_reports_and_the_timeout_names_its_override(self) -> None:
+        # A stall that prints nothing is indistinguishable from a hung build.
+        notes = self.tmp / "notes.txt"
+        note_fd = os.open(notes, os.O_WRONLY | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, note_fd)
+        os.environ[bt.DIAG_FD_ENV] = str(note_fd)
+        self.addCleanup(os.environ.pop, bt.DIAG_FD_ENV, None)
+        fcntl.flock(self.open_token(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with self.assertRaises(bt.BuildTokenTimeout) as caught:
+            bt.acquire(self.open_token(), str(self.token), 0.1)
+        notice = notes.read_text()  # only the first-wait notice reaches this fd
+        self.assertIn(str(self.token), notice, "the first wait must name the token")
+        self.assertIn(bt.WAIT_TIMEOUT_ENV, notice, "the only escape hatch must be named")
+        self.assertIn(bt.WAIT_TIMEOUT_ENV, str(caught.exception))
+        self.assertIn("ancestor", str(caught.exception))
 
 
 class FailClosedTests(TokenTestCase):
@@ -244,8 +299,7 @@ class FailClosedTests(TokenTestCase):
         self.addCleanup(holder.wait)
         self.addCleanup(holder.kill)
         time.sleep(1.5)
-        rc = bt.run([sys.executable, "-c", ""],
-                    env={bt.WAIT_TIMEOUT_ENV: "1"}, path=str(self.token))
+        rc = bt.run([sys.executable, "-c", ""], env={bt.WAIT_TIMEOUT_ENV: "1"}, path=str(self.token))
         self.assertEqual(rc, bt.EXIT_TOKEN_TIMEOUT)
 
 
@@ -265,8 +319,7 @@ class HandlerRestorationTests(TokenTestCase):
         def custom(_signum, _frame):  # pragma: no cover - never delivered
             raise AssertionError("unexpected delivery")
 
-        before_usr1 = signal.getsignal(signal.SIGUSR1)
-        before_pipe = signal.getsignal(signal.SIGPIPE)
+        before_usr1, before_pipe = signal.getsignal(signal.SIGUSR1), signal.getsignal(signal.SIGPIPE)
         signal.signal(signal.SIGUSR1, custom)
         self.addCleanup(signal.signal, signal.SIGUSR1, before_usr1)
         self.assertEqual(bt.run([sys.executable, "-c", ""], path=str(self.token)), 0)
@@ -302,11 +355,9 @@ class SigemtLifetimeTests(TokenTestCase):
         wrapper_pid = self.tmp / "wrapper.pid"
         child_pid = self.tmp / "child.pid"
         release = self.tmp / "release"
-        body = (
-            f"open({str(wrapper_pid)!r}, 'w').write(str(os.getpid()))\n"
-            f"run([sys.executable, '-c', {_CHILD_IGNORES_EMT!r},"
-            f" {str(child_pid)!r}, {str(release)!r}])\n"
-        )
+        body = (f"open({str(wrapper_pid)!r}, 'w').write(str(os.getpid()))\n"
+                f"run([sys.executable, '-c', {_CHILD_IGNORES_EMT!r},"
+                f" {str(child_pid)!r}, {str(release)!r}])\n")
         first = self.driver(body)
         reaped = []
 
@@ -350,6 +401,49 @@ class SigemtLifetimeTests(TokenTestCase):
         self.assertEqual(bt.run([sys.executable, "-c", ""], env={bt.WAIT_TIMEOUT_ENV: "10"},
                                 path=str(self.token)), 0,
                          "token must be released once the build is done")
+
+
+class MutationOwnerTests(TokenTestCase):
+    # Each of these fails if one specific production line is dropped or inverted.
+    def test_the_win32_branch_delegates_to_its_backend(self) -> None:
+        noop = [sys.executable, "-c", ""]
+        backend = types.ModuleType("build_token_win32")
+        backend.BuildTokenWindowsError = RuntimeError
+        backend.supervise_windows = lambda command, env: 21 if command == noop else 0
+        with mock.patch.dict(sys.modules, {"build_token_win32": backend}), \
+                mock.patch.object(sys, "platform", "win32"):
+            rc = bt.run(noop, env={}, path=str(self.token))
+        self.assertEqual(rc, 21, "the win32 branch must delegate and return its result")
+
+    def test_a_token_replaced_while_a_wrapper_waits_is_refused(self) -> None:
+        holder = self.open_token()
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        waiter = self.driver("raise SystemExit(run([sys.executable, '-c', '']))",
+                             env={bt.WAIT_TIMEOUT_ENV: "30", bt.DIAG_FD_ENV: ""})
+        self.addCleanup(waiter.kill)
+        self.assertIn("waiting for", waiter.stderr.readline())  # blocked, its fd open
+        self.token.unlink()
+        self.token.touch()
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        _, err = waiter.communicate(timeout=60)
+        self.assertEqual(waiter.returncode, bt.EXIT_TOKEN_UNUSABLE, err)
+        self.assertIn("was replaced while held", err)
+
+    def test_the_wrapper_forwards_the_signal_to_a_child_that_never_self_signals(self) -> None:
+        pid_file, forwarded = self.tmp / "child.pid", self.tmp / "forwarded"
+        # The child neither ignores the signal nor sends it to itself: only a real
+        # forward from the wrapper can run its trap.
+        script = (f"trap 'printf TERM > {forwarded}; exit 29' TERM;"
+                  f" echo $$ > {pid_file}; sleep 6 & wait")
+        proc = self.driver(f"raise SystemExit(run(['/bin/sh', '-c', {script!r}]))")
+        self.addCleanup(proc.kill)
+        wait_for(pid_file)
+        os.kill(proc.pid, signal.SIGTERM)  # the wrapper only, never the child
+        _, err = proc.communicate(timeout=60)
+        self.assertEqual(forwarded.read_text() if forwarded.exists() else "(nothing)",
+                         "TERM", f"the wrapper never forwarded the signal: {err}")
+        self.assertNotEqual(int(pid_file.read_text()), proc.pid, "the child must be a child")
+        self.assertEqual(proc.returncode, -int(signal.SIGTERM), err)
 
 
 class CliTests(TokenTestCase):

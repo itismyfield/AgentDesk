@@ -394,10 +394,11 @@ echo "=== Relay watchdog + PG tunnel supervisor tests (#4381/#4378) ==="
 "$PYTHON" -m unittest tests.test_relay_watchdog tests.test_pg_tunnel
 
 echo "=== Build token serialization tests (#5663) ==="
-# scripts/build_token.py serializes both release cargo sites. It is Python,
-# so neither shellcheck nor cargo covers it; this unittest run is its ONLY CI
-# gate, and it also pins the two shell wiring sites so the wrapper cannot
-# silently fall back out of the release path.
+# scripts/build_token.py serializes the two release scripts' cargo sites; the
+# Makefile target and install.sh's source install stay outside it by design.
+# It is Python, so neither shellcheck nor cargo covers it; this unittest run is
+# its ONLY CI gate, and it scans every tracked *.sh and Makefile for release
+# cargo sites, so a dropped wiring or a new unserialized one cannot pass silently.
 "$PYTHON" -m unittest tests.test_build_token_serialization_5663
 
 echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036) ==="

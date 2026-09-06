@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Serialize AgentDesk release builds behind one advisory-locked build token.
+"""Serialize the release scripts' Cargo builds behind one locked build token.
 
 `run()` takes an exclusive `flock` on the token, runs one foreground command
 while holding it, and releases only after that direct child is reaped, so a
 second wrapper blocks while a first wrapper's build is still alive.
+
+Wiring is scoped, not universal: build-release.sh and deploy-release.sh route
+through this wrapper; `Makefile`'s signing target and install.sh's source
+install do not, and the #5663 owner test pins that list by scanning the repo.
 
 Signal supervision is *derived*, not enumerated. Earlier revisions carried a
 hand-written list of terminating signals; it missed eight, then missed SIGEMT,
@@ -31,8 +35,12 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 CANONICAL_TOKEN_PATH = "/tmp/adk-build-token.lock"
 WAIT_TIMEOUT_ENV = "ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS"
+# Names an inherited fd for contention notices, for callers that pipe the
+# build log (build-release.sh runs cargo through `tail -1`). Absent: stderr.
+DIAG_FD_ENV = "ADK_BUILD_TOKEN_DIAG_FD"
 DEFAULT_WAIT_TIMEOUT_SECS = 14400.0
 WAIT_POLL_SECS = 0.5
+WAIT_NOTICE_SECS = 300.0
 EXIT_USAGE = 64
 EXIT_TOKEN_UNUSABLE = 69
 EXIT_TOKEN_TIMEOUT = 75
@@ -74,7 +82,25 @@ def excluded_signal_names() -> frozenset[str]:
     return frozenset(names)
 
 
-def supervised_signals(signals: Iterable[signal.Signals] | None = None) -> tuple[int, ...]:
+def signal_domain(source: object = signal) -> tuple[tuple[int, str], ...]:
+    """The (number, name) pairs to consider, before any exclusion is applied.
+
+    `signal.Signals` holds only *named* `SIG*` constants, so an enum-only
+    domain leaves Linux's realtime range -- unnamed between SIGRTMIN and
+    SIGRTMAX, default disposition Term -- unsupervised, which is the original
+    class of miss. `source` is injectable so the range logic stays testable
+    on a platform that has no realtime signals at all.
+    """
+    pairs = {int(sig): sig.name for sig in getattr(source, "Signals", ())}
+    low, high = getattr(source, "SIGRTMIN", None), getattr(source, "SIGRTMAX", None)
+    if low is not None and high is not None:
+        for num in range(int(low), int(high) + 1):
+            pairs.setdefault(num, f"SIGRT{num}")
+    return tuple(sorted(pairs.items()))
+
+
+def supervised_signals(signals: Iterable[signal.Signals] | None = None,
+                       source: object = signal) -> tuple[int, ...]:
     """Derive the signals whose default disposition would terminate this wrapper.
 
     Aliases collapse by number. Signals already SIG_IGN are left alone: that is
@@ -83,15 +109,19 @@ def supervised_signals(signals: Iterable[signal.Signals] | None = None) -> tuple
     """
     excluded = excluded_signal_names()
     chosen: set[int] = set()
-    for sig in signal.Signals if signals is None else signals:
-        if sig.name in excluded:
+    domain = signal_domain(source) if signals is None else [(int(s), s.name) for s in signals]
+    for num, name in domain:
+        if name in excluded:
             continue
         try:
-            if signal.getsignal(sig) is signal.SIG_IGN:
-                continue
+            ignored = signal.getsignal(num) is signal.SIG_IGN
         except (OSError, ValueError):
+            # Unknown disposition: stay supervised. Dropping the number is the
+            # miss this derivation exists to prevent; installing it is guarded.
+            ignored = False
+        if ignored:
             continue
-        chosen.add(int(sig))
+        chosen.add(num)
     return tuple(sorted(chosen))
 
 
@@ -159,7 +189,9 @@ def acquire(fd: int, path: str, timeout: float) -> None:
     """Block until this fd owns the token, or raise past the deadline."""
     import fcntl
 
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    notice_at, since = started, time.strftime("%H:%M:%S")
     while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -167,8 +199,24 @@ def acquire(fd: int, path: str, timeout: float) -> None:
         except OSError as exc:
             if exc.errno not in _WOULD_BLOCK:
                 raise BuildTokenError(f"build token {path} is unusable: {exc}") from exc
-        if time.monotonic() >= deadline:
-            raise BuildTokenTimeout(f"build token {path} still held after {timeout:g}s")
+        now = time.monotonic()
+        if now >= notice_at:
+            # A stall that prints nothing is indistinguishable from a hung
+            # build, and the default deadline here is four hours.
+            note = (f"build token: waiting for {path} since {since}: another release"
+                    f" build holds it ({now - started:.0f}s of {timeout:g}s; raise"
+                    f" {WAIT_TIMEOUT_ENV} to wait longer)\n")
+            try:
+                os.write(int(os.environ[DIAG_FD_ENV]), note.encode())
+            except (KeyError, ValueError, OSError):
+                sys.stderr.write(note)
+                sys.stderr.flush()
+            notice_at = now + WAIT_NOTICE_SECS
+        if now >= deadline:
+            raise BuildTokenTimeout(
+                f"build token {path} still held after {timeout:g}s: raise"
+                f" {WAIT_TIMEOUT_ENV} to wait longer, or clear the holder -- an"
+                " ancestor of this process holding the token deadlocks here")
         time.sleep(WAIT_POLL_SECS)
 
 
