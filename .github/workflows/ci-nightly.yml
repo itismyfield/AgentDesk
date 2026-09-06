@@ -99,7 +99,7 @@ jobs:
 
       - name: Install Opus on macOS
         run: |
-          brew install opus pkg-config
+          brew install opus pkg-config tmux
           echo "PKG_CONFIG_PATH=$(brew --prefix opus)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Setup sccache
