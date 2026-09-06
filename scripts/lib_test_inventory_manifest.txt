@@ -1083,6 +1083,17 @@ server::routes::scheduled_messages::tests::patch_realigns_stale_recurring_time
 server::routes::scheduled_messages::tests::patch_rejects_stale_effective_one_shot_time
 server::routes::scheduled_messages::tests::snapshot_patch_retarget_is_rejected_but_fresh_and_other_fields_pass
 server::routes::scheduled_messages::tests::target_channel_ids_are_normalized_and_invalid_values_rejected
+server::routes::skills_manifest_audit::tests::a_flat_skip_does_not_swallow_the_nested_entries_beside_it
+server::routes::skills_manifest_audit::tests::a_manifest_that_exists_but_cannot_be_read_still_reaches_its_skip
+server::routes::skills_manifest_audit::tests::a_padded_wildcard_is_not_the_wildcard_the_distributor_reserves
+server::routes::skills_manifest_audit::tests::an_empty_roster_skips_instead_of_reporting_a_clean_manifest
+server::routes::skills_manifest_audit::tests::both_keys_are_answered_in_both_manifest_locations
+server::routes::skills_manifest_audit::tests::manifest_paths_read_the_runtime_root_and_the_process_home
+server::routes::skills_manifest_audit::tests::nested_ids_are_graded_only_against_directories_the_distributor_walks
+server::routes::skills_manifest_audit::tests::only_the_bare_wildcard_is_reserved
+server::routes::skills_manifest_audit::tests::skill_manifest_paths_takes_directory_roots_only
+server::routes::skills_manifest_audit::tests::the_four_manifest_read_states_stay_distinguishable
+server::routes::skills_manifest_audit::tests::union_covers_db_only_ids_and_a_failed_source_stops_grading
 server::routes::stats::memento_feedback_stats_pg_tests::load_memento_feedback_counts_returns_persisted_writer_values_pg
 server::routes::voice_config::tests::put_body_rejects_duplicate_dashboard_aliases
 server::routes::voice_config::tests::version_changes_when_voice_alias_changes

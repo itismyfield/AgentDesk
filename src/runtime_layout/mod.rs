@@ -320,6 +320,13 @@ pub fn sync_managed_skills(root: &Path) -> Result<SkillSyncReport, String> {
     skill_sync::sync_managed_skills(root)
 }
 
+/// Workspace directory names the skill distributor actually walks. Manifest
+/// workspace names are resolved against these and silently dropped otherwise,
+/// so this set - not the configured roster - decides delivery (#5720).
+pub(crate) fn distributed_workspace_names(root: &Path) -> Result<Vec<String>, String> {
+    skill_sync::discover_workspaces(root)
+}
+
 fn legacy_layout_needs_migration(root: &Path) -> bool {
     let backend = load_memory_backend(root);
     if backend.version < MEMORY_LAYOUT_VERSION {
