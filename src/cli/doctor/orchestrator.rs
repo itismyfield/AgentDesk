@@ -2881,7 +2881,7 @@ fn check_runtime_path() -> Check {
             CheckGroup::ProviderRuntime,
             "Runtime PATH",
             "unable to resolve provider runtime PATH",
-            "login shell PATH를 읽지 못했습니다. 서비스 환경 PATH와 shell PATH를 비교하세요.",
+            "Could not read the login shell PATH. Compare the service environment PATH with your shell PATH.",
         )
         .with_expected_actual("runtime PATH resolved", "runtime PATH resolution failed")
         .with_next_steps(vec!["echo $PATH".to_string()]),
