@@ -285,9 +285,9 @@
 | `GET` | `/api/settings/runtime-config` | `settings::get_runtime_config` | `src/server/routes/settings.rs:63` | `src/server/routes/domains/admin.rs:56` |
 | `PUT` | `/api/settings/runtime-config` | `settings::put_runtime_config` | `src/server/routes/settings.rs:83` | `src/server/routes/domains/admin.rs:56` |
 | `GET` | `/api/skills-trend` | `analytics::skills_trend` | `src/server/routes/analytics.rs:517` | `src/server/routes/domains/admin.rs:80` |
-| `GET` | `/api/skills/catalog` | `skills_api::catalog` | `src/server/routes/skills_api.rs:352` | `src/server/routes/domains/ops.rs:234` |
-| `POST` | `/api/skills/prune` | `skills_api::prune` | `src/server/routes/skills_api.rs:604` | `src/server/routes/domains/ops.rs:236` |
-| `GET` | `/api/skills/ranking` | `skills_api::ranking` | `src/server/routes/skills_api.rs:454` | `src/server/routes/domains/ops.rs:235` |
+| `GET` | `/api/skills/catalog` | `skills_api::catalog` | `src/server/routes/skills_api.rs:362` | `src/server/routes/domains/ops.rs:234` |
+| `POST` | `/api/skills/prune` | `skills_api::prune` | `src/server/routes/skills_api.rs:614` | `src/server/routes/domains/ops.rs:236` |
+| `GET` | `/api/skills/ranking` | `skills_api::ranking` | `src/server/routes/skills_api.rs:464` | `src/server/routes/domains/ops.rs:235` |
 | `GET` | `/api/stats` | `stats::get_stats` | `src/server/routes/stats.rs:501` | `src/server/routes/domains/admin.rs:46` |
 | `GET` | `/api/stats/memento` | `stats::get_memento_stats` | `src/server/routes/stats.rs:519` | `src/server/routes/domains/admin.rs:47` |
 | `GET` | `/api/streaks` | `analytics::streaks` | `src/server/routes/analytics.rs:409` | `src/server/routes/domains/analytics.rs:15` |
