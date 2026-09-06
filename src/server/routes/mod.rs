@@ -85,18 +85,21 @@ pub use crate::app_state::AppState;
 
 pub(crate) type ApiRouter = Router<AppState>;
 
+pub(crate) use self::ExplicitAuthMutationRoute as AuthRoute;
+/// Shared route labels used by the boot audit and the handlers' auth gates.
+pub use crate::services::explicit_auth_route::ExplicitAuthMutationRoute;
+
 /// Mutation routes that gate themselves with `require_explicit_bearer_token`.
 /// Kept in one place so the boot-time audit emits a complete inventory.
 /// Order matches code-grep order for stable log output.
 /// (#2257 concern 1 — operators need to see at startup which write
 /// endpoints are mounted on a fail-open auth config.)
-pub const EXPLICIT_AUTH_MUTATION_ROUTES: &[&str] = &[
-    "kanban: rereview",
-    "kanban: batch rereview",
-    "kanban: reopen",
-    "kanban: batch-transition",
-    "kanban: force-transition",
-    "auto-queue: submit_order",
+pub const EXPLICIT_AUTH_MUTATION_ROUTES: &[ExplicitAuthMutationRoute] = &[
+    AuthRoute::KANBAN_REREVIEW,
+    AuthRoute::KANBAN_BATCH_REREVIEW,
+    AuthRoute::KANBAN_REOPEN,
+    AuthRoute::KANBAN_FORCE_TRANSITION,
+    AuthRoute::AUTO_QUEUE_SUBMIT_ORDER,
 ];
 
 /// Mutation routes that fail closed unless an operator auth mechanism is
@@ -269,6 +272,178 @@ mod audit_explicit_auth_routes_tests {
             FAIL_CLOSED_OPERATOR_MUTATION_ROUTES.len(),
             "duplicate label in FAIL_CLOSED_OPERATOR_MUTATION_ROUTES — audit log will report misleading counts"
         );
+    }
+
+    #[test]
+    fn route_inventory_has_only_live_explicit_auth_mutations() {
+        let labels: Vec<_> = EXPLICIT_AUTH_MUTATION_ROUTES
+            .iter()
+            .map(|route| (route.domain, route.operation))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("kanban", "rereview"),
+                ("kanban", "batch rereview"),
+                ("kanban", "reopen"),
+                ("kanban", "force-transition"),
+                ("auto-queue", "submit_order"),
+            ],
+            "keep every live mutation gate and exclude the retired batch-transition"
+        );
+    }
+
+    #[test]
+    fn route_debug_format_matches_legacy_audit_string() {
+        assert_eq!(
+            format!("{:?}", AuthRoute::KANBAN_REOPEN),
+            "\"kanban: reopen\""
+        );
+        assert_eq!(
+            format!("{:?}", &EXPLICIT_AUTH_MUTATION_ROUTES[..2]),
+            "[\"kanban: rereview\", \"kanban: batch rereview\"]"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_mutation_routes_enforce_explicit_auth_before_state_access() {
+        use axum::{
+            body::{Body, to_bytes},
+            extract::ConnectInfo,
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+
+        // Pin the guard's config lookup to synthetic local fixtures. No pool,
+        // listener, policy files, runtime config, or external services are used.
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("agentdesk.yaml");
+        let _config_guard =
+            crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &config_path);
+        let mut config = test_config();
+        config.data.dir = temp.path().join("data");
+        config.policies.dir = temp.path().join("empty-policies");
+        config.policies.hot_reload = false;
+        std::fs::create_dir_all(&config.policies.dir).unwrap();
+        let engine = PolicyEngine::new_with_pg(&config, None).unwrap();
+        let routes = [
+            ("/kanban-cards/card/rereview", "{}", "rereview"),
+            (
+                "/kanban-cards/batch-rereview",
+                r#"{"issues":[1]}"#,
+                "batch rereview",
+            ),
+            ("/kanban-cards/card/reopen", "{}", "reopen"),
+            (
+                "/kanban-cards/card/transition",
+                r#"{"status":"ready"}"#,
+                "force-transition",
+            ),
+            ("/queue/runs/run/order", r#"{"order":[1]}"#, "submit_order"),
+        ];
+
+        for (token_required, channel_required) in
+            [(true, false), (false, true), (true, true), (false, false)]
+        {
+            config.server.auth_token = token_required.then(|| "slice-a-token".to_string());
+            config.kanban.manager_channel_id =
+                channel_required.then(|| "slice-a-channel".to_string());
+            // Config intentionally omits auth_token during serialization; add
+            // the synthetic token explicitly to the private test fixture.
+            let mut fixture = serde_json::to_value(&config).unwrap();
+            fixture["server"]["auth_token"] = serde_json::json!(config.server.auth_token);
+            std::fs::write(&config_path, serde_yaml::to_string(&fixture).unwrap()).unwrap();
+            let state = AppState {
+                pg_pool: None,
+                engine: engine.clone(),
+                config: Arc::new(config.clone()),
+                broadcast_tx: crate::eventbus::new_broadcast(),
+                batch_buffer: Default::default(),
+                health_registry: None,
+                cluster_instance_id: None,
+            };
+            let app = Router::new()
+                .merge(domains::access::router())
+                .merge(domains::kanban::router(state.clone()))
+                .merge(domains::ops::router(state.clone()))
+                .with_state(state);
+
+            for (path, body, operation) in routes {
+                for bearer in [None, Some("wrong-token"), Some("slice-a-token")] {
+                    for channel in [None, Some("wrong-channel"), Some("slice-a-channel")] {
+                        let mut request = Request::builder()
+                            .method("POST")
+                            .uri(path)
+                            .header("content-type", "application/json")
+                            .header("origin", "http://127.0.0.1:8791");
+                        if let Some(bearer) = bearer {
+                            request = request.header("authorization", format!("Bearer {bearer}"));
+                        }
+                        if let Some(channel) = channel {
+                            request = request.header("x-channel-id", channel);
+                        }
+                        let mut request = request.body(Body::from(body)).unwrap();
+                        // General auth accepts this same-origin loopback peer;
+                        // the handler must still enforce its explicit gate.
+                        request.extensions_mut().insert(ConnectInfo(
+                            "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+                        ));
+                        let response = app.clone().oneshot(request).await.unwrap();
+                        let failure = if token_required && bearer != Some("slice-a-token") {
+                            Some("explicit Bearer token")
+                        } else if channel_required && channel != Some("slice-a-channel") {
+                            Some("PMD channel authorization")
+                        } else {
+                            None
+                        };
+                        assert_eq!(
+                            response.status(),
+                            if failure.is_some() {
+                                StatusCode::UNAUTHORIZED
+                            } else {
+                                StatusCode::SERVICE_UNAVAILABLE
+                            },
+                            "{path}: token_required={token_required}, channel_required={channel_required}, bearer={bearer:?}, channel={channel:?}"
+                        );
+                        if let Some(failure) = failure {
+                            let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+                            let message = std::str::from_utf8(&bytes).unwrap();
+                            assert!(
+                                message.contains(&format!("{operation} requires {failure}")),
+                                "{message}"
+                            );
+                        }
+                    }
+                }
+            }
+
+            let public = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/auth/session")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(public.status(), StatusCode::OK);
+            let retired = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/kanban-cards/batch-transition")
+                        .header("authorization", "Bearer slice-a-token")
+                        .header("x-channel-id", "slice-a-channel")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            // The remaining /kanban-cards/{id} resource matches this path,
+            // but exposes no POST method after bulk transition was retired.
+            assert_eq!(retired.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
     }
 
     #[test]
