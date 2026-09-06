@@ -601,7 +601,14 @@ pub async fn resolve_for_card_pg(
 
 /// A partial pipeline config used for repo/agent-level overrides.
 /// Only non-None fields replace the parent's values.
+///
+/// `deny_unknown_fields` (#5718): an override key that this struct does not
+/// declare is a typo or a retired field, and silently dropping it makes the
+/// stored override look applied when it is not. Rejecting it surfaces the key
+/// in `PipelineOverrideHealthReport::parse_failures` and in the 400 returned by
+/// the pipeline-override write API instead.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PipelineOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub states: Option<Vec<StateConfig>>,
@@ -623,7 +630,13 @@ pub struct PipelineOverride {
 
 // ── Schema ───────────────────────────────────────────────────────
 
+/// `deny_unknown_fields` (#5718): `stage_failure_policy:` sat in
+/// `policies/default-pipeline.yaml` while this struct declared no such field,
+/// so serde dropped it on every load and nothing ever read it.
+/// An undeclared top-level key now fails `load()` with the key named, instead
+/// of booting a pipeline that silently ignores part of its own manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PipelineConfig {
     pub name: String,
     pub version: u32,
@@ -1515,3 +1528,143 @@ mod gate_validation_tests {
 }
 
 // ── Tests ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod schema_strictness_tests {
+    use super::*;
+    use std::path::{Path as StdPath, PathBuf};
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// Discover every pipeline manifest tracked under `policies/`. A pipeline
+    /// manifest is a YAML file with a top-level `states:` key — the same
+    /// discriminator used to inventory them for #5718. Discovery (rather than a
+    /// hardcoded list) keeps a newly added example pipeline covered.
+    fn tracked_pipeline_manifests() -> Vec<PathBuf> {
+        fn walk(dir: &StdPath, found: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, found);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                if content.lines().any(|line| line == "states:") {
+                    found.push(path);
+                }
+            }
+        }
+
+        let mut found = Vec::new();
+        walk(&repo_root().join("policies"), &mut found);
+        found.sort();
+        found
+    }
+
+    fn default_pipeline_yaml() -> String {
+        let path = repo_root().join("policies/default-pipeline.yaml");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
+    }
+
+    /// #5718: `deny_unknown_fields` must not reject any manifest this repo
+    /// actually ships. Every tracked pipeline YAML has to deserialize into
+    /// `PipelineConfig` and pass `validate()`.
+    #[test]
+    fn every_tracked_pipeline_yaml_loads_under_deny_unknown_fields() {
+        let manifests = tracked_pipeline_manifests();
+        assert!(
+            manifests.len() >= 3,
+            "expected the tracked pipeline manifests to be discovered, found {manifests:?}"
+        );
+        for path in manifests {
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+            let config: PipelineConfig = serde_yaml::from_str(&content)
+                .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()));
+            config
+                .validate()
+                .unwrap_or_else(|error| panic!("validating {}: {error}", path.display()));
+        }
+    }
+
+    /// #5718 regression pin: `stage_failure_policy:` was accepted-and-dropped by
+    /// serde for the entire time it sat in the shipped manifest. Re-adding it
+    /// must now fail the load with the offending key named, so the failure is
+    /// diagnosable instead of silent.
+    #[test]
+    fn reintroducing_stage_failure_policy_fails_the_load_with_the_key_named() {
+        let content = format!(
+            "{}\nstage_failure_policy:\n  default: fail\n  allowed: [fail, rework, skip]\n",
+            default_pipeline_yaml()
+        );
+        let error = serde_yaml::from_str::<PipelineConfig>(&content)
+            .expect_err("an unknown top-level key must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("stage_failure_policy"),
+            "the parse error must name the rejected key, got: {message}"
+        );
+    }
+
+    /// A key that no longer exists anywhere must be rejected too — the pin above
+    /// must not pass merely because of something specific to that one name.
+    #[test]
+    fn arbitrary_unknown_top_level_key_is_rejected() {
+        let content = format!("{}\nnot_a_pipeline_field: 1\n", default_pipeline_yaml());
+        let error = serde_yaml::from_str::<PipelineConfig>(&content)
+            .expect_err("an unknown top-level key must be rejected");
+        assert!(
+            error.to_string().contains("not_a_pipeline_field"),
+            "the parse error must name the rejected key, got: {error}"
+        );
+    }
+
+    /// `agentdesk.pipeline.getConfig()` hands policy JS `PipelineConfig::to_json`,
+    /// and `previewTimeoutDecision` (src/engine/ops/timeouts_ops.rs) deserializes
+    /// that JSON straight back into `PipelineConfig` on the live timeout sweep.
+    /// `deny_unknown_fields` must not break that round trip.
+    #[test]
+    fn to_json_output_still_deserializes_back_into_pipeline_config() {
+        let config: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let restored: PipelineConfig = serde_json::from_value(config.to_json())
+            .expect("to_json output must deserialize back into PipelineConfig");
+        assert_eq!(restored.name, config.name);
+        assert_eq!(restored.states.len(), config.states.len());
+        assert_eq!(restored.timeouts.len(), config.timeouts.len());
+    }
+
+    /// Overrides carrying only declared sections must keep parsing — the deny
+    /// must not turn every stored override into a parse failure.
+    #[test]
+    fn override_with_known_sections_still_parses() {
+        let parsed = parse_override(r#"{"timeouts":{},"gates":{}}"#)
+            .expect("a known-fields override must parse");
+        assert!(parsed.is_some(), "override must not be treated as empty");
+    }
+
+    /// #5718: an override key that `PipelineOverride` does not declare is a typo
+    /// or a retired field. It must surface as a parse failure (visible in the
+    /// override health report) instead of being dropped.
+    #[test]
+    fn override_with_unknown_section_is_rejected() {
+        let error = parse_override(r#"{"stage_failure_policy":{"default":"fail"}}"#)
+            .expect_err("an unknown override key must be rejected");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("stage_failure_policy"),
+            "the parse error must name the rejected key, got: {message}"
+        );
+    }
+}
