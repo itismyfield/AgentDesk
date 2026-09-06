@@ -223,12 +223,12 @@ pub(super) fn audit_skill_manifest_agents(request: ManifestAuditRequest) -> Mani
                 } else if namespace_unconfirmed {
                     report.skipped.insert(WORKSPACE_NAMESPACE_UNCONFIRMED);
                 } else if roster.is_some_and(|roster| !roster.contains(&agent_id)) {
-                    // Confirming the namespace against the roster is what
-                    // makes this rule safe, and it is also what keeps it
-                    // silent today: a walked directory no agent answers to
+                    // Under this roster-only namespace check, this branch
+                    // is unreachable for all inputs: a walked off-roster id
                     // unconfirms the premise instead of proving a dead id.
-                    // The rule stands for a namespace an authority other than
-                    // the roster can confirm; nothing weaker gets graded.
+                    // A live finding rule requires an independent namespace
+                    // authority and separately reviewed grading logic.
+                    // Keep this shape dormant; current findings are always empty.
                     report.findings.push(json!({
                         "manifest": path.display().to_string(),
                         "skill": skill,
