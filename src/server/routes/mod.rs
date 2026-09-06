@@ -111,6 +111,16 @@ impl ExplicitAuthMutationRoute {
     pub const KANBAN_REOPEN: Self = Self::new("kanban", "reopen");
     pub const KANBAN_FORCE_TRANSITION: Self = Self::new("kanban", "force-transition");
     pub const AUTO_QUEUE_SUBMIT_ORDER: Self = Self::new("auto-queue", "submit_order");
+
+    /// Gate a handler with this route's explicit-auth requirement (Bearer
+    /// token and/or `x-channel-id`, see `services::kanban`). Thin wrapper so
+    /// handlers stay one line and the label cannot drift from the inventory.
+    pub(crate) fn require(
+        self,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<(), (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
+        crate::services::kanban::require_explicit_bearer_token(headers, self.operation)
+    }
 }
 
 impl std::fmt::Debug for ExplicitAuthMutationRoute {
@@ -126,6 +136,9 @@ impl std::fmt::Debug for ExplicitAuthMutationRoute {
 /// Order matches code-grep order for stable log output.
 /// (#2257 concern 1 — operators need to see at startup which write
 /// endpoints are mounted on a fail-open auth config.)
+/// Short alias for handler call sites (`super::AuthRoute::KANBAN_REOPEN.require(..)`).
+pub(crate) use self::ExplicitAuthMutationRoute as AuthRoute;
+
 pub const EXPLICIT_AUTH_MUTATION_ROUTES: &[ExplicitAuthMutationRoute] = &[
     ExplicitAuthMutationRoute::KANBAN_REREVIEW,
     ExplicitAuthMutationRoute::KANBAN_BATCH_REREVIEW,

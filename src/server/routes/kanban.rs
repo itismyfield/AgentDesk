@@ -1572,8 +1572,7 @@ pub async fn pm_decision(
 // `require_explicit_bearer_token` / `resolve_requesting_agent_id_with_pg` were
 // relocated to `crate::services::kanban` (#3037 service→server backflow). Routes
 // below call them through the services facade.
-use super::ExplicitAuthMutationRoute;
-use crate::services::kanban::{require_explicit_bearer_token, resolve_requesting_agent_id_with_pg};
+use crate::services::kanban::resolve_requesting_agent_id_with_pg;
 
 fn request_principal_ref(
     principal: &Option<Extension<RequestPrincipal>>,
@@ -1610,10 +1609,7 @@ pub async fn rereview_card(
     principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<RereviewBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    if let Err(response) = require_explicit_bearer_token(
-        &headers,
-        ExplicitAuthMutationRoute::KANBAN_REREVIEW.operation,
-    ) {
+    if let Err(response) = super::AuthRoute::KANBAN_REREVIEW.require(&headers) {
         return Err(tuple_error(response));
     }
 
@@ -1831,10 +1827,7 @@ pub async fn batch_rereview(
     principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<BatchRereviewBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    if let Err(response) = require_explicit_bearer_token(
-        &headers,
-        ExplicitAuthMutationRoute::KANBAN_BATCH_REREVIEW.operation,
-    ) {
+    if let Err(response) = super::AuthRoute::KANBAN_BATCH_REREVIEW.require(&headers) {
         return Err(tuple_error(response));
     }
 
@@ -1923,9 +1916,7 @@ pub async fn reopen_card(
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let reset_full = body.reset_full.unwrap_or(false);
 
-    if let Err(response) =
-        require_explicit_bearer_token(&headers, ExplicitAuthMutationRoute::KANBAN_REOPEN.operation)
-    {
+    if let Err(response) = super::AuthRoute::KANBAN_REOPEN.require(&headers) {
         return Err(tuple_error(response));
     }
 
@@ -2150,10 +2141,7 @@ pub async fn force_transition(
     principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<ForceTransitionBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    if let Err(response) = require_explicit_bearer_token(
-        &headers,
-        ExplicitAuthMutationRoute::KANBAN_FORCE_TRANSITION.operation,
-    ) {
+    if let Err(response) = super::AuthRoute::KANBAN_FORCE_TRANSITION.require(&headers) {
         return Err(tuple_error(response));
     }
 

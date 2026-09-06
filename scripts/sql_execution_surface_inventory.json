@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "08f2dba6d8c1764c4835c41ac511d70bb98c5b04",
+  "measured_at_sha": "8cb69bb3dfeb88f982c1e974d9e5adcee952fae9",
   "records": [
     {
       "root": "migrations/postgres",
@@ -30020,6 +30020,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/routines/script_refs.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7fb86d34b3894a869f18e51238ecda95c6340d7a37b080e834dfe1aa4d24fd85"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/routines/session_control.rs",
       "api": "sqlx::query",
       "symbol": "query",
@@ -30628,15 +30637,6 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:dc537ceaf2dc3713259d83b6f88407247864a62f0836d31b45dc18040e9c7650"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/routines/store.rs",
-      "api": "sqlx::query_scalar",
-      "symbol": "query_scalar",
-      "classification": "STATIC",
-      "fingerprint": "sha256:e8409b5e74eb4a8c32597602876fb7cd70b1dd2945976ce7c01af1b5fdbd36e0"
     },
     {
       "root": "src",

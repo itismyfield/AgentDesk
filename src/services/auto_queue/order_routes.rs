@@ -275,10 +275,9 @@ pub async fn submit_order(
     principal: Option<Extension<RequestPrincipal>>,
     Json(body): Json<OrderBody>,
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
-    if let Err(response) = crate::services::kanban::require_explicit_bearer_token(
-        &headers,
-        crate::server::routes::ExplicitAuthMutationRoute::AUTO_QUEUE_SUBMIT_ORDER.operation,
-    ) {
+    if let Err(response) =
+        crate::server::routes::ExplicitAuthMutationRoute::AUTO_QUEUE_SUBMIT_ORDER.require(&headers)
+    {
         return Err(auto_queue_tuple_error(response));
     }
     let Some(pg_pool) = state.pg_pool.clone() else {

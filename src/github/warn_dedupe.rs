@@ -86,6 +86,80 @@ pub(crate) fn triage_scope(repo: &str) -> String {
     format!("triage:{repo}")
 }
 
+/// Dedupe key for the "card is terminal but issue is OPEN" warning.
+pub(crate) fn terminal_open_warn_key(issue_number: i64, card_id: &str) -> String {
+    format!("terminal-open:#{issue_number}:{card_id}")
+}
+
+/// Dedupe key for one stale-reconcile GraphQL error string. The error text
+/// carries the issue number (`Could not resolve … number of 4303`), so the
+/// key is effectively `(repo, issue, reason)`.
+pub(crate) fn stale_reconcile_warn_key(error: &str) -> String {
+    format!("stale-reconcile:{error}")
+}
+
+/// Per-cycle collector for `github::sync` repeat warnings. Lives on
+/// `SyncResult`; records every key observed this cycle and, when the cycle
+/// completes successfully, releases keys that were not observed so a
+/// condition that resolves and later recurs warns again. Error paths that
+/// abort a cycle never call [`finish`](Self::finish) — an aborted cycle
+/// proves nothing about resolution.
+#[derive(Debug, Default)]
+pub(crate) struct SyncWarnCycle {
+    keys: HashSet<String>,
+}
+
+impl SyncWarnCycle {
+    /// "card {card_id} is terminal but issue is OPEN" — the same
+    /// (repo, issue, card) recurs every sync cycle until an operator acts.
+    pub(crate) fn terminal_open(&mut self, repo: &str, issue_number: i64, card_id: &str) {
+        let key = terminal_open_warn_key(issue_number, card_id);
+        warn_once_else_debug(
+            &sync_scope(repo),
+            &key,
+            &format!(
+                "[github-sync] {repo}#{issue_number}: card {card_id} is terminal but issue is OPEN"
+            ),
+        );
+        self.keys.insert(key);
+    }
+
+    /// Stale-reconcile GraphQL errors. Each distinct error string (e.g.
+    /// "Could not resolve … Issue 4303") recurs every cycle while the
+    /// referenced issue stays unresolvable; WARN only when at least one error
+    /// is new for this process, DEBUG otherwise.
+    pub(crate) fn stale_reconcile(&mut self, repo: &str, error_count: usize, errors: &[String]) {
+        let scope = sync_scope(repo);
+        let mut any_new = false;
+        for error in errors {
+            let key = stale_reconcile_warn_key(error);
+            if GITHUB_REPEAT_WARNINGS.first_occurrence(&scope, &key) {
+                any_new = true;
+            }
+            self.keys.insert(key);
+        }
+        let message = format!(
+            "[github-sync] {repo}: stale card reconcile had {error_count} non-fatal GraphQL error(s): {}",
+            errors.join("; ")
+        );
+        if any_new {
+            tracing::warn!("{message}");
+        } else {
+            tracing::debug!("{message} (repeat; first occurrence already warned)");
+        }
+    }
+
+    /// Cycle completed: release keys not observed this cycle.
+    pub(crate) fn finish(&self, repo: &str) {
+        GITHUB_REPEAT_WARNINGS.retain(&sync_scope(repo), &self.keys);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, key: &str) -> bool {
+        self.keys.contains(key)
+    }
+}
+
 /// Emits `message` at WARN on the first observation of `(scope, key)` and at
 /// DEBUG afterwards. Returns whether this call warned.
 pub(crate) fn warn_once_else_debug(scope: &str, key: &str, message: &str) -> bool {
