@@ -234,10 +234,13 @@ class E22KnownGapContract(unittest.TestCase):
     def test_required_completion_failure_precedes_pending_refetch(self):
         record, error, requests, sleeps = self._pending_pipeline(resolve_on=1, completion=False)
         self.assertIn("completion chrome not found", str(error))
-        self.assertEqual(len(requests), 5)
-        self.assertEqual(sleeps, [])
+        self.assertEqual(len(requests), 8)
+        self.assertEqual(sleeps, [2.0] * 3)
         self.assertNotIn("known_gap_rechecks", record)
-        self.assertNotIn("revalidated_after_recheck", record)
+        self.assertEqual(record["completion_rechecks"][0]["refetches"], 3)
+        self.assertEqual(record["completion_rechecks"][0]["outcome"], "EXHAUSTED")
+        self.assertEqual(len(record["revalidated_after_recheck"]), 3)
+        self.assertTrue(all(item["passed"] for item in record["revalidated_after_recheck"]))
 
     def test_pending_still_requires_all_identity_and_raw_guards(self):
         for name in ("author", "channel", "setup", "history_third", "same_body", "new_edit", "missing"):
