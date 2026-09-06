@@ -123,6 +123,7 @@ DIRECT_INPUT_NOTIFICATION_MARKER = "터미널에 직접 주입된 입력"
 REPORT_RECORD_KEYS: tuple[str, ...] = (
     "known_gaps",
     "known_gap_rechecks",
+    "completion_rechecks",
     "revalidated_after_recheck",
     "relay_count",
     "raw_count",
@@ -3317,6 +3318,10 @@ def run_one_cell(
         }
         client = replace(client, captures=record["_known_gap_captures"],
                          capture_after_id=record["_known_gap_binding"]["after_id"])
+    try:
+        client = replace(client, body_observations=record.setdefault("_body_observations", {}))
+    except TypeError:
+        pass
     time.sleep(8.0)
 
     def _ingest_observed(messages: list[dict[str, Any]]) -> None:
@@ -4434,11 +4439,44 @@ def run_assertion(
         params = spec["completion_chrome_after_body"]
         body_marker = params.get("body_marker") if isinstance(params, dict) else params
         required = bool(params.get("required", False)) if isinstance(params, dict) else False
-        assertions.completion_chrome_after_body(
-            window,
-            body_marker=expand_marker(str(body_marker)),
-            required=required,
-        )
+        body_marker = expand_marker(str(body_marker))
+        trace = None
+        for attempt in range(4):
+            try:
+                assertions.completion_chrome_after_body(
+                    window,
+                    body_marker=body_marker,
+                    required=required,
+                )
+                break
+            except assertions.AssertionError:
+                first = min((at for body, at in (record or {}).get("_body_observations", {}).items()
+                             if body_marker in body), default=None)
+                if pending_refetch is None or first is None:
+                    raise
+                assertions.completion_chrome_after_body(window, body_marker=body_marker)
+                if trace is None:
+                    trace = {"refetches": 0, "deadline_at": first + 10,
+                             "elapsed_s": time.monotonic() - first, "outcome": "FAIL"}
+                    record.setdefault("completion_rechecks", []).append(trace)
+                if attempt == 3:
+                    trace["outcome"] = "EXHAUSTED"
+                    raise
+                time.sleep(min(2.0, max(0.0, first + 10 - time.monotonic())))
+                trace["elapsed_s"] = time.monotonic() - first
+                if trace["elapsed_s"] >= 10:
+                    trace["outcome"] = "EXHAUSTED"
+                    raise
+                trace["refetches"] += 1
+                try:
+                    pending_refetch()
+                finally:
+                    trace["elapsed_s"] = time.monotonic() - first
+                if trace["elapsed_s"] >= 10:
+                    trace["outcome"] = "EXHAUSTED"
+                    raise
+        if trace is not None:
+            trace["outcome"] = "PASS"
     elif "body_not_overwritten" in spec:
         assertions.body_not_overwritten(window, marker=str(spec["body_not_overwritten"]))
     elif spec.get("no_suppressed_label_chrome"):

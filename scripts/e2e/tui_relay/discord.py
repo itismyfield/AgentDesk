@@ -17,6 +17,8 @@ from collections.abc import Mapping
 from email.utils import parsedate_to_datetime
 from typing import Any
 
+from .assertions import relay_body
+
 
 MESSAGE_FETCH_MAX_ATTEMPTS = 3
 MESSAGE_FETCH_RETRY_BUDGET_S = 15.0
@@ -76,6 +78,7 @@ class DiscordClient:
     handoff_from_agent: str | None = None
     captures: list[dict[str, Any]] | None = None
     capture_after_id: str | None = None
+    body_observations: dict[str, float] | None = None
 
     def send(self, channel_id: int | str, content: str) -> dict[str, Any]:
         body = json.dumps({"channel_id": str(channel_id), "content": content}).encode("utf-8")
@@ -316,6 +319,10 @@ class DiscordClient:
                     raise _fetch_error(status, payload, "expected message array or messages envelope")
                 if not all(isinstance(message, Mapping) for message in messages):
                     raise _fetch_error(status, payload, "message array contains a non-object element")
+                if self.body_observations is not None:
+                    for message in messages:
+                        if (body := relay_body(message)) is not None:
+                            self.body_observations.setdefault(body, time.monotonic())
                 if self.captures is not None:
                     self.captures.append({"pages": [{"channel_id": str(channel_id),
                         "after_id": after_id, "limit": limit, "observed_at": time.time(),
