@@ -2277,15 +2277,6 @@
       "api": "agentdesk.db.query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:8a30fa644ed0da8435e50aeffa0d170327a6ad2417f4ce384d802261613de2c9"
-    },
-    {
-      "root": "policies",
-      "kind": "POLICY",
-      "path": "policies/timeouts/reconciliation.js",
-      "api": "agentdesk.db.query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:e7b5d732429cbeb10825c1da05cb41d30302bc510cbded9e7e6dce73efff0560"
     },
     {
