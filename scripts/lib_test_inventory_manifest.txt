@@ -1084,7 +1084,11 @@ server::routes::scheduled_messages::tests::patch_rejects_stale_effective_one_sho
 server::routes::scheduled_messages::tests::snapshot_patch_retarget_is_rejected_but_fresh_and_other_fields_pass
 server::routes::scheduled_messages::tests::target_channel_ids_are_normalized_and_invalid_values_rejected
 server::routes::skills_manifest_audit::tests::a_flat_skip_does_not_swallow_the_nested_entries_beside_it
+server::routes::skills_manifest_audit::tests::a_manifest_that_exists_but_cannot_be_read_still_reaches_its_skip
+server::routes::skills_manifest_audit::tests::a_padded_wildcard_is_not_the_wildcard_the_distributor_reserves
 server::routes::skills_manifest_audit::tests::an_empty_roster_skips_instead_of_reporting_a_clean_manifest
+server::routes::skills_manifest_audit::tests::both_keys_are_answered_in_both_manifest_locations
+server::routes::skills_manifest_audit::tests::manifest_paths_read_the_runtime_root_and_the_process_home
 server::routes::skills_manifest_audit::tests::nested_ids_are_graded_only_against_directories_the_distributor_walks
 server::routes::skills_manifest_audit::tests::only_the_bare_wildcard_is_reserved
 server::routes::skills_manifest_audit::tests::skill_manifest_paths_takes_directory_roots_only
