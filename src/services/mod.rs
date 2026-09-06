@@ -37,6 +37,7 @@ pub mod dispatches;
 #[allow(dead_code)]
 pub mod dispatches_followup;
 pub mod escalation_settings;
+pub mod explicit_auth_route;
 pub mod gemini;
 pub mod git;
 pub mod github_issue_creation;

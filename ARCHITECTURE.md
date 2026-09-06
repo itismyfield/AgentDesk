@@ -1550,6 +1550,7 @@ src/
 │   ├── dispatched_sessions.rs
 │   ├── dispatches_followup.rs
 │   ├── escalation_settings.rs
+│   ├── explicit_auth_route.rs
 │   ├── gemini.rs
 │   ├── github_issue_creation.rs
 │   ├── hang_forensics.rs
