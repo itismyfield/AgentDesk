@@ -1,6 +1,8 @@
 import type { PipelineConfigFull, PipelineStage } from "../../types";
 import {
   clonePipelineConfig,
+  extractOverrideExtras,
+  hasRawOverride,
   type Selection,
   type StageDraft,
 } from "./pipeline-visual-editor-model";
@@ -106,6 +108,37 @@ export function normalizePersistedFsmDraftStore(value: unknown): PersistedFsmDra
   });
 
   return { version: 2, entries };
+}
+
+/**
+ * #5718 prerequisite. A persisted draft carries the override extras that were
+ * extracted from whatever the override GET returned when the draft was written.
+ * Once the backend stops echoing a key, replaying those stale extras puts the
+ * key back into the next save and the strict PUT rejects the whole request.
+ *
+ * The fetched override is the authority on which extra keys the server still
+ * carries: every persisted key the GET still returns is kept with the value the
+ * user edited, and keys the GET no longer returns are dropped. A GET that
+ * returns no override document at all carries no such authority — nothing was
+ * normalized away — so those drafts keep their extras untouched.
+ */
+export function reconcileDraftOverrideExtras(
+  draftExtras: Record<string, unknown> | null | undefined,
+  rawOverride: unknown,
+): Record<string, unknown> {
+  const persisted =
+    draftExtras && typeof draftExtras === "object" ? (draftExtras as Record<string, unknown>) : {};
+  if (!hasRawOverride(rawOverride)) {
+    return { ...persisted };
+  }
+  const serverExtras = extractOverrideExtras(rawOverride);
+  const reconciled: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(persisted)) {
+    if (Object.hasOwn(serverExtras, key)) {
+      reconciled[key] = value;
+    }
+  }
+  return reconciled;
 }
 
 export function normalizePersistedPipelineSnapshotStore(

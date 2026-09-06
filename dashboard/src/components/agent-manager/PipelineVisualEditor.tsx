@@ -26,6 +26,7 @@ import {
   coerceSelectionForPipeline,
   normalizePersistedFsmDraftStore,
   normalizePersistedPipelineSnapshotStore,
+  reconcileDraftOverrideExtras,
   removeDraftScope,
 } from "./pipeline-visual-editor-persistence";
 import type {
@@ -181,7 +182,9 @@ export default function PipelineVisualEditor({
     setSavedPipeline(clonePipelineConfig(snapshot.pipeline));
     setLayers(snapshot.layers);
     setOverrideExtras(
-      persistedDraft ? { ...persistedDraft.overrideExtras } : extractOverrideExtras(snapshot.rawOverride),
+      persistedDraft
+        ? reconcileDraftOverrideExtras(persistedDraft.overrideExtras, snapshot.rawOverride)
+        : extractOverrideExtras(snapshot.rawOverride),
     );
     setOverrideExists(hasRawOverride(snapshot.rawOverride));
     setAllRepoStages(snapshot.repoStages);
