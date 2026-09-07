@@ -38,6 +38,7 @@ src/
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
+│   ├── channel_provider.rs
 │   ├── client.rs
 │   ├── dcserver.rs
 │   ├── dcserver_pg_bootstrap.rs
@@ -1432,6 +1433,7 @@ src/
 │   │   ├── cancel_token_claude_interrupt.rs
 │   │   ├── cancel_token_cleanup.rs
 │   │   ├── cancel_watchdog.rs
+│   │   ├── channel_rules.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   └── registry.rs
 │   ├── provider_cli/
