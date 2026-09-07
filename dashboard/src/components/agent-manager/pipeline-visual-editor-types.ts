@@ -34,6 +34,8 @@ export interface PersistedFsmDraftEntry {
   stageDrafts: StageDraft[];
   selection: Selection;
   overrideExtras: Record<string, unknown>;
+  /** Extras the override document carried when written; absent means unknown provenance. */
+  serverExtraKeys?: string[];
 }
 
 export interface PersistedFsmDraftStore {

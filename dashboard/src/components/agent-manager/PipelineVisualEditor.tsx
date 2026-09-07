@@ -64,6 +64,7 @@ export default function PipelineVisualEditor({
   const [savedPipeline, setSavedPipeline] = useState<PipelineConfigFull | null>(null);
   const [layers, setLayers] = useState({ default: true, repo: false, agent: false });
   const [overrideExtras, setOverrideExtras] = useState<Record<string, unknown>>({});
+  const [serverExtraKeys, setServerExtraKeys] = useState<string[] | null>(null);
   const [overrideExists, setOverrideExists] = useState(false);
   const [allRepoStages, setAllRepoStages] = useState<PipelineStage[]>([]);
   const [stageDrafts, setStageDrafts] = useState<StageDraft[]>([]);
@@ -160,6 +161,7 @@ export default function PipelineVisualEditor({
     setSavedPipeline(null);
     setLayers({ default: true, repo: false, agent: false });
     setOverrideExtras({});
+    setServerExtraKeys(null);
     setOverrideExists(false);
     setAllRepoStages([]);
     setStageDrafts([]);
@@ -179,16 +181,25 @@ export default function PipelineVisualEditor({
       ? coerceSelectionForPipeline(draftPipeline, persistedDraft.selection)
       : null;
 
+    const draftExtraKeys = persistedDraft?.serverExtraKeys ?? null;
+
     setPipelineDraft(draftPipeline);
     setSavedPipeline(clonePipelineConfig(snapshot.pipeline));
     setLayers(snapshot.layers);
     setOverrideExtras(
       persistedDraft
         ? source === "fetch"
-          ? reconcileDraftOverrideExtras(persistedDraft.overrideExtras, snapshot.rawOverride)
+          ? reconcileDraftOverrideExtras(persistedDraft.overrideExtras, snapshot.rawOverride, draftExtraKeys)
           // Cached key absence cannot authorize deleting persisted edits.
           : { ...persistedDraft.overrideExtras }
         : extractOverrideExtras(snapshot.rawOverride),
+    );
+    // Provenance travels with the extras it describes: a document replaces it only
+    // when that document supplied them, so a restored draft keeps its own record.
+    setServerExtraKeys(
+      hasRawOverride(snapshot.rawOverride) && (!persistedDraft || source === "fetch")
+        ? Object.keys(extractOverrideExtras(snapshot.rawOverride))
+        : draftExtraKeys,
     );
     setOverrideExists(hasRawOverride(snapshot.rawOverride));
     setAllRepoStages(snapshot.repoStages);
@@ -424,6 +435,7 @@ export default function PipelineVisualEditor({
       stageDrafts: cloneStageDrafts(stageDrafts),
       selection,
       overrideExtras: { ...overrideExtras },
+      serverExtraKeys: serverExtraKeys ? [...serverExtraKeys] : undefined,
     };
 
     setPersistedFsmDraftStore((currentStore) => {
@@ -447,6 +459,7 @@ export default function PipelineVisualEditor({
     repo,
     selectedAgentId,
     selection,
+    serverExtraKeys,
     setPersistedFsmDraftStore,
     stageDrafts,
     stagesChanged,

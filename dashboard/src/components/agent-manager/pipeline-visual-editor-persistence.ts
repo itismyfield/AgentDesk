@@ -104,6 +104,9 @@ export function normalizePersistedFsmDraftStore(value: unknown): PersistedFsmDra
         parsed.overrideExtras && typeof parsed.overrideExtras === "object"
           ? { ...(parsed.overrideExtras as Record<string, unknown>) }
           : {},
+      serverExtraKeys: Array.isArray(parsed.serverExtraKeys)
+        ? parsed.serverExtraKeys.filter((key): key is string => typeof key === "string")
+        : undefined,
     };
   });
 
@@ -116,27 +119,35 @@ export function normalizePersistedFsmDraftStore(value: unknown): PersistedFsmDra
  * Once the backend stops echoing a key, replaying those stale extras puts the
  * key back into the next save and the strict PUT rejects the whole request.
  *
- * The fetched override is the authority on which extra keys the server still
- * carries: every persisted key the GET still returns is kept with the value the
- * user edited, and keys the GET no longer returns are dropped. A GET that
- * returns no override document at all carries no such authority — nothing was
- * normalized away — so those drafts keep their extras untouched.
+ * Dropping a key needs provenance, not merely absence.
+ * `serverExtraKeysAtDraftTime` is the set of extra keys the override document
+ * carried when this draft was written, so a key is migrated away only when it
+ * was server-carried back then and the current GET no longer returns it. Keys
+ * the user created locally were never in that set and therefore survive.
+ *
+ * Two cases carry no authority to delete and leave the extras untouched: a GET
+ * that returned no override document at all (nothing was normalized away), and
+ * a draft that recorded no key set at all — one written before this field
+ * existed. An unknown provenance is not a server deletion.
  */
 export function reconcileDraftOverrideExtras(
   draftExtras: Record<string, unknown> | null | undefined,
   rawOverride: unknown,
+  serverExtraKeysAtDraftTime?: readonly string[] | null,
 ): Record<string, unknown> {
   const persisted =
     draftExtras && typeof draftExtras === "object" ? (draftExtras as Record<string, unknown>) : {};
-  if (!hasRawOverride(rawOverride)) {
+  if (!hasRawOverride(rawOverride) || !serverExtraKeysAtDraftTime) {
     return { ...persisted };
   }
+  const serverCarriedAtDraftTime = new Set(serverExtraKeysAtDraftTime);
   const serverExtras = extractOverrideExtras(rawOverride);
   const reconciled: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(persisted)) {
-    if (Object.hasOwn(serverExtras, key)) {
-      reconciled[key] = value;
+    if (serverCarriedAtDraftTime.has(key) && !Object.hasOwn(serverExtras, key)) {
+      continue;
     }
+    reconciled[key] = value;
   }
   return reconciled;
 }
