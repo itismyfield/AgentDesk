@@ -12,9 +12,9 @@
  *
  * These tests mount the real editor with a real persisted draft in localStorage,
  * stub only the HTTP layer and the presentational view, and assert on the
- * payload that actually leaves `handleSave`. The reconciliation is keyed on the
- * keys the draft recorded as server-carried, so no key name is special-cased and
- * a key the user created locally is never mistaken for one the server retired.
+ * payload that actually leaves `handleSave`. Recorded server keys authorize
+ * retirement; pre-field drafts migrate only the known stage_failure_policy key.
+ * Locally created keys keep their provenance through later server responses.
  */
 
 import { act } from "react";
@@ -212,12 +212,41 @@ async function unmountEditor() {
   view.current = null;
 }
 
+async function refreshInPlace() {
+  await act(async () => {
+    view.current?.actions.setReloadKey((current: number) => current + 1);
+  });
+}
+
 afterEach(async () => {
   await unmountEditor();
   vi.restoreAllMocks();
 });
 
 describe("restored draft extras vs. fetched override", () => {
+  it("migrates a pre-field retired key through refresh and remount without dropping local extras", async () => {
+    const draft = historicalDraft();
+    delete draft.serverExtraKeys;
+    draft.overrideExtras.local_extension = { note: "unsaved" };
+    seedDraft(draft);
+    mockApi(normalizedGet());
+
+    await mountEditor();
+    await refreshInPlace();
+    await unmountEditor();
+    await mountEditor();
+    await refreshInPlace();
+
+    const restoredExtras = persistedDraftExtras();
+    const payload = await saveAndReadPayload();
+    expect(Object.hasOwn(payload, "stage_failure_policy")).toBe(false);
+    expect(Object.hasOwn(restoredExtras, "stage_failure_policy")).toBe(false);
+    expect(payload.local_extension).toEqual({ note: "unsaved" });
+    expect(payload.fsm_edge_bindings).toEqual(draft.overrideExtras.fsm_edge_bindings);
+    expect(payload.retry_budget).toEqual({ max: 7 });
+    expect((payload as unknown as PipelineConfigFull).states[0].label).toBe(EDITED_LABEL);
+  });
+
   it("preserves persisted extras when stages refresh fails after displaying a stale cache", async () => {
     const draft = historicalDraft();
     seedDraft(draft);
@@ -315,6 +344,22 @@ describe("restored draft extras vs. fetched override", () => {
     expect((payload as unknown as PipelineConfigFull).states[0].label).toBe(EDITED_LABEL);
   });
 
+  it("retires a pre-field legacy key after a permissive GET returned a different value", async () => {
+    const draft = historicalDraft();
+    delete draft.serverExtraKeys;
+    draft.overrideExtras.stage_failure_policy = { default: "edited" };
+    seedDraft(draft);
+    mockApi(permissiveGet());
+
+    await mountEditor();
+    expect(persistedDraftExtras().stage_failure_policy).toEqual({ default: "edited" });
+    vi.mocked(api.getRepoPipeline).mockResolvedValue({ repo: REPO, pipeline_config: normalizedGet() });
+    await refreshInPlace();
+    const payload = await saveAndReadPayload();
+    expect(Object.hasOwn(payload, "stage_failure_policy")).toBe(false);
+    expect(payload.fsm_edge_bindings).toEqual(draft.overrideExtras.fsm_edge_bindings);
+  });
+
   it("leaves the no-draft path on the fetched extras", async () => {
     mockApi(normalizedGet());
 
@@ -354,9 +399,12 @@ describe("reconcileDraftOverrideExtras", () => {
     expect(reconcileDraftOverrideExtras(persisted, [1, 2], carried)).toEqual(persisted);
   });
 
-  it("keeps every key when the draft recorded no server-carried set", () => {
-    expect(reconcileDraftOverrideExtras(persisted, buildOverridePayload(makePipeline()))).toEqual(persisted);
-    expect(reconcileDraftOverrideExtras(persisted, normalizedGet(), null)).toEqual(persisted);
+  it("migrates only the known retired field when the draft recorded no server-carried set", () => {
+    expect(reconcileDraftOverrideExtras(persisted, buildOverridePayload(makePipeline())))
+      .toEqual({ retry_budget: { max: 7 } });
+    expect(reconcileDraftOverrideExtras(persisted, normalizedGet(), null))
+      .toEqual({ retry_budget: { max: 7 } });
+    expect(reconcileDraftOverrideExtras(persisted, permissiveGet())).toEqual(persisted);
   });
 
   it("keeps a key the draft never recorded as server-carried", () => {
@@ -379,17 +427,6 @@ describe("reconcileDraftOverrideExtras", () => {
  * Only keys the draft itself recorded as server-carried may be migrated away.
  */
 describe("locally created override extras", () => {
-  async function refreshInPlace() {
-    await act(async () => {
-      view.current?.actions.setReloadKey((current: number) => current + 1);
-    });
-    for (let tick = 0; tick < 3; tick += 1) {
-      await act(async () => {
-        await Promise.resolve();
-      });
-    }
-  }
-
   it("keeps an edge rename the override document never carried across a refresh", async () => {
     mockApi(buildOverridePayload(makePipeline()));
 
@@ -433,5 +470,65 @@ describe("locally created override extras", () => {
     const payload = await saveAndReadPayload();
     expect(Object.hasOwn(payload, "retry_budget")).toBe(false);
     expect((payload as unknown as PipelineConfigFull).states[0].label).toBe("Edited after upgrade");
+  });
+
+  it("keeps local bindings after a GET briefly carries the same key with a different value", async () => {
+    mockApi(buildOverridePayload(makePipeline()));
+    await mountEditor();
+    await act(async () => {
+      view.current?.actions.updateFsmTransitionEvent(0, "on_locally_named");
+    });
+    const localBindings = { "ready->done": { event: "on_locally_named" } };
+    expect(persistedDraftExtras().fsm_edge_bindings).toEqual(localBindings);
+
+    vi.mocked(api.getRepoPipeline).mockResolvedValue({
+      repo: REPO,
+      pipeline_config: {
+        ...buildOverridePayload(makePipeline()),
+        fsm_edge_bindings: { "ready->done": { event: "on_remote" } },
+      },
+    });
+    await refreshInPlace();
+    expect(persistedDraftExtras().fsm_edge_bindings).toEqual(localBindings);
+    await unmountEditor();
+    vi.mocked(api.getRepoPipeline).mockResolvedValue({
+      repo: REPO,
+      pipeline_config: buildOverridePayload(makePipeline()),
+    });
+    await mountEditor();
+    await refreshInPlace();
+
+    const restoredExtras = persistedDraftExtras();
+    const payload = await saveAndReadPayload();
+    expect(payload.fsm_edge_bindings).toEqual(localBindings);
+    expect(restoredExtras.fsm_edge_bindings).toEqual(localBindings);
+  });
+
+  it.each([false, true])("learns a restored draft's provenance before retirement (reordered object keys: %s)", async (reordered) => {
+    const draft = historicalDraft();
+    delete draft.serverExtraKeys;
+    draft.overrideExtras = { retry_budget: { max: 7, window: 2 } };
+    seedDraft(draft);
+    seedCachedSnapshot(buildOverridePayload(makePipeline()));
+    mockApi({
+      ...buildOverridePayload(makePipeline()),
+      retry_budget: reordered ? { window: 2, max: 7 } : { max: 7, window: 2 },
+    });
+
+    await mountEditor();
+    expect(persistedDraftExtras().retry_budget).toEqual({ max: 7, window: 2 });
+    await unmountEditor();
+    vi.mocked(api.getRepoPipeline).mockResolvedValue({
+      repo: REPO,
+      pipeline_config: buildOverridePayload(makePipeline()),
+    });
+    await mountEditor();
+    await refreshInPlace();
+
+    const restoredExtras = persistedDraftExtras();
+    const payload = await saveAndReadPayload();
+    expect(Object.hasOwn(payload, "retry_budget")).toBe(false);
+    expect(Object.hasOwn(restoredExtras, "retry_budget")).toBe(false);
+    expect((payload as unknown as PipelineConfigFull).states[0].label).toBe(EDITED_LABEL);
   });
 });

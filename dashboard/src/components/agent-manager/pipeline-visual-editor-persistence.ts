@@ -25,6 +25,8 @@ export const EMPTY_PIPELINE_SNAPSHOT_STORE: PersistedPipelineSnapshotStore = {
   entries: {},
 };
 
+export const LEGACY_SERVER_EXTRA_KEYS: readonly string[] = ["stage_failure_policy"];
+
 export function cloneStageDrafts(stages: StageDraft[]) {
   return stages.map((stage) => ({ ...stage }));
 }
@@ -42,6 +44,23 @@ export function cloneJsonValue<T>(value: T): T {
   } catch {
     return value;
   }
+}
+
+/** JSON object ordering is immaterial; array ordering is part of the value. */
+export function equalJsonValues(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => equalJsonValues(value, right[index]));
+  }
+  const leftObject = left as Record<string, unknown>;
+  const rightObject = right as Record<string, unknown>;
+  const keys = Object.keys(leftObject);
+  return keys.length === Object.keys(rightObject).length && keys.every((key) =>
+    Object.hasOwn(rightObject, key) && equalJsonValues(leftObject[key], rightObject[key]),
+  );
 }
 
 export function cloneEditorSnapshot(snapshot: EditorSnapshot): EditorSnapshot {
@@ -125,10 +144,10 @@ export function normalizePersistedFsmDraftStore(value: unknown): PersistedFsmDra
  * was server-carried back then and the current GET no longer returns it. Keys
  * the user created locally were never in that set and therefore survive.
  *
- * Two cases carry no authority to delete and leave the extras untouched: a GET
- * that returned no override document at all (nothing was normalized away), and
- * a draft that recorded no key set at all — one written before this field
- * existed. An unknown provenance is not a server deletion.
+ * Pre-field drafts need the #5718 compatibility migration for the known retired
+ * stage_failure_policy field. Other unrecorded extras may be local and survive.
+ * A GET with no override document carries no deletion authority, even for that
+ * migration. The caller must use a successful fetch, never a cached snapshot.
  */
 export function reconcileDraftOverrideExtras(
   draftExtras: Record<string, unknown> | null | undefined,
@@ -137,10 +156,10 @@ export function reconcileDraftOverrideExtras(
 ): Record<string, unknown> {
   const persisted =
     draftExtras && typeof draftExtras === "object" ? (draftExtras as Record<string, unknown>) : {};
-  if (!hasRawOverride(rawOverride) || !serverExtraKeysAtDraftTime) {
+  if (!hasRawOverride(rawOverride)) {
     return { ...persisted };
   }
-  const serverCarriedAtDraftTime = new Set(serverExtraKeysAtDraftTime);
+  const serverCarriedAtDraftTime = new Set(serverExtraKeysAtDraftTime ?? LEGACY_SERVER_EXTRA_KEYS);
   const serverExtras = extractOverrideExtras(rawOverride);
   const reconciled: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(persisted)) {

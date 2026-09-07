@@ -20,10 +20,12 @@ import {
 import {
   EMPTY_FSM_DRAFT_STORE,
   EMPTY_PIPELINE_SNAPSHOT_STORE,
+  LEGACY_SERVER_EXTRA_KEYS,
   buildFsmDraftScopeKey,
   cloneEditorSnapshot,
   cloneStageDrafts,
   coerceSelectionForPipeline,
+  equalJsonValues,
   normalizePersistedFsmDraftStore,
   normalizePersistedPipelineSnapshotStore,
   reconcileDraftOverrideExtras,
@@ -182,6 +184,7 @@ export default function PipelineVisualEditor({
       : null;
 
     const draftExtraKeys = persistedDraft?.serverExtraKeys ?? null;
+    const serverExtras = extractOverrideExtras(snapshot.rawOverride);
 
     setPipelineDraft(draftPipeline);
     setSavedPipeline(clonePipelineConfig(snapshot.pipeline));
@@ -192,13 +195,22 @@ export default function PipelineVisualEditor({
           ? reconcileDraftOverrideExtras(persistedDraft.overrideExtras, snapshot.rawOverride, draftExtraKeys)
           // Cached key absence cannot authorize deleting persisted edits.
           : { ...persistedDraft.overrideExtras }
-        : extractOverrideExtras(snapshot.rawOverride),
+        : serverExtras,
     );
-    // Provenance travels with the extras it describes: a document replaces it only
-    // when that document supplied them, so a restored draft keeps its own record.
+    // A known local key stays local even if a later GET happens to carry it.
+    // Pre-field drafts can also learn matching values and known legacy fields.
     setServerExtraKeys(
       hasRawOverride(snapshot.rawOverride) && (!persistedDraft || source === "fetch")
-        ? Object.keys(extractOverrideExtras(snapshot.rawOverride))
+        ? Object.keys(serverExtras).filter((key) =>
+          !persistedDraft || (
+            Object.hasOwn(persistedDraft.overrideExtras, key) && (
+              draftExtraKeys
+                ? draftExtraKeys.includes(key)
+                : LEGACY_SERVER_EXTRA_KEYS.includes(key)
+                  || equalJsonValues(persistedDraft.overrideExtras[key], serverExtras[key])
+            )
+          ),
+        )
         : draftExtraKeys,
     );
     setOverrideExists(hasRawOverride(snapshot.rawOverride));
