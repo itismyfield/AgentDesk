@@ -18,6 +18,7 @@ pub(crate) mod provider_cli;
 pub(crate) mod query;
 pub(crate) mod restart_terminal_proof;
 pub(crate) mod run;
+pub(crate) mod turn_lease;
 pub(crate) mod utils;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

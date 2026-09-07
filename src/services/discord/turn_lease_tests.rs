@@ -8,6 +8,122 @@ use std::sync::atomic::Ordering;
 
 const PROVIDER: ProviderKind = ProviderKind::Codex;
 
+#[tokio::test]
+async fn committed_a_recovery_after_operator_release_cannot_cancel_claimed_b_r3() {
+    with_isolated_runtime_root(|| async {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(575430);
+        let original = seed(&shared, channel).await;
+        let mut old_row = inflight::load_inflight_state(&PROVIDER, channel.get()).unwrap();
+        old_row.full_response = "committed A".into();
+        old_row.response_sent_offset = old_row.full_response.len();
+        old_row.terminal_delivery_committed = true;
+        inflight::save_inflight_state(&old_row).unwrap();
+        assert_eq!(
+            release_on(&shared, &PROVIDER, channel, original)
+                .await
+                .unwrap()["released"],
+            true
+        );
+        let successor = seed(&shared, channel).await;
+        let token = shared
+            .mailbox(channel)
+            .snapshot()
+            .await
+            .cancel_token
+            .unwrap();
+        // The real intake path claims B before awaited bootstrap registers Start.
+        let mut events = turn_completion_events::subscribe_turn_completion_events(&shared);
+        assert!(
+            !super::super::recovery::reregister_active_turn_from_inflight(&shared, &old_row).await
+        );
+        assert!(
+            !token.cancelled.load(Ordering::Acquire),
+            "old committed A recovery must not cancel claimed B before Start"
+        );
+        let live = shared
+            .mailbox(channel)
+            .snapshot()
+            .await
+            .cancel_token
+            .unwrap();
+        assert!(Arc::ptr_eq(&live, &token));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            inflight::load_inflight_state(&PROVIDER, channel.get())
+                .unwrap()
+                .turn_nonce,
+            Some(successor.expected.turn_nonce)
+        );
+        assert!(events.try_recv().is_err());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn successor_normal_complete_preserves_negative_admission_after_operator_release_r2() {
+    with_isolated_runtime_root(|| async {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(575405);
+        let original = seed(&shared, channel).await;
+        release_on(&shared, &PROVIDER, channel, original)
+            .await
+            .unwrap();
+        let successor = seed(&shared, channel).await;
+        let key = TurnKey::new(channel, 123, successor.expected.generation)
+            .with_episode_nonce(Some(&successor.expected.turn_nonce));
+        shared
+            .turn_finalizer
+            .register_start_with_completion_admission(
+                key,
+                PROVIDER,
+                inflight::RelayOwnerKind::Watcher,
+                CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+                &shared,
+            );
+        shared
+            .turn_finalizer
+            .note_terminal_projection_settled(key, false, shared.clone());
+        shared
+            .turn_finalizer
+            .note_terminal_disposition_settled(key, false, shared.clone());
+        let row = inflight::load_inflight_state(&PROVIDER, channel.get()).unwrap();
+        let mut events = turn_completion_events::subscribe_turn_completion_events(&shared);
+        let outcome = shared
+            .turn_finalizer
+            .submit_terminal_with_claim_snapshot(
+                key,
+                PROVIDER,
+                TerminalEvent::Complete,
+                FinalizeContext::bridge(),
+                Some(SyntheticClaimSnapshot::from_row(&row)),
+                shared.clone(),
+            )
+            .await;
+        assert!(matches!(
+            outcome,
+            FinalizeOutcome::Finalized {
+                removed_token: Some(_),
+                ..
+            }
+        ));
+        let mut released = false;
+        while let Ok(event) = events.try_recv() {
+            assert_ne!(
+                event.phase,
+                TurnCompletionPhase::QueueEligible,
+                "ordinary B completion cannot bypass B's negative delivery/disposition evidence"
+            );
+            released |= event.phase == TurnCompletionPhase::MailboxReleased;
+        }
+        assert!(
+            released,
+            "ordinary B completion still releases its own mailbox"
+        );
+    })
+    .await;
+}
+
 async fn seed(shared: &Arc<SharedData>, channel: ChannelId) -> ReleaseRequest {
     let mailbox = shared.mailbox(channel);
     let token = Arc::new(CancelToken::new());

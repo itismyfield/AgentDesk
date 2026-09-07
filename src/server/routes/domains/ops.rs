@@ -7,7 +7,7 @@ use super::super::{
     ApiRouter, AppState, auto_queue, cluster, cron_api, dispatched_sessions, dispatches, docs,
     e2e_control, health_api, idle_recap, maintenance, message_outbox, messages, monitoring,
     pipeline, prompt_manifest_retention, protected_api_domain, provider_cli_api, queue_api,
-    routines, scheduled_messages, skills_api, termination_events,
+    routines, scheduled_messages, skills_api, termination_events, turn_lease,
 };
 
 // Category: dispatches, queue, and ops
@@ -15,6 +15,11 @@ use super::super::{
 pub(crate) fn router(state: AppState) -> ApiRouter {
     let router = protected_api_domain(
         Router::new()
+            .route(
+                "/turn-lease/{provider}/{channel_id}",
+                get(turn_lease::inspect),
+            )
+            .route("/turn-lease/release", post(turn_lease::release))
             .route(
                 "/dispatches",
                 get(dispatches::list_dispatches).post(dispatches::create_dispatch),
