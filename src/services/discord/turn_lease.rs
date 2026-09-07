@@ -12,6 +12,9 @@ use serenity::model::id::{ChannelId, MessageId};
 use super::{SharedData, inflight, turn_finalizer::*};
 use crate::services::{provider::ProviderKind, turn_orchestrator::FinishTurnResult};
 
+mod registry;
+pub(crate) use registry::{inspect, release};
+
 impl SharedData {
     /// Non-creating lookup for probes and operator recovery.
     pub(in crate::services::discord) fn mailbox_peek(

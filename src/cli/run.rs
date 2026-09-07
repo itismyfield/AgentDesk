@@ -72,6 +72,7 @@ fn command_supports_json(command: &Commands) -> bool {
         | Commands::Docs { .. }
         | Commands::AutoQueue { .. }
         | Commands::ForceKill { .. }
+        | Commands::TurnLease(..)
         | Commands::GithubSync { .. }
         | Commands::Monitoring { .. }
         | Commands::Discord { .. }
@@ -289,6 +290,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
                 max_concurrent_threads,
             )),
         }),
+        Commands::TurnLease(args) => exit_for_json_cli(super::turn_lease::run(args)),
         Commands::ForceKill { session_key, retry } => exit_for_cli(super::direct::run_async(
             super::direct::cmd_force_kill(&session_key, retry),
         )),

@@ -194,6 +194,8 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: AutoQueueAction,
     },
+    /// Inspect or explicitly release one turn lease while preserving its session
+    TurnLease(super::turn_lease::TurnLeaseArgs),
     /// Force-kill a session without HTTP server dependency
     ForceKill {
         /// Session key
@@ -1000,6 +1002,58 @@ mod tests {
     use clap::{CommandFactory, Parser, error::ErrorKind};
 
     #[test]
+    fn turn_lease_cli_parses_read_and_exact_release() {
+        let read = Cli::try_parse_from([
+            "agentdesk",
+            "turn-lease",
+            "inspect",
+            "--provider",
+            "codex",
+            "--channel-id",
+            "5754",
+        ])
+        .unwrap();
+        assert!(matches!(read.command, Some(Commands::TurnLease(_))));
+        let release = Cli::try_parse_from([
+            "agentdesk",
+            "--json",
+            "turn-lease",
+            "release",
+            "--expected",
+            "{}",
+            "--reason",
+            "operator verified turn ended",
+        ])
+        .unwrap();
+        assert!(release.json);
+        assert!(matches!(release.command, Some(Commands::TurnLease(_))));
+    }
+
+    #[test]
+    fn turn_lease_cli_rejects_unpinned_release_and_zero_channel() {
+        assert!(
+            Cli::try_parse_from(["agentdesk", "turn-lease", "release", "--reason", "verified"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["agentdesk", "turn-lease", "release", "--expected", "{}"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "agentdesk",
+                "turn-lease",
+                "inspect",
+                "--provider",
+                "codex",
+                "--channel-id",
+                "0"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn top_level_command_name_snapshot_preserves_public_cli_surface() {
         let mut command = Cli::command();
         command.build();
@@ -1023,6 +1077,7 @@ mod tests {
             "review-recover-target",
             "docs",
             "auto-queue",
+            "turn-lease",
             "force-kill",
             "github-sync",
             "monitoring",
