@@ -6645,7 +6645,10 @@ services::discord::turn_finalizer::delivery_lease::tests::same_key_range_stale_b
 services::discord::turn_finalizer::delivery_lease::tests::same_turn_stale_range_release_is_noop_after_reacquire
 services::discord::turn_finalizer::delivery_lease::tests::stale_turn_commit_and_release_are_noops_after_reacquire
 services::discord::turn_finalizer::episode::tests::missing_snapshot_is_not_an_observed_legacy_episode
+services::discord::turn_finalizer::episode::tests::normal_successor_keeps_admission_and_cleanup_for_modern_and_legacy_episode
+services::discord::turn_finalizer::episode::tests::recovery_retains_captured_nonce_and_refuses_same_id_successor
 services::discord::turn_finalizer::episode::tests::rowless_submission_transports_original_episode_without_snapshot
+services::discord::turn_finalizer::episode::tests::unique_generation_producer_keeps_successor_safe_after_external_release
 services::discord::turn_finalizer::finalize::tests::finalize_chokepoint_publishes_mailbox_release_completion_event
 services::discord::turn_finalizer::finalize::tests::guarded_miss_preserves_parent_mapping_and_skips_parent_kickoff
 services::discord::turn_finalizer::finalize::tests::identity_guard_mismatch_does_not_release_wrong_owner_and_logs

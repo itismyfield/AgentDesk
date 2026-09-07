@@ -9,9 +9,36 @@ pub(super) async fn handle_terminal(
     evidence: TerminalEvidence,
     shared: &Arc<SharedData>,
 ) -> FinalizeOutcome {
-    // Captured before the producer's yielding work; the next authority slice
-    // consumes this nonce without deriving it from a successor's live state.
-    let _captured_episode = (evidence.episode_captured, evidence.turn_nonce);
+    // Monitor producers carry an existing per-turn generation. Resolve only
+    // its registered episode; a late/collected generation owns no current slot.
+    let key = if key.episode.is_none() && key.generation != shared.restart.current_generation {
+        let mut matches = ledger.values().filter(|entry| {
+            entry.turn_key.channel_id == key.channel_id
+                && entry.turn_key.user_msg_id == key.user_msg_id
+                && entry.turn_key.generation == key.generation
+        });
+        let Some(entry) = matches.next() else {
+            return FinalizeOutcome::AlreadyFinalized;
+        };
+        if matches.next().is_some() || entry.phase == Phase::Finalized {
+            return FinalizeOutcome::AlreadyFinalized;
+        }
+        entry.turn_key
+    } else {
+        key
+    };
+    // A producer lacking episode evidence cannot borrow a known successor's
+    // ledger, nor enter the legacy AlreadyFinalized repair path.
+    if key.episode.is_none()
+        && ledger.keys().any(|known| {
+            known.channel_id == key.channel_id
+                && known.generation == key.generation
+                && known.user_msg_id == key.user_msg_id
+                && known.episode.is_some()
+        })
+    {
+        return FinalizeOutcome::Deferred;
+    }
     let claim_snapshot = evidence.claim_snapshot;
     // #3866: test-only injection point — lets a test drive a real finalize
     // side-effect panic through the live actor loop to prove the catch_unwind

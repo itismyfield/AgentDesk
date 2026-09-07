@@ -445,7 +445,7 @@ pub(super) fn handle_watcher_runtime_handoff(
                         channel_id,
                         inflight_state.effective_finalizer_turn_id(),
                         shared_owned.restart.current_generation,
-                    ),
+                    ).with_episode_nonce(inflight_state.turn_nonce.as_deref()),
                     provider.clone(),
                     super::super::inflight::RelayOwnerKind::Watcher,
                     super::super::turn_finalizer::CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,

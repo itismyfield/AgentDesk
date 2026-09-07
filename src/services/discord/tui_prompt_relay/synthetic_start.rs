@@ -61,6 +61,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         prompt_text,
         anchor_message_id,
         lease,
+        register_deferred_start,
     } = identity;
 
     let cancel_token = Arc::new(CancelToken::new());
@@ -183,9 +184,21 @@ async fn claim_tui_direct_synthetic_turn_prepared(
     // observed an already-active matching synthetic turn, the fresh local token
     // was not admitted; the mailbox snapshot, not that unused token, is the
     // authority for the nonce persisted below.
-    let active_turn_nonce = super::super::mailbox_snapshot(shared, channel_id)
-        .await
-        .active_turn_nonce;
+    let active_snapshot = super::super::mailbox_snapshot(shared, channel_id).await;
+    if register_deferred_start
+        && (active_snapshot.active_user_message_id != Some(anchor_message_id)
+            || active_snapshot.cancel_token.as_ref().is_none_or(|active| {
+                mailbox_activation_occurred && !Arc::ptr_eq(active, &cancel_token)
+            }))
+    {
+        return TuiDirectSyntheticTurnClaim {
+            relay_owner,
+            claimed: false,
+            turn_start_offset: start_offset,
+        };
+    }
+    let active_turn_nonce = active_snapshot.active_turn_nonce;
+    identity.register_episode(active_turn_nonce.as_deref());
 
     // #3146 Part 1: a TUI-driven turn is now active for this channel (we either
     // just started it via `mailbox_try_start_turn` or already own the matching
@@ -482,23 +495,40 @@ mod tests {
     async fn aged_rowless_synthetic_owner_reclaims_and_finalizes_ledger() {
         let root = tempfile::tempdir().expect("runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let provider = ProviderKind::Claude;
+        let provider = ProviderKind::Codex;
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4_018_201);
-        let tmux = "AgentDesk-claude-4018-aged";
+        let tmux = "AgentDesk-codex-4018-aged";
         let stale_id = MessageId::new(4_018_301);
         let next_id = MessageId::new(4_018_401);
         let stale_token = seed_synthetic_mailbox_owner(&shared, channel_id, stale_id).await;
-        let key = crate::services::discord::turn_finalizer::TurnKey::new(
-            channel_id,
-            stale_id.get(),
-            shared.restart.current_generation,
-        );
-        shared.turn_finalizer.register_start(
-            key,
-            provider.clone(),
-            RelayOwnerKind::Watcher,
-            &shared,
+        let record = crate::services::discord::tui_direct_pending_start::TuiDirectPendingStart {
+            provider: provider.as_str().into(),
+            channel_id: channel_id.get(),
+            tmux_session_name: tmux.into(),
+            prompt_text: "continue".into(),
+            anchor_message_id: stale_id.get(),
+            lease_relay_owner: ExternalInputRelayOwner::BridgeAdapter.as_str().into(),
+            lease_runtime_kind: None,
+            lease_turn_id: None,
+            lease_session_key: None,
+            generation: shared.restart.current_generation,
+            created_at_ms: 0,
+            observed_at_ms: 0,
+            state: crate::services::discord::tui_direct_pending_start::PendingStartState::Waiting,
+            attempt_count: 0,
+        };
+        assert!(pending_start_claim_fn()(&shared, &record).await);
+        let row = inflight::load_inflight_state(&provider, channel_id.get()).unwrap();
+        assert_eq!(row.turn_nonce.as_deref(), stale_token.turn_nonce());
+        assert_eq!(
+            inflight::clear_inflight_state_for_captured_episode(
+                &provider,
+                channel_id.get(),
+                &inflight::InflightTurnIdentity::from_state(&row),
+                stale_token.turn_nonce(),
+            ),
+            inflight::GuardedClearOutcome::Cleared
         );
         assert!(
             shared
@@ -1798,23 +1828,7 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                 lease,
             );
 
-            // #3154 design point 6: register the turn with the single-authority
-            // finalizer BEFORE the claim saves the inflight + (implicitly, via
-            // the lease/inflight) releases the watcher gate — mirrors the bridge
-            // register-before-unpause at turn_bridge/mod.rs.
-            shared.turn_finalizer.register_start(
-                super::super::turn_finalizer::TurnKey::new(
-                    channel_id,
-                    record.anchor_message_id,
-                    shared.restart.current_generation,
-                ),
-                provider.clone(),
-                super::super::inflight::RelayOwnerKind::Watcher,
-                // #3016 phase-5a: prime the reconcile cache at register time.
-                shared,
-            );
-
-            let claim = claim_tui_direct_synthetic_turn(
+            let claim = claim::claim_tui_direct_synthetic_turn_inner::<true>(
                 shared,
                 &provider,
                 channel_id,

@@ -9,6 +9,7 @@ pub(super) struct SyntheticClaimIdentity<'a> {
     pub(super) prompt_text: &'a str,
     pub(super) anchor_message_id: MessageId,
     pub(super) lease: &'a ExternalInputRelayLease,
+    pub(super) register_deferred_start: bool,
 }
 
 pub(super) struct SyntheticClaimPreparation<'a> {
@@ -20,6 +21,27 @@ pub(super) struct SyntheticClaimPreparation<'a> {
 }
 
 pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_synthetic_turn(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    prompt_text: &str,
+    anchor_message_id: MessageId,
+    lease: &ExternalInputRelayLease,
+) -> TuiDirectSyntheticTurnClaim {
+    claim_tui_direct_synthetic_turn_inner::<false>(
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+        prompt_text,
+        anchor_message_id,
+        lease,
+    )
+    .await
+}
+
+pub(super) async fn claim_tui_direct_synthetic_turn_inner<const DEFERRED: bool>(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -100,6 +122,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
             prompt_text,
             anchor_message_id,
             lease,
+            register_deferred_start: DEFERRED,
         },
         output_path,
         start_offset,
@@ -107,4 +130,24 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
         relay_owner_kind,
     })
     .await
+}
+
+impl SyntheticClaimIdentity<'_> {
+    pub(super) fn register_episode(&self, active_turn_nonce: Option<&str>) {
+        if self.register_deferred_start {
+            // #3154: bind the admitted episode before either durable row write can
+            // release the watcher gate. Adoption uses the existing actor nonce.
+            self.shared.turn_finalizer.register_start(
+                super::super::super::turn_finalizer::TurnKey::new(
+                    self.channel_id,
+                    self.anchor_message_id.get(),
+                    self.shared.restart.current_generation,
+                )
+                .with_episode_nonce(active_turn_nonce),
+                self.provider.clone(),
+                RelayOwnerKind::Watcher,
+                self.shared,
+            );
+        }
+    }
 }
