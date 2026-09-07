@@ -19,7 +19,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 |---|---|---|
 | `ADK_API_URL` | `src/cli/monitoring.rs:33` | This module's api_base() prefers ADK_API_URL over AGENTDESK_API_URL — the hint must match that order. |
 | `ADK_FORCE_LOCAL_MEMORY` | `src/server/routes/memory_api.rs:53` | `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch). |
-| `ADK_GITHUB_SYNC_ALERT_CHANNEL` | `src/github/sync.rs:1460` |  |
+| `ADK_GITHUB_SYNC_ALERT_CHANNEL` | `src/github/sync.rs:1455` |  |
 | `ADK_INTAKE_ROUTING_MODE` | `src/services/cluster/intake_routing_config.rs:236` (+1 more) |  |
 | `ADK_OBSERVABILITY_COUNTER_SNAPSHOT_RETENTION_DAYS` | `src/services/observability/retention.rs:35` | #2049 Finding 9: prune old rows from observability tables to bound disk and index growth on long-lived single-node deployments. |
 | `ADK_OBSERVABILITY_EVENTS_PATH` | `src/services/observability/events.rs:211` | Honors `ADK_OBSERVABILITY_EVENTS_PATH` for tests. |
@@ -53,7 +53,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_DISCORD_HIGH_RISK_ENABLED` | `src/services/discord/commands/command_policy.rs:272` | - `high_risk_enabled_via_env` — explicit opt-in via `AGENTDESK_DISCORD_HIGH_RISK_ENABLED=1`. |
 | `AGENTDESK_E2E_CHANNEL_IDS` | `src/services/discord/e2e_control.rs:22` (+1 more) | The HTTP route subtree is mounted only when `AGENTDESK_E2E_CONTROL=1` was present when dcserver started, and every operation is restricted to channel IDs captu… |
 | `AGENTDESK_E2E_CONTROL` | `src/services/discord/e2e_control.rs:21` (+1 more) | The HTTP route subtree is mounted only when `AGENTDESK_E2E_CONTROL=1` was present when dcserver started, and every operation is restricted to channel IDs captu… |
-| `AGENTDESK_GH_PATH` | `src/github/mod.rs:17` (+1 more) |  |
+| `AGENTDESK_GH_PATH` | `src/github/mod.rs:20` (+1 more) |  |
 | `AGENTDESK_HEADLESS_DISCORD_NONCE` | `src/services/discord/outbound/manual_delivery/headless_nonce.rs:8` (+1 more) |  |
 | `AGENTDESK_HEADLESS_DURABLE_OUTBOX` | `src/services/discord/turn_bridge/headless_delivery/durable_outbox.rs:8` (+1 more) |  |
 | `AGENTDESK_HOOK_RELAY_FAILURE_MARKER_PARENT_TEST` | `src/services/claude_tui/hook_relay.rs:36` |  |

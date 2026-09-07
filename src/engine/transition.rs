@@ -877,6 +877,7 @@ mod gate_fail_closed_tests {
             clocks: HashMap::new(),
             timeouts: HashMap::new(),
             phase_gate: PhaseGateConfig::default(),
+            fsm_edge_bindings: None,
         }
     }
 
@@ -1103,6 +1104,7 @@ mod dispatch_attached_tests {
             clocks: HashMap::new(),
             timeouts: HashMap::new(),
             phase_gate: PhaseGateConfig::default(),
+            fsm_edge_bindings: None,
         }
     }
 
@@ -1235,6 +1237,7 @@ mod timeout_policy_tests {
             clocks: HashMap::new(),
             timeouts,
             phase_gate: PhaseGateConfig::default(),
+            fsm_edge_bindings: None,
         }
     }
 

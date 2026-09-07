@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "b23edebf86f7cde6e67986187a1a7accc1df68d3",
+  "measured_at_sha": "e7b4745b846429c9063a5948cf3c281ea19ec535",
   "records": [
     {
       "root": "migrations/postgres",
@@ -29242,6 +29242,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:493d48bbdd54a8bb44a9afbe4b8430acb168240069ca91ab5570c5008db87729"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/pipeline_override.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:5c8ded73515f9af5bd1b7adc30cbf641843c25514268215a9ba5eef328759206"
     },
     {
       "root": "src",

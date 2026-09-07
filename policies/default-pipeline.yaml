@@ -165,32 +165,20 @@ phase_gate:
     - issue_closed
     - build_passed
 
-# ── Stage → FSM feedback (#1081) ─────────────────────────────────
+# ── Stage failure moves (#1081, #5718) ───────────────────────────
 #
-# Pipeline stages (stored in the `pipeline_stages` table) may declare
-# an `on_failure` policy. When a stage's dispatch fails (code failure,
-# verdict=reject, timeout exhaust), the pipeline resolver maps that to
-# one of the following FSM-visible actions:
+# This file declares no stage-failure policy. Card timeout sweeps and
+# the failure moves they trigger are decided by `policies/timeouts/*.js`
+# — that is the source of truth for both.
 #
-#   on_failure: fail      — leave card in current state, surface to PMD
-#                           via escalation (default).
-#   on_failure: rework    — route the card back into a rework loop by
-#                           transitioning toward `in_progress` via the
-#                           review-rework path. This lets the FSM reuse
-#                           its existing `review → in_progress` gated
-#                           transition (see `transitions` above) instead
-#                           of teaching stages how to mutate status.
-#   on_failure: skip      — mark this stage skipped, advance to the next
-#                           stage without changing FSM state.
+# A `stage_failure_policy:` block used to sit here (#1081). `PipelineConfig`
+# has no such field, so serde discarded it on every load and no code ever
+# read it; removed in #5718. Unknown top-level keys are now rejected at
+# load time instead of being dropped silently.
 #
-# `on_failure_target` (optional) pins the destination stage when the
-# default next-stage resolution is insufficient. The FSM state changes
-# triggered by these policies still flow exclusively through the FSM
-# executor — the stage layer never writes `kanban_cards.status` itself.
-
-stage_failure_policy:
-  default: fail
-  allowed: [fail, rework, skip]
+# The `pipeline_stages` columns `on_failure` / `on_failure_target` /
+# `max_retries` / `backoff` remain stored config metadata that no runtime
+# executor reads (see migrations/postgres/0076_pipeline_stages_backoff.sql).
 
 # ── Clocks ────────────────────────────────────────────────────────
 #
@@ -209,7 +197,18 @@ clocks:
 
 # ── Timeouts ──────────────────────────────────────────────────────
 #
-# Evaluated by timeouts.js on each onTick cycle.
+# NOT read by the live timeout sweep (#5718). `policies/timeouts/*.js`
+# never reads `config.timeouts` — `agentdesk.pipeline.getTimeout` has no
+# callers, and the sweep takes its durations from `agentdesk.config.get`
+# (e.g. `requested_timeout_min`, default 45) via `getTimeoutInterval` in
+# `policies/lib/timeouts-helpers.js`.
+#
+# The one reader is the Rust `decide_timeout` reducer, reached through
+# `agentdesk.timeouts.previewTimeoutDecision` (src/engine/ops/timeouts_ops.rs)
+# from `shadowTimeoutDecision`. That path is preview-only: it emits the
+# `[timeout_shadow]` comparison records consumed by
+# `scripts/timeout-shadow-gate.mjs` (#3950) and never moves a card.
+# Retiring this block therefore means retiring that shadow harness too.
 
 timeouts:
   # #1082: max_retries >= 1, backoff: exponential (1m→5m→15m),

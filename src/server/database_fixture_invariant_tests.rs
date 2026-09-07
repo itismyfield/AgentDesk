@@ -37,19 +37,14 @@ mod tests {
         ),
     ];
 
-    /// Every in-tree fixture constructor that used to assemble a URL from
-    /// `PGHOST`/`PGPORT`. Keep this inventory explicit: a new fixture source
-    /// must be added here before it can create a database. The tunnel test and
-    /// `db::fixture_target` are intentionally out of scope: they test the
-    /// environment contract itself rather than selecting a test fixture.
-    ///
-    /// The list is maintained by hand: `include_str!` needs a compile-time
-    /// literal, so nothing compares it against the tree, and it has already
-    /// drifted — the five entries added for #5510 called `create_test_database`
-    /// while sitting outside every assertion below. `engine::ops::config_ops`
-    /// is a sixth caller left out on purpose: it reaches the base only through
-    /// `dispatch::test_support::postgres_base_database_url` (listed here), so
-    /// its own source carries none of the tokens these assertions read.
+    /// Fixture sources that select the shared base directly, beyond the four
+    /// cluster fixtures above. The bounded constructor inventory below checks
+    /// both lists against direct calls in `src/**/*.rs`, including the real
+    /// fixture in `db::postgres`; that file is not merely a helper definition.
+    /// `engine::ops::config_ops` delegates base selection through the listed
+    /// `dispatch::test_support` and is an explicit exception below, not covered
+    /// by these per-source token assertions. Target-parser and tunnel contract
+    /// tests have no direct constructor calls and need no inventory exception.
     const PG_FIXTURE_SOURCES: &[(&str, &str)] = &[
         (
             "db::auto_queue::test_support",
@@ -67,6 +62,7 @@ mod tests {
             "db::dispatches::delivery_events",
             include_str!("../db/dispatches/delivery_events.rs"),
         ),
+        ("db::postgres", include_str!("../db/postgres.rs")),
         (
             "db::prompt_manifests::tests",
             include_str!("../db/prompt_manifests/tests.rs"),
@@ -193,6 +189,181 @@ mod tests {
                 !source.contains(&needle),
                 "{module} hardcodes {needle}; a fixture must never name a server \
                  the lane did not configure (#5218)"
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_sources_never_hardcode_a_database_server_address() {
+        let needle = forbidden_address();
+        for (module, source) in PG_FIXTURE_SOURCES {
+            assert!(
+                !source.contains(&needle),
+                "{module} hardcodes {needle}; fixture addresses must come from the lane (#5510)"
+            );
+        }
+    }
+
+    /// Lexical code tokens only: comments (including nested blocks), ordinary
+    /// strings, raw strings and character literals cannot register a caller.
+    fn fixture_code_tokens(source: &str) -> Vec<&str> {
+        static LEXEMES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let lexemes = LEXEMES.get_or_init(|| {
+            regex::Regex::new(
+                r#"(?s)//[^\n]*|/\*|(?:br|cr|r)(#*)"|(?:b|c)?"(?:\\.|[^"\\])*"|b?'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.)|[^'\\])'|(?:r#)?[A-Za-z_][A-Za-z_0-9]*|[^\s]"#,
+            )
+            .expect("fixture source lexer")
+        });
+        let mut tokens = Vec::new();
+        let mut offset = 0;
+        while let Some(parts) = lexemes.captures(&source[offset..]) {
+            let token = parts.get(0).expect("matched lexeme");
+            offset += token.end();
+            let token = token.as_str();
+            if token == "/*" {
+                let mut depth = 1;
+                while depth > 0 {
+                    let rest = &source[offset..];
+                    assert!(!rest.is_empty(), "unterminated source comment");
+                    if rest.starts_with("/*") {
+                        depth += 1;
+                        offset += 2;
+                    } else if rest.starts_with("*/") {
+                        depth -= 1;
+                        offset += 2;
+                    } else {
+                        offset += rest.chars().next().expect("comment character").len_utf8();
+                    }
+                }
+            } else if let Some(hashes) = parts.get(1) {
+                let end = format!("\"{}", hashes.as_str());
+                offset += source[offset..]
+                    .find(&end)
+                    .expect("unterminated raw source string")
+                    + end.len();
+            } else if !token.starts_with("//")
+                && !token.contains('"')
+                && !token.starts_with('\'')
+                && !token.starts_with("b'")
+            {
+                tokens.push(token.strip_prefix("r#").unwrap_or(token));
+            }
+        }
+        tokens
+    }
+
+    fn has_named_fixture_call(source: &str, name: &str) -> bool {
+        if !source.contains(name) {
+            return false;
+        }
+        let tokens = fixture_code_tokens(source);
+        tokens
+            .windows(2)
+            .enumerate()
+            .any(|(index, pair)| pair == [name, "("] && (index == 0 || tokens[index - 1] != "fn"))
+    }
+
+    /// This is a bounded lexical inventory, not a Rust call graph: it checks
+    /// regular files under `src`, without following symlinks or resolving
+    /// aliases, generated code, macro expansion or generic call syntax. A
+    /// direct named invocation in macro input is conservatively a caller.
+    #[test]
+    fn fixture_constructor_sources_are_registered() {
+        // Assemble the name so the lane classifier does not mark this audit
+        // as database-dependent from a seed identifier in its own source.
+        let constructor = ["create", "test", "database"].join("_");
+        let delegated = fixture_code_tokens(include_str!("../engine/ops/config_ops.rs"));
+        for helper in ["postgres_base_database_url", "postgres_admin_database_url"] {
+            let qualified = [
+                "crate",
+                ":",
+                ":",
+                "dispatch",
+                ":",
+                ":",
+                "test_support",
+                ":",
+                ":",
+                helper,
+                "(",
+            ];
+            assert!(
+                delegated
+                    .windows(qualified.len())
+                    .any(|call| call == qualified),
+                "config_ops must keep delegating to dispatch::test_support::{helper}"
+            );
+        }
+        let expected: std::collections::BTreeSet<_> = FIXTURE_SOURCES
+            .iter()
+            .chain(PG_FIXTURE_SOURCES)
+            .map(|(module, _)| module.to_string())
+            .chain(std::iter::once("engine::ops::config_ops".to_string()))
+            .collect();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut pending = vec![root.clone()];
+        let mut actual = std::collections::BTreeSet::new();
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(directory).expect("read fixture source directory") {
+                let entry = entry.expect("fixture source entry");
+                let kind = entry.file_type().expect("fixture source type");
+                let path = entry.path();
+                if kind.is_dir() {
+                    pending.push(path);
+                } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
+                    let source = std::fs::read_to_string(&path).expect("read fixture source");
+                    if has_named_fixture_call(&source, &constructor) {
+                        let relative = path.strip_prefix(&root).expect("source below root");
+                        let mut module = relative.with_extension("");
+                        if module.file_name().is_some_and(|name| name == "mod") {
+                            module.pop();
+                        }
+                        actual.insert(
+                            module
+                                .iter()
+                                .map(|part| part.to_str().expect("UTF-8 module"))
+                                .collect::<Vec<_>>()
+                                .join("::"),
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            actual, expected,
+            "fixture constructor inventory drift (#5510)"
+        );
+    }
+
+    #[test]
+    fn fixture_constructor_inventory_distinguishes_code_from_prose() {
+        let name = ["create", "test", "database"].join("_");
+        for source in [
+            format!("// {name}();\nfn unrelated() {{}}"),
+            format!("/* outer /* nested */ {name}(); */"),
+            format!("async fn {name}(url: &str) {{}}"),
+            format!("async fn r#{name}(url: &str) {{}}"),
+            format!(r#"let note = "escaped \" {name}()";"#),
+            format!(r####"let note = br###"quoted " {name}() /* prose */"###;"####),
+            format!("fn other_{name}() {{}}"),
+        ] {
+            assert!(
+                !has_named_fixture_call(&source, &name),
+                "not a call: {source}"
+            );
+        }
+        for source in [
+            format!("{name}(url);"),
+            format!("crate::db::r#{name}(url);"),
+            format!(
+                "fn fixture<'a>() {{ let quote = '\"'; crate::db::{name} /* call */\n(url); }}"
+            ),
+            format!("fn {name}() {{}} fn fixture() {{ {name}(); }}"),
+            format!(r####"let note = r###"quoted " ()"###; {name}(url);"####),
+        ] {
+            assert!(
+                has_named_fixture_call(&source, &name),
+                "missed call: {source}"
             );
         }
     }
