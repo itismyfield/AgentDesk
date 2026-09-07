@@ -324,35 +324,10 @@ mod tests {
         assert!(stale_reconcile("empty-errors/repo", 2, &[]));
     }
 
-    #[derive(Clone)]
-    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for LogBuffer {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn first_and_changed_warnings_are_warn_and_repeats_remain_debug() {
-        // With one live dispatcher, tracing-core can cache no interest when
-        // another test first registers our shared callsites without a local
-        // subscriber. Keep two dispatchers alive during this parallel capture.
-        let _other_dispatch = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let writer = LogBuffer(output.clone());
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_writer(move || writer.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        let capture = crate::github::test_support::LogCapture::new();
+        tracing::dispatcher::with_default(&capture.dispatch, || {
             assert!(unknown_agent(
                 "log-level/repo",
                 1,
@@ -372,7 +347,7 @@ mod tests {
                 "explicit label"
             ));
         });
-        let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let logs = capture.take();
         assert_eq!(
             logs.lines().filter(|line| line.contains("WARN")).count(),
             2,

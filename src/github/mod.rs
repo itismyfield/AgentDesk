@@ -1,4 +1,6 @@
 pub mod sync;
+#[cfg(test)]
+mod test_support;
 pub mod triage;
 pub(crate) mod warn_dedupe;
 

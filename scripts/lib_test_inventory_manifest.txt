@@ -769,6 +769,8 @@ github::sync::terminal_open_alert_tests::stale_candidate_selection_excludes_pipe
 github::sync::terminal_open_alert_tests::stale_candidate_selection_rotates_past_old_open_frontier
 github::sync::terminal_open_alert_tests::stale_candidate_selection_skips_normal_fetch_window
 github::sync::terminal_open_alert_tests::stale_fetch_failure_records_metric_without_dropping_normal_issues
+github::sync::warning_tests::stale_reconcile_caller_keeps_repeats_debug_and_changed_errors_warn
+github::sync::warning_tests::terminal_open_caller_warns_repeats_and_recovers_from_loaded_state
 github::triage::tests::broad_signals_require_boundaries
 github::triage::tests::conflicting_owner_signals_leave_pmd_fallback
 github::triage::tests::existing_assigned_card_disables_inference_without_agent_label
@@ -779,6 +781,7 @@ github::triage::tests::path_and_label_signals_still_route
 github::triage::tests::priority_inference_from_labels
 github::triage::tests::single_owner_signal_infers_agent
 github::triage::tests::unknown_agent_bucket_is_not_deterministic_coverage
+github::triage::warning_tests::unknown_agent_caller_preserves_routing_identity_and_recovery_paths
 github::warn_dedupe::tests::capacity_and_identity_size_are_bounded_without_silencing_new_warnings
 github::warn_dedupe::tests::concurrent_duplicate_observations_warn_exactly_once
 github::warn_dedupe::tests::first_and_changed_warnings_are_warn_and_repeats_remain_debug

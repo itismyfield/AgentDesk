@@ -281,6 +281,26 @@ async fn validate_agent_routing_pg(
     issue: &GhIssue,
     routing: &AgentRoutingResolution,
 ) -> Result<ValidatedAgentRouting, String> {
+    validate_agent_routing(repo, issue, routing, |agent_id| async move {
+        sqlx::query_scalar::<_, String>("SELECT id FROM agents WHERE id = $1")
+            .bind(&agent_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("resolve agent label {agent_id}: {error}"))
+    })
+    .await
+}
+
+async fn validate_agent_routing<F, Fut>(
+    repo: &str,
+    issue: &GhIssue,
+    routing: &AgentRoutingResolution,
+    lookup: F,
+) -> Result<ValidatedAgentRouting, String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<String>, String>>,
+{
     if matches!(routing, AgentRoutingResolution::Unrouted { .. }) {
         super::warn_dedupe::unknown_agent(repo, issue.number, None, "unrouted");
     }
@@ -328,11 +348,7 @@ async fn validate_agent_routing_pg(
         }
     };
 
-    let exists = sqlx::query_scalar::<_, String>("SELECT id FROM agents WHERE id = $1")
-        .bind(agent_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| format!("resolve agent label {agent_id}: {error}"))?;
+    let exists = lookup(agent_id.to_string()).await?;
 
     if exists.is_none() {
         super::warn_dedupe::unknown_agent(repo, issue.number, Some(agent_id), source);
@@ -666,27 +682,13 @@ fn infer_priority(labels: &[super::sync::GhLabel]) -> &'static str {
 }
 
 #[cfg(test)]
+mod warning_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::github::sync::GhLabel;
-
-    fn issue(title: &str, body: Option<&str>, labels: &[&str]) -> GhIssue {
-        GhIssue {
-            number: 42,
-            state: "OPEN".to_string(),
-            title: title.to_string(),
-            labels: labels
-                .iter()
-                .map(|name| GhLabel {
-                    name: (*name).to_string(),
-                })
-                .collect(),
-            body: body.map(str::to_string),
-            url: None,
-            closed_at: None,
-            closed_by_pull_requests_references: Vec::new(),
-        }
-    }
+    use crate::github::test_support::issue;
 
     #[test]
     fn priority_inference_from_labels() {

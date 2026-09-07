@@ -6,6 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+mod card_state;
+#[cfg(test)]
+mod warning_tests;
+
 const ISSUE_JSON_FIELDS: &str =
     "number,state,title,labels,body,url,closedAt,closedByPullRequestsReferences";
 const PRIMARY_FETCH_LIMIT: u32 = 100;
@@ -313,13 +317,7 @@ async fn sync_loaded_github_issues_for_repo_pg(
                 agent_overrides,
             )
             .await?;
-            let is_terminal = pipeline.is_terminal(&card.status);
-            super::warn_dedupe::terminal_open(
-                repo,
-                issue.number,
-                &card.id,
-                issue.state == "OPEN" && is_terminal,
-            );
+            let is_terminal = card_state::observe(repo, issue, &card, &pipeline);
 
             if issue.state == "CLOSED" && !is_terminal {
                 close_pg_card_for_issue(pool, &card, &pipeline).await?;
