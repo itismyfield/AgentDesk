@@ -7239,6 +7239,7 @@ services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests::emit_tu
 services::onboarding::canonical_status_tests::new_agents_start_with_core_canonical_idle_status
 services::onboarding::channel::tests::onboarding_routing_channel_creation_sends_configured_guild_and_category
 services::onboarding::channel::tests::onboarding_routing_defaults_and_category_retry_identity
+services::onboarding::channel::tests::onboarding_routing_guild_override_preserves_runtime_and_artifacts
 services::onboarding::credential_token_permission_tests::write_credential_token_creates_owner_only_secret_file
 services::onboarding::secondary_command_provider_tests::supported_primary_providers_have_stable_secondary_defaults
 services::opencode::tests::hard_kill_marks_retiring_only_for_exclusive_session
@@ -7386,6 +7387,7 @@ services::provider::cancel_watchdog::tests::failed_pid_cleanup_keeps_watchdog_al
 services::provider::channel_rules::tests::onboarding_routing_add_override_delete_and_longest_match
 services::provider::channel_rules::tests::onboarding_routing_empty_config_preserves_registry_behavior
 services::provider::channel_rules::tests::onboarding_routing_installed_snapshot_controls_dispatch
+services::provider::channel_rules::tests::onboarding_routing_legacy_identity_survives_default_changes
 services::provider::channel_rules::tests::onboarding_routing_reports_typos_ambiguity_and_normalized_collisions
 services::provider::codex_context_window_tests::blank_slug_entry_never_exact_matches_empty_model
 services::provider::codex_context_window_tests::cache_present_with_empty_slug_returns_max_of_cache

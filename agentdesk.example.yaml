@@ -479,11 +479,10 @@ automation:
 # - default_categories: operator-named labels → Discord category (channel)
 #   IDs. The wizard / factory agent picks from these labels rather than
 #   hardcoded numeric IDs.
-# - provider_suffix_map: channel-name suffix → CLI provider id. Mirrors the
-#   dashboard `setupWizardHelpers.ts::PROVIDER_SUFFIX_MAP`. Leave empty to
-#   fall back to the built-in default.
-# - provider_options: providers offered by the wizard's picker (empty =
-#   all built-in providers).
+# - provider_suffix_map: overlays registry defaults. Add or replace a key;
+#   use null to remove a suffix. Empty preserves all registry defaults.
+#   The example adds -gem; -gm (gemini) and -gx (grok) remain registered.
+# - provider_options: reserved compatibility field; currently no runtime effect.
 # - default_provider: provider used when nothing else hints (empty = registry
 #   default, currently `claude`).
 onboarding:
@@ -499,10 +498,8 @@ onboarding:
     "-gem": gemini
     "-oc": opencode
     "-qw": qwen
-  provider_options:
-    - claude
-    - codex
-    - opencode
+    # "-gm": null # Uncomment to remove the registry's Gemini suffix.
+  provider_options: []
   default_provider: claude
 
 # agentdesk.yaml 변경을 감시해 hot-swappable 설정을 재적용합니다. 기본값은 true입니다.

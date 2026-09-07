@@ -539,6 +539,8 @@ pub struct CompleteBody {
     pub command_provider_2: Option<String>,
     #[serde(default)]
     pub guild_id: String,
+    #[serde(skip)]
+    runtime_guild_id: Option<String>,
     pub owner_id: Option<String>,
     pub provider: Option<String>,
     pub channels: Vec<ChannelMapping>,
@@ -1018,8 +1020,6 @@ async fn discord_create_text_channel(
 
     let payload = channel::create_payload(channel_name, mapping);
 
-    // Category labels are resolved and validated before channel resolution.
-    // The creation payload carries the resolved ID as Discord's parent_id.
     // Existing channels in other categories are excluded by the lookup below.
 
     let resp = client
@@ -2532,7 +2532,7 @@ fn persist_complete_filesystem_artifacts(
 
     if let Err(error) = write_agentdesk_discord_config(
         root,
-        &body.guild_id,
+        channel::runtime_guild_id(body),
         &body.token,
         provider,
         body.command_token_2.as_deref(),
@@ -2571,7 +2571,7 @@ fn persist_complete_filesystem_artifacts(
         provider,
         body.command_token_2.as_deref(),
         body.command_provider_2.as_deref(),
-        &body.guild_id,
+        channel::runtime_guild_id(body),
         body.owner_id.as_deref(),
         body.announce_token.as_deref(),
         body.notify_token.as_deref(),

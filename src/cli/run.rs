@@ -732,16 +732,16 @@ fn handle_show(action: ShowAction) -> std::result::Result<(), String> {
 /// channel. Operator-facing: pre-create matching sessions with
 /// `tmux new -s "$(agentdesk show session-name --channel <id> --provider <kind>)"`.
 ///
-/// Provider resolution is deliberately *offline-reproducible*:
+/// Provider resolution is reproducible for a fixed config, without a server:
 ///   1. explicit `--provider` flag — always wins;
-///   2. channel-suffix heuristic when the channel ends in a registered
-///      provider suffix (`-cc`/`-cdx`/`-gm`/`-oc`/`-qw`);
+///   2. channel suffix from the selected YAML overlay and registry defaults;
+///      pin `AGENTDESK_CONFIG` to avoid working-directory-dependent selection;
 ///   3. otherwise, error out and require the operator to pass `--provider`.
 ///
 /// We do *not* consult the live agent_bindings table here. That would make
-/// the output depend on database state that operators can't see from a
-/// terminal — the whole point of the contract is determinism. Discovery /
-/// supervisor code (E2/E3) that *does* have the binding directory should call
+/// the output depend on database state. A selected config must fully validate.
+/// Explicit --provider bypasses loading. Discovery and supervisor code that
+/// has the binding directory should call
 /// [`crate::services::cluster::session_matcher::expected_session_name_for`]
 /// directly.
 fn cmd_show_session_name(channel: &str, provider: Option<&str>) -> std::result::Result<(), String> {

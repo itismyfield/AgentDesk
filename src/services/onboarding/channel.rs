@@ -24,7 +24,13 @@ pub(super) fn apply_config_defaults(
     body: &CompleteBody,
 ) -> CompleteBody {
     let mut body = body.clone();
+    body.runtime_guild_id = None;
     if body.guild_id.trim().is_empty() {
+        body.runtime_guild_id = config
+            .discord
+            .guild_id
+            .clone()
+            .filter(|guild| !guild.trim().is_empty());
         body.guild_id = config
             .onboarding
             .effective_guild_id(&config.discord)
@@ -47,6 +53,11 @@ pub(super) fn apply_config_defaults(
         }
     }
     body
+}
+
+/// An omitted guild may target another server without moving existing bots.
+pub(super) fn runtime_guild_id(body: &CompleteBody) -> &str {
+    body.runtime_guild_id.as_deref().unwrap_or(&body.guild_id)
 }
 
 pub(super) fn create_payload(channel_name: &str, mapping: &ChannelMapping) -> serde_json::Value {
@@ -86,7 +97,7 @@ pub(super) fn fingerprint_categories(payload: &mut serde_json::Value, channels: 
             mapping
                 .category
                 .as_ref()
-                .map(|category| (&mapping.role_id, category))
+                .map(|category| (mapping.role_id.trim(), category))
         })
         .collect();
     if !categories.is_empty() {
@@ -290,6 +301,88 @@ mod tests {
     }
 
     #[test]
+    fn onboarding_routing_guild_override_preserves_runtime_and_artifacts() {
+        use crate::services::onboarding;
+        for (existing, explicit, expected) in [
+            (Some("111"), None, "111"),
+            (Some("111"), Some("444"), "444"),
+            (None, None, "222"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let mut config = config();
+            config.discord.guild_id = existing.map(str::to_string);
+            config.policies.dir =
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+            std::fs::create_dir_all(crate::runtime_layout::config_dir(root)).unwrap();
+            let path = onboarding::onboarding_config_path(root);
+            crate::config::save_to_path(&path, &config).unwrap();
+            let mut requested = request();
+            requested.channels.clear();
+            requested.guild_id = explicit.unwrap_or_default().into();
+            let body = apply_config_defaults(&config, &requested);
+            assert_eq!(body.guild_id, explicit.unwrap_or("222"));
+            let policy = onboarding::OnboardingRerunPolicy::ReuseExisting;
+            let ctx = onboarding::CompleteErrorContext {
+                provider: "gemini",
+                rerun_policy: policy,
+                explicit_rerun_policy: false,
+            };
+            let mut checkpoint = onboarding::build_onboarding_completion_state(
+                "test",
+                &body.guild_id,
+                "gemini",
+                policy,
+                onboarding::OnboardingCompletionStage::ChannelsResolved,
+                false,
+                false,
+                None,
+                &[],
+            );
+            let result = onboarding::persist_complete_filesystem_artifacts(
+                &ctx,
+                root,
+                &body,
+                "gemini",
+                &[],
+                &mut checkpoint,
+            );
+            let saved = crate::config::load_from_path(&path).unwrap();
+            assert_eq!(saved.discord.guild_id.as_deref(), Some(expected));
+            assert_eq!(saved.onboarding.guild_id.as_deref(), Some("222"));
+            // BotConfig's pre-existing skip_serializing token policy prevents
+            // full completion here. Guild verification must pass before that
+            // unrelated check; supplement only the temporary test fixture.
+            assert!(
+                result.unwrap_err().1["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("primary command token was not persisted")
+            );
+            let mut yaml: serde_yaml::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            yaml["discord"]["bots"]["command"]["token"] =
+                serde_yaml::Value::String(body.token.clone());
+            std::fs::write(&path, serde_yaml::to_string(&yaml).unwrap()).unwrap();
+            assert!(
+                onboarding::verify_onboarding_settings_artifacts(
+                    root,
+                    &body.token,
+                    "gemini",
+                    None,
+                    None,
+                    expected,
+                    None,
+                    None,
+                    None,
+                    &[]
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
     fn onboarding_routing_defaults_and_category_retry_identity() {
         let config = config();
         let body = apply_config_defaults(&config, &request());
@@ -297,6 +390,12 @@ mod tests {
         assert_eq!(body.provider.as_deref(), Some("gemini"));
         assert_eq!(body.channels[0].category.as_deref(), Some("333"));
         let first = super::super::requested_channel_fingerprint(&body, "gemini").unwrap();
+        let mut whitespace = body.clone();
+        whitespace.channels[0].role_id.push(' ');
+        assert_eq!(
+            first,
+            super::super::requested_channel_fingerprint(&whitespace, "gemini").unwrap()
+        );
         let mut other = body.clone();
         other.channels[0].category = Some("444".into());
         assert_ne!(

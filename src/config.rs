@@ -2643,8 +2643,8 @@ pub struct OnboardingConfig {
     /// to remove that suffix; an empty map preserves the registry defaults.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub provider_suffix_map: std::collections::BTreeMap<String, Option<String>>,
-    /// Optional list of providers offered to the wizard's provider picker.
-    /// When empty, all providers from the built-in registry are offered.
+    /// Reserved compatibility field; currently has no runtime effect.
+    /// Dashboard provider-picker settings are maintained separately.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_options: Vec<String>,
     /// Default provider id when nothing else (channel suffix, agent_id)

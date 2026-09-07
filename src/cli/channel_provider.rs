@@ -49,5 +49,15 @@ mod tests {
                 .unwrap_err()
                 .contains("unknown field")
         );
+        std::fs::write(
+            &path,
+            "server: {}\nescalation: {schedule: {timezone: invalid}}\n",
+        )
+        .unwrap();
+        assert!(
+            from_path("dev-cc", &path)
+                .unwrap_err()
+                .contains("schedule.timezone")
+        );
     }
 }

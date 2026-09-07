@@ -453,7 +453,7 @@ pub fn parse_provider_and_channel_from_tmux_name(
             }
         }
     }
-    ProviderKind::default_channel_provider().map(|provider| (provider, without_suffix.to_string()))
+    channel_rules::legacy_default().map(|provider| (provider, without_suffix.to_string()))
 }
 
 pub fn compose_structured_turn_prompt(

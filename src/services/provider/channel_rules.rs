@@ -3,6 +3,14 @@
 use super::ProviderKind;
 use crate::config::OnboardingConfig;
 
+/// Legacy tmux identity uses the registry default, never live routing policy.
+pub(super) fn legacy_default() -> Option<ProviderKind> {
+    super::provider_registry()
+        .iter()
+        .find(|entry| entry.default_channel_provider)
+        .and_then(|entry| entry.kind())
+}
+
 pub(crate) fn warnings(config: &OnboardingConfig) -> Vec<String> {
     let mut warnings = Vec::new();
     let mut normalized = std::collections::BTreeMap::new();
@@ -37,11 +45,7 @@ pub(crate) fn warnings(config: &OnboardingConfig) -> Vec<String> {
     let suffixes: Vec<_> = merged.keys().collect();
     for (index, left) in suffixes.iter().enumerate() {
         for right in &suffixes[index + 1..] {
-            // Include bare suffix tokens: operators commonly expect '-c' and
-            // '-cc' to overlap even though the hyphens separate exact matches.
-            let a = left.trim_start_matches('-');
-            let b = right.trim_start_matches('-');
-            if a.ends_with(b) || b.ends_with(a) {
+            if left.ends_with(right.as_str()) || right.ends_with(left.as_str()) {
                 warnings.push(format!("provider_suffix_map suffixes {left:?} and {right:?} overlap; longest exact suffix wins"));
             }
         }
@@ -55,6 +59,31 @@ mod tests {
 
     fn parse(yaml: &str) -> OnboardingConfig {
         serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn onboarding_routing_legacy_identity_survives_default_changes() {
+        if std::env::var_os("ADK_LEGACY_IDENTITY_TEST_CHILD").is_none() {
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "services::provider::channel_rules::tests::onboarding_routing_legacy_identity_survives_default_changes"])
+                .env("ADK_LEGACY_IDENTITY_TEST_CHILD", "1").status().unwrap().success());
+            return;
+        }
+        let mut config = crate::config::Config::default();
+        for default in ["claude", "qwen", "grok"] {
+            config.onboarding.default_provider = Some(default.into());
+            crate::config_live_reload::install(config.clone());
+            assert_eq!(
+                ProviderKind::default_channel_provider(),
+                ProviderKind::from_str(default)
+            );
+            assert_eq!(
+                crate::services::provider::parse_provider_and_channel_from_tmux_name(
+                    "AgentDesk-legacy-channel"
+                ),
+                Some((ProviderKind::Claude, "legacy-channel".into()))
+            );
+        }
     }
 
     #[test]
@@ -130,9 +159,10 @@ mod tests {
     #[test]
     fn onboarding_routing_reports_typos_ambiguity_and_normalized_collisions() {
         let config = parse(
-            "provider_suffix_map: {'-c': codex, '-cc': claud, 'cc': claude, '': codex}\ndefault_provider: typo",
+            "provider_suffix_map: {'-long-cc': codex, '-cc': claud, 'cc': claude, '': codex}\ndefault_provider: typo",
         );
         let messages = warnings(&config).join("\n");
+        assert!(warnings(&parse("provider_suffix_map: {'-m': claude}")).is_empty());
         for expected in [
             "unknown provider",
             "overlap",
