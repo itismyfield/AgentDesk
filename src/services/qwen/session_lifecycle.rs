@@ -16,8 +16,10 @@ pub(super) fn execute_streaming_local_tmux(
     report_provider: Option<ProviderKind>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
-    let auth_overlay =
-        crate::services::discord::overlay_from_tmux_session(ProviderKind::Qwen, tmux_session_name)?;
+    let auth_overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
+        ProviderKind::Qwen,
+        tmux_session_name,
+    )?;
     let auth_env_lines =
         crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
     let session_exists = tmux_session_exists(tmux_session_name);
@@ -383,8 +385,10 @@ pub(super) fn execute_streaming_local_process(
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
 
-    let overlay =
-        crate::services::discord::overlay_from_tmux_session(ProviderKind::Qwen, session_name)?;
+    let overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
+        ProviderKind::Qwen,
+        session_name,
+    )?;
     let config = SessionConfig {
         session_name: session_name.to_string(),
         working_dir: working_dir.to_string(),

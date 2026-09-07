@@ -58,7 +58,7 @@ impl ProviderTurnRequest {
                 .map(ProviderSessionToken::new_opaque)
         };
         let auth_overlay =
-            crate::services::discord::spawn_auth_overlay(provider.clone(), channel_id)
+            crate::services::discord::org_schema::spawn_auth_overlay(provider.clone(), channel_id)
                 .map_err(|error| format!("provider auth profile resolution failed: {error}"))?;
         Ok(Self {
             provider,

@@ -38,7 +38,7 @@ pub struct LoginCompleteBody {
 
 #[derive(Debug, Deserialize)]
 pub struct AuthProfilePatchBody {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_auth_profile_patch")]
     pub auth_profile: Option<Value>,
 }
 
@@ -48,13 +48,19 @@ pub struct PrimaryProfileBody {
     pub profile_id: Option<String>,
 }
 
+pub(super) fn deserialize_auth_profile_patch<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
 /// GET /api/provider-auth-profiles
 pub async fn list_provider_auth_profiles(
     State(state): State<AppState>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
-    let catalog = crate::services::discord::provider_auth_catalog();
-    let primary_profiles = crate::services::discord::provider_auth_primary_profiles();
-    let bindings = crate::services::discord::list_profile_bindings();
+    let catalog = crate::services::discord::org_schema::provider_auth_catalog();
+    let primary_profiles = crate::services::discord::org_schema::provider_auth_primary_profiles();
+    let bindings = crate::services::discord::org_schema::list_profile_bindings();
     let usage_by_key = if let Some(pool) = state.pg_pool_ref() {
         let now = chrono::Utc::now().timestamp();
         crate::services::analytics::build_rate_limit_provider_payloads_pg(pool, now)
@@ -171,7 +177,7 @@ pub async fn login_start(
             kind.as_str().to_string(),
         )));
     }
-    let catalog = crate::services::discord::provider_auth_catalog();
+    let catalog = crate::services::discord::org_schema::provider_auth_catalog();
     let profile_id = match body
         .profile_id
         .as_deref()
@@ -389,10 +395,12 @@ fn parse_auth_profile_patch(value: &Value) -> Result<Option<&str>, AppError> {
         Value::Null => Ok(None),
         Value::String(raw) => {
             let trimmed = raw.trim();
-            if trimmed.is_empty() || trimmed == provider_auth_profile::DEFAULT_PROFILE_ID {
+            if trimmed.is_empty() {
                 Ok(None)
             } else {
-                validate_profile_id(trimmed).map_err(profile_error)?;
+                if trimmed != provider_auth_profile::DEFAULT_PROFILE_ID {
+                    validate_profile_id(trimmed).map_err(profile_error)?;
+                }
                 Ok(Some(trimmed))
             }
         }
@@ -406,7 +414,7 @@ fn account_payload(
     profile_id: &str,
     home: &str,
     provider: &ProviderKind,
-    bindings: &[crate::services::discord::ProfileBinding],
+    bindings: &[crate::services::discord::org_schema::ProfileBinding],
     usage_by_key: &HashMap<(String, String), Value>,
 ) -> Value {
     let mut bound_agents: Vec<String> = bindings
@@ -543,7 +551,7 @@ mod tests {
 
     #[test]
     fn test_013_account_payload_includes_usage_without_secrets() {
-        let bindings = vec![crate::services::discord::ProfileBinding {
+        let bindings = vec![crate::services::discord::org_schema::ProfileBinding {
             agent_id: "coder".into(),
             provider: "codex".into(),
             profile_id: "work".into(),
@@ -597,7 +605,18 @@ mod tests {
     #[test]
     fn auth_profile_patch_null_clears() {
         assert_eq!(parse_auth_profile_patch(&Value::Null).unwrap(), None);
-        assert_eq!(parse_auth_profile_patch(&json!("default")).unwrap(), None);
+        assert_eq!(
+            parse_auth_profile_patch(&json!("default")).unwrap(),
+            Some("default")
+        );
+        let explicit: AuthProfilePatchBody =
+            serde_json::from_value(json!({"auth_profile": null})).unwrap();
+        assert_eq!(explicit.auth_profile, Some(Value::Null));
+        let absent: AuthProfilePatchBody = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(absent.auth_profile, None);
+        let agent_body: super::super::agents_crud::UpdateAgentBody =
+            serde_json::from_value(json!({"auth_profile": null})).unwrap();
+        assert!(format!("{agent_body:?}").contains("auth_profile: Some(Null)"));
         assert_eq!(
             parse_auth_profile_patch(&json!("work")).unwrap(),
             Some("work")

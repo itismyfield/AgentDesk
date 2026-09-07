@@ -177,6 +177,8 @@ fn load_org_document(path: &Path) -> Result<OrgDocument, String> {
     serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse '{}': {e}", path.display()))
 }
 
+static ORG_PROFILE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn persist_org_document(path: &Path, document: &OrgDocument) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -220,6 +222,9 @@ pub(crate) fn set_provider_primary_profile_at(
 ) -> Result<(), String> {
     let provider = provider.trim().to_ascii_lowercase();
     let profile_id = profile_id.trim();
+    let _guard = ORG_PROFILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "org profile writer lock poisoned".to_string())?;
     let mut document = load_org_document(org_path)?;
     if profile_id.is_empty() || profile_id == "default" {
         document.provider_auth_primary_profiles.remove(&provider);
@@ -253,6 +258,9 @@ pub(crate) fn append_provider_auth_profile_at(
     def: ProviderAuthProfileDef,
 ) -> Result<(), String> {
     validate_profile_def(profile_id, &def).map_err(|error| error.to_string())?;
+    let _guard = ORG_PROFILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "org profile writer lock poisoned".to_string())?;
     let mut document = load_org_document(org_path)?;
     if let Some(existing) = document.provider_auth_profiles.get(profile_id) {
         if existing == &def {
@@ -278,6 +286,9 @@ pub(crate) fn set_agent_auth_profile_at(
     role_id: &str,
     auth_profile: Option<&str>,
 ) -> Result<(), String> {
+    let _guard = ORG_PROFILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "org profile writer lock poisoned".to_string())?;
     let mut document = load_org_document(org_path)?;
     if !document.agents.contains_key(role_id) {
         return Err(format!(
@@ -324,6 +335,9 @@ pub(crate) fn set_channel_auth_profile_at(
     channel_id: &str,
     auth_profile: Option<&str>,
 ) -> Result<(), String> {
+    let _guard = ORG_PROFILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "org profile writer lock poisoned".to_string())?;
     let mut document = load_org_document(org_path)?;
     let has_binding = document
         .channels
@@ -386,6 +400,9 @@ pub(crate) fn remove_provider_auth_profile_at(
     profile_id: &str,
     provider: &str,
 ) -> Result<(), String> {
+    let _guard = ORG_PROFILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "org profile writer lock poisoned".to_string())?;
     let mut document = load_org_document(org_path)?;
     let Some(profile) = document.provider_auth_profiles.get(profile_id) else {
         return Err(format!("auth profile '{profile_id}' not found"));

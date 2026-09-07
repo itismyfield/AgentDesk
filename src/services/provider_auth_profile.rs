@@ -369,6 +369,9 @@ pub fn resolve(
     agent_auth_profile: Option<&str>,
     catalog: &HashMap<String, ProviderAuthProfileDef>,
 ) -> Result<ProviderAuthOverlay, AuthProfileError> {
+    if selected_profile_id(channel_auth_profile, agent_auth_profile).is_none() {
+        return Ok(ProviderAuthOverlay::default_for(provider));
+    }
     resolve_at(
         &extra_accounts_root()?,
         provider,
