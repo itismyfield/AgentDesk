@@ -58,6 +58,16 @@ P3 항목이며, 이 결정 기록이 해결한 것으로 간주하지 않는다
 
 #5721의 결정에 따라 이 신뢰 경계를 벗어나는 배포에서는 `server.auth_token`
 설정이 필수다. 접근 범위를 바꾸기 전에 바인드와 네트워크 통제도 함께 재검토한다.
+
+다만 [#5750](https://github.com/itismyfield/AgentDesk/issues/5750)에서 추적하는 현재
+결함으로, 정상적인 [Discord 설정 저장](../src/services/discord/settings/write.rs)이
+전체 `Config`를 YAML로 재직렬화하면 [`skip_serializing`](../src/config.rs)으로
+지정된 `server.auth_token`이 저장 파일에서 소실될 수 있다. [`/ws`](../src/server/ws.rs)는
+[API 인증 미들웨어 밖에 등록](../src/server/mod.rs)되어 연결 요청마다 `load_graceful()`로
+파일을 다시 읽으므로, 토큰이 빠진 유효한 YAML을 읽으면 `None`으로 판단하여 재시작
+전에도 토큰 검사 없이 연결을 허용한다. #5750이 해결되기 전에는 `auth_token` 설정만을
+이 신뢰 경계 밖 배포의 보호 근거로 삼지 말고, 독립적인 호스트·네트워크 접근 통제를 유지한다.
+
 `/api/*` 요청 제한(rate limit)은 #5721에서 구현 대상에서 제외하고 기록만 남긴
 항목이다. 이 결정은 요청 폭주에 대한 방어를 보장하지 않는다.
 
