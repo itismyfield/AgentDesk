@@ -7,6 +7,16 @@ use super::super::{EndpointDoc, ParamDoc, body_param, ep, header_param, path_par
 
 pub(super) fn endpoints() -> Vec<EndpointDoc> {
     vec![
+        ep("GET", "/api/turn-lease/{provider}/{channel_id}", "sessions",
+            "Inspect an exact active turn lease for explicit operator recovery. Returns null when idle; rejects missing nonce/inflight or protected restart/rebind state. Never infers completion from age or pane text.")
+            .with_params([("provider", path_param("Provider runtime name.")), ("channel_id", path_param("Positive channel ID."))])
+            .with_example(json!({"path": {"provider": "codex", "channel_id": 5754}}),
+                json!({"provider": "codex", "channel_id": 5754, "generation": 42, "runtime": "token-hash", "user_message_id": 123, "turn_nonce": "episode-nonce", "started_at": "2026-09-07T00:00:00Z"})),
+        ep("POST", "/api/turn-lease/release", "sessions",
+            "Explicitly release only the inspected mailbox episode, preserving provider/TUI/tmux context and queued messages. CAS mismatch returns 409; idle duplicate is a no-op. Uses canonical finalizer queue admission without claiming successful output delivery.")
+            .with_params([("expected", body_param("object", true, "Exact identity object from GET /api/turn-lease/{provider}/{channel_id}.")), ("reason", body_param("string", true, "Nonempty operator audit reason."))])
+            .with_example(json!({"body": {"expected": {"provider": "codex", "channel_id": 5754, "generation": 42, "runtime": "token-hash", "user_message_id": 123, "turn_nonce": "episode-nonce", "started_at": "2026-09-07T00:00:00Z"}, "reason": "operator verified turn finished"}}), json!({"released": true, "status": "operator_released"}))
+            .with_error_example(409, json!({}), json!({"error": "lease changed; inspect again"})),
         ep(
             "DELETE",
             "/api/dispatched-sessions/gc-threads",

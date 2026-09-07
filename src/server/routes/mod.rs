@@ -53,6 +53,7 @@ mod skills_manifest_audit;
 pub mod state;
 pub mod stats;
 pub mod termination_events;
+mod turn_lease;
 pub mod v1;
 pub mod voice_config;
 

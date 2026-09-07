@@ -58,6 +58,7 @@ src/
 │   ├── query.rs
 │   ├── restart_terminal_proof.rs
 │   ├── run.rs
+│   ├── turn_lease.rs
 │   └── utils.rs
 ├── compat/
 │   ├── legacy_db_paths.rs
@@ -350,6 +351,7 @@ src/
 │   │   ├── skills_manifest_audit_tests.rs
 │   │   ├── stats.rs
 │   │   ├── termination_events.rs
+│   │   ├── turn_lease.rs
 │   │   ├── v1.rs
 │   │   └── voice_config.rs
 │   ├── worker_registry/
@@ -1174,6 +1176,8 @@ src/
 │   │   │   ├── reconcile.rs
 │   │   │   ├── terminal_handler.rs
 │   │   │   └── watcher_backstop.rs
+│   │   ├── turn_lease/
+│   │   │   └── registry.rs
 │   │   ├── turn_view_reconciler/
 │   │   │   ├── api.rs
 │   │   │   ├── apply.rs
@@ -1343,6 +1347,8 @@ src/
 │   │   ├── turn_completion_events.rs
 │   │   ├── turn_end_wip_warning.rs
 │   │   ├── turn_finalizer.rs
+│   │   ├── turn_lease.rs
+│   │   ├── turn_lease_tests.rs
 │   │   ├── turn_view_reconciler.rs
 │   │   ├── voice_acknowledgement.rs
 │   │   ├── voice_background_driver.rs

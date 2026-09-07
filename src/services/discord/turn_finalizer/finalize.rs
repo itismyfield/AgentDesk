@@ -25,19 +25,33 @@ pub(super) async fn do_finalize(
     submit_snapshot: Option<&super::cleanup::SyntheticClaimSnapshot>,
     shared: &Arc<SharedData>,
 ) -> FinalizeOutcome {
+    do_finalize_with_release(key, provider, event, ctx, submit_snapshot, shared, None).await
+}
+
+pub(in crate::services::discord) async fn do_finalize_with_release(
+    key: TurnKey,
+    provider: ProviderKind,
+    event: &TerminalEvent,
+    ctx: FinalizeContext,
+    submit_snapshot: Option<&super::cleanup::SyntheticClaimSnapshot>,
+    shared: &Arc<SharedData>,
+    released: Option<crate::services::turn_orchestrator::FinishTurnResult>,
+) -> FinalizeOutcome {
+    let operator_release = matches!(event, TerminalEvent::OperatorRelease(_));
     #[cfg(test)]
     super::test_panic_hook::maybe_panic_in_finalize();
     let owned_role_override = super::cleanup::snapshot_role_override(shared, key.channel_id);
-    let captured = match super::episode::claim_normal_episode(
-        shared,
-        &provider,
-        key,
-        ctx.clear_inflight,
-    )
-    .await
-    {
-        Ok(captured) => captured,
-        Err(()) => return FinalizeOutcome::AlreadyFinalized,
+    let captured = if let Some(finish) = released {
+        Some(super::episode::CapturedFinish {
+            finish,
+            snapshot: None,
+        })
+    } else {
+        match super::episode::claim_normal_episode(shared, &provider, key, ctx.clear_inflight).await
+        {
+            Ok(captured) => captured,
+            Err(()) => return FinalizeOutcome::AlreadyFinalized,
+        }
     };
     let owned_snapshot = captured
         .as_ref()
@@ -154,9 +168,11 @@ pub(super) async fn do_finalize(
         }
         // Stop any lingering watchdog timer from firing on a newer turn's
         // token.
-        token
-            .cancelled
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if !operator_release {
+            token
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     // (C) #3019 active-counter — decrement ONLY here, ONLY when this submission
@@ -252,7 +268,11 @@ pub(super) async fn do_finalize(
         relay_owner_kind,
     );
 
-    let has_pending_after_voice = if guarded_finish_missed {
+    let has_pending_after_voice = if operator_release {
+        // A successor can be admitted after the operator CAS. Preserve its
+        // channel-scoped routing, watchdog and voice state.
+        finish.has_pending
+    } else if guarded_finish_missed {
         // No-op finalize on a stale terminal: leave the live newer turn's
         // channel state untouched. Report NO backlog (Codex P2): the newer turn
         // is still active and owns its queue. Surfacing `finish.has_pending`

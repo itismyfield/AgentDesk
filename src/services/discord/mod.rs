@@ -158,6 +158,7 @@ mod tui_task_card;
 mod turn_bridge;
 #[allow(clippy::too_many_arguments)]
 mod turn_finalizer;
+pub(crate) mod turn_lease;
 mod turn_view_reconciler;
 mod voice_acknowledgement;
 mod voice_background_driver;
@@ -1169,12 +1170,6 @@ impl SharedData {
 
     fn mailbox(&self, channel_id: ChannelId) -> ChannelMailboxHandle {
         self.mailboxes.handle(channel_id)
-    }
-
-    /// #3293: non-creating mailbox lookup for probes — `mailbox()` mints a
-    /// permanent registry entry for any channel id it is asked about.
-    fn mailbox_peek(&self, channel_id: ChannelId) -> Option<ChannelMailboxHandle> {
-        self.mailboxes.peek(channel_id)
     }
 
     fn health_registry(&self) -> Option<Arc<health::HealthRegistry>> {

@@ -504,6 +504,7 @@ impl TurnFinalizer {
         };
         if matches!(out, FinalizeOutcome::AlreadyFinalized)
             && !(key.episode.is_none() && key.generation != shared.restart.current_generation)
+            && !matches!(event, TerminalEvent::OperatorRelease(_))
         {
             cleanup::already_finalized_active_state(key, &provider, &event, ctx, &shared).await;
         }

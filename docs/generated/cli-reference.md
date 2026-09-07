@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 53
-- Commands including nested subcommands: 93
+- Top-level commands: 54
+- Commands including nested subcommands: 96
 
 ## Global options
 
@@ -44,6 +44,9 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk auto-queue activate`](#agentdesk-auto-queue-activate) | Activate an auto-queue run |  |
 | [`agentdesk auto-queue add`](#agentdesk-auto-queue-add) | Add a card to an auto-queue run |  |
 | [`agentdesk auto-queue config`](#agentdesk-auto-queue-config) | Update auto-queue runtime config |  |
+| [`agentdesk turn-lease`](#agentdesk-turn-lease) | Inspect or explicitly release one turn lease while preserving its session |  |
+| [`agentdesk turn-lease inspect`](#agentdesk-turn-lease-inspect) | Read the exact active mailbox lease (JSON, no mutation) |  |
+| [`agentdesk turn-lease release`](#agentdesk-turn-lease-release) | Release that lease without stopping or restarting the provider session |  |
 | [`agentdesk force-kill`](#agentdesk-force-kill) | Force-kill a session without HTTP server dependency |  |
 | [`agentdesk github-sync`](#agentdesk-github-sync) | Sync GitHub issues without HTTP server dependency |  |
 | [`agentdesk monitoring`](#agentdesk-monitoring) | Monitor status commands for Discord channels |  |
@@ -353,6 +356,39 @@ Usage: `agentdesk auto-queue config [OPTIONS]`
 | `--repo <REPO>` | `String` |  | Repository in owner/repo form |
 | `--agent <AGENT_ID>` | `String` |  | Target agent ID |
 | `--max-concurrent <MAX_CONCURRENT_THREADS>` (required) | `i64` |  | Max concurrently active threads |
+
+## `agentdesk turn-lease`
+
+Inspect or explicitly release one turn lease while preserving its session
+
+Usage: `agentdesk turn-lease <COMMAND>`
+
+Subcommands:
+
+- `inspect` — Read the exact active mailbox lease (JSON, no mutation)
+- `release` — Release that lease without stopping or restarting the provider session
+
+### `agentdesk turn-lease inspect`
+
+Read the exact active mailbox lease (JSON, no mutation)
+
+Usage: `agentdesk turn-lease inspect [OPTIONS]`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `--provider <PROVIDER>` (required) | `String` |  |  |
+| `--channel-id <CHANNEL_ID>` (required) | `std::num::NonZeroU64` |  |  |
+
+### `agentdesk turn-lease release`
+
+Release that lease without stopping or restarting the provider session
+
+Usage: `agentdesk turn-lease release [OPTIONS]`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `--expected <EXPECTED>` (required) | `String` |  | Exact JSON object returned by inspect; never resolved from current age |
+| `--reason <REASON>` (required) | `String` |  | Operator's explanation of why this turn may be released |
 
 ## `agentdesk force-kill`
 

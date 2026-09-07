@@ -85,6 +85,8 @@ pub(in crate::services::discord) use self::finalize_context::FinalizeContext;
 // #3894: the finalize side-effect chokepoint extracted; re-imported so
 // `handle_terminal` + the reconcile/backstop child call it byte-identically.
 use self::finalize::do_finalize;
+#[cfg(test)]
+pub(in crate::services::discord) use self::finalize::do_finalize_with_release as do_finalize_with_release_for_test;
 // #3894: the timer-driven reconcile/backstop cluster extracted; re-imported so
 // the actor loop's reconcile `select!` arm stays byte-identical.
 use self::reconcile::reconcile;
@@ -266,6 +268,8 @@ pub(in crate::services::discord) fn resolve_channel_only<'a>(
 /// in Phase 4 and are listed here so the matrix is explicit.
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) enum TerminalEvent {
+    /// Explicit lease recovery; not evidence that provider output was delivered.
+    OperatorRelease(Box<super::turn_lease::OperatorRelease>),
     /// Normal completion — bridge or watcher relayed (or intentionally
     /// suppressed) terminal output and the turn is done.
     Complete,
@@ -290,6 +294,7 @@ pub(in crate::services::discord) enum TerminalEvent {
 /// into the payload via `Debug`).
 fn terminal_event_kind_str(event: &TerminalEvent) -> &'static str {
     match event {
+        TerminalEvent::OperatorRelease(_) => "operator_lease_release",
         TerminalEvent::Complete => "complete",
         TerminalEvent::Cancel => "cancel",
         TerminalEvent::GateTimeout { .. } => "gate_timeout",
@@ -912,7 +917,7 @@ mod test_panic_hook {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
 
@@ -943,7 +948,7 @@ mod tests {
     // env-dir Mutex is intentionally held across the test awaits (current-thread
     // runtime, serialization is the whole point). Test-only.
     #[allow(clippy::await_holding_lock)]
-    pub(super) async fn with_isolated_runtime_root<F, Fut>(f: F)
+    pub(in crate::services::discord) async fn with_isolated_runtime_root<F, Fut>(f: F)
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ()>,
