@@ -6606,6 +6606,7 @@ services::discord::turn_finalizer::completion_admission::tests::deferred_resume_
 services::discord::turn_finalizer::completion_admission::tests::immediate_refresh_cannot_downgrade_deferred_admission_4888
 services::discord::turn_finalizer::completion_admission::tests::no_projection_path_releases_after_explicit_settle_4888
 services::discord::turn_finalizer::completion_admission::tests::normal_bridge_disposition_releases_after_watcher_projection_4888
+services::discord::turn_finalizer::completion_admission::tests::operator_permission_preserves_negative_delivery_evidence
 services::discord::turn_finalizer::completion_admission::tests::terminal_projection_success_or_failure_share_one_settled_edge_4888
 services::discord::turn_finalizer::completion_admission::tests::watcher_projection_cannot_publish_before_bridge_disposition_4888
 services::discord::turn_finalizer::completion_admission_actor::tests::conflicting_pending_generations_do_not_cross_settle_and_orphan_expires_4906
@@ -6727,6 +6728,10 @@ services::discord::turn_finalizer::watcher_backstop::tests::done_with_zero_infli
 services::discord::turn_finalizer::watcher_backstop::tests::done_without_inflight_or_lease_defers_strict_finalize
 services::discord::turn_finalizer::watcher_backstop::tests::missing_delivery_proof_never_confirms_terminal_end
 services::discord::turn_finalizer::watcher_backstop::tests::non_jsonl_signal_never_terminal_on_fast_path_probe
+services::discord::turn_lease::tests::operator_release_cas_then_successor_keeps_new_turn_and_row
+services::discord::turn_lease::tests::operator_release_preserves_queue_and_provider_and_is_idempotent
+services::discord::turn_lease::tests::operator_release_rejects_changed_identity_or_generation_without_effects
+services::discord::turn_lease::tests::operator_release_strict_clear_preserves_nonce_less_successor
 services::discord::turn_view_reconciler::orphan_sweep::tests::enumerate_returns_only_matching_provider_pending_anchors
 services::discord::turn_view_reconciler::orphan_sweep::tests::orphan_verdict_requires_aged_and_no_live_turn_and_no_marker
 services::discord::turn_view_reconciler::orphan_sweep::tests::sweep_aborts_when_hold_appears_between_verdict_and_removal

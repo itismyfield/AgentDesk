@@ -27,6 +27,14 @@ pub(super) async fn handle_terminal(
     } else {
         key
     };
+    let released = if let TerminalEvent::OperatorRelease(release) = &event {
+        let Some(finish) = release.claim(shared, &provider, key).await else {
+            return FinalizeOutcome::AlreadyFinalized;
+        };
+        Some(finish)
+    } else {
+        None
+    };
     // A producer lacking episode evidence cannot borrow a known successor's
     // ledger, nor enter the legacy AlreadyFinalized repair path.
     if key.episode.is_none()
@@ -86,6 +94,12 @@ pub(super) async fn handle_terminal(
         finalized_at: None,
     });
     apply_pending_completion_admission(entry, pending);
+
+    // A newly CAS-released lease may share a previously finalized episode.
+    // Reopen only its phase; retain its delivery evidence and admission plan.
+    if released.is_some() {
+        entry.phase = Phase::Pending;
+    }
 
     match entry.phase {
         Phase::Finalizing | Phase::Finalized => {
@@ -174,18 +188,23 @@ pub(super) async fn handle_terminal(
     // poison `ledger_has_live_watcher_pending` / `resolve_channel_only` for this
     // channel+generation. Resetting it to `Finalized` (the normal post-finalize
     // flip) lets GC reap it and frees the channel for the next turn.
-    let outcome = match AssertUnwindSafe(do_finalize(
+    let outcome = match AssertUnwindSafe(super::finalize::do_finalize_with_release(
         finalize_key,
         provider,
         &event,
         effective_ctx,
         claim_snapshot.as_ref(),
         shared,
+        released,
     ))
     .catch_unwind()
     .await
     {
         Ok(outcome) => {
+            if matches!(event, TerminalEvent::OperatorRelease(_)) {
+                entry.completion_admission.operator_released = true;
+                entry.completion_admission.queue_eligible_published = false;
+            }
             note_mailbox_release_after_finalize(&outcome, entry, shared);
             outcome
         }
