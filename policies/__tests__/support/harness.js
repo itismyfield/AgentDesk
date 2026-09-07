@@ -157,6 +157,7 @@ function createAgentdeskMock(options) {
     retrospectiveCalls: [],
     runtimeSignals: [],
     httpPosts: [],
+    httpGets: [],
     deadlockAlerts: [],
     escalations: [],
     manualInterventions: [],
@@ -406,6 +407,13 @@ function createAgentdeskMock(options) {
       }
     },
     http: {
+      get(url) {
+        state.httpGets.push({ url });
+        if (typeof settings.httpGet === "function") {
+          return clone(settings.httpGet(url, state));
+        }
+        return { cluster: { local_instance_id: null, configured_forward_owner_ids: [], lease_ttl_secs: 30 }, nodes: [] };
+      },
       post(url, body) {
         state.httpPosts.push({ url, body: clone(body || null) });
         if (typeof settings.httpPost === "function") {

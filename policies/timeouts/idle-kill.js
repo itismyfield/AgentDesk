@@ -1,4 +1,5 @@
 module.exports = function attachIdleKill(timeouts, helpers) {
+  var loadOwnerGuard = require("./idle-kill-owners")();
   var sendDeadlockAlert = helpers.sendDeadlockAlert;
   var MAX_DISPATCH_RETRIES = helpers.MAX_DISPATCH_RETRIES;
   var getTimeoutInterval = helpers.getTimeoutInterval;
@@ -32,6 +33,8 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         agentdesk.log.error("[idle-kill] server_port missing — cannot call kill-tmux API");
         return;
       }
+      var ownerEligible = loadOwnerGuard(apiPort);
+      if (!ownerEligible) return;
       var agents = loadAgentDirectory();
       backfillMissingSessionAgentIds(agents);
 
@@ -58,16 +61,28 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         "AND session_key !~ '-t[0-9]{15,}(-dev)?$' ";
       var effectiveLastSeenJoin =
         "CROSS JOIN LATERAL (SELECT COALESCE(s.last_heartbeat, s.created_at) AS last_seen_at) latest ";
-      var idleSessions = agentdesk.db.query(
-        "SELECT s.session_key, s.agent_id, s.provider, s.active_dispatch_id, s.thread_channel_id, latest.last_seen_at " +
+      var idleFromWhere =
         "FROM sessions s " +
         effectiveLastSeenJoin +
         "WHERE status = 'idle' " +
         "AND provider IN ('claude', 'codex', 'qwen') " +
         "AND active_dispatch_id IS NULL " +
         mainChannelSqlGuard +
-        "AND latest.last_seen_at < NOW() - INTERVAL '6 hours' " +
-        "ORDER BY latest.last_seen_at ASC LIMIT 50"
+        "AND latest.last_seen_at < NOW() - INTERVAL '6 hours' ";
+      // Exclude unavailable owners before LIMIT so an offline node's backlog
+      // cannot occupy all 50 slots and starve healthy/local owners (#5714).
+      var owners = agentdesk.db.query("SELECT DISTINCT s.instance_id " + idleFromWhere);
+      ownerEligible.retainOwners(owners);
+      var excludedOwners = owners.filter(function(s) { return !ownerEligible(s.instance_id); })
+        .map(function(s) { return s.instance_id.trim(); });
+      var ownerSqlGuard = excludedOwners.length
+        ? "AND (NULLIF(BTRIM(s.instance_id), '') IS NULL OR BTRIM(s.instance_id) NOT IN (" +
+          excludedOwners.map(function() { return "?"; }).join(", ") + ")) "
+        : "";
+      var idleSessions = agentdesk.db.query(
+        "SELECT s.session_key, s.agent_id, s.provider, s.instance_id, s.active_dispatch_id, s.thread_channel_id, latest.last_seen_at " +
+        idleFromWhere + ownerSqlGuard + "ORDER BY latest.last_seen_at ASC LIMIT 50",
+        excludedOwners
       );
 
       // Defense-in-depth: client-side filter catches anything the SQL guard
@@ -76,7 +91,9 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         return !s.thread_channel_id
           && !parseSessionThreadId(s.session_key, s.provider);
       }
-      idleSessions = idleSessions.filter(isMainChannelSession);
+      idleSessions = idleSessions.filter(function(s) {
+        return isMainChannelSession(s) && ownerEligible(s.instance_id);
+      });
 
       function formatIdleDuration(idleMin) {
         if (idleMin >= 60 * 24) {

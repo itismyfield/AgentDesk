@@ -101,6 +101,32 @@ fn invoke_localhost_post(url: &str, body_json: &str) -> String {
         .unwrap_or_else(|_| r#"{"error":"thread panic"}"#.to_string())
 }
 
+// Read-only policy preflight for the plain-HTTP dcserver. Reuse the POST
+// transport's bounded, proxy-free, redirect-free socket path (#5714).
+fn invoke_localhost_get(url: &str) -> String {
+    let parsed = match url::Url::parse(url) {
+        Ok(parsed)
+            if parsed.scheme() == "http"
+                && crate::utils::loopback_url::is_loopback_url(url, None) =>
+        {
+            parsed
+        }
+        _ => return r#"{"error":"only http localhost allowed"}"#.to_string(),
+    };
+    let timeout = match resolve_http_post_timeout() {
+        Ok(timeout) => timeout,
+        Err(message) => return format!(r#"{{"error":"{}"}}"#, escape_for_json(&message)),
+    };
+    std::thread::spawn(
+        move || match loopback_http_request_inner(&parsed, "", timeout, "GET") {
+            Ok(body) => body,
+            Err(message) => format!(r#"{{"error":"{}"}}"#, escape_for_json(&message)),
+        },
+    )
+    .join()
+    .unwrap_or_else(|_| r#"{"error":"thread panic"}"#.to_string())
+}
+
 /// Panic-free blocking HTTP/1.1 POST to a loopback target.
 ///
 /// #4251 root fix. ureq-2.12.1 resets the socket read timeout
@@ -133,6 +159,15 @@ fn loopback_http_post_inner(
     url: &url::Url,
     body: &str,
     timeout: std::time::Duration,
+) -> Result<String, String> {
+    loopback_http_request_inner(url, body, timeout, "POST")
+}
+
+fn loopback_http_request_inner(
+    url: &url::Url,
+    body: &str,
+    timeout: std::time::Duration,
+    method: &str,
 ) -> Result<String, String> {
     use std::io::{Read, Write};
 
@@ -170,7 +205,11 @@ fn loopback_http_post_inner(
         .set_write_timeout(Some(socket_timeout))
         .map_err(|e| format!("set_write_timeout: {e}"))?;
 
-    let head = build_request_head(&request_target, authority, body.len());
+    let head = if method == "POST" {
+        build_request_head(&request_target, authority, body.len())
+    } else {
+        build_request_head_for_method(&request_target, authority, body.len(), method)
+    };
     stream
         .write_all(head.as_bytes())
         .and_then(|()| stream.write_all(body.as_bytes()))
@@ -289,8 +328,17 @@ fn connect_first_reachable(
 /// the client free of a chunked decoder (parsing surface we chose not to
 /// grow; a rogue chunked reply is rejected fail-closed in `build_response`).
 fn build_request_head(request_target: &str, authority: &str, body_len: usize) -> String {
+    build_request_head_for_method(request_target, authority, body_len, "POST")
+}
+
+fn build_request_head_for_method(
+    request_target: &str,
+    authority: &str,
+    body_len: usize,
+    method: &str,
+) -> String {
     format!(
-        "POST {request_target} HTTP/1.0\r\n\
+        "{method} {request_target} HTTP/1.0\r\n\
          Host: {authority}\r\n\
          Content-Type: application/json\r\n\
          Content-Length: {body_len}\r\n\
@@ -423,6 +471,66 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn policy_http_get_uses_read_only_loopback_transport_and_js_registration() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /api/cluster/nodes HTTP/1.0\r\n"));
+            assert!(request.contains("Content-Length: 0\r\n"));
+            socket
+                .write_all(&http_response("200 OK", r#"{"nodes":[]}"#, true))
+                .unwrap();
+        });
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            ctx.eval::<(), _>("var agentdesk = {};").unwrap();
+            register_http_ops(&ctx).unwrap();
+            let count: i32 = ctx
+                .eval(format!(
+                    "agentdesk.http.get('http://127.0.0.1:{port}/api/cluster/nodes').nodes.length"
+                ))
+                .unwrap();
+            assert_eq!(count, 0);
+        });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn policy_http_get_rejects_remote_targets_and_never_follows_redirects() {
+        assert!(
+            invoke_localhost_get("http://100.64.0.1:8791/api/cluster/nodes")
+                .contains("only http localhost allowed")
+        );
+        assert!(invoke_localhost_get("file:///etc/passwd").contains("only http localhost allowed"));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let target = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.0 302 Found\r\nLocation: http://{target}/redirected\r\nContent-Length: 2\r\n\r\n{{}}"
+        );
+        let port = spawn_oneshot_server(response.into_bytes(), Duration::ZERO);
+        assert_eq!(
+            invoke_localhost_get(&format!("http://127.0.0.1:{port}/api/cluster/nodes")),
+            "{}"
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
 
     /// Accept exactly one connection, drain the request, write `response`,
     /// keep the socket open for `keep_open`, then drop it (FIN). This mimics
@@ -880,6 +988,13 @@ pub(super) fn register_http_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     let http_obj = Object::new(ctx.clone())?;
 
     http_obj.set(
+        "__get_raw",
+        Function::new(ctx.clone(), |url: String| -> String {
+            invoke_localhost_get(&url)
+        })?,
+    )?;
+
+    http_obj.set(
         "__post_raw",
         Function::new(ctx.clone(), |url: String, body_json: String| -> String {
             invoke_localhost_post(&url, &body_json)
@@ -891,6 +1006,9 @@ pub(super) fn register_http_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     let _: rquickjs::Value = ctx.eval(
         r#"
         (function() {
+            agentdesk.http.get = function(url) {
+                return JSON.parse(agentdesk.http.__get_raw(url));
+            };
             agentdesk.http.post = function(url, body) {
                 return JSON.parse(agentdesk.http.__post_raw(url, JSON.stringify(body)));
             };
