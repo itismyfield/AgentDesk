@@ -27,6 +27,8 @@ cli::args::tests::send_to_agent_parses_expect_reply_false
 cli::args::tests::send_to_agent_parses_expect_reply_true
 cli::args::tests::send_to_agent_requires_expect_reply
 cli::args::tests::top_level_command_name_snapshot_preserves_public_cli_surface
+cli::args::tests::turn_lease_cli_parses_read_and_exact_release
+cli::args::tests::turn_lease_cli_rejects_unpinned_release_and_zero_channel
 cli::channel_provider::tests::onboarding_routing_cli_reads_config_and_rejects_unknown_keys
 cli::client::activity_tests::activity_counts_buckets_by_kind
 cli::client::activity_tests::parse_duration_suffix_handles_each_unit
@@ -6661,6 +6663,7 @@ services::discord::turn_finalizer::finalize::tests::residue_tests::health_names_
 services::discord::turn_finalizer::finalize::tests::residue_tests::health_still_shows_residual_while_an_inflight_owner_holds_the_release
 services::discord::turn_finalizer::finalize::tests::residue_tests::issue_shape_surviving_inflight_row_holds_recovery_on_every_tick
 services::discord::turn_finalizer::finalize::tests::residue_tests::kickoff_guard_skip_preserves_queue_and_arms_recovery
+services::discord::turn_finalizer::finalize::tests::residue_tests::producer_bound_same_episode_miss_keeps_residue_recovery_owner_r3
 services::discord::turn_finalizer::finalize::tests::thread_finalize_removes_parent_mapping_and_schedules_parent_kickoff
 services::discord::turn_finalizer::finalize_context::tests::watcher_after_pre_panel_release_only_flips_expected_guard_miss
 services::discord::turn_finalizer::tests::already_finalized_loser_cleans_same_turn_mailbox_and_inflight
@@ -6728,10 +6731,14 @@ services::discord::turn_finalizer::watcher_backstop::tests::done_with_zero_infli
 services::discord::turn_finalizer::watcher_backstop::tests::done_without_inflight_or_lease_defers_strict_finalize
 services::discord::turn_finalizer::watcher_backstop::tests::missing_delivery_proof_never_confirms_terminal_end
 services::discord::turn_finalizer::watcher_backstop::tests::non_jsonl_signal_never_terminal_on_fast_path_probe
+services::discord::turn_lease::registry::tests::turn_lease_registry_inspect_rejects_missing_inflight
+services::discord::turn_lease::registry::tests::turn_lease_registry_selects_owner_and_refuses_ambiguity
+services::discord::turn_lease::tests::committed_a_recovery_after_operator_release_cannot_cancel_claimed_b_r3
 services::discord::turn_lease::tests::operator_release_cas_then_successor_keeps_new_turn_and_row
 services::discord::turn_lease::tests::operator_release_preserves_queue_and_provider_and_is_idempotent
 services::discord::turn_lease::tests::operator_release_rejects_changed_identity_or_generation_without_effects
 services::discord::turn_lease::tests::operator_release_strict_clear_preserves_nonce_less_successor
+services::discord::turn_lease::tests::successor_normal_complete_preserves_negative_admission_after_operator_release_r2
 services::discord::turn_view_reconciler::orphan_sweep::tests::enumerate_returns_only_matching_provider_pending_anchors
 services::discord::turn_view_reconciler::orphan_sweep::tests::orphan_verdict_requires_aged_and_no_live_turn_and_no_marker
 services::discord::turn_view_reconciler::orphan_sweep::tests::sweep_aborts_when_hold_appears_between_verdict_and_removal
