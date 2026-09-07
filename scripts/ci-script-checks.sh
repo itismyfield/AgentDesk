@@ -216,6 +216,9 @@ banner "Reachability canonical Rust<->Python equivalence gate (#5071 T4-B2a)"
 banner "Merge automation policy tests (#4250)"
 node --test policies/__tests__/merge-automation.test.js
 
+banner "Idle-kill owner and timeout policy regressions (#5714)"
+node --test policies/__tests__/idle-kill-owners.test.js policies/__tests__/timeouts.test.js
+
 banner "Timeout shadow aggregation gate tests (#3950)"
 node --test scripts/__tests__/timeout-shadow-gate.test.mjs
 
