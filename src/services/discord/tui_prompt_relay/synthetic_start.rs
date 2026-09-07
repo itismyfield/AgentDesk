@@ -1,6 +1,8 @@
 use super::*;
 
+mod claim;
 mod stale_reclaim;
+pub(super) use claim::claim_tui_direct_synthetic_turn;
 
 use stale_reclaim::release_reclaimable_stale_synthetic_mailbox_owner_if_current;
 pub(super) use stale_reclaim::{
@@ -40,16 +42,18 @@ pub(in crate::services::discord) fn synthetic_start_offset_carry_forward(
     relay_last_offset.max(committed_relay_offset.unwrap_or(0))
 }
 
-pub(super) async fn claim_tui_direct_synthetic_turn(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    prompt_text: &str,
-    anchor_message_id: MessageId,
-    lease: &ExternalInputRelayLease,
+async fn claim_tui_direct_synthetic_turn_prepared(
+    preparation: claim::SyntheticClaimPreparation<'_>,
 ) -> TuiDirectSyntheticTurnClaim {
-    claim_tui_direct_synthetic_turn_inner(
+    let claim::SyntheticClaimPreparation {
+        identity,
+        output_path,
+        start_offset,
+        relay_owner,
+        relay_owner_kind,
+    } = preparation;
+
+    let claim::SyntheticClaimIdentity {
         shared,
         provider,
         channel_id,
@@ -57,83 +61,8 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
         prompt_text,
         anchor_message_id,
         lease,
-        false,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn claim_tui_direct_synthetic_turn_inner(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    prompt_text: &str,
-    anchor_message_id: MessageId,
-    lease: &ExternalInputRelayLease,
-    register_deferred_start: bool,
-) -> TuiDirectSyntheticTurnClaim {
-    let binding =
-        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
-    let binding =
-        external_input_relay_binding(provider.as_str(), tmux_session_name, channel_id, binding);
-    let output_path = external_input_relay_output_path(
-        shared,
-        provider.as_str(),
-        tmux_session_name,
-        channel_id,
-        binding.as_ref(),
-    );
-    let relay_last_offset = external_input_relay_start_offset(provider, binding.as_ref());
-    // #3358 round 2: carry the committed frontier forward, but ONLY for the
-    // CURRENT wrapper generation (stale → `None` → no content skip).
-    // The `tmux` module is `#[cfg(unix)]`; on non-unix targets (windows CI
-    // cross-compile check) there is no committed frontier to carry forward, so
-    // `None` (no carry-forward) is the correct, behavior-preserving default.
-    #[cfg(unix)]
-    let committed_relay_offset = super::super::tmux::committed_frontier_for_current_generation(
-        shared,
-        channel_id,
-        tmux_session_name,
-    );
-    #[cfg(not(unix))]
-    let committed_relay_offset: Option<u64> = None;
-    let start_offset =
-        synthetic_start_offset_carry_forward(relay_last_offset, committed_relay_offset);
-    if start_offset > relay_last_offset {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            tmux_session_name = %tmux_session_name,
-            anchor_message_id = anchor_message_id.get(),
-            relay_last_offset,
-            committed_relay_offset = committed_relay_offset.unwrap_or(0),
-            start_offset,
-            "#3358 synthetic inflight offset-authority handover: carried committed relay frontier forward"
-        );
-    }
-    // #3876 (codex rework): gate the SessionBoundRelay stamp on a LIVE per-session
-    // producer — NOT the global session-bound flag. The sink only commits when a
-    // production tmux watcher is feeding the supervisor-owned StreamRelay for this
-    // session; with no registered producer the bridge tail must stay the deliverer.
-    let live_producer_present =
-        crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
-            .get_live_producer(tmux_session_name)
-            .is_some();
-    let relay_owner = tui_direct_synthetic_relay_owner(
-        tui_direct_watcher_can_own_output(
-            &shared.tmux_watchers,
-            tmux_session_name,
-            output_path.as_deref(),
-        ),
-        session_bound_discord_delivery_enabled(),
-        live_producer_present,
-    );
-    let relay_owner_kind = match relay_owner {
-        ExternalInputRelayOwner::TmuxWatcher => RelayOwnerKind::Watcher,
-        ExternalInputRelayOwner::SessionBoundRelay => RelayOwnerKind::SessionBoundRelay,
-        _ => RelayOwnerKind::None,
-    };
+        register_deferred_start,
+    } = identity;
 
     let cancel_token = Arc::new(CancelToken::new());
     super::super::turn_bridge::bind_cancel_token_tmux_runtime(
@@ -269,21 +198,7 @@ async fn claim_tui_direct_synthetic_turn_inner(
         };
     }
     let active_turn_nonce = active_snapshot.active_turn_nonce;
-    if register_deferred_start {
-        // #3154: bind the admitted episode before either durable row write can
-        // release the watcher gate. Adoption uses the existing actor nonce.
-        shared.turn_finalizer.register_start(
-            super::super::turn_finalizer::TurnKey::new(
-                channel_id,
-                anchor_message_id.get(),
-                shared.restart.current_generation,
-            )
-            .with_episode_nonce(active_turn_nonce.as_deref()),
-            provider.clone(),
-            RelayOwnerKind::Watcher,
-            shared,
-        );
-    }
+    identity.register_episode(active_turn_nonce.as_deref());
 
     // #3146 Part 1: a TUI-driven turn is now active for this channel (we either
     // just started it via `mailbox_try_start_turn` or already own the matching
@@ -1913,7 +1828,7 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                 lease,
             );
 
-            let claim = claim_tui_direct_synthetic_turn_inner(
+            let claim = claim::claim_tui_direct_synthetic_turn_inner(
                 shared,
                 &provider,
                 channel_id,
