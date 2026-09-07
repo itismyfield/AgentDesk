@@ -165,6 +165,36 @@ class GiantFilesCheck(unittest.TestCase):
 class GiantFileRatchetCheck(unittest.TestCase):
     _BASELINE = "scripts/audit_maintainability_giant_baseline.toml"
 
+    def test_real_pin_overrun_and_threshold_controls_reach_check_exit_code(self) -> None:
+        path = "src/pinned.rs"
+        for loc, cap, expected_rc in ((1000, 1000, 0), (1001, 1000, 1), (999, 500, 0)):
+            with self.subTest(loc=loc, cap=cap), _FakeSrcTree({
+                path: "fn production() {}\n" * loc,
+                self._BASELINE: f'[giant_file_ratchet]\n"{path}" = {cap}\n',
+                "scripts/ratchet_admission_history.toml": "schema_version = 1\nadmission = []\n",
+                "empty-allowlist.toml": "",
+            }) as root:
+                allowlist = root / "empty-allowlist.toml"
+                self.assertFalse((root / ".git").exists())
+                self.assertEqual(HARNESS.load_allowlist(allowlist), {})
+                self.assertEqual(giant_file_ratchet.load_giant_baseline(root / self._BASELINE), {path: cap})
+                # A pin below 1000 does not expand the audit's measured population.
+                self.assertEqual(giant_files.giant_production_loc(), {path: loc} if loc >= 1000 else {})
+                hits = list(giant_file_ratchet.CHECK.runner(set()))
+                if expected_rc:
+                    self.assertEqual(len(hits), 1)
+                    self.assertEqual((hits[0].rule, hits[0].file, hits[0].severity),
+                                     ("giant_file_ratchet", path, "warn"))
+                    self.assertEqual((hits[0].extra["loc"], hits[0].extra["baseline"]), ("1001", "1000"))
+                else:
+                    self.assertEqual(hits, [])
+                self.assertFalse(any("admission metadata invalid" in hit.message for hit in hits))
+                with mock.patch.object(HARNESS, "load_check_specs", return_value=[giant_file_ratchet.CHECK]), \
+                        mock.patch.object(sys, "stdout", new=mock.MagicMock()), \
+                        mock.patch.object(sys, "stderr", new=mock.MagicMock()):
+                    rc = HARNESS.main(["--check", "--format", "json", "--allowlist", str(allowlist)])
+                self.assertEqual(rc, expected_rc)
+
     def test_flags_file_grown_past_frozen_baseline(self) -> None:
         over = "fn x() {}\n" * (giant_files.THRESHOLD + 50)  # 1050 prod LoC
         with _FakeSrcTree(
