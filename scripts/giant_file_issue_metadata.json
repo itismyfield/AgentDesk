@@ -1,9 +1,9 @@
 {
   "schema_version": 2,
-  "refreshed_at": "2026-09-02T11:41:35Z",
+  "refreshed_at": "2026-09-06T22:50:07Z",
   "ratchets": {
-    "closed_deadline_entries": 79,
-    "transition_list_entries": 79
+    "closed_deadline_entries": 75,
+    "transition_list_entries": 75
   },
   "issues": [
     {
@@ -130,7 +130,7 @@
     {
       "number": 5447,
       "state": "open",
-      "title": "Decompose src/services/discord/health/snapshot.rs (prod-giant: 1022 LoC after T4-B6)",
+      "title": "Decompose src/services/discord/health/snapshot.rs (prod 1,240 LoC) — giant 트랙 종료 결정(09-04)에 따라 registry 포인터·deadline 정리 후 재판정",
       "owners": [
         "discord-relay"
       ],
