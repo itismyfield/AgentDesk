@@ -272,7 +272,7 @@ async fn submit_stale_foreign_inflight_cancel(
     let stale_identity = probe.inflight_identity.clone();
     let _ = shared
         .turn_finalizer
-        .submit_terminal(
+        .submit_terminal_with_claim_snapshot(
             super::turn_finalizer::TurnKey::new(
                 channel_id,
                 finalizer_turn_id,
@@ -281,6 +281,7 @@ async fn submit_stale_foreign_inflight_cancel(
             provider.clone(),
             super::turn_finalizer::TerminalEvent::Cancel,
             stale_foreign_cancel_finalize_context(),
+            Some(probe.finalizer_claim_snapshot.clone()),
             shared.clone(),
         )
         .await;
@@ -385,7 +386,7 @@ async fn submit_committed_foreign_inflight_complete(
     }
     let outcome = shared
         .turn_finalizer
-        .submit_terminal(
+        .submit_terminal_with_claim_snapshot(
             super::turn_finalizer::TurnKey::new(
                 channel_id,
                 finalizer_turn_id,
@@ -394,6 +395,7 @@ async fn submit_committed_foreign_inflight_complete(
             provider.clone(),
             super::turn_finalizer::TerminalEvent::Complete,
             committed_foreign_complete_finalize_context(),
+            Some(probe.finalizer_claim_snapshot.clone()),
             shared.clone(),
         )
         .await;

@@ -1,5 +1,14 @@
 use super::*;
 
+pub(in crate::services::discord::tui_prompt_relay) async fn finish_tui_direct_synthetic_pre_save_failure(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+) {
+    // This cleanup runs before the synthetic path increments global_active.
+    let _ = super::super::super::mailbox_finish_turn(shared, provider, channel_id).await;
+}
+
 /// #4370 R3-4 — the positive-staleness age gate, and the timing tradeoff it buys.
 ///
 /// Which stuck-mailbox shape a starved follow-up frees, and WHEN:
@@ -55,10 +64,11 @@ async fn finalize_stale_mailbox_owner_if_current(
     provider: &ProviderKind,
     channel_id: ChannelId,
     active_user_message_id: MessageId,
+    captured_turn_nonce: Option<String>,
 ) -> Option<StaleMailboxRelease> {
     let outcome = shared
         .turn_finalizer
-        .submit_terminal(
+        .submit_terminal_with_episode_nonce(
             super::super::super::turn_finalizer::TurnKey::new(
                 channel_id,
                 active_user_message_id.get(),
@@ -67,6 +77,7 @@ async fn finalize_stale_mailbox_owner_if_current(
             provider.clone(),
             super::super::super::turn_finalizer::TerminalEvent::Cancel,
             reclaim_finalize_context(),
+            captured_turn_nonce,
             shared.clone(),
         )
         .await;
@@ -112,6 +123,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn release_stale_ownerl
         provider,
         channel_id,
         active_user_message_id,
+        state.turn_nonce.clone(),
     )
     .await
     else {
@@ -337,6 +349,7 @@ pub(super) async fn release_reclaimable_stale_synthetic_mailbox_owner_if_current
     active_request_owner: Option<serenity::UserId>,
     active_turn_kind: crate::services::turn_orchestrator::ActiveTurnKind,
     turn_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    captured_turn_nonce: Option<String>,
     anchor_message_id: MessageId,
 ) -> bool {
     if active_turn_kind.is_monitor_auto_turn() {
@@ -397,6 +410,7 @@ pub(super) async fn release_reclaimable_stale_synthetic_mailbox_owner_if_current
         provider,
         channel_id,
         active_user_message_id,
+        captured_turn_nonce,
     )
     .await
     else {
