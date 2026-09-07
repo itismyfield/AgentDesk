@@ -3150,10 +3150,8 @@ mod tests {
             user_msg_id: 1001,
         };
         let live_b = LedgerKey {
-            episode: None,
-            channel_id: ch,
-            generation,
             user_msg_id: 1002,
+            ..live_a
         };
         let zero_key = TurnKey::new(ch, 0, generation);
         let candidates = [

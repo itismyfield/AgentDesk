@@ -192,8 +192,8 @@ pub(super) async fn do_finalize(
     // skip the channel cleanup entirely — exactly as we already skip the token
     // release and counter decrement. (An id-0 orphan keeps today's behaviour.)
     let guarded_finish_missed = key.user_msg_id != 0 && finish.removed_token.is_none();
-    if guarded_finish_missed {
-        let active_snapshot = crate::services::discord::mailbox_snapshot(shared, channel_id).await;
+    if guarded_finish_missed && let Some(mailbox) = shared.mailbox_peek(channel_id) {
+        let active_snapshot = mailbox.snapshot().await;
         let active_user_message_id = active_snapshot.active_user_message_id.map(|id| id.get());
         let residue_recorded = if let Some(active_user_msg_id) = active_user_message_id
             && active_snapshot.cancel_token.is_some()

@@ -39,12 +39,16 @@ pub(in crate::services::discord) async fn claim_normal_episode(
         return Ok(None);
     }
     let observed_before = std::time::Instant::now();
-    let observed = shared
-        .mailbox_peek(key.channel_id)
-        .ok_or(())?
-        .snapshot()
-        .await;
-    if key.user_msg_id == 0 || !key.matches_episode_nonce(observed.active_turn_nonce.as_deref()) {
+    let observed = match shared.mailbox_peek(key.channel_id) {
+        Some(mailbox) => Some(mailbox.snapshot().await),
+        None => None,
+    };
+    if key.user_msg_id == 0
+        || observed.as_ref().is_some_and(|snapshot| {
+            snapshot.cancel_token.is_some()
+                && !key.matches_episode_nonce(snapshot.active_turn_nonce.as_deref())
+        })
+    {
         return Err(());
     }
     let row =
@@ -52,16 +56,25 @@ pub(in crate::services::discord) async fn claim_normal_episode(
             row.effective_finalizer_turn_id() == key.user_msg_id
                 && key.matches_episode_nonce(row.turn_nonce.as_deref())
         });
-    let finish =
+    let finish = if let Some(active) = observed.as_ref().filter(|s| s.cancel_token.is_some()) {
         super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_without_completion(
             shared,
             provider,
             key.channel_id,
             serenity::model::id::MessageId::new(key.user_msg_id),
-            observed.active_turn_nonce,
+            active.active_turn_nonce.clone(),
             observed_before,
         )
-        .await;
+        .await
+    } else {
+        crate::services::turn_orchestrator::FinishTurnResult {
+            removed_token: None,
+            has_pending: false,
+            mailbox_online: observed.is_some(),
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        }
+    };
     // Same-episode ID misses retain the ordinary guarded-miss recovery owner.
     // Only the separately gated reconciler may release that residual anchor.
     // Row cleanup is independently authorized by the captured row identity;
