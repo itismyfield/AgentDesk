@@ -61,12 +61,37 @@ mod tests {
         serde_yaml::from_str(yaml).unwrap()
     }
 
+    // Keep nested libtest summaries out of the parent lane's selection accounting.
+    fn run_child(name: &str, marker: &str) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(marker, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success()
+                && stdout
+                    .lines()
+                    .filter(|line| line.starts_with("test result:"))
+                    .count()
+                    == 1
+                && stdout.lines().any(|line| line
+                    .starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")),
+            "{name}: {}\n{stdout}\n{stderr}",
+            output.status
+        );
+        eprintln!("isolated child verified: {name}; selected=1");
+    }
+
     #[test]
     fn onboarding_routing_legacy_identity_survives_default_changes() {
         if std::env::var_os("ADK_LEGACY_IDENTITY_TEST_CHILD").is_none() {
-            assert!(std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "services::provider::channel_rules::tests::onboarding_routing_legacy_identity_survives_default_changes"])
-                .env("ADK_LEGACY_IDENTITY_TEST_CHILD", "1").status().unwrap().success());
+            run_child(
+                "services::provider::channel_rules::tests::onboarding_routing_legacy_identity_survives_default_changes",
+                "ADK_LEGACY_IDENTITY_TEST_CHILD",
+            );
             return;
         }
         let mut config = crate::config::Config::default();
@@ -193,10 +218,10 @@ mod tests {
     fn onboarding_routing_installed_snapshot_controls_dispatch() {
         const CHILD: &str = "ADK_ONBOARDING_ROUTING_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "services::provider::channel_rules::tests::onboarding_routing_installed_snapshot_controls_dispatch", "--nocapture"])
-                .env(CHILD, "1").status().unwrap();
-            assert!(status.success());
+            run_child(
+                "services::provider::channel_rules::tests::onboarding_routing_installed_snapshot_controls_dispatch",
+                CHILD,
+            );
             return;
         }
         // Load the same validated YAML used at boot; isolate the process-global
