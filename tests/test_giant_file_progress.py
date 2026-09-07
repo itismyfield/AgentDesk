@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import copy
+import builtins
 import importlib
+import importlib.util
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -644,5 +648,476 @@ class GuardRepinTest(unittest.TestCase):
                     PROGRESS.inventory, "giant_file_snapshot", side_effect=snapshot):
                 rc = PROGRESS.main()
             return rc, json.loads(evidence.read_text(encoding="utf-8"))
+
+P = PROGRESS
+G = P.inventory
+LEDGER_ROOT = "src/root.rs"
+OTHER = "src/other.rs"
+RETIRED = "src/retired.rs"
+OLD, NEW = "2026-08-31", "2026-10-31"
+STAMP = "2026-09-02T11:41:35Z"
+NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
+
+
+def marker(old=OLD, new=NEW):
+    return f"# DEADLINE RESET {old} -> {new} on 2026-09-07 (#5742). The prior date\n# needs a bounded repair.\n"
+
+
+def entry(path, deadline, history=""):
+    return (f'[[entry]]\n# measured production LoC\n{history}file = "{path}"\n'
+            f'decision = "shrink"\nowner = "team"\ndeadline = "{deadline}"\n'
+            'decompose_issue = "#4712"\n\n')
+
+
+def metadata(state="open", stamp=STAMP, closed=0, transitions=0):
+    return {"schema_version": 2, "refreshed_at": stamp,
+            "ratchets": {"closed_deadline_entries": closed, "transition_list_entries": transitions},
+            "issues": [{"number": 4712, "state": state, "title": "decompose root",
+                        "owners": ["team"], "files": [LEDGER_ROOT, OTHER]}]}
+
+
+class GiantFileLedgerRepairTest(unittest.TestCase):
+    def fixture(self, moved=True, history=""):
+        registrations = {LEDGER_ROOT: ("shrink", "team", OLD, "#4712", ""),
+                         OTHER: ("shrink", "team", NEW, "#4712", "")}
+        base = {"modules": {LEDGER_ROOT: 1200, OTHER: 1200, RETIRED: 860},
+                "registrations": registrations, "overdue": [LEDGER_ROOT]}
+        candidate = copy.deepcopy(base)
+        if moved:
+            candidate["registrations"][LEDGER_ROOT] = ("shrink", "team", NEW, "#4712", "")
+            candidate["overdue"] = []
+        prefix = 'grandfathered = []\ngrandfathered_baseline_paths = []\n'
+        old = {"registry": prefix + entry(LEDGER_ROOT, OLD, history) + entry(OTHER, NEW),
+               "transition": {RETIRED}, "ratchets": metadata(closed=1, transitions=1)["ratchets"],
+               "pins": {RETIRED: 1048}}
+        new = copy.deepcopy(old)
+        if moved:
+            new["registry"] = prefix + entry(LEDGER_ROOT, NEW, history + marker()) + entry(OTHER, NEW)
+        facts = {"changed": {P.REGISTRY} if moved else {P.METADATA},
+                 "authority_equal": True, "registry_equal": not moved,
+                 "ledger_base": old, "ledger_candidate": new}
+        return base, candidate, facts
+
+    def assert_ledger(self, case, fragment=None):
+        selector, errors = P.pr_evaluation(*case)
+        self.assertEqual(selector, "pr_ledger_repair")
+        if fragment is None:
+            self.assertEqual(errors, [])
+        else:
+            self.assertIn(fragment, "; ".join(errors))
+
+    def test_r2_04_transition_addition_and_count_preserving_swap(self):
+        for paths in ({RETIRED, "src/new.rs"}, {"src/new.rs"}):
+            with self.subTest(paths=paths):
+                case = self.fixture(False)
+                case[2]["ledger_candidate"]["transition"] = paths
+                self.assert_ledger(case, "E6: transition paths added or replaced")
+
+    def test_r2_03_measured_5744_retired_paths_allow_transition_cleanup(self):
+        # Re-measured at base 5a3d16ef765b / head 769f7f0dd700: no source diff.
+        retired = {"src/server/worker_registry.rs": 483,
+                   "src/services/discord/outbound/turn_output_controller.rs": 996,
+                   "src/services/discord/tui_direct_pending_start.rs": 933,
+                   "src/services/discord/turn_finalizer.rs": 860}
+        base, candidate, facts = self.fixture()
+        for snapshot in (base, candidate):
+            snapshot["modules"].update(retired)
+            self.assertFalse(set(retired) & snapshot["registrations"].keys())
+        facts["ledger_base"]["transition"] = set(retired)
+        facts["ledger_base"]["ratchets"] = dict.fromkeys(G.GIANT_FILE_ISSUE_RATCHET_KEYS, 4)
+        facts["ledger_candidate"]["transition"] = set()
+        facts["ledger_candidate"]["ratchets"] = dict.fromkeys(G.GIANT_FILE_ISSUE_RATCHET_KEYS, 0)
+        self.assert_ledger((base, candidate, facts))
+
+    def test_e6_requires_retirement_in_both_snapshots_without_missing_loc_default(self):
+        for side in (0, 1):
+            for loc in (None, -1, 1000):
+                with self.subTest(side=side, loc=loc):
+                    base, candidate, facts = self.fixture(False)
+                    facts["ledger_candidate"]["transition"] = set()
+                    snapshot = (base, candidate)[side]
+                    snapshot["modules"].pop(RETIRED)
+                    if loc is not None:
+                        snapshot["modules"][RETIRED] = loc
+                    errors = P.ledger_repair_errors(base, candidate, facts, [])
+                    self.assertIn("measured retirement in " + ("base", "candidate")[side], "; ".join(errors))
+
+    def test_r2_05_and_06_history_cannot_move_disappear_or_lose_rationale(self):
+        history = marker("2026-04-30", "2026-06-30") + marker("2026-06-30", OLD)
+        for moved in (False, True):
+            for mutation in ("header", "other", "delete", "edit", "rationale"):
+                with self.subTest(moved=moved, mutation=mutation):
+                    case = self.fixture(moved, history)
+                    ledger = case[2]["ledger_candidate"]
+                    first = marker("2026-04-30", "2026-06-30")
+                    if mutation == "edit":
+                        ledger["registry"] = ledger["registry"].replace("(#5742)", "(#5743)", 1)
+                    elif mutation == "rationale":
+                        ledger["registry"] = ledger["registry"].replace("# needs a bounded repair.\n", "", 1)
+                    else:
+                        ledger["registry"] = ledger["registry"].replace(first, "", 1)
+                        if mutation == "header":
+                            ledger["registry"] = first + ledger["registry"]
+                        elif mutation == "other":
+                            ledger["registry"] = ledger["registry"].replace(f'file = "{OTHER}"', first + f'file = "{OTHER}"')
+                    self.assert_ledger(case, "E3")
+
+    def test_r2_07_exactly_one_new_marker_per_moved_path_with_matching_dates(self):
+        for replacement in ("", marker() * 2, marker("2026-08-30", NEW), marker(OLD, "2026-11-01")):
+            with self.subTest(replacement=replacement):
+                case = self.fixture()
+                case[2]["ledger_candidate"]["registry"] = case[2]["ledger_candidate"]["registry"].replace(marker(), replacement)
+                self.assert_ledger(case, "E3")
+        case = self.fixture()
+        ledger = case[2]["ledger_candidate"]
+        ledger["registry"] = ledger["registry"].replace(marker(), "").replace(f'file = "{OTHER}"', marker() + f'file = "{OTHER}"')
+        self.assert_ledger(case, "E3")
+        self.assert_ledger(self.fixture())
+
+    def test_r2_08_fourteen_paths_each_append_one_marker_at_92_day_limit(self):
+        base, candidate, facts = self.fixture()
+        for snapshot, deadline in ((base, NEW), (candidate, "2027-01-31")):
+            snapshot["registrations"] = {f"src/{index}.rs": ("shrink", "team", deadline, "#4712", "") for index in range(14)}
+            snapshot["modules"] = {path: 1200 for path in snapshot["registrations"]}
+            snapshot["overdue"] = []
+        for key, snapshot in (("ledger_base", base), ("ledger_candidate", candidate)):
+            history = marker(NEW, "2027-01-31") if key == "ledger_candidate" else ""
+            facts[key]["registry"] = "".join(entry(path, value[2], history) for path, value in snapshot["registrations"].items())
+        self.assert_ledger((base, candidate, facts))
+
+    def test_r2_09_pin_only_needs_no_deadline_marker(self):
+        case = self.fixture(False, marker("2026-06-30", OLD))
+        case[2]["changed"] = {P.GIANT_PIN}
+        case[2]["ledger_candidate"]["pins"][RETIRED] = 860
+        self.assert_ledger(case)
+
+    def test_e7_e8_ratchets_and_pins_only_tighten_or_add_measured_pins(self):
+        for key in G.GIANT_FILE_ISSUE_RATCHET_KEYS:
+            case = self.fixture(False)
+            case[2]["ledger_candidate"]["ratchets"][key] += 1
+            self.assert_ledger(case, "E7")
+        for pins in ({}, {RETIRED: 1049}, {RETIRED: 1048, LEDGER_ROOT: 1201}, {RETIRED: 1048, "src/missing.rs": 1}):
+            case = self.fixture(False)
+            case[2]["ledger_candidate"]["pins"] = pins
+            self.assert_ledger(case, "E8")
+        case = self.fixture(False)
+        case[2]["ledger_candidate"]["pins"][LEDGER_ROOT] = 1200
+        self.assert_ledger(case)
+
+    def test_r2_13_two_extensions_pass_third_fails_even_with_history_laundering(self):
+        base, candidate, facts = self.fixture()
+        for snapshot in (base, candidate):
+            snapshot["registrations"].pop(OTHER)
+        for key in ("ledger_base", "ledger_candidate"):
+            facts[key]["registry"] = facts[key]["registry"].replace(entry(OTHER, NEW), "")
+        self.assert_ledger((base, candidate, facts))
+        for old, new in ((NEW, "2027-01-31"), ("2027-01-31", "2027-04-30")):
+            base = copy.deepcopy(candidate)
+            facts["ledger_base"] = copy.deepcopy(facts["ledger_candidate"])
+            candidate["registrations"][LEDGER_ROOT] = ("shrink", "team", new, "#4712", "")
+            facts["ledger_candidate"]["registry"] = facts["ledger_candidate"]["registry"].replace(
+                f'file = "{LEDGER_ROOT}"', marker(old, new) + f'file = "{LEDGER_ROOT}"').replace(
+                f'deadline = "{old}"', f'deadline = "{new}"', 1)
+            self.assert_ledger((base, candidate, facts), "E4" if new == "2027-04-30" else None)
+        facts["ledger_candidate"]["registry"] = facts["ledger_candidate"]["registry"].replace(marker(), "")
+        self.assert_ledger((base, candidate, facts), "E3")
+
+    def test_l1_to_l4_selection_rejects_source_scope_and_non_deadline_registry_changes(self):
+        mutations = [lambda b, c, f: f["changed"].add(LEDGER_ROOT),
+                     lambda b, c, f: f.update(changed=set()),
+                     lambda b, c, f: c["modules"].update({LEDGER_ROOT: 1199}),
+                     lambda b, c, f: c["registrations"].pop(LEDGER_ROOT),
+                     lambda b, c, f: c["registrations"].update({LEDGER_ROOT: ("keep", "team", "", "", "retained API")}),
+                     lambda b, c, f: c["registrations"].update({LEDGER_ROOT: ("shrink", "other", NEW, "#4712", "")}),
+                     lambda b, c, f: c["registrations"].update({LEDGER_ROOT: ("shrink", "team", "2026-07-31", "#4712", "")})]
+        for mutate in mutations:
+            case = self.fixture()
+            mutate(*case)
+            self.assertIsNone(P.ledger_repair_moves(*case))
+        for replacement in ('grandfathered_baseline_paths = ["src/new.rs"]', 'grandfathered_baseline_paths = [\n"src/new.rs",\n]'):
+            case = self.fixture()
+            ledger = case[2]["ledger_candidate"]
+            ledger["registry"] = ledger["registry"].replace("grandfathered_baseline_paths = []", replacement)
+            self.assertIsNone(P.ledger_repair_moves(*case))
+
+    def test_r2_15_marker_prose_ownership_and_actual_retirement_deletion(self):
+        text = entry(LEDGER_ROOT, NEW, marker()) + entry(OTHER, NEW)
+        records = P.deadline_markers(text)
+        self.assertEqual(records[LEDGER_ROOT], [(OLD, NEW, "2026-09-07", 5742, marker())])
+        remaining = P.without_entry(text, LEDGER_ROOT)
+        self.assertEqual(remaining, entry(OTHER, NEW))
+        self.assertEqual(P.deadline_markers(remaining), {OTHER: []})
+        self.assertIsNone(P.without_entry(entry(LEDGER_ROOT, NEW, marker()).rstrip(), LEDGER_ROOT))
+        case = self.fixture()
+        case[2]["ledger_candidate"]["registry"] = case[2]["ledger_candidate"]["registry"].replace("# measured production LoC", "# corrected production LoC")
+        self.assert_ledger(case)
+
+    def test_malformed_unowned_duplicate_and_blank_separated_markers_fail_closed(self):
+        invalid = [marker().replace("2026-09-07", "2026-02-30"), marker().replace("#5742", "#0"),
+                   marker().replace("#5742", "#bad"), marker() + "\n"]
+        for history in invalid:
+            with self.subTest(history=history), self.assertRaises(G.ParseError):
+                P.deadline_markers(entry(LEDGER_ROOT, NEW, history))
+        for text in (marker() + entry(LEDGER_ROOT, NEW), entry(LEDGER_ROOT, NEW) + marker(),
+                     entry(LEDGER_ROOT, NEW, marker()).replace('owner = "team"', f'file = "{LEDGER_ROOT}"')):
+            with self.assertRaises(G.ParseError):
+                P.deadline_markers(text)
+
+    def test_r2_16_selected_ledger_error_never_falls_back_to_ordinary(self):
+        case = self.fixture(False)
+        case[2]["ledger_candidate"]["registry"] = case[2]["ledger_candidate"]["registry"].replace(f'file = "{LEDGER_ROOT}"', marker() + f'file = "{LEDGER_ROOT}"')
+        self.assert_ledger(case, "E3")
+
+    def test_r2_17_distinct_count_allows_singleton_replacement_by_91_days(self):
+        case = self.fixture()
+        case[1]["registrations"][LEDGER_ROOT] = ("shrink", "team", "2026-11-30", "#4712", "")
+        case[2]["ledger_candidate"]["registry"] = case[2]["ledger_candidate"]["registry"].replace(marker(), marker(OLD, "2026-11-30")).replace(f'deadline = "{NEW}"', 'deadline = "2026-11-30"', 1)
+        self.assert_ledger(case)
+        case[1]["registrations"][LEDGER_ROOT] = ("shrink", "team", "2026-12-02", "#4712", "")
+        case[2]["ledger_candidate"]["registry"] = case[2]["ledger_candidate"]["registry"].replace("2026-11-30", "2026-12-02")
+        self.assert_ledger(case, "E1")
+        case = self.fixture()
+        case[0]["registrations"][OTHER] = ("shrink", "team", OLD, "#4712", "")
+        case[1]["registrations"][OTHER] = case[0]["registrations"][OTHER]
+        for key in ("ledger_base", "ledger_candidate"):
+            case[2][key]["registry"] = case[2][key]["registry"].replace(entry(OTHER, NEW), entry(OTHER, OLD))
+        self.assert_ledger(case, "E2")
+
+
+class GiantFileLedgerIntegrationTest(unittest.TestCase):
+    def files(self, *, stamp=STAMP, state="open", transition=False, deadline=OLD, history=""):
+        return {LEDGER_ROOT: "pub fn production() {}\n" * 1200,
+                P.REGISTRY: 'grandfathered = []\ngrandfathered_baseline_paths = []\n' + entry(LEDGER_ROOT, deadline, history),
+                P.METADATA: json.dumps(metadata(state, stamp, int(state == "closed"), int(transition))),
+                P.TRANSITION: LEDGER_ROOT + "\n" if transition else "# no transitions\n",
+                P.GIANT_PIN: f'[giant_file_ratchet]\n"{LEDGER_ROOT}" = 1200\n',
+                P.EVALUATOR: Path(P.__file__).read_text(encoding="utf-8")}
+
+    @staticmethod
+    def write(root, files):
+        for path, text in files.items():
+            target = root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(text, bytes):
+                target.write_bytes(text)
+            else:
+                target.write_text(text, encoding="utf-8")
+
+    def evaluate(self, before, after, now=NOW):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(G, "now_utc", return_value=now), redirect_stderr(io.StringIO()):
+            roots = [Path(directory) / name for name in ("base", "candidate")]
+            for root, files in zip(roots, (before, after)):
+                self.write(root, files)
+            snapshots = [G.giant_file_snapshot(root, evaluation_date=now.date()) for root in roots]
+            facts = {"changed": {path for path in before.keys() | after.keys() if before.get(path) != after.get(path)},
+                     "ledger_base": P.load_ledger(roots[0]), "ledger_candidate": P.load_ledger(roots[1]),
+                     "rename_copy": False, "additions": 4, "bootstrap": False,
+                     "moved": {}, "children": {}, "numstat": {}, "statuses": {}, "registry_exact": False,
+                     "authority_equal": True, "registry_equal": before[P.REGISTRY] == after[P.REGISTRY]}
+            return P.pr_evaluation(*snapshots, facts)
+
+    def test_r2_01_state_and_ratchet_changes_cannot_delete_live_transition(self):
+        before = self.files(state="closed", transition=True)
+        after = self.files(stamp="2026-09-07T00:00:00Z")
+        selector, errors = self.evaluate(before, after)
+        self.assertEqual(selector, "pr_ledger_repair")
+        self.assertIn("E6", "; ".join(errors))
+
+    def test_r2_02_metadata_first_does_not_launder_later_transition_deletion(self):
+        before = self.files(state="closed", transition=True)
+        intermediate = self.files(transition=True)
+        self.assertEqual(self.evaluate(before, intermediate), ("pr_ledger_repair", []))
+        selector, errors = self.evaluate(intermediate, self.files())
+        self.assertEqual(selector, "pr_ledger_repair")
+        self.assertIn("E6", "; ".join(errors))
+
+    def test_r2_10_fresh_metadata_only_and_deadline_repair_pass_real_snapshot(self):
+        before = self.files()
+        for after in (self.files(stamp="2026-09-07T00:00:00Z"), self.files(deadline=NEW, history=marker())):
+            self.assertEqual(self.evaluate(before, after), ("pr_ledger_repair", []))
+
+    def test_r2_11_exact_30_day_boundary_and_invalid_timestamps(self):
+        boundary = datetime(2026, 10, 2, 11, 41, 35, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, self.files())
+            with mock.patch.object(G, "now_utc", return_value=boundary):
+                G.giant_file_snapshot(root)
+            for now, stamp, error in ((boundary + timedelta(microseconds=1), STAMP, "older than 30 days"),
+                                      (NOW, "2026-09-08T00:00:00Z", "future"), (NOW, "invalid", "YYYY-MM-DD")):
+                self.write(root, self.files(stamp=stamp))
+                with mock.patch.object(G, "now_utc", return_value=now), self.assertRaisesRegex(G.ParseError, error):
+                    G.giant_file_snapshot(root)
+
+    def run_main(self, before, after, now):
+        env = {"GFP_EVENT_NAME": "pull_request", "GFP_REPOSITORY": "itismyfield/AgentDesk",
+               "GFP_HEAD_REPOSITORY": "itismyfield/AgentDesk", "GFP_CANDIDATE_SHA": "merge",
+               "GFP_BASE_SHA": "base", "GFP_HEAD_SHA": "head"}
+        def git(*args, **kwargs):
+            if args[0] in {"status", "fetch"}:
+                return ""
+            if args[0] == "rev-list":
+                return "merge base head\n"
+            raise AssertionError(args)
+        def oid(ref, suffix="commit"):
+            return {"HEAD": "merge", "origin/main": "base"}.get(ref, ref)
+        facts = {"changed": {path for path in before.keys() | after.keys() if before.get(path) != after.get(path)}, "additions": 4,
+                 "numstat": {}, "statuses": {}}
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence.json"
+            with mock.patch.dict(P.os.environ, env, clear=True), mock.patch.multiple(
+                    P, EVIDENCE=evidence, git=git, oid=oid,
+                    archive=lambda ref, root: self.write(root, before if ref == "base" else after),
+                    diff_facts=lambda *_: copy.deepcopy(facts), movement_ledger=lambda *_: {}), mock.patch.object(
+                    G, "now_utc", return_value=now), mock.patch.object(G, "today_utc", return_value=now.date()), mock.patch.object(
+                    P, "pr_evaluation", wraps=P.pr_evaluation) as evaluation, redirect_stderr(io.StringIO()):
+                rc = P.main()
+            return rc, json.loads(evidence.read_text()), evaluation.call_count
+
+    def test_r2_12_stale_base_fails_before_selector_fresh_base_passes(self):
+        now = datetime(2026, 10, 2, 11, 41, 35, 1, tzinfo=timezone.utc)
+        after = self.files(stamp="2026-10-02T11:41:35Z")
+        rc, evidence, calls = self.run_main(self.files(), after, now)
+        self.assertEqual((rc, calls), (2, 0))
+        self.assertIn("older than 30 days", evidence["reason"])
+        rc, evidence, calls = self.run_main(self.files(stamp="2026-09-07T00:00:00Z"), after, now)
+        self.assertEqual((rc, calls, evidence["selector"]), (0, 1, "pr_ledger_repair"), evidence)
+
+    def test_main_records_deadline_repair_without_false_source_retirement(self):
+        rc, evidence, calls = self.run_main(self.files(), self.files(deadline=NEW, history=marker()), NOW)
+        self.assertEqual((rc, calls, evidence["selector"]), (0, 1, "pr_ledger_repair"))
+        self.assertEqual(evidence["retired"], [])
+
+    def test_r2_14_exhausted_keep_reclassification_and_overdue_remain_blocked(self):
+        history = marker("2026-04-30", "2026-06-30") + marker("2026-06-30", OLD)
+        before = self.files(history=history)
+        after = copy.deepcopy(before)
+        after[P.REGISTRY] = after[P.REGISTRY].replace('decision = "shrink"', 'decision = "keep"').replace(
+            f'deadline = "{OLD}"\n', '').replace('decompose_issue = "#4712"', 'keep_reason = "retained API"')
+        selector, errors = self.evaluate(before, after)
+        self.assertEqual(selector, "pr_strict_progress")
+        self.assertTrue(errors)
+        module = G.ModuleEntry(LEDGER_ROOT, LEDGER_ROOT, 1200, 1200, 0, ("giant-file",))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, before)
+            with mock.patch.multiple(G, GIANT_FILE_REGISTRY=root / P.REGISTRY,
+                                     GIANT_FILE_ISSUE_METADATA=root / P.METADATA,
+                                     GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST=root / P.TRANSITION), mock.patch.object(
+                    G, "now_utc", return_value=NOW), self.assertRaisesRegex(G.ParseError, "overdue"):
+                G.build_giant_registrations([module], evaluation_date=NOW.date())
+
+    def assert_pin_input_failure(self, before, after, context):
+        rc, evidence, calls = self.run_main(before, after, NOW)
+        self.assertEqual((rc, calls), (2, 0), evidence)
+        for key, expected in {"selector": "pr_strict_progress", "selected": True,
+                              "ordinary_problem_count": 1, "verdict": "fail"}.items():
+            self.assertEqual(evidence[key], expected, evidence)
+        self.assertIn("invalid giant-file pins", evidence["reason"])
+        self.assertIn(context, evidence["reason"])
+
+    def test_r3_real_pin_representations_and_invalid_inputs_fail_in_both_archives(self):
+        canonical = (P.ROOT / P.GIANT_PIN).read_text(encoding="utf-8")
+        pins = P.parse_cap_table(canonical, "giant_file_ratchet")
+        first, cap = next(iter(pins.items()))
+        representations = [
+            canonical.replace("[giant_file_ratchet]", '["giant_file_ratchet"]'),
+            canonical.replace("[giant_file_ratchet]", "[ giant_file_ratchet ]"),
+            canonical.replace(f'\n"{first}" =', f"\n'{first}' =", 1),
+            "[giant_file_ratchet]\n" + "".join(f"'{path}' = {cap}\n" for path, cap in pins.items()),
+            canonical.replace(f'\n"{first}" = {cap}', f'\n"{first}" = +{cap}', 1),
+        ]
+        for text in representations:
+            self.assertEqual(P.parse_cap_table(text, "giant_file_ratchet"), pins)
+        invalid = representations + [
+            "", "# only a comment\n", "[giant_file_ratchet]\n", "[other]\n",
+            '[giant_file_ratchet\n', '[giant_file_ratchet]\n[giant_file_ratchet]\n',
+            '[giant_file_ratchet]\n"x" = 1000\n"x" = 1000\n',
+            '[giant_file_ratchet]\n"x" = 1000\n"x" = 1001\n',
+            '[giant_file_ratchet]\n" src/a.rs " = 1000\n',
+            '[giant_file_ratchet]\n"a#b.rs" = 1000\n',
+            '[giant_file_ratchet]\n"src/a.rs" = 1_000\n',
+            '[giant_file_ratchet]\n' + r'"src/a\u002Ers" = 1000' + '\n',
+            *[f'[giant_file_ratchet]\n"x" = {value}\n' for value in
+              ("true", "0", "-1", '"1000"', "1.5")],
+            None, b"\xff",
+        ]
+        for side in ("base", "candidate"):
+            for index, text in enumerate(invalid):
+                with self.subTest(side=side, case=index):
+                    before, after = self.files(), self.files(stamp="2026-09-07T00:00:00Z")
+                    before[P.GIANT_PIN] = after[P.GIANT_PIN] = canonical
+                    target = before if side == "base" else after
+                    if text is None:
+                        target.pop(P.GIANT_PIN)
+                    else:
+                        target[P.GIANT_PIN] = text
+                    self.assert_pin_input_failure(before, after, f"({side})")
+        # The default worktree and candidate remain valid when only base is
+        # representation-corrupt: omitting the archived base path must fail.
+        from audit_maintainability.checks import giant_file_ratchet
+        self.assertEqual(giant_file_ratchet.load_giant_baseline(), pins)
+        # Inventory tests replace sys.modules; check production import identity
+        # in a fresh interpreter rather than asserting their artificial state.
+        subprocess.run([sys.executable, "-B", "-c",
+                        "import sys; sys.path.insert(0, 'scripts')\n"
+                        "import giant_file_progress as p\n"
+                        "from audit_maintainability.checks import giant_files\n"
+                        "assert giant_files._INVENTORY is p.inventory\n"],
+                       cwd=P.ROOT, check=True, capture_output=True, text=True)
+
+    def test_r3_effective_superset_cannot_be_normalized_away(self):
+        from audit_maintainability.checks.giant_file_ratchet import load_giant_baseline
+        prefix = f'[giant_file_ratchet]\n"{LEDGER_ROOT}" = 1200\n'
+        for section in ("[ other ]", '["other"]', '[a."b"]'):
+            before, after = self.files(), self.files()
+            before[P.GIANT_PIN] = prefix + f'{section}\n"{OTHER}" = 1200\n'
+            after[P.GIANT_PIN] = prefix
+            self.assertEqual(P.parse_cap_table(before[P.GIANT_PIN], "giant_file_ratchet"),
+                             P.parse_cap_table(after[P.GIANT_PIN], "giant_file_ratchet"))
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.write(root, before)
+                self.assertEqual(set(load_giant_baseline(root / P.GIANT_PIN)), {LEDGER_ROOT, OTHER})
+                # Unpadded [other] is recognized and is NOT an injection.
+                self.write(root, {P.GIANT_PIN: before[P.GIANT_PIN].replace(section, "[other]")})
+                self.assertEqual(set(load_giant_baseline(root / P.GIANT_PIN)), {LEDGER_ROOT})
+            self.assert_pin_input_failure(before, after, "(base)")
+
+    def test_r3_loader_import_is_lazy_and_failures_produce_evidence(self):
+        original_import = builtins.__import__
+        for failure in (ImportError("loader unavailable"), SyntaxError("loader syntax"),
+                        RuntimeError("loader initialization")):
+            def import_with_failure(name, *args, **kwargs):
+                if name == "audit_maintainability.checks.giant_file_ratchet":
+                    raise failure
+                return original_import(name, *args, **kwargs)
+            with mock.patch.object(builtins, "__import__", side_effect=import_with_failure):
+                spec = importlib.util.spec_from_file_location("lazy_progress_probe", P.__file__)
+                spec.loader.exec_module(importlib.util.module_from_spec(spec))
+                self.assert_pin_input_failure(self.files(), self.files(stamp="2026-09-07T00:00:00Z"),
+                                              str(failure))
+
+    def test_r3_real_loaders_preserve_pin_removal_growth_and_measurement_guards(self):
+        before = self.files()
+        before[RETIRED] = "pub fn production() {}\n" * 860
+        before[P.GIANT_PIN] = f'[giant_file_ratchet]\n"{LEDGER_ROOT}" = 1300\n'
+        for entries, error in (
+                ({RETIRED: 860}, "removed"),
+                ({LEDGER_ROOT: 1301}, "increased"),
+                ({LEDGER_ROOT: 1300, RETIRED: 861}, "measured"),
+                ({LEDGER_ROOT: 1300, "src/missing.rs": 1000}, "measured"),
+                ({LEDGER_ROOT: 1200, RETIRED: 860}, None)):
+            after = copy.deepcopy(before)
+            after[P.GIANT_PIN] = "[giant_file_ratchet]\n" + "".join(
+                f'"{path}" = {cap}\n' for path, cap in entries.items())
+            selector, errors = self.evaluate(before, after)
+            self.assertEqual(selector, "pr_ledger_repair")
+            if error:
+                self.assertIn(error, "; ".join(errors))
+            else:
+                self.assertEqual(errors, [])
+
+
 if __name__ == "__main__":
     unittest.main()
