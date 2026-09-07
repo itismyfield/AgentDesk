@@ -6663,6 +6663,7 @@ services::discord::turn_finalizer::finalize::tests::residue_tests::health_names_
 services::discord::turn_finalizer::finalize::tests::residue_tests::health_still_shows_residual_while_an_inflight_owner_holds_the_release
 services::discord::turn_finalizer::finalize::tests::residue_tests::issue_shape_surviving_inflight_row_holds_recovery_on_every_tick
 services::discord::turn_finalizer::finalize::tests::residue_tests::kickoff_guard_skip_preserves_queue_and_arms_recovery
+services::discord::turn_finalizer::finalize::tests::residue_tests::owned_row_backstop_miss_clears_only_its_episode_without_manual_unlink
 services::discord::turn_finalizer::finalize::tests::residue_tests::producer_bound_same_episode_miss_keeps_residue_recovery_owner_r3
 services::discord::turn_finalizer::finalize::tests::thread_finalize_removes_parent_mapping_and_schedules_parent_kickoff
 services::discord::turn_finalizer::finalize_context::tests::watcher_after_pre_panel_release_only_flips_expected_guard_miss
