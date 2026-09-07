@@ -1,3 +1,6 @@
+mod rate_limit_sync;
+use rate_limit_sync::{rate_limit_sync_loop, upsert_rate_limit_cache_entry};
+
 pub(crate) mod cluster;
 pub(crate) mod cluster_session_routing;
 pub(crate) mod cron_catalog;
@@ -970,39 +973,6 @@ async fn record_periodic_job_execution_pg(
     upsert_kv_meta_pg_ignore(pg_pool, &key_duration, &elapsed_ms).await;
 }
 
-/// Background task that periodically fetches rate-limit data from external providers
-/// and caches it in the `rate_limit_cache` table for the dashboard API.
-async fn upsert_rate_limit_cache_entry(
-    pg_pool: &PgPool,
-    provider: &str,
-    profile_id: &str,
-    data: &str,
-    fetched_at: i64,
-) {
-    let profile_id = if profile_id.trim().is_empty() {
-        "default"
-    } else {
-        profile_id
-    };
-    if let Err(error) = sqlx::query(
-        "INSERT INTO rate_limit_cache (provider, profile_id, data, fetched_at)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (provider, profile_id)
-         DO UPDATE SET data = EXCLUDED.data, fetched_at = EXCLUDED.fetched_at",
-    )
-    .bind(provider)
-    .bind(profile_id)
-    .bind(data)
-    .bind(fetched_at)
-    .execute(pg_pool)
-    .await
-    {
-        tracing::warn!(
-            "[rate-limit-sync] failed to upsert rate_limit_cache row for {provider}: {error}"
-        );
-    }
-}
-
 fn rate_limit_upsert_conflict_target() -> &'static str {
     "(provider, profile_id)"
 }
@@ -1518,34 +1488,6 @@ mod claude_oauth_usage_tests {
         assert_eq!(buckets[0]["utilization"], 41.5);
         assert_eq!(buckets[0]["used"], 41);
     }
-}
-
-/// Fetch Codex usage via chatgpt.com backend API (subscription-based, no API key needed).
-async fn fetch_grok_billing_usage(token: &str) -> Result<Vec<serde_json::Value>, anyhow::Error> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
-    let resp = client
-        .get("https://cli-chat-proxy.grok.com/v1/billing")
-        .header("authorization", format!("Bearer {token}"))
-        .header("xai-grok-cli", "1")
-        .header("accept", "application/json")
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "Grok billing API returned {}",
-            resp.status()
-        ));
-    }
-    let data: serde_json::Value = resp.json().await?;
-    if let Some(buckets) = data.get("buckets").and_then(|value| value.as_array()) {
-        return Ok(buckets.clone());
-    }
-    Ok(vec![serde_json::json!({
-        "label": "grok",
-        "raw": data,
-    })])
 }
 
 async fn fetch_codex_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>, anyhow::Error> {

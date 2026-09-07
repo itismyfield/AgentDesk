@@ -222,9 +222,21 @@ pub(crate) fn spawn_auth_overlay(
     provider: ProviderKind,
     channel_id: Option<u64>,
 ) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
-    let agent_id = channel_id.and_then(|id| {
-        resolve_role_binding(ChannelId::new(id), None).map(|binding| binding.role_id)
+    let context = crate::services::platform::active_provider_context(provider.as_str());
+    let channel_id = channel_id.or_else(|| {
+        context
+            .as_ref()
+            .and_then(|context| context.channel_id.as_deref())
+            .and_then(|id| id.parse().ok())
     });
+    let agent_id = context
+        .as_ref()
+        .and_then(|context| context.agent_id.clone())
+        .or_else(|| {
+            channel_id.and_then(|id| {
+                resolve_role_binding(ChannelId::new(id), None).map(|binding| binding.role_id)
+            })
+        });
     spawn_auth_overlay_for_context(provider, channel_id, agent_id.as_deref())
 }
 
@@ -404,6 +416,15 @@ pub(crate) fn api_agent_identity(
         .or(db_provider)
         .and_then(ProviderKind::from_str)
         .unwrap_or_else(|| ProviderKind::Unsupported(db_provider.unwrap_or("unknown").to_string()));
+    let effective_profile =
+        configured_auth_profile(None, def.and_then(|def| def.auth_profile.as_deref()))
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                schema
+                    .as_ref()
+                    .map(|schema| provider_primary_profile(schema, Some(provider.as_str())))
+                    .unwrap_or_else(|| "default".to_string())
+            });
     let identity = identity_from_parts(
         agent_id,
         def.map(|def| def.display_name.clone())
@@ -411,7 +432,7 @@ pub(crate) fn api_agent_identity(
             .unwrap_or_else(|| agent_id.to_string()),
         provider,
         def.and_then(|def| def.model.clone()),
-        def.and_then(|def| def.auth_profile.as_deref()),
+        Some(&effective_profile),
     );
     agent_identity::identity_json(&identity)
 }

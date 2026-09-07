@@ -120,7 +120,12 @@
     {
       "path": "src/services/claude.rs",
       "lint": "too_many_arguments",
-      "count": 7
+      "count": 6
+    },
+    {
+      "path": "src/services/claude/tui_session_launch.rs",
+      "lint": "too_many_arguments",
+      "count": 1
     },
     {
       "path": "src/services/claude_e/process.rs",

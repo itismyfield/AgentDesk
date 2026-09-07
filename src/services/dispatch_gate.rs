@@ -36,6 +36,8 @@
 //!   codes — never string parsing in route handlers, never the terminal
 //!   auto-queue `skipped` status.
 
+mod auth_profiles;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
@@ -260,6 +262,7 @@ pub fn set_agent_provider_snapshot(snapshot: HashMap<String, String>) {
 /// fails OPEN (unresolved provider -> allow) instead of gating on a stale
 /// mapping. (P2 review fix — server/mod.rs:1047.)
 pub fn clear_agent_provider_snapshot() {
+    auth_profiles::clear_profiles();
     let lock = agent_provider_map();
     lock.write().unwrap_or_else(|p| p.into_inner()).clear();
 }
@@ -298,6 +301,7 @@ pub async fn refresh_snapshots_from_db(pg_pool: &sqlx::PgPool, now: i64) {
 pub async fn refresh_agent_provider_snapshot_from_db(pg_pool: &sqlx::PgPool) {
     match crate::db::agents::load_all_agent_channel_bindings_pg(pg_pool).await {
         Ok(bindings) => {
+            auth_profiles::refresh_profiles(&bindings);
             let mut agent_provider = HashMap::new();
             for (agent_id, binding) in bindings {
                 if let Some(provider) = binding.resolved_primary_provider_kind() {
@@ -487,7 +491,11 @@ pub fn pressure_snapshot_from_payloads(
     let mut map = HashMap::new();
     for payload in payloads {
         if let Some((provider, snapshot)) = snapshot_from_provider_payload(payload) {
-            map.insert(provider, snapshot);
+            let profile_id = payload
+                .get("profile_id")
+                .and_then(Value::as_str)
+                .unwrap_or("default");
+            map.insert(auth_profiles::account_key(&provider, profile_id), snapshot);
         }
     }
     map
@@ -734,7 +742,7 @@ pub fn evaluate_agent_provider_pressure_with_overrides(
         let map = lock.read().unwrap_or_else(|p| p.into_inner());
         evaluate_provider_pressure(
             &provider,
-            map.get(&provider),
+            map.get(&auth_profiles::agent_account_key(agent_id, &provider)),
             danger,
             stale_override.unwrap_or_else(stale_sec),
             now,

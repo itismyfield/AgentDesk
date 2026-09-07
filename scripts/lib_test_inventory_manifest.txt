@@ -7275,6 +7275,7 @@ services::discord_config_audit::voice_alias_precheck_tests::precheck_collision_r
 services::discord_config_audit::voice_alias_precheck_tests::precheck_collision_with_voice_enabled_downgrades_to_disabled
 services::discord_config_audit::voice_alias_precheck_tests::precheck_no_collision_keeps_voice_enabled
 services::discord_config_audit::voice_alias_precheck_tests::precheck_no_voice_section_is_noop_even_with_collision
+services::dispatch_gate::auth_profiles::tests::named_account_pressure_does_not_replace_default_pressure
 services::dispatch_gate::tests::at_threshold_defers
 services::dispatch_gate::tests::bypass_counter_increments
 services::dispatch_gate::tests::cleared_agent_provider_snapshot_fails_open

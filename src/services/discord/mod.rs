@@ -39,11 +39,7 @@ mod metrics;
 mod model_catalog;
 mod model_picker_interaction;
 pub(crate) mod monitoring_status;
-mod org_schema;
-pub(crate) use org_schema::{
-    ProfileBinding, api_agent_identity, list_profile_bindings, overlay_from_tmux_session,
-    provider_auth_catalog, provider_auth_primary_profiles, spawn_auth_overlay,
-};
+pub(crate) mod org_schema;
 pub(crate) mod org_writer;
 pub(crate) mod outbound;
 mod placeholder_cleanup;
