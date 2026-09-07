@@ -20,17 +20,7 @@ pub(crate) async fn inspect(
     let shared = runtime(registry, provider, channel).await?;
     let lease = identity(&shared, provider, channel).await?;
     if let Some(expected) = lease.as_ref() {
-        let row = inflight::load_inflight_state(provider, channel.get())
-            .ok_or("lease cannot be released: matching inflight identity is missing")?;
-        if row.effective_finalizer_turn_id() != expected.user_message_id
-            || row.turn_nonce.as_deref() != Some(expected.turn_nonce.as_str())
-            || row.restart_mode.is_some()
-            || row.rebind_origin
-        {
-            return Err(
-                "lease cannot be released: inflight identity differs or is protected".into(),
-            );
-        }
+        matching_inflight(provider, expected)?;
     }
     Ok(lease)
 }
