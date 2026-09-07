@@ -612,6 +612,46 @@ impl RoutineScriptLoader {
     }
 }
 
+/// Script refs (root-relative `*.js` paths, `/`-separated) present on disk
+/// under `roots`, using the same walk and bundled-helper exclusion as
+/// `RoutineScriptLoader::load_dirs` but without evaluating anything. Missing
+/// or unreadable roots contribute nothing. Sorted and de-duplicated.
+pub fn discover_routine_script_refs(roots: &[PathBuf]) -> Vec<String> {
+    let primary_root_identity = roots.first().and_then(|root| root.canonicalize().ok());
+    let mut refs = std::collections::BTreeSet::new();
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        let exclude_bundled_node_helpers = root
+            .canonicalize()
+            .ok()
+            .is_some_and(|identity| primary_root_identity.as_ref() == Some(&identity));
+        let mut entries = Vec::new();
+        if collect_routine_script_paths(root, exclude_bundled_node_helpers, &mut entries).is_err() {
+            continue;
+        }
+        for path in entries {
+            refs.insert(script_ref(root, &path));
+        }
+    }
+    refs.into_iter().collect()
+}
+
+/// Discovered script refs that have no `routines` row (any status) — files
+/// an operator dropped into `routines.dir` but never attached via
+/// `POST /api/routines`. Preserves the (sorted) discovery order.
+pub fn unregistered_routine_script_refs(
+    discovered: &[String],
+    registered: &HashSet<String>,
+) -> Vec<String> {
+    discovered
+        .iter()
+        .filter(|script_ref| !registered.contains(script_ref.as_str()))
+        .cloned()
+        .collect()
+}
+
 pub fn load_single_routine_script(root: &Path, path: &Path) -> Result<LoadedRoutineScript> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow!("read routine script {}: {e}", path.display()))?;
@@ -934,6 +974,63 @@ mod tests {
     use std::sync::Barrier;
     use std::thread;
     use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[test]
+    fn discover_routine_script_refs_walks_roots_and_skips_non_js() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("routines");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("b.js"), "x").unwrap();
+        std::fs::write(root.join("a.js"), "x").unwrap();
+        std::fs::write(root.join("nested").join("c.js"), "x").unwrap();
+        std::fs::write(root.join("README.md"), "x").unwrap();
+        let extra = temp.path().join("extra");
+        std::fs::create_dir_all(&extra).unwrap();
+        std::fs::write(extra.join("a.js"), "override").unwrap();
+        std::fs::write(extra.join("d.js"), "x").unwrap();
+
+        let refs = discover_routine_script_refs(&[
+            root.clone(),
+            extra,
+            temp.path().join("does-not-exist"),
+        ]);
+        assert_eq!(refs, vec!["a.js", "b.js", "d.js", "nested/c.js"]);
+    }
+
+    #[test]
+    fn discover_routine_script_refs_excludes_bundled_node_helper_in_primary_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("routines");
+        std::fs::create_dir_all(root.join("monitoring")).unwrap();
+        std::fs::write(
+            root.join("monitoring").join("local_worktree_inventory.js"),
+            "x",
+        )
+        .unwrap();
+        std::fs::write(root.join("local-worktree-gc.js"), "x").unwrap();
+
+        assert_eq!(
+            discover_routine_script_refs(&[root]),
+            vec!["local-worktree-gc.js"]
+        );
+    }
+
+    #[test]
+    fn unregistered_routine_script_refs_reports_only_missing_rows() {
+        let discovered = vec![
+            "a.js".to_string(),
+            "b.js".to_string(),
+            "nested/c.js".to_string(),
+        ];
+        let registered: HashSet<String> = ["b.js".to_string()].into_iter().collect();
+        assert_eq!(
+            unregistered_routine_script_refs(&discovered, &registered),
+            vec!["a.js", "nested/c.js"]
+        );
+        let all: HashSet<String> = discovered.iter().cloned().collect();
+        assert!(unregistered_routine_script_refs(&discovered, &all).is_empty());
+        assert!(unregistered_routine_script_refs(&[], &registered).is_empty());
+    }
 
     #[derive(Clone)]
     struct CapturingWriter {

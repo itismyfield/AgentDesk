@@ -34,6 +34,8 @@ export interface PersistedFsmDraftEntry {
   stageDrafts: StageDraft[];
   selection: Selection;
   overrideExtras: Record<string, unknown>;
+  /** Server-sourced extras; [] keeps local keys local, absent needs legacy migration/learning. */
+  serverExtraKeys?: string[];
 }
 
 export interface PersistedFsmDraftStore {

@@ -12,6 +12,7 @@ mod outbox_actionable_delivery;
 mod outbox_delivery_alert;
 pub(crate) mod resource_locks;
 pub mod routes;
+mod routine_script_audit;
 mod startup_preflight;
 pub(crate) mod task_dispatch_claims;
 pub(crate) mod test_phase_runs;
@@ -3220,8 +3221,8 @@ async fn routine_runtime_loop(
     tick_interval_secs: u64,
 ) {
     use crate::services::routines::{
-        RoutineAction, RoutineAgentExecutor, RoutineDiscordLogger, RoutineScriptLoader,
-        RoutineStore, poll_agent_turns, run_due_tick,
+        RoutineAction, RoutineAgentExecutor, RoutineDiscordLogger, RoutineStore, poll_agent_turns,
+        run_due_tick,
     };
     let Some(tick_interval_secs) = std::num::NonZeroU64::new(tick_interval_secs) else {
         tracing::warn!("routine runtime not started: tick_interval_secs must be greater than zero");
@@ -3234,9 +3235,7 @@ async fn routine_runtime_loop(
     let routine_script_dirs = routines_config.script_dirs();
     let initial_script_dirs = routine_script_dirs.clone();
     let script_loader = match tokio::task::spawn_blocking(move || {
-        let loader = Arc::new(RoutineScriptLoader::new_shared(&initial_script_dirs)?);
-        let count = loader.load_dirs(&initial_script_dirs)?;
-        Ok::<_, anyhow::Error>((loader, count))
+        routine_script_audit::load_registry(&initial_script_dirs)
     })
     .await
     {
@@ -3259,6 +3258,7 @@ async fn routine_runtime_loop(
         routines_config.default_timezone.clone(),
         routines_config.max_checkpoint_bytes,
     );
+    routine_script_audit::warn_once_unregistered(pg_pool.as_ref(), &routine_script_dirs).await;
     let discord_logger = RoutineDiscordLogger::new_with_health_registry(
         pg_pool.clone(),
         health_registry.clone(),

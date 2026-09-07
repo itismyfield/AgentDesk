@@ -30038,6 +30038,15 @@
     {
       "root": "src",
       "kind": "RUST",
+      "path": "src/services/routines/script_refs.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7fb86d34b3894a869f18e51238ecda95c6340d7a37b080e834dfe1aa4d24fd85"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
       "path": "src/services/routines/session_control.rs",
       "api": "sqlx::query",
       "symbol": "query",
