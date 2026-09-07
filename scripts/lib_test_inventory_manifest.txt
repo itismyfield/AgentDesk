@@ -696,6 +696,8 @@ engine::ops::http_ops::tests::loopback_http_post_enforces_total_deadline_against
 engine::ops::http_ops::tests::loopback_http_post_passes_through_non_2xx_json_body
 engine::ops::http_ops::tests::loopback_http_post_returns_body_when_server_closes_after_response
 engine::ops::http_ops::tests::loopback_http_post_returns_on_content_length_before_server_close
+engine::ops::http_ops::tests::policy_http_get_rejects_remote_targets_and_never_follows_redirects
+engine::ops::http_ops::tests::policy_http_get_uses_read_only_loopback_transport_and_js_registration
 engine::ops::http_ops::tests::request_head_speaks_http_1_0_and_closes
 engine::ops::http_ops::tests::resolve_http_post_timeout_clamps_under_tight_deadline
 engine::ops::http_ops::tests::resolve_http_post_timeout_errors_after_deadline_elapses
@@ -956,6 +958,7 @@ server::routes::bind_security_tests::loopback_host_is_never_downgraded
 server::routes::bind_security_tests::loopback_notation_edges_are_not_force_downgraded
 server::routes::bind_security_tests::nonloopback_with_token_binds_requested_host
 server::routes::bind_security_tests::nonloopback_without_token_is_forced_to_loopback
+server::routes::cluster::idle_kill_config_tests::idle_kill_owner_config_requires_explicit_nonempty_trusted_origin
 server::routes::departments::tests::db_error_preserves_500_and_verbatim_message
 server::routes::departments::tests::department_not_found_preserves_404_and_message
 server::routes::departments::tests::ensure_pg_missing_pool_preserves_503_and_message
