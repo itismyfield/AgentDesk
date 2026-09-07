@@ -775,6 +775,7 @@ decompose_issue = "#4712"
 #   a shrink -> keep reclassification of all fourteen 2026-10-31 entries, not a
 #   decomposition round. Either disposition is a cohort-wide call; what this
 #   change fixes is that the path is no longer stranded on a private date.
+# No current selector admits shrink -> keep; it requires a separately authorized evaluator change.
 file = "src/services/discord/session_relay_sink.rs"
 owner = "discord-relay"
 deadline = "2026-10-31"
@@ -786,8 +787,8 @@ decompose_issue = "#4712"
 # giants and must not be re-registered. Measured prod LoC (threshold 1000):
 #   - src/server/worker_registry.rs                              483 (#5688)
 #   - src/services/discord/outbound/turn_output_controller.rs    996 (#5679)
-#   - src/services/discord/tui_direct_pending_start.rs           933 (#5699)
-#   - src/services/discord/turn_finalizer.rs                     860
+#   - src/services/discord/tui_direct_pending_start.rs           935 (#5699)
+#   - src/services/discord/turn_finalizer.rs                     844
 # WARNING: turn_output_controller.rs sits 4 production lines under the giant
 # threshold (996 of 1000; its 3457 total lines are mostly tests). Four added
 # production lines flip it back to prod-giant, which re-registers it here and

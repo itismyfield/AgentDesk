@@ -17,8 +17,8 @@ gate for three consecutive nightly runs. None of them is a giant any more --
 measured production LoC against the 1000-line threshold:
   - server/worker_registry.rs                             483  (#5688)
   - services/discord/outbound/turn_output_controller.rs   996  (#5679)
-  - services/discord/tui_direct_pending_start.rs          933  (#5699)
-  - services/discord/turn_finalizer.rs                    860
+  - services/discord/tui_direct_pending_start.rs          935  (#5699)
+  - services/discord/turn_finalizer.rs                    844
 (paths above are relative to src/, so that this prose is not parsed as entries)
 See the TRANSITION-LIST CLEANUP note in scripts/giant_file_registry.toml: it
 records that turn_output_controller.rs clears the threshold by only 4
