@@ -4706,6 +4706,7 @@ mod stall_watchdog_auto_heal_tests {
                 output_len,
                 "axis-b-watchdog-session",
             );
+            state.turn_nonce = token.turn_nonce().map(str::to_owned);
             let stale_at = (chrono::Local::now() - chrono::Duration::minutes(30))
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string();

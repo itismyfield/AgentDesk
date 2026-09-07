@@ -830,6 +830,7 @@ fn stale_foreign_inflight_dead_frontier_is_demoted_via_finalizer_cancel() {
             .store(1, std::sync::atomic::Ordering::Relaxed);
         let mut state =
             stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &output_path);
+        state.turn_nonce = token.turn_nonce().map(str::to_owned);
         stamp_claude_ready_for_input_evidence(&mut state, &output_path);
         write_inflight_fixture(root.path(), &provider, &state);
         let mut rec = record("claude", channel_id, anchor);
@@ -909,6 +910,7 @@ fn committed_leaked_foreign_row_clears_then_pending_start_claims() {
 
         let mut stale_state =
             stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &stale_output);
+        stale_state.turn_nonce = stale_token.turn_nonce().map(str::to_owned);
         stale_state.terminal_delivery_committed = true;
         stale_state.full_response = "delivered".to_string();
         stale_state.response_sent_offset = stale_state.full_response.len();
@@ -1095,6 +1097,7 @@ fn stale_foreign_demote_uses_no_progress_not_absolute_zero_frontier() {
             .store(1, std::sync::atomic::Ordering::Relaxed);
         let mut state =
             stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &output_path);
+        state.turn_nonce = token.turn_nonce().map(str::to_owned);
         stamp_claude_ready_for_input_evidence(&mut state, &output_path);
         write_inflight_fixture(root.path(), &provider, &state);
         let mut rec = record("claude", channel_id, anchor);
@@ -1215,6 +1218,7 @@ fn stale_foreign_demote_cancels_and_removes_current_watcher() {
             .store(1, std::sync::atomic::Ordering::Relaxed);
         let mut state =
             stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &output_path);
+        state.turn_nonce = token.turn_nonce().map(str::to_owned);
         stamp_claude_ready_for_input_evidence(&mut state, &output_path);
         write_inflight_fixture(root.path(), &provider, &state);
         let (watcher, watcher_cancel) = test_watcher_handle(tmux, &output_path);
@@ -1374,6 +1378,7 @@ async fn stale_foreign_demote_under_delivery_lease(
         .store(1, std::sync::atomic::Ordering::Relaxed);
     let mut state =
         stale_foreign_state(provider.clone(), channel_id, stale_msg, &tmux, &output_path);
+    state.turn_nonce = token.turn_nonce().map(str::to_owned);
     stamp_claude_ready_for_input_evidence(&mut state, &output_path);
     write_inflight_fixture(root, &provider, &state);
     let (watcher, watcher_cancel) = test_watcher_handle(&tmux, &output_path);
@@ -1600,6 +1605,7 @@ async fn stale_foreign_demote_with_replaced_binding(
         .store(1, std::sync::atomic::Ordering::Relaxed);
     let mut state =
         stale_foreign_state(provider.clone(), channel_id, stale_msg, &tmux, &output_path);
+    state.turn_nonce = token.turn_nonce().map(str::to_owned);
     stamp_claude_ready_for_input_evidence(&mut state, &output_path);
     write_inflight_fixture(root, &provider, &state);
     let (watcher, watcher_cancel) = test_watcher_handle(&tmux, &output_path);
@@ -1768,6 +1774,7 @@ fn stale_foreign_demote_without_watcher_still_commits_cancel() {
             .store(1, std::sync::atomic::Ordering::Relaxed);
         let mut state =
             stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &output_path);
+        state.turn_nonce = token.turn_nonce().map(str::to_owned);
         stamp_claude_ready_for_input_evidence(&mut state, &output_path);
         write_inflight_fixture(root.path(), &provider, &state);
         let mut rec = record("claude", channel_id, 4_030_317);
@@ -1820,6 +1827,7 @@ fn stale_foreign_death_gate_clears_rebind_origin_lifecycle_row() {
             .store(1, std::sync::atomic::Ordering::Relaxed);
         let mut state =
             stale_foreign_state(provider.clone(), channel_id, stale_msg, tmux, &output_path);
+        state.turn_nonce = token.turn_nonce().map(str::to_owned);
         stamp_claude_ready_for_input_evidence(&mut state, &output_path);
         state.rebind_origin = true;
         write_inflight_fixture(root.path(), &provider, &state);

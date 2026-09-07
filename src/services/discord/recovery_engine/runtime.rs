@@ -615,7 +615,7 @@ mod reregister_ledger_reseed_tests {
         );
         let outcome = shared
             .turn_finalizer
-            .submit_terminal(
+            .submit_terminal_with_episode_nonce(
                 super::super::turn_finalizer::TurnKey::new(
                     ch,
                     state.finalizer_turn_id,
@@ -624,6 +624,7 @@ mod reregister_ledger_reseed_tests {
                 ProviderKind::Claude,
                 super::super::turn_finalizer::TerminalEvent::Complete,
                 super::super::turn_finalizer::FinalizeContext::watcher(),
+                state.turn_nonce.clone(),
                 shared.clone(),
             )
             .await;
