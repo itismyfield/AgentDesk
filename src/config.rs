@@ -2624,7 +2624,7 @@ pub struct EscalationSettingsResponse {
 /// dropped into, and the channel-name suffix → CLI provider map used by
 /// dashboard / Discord wizard auto-detection. (#1110, Epic #912 Phase P6)
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct OnboardingConfig {
     /// Override for `discord.guild_id` when onboarding tooling needs to
     /// target a different guild than the runtime bots. Most setups leave
@@ -2638,11 +2638,11 @@ pub struct OnboardingConfig {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub default_categories: std::collections::BTreeMap<String, String>,
     /// Channel-name suffix → CLI provider id. Suffixes match the trailing
-    /// portion of a channel name (case-insensitive, leading `-` optional).
-    /// When empty, the built-in fallback derived from the provider
-    /// registry (`provider_suffix_default_map`) is used.
+    /// portion of a channel name (exact match, leading `-` optional in keys).
+    /// Entries overlay the provider registry defaults. Set a value to null
+    /// to remove that suffix; an empty map preserves the registry defaults.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub provider_suffix_map: std::collections::BTreeMap<String, String>,
+    pub provider_suffix_map: std::collections::BTreeMap<String, Option<String>>,
     /// Optional list of providers offered to the wizard's provider picker.
     /// When empty, all providers from the built-in registry are offered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2663,67 +2663,71 @@ impl OnboardingConfig {
             && self.default_provider.is_none()
     }
 
-    /// Built-in suffix→provider table mirrored from the dashboard
-    /// `setupWizardHelpers.ts::PROVIDER_SUFFIX_MAP`. Used as a fallback
-    /// when `provider_suffix_map` is unset, so backend and dashboard stay
-    /// in lockstep without a config file present.
-    // reason: onboarding suffix-resolution config API mirroring the dashboard
-    // `setupWizardHelpers.ts`; test-covered but not yet wired into a production
-    // caller (the live path uses dispatch::provider_from_channel_suffix).
-    #[allow(dead_code)]
-    pub fn provider_suffix_default_map() -> &'static [(&'static str, &'static str)] {
-        &[
-            ("-cc", "claude"),
-            ("-cdx", "codex"),
-            ("-gem", "gemini"),
-            ("-gm", "gemini"),
-            ("-qw", "qwen"),
-            ("-oc", "opencode"),
-            ("-cop", "copilot"),
-            ("-ag", "antigravity"),
-            ("-api", "api"),
-        ]
+    /// Derive the built-in suffix table from the provider registry itself.
+    pub fn provider_suffix_default_map() -> BTreeMap<String, String> {
+        crate::services::provider::provider_registry()
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .channel_suffix
+                    .map(|suffix| (suffix.to_string(), entry.id.to_string()))
+            })
+            .collect()
     }
 
-    /// Resolves a provider id from a channel name (or any string with the
-    /// suffix-bearing trailing token). Reads `provider_suffix_map` first;
-    /// falls back to the built-in default map. Case-insensitive.
-    // reason: onboarding config-driven suffix resolver; covered by config tests,
-    // pending wiring into the setup flow.
-    #[allow(dead_code)]
-    pub fn provider_from_channel_suffix(&self, channel_name: &str) -> Option<String> {
-        let lowered = channel_name.trim().to_ascii_lowercase();
-        if lowered.is_empty() {
-            return None;
-        }
-
-        let mut entries: Vec<(String, String)> = self
-            .provider_suffix_map
-            .iter()
-            .map(|(k, v)| (normalize_suffix_key(k), v.trim().to_string()))
-            .filter(|(suffix, provider)| !suffix.is_empty() && !provider.is_empty())
-            .collect();
-        if entries.is_empty() {
-            entries = Self::provider_suffix_default_map()
-                .iter()
-                .map(|(suffix, provider)| ((*suffix).to_string(), (*provider).to_string()))
-                .collect();
-        }
-        // Match longest suffix first so `-cdx` wins over `-x`.
-        entries.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-        for (suffix, provider) in entries {
-            if lowered.ends_with(&suffix) {
-                return Some(provider);
+    /// Merge additions, replacements and explicit removals over defaults.
+    /// Invalid provider values leave existing defaults intact and emit warnings.
+    pub fn merged_provider_suffix_map(&self) -> BTreeMap<String, String> {
+        let mut entries = Self::provider_suffix_default_map();
+        for (raw_suffix, value) in &self.provider_suffix_map {
+            let suffix = normalize_suffix_key(raw_suffix);
+            if suffix.is_empty() {
+                continue;
+            }
+            match value {
+                None => {
+                    entries.remove(&suffix);
+                }
+                Some(raw) => {
+                    if let Some(provider) = crate::services::provider::ProviderKind::from_str(raw) {
+                        entries.insert(suffix, provider.as_str().to_string());
+                    }
+                }
             }
         }
-        None
+        entries
     }
 
-    /// Resolve a category by either a label key (e.g. `dev`) or a raw
-    /// numeric Discord category ID. Returns the resolved Discord ID.
-    // reason: onboarding category resolver (label or raw Discord ID); test-covered,
-    // pending wiring into the setup flow.
-    #[allow(dead_code)]
+    /// Resolve the longest matching suffix from the merged map.
+    /// Channel names retain the registry's exact, case-sensitive matching.
+    pub fn provider_from_channel_suffix(&self, channel_name: &str) -> Option<String> {
+        self.merged_provider_suffix_map()
+            .into_iter()
+            .filter(|(suffix, _)| channel_name.ends_with(suffix))
+            .max_by_key(|(suffix, _)| suffix.len())
+            .map(|(_, provider)| provider)
+    }
+
+    pub fn effective_default_provider(&self) -> Option<crate::services::provider::ProviderKind> {
+        use crate::services::provider::{ProviderKind, provider_registry};
+        self.default_provider
+            .as_deref()
+            .and_then(ProviderKind::from_str)
+            .or_else(|| {
+                provider_registry()
+                    .iter()
+                    .find(|entry| entry.default_channel_provider)
+                    .and_then(|entry| ProviderKind::from_str(entry.id))
+            })
+    }
+
+    pub fn warn_invalid_rules(&self) {
+        for warning in crate::services::provider::channel_rules::warnings(self) {
+            tracing::warn!("onboarding: {warning}");
+        }
+    }
+
+    /// Resolve a category label or raw Discord category ID.
     pub fn resolve_category(&self, label_or_id: &str) -> Option<String> {
         let trimmed = label_or_id.trim();
         if trimmed.is_empty() {
@@ -2732,7 +2736,6 @@ impl OnboardingConfig {
         if let Some(id) = self.default_categories.get(trimmed) {
             return Some(id.trim().to_string());
         }
-        // Treat numeric-looking strings as raw Discord IDs.
         if trimmed.chars().all(|c| c.is_ascii_digit()) {
             return Some(trimmed.to_string());
         }
@@ -2740,7 +2743,7 @@ impl OnboardingConfig {
     }
 
     /// Effective guild ID: prefer the onboarding override, fall back to
-    /// `DiscordConfig::guild_id`. Returns `None` if neither is set.
+    /// `DiscordConfig::guild_id`.
     pub fn effective_guild_id<'a>(&'a self, discord: &'a DiscordConfig) -> Option<&'a str> {
         self.guild_id
             .as_deref()
@@ -2749,11 +2752,7 @@ impl OnboardingConfig {
     }
 }
 
-/// Normalise a user-provided suffix key so both `cc` and `-cc` resolve to
-/// `-cc`. Empty strings stay empty so the caller can drop them.
-// reason: helper for provider_from_channel_suffix (onboarding config API), dead
-// until that resolver is wired into the setup flow.
-#[allow(dead_code)]
+/// Normalize suffix keys; empty strings stay empty for validation.
 fn normalize_suffix_key(raw: &str) -> String {
     let trimmed = raw.trim().trim_start_matches('-').to_ascii_lowercase();
     if trimmed.is_empty() {
@@ -3411,6 +3410,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
 }
 
 fn validate_config(config: &Config) -> Result<()> {
+    config.onboarding.warn_invalid_rules();
     validate_escalation_schedule(&config.escalation.schedule)?;
     validate_scheduled_message_required_mentions(
         &config.discord.scheduled_message_required_mention_user_ids,

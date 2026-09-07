@@ -755,7 +755,7 @@ fn cmd_show_session_name(channel: &str, provider: Option<&str>) -> std::result::
                 crate::services::provider::supported_provider_ids().join(", ")
             )
         })?,
-        None => ProviderKind::from_channel_suffix(channel).ok_or_else(|| {
+        None => super::channel_provider::from_config(channel)?.ok_or_else(|| {
             format!(
                 "could not infer provider from channel '{channel}' \
                  (no registered suffix). pass --provider <{}>",

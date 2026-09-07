@@ -27,3 +27,4 @@ pub use dcserver::{agentdesk_runtime_root, handle_dcserver, handle_restart_dcser
 pub use discord::{handle_discord_senddm, handle_discord_sendfile, handle_discord_sendmessage};
 pub use init::handle_init;
 pub(crate) use run::execute;
+mod channel_provider;

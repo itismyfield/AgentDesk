@@ -27,6 +27,7 @@ cli::args::tests::send_to_agent_parses_expect_reply_false
 cli::args::tests::send_to_agent_parses_expect_reply_true
 cli::args::tests::send_to_agent_requires_expect_reply
 cli::args::tests::top_level_command_name_snapshot_preserves_public_cli_surface
+cli::channel_provider::tests::onboarding_routing_cli_reads_config_and_rejects_unknown_keys
 cli::client::activity_tests::activity_counts_buckets_by_kind
 cli::client::activity_tests::parse_duration_suffix_handles_each_unit
 cli::client::activity_tests::parse_window_anchor_accepts_rfc3339
@@ -7236,6 +7237,8 @@ services::observability::turn_lifecycle::tests::turn_event_notification_policy_a
 services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests::emit_turn_lifecycle_enqueues_expected_notifications_and_dedupes
 services::observability::turn_lifecycle::tests::turn_lifecycle_pg_tests::emit_turn_lifecycle_persists_round_trip
 services::onboarding::canonical_status_tests::new_agents_start_with_core_canonical_idle_status
+services::onboarding::channel::tests::onboarding_routing_channel_creation_sends_configured_guild_and_category
+services::onboarding::channel::tests::onboarding_routing_defaults_and_category_retry_identity
 services::onboarding::credential_token_permission_tests::write_credential_token_creates_owner_only_secret_file
 services::onboarding::secondary_command_provider_tests::supported_primary_providers_have_stable_secondary_defaults
 services::opencode::tests::hard_kill_marks_retiring_only_for_exclusive_session
@@ -7380,6 +7383,10 @@ services::provider::cancel_watchdog::tests::delayed_watchdog_preserves_existing_
 services::provider::cancel_watchdog::tests::external_cancel_before_deadline_does_not_become_watchdog_timeout
 services::provider::cancel_watchdog::tests::external_cancel_publication_wins_interleaving_before_timeout_commit
 services::provider::cancel_watchdog::tests::failed_pid_cleanup_keeps_watchdog_alive_for_retry
+services::provider::channel_rules::tests::onboarding_routing_add_override_delete_and_longest_match
+services::provider::channel_rules::tests::onboarding_routing_empty_config_preserves_registry_behavior
+services::provider::channel_rules::tests::onboarding_routing_installed_snapshot_controls_dispatch
+services::provider::channel_rules::tests::onboarding_routing_reports_typos_ambiguity_and_normalized_collisions
 services::provider::codex_context_window_tests::blank_slug_entry_never_exact_matches_empty_model
 services::provider::codex_context_window_tests::cache_present_with_empty_slug_returns_max_of_cache
 services::provider::codex_context_window_tests::cache_present_with_unknown_slug_returns_max_of_cache
