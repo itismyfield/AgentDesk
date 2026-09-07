@@ -472,8 +472,11 @@ describe("locally created override extras", () => {
     expect((payload as unknown as PipelineConfigFull).states[0].label).toBe("Edited after upgrade");
   });
 
-  it("keeps local bindings after a GET briefly carries the same key with a different value", async () => {
-    mockApi(buildOverridePayload(makePipeline()));
+  it.each([
+    { caseName: "existing override, different value", initialOverride: buildOverridePayload(makePipeline()), fetchedEvent: "on_remote" },
+    { caseName: "no override, equal value", initialOverride: null, fetchedEvent: "on_locally_named" },
+  ])("keeps local bindings after a GET briefly carries the same key ($caseName)", async ({ initialOverride, fetchedEvent }) => {
+    mockApi(initialOverride);
     await mountEditor();
     await act(async () => {
       view.current?.actions.updateFsmTransitionEvent(0, "on_locally_named");
@@ -485,7 +488,7 @@ describe("locally created override extras", () => {
       repo: REPO,
       pipeline_config: {
         ...buildOverridePayload(makePipeline()),
-        fsm_edge_bindings: { "ready->done": { event: "on_remote" } },
+        fsm_edge_bindings: { "ready->done": { event: fetchedEvent } },
       },
     });
     await refreshInPlace();

@@ -211,7 +211,7 @@ export default function PipelineVisualEditor({
             )
           ),
         )
-        : draftExtraKeys,
+        : (!persistedDraft && source === "fetch" ? [] : draftExtraKeys),
     );
     setOverrideExists(hasRawOverride(snapshot.rawOverride));
     setAllRepoStages(snapshot.repoStages);
