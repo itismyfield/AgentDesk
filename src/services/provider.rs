@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
 pub(crate) mod cancel_token_claude_interrupt;
 pub(crate) mod cancel_token_cleanup;
 mod cancel_watchdog;
+pub(crate) mod channel_rules;
 mod registry;
 pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 use cancel_watchdog::{current_unix_millis, enforce_watchdog_deadline};
@@ -137,22 +138,21 @@ impl ProviderKind {
     }
 
     pub fn default_channel_provider() -> Option<Self> {
-        provider_registry()
-            .iter()
-            .find(|entry| entry.default_channel_provider)
-            .and_then(|entry| Self::from_str(entry.id))
-    }
-
-    pub fn from_channel_suffix(channel_name: &str) -> Option<Self> {
-        provider_registry()
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .channel_suffix
-                    .filter(|suffix| channel_name.ends_with(suffix))
-                    .and_then(|_| Self::from_str(entry.id))
+        crate::config_live_reload::current()
+            .map(|config| config.onboarding.effective_default_provider())
+            .unwrap_or_else(|| {
+                crate::config::OnboardingConfig::default().effective_default_provider()
             })
-            .next()
+    }
+    pub fn from_channel_suffix(channel_name: &str) -> Option<Self> {
+        crate::config_live_reload::current()
+            .map(|config| config.onboarding.provider_from_channel_suffix(channel_name))
+            .unwrap_or_else(|| {
+                crate::config::OnboardingConfig::default()
+                    .provider_from_channel_suffix(channel_name)
+            })
+            .as_deref()
+            .and_then(Self::from_str)
     }
 
     pub fn counterpart(&self) -> Self {
@@ -453,7 +453,7 @@ pub fn parse_provider_and_channel_from_tmux_name(
             }
         }
     }
-    ProviderKind::default_channel_provider().map(|provider| (provider, without_suffix.to_string()))
+    channel_rules::legacy_default().map(|provider| (provider, without_suffix.to_string()))
 }
 
 pub fn compose_structured_turn_prompt(

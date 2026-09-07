@@ -537,7 +537,10 @@ pub struct CompleteBody {
     pub notify_token: Option<String>,
     pub command_token_2: Option<String>,
     pub command_provider_2: Option<String>,
+    #[serde(default)]
     pub guild_id: String,
+    #[serde(skip)]
+    runtime_guild_id: Option<String>,
     pub owner_id: Option<String>,
     pub provider: Option<String>,
     pub channels: Vec<ChannelMapping>,
@@ -552,6 +555,9 @@ pub struct ChannelMapping {
     pub role_id: String,
     pub description: Option<String>,
     pub system_prompt: Option<String>,
+    /// Category label from onboarding.default_categories, or a raw Discord ID.
+    /// Omitted categories preserve uncategorized creation and name-based reuse.
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -936,6 +942,7 @@ fn requested_channel_fingerprint(body: &CompleteBody, provider: &str) -> Result<
         .channels
         .iter()
         .map(|mapping| {
+            channel::validate_category(mapping)?;
             Ok(json!({
                 "role_id": mapping.role_id.trim(),
                 "channel_id": normalized_channel_name(&mapping.channel_id)
@@ -947,11 +954,12 @@ fn requested_channel_fingerprint(body: &CompleteBody, provider: &str) -> Result<
 
     channels.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
 
-    let payload = json!({
+    let mut payload = json!({
         "guild_id": body.guild_id.trim(),
         "provider": provider.trim(),
         "channels": channels,
     });
+    channel::fingerprint_categories(&mut payload, &body.channels);
     let mut hasher = Sha256::new();
     hasher.update(payload.to_string().as_bytes());
     Ok(hex::encode(hasher.finalize()))
@@ -1002,7 +1010,7 @@ async fn discord_create_text_channel(
     api_base: &str,
     guild_id: &str,
     channel_name: &str,
-    topic: Option<&str>,
+    mapping: &ChannelMapping,
 ) -> Result<serde_json::Value, String> {
     let url = format!(
         "{}/guilds/{}/channels",
@@ -1010,15 +1018,9 @@ async fn discord_create_text_channel(
         guild_id
     );
 
-    let mut payload = json!({
-        "name": channel_name,
-        "type": 0,
-    });
+    let payload = channel::create_payload(channel_name, mapping);
 
-    if let Some(topic) = topic.map(str::trim).filter(|value| !value.is_empty()) {
-        let truncated: String = topic.chars().take(1024).collect();
-        payload["topic"] = json!(truncated);
-    }
+    // Existing channels in other categories are excluded by the lookup below.
 
     let resp = client
         .post(&url)
@@ -1090,6 +1092,9 @@ async fn resolve_channel_mapping(
         .into_iter()
         .find(|channel| {
             channel.get("type").and_then(|value| value.as_i64()) == Some(0)
+                && mapping.category.as_deref().is_none_or(|category| {
+                    channel.get("parent_id").and_then(|value| value.as_str()) == Some(category)
+                })
                 && channel
                     .get("name")
                     .and_then(|value| value.as_str())
@@ -1122,15 +1127,9 @@ async fn resolve_channel_mapping(
         });
     }
 
-    let created = discord_create_text_channel(
-        client,
-        token,
-        api_base,
-        guild_id,
-        &requested_name,
-        mapping.description.as_deref(),
-    )
-    .await?;
+    let created =
+        discord_create_text_channel(client, token, api_base, guild_id, &requested_name, mapping)
+            .await?;
 
     let channel_id = created
         .get("id")
@@ -2533,7 +2532,7 @@ fn persist_complete_filesystem_artifacts(
 
     if let Err(error) = write_agentdesk_discord_config(
         root,
-        &body.guild_id,
+        channel::runtime_guild_id(body),
         &body.token,
         provider,
         body.command_token_2.as_deref(),
@@ -2572,7 +2571,7 @@ fn persist_complete_filesystem_artifacts(
         provider,
         body.command_token_2.as_deref(),
         body.command_provider_2.as_deref(),
-        &body.guild_id,
+        channel::runtime_guild_id(body),
         body.owner_id.as_deref(),
         body.announce_token.as_deref(),
         body.notify_token.as_deref(),
@@ -2609,6 +2608,7 @@ async fn complete_with_options(
     body: &CompleteBody,
     options: &CompleteExecutionOptions,
 ) -> (StatusCode, serde_json::Value) {
+    let body = &channel::apply_runtime_config_defaults(state, body);
     let provider = body.provider.as_deref().unwrap_or("claude");
 
     let (rerun_policy, explicit_rerun_policy, request_fingerprint) =
