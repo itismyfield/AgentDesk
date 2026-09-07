@@ -64,10 +64,9 @@ pub(in crate::services::discord) async fn claim_normal_episode(
         .await;
     // Same-episode ID misses retain the ordinary guarded-miss recovery owner.
     // Only the separately gated reconciler may release that residual anchor.
-    if finish.removed_token.is_some()
-        && clear_inflight
-        && let Some(row) = row.as_ref()
-    {
+    // Row cleanup is independently authorized by the captured row identity;
+    // the lock-held recheck still preserves any successor that replaced it.
+    if clear_inflight && let Some(row) = row.as_ref() {
         let _ = super::super::inflight::clear_inflight_state_for_captured_episode(
             provider,
             key.channel_id.get(),
