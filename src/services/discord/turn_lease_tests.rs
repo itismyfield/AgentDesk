@@ -104,9 +104,9 @@ async fn seed(shared: &Arc<SharedData>, channel: ChannelId) -> ReleaseRequest {
 #[tokio::test]
 async fn operator_release_preserves_queue_and_provider_and_is_idempotent() {
     with_isolated_runtime_root(|| async {
-        for finalized_lease in [false, true] {
+        for (channel_id, finalized_lease) in [(575401, false), (575411, true)] {
             let shared = super::super::make_shared_data_for_tests_with_storage(None);
-            let channel = ChannelId::new(575401);
+            let channel = ChannelId::new(channel_id);
             let mailbox = shared.mailbox(channel);
             let mut request = seed(&shared, channel).await;
             if finalized_lease {
