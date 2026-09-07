@@ -1828,7 +1828,7 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                 lease,
             );
 
-            let claim = claim::claim_tui_direct_synthetic_turn_inner(
+            let claim = claim::claim_tui_direct_synthetic_turn_inner::<true>(
                 shared,
                 &provider,
                 channel_id,
@@ -1836,7 +1836,6 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                 &record.prompt_text,
                 anchor_message_id,
                 &lease,
-                true,
             )
             .await;
 

@@ -29,7 +29,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
     anchor_message_id: MessageId,
     lease: &ExternalInputRelayLease,
 ) -> TuiDirectSyntheticTurnClaim {
-    claim_tui_direct_synthetic_turn_inner(
+    claim_tui_direct_synthetic_turn_inner::<false>(
         shared,
         provider,
         channel_id,
@@ -37,13 +37,11 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
         prompt_text,
         anchor_message_id,
         lease,
-        false,
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn claim_tui_direct_synthetic_turn_inner(
+pub(super) async fn claim_tui_direct_synthetic_turn_inner<const DEFERRED: bool>(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,
@@ -51,7 +49,6 @@ pub(super) async fn claim_tui_direct_synthetic_turn_inner(
     prompt_text: &str,
     anchor_message_id: MessageId,
     lease: &ExternalInputRelayLease,
-    register_deferred_start: bool,
 ) -> TuiDirectSyntheticTurnClaim {
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
@@ -125,7 +122,7 @@ pub(super) async fn claim_tui_direct_synthetic_turn_inner(
             prompt_text,
             anchor_message_id,
             lease,
-            register_deferred_start,
+            register_deferred_start: DEFERRED,
         },
         output_path,
         start_offset,
