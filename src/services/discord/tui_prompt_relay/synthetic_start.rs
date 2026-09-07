@@ -852,6 +852,7 @@ mod tests {
         let token = seed_synthetic_mailbox_owner(&shared, channel_id, turn_id).await;
         let mut state = synthetic_state(channel_id, turn_id, tmux, false);
         state.session_key = Some("session-4019-release".to_string());
+        state.turn_nonce = token.turn_nonce().map(str::to_owned);
         inflight::save_inflight_state(&state).expect("save synthetic inflight");
 
         finish_tui_direct_synthetic_turn_if_current(

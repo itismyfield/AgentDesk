@@ -3890,6 +3890,7 @@ fn save_ownerless_tui_direct_inflight_for_mailbox_release_test(
     tmux_session_name: &str,
     output_path: &Path,
     stale_started_at: bool,
+    turn_nonce: Option<&str>,
 ) {
     let lease = ExternalInputRelayLease::unassigned(Some(channel_id.get()));
     let mut state = build_tui_direct_synthetic_inflight_state(
@@ -3904,6 +3905,7 @@ fn save_ownerless_tui_direct_inflight_for_mailbox_release_test(
         &lease,
         RelayOwnerKind::None,
     );
+    state.turn_nonce = turn_nonce.map(str::to_owned);
     state.set_restart_mode(super::super::InflightRestartMode::DrainRestart);
     if stale_started_at {
         let stale_started_at = chrono::Local::now()
@@ -3948,6 +3950,7 @@ async fn stale_ownerless_tui_direct_mailbox_release_allows_new_synthetic_claim()
         tmux_session_name,
         &output_path,
         true,
+        stale_token.turn_nonce(),
     );
 
     assert!(
@@ -4013,6 +4016,7 @@ async fn stale_ownerless_tui_direct_mailbox_release_preserves_fresh_owner() {
         tmux_session_name,
         &output_path,
         false,
+        active_token.turn_nonce(),
     );
 
     assert!(

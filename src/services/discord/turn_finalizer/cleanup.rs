@@ -1214,6 +1214,7 @@ mod tests {
                     None,
                     0,
                 );
+                row.turn_nonce = _token.turn_nonce().map(str::to_owned);
                 row.turn_source = TurnSource::ExternalInput;
                 row.set_relay_owner_kind(RelayOwnerKind::Watcher);
                 row.injected_prompt_message_id = Some(tid);
@@ -1727,6 +1728,7 @@ mod tests {
                     None,
                     0,
                 );
+                row.turn_nonce = _token.turn_nonce().map(str::to_owned);
                 row.turn_source = TurnSource::ExternalInput;
                 row.set_relay_owner_kind(RelayOwnerKind::Watcher);
                 row.injected_prompt_message_id = Some(tid);

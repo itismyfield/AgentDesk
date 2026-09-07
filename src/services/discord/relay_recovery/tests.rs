@@ -578,6 +578,7 @@ async fn dead_frontier_watcher_cancel_finalizes_owner_and_releases_inflight() {
         None,
         output_len,
     );
+    state.turn_nonce = token.turn_nonce().map(str::to_owned);
     state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
     state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
     super::super::inflight::save_inflight_state(&state).expect("save watcher inflight");
@@ -807,6 +808,7 @@ async fn dead_frontier_fixture(
         None,
         output_len,
     );
+    state.turn_nonce = token.turn_nonce().map(str::to_owned);
     state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
     state.set_relay_owner_kind(super::super::inflight::RelayOwnerKind::Watcher);
     super::super::inflight::save_inflight_state(&state).expect("save watcher inflight");
