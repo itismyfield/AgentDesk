@@ -141,7 +141,8 @@ pub(super) fn make_bridge_guards(
         authority.channel_id,
         authority.finalizer_turn_id,
         shared_owned.restart.current_generation,
-    );
+    )
+    .with_episode_nonce(authoritative_state.turn_nonce.as_deref());
     shared_owned
         .turn_finalizer
         .register_start_with_completion_admission(
