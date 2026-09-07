@@ -3,7 +3,10 @@ use super::*;
 mod stale_reclaim;
 
 use stale_reclaim::release_reclaimable_stale_synthetic_mailbox_owner_if_current;
-pub(super) use stale_reclaim::release_stale_ownerless_tui_direct_mailbox_if_current;
+pub(super) use stale_reclaim::{
+    finish_tui_direct_synthetic_pre_save_failure,
+    release_stale_ownerless_tui_direct_mailbox_if_current,
+};
 
 #[derive(Debug)]
 pub(super) struct TuiDirectSyntheticTurnClaim {
@@ -14,15 +17,6 @@ pub(super) struct TuiDirectSyntheticTurnClaim {
     // worker anchors its bridge tail to THIS byte boundary instead of a `Utc::now()`
     // scan, which can skip bytes written during the deferred-claim wait window.
     pub(super) turn_start_offset: u64,
-}
-
-pub(super) async fn finish_tui_direct_synthetic_pre_save_failure(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-) {
-    // This cleanup runs before the synthetic path increments global_active.
-    let _ = super::super::mailbox_finish_turn(shared, provider, channel_id).await;
 }
 
 /// #3358 — offset-authority handover for synthetic inflight creation.
@@ -182,6 +176,7 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
                     snapshot.active_request_owner,
                     snapshot.active_turn_kind,
                     snapshot.turn_started_at,
+                    snapshot.active_turn_nonce.clone(),
                     anchor_message_id,
                 )
                 .await
@@ -511,6 +506,7 @@ mod tests {
             Some(synthetic_owner()),
             ActiveTurnKind::Background,
             young_owner_started_at(),
+            stale_token.turn_nonce().map(str::to_owned),
             next_id,
         )
         .await;
@@ -569,6 +565,7 @@ mod tests {
             Some(synthetic_owner()),
             ActiveTurnKind::Background,
             old_owner_started_at(),
+            stale_token.turn_nonce().map(str::to_owned),
             next_id,
         )
         .await;
@@ -628,6 +625,7 @@ mod tests {
             Some(synthetic_owner()),
             ActiveTurnKind::MonitorAutoTurn,
             old_owner_started_at(),
+            token.turn_nonce().map(str::to_owned),
             next_id,
         )
         .await;
@@ -662,6 +660,7 @@ mod tests {
             Some(synthetic_owner()),
             ActiveTurnKind::Background,
             young_owner_started_at(),
+            stale_token.turn_nonce().map(str::to_owned),
             next_id,
         )
         .await;
@@ -708,6 +707,7 @@ mod tests {
             Some(synthetic_owner()),
             ActiveTurnKind::Background,
             old_owner_started_at(),
+            stale_token.turn_nonce().map(str::to_owned),
             next_id,
         )
         .await;
@@ -742,6 +742,7 @@ mod tests {
             Some(synthetic_owner()),
             ActiveTurnKind::Background,
             old_owner_started_at(),
+            live_token.turn_nonce().map(str::to_owned),
             next_id,
         )
         .await;
@@ -972,6 +973,7 @@ mod tests {
             Some(real_owner()),
             ActiveTurnKind::UserOrAgent,
             young_owner_started_at(),
+            real_token.turn_nonce().map(str::to_owned),
             synth_id,
         )
         .await;
@@ -1030,6 +1032,7 @@ mod tests {
             Some(real_owner()),
             ActiveTurnKind::UserOrAgent,
             old_owner_started_at(),
+            real_token.turn_nonce().map(str::to_owned),
             synth_id,
         )
         .await;
@@ -1092,6 +1095,7 @@ mod tests {
             Some(real_owner()),
             ActiveTurnKind::UserOrAgent,
             old_owner_started_at(),
+            real_token.turn_nonce().map(str::to_owned),
             synth_id,
         )
         .await;
@@ -1132,6 +1136,7 @@ mod tests {
             Some(real_owner()),
             ActiveTurnKind::UserOrAgent,
             old_owner_started_at(),
+            real_token.turn_nonce().map(str::to_owned),
             synth_id,
         )
         .await;
@@ -1235,6 +1240,7 @@ mod tests {
                 snap.active_request_owner,
                 snap.active_turn_kind,
                 snap.turn_started_at,
+                snap.active_turn_nonce.clone(),
                 synth_id,
             )
             .await;
@@ -1341,6 +1347,7 @@ mod tests {
             Some(real_owner()),
             ActiveTurnKind::UserOrAgent,
             old_owner_started_at(),
+            real_token.turn_nonce().map(str::to_owned),
             synth_id,
         )
         .await;
@@ -1392,6 +1399,7 @@ mod tests {
             Some(real_owner()),
             ActiveTurnKind::UserOrAgent,
             old_owner_started_at(),
+            real_token.turn_nonce().map(str::to_owned),
             synth_id,
         )
         .await;
@@ -1443,6 +1451,7 @@ mod tests {
             Some(real_owner()),
             ActiveTurnKind::UserOrAgent,
             young_owner_started_at(),
+            real_token.turn_nonce().map(str::to_owned),
             synth_id,
         )
         .await;
@@ -1504,6 +1513,7 @@ mod tests {
             Some(real_owner()),
             ActiveTurnKind::UserOrAgent,
             old_owner_started_at(),
+            live_token.turn_nonce().map(str::to_owned),
             synth_id,
         )
         .await;
@@ -1559,6 +1569,7 @@ mod tests {
             // AGED — isolates the `finished` gate from the age gate: age is
             // satisfied, so a reclaim would fire if `finished` were not required.
             old_owner_started_at(),
+            real_token.turn_nonce().map(str::to_owned),
             synth_id,
         )
         .await;
@@ -1657,6 +1668,7 @@ mod tests {
             Some(real_owner()),
             ActiveTurnKind::UserOrAgent,
             young_owner_started_at(),
+            real_token.turn_nonce().map(str::to_owned),
             synth_id,
         )
         .await;
