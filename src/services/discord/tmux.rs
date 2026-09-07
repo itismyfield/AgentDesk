@@ -1071,7 +1071,7 @@ async fn start_monitor_auto_turn_when_available(
         let started = super::mailbox_try_start_turn_kinded(
             shared,
             channel_id,
-            token,
+            token.clone(),
             UserId::new(1),
             synthetic_message_id,
             crate::services::turn_orchestrator::ActiveTurnKind::MonitorAutoTurn,
@@ -1093,7 +1093,8 @@ async fn start_monitor_auto_turn_when_available(
                     channel_id,
                     synthetic_message_id.get(),
                     ledger_generation,
-                ),
+                )
+                .with_episode_nonce(token.turn_nonce()),
                 provider.clone(),
                 crate::services::discord::inflight::RelayOwnerKind::Watcher,
                 // #3016 phase-5a: prime the reconcile cache at register time so

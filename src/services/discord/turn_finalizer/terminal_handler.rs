@@ -9,6 +9,24 @@ pub(super) async fn handle_terminal(
     evidence: TerminalEvidence,
     shared: &Arc<SharedData>,
 ) -> FinalizeOutcome {
+    // Monitor producers carry an existing per-turn generation. Resolve only
+    // its registered episode; a late/collected generation owns no current slot.
+    let key = if key.episode.is_none() && key.generation != shared.restart.current_generation {
+        let mut matches = ledger.values().filter(|entry| {
+            entry.turn_key.channel_id == key.channel_id
+                && entry.turn_key.user_msg_id == key.user_msg_id
+                && entry.turn_key.generation == key.generation
+        });
+        let Some(entry) = matches.next() else {
+            return FinalizeOutcome::AlreadyFinalized;
+        };
+        if matches.next().is_some() || entry.phase == Phase::Finalized {
+            return FinalizeOutcome::AlreadyFinalized;
+        }
+        entry.turn_key
+    } else {
+        key
+    };
     // A producer lacking episode evidence cannot borrow a known successor's
     // ledger, nor enter the legacy AlreadyFinalized repair path.
     if key.episode.is_none()

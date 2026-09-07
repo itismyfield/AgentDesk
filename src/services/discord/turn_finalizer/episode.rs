@@ -259,6 +259,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unique_generation_producer_keeps_successor_safe_after_external_release() {
+        super::super::tests::with_isolated_runtime_root(|| async {
+            let shared = super::super::super::make_shared_data_for_tests_with_storage(None);
+            let channel = ChannelId::new(575410);
+            let mailbox = shared.mailbox(channel);
+            let original = Arc::new(CancelToken::new());
+            let first =
+                TurnKey::new(channel, 123, 1 << 48).with_episode_nonce(original.turn_nonce());
+            mailbox
+                .restore_active_turn(original.clone(), UserId::new(7), MessageId::new(123))
+                .await;
+            shared.turn_finalizer.register_start(
+                first,
+                ProviderKind::Codex,
+                RelayOwnerKind::Watcher,
+                &shared,
+            );
+            // Model an external lease release that leaves the old producer pending.
+            let released = mailbox
+                .finish_turn_if_matches_episode_started_before(
+                    MessageId::new(123),
+                    original.turn_nonce().map(str::to_owned),
+                    std::time::Instant::now(),
+                    super::super::super::queue_persistence_context(
+                        &shared,
+                        &ProviderKind::Codex,
+                        channel,
+                    ),
+                )
+                .await;
+            assert!(released.removed_token.is_some());
+            let successor = Arc::new(CancelToken::new());
+            let second = TurnKey::new(channel, 123, (1 << 48) + 1)
+                .with_episode_nonce(successor.turn_nonce());
+            mailbox
+                .restore_active_turn(successor.clone(), UserId::new(7), MessageId::new(123))
+                .await;
+            shared.restart.global_active.store(1, Ordering::Relaxed);
+            shared.turn_finalizer.register_start(
+                second,
+                ProviderKind::Codex,
+                RelayOwnerKind::Watcher,
+                &shared,
+            );
+            for generation in [first.generation, (1 << 48) + 99] {
+                shared
+                    .turn_finalizer
+                    .submit_terminal(
+                        TurnKey::new(channel, 123, generation),
+                        ProviderKind::Codex,
+                        TerminalEvent::Complete,
+                        FinalizeContext::bridge(),
+                        shared.clone(),
+                    )
+                    .await;
+                assert!(!successor.cancelled.load(Ordering::Acquire));
+                assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+            }
+            let completed = shared
+                .turn_finalizer
+                .submit_terminal(
+                    TurnKey::new(channel, 123, second.generation),
+                    ProviderKind::Codex,
+                    TerminalEvent::Complete,
+                    FinalizeContext::bridge(),
+                    shared.clone(),
+                )
+                .await;
+            assert!(matches!(
+                completed,
+                FinalizeOutcome::Finalized {
+                    removed_token: Some(_),
+                    ..
+                }
+            ));
+            assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn recovery_retains_captured_nonce_and_refuses_same_id_successor() {
         super::super::tests::with_isolated_runtime_root(|| async {
             for nonce in [Some("restored-a"), None] {
@@ -407,7 +488,9 @@ impl TurnFinalizer {
         let Ok(out) = rx.await else {
             return FinalizeOutcome::AlreadyFinalized;
         };
-        if matches!(out, FinalizeOutcome::AlreadyFinalized) {
+        if matches!(out, FinalizeOutcome::AlreadyFinalized)
+            && !(key.episode.is_none() && key.generation != shared.restart.current_generation)
+        {
             cleanup::already_finalized_active_state(key, &provider, &event, ctx, &shared).await;
         }
         out
