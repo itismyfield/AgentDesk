@@ -2976,6 +2976,13 @@ services::discord::inflight::budget::tests::bump_persists_attempts_on_restart_ma
 services::discord::inflight::budget::tests::bump_persists_attempts_on_tui_direct_row
 services::discord::inflight::budget::tests::bump_refuses_row_owned_by_newer_turn
 services::discord::inflight::budget::tests::bump_refuses_tui_direct_row_without_offset_proof
+services::discord::inflight::clear_store::identity::tests::captured_episode_clears_its_matching_row
+services::discord::inflight::clear_store::identity::tests::captured_episode_preserves_a_foreign_nonce
+services::discord::inflight::clear_store::identity::tests::captured_episode_preserves_every_changed_identity_field
+services::discord::inflight::clear_store::identity::tests::captured_episode_preserves_restart_and_rebind_rows
+services::discord::inflight::clear_store::identity::tests::captured_episode_strictly_separates_legacy_and_modern_nonces
+services::discord::inflight::clear_store::identity::tests::ordinary_and_reconcile_clear_keep_legacy_nonce_wildcards
+services::discord::inflight::clear_store::identity::tests::reconcile_clear_keeps_its_current_generation_fence
 services::discord::inflight::clear_store::reconcile_gate::tests::allocation_route_is_observed_but_never_changes_the_reconcile_decision
 services::discord::inflight::clear_store::reconcile_gate::tests::allow_side_facts_are_wired_from_the_row_then_the_epoch
 services::discord::inflight::clear_store::reconcile_gate::tests::allowed_generation_buckets_separate_the_deferred_populations
