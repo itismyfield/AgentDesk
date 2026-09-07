@@ -20,12 +20,15 @@ import {
 import {
   EMPTY_FSM_DRAFT_STORE,
   EMPTY_PIPELINE_SNAPSHOT_STORE,
+  LEGACY_SERVER_EXTRA_KEYS,
   buildFsmDraftScopeKey,
   cloneEditorSnapshot,
   cloneStageDrafts,
   coerceSelectionForPipeline,
+  equalJsonValues,
   normalizePersistedFsmDraftStore,
   normalizePersistedPipelineSnapshotStore,
+  reconcileDraftOverrideExtras,
   removeDraftScope,
 } from "./pipeline-visual-editor-persistence";
 import type {
@@ -63,6 +66,7 @@ export default function PipelineVisualEditor({
   const [savedPipeline, setSavedPipeline] = useState<PipelineConfigFull | null>(null);
   const [layers, setLayers] = useState({ default: true, repo: false, agent: false });
   const [overrideExtras, setOverrideExtras] = useState<Record<string, unknown>>({});
+  const [serverExtraKeys, setServerExtraKeys] = useState<string[] | null>(null);
   const [overrideExists, setOverrideExists] = useState(false);
   const [allRepoStages, setAllRepoStages] = useState<PipelineStage[]>([]);
   const [stageDrafts, setStageDrafts] = useState<StageDraft[]>([]);
@@ -159,6 +163,7 @@ export default function PipelineVisualEditor({
     setSavedPipeline(null);
     setLayers({ default: true, repo: false, agent: false });
     setOverrideExtras({});
+    setServerExtraKeys(null);
     setOverrideExists(false);
     setAllRepoStages([]);
     setStageDrafts([]);
@@ -168,6 +173,7 @@ export default function PipelineVisualEditor({
 
   function applySnapshot(
     snapshot: EditorSnapshot,
+    source: "cache" | "fetch",
     persistedDraft: PersistedFsmDraftEntry | null = null,
   ) {
     const visibleStages = filterVisibleStages(snapshot.repoStages, selectedAgentId).map(stageDraftFromApi);
@@ -177,11 +183,35 @@ export default function PipelineVisualEditor({
       ? coerceSelectionForPipeline(draftPipeline, persistedDraft.selection)
       : null;
 
+    const draftExtraKeys = persistedDraft?.serverExtraKeys ?? null;
+    const serverExtras = extractOverrideExtras(snapshot.rawOverride);
+
     setPipelineDraft(draftPipeline);
     setSavedPipeline(clonePipelineConfig(snapshot.pipeline));
     setLayers(snapshot.layers);
     setOverrideExtras(
-      persistedDraft ? { ...persistedDraft.overrideExtras } : extractOverrideExtras(snapshot.rawOverride),
+      persistedDraft
+        ? source === "fetch"
+          ? reconcileDraftOverrideExtras(persistedDraft.overrideExtras, snapshot.rawOverride, draftExtraKeys)
+          // Cached key absence cannot authorize deleting persisted edits.
+          : { ...persistedDraft.overrideExtras }
+        : serverExtras,
+    );
+    // A known local key stays local even if a later GET happens to carry it.
+    // Pre-field drafts can also learn matching values and known legacy fields.
+    setServerExtraKeys(
+      hasRawOverride(snapshot.rawOverride) && (!persistedDraft || source === "fetch")
+        ? Object.keys(serverExtras).filter((key) =>
+          !persistedDraft || (
+            Object.hasOwn(persistedDraft.overrideExtras, key) && (
+              draftExtraKeys
+                ? draftExtraKeys.includes(key)
+                : LEGACY_SERVER_EXTRA_KEYS.includes(key)
+                  || equalJsonValues(persistedDraft.overrideExtras[key], serverExtras[key])
+            )
+          ),
+        )
+        : (!persistedDraft && source === "fetch" ? [] : draftExtraKeys),
     );
     setOverrideExists(hasRawOverride(snapshot.rawOverride));
     setAllRepoStages(snapshot.repoStages);
@@ -238,7 +268,7 @@ export default function PipelineVisualEditor({
     setLoading(true);
     setError(null);
     if (cachedSnapshot) {
-      applySnapshot(cloneEditorSnapshot(cachedSnapshot), persistedDraft);
+      applySnapshot(cloneEditorSnapshot(cachedSnapshot), "cache", persistedDraft);
     } else {
       resetEditorState();
     }
@@ -252,7 +282,7 @@ export default function PipelineVisualEditor({
         if (fsmDraftScopeKey) {
           persistSnapshot(fsmDraftScopeKey, level, snapshot);
         }
-        applySnapshot(snapshot, persistedDraft);
+        applySnapshot(snapshot, "fetch", persistedDraft);
       } catch (cause) {
         if (!cancelled) {
           setError(
@@ -417,6 +447,7 @@ export default function PipelineVisualEditor({
       stageDrafts: cloneStageDrafts(stageDrafts),
       selection,
       overrideExtras: { ...overrideExtras },
+      serverExtraKeys: serverExtraKeys ? [...serverExtraKeys] : undefined,
     };
 
     setPersistedFsmDraftStore((currentStore) => {
@@ -440,6 +471,7 @@ export default function PipelineVisualEditor({
     repo,
     selectedAgentId,
     selection,
+    serverExtraKeys,
     setPersistedFsmDraftStore,
     stageDrafts,
     stagesChanged,
@@ -451,7 +483,7 @@ export default function PipelineVisualEditor({
     if (nextScopeKey) {
       persistSnapshot(nextScopeKey, nextLevel, snapshot);
     }
-    applySnapshot(snapshot);
+    applySnapshot(snapshot, "fetch");
   }
 
   const actions = usePipelineVisualEditorActions({

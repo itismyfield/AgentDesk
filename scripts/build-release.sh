@@ -114,7 +114,11 @@ if ! command -v cargo &>/dev/null; then
 fi
 
 echo "[1/3] Building Rust binary (release)..."
-cargo build --release 2>&1 | tail -1
+# Serialized behind the build token so a concurrent release build cannot
+# interleave with this one (#5663). `tail -1` would swallow the wrapper's
+# contention notices, so fd 3 keeps them on stderr, outside the pipe.
+ADK_BUILD_TOKEN_DIAG_FD=3 python3 "$SCRIPT_DIR/build_token.py" -- \
+  cargo build --release 3>&2 2>&1 | tail -1
 
 BINARY="target/release/${BINARY_NAME}"
 if [ ! -f "$BINARY" ]; then

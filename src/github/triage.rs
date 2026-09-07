@@ -167,11 +167,10 @@ pub async fn triage_new_issues_pg(
 ) -> Result<usize, String> {
     let mut created = 0;
     let mut routing_stats = TriageRoutingStats::default();
-    let mut live_unknown_agent_keys: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
 
     for issue in issues {
         if issue.state != "OPEN" {
+            super::warn_dedupe::unknown_agent(repo, issue.number, None, "closed issue");
             continue;
         }
 
@@ -179,9 +178,6 @@ pub async fn triage_new_issues_pg(
             existing_issue_card_assignment_pg(pool, repo, issue.number).await?;
         let routing = resolve_agent_routing(issue, existing_assignment.allows_inferred_routing());
         let validated = validate_agent_routing_pg(pool, repo, issue, &routing).await?;
-        if let Some(unknown_agent_id) = validated.unknown_agent_id.as_deref() {
-            live_unknown_agent_keys.insert(unknown_agent_warn_key(issue.number, unknown_agent_id));
-        }
         let assigned_agent_id = match &routing {
             AgentRoutingResolution::Explicit(_) => validated.assigned_agent_id.clone(),
             _ => None,
@@ -227,20 +223,7 @@ pub async fn triage_new_issues_pg(
 
     log_triage_routing_stats(repo, &routing_stats);
 
-    // Cycle completed: release unknown-agent keys no longer observed so a
-    // label that is removed and later re-added warns again.
-    super::warn_dedupe::GITHUB_REPEAT_WARNINGS.retain(
-        &super::warn_dedupe::triage_scope(repo),
-        &live_unknown_agent_keys,
-    );
-
     Ok(created)
-}
-
-/// Dedupe key for the "Ignoring unknown agent" warning: one per
-/// `(issue, agent label)` within a repo scope.
-fn unknown_agent_warn_key(issue_number: i64, agent_id: &str) -> String {
-    format!("unknown-agent:#{issue_number}:{agent_id}")
 }
 
 fn labels_metadata_json(issue: &GhIssue, inferred_agent_id: Option<&str>) -> Option<String> {
@@ -298,6 +281,29 @@ async fn validate_agent_routing_pg(
     issue: &GhIssue,
     routing: &AgentRoutingResolution,
 ) -> Result<ValidatedAgentRouting, String> {
+    validate_agent_routing(repo, issue, routing, |agent_id| async move {
+        sqlx::query_scalar::<_, String>("SELECT id FROM agents WHERE id = $1")
+            .bind(&agent_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("resolve agent label {agent_id}: {error}"))
+    })
+    .await
+}
+
+async fn validate_agent_routing<F, Fut>(
+    repo: &str,
+    issue: &GhIssue,
+    routing: &AgentRoutingResolution,
+    lookup: F,
+) -> Result<ValidatedAgentRouting, String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<String>, String>>,
+{
+    if matches!(routing, AgentRoutingResolution::Unrouted { .. }) {
+        super::warn_dedupe::unknown_agent(repo, issue.number, None, "unrouted");
+    }
     let (agent_id, source) = match routing {
         AgentRoutingResolution::Explicit(agent_id) => (agent_id.as_str(), "explicit label"),
         AgentRoutingResolution::Inferred { agent_id, matches } => {
@@ -342,30 +348,17 @@ async fn validate_agent_routing_pg(
         }
     };
 
-    let exists = sqlx::query_scalar::<_, String>("SELECT id FROM agents WHERE id = $1")
-        .bind(agent_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| format!("resolve agent label {agent_id}: {error}"))?;
+    let exists = lookup(agent_id.to_string()).await?;
 
     if exists.is_none() {
-        // The same unknown `agent:<id>` label is re-evaluated every sync
-        // cycle; WARN once per process lifetime, DEBUG afterwards. The
-        // caller releases the key once the issue no longer carries it.
-        super::warn_dedupe::warn_once_else_debug(
-            &super::warn_dedupe::triage_scope(repo),
-            &unknown_agent_warn_key(issue.number, agent_id),
-            &format!(
-                "[triage] Ignoring unknown agent '{}' from {} for issue #{}",
-                agent_id, source, issue.number
-            ),
-        );
+        super::warn_dedupe::unknown_agent(repo, issue.number, Some(agent_id), source);
         return Ok(ValidatedAgentRouting {
             assigned_agent_id: None,
             unknown_agent_id: Some(agent_id.to_string()),
         });
     }
 
+    super::warn_dedupe::unknown_agent(repo, issue.number, None, source);
     Ok(ValidatedAgentRouting {
         assigned_agent_id: exists,
         unknown_agent_id: None,
@@ -689,27 +682,13 @@ fn infer_priority(labels: &[super::sync::GhLabel]) -> &'static str {
 }
 
 #[cfg(test)]
+mod warning_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::github::sync::GhLabel;
-
-    fn issue(title: &str, body: Option<&str>, labels: &[&str]) -> GhIssue {
-        GhIssue {
-            number: 42,
-            state: "OPEN".to_string(),
-            title: title.to_string(),
-            labels: labels
-                .iter()
-                .map(|name| GhLabel {
-                    name: (*name).to_string(),
-                })
-                .collect(),
-            body: body.map(str::to_string),
-            url: None,
-            closed_at: None,
-            closed_by_pull_requests_references: Vec::new(),
-        }
-    }
+    use crate::github::test_support::issue;
 
     #[test]
     fn priority_inference_from_labels() {
@@ -860,35 +839,6 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn unknown_agent_warning_dedupes_until_label_disappears() {
-        use super::super::warn_dedupe::{
-            GITHUB_REPEAT_WARNINGS, triage_scope, warn_once_else_debug,
-        };
-
-        let repo = "owner/cookingheart-dedupe";
-        let scope = triage_scope(repo);
-        let key_186 = unknown_agent_warn_key(186, "td");
-        let key_187 = unknown_agent_warn_key(187, "td");
-        assert_eq!(key_186, "unknown-agent:#186:td");
-
-        // First cycle: both issues warn once.
-        assert!(warn_once_else_debug(&scope, &key_186, "first"));
-        assert!(warn_once_else_debug(&scope, &key_187, "first"));
-        // Second cycle (same labels): neither warns.
-        assert!(!warn_once_else_debug(&scope, &key_186, "repeat"));
-        assert!(!warn_once_else_debug(&scope, &key_187, "repeat"));
-
-        // Third cycle: #187 lost the label → only #186 is live.
-        let live: std::collections::HashSet<String> = [key_186.clone()].into_iter().collect();
-        GITHUB_REPEAT_WARNINGS.retain(&scope, &live);
-        assert!(!warn_once_else_debug(&scope, &key_186, "still repeat"));
-        // Label re-added on #187 → warns again.
-        assert!(warn_once_else_debug(&scope, &key_187, "recurred"));
-
-        GITHUB_REPEAT_WARNINGS.retain(&scope, &std::collections::HashSet::new());
     }
 
     #[test]

@@ -98,8 +98,42 @@ require_python_probe_marker "-m module" "$module_probe_marker" "$module_probe_ou
 cleanup_python_probe
 trap - EXIT
 
+CURRENT_CHECK=""
+banner() {
+  CURRENT_CHECK="$1"
+  printf '=== %s ===\n' "$1"
+}
+
+report_script_check_failure() {
+  local status="$1"
+  # The parent reports failed pipelines/subshells once. Expected negatives in
+  # conditionals and || lists keep Bash's normal ERR/errexit suppression.
+  if [ "$status" -eq 0 ] || [ "$BASH_SUBSHELL" -ne 0 ]; then
+    return "$status"
+  fi
+  trap - ERR EXIT
+  local check="${CURRENT_CHECK:-unknown}" message title summary
+  # GitHub workflow command data escapes %, CR, LF; properties also escape : ,.
+  message="${check//%/%25}"
+  message="${message//$'\r'/%0D}"
+  message="${message//$'\n'/%0A}"
+  title="${message//:/%3A}"
+  title="${title//,/%2C}"
+  printf '::error title=%s::FAIL: %s\n' "$title" "$message" || true
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    summary="${check//$'\r'/ }"
+    summary="${summary//$'\n'/ }"
+    printf 'FAIL: %s\n' "$summary" >> "$GITHUB_STEP_SUMMARY" || true
+  fi
+  exit "$status"
+}
+
+# ERR covers commands; EXIT also covers function failures and explicit exits.
+# Install after Python preflight so its temporary-directory cleanup stays intact.
+trap 'report_script_check_failure "$?"' ERR EXIT
+
 if command -v shellcheck >/dev/null 2>&1; then
-  echo "=== shellcheck scripts ==="
+  banner "shellcheck scripts"
   FAILED=0
   while IFS= read -r f; do
     shellcheck -S warning "$f" || FAILED=1
@@ -111,42 +145,42 @@ else
   echo "::warning::shellcheck not found; skipping shell script lint"
 fi
 
-echo "=== PG audit guard ==="
+banner "PG audit guard"
 ./scripts/pg-audit.sh
 
-echo "=== Writer namespace Windows exact-target runner fixtures (#5670) ==="
+banner "Writer namespace Windows exact-target runner fixtures (#5670)"
 "$PYTHON" -m unittest tests.test_writer_namespace_windows_targets
 
-echo "=== Postgres migration checksum guard ==="
+banner "Postgres migration checksum guard"
 "$PYTHON" scripts/check_postgres_migration_checksums.py
 
-echo "=== message_outbox validated-insert guard (#4424) ==="
+banner "message_outbox validated-insert guard (#4424)"
 "$PYTHON" scripts/check_message_outbox_inserts.py
 "$PYTHON" -m unittest tests.test_message_outbox_inserts
 
-echo "=== Alert dedupe/authority/routing wiring contract (#4448/#4449) ==="
+banner "Alert dedupe/authority/routing wiring contract (#4448/#4449)"
 "$PYTHON" -m unittest tests.test_alert_dedupe_4448 tests.test_auto_queue_monitor tests.test_actionable_ops_alert_routing
 
-echo "=== State/lint hardening guard ==="
+banner "State/lint hardening guard"
 "$PYTHON" scripts/audit_state_lint_hardening.py
 
-echo "=== Policy DB capability manifest guard (#3734) ==="
+banner "Policy DB capability manifest guard (#3734)"
 "$PYTHON" scripts/check_policy_db_capabilities.py --no-silent-growth \
   --require-manifest policies/timeouts/active-monitor.cap.yaml \
   --require-manifest policies/review-automation.cap.yaml \
   --require-manifest policies/merge-automation.cap.yaml
 "$PYTHON" -m unittest tests.test_policy_db_capabilities
 
-echo "=== SQL execution surface inventory baseline (#5358) ==="
+banner "SQL execution surface inventory baseline (#5358)"
 "$PYTHON" scripts/check_sql_execution_surface_inventory.py --check
 git diff --exit-code HEAD -- scripts/sql_execution_surface_inventory.json
 "$PYTHON" -m unittest tests.test_sql_execution_surface_inventory
 
-echo "=== Destructive call-site per-file ratchet (#5071 T3-A4) ==="
+banner "Destructive call-site per-file ratchet (#5071 T3-A4)"
 "$PYTHON" scripts/check_destructive_call_site_ratchet.py --check
 "$PYTHON" -m unittest tests.test_destructive_call_site_ratchet
 
-echo "=== Reachability row-independence + change-surface gate (#5071 T4-B1) ==="
+banner "Reachability row-independence + change-surface gate (#5071 T4-B1)"
 # 4987 §-1.5 withdrew the claim that I14 ("obligation production is independent
 # of the inflight row") is compiler-enforced: InflightTurnState is
 # pub(in crate::services::discord), so the compiler accepts an import from
@@ -160,7 +194,7 @@ echo "=== Reachability row-independence + change-surface gate (#5071 T4-B1) ==="
 "$PYTHON" scripts/check_reachability_row_independence.py
 "$PYTHON" -m unittest tests.test_reachability_row_independence
 
-echo "=== Reachability canonical Rust<->Python equivalence gate (#5071 T4-B2a) ==="
+banner "Reachability canonical Rust<->Python equivalence gate (#5071 T4-B2a)"
 # 4987 blocker B1': the obligation rule has two implementations, and two
 # definitions of "assistant text block" are two oracles of which one is always
 # wrong. Both are compared byte for byte against the golden corpus in
@@ -179,31 +213,31 @@ echo "=== Reachability canonical Rust<->Python equivalence gate (#5071 T4-B2a) =
 "$PYTHON" scripts/check_reachability_canonical_equivalence.py
 "$PYTHON" -m unittest tests.test_reachability_canonical_equivalence
 
-echo "=== Merge automation policy tests (#4250) ==="
+banner "Merge automation policy tests (#4250)"
 node --test policies/__tests__/merge-automation.test.js
 
-echo "=== Timeout shadow aggregation gate tests (#3950) ==="
+banner "Timeout shadow aggregation gate tests (#3950)"
 node --test scripts/__tests__/timeout-shadow-gate.test.mjs
 
-echo "=== Operator routine scripts must stay out of git (docs/source-of-truth.md) ==="
+banner "Operator routine scripts must stay out of git (docs/source-of-truth.md)"
 if tracked_routines="$(git ls-files routines)" && [ -n "$tracked_routines" ]; then
   echo "✗ routines/ is operator-private and must not be tracked; found:" >&2
   printf '  %s\n' $tracked_routines >&2
   exit 1
 fi
 
-echo "=== External toolchain draft/approval/smoke tests (#4555) ==="
+banner "External toolchain draft/approval/smoke tests (#4555)"
 "$PYTHON" -m unittest tests.test_toolchain_update
 
-echo "=== await_holding_lock ratchet guard ==="
+banner "await_holding_lock ratchet guard"
 "$PYTHON" scripts/check_await_holding_lock_ratchet.py
 "$PYTHON" -m unittest tests.test_await_holding_lock_ratchet
 
-echo "=== DeliveryJournal raw-writer allowlist ==="
+banner "DeliveryJournal raw-writer allowlist"
 "$PYTHON" scripts/check_delivery_journal_raw_writer.py
 "$PYTHON" -m unittest tests.test_delivery_journal_raw_writer
 
-echo "=== Durable frontier writer per-file call-site allowlist (#5071) ==="
+banner "Durable frontier writer per-file call-site allowlist (#5071)"
 # Built for #5071 T1 S7, which changes the recovery path's durable behaviour.
 # Nothing in the repo pinned WHERE these writer symbols are called from, so this
 # fixes an exact per-file count for each of them over all of src/ before that
@@ -214,37 +248,38 @@ echo "=== Durable frontier writer per-file call-site allowlist (#5071) ==="
 "$PYTHON" scripts/check_durable_frontier_writer_call_sites.py
 "$PYTHON" -m unittest tests.test_durable_frontier_writer_call_sites
 
-echo "=== Intake-outbox done writer per-file call-site allowlist (#5071 T2) ==="
+banner "Intake-outbox done writer per-file call-site allowlist (#5071 T2)"
 # Pins the pre-T2 `mark_done` owner by exact per-file textual count over src/;
 # the script docstring declares the lexical forms and semantic facts it cannot see.
 "$PYTHON" scripts/check_intake_outbox_done_writer_call_sites.py
 "$PYTHON" -m unittest tests.test_intake_outbox_done_writer_call_sites
 "$PYTHON" -m unittest tests.test_rust_lex
 
-echo "=== Hotfile LOC ratchet guard (#3565) ==="
+banner "Hotfile LOC ratchet guard (#3565)"
 "$PYTHON" scripts/check_hotfile_ratchet.py
 "$PYTHON" -m unittest scripts.test_ratchet_admission
+"$PYTHON" -m unittest scripts.test_pr_cap_check
 "$PYTHON" -m unittest scripts.test_intervention_log
 
-echo "=== Discord log field-key drift guard (#4218) ==="
+banner "Discord log field-key drift guard (#4218)"
 "$PYTHON" scripts/check_log_key_drift.py
 "$PYTHON" -m unittest tests.test_log_key_drift
 
-echo "=== Inflight blind-save ratchet guard (#4259) ==="
+banner "Inflight blind-save ratchet guard (#4259)"
 "$PYTHON" scripts/check_inflight_blind_save_ratchet.py
 "$PYTHON" -m unittest tests.test_inflight_blind_save_ratchet
 
 # #4511 post-deploy smoke WARN post-restart scoping
 bash tests/test_deploy_smoke_warn_scope_4511.sh
 
-echo "=== Cluster deploy peer verdict + terminal marker contract (#5189) ==="
+banner "Cluster deploy peer verdict + terminal marker contract (#5189)"
 bash tests/test_cluster_deploy_peer_verdict_5189.sh
 
-echo "=== CI runner hardening guard ==="
+banner "CI runner hardening guard"
 ./scripts/check-ci-runner-hardening.sh
 "$PYTHON" -m unittest tests.test_discord_thread_create_ci_wiring
 
-echo "=== PR infrastructure failure rerun classifier (#4392/#5207) ==="
+banner "PR infrastructure failure rerun classifier (#4392/#5207)"
 # These self-tests also enforce the #5207 sibling-regex sync contract: the
 # classifier's INFRA_TERMINATION_REGEX must stay byte-identical to
 # log_has_infra_termination in scripts/main-ci-triage.sh, and drift fails here.
@@ -253,19 +288,19 @@ echo "=== PR infrastructure failure rerun classifier (#4392/#5207) ==="
 ./scripts/ci/infra-failure-rerun.sh --self-test
 bash scripts/main-ci-triage.sh --self-test
 
-echo "=== CI timeout wrapper tests (#4413) ==="
+banner "CI timeout wrapper tests (#4413)"
 "$PYTHON" -m unittest tests.test_ci_timeout
 
-echo "=== Relay-authority fixed mutation gate (#5071) ==="
+banner "Relay-authority fixed mutation gate (#5071)"
 "$PYTHON" -m unittest tests.test_relay_authority_mutations
 
-echo "=== Relay recovery targeted-lane wiring contract (#4423) ==="
+banner "Relay recovery targeted-lane wiring contract (#4423)"
 "$PYTHON" -m unittest tests.test_relay_recovery_ci_wiring
 
-echo "=== TUI relay assertion unit tests (#5065) ==="
+banner "TUI relay assertion unit tests (#5065)"
 "$PYTHON" -m unittest scripts.e2e.tui_relay.test_assertions
 
-echo "=== Relay-authority named-target floor contract (#5071) ==="
+banner "Relay-authority named-target floor contract (#5071)"
 "$PYTHON" scripts/check_relay_authority_contract.py --check-manifest
 "$PYTHON" -m unittest tests.test_check_relay_authority_contract
 
@@ -277,13 +312,13 @@ echo "=== Relay-authority named-target floor contract (#5071) ==="
 # losses and the verdict does not move with how much cohabits there; and a JSON
 # line that is a bare scalar is counted as unusable instead of aborting the run
 # before any criterion is evaluated.
-echo "=== Relay-authority axis-A promotion report (#5464 T5 S2) ==="
+banner "Relay-authority axis-A promotion report (#5464 T5 S2)"
 "$PYTHON" -m unittest tests.test_relay_authority_rollout_report
 
-echo "=== Fast compile check PR/main/nightly split contract (#4747) ==="
+banner "Fast compile check PR/main/nightly split contract (#4747)"
 "$PYTHON" -m unittest tests.test_fast_check_ci_wiring
 
-echo "=== Rust test-lane coverage ratchet (#4846/#4910) ==="
+banner "Rust test-lane coverage ratchet (#4846/#4910)"
 if [[ -z "${TEST_LANE_BASELINE_REF:-}" ]]; then
   echo "ERROR: TEST_LANE_BASELINE_REF must name an immutable comparison snapshot" >&2
   exit 1
@@ -291,7 +326,7 @@ fi
 "$PYTHON" scripts/check_test_lane_coverage.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_test_lane_coverage
 
-echo "=== Test-target integrity gate (#5003/#5008) ==="
+banner "Test-target integrity gate (#5003/#5008)"
 # cargo exits 0 on zero filter matches, so a curated lane with the wrong
 # --lib/--bin/--test flag can run 0 tests while its required check stays
 # green. The gate consumes workflow and justfile command sites and is enforced
@@ -300,11 +335,11 @@ echo "=== Test-target integrity gate (#5003/#5008) ==="
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
 AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 
-echo "=== PostgreSQL test-lane membership gate (#4979, enforced) ==="
+banner "PostgreSQL test-lane membership gate (#4979, enforced)"
 "$PYTHON" scripts/check_pg_test_lane_membership.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_check_pg_test_lane_membership
 
-echo "=== Process-global Mutex<()> poison-recovery gate (#5185) ==="
+banner "Process-global Mutex<()> poison-recovery gate (#5185)"
 # The rule this enforces was documented in src/config.rs and recurred anyway:
 # one real failure reported itself as 11, was repaired at one mutex, and then a
 # different process-global Mutex<()> turned one real failure into 68 (67 of 73
@@ -312,10 +347,10 @@ echo "=== Process-global Mutex<()> poison-recovery gate (#5185) ==="
 "$PYTHON" scripts/check_test_mutex_poison_recovery.py
 "$PYTHON" -m unittest tests.test_check_test_mutex_poison_recovery
 
-echo "=== Scheduled-message PG path-filter wiring contract ==="
+banner "Scheduled-message PG path-filter wiring contract"
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
 
-echo "=== Scratch file guard ==="
+banner "Scratch file guard"
 FAIL=0
 for scratch_file in plan.md scratch.md scratch.txt scratch.sh scratchpad.md scratchpad.txt scratchpad.sh sql_test.rs test_scratch.rs plan.txt pr-body.md test.sh test.sql verify.sh; do
   if [ -f "$scratch_file" ]; then
@@ -345,7 +380,7 @@ if [ "$FAIL" -ne 0 ]; then
   exit "$FAIL"
 fi
 
-echo "=== Check hardcoded port/path drift ==="
+banner "Check hardcoded port/path drift"
 grep -rn '8791\|8799' --include='*.rs' --include='*.js' --include='*.yaml' --include='*.json' \
   --exclude-dir=target --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.claude \
   | grep -v 'Cargo.lock' \
@@ -353,7 +388,7 @@ grep -rn '8791\|8799' --include='*.rs' --include='*.js' --include='*.yaml' --inc
   | grep -v '# port' || true
 
 echo ""
-echo "=== Checking hardcoded home paths (informational; see #100) ==="
+banner "Checking hardcoded home paths (informational; see #100)"
 if grep -rn 'env!("HOME")' --include='*.rs' \
   --exclude-dir=target --exclude-dir=.git --exclude-dir=.claude 2>/dev/null; then
   echo "NOTE: env!(\"HOME\") found; tracked in #100"
@@ -361,7 +396,7 @@ else
   echo "OK: No env!(\"HOME\") found"
 fi
 
-echo "=== Path integrity check ==="
+banner "Path integrity check"
 FAIL=0
 if grep -n '/Users/\|/home/' Cargo.toml 2>/dev/null; then
   echo "ERROR: Absolute paths found in Cargo.toml"
@@ -378,7 +413,7 @@ if [ "$FAIL" -ne 0 ]; then
   exit "$FAIL"
 fi
 
-echo "=== Portable deployable path lint ==="
+banner "Portable deployable path lint"
 "$PYTHON" scripts/check-portable-paths.py
 "$PYTHON" -m unittest \
   tests.test_portable_path_lint \
@@ -386,14 +421,22 @@ echo "=== Portable deployable path lint ==="
   tests.test_script_python_policy \
   tests.test_analyze_prs
 
-echo "=== Relay watchdog + PG tunnel supervisor tests (#4381/#4378) ==="
+banner "Relay watchdog + PG tunnel supervisor tests (#4381/#4378)"
 # The out-of-band relay watchdog is a deployable Python script; it is not
 # covered by shellcheck (only *.sh) nor by cargo, so this unittest run is its
 # ONLY CI gate. It also pins the deploy/plist wiring so the watchdog cannot
 # silently fall out of the deploy again (the 06-29 relay-gap-watch failure).
 "$PYTHON" -m unittest tests.test_relay_watchdog tests.test_pg_tunnel
 
-echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036) ==="
+banner "Build token serialization tests (#5663)"
+# scripts/build_token.py serializes the two release scripts' cargo sites; the
+# Makefile target and install.sh's source install stay outside it by design.
+# It is Python, so neither shellcheck nor cargo covers it; this unittest run is
+# its ONLY CI gate, and it scans every tracked *.sh and Makefile for release
+# cargo sites, so a dropped wiring or a new unserialized one cannot pass silently.
+"$PYTHON" -m unittest tests.test_build_token_serialization_5663
+
+banner "Generate inventory docs (refresh workspace; gate source-of-truth invariants, #3036)"
 # Inventory snapshots are untracked, so generate them in the CI workspace
 # before checks consume their source-of-truth data. The generator hard-fails
 # (exit 2) on giant-file registry drift: unregistered new giants, ghost
@@ -414,7 +457,7 @@ echo "=== Generate inventory docs (refresh workspace; gate source-of-truth invar
 # after its fail-closed main or strict PR-progress verdict succeeds.
 GFP_REFRESH_DOCS=1 "$PYTHON" scripts/giant_file_progress.py
 
-echo "=== Generate env + CLI reference docs (README source-of-truth tables) ==="
+banner "Generate env + CLI reference docs (README source-of-truth tables)"
 # README links to these instead of carrying hand-written tables. Both
 # generators are pure source parsers (no cargo build), so they run on every
 # pass and share the tracked-doc drift gate below: regenerate, then fail the
@@ -429,18 +472,18 @@ git diff --exit-code -- \
   docs/generated/env-reference.md \
   docs/generated/cli-reference.md
 
-echo "=== Inventory prod/test split regression tests (#4394) ==="
+banner "Inventory prod/test split regression tests (#4394)"
 "$PYTHON" -m unittest tests.test_giant_file_progress tests.test_inventory_giant_split
 
-echo "=== Structural Clippy allow occurrence ratchet (#4519) ==="
+banner "Structural Clippy allow occurrence ratchet (#4519)"
 "$PYTHON" scripts/check_clippy_allow_ratchet.py
 "$PYTHON" -m unittest tests.test_clippy_allow_ratchet
 
-echo "=== API docs coverage gate (#3719) ==="
+banner "API docs coverage gate (#3719)"
 "$PYTHON" scripts/check_api_docs_coverage.py
 "$PYTHON" -m unittest tests.test_api_docs_coverage
 
-echo "=== Contract symbol-ref doc<->code sync gate (#4268) ==="
+banner "Contract symbol-ref doc<->code sync gate (#4268)"
 # docs/relay-state-contract.md anchors code with `sym:` symbol paths. This check
 # verifies the doc's `sym:` anchors exactly match the references PARSED FROM THE
 # CODE in the relay_state_contract_refs blocks (use / field / assoc-fn forms,
@@ -454,14 +497,14 @@ echo "=== Contract symbol-ref doc<->code sync gate (#4268) ==="
 "$PYTHON" scripts/check_contract_symbol_refs.py
 "$PYTHON" -m unittest tests.test_contract_symbol_refs
 
-echo "=== Agent maintenance freshness gate (warn, #1432; targeted hard gates) ==="
+banner "Agent maintenance freshness gate (warn, #1432; targeted hard gates)"
 # --warning-only keeps the #1432 freshness/touch rollout non-fatal. The LoC gate
 # remains unconditional; the migration 0093 rollout gate activates only when the
 # migration itself is in the changed-file set.
 "$PYTHON" scripts/check_agent_maintenance_docs.py --warning-only --line-count-gate \
   --migration-0093-rollout-gate
 
-echo "=== Shell test suites (tests/*.sh) ==="
+banner "Shell test suites (tests/*.sh)"
 # #4255: these suites existed but NOTHING executed them — `tests/**` appears in
 # ci-pr.yml only as a path filter that triggers the Rust jobs. Their assertions
 # had therefore never run on CI, so a shell guard could regress (or ship broken)
@@ -485,13 +528,13 @@ if [ "$SHELL_TESTS_FAILED" -ne 0 ]; then
   exit 1
 fi
 
-echo "=== Agent maintenance freshness tests ==="
+banner "Agent maintenance freshness tests"
 "$PYTHON" -m unittest tests.test_agent_maintenance_docs
 
-echo "=== Maintainability audit tests ==="
+banner "Maintainability audit tests"
 "$PYTHON" -m unittest tests.test_audit_maintainability.FooterViewWritesCheck
 
-echo "=== Maintainability audit ==="
+banner "Maintainability audit"
 mkdir -p target
 "$PYTHON" scripts/audit_maintainability.py --format yaml > target/maintainability-audit.yaml
 "$PYTHON" scripts/audit_maintainability.py --check

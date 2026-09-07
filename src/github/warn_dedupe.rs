@@ -1,230 +1,364 @@
-//! Process-lifetime dedupe for GitHub sync/triage warnings that recur on
-//! every periodic cycle while the underlying condition persists.
+//! Bounded, process-local dedupe for recurring sync and triage warnings.
 //!
-//! The periodic sync runs every `github.sync_interval_minutes` (10 min in
-//! production) and re-discovers the same conditions each time: a card that is
-//! terminal while its issue is still OPEN, a stale-reconcile GraphQL error
-//! for an issue that no longer resolves, or an `agent:<id>` label naming an
-//! agent this instance does not know. Each of those emitted a WARN per cycle
-//! (3,346 lines over three days for a handful of distinct keys), burying
-//! genuinely new problems.
-//!
-//! Semantics:
-//! * The first observation of a `(scope, key)` pair returns `true` → caller
-//!   logs at WARN. Later observations return `false` → caller logs at DEBUG.
-//! * At the end of a successful cycle the caller passes the set of keys it
-//!   observed in that cycle via [`RepeatWarnRegistry::retain`]; keys that were
-//!   not observed are dropped so a condition that resolves and then recurs
-//!   warns again.
-//! * Purely in-memory; a process restart warns once more, which is the
-//!   desired "one WARN per process lifetime" contract.
+//! A first or changed condition warns; repeats remain visible at DEBUG. Each
+//! warning expires 24 hours after WARN, even if it keeps recurring. Observed
+//! recovery clears terminal-card and unknown-agent warnings immediately.
+//! Missing issues and successful rotating reconcile batches do not prove that
+//! earlier warnings resolved, so they never clear an entire repository scope.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
-/// Scope-partitioned set of already-warned keys.
-pub(crate) struct RepeatWarnRegistry {
-    scopes: Mutex<HashMap<String, HashSet<String>>>,
+const WARN_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_ENTRIES: usize = 4096;
+const MAX_IDENTITY_BYTES: usize = 4096;
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum WarningKey {
+    TerminalOpen(i64, String),
+    UnknownAgent(i64, String, &'static str),
+    StaleReconcile(String, usize),
+}
+
+impl WarningKey {
+    fn text_bytes(&self) -> usize {
+        match self {
+            Self::TerminalOpen(_, card) => card.len(),
+            Self::UnknownAgent(_, agent, source) => agent.len() + source.len(),
+            Self::StaleReconcile(error, _) => error.len(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct RepeatWarnRegistry {
+    entries: Mutex<HashMap<(String, WarningKey), Instant>>,
 }
 
 impl RepeatWarnRegistry {
-    pub(crate) fn new() -> Self {
-        Self {
-            scopes: Mutex::new(HashMap::new()),
+    fn first_occurrence(&self, repo: &str, key: WarningKey, now: Instant) -> bool {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.retain(|(old_repo, old_key), warned_at| {
+            let replaced_agent = matches!(
+                (&key, old_key),
+                (WarningKey::UnknownAgent(issue, ..), WarningKey::UnknownAgent(old_issue, ..))
+                    if repo == old_repo && issue == old_issue && key != *old_key
+            );
+            !replaced_agent && now.saturating_duration_since(*warned_at) < WARN_TTL
+        });
+        // Oversized identities still WARN; they must not consume unbounded
+        // retained memory or collide through truncation/hashing.
+        if repo.len().saturating_add(key.text_bytes()) > MAX_IDENTITY_BYTES {
+            return true;
         }
-    }
-
-    /// Returns `true` when `key` has not been seen in `scope` since the last
-    /// [`retain`](Self::retain) that dropped it (or ever), and records it.
-    pub(crate) fn first_occurrence(&self, scope: &str, key: &str) -> bool {
-        let mut scopes = self
-            .scopes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        scopes
-            .entry(scope.to_string())
-            .or_default()
-            .insert(key.to_string())
-    }
-
-    /// Keeps only the keys still `live` for `scope`; everything else is
-    /// forgotten so it warns again on recurrence.
-    pub(crate) fn retain(&self, scope: &str, live: &HashSet<String>) {
-        let mut scopes = self
-            .scopes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(keys) = scopes.get_mut(scope) {
-            keys.retain(|key| live.contains(key));
-            if keys.is_empty() {
-                scopes.remove(scope);
+        let identity = (repo.to_string(), key);
+        if entries.contains_key(&identity) {
+            return false;
+        }
+        if entries.len() >= MAX_ENTRIES {
+            let oldest = entries
+                .iter()
+                .min_by_key(|(_, warned_at)| **warned_at)
+                .map(|(identity, _)| identity.clone());
+            if let Some(oldest) = oldest {
+                entries.remove(&oldest);
             }
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_tracked(&self, scope: &str, key: &str) -> bool {
-        self.scopes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(scope)
-            .is_some_and(|keys| keys.contains(key))
-    }
-}
-
-/// Registry shared by `github::sync` (terminal-but-OPEN, stale reconcile)
-/// and `github::triage` (unknown agent label). Scopes are prefixed per
-/// producer so the two never collide.
-pub(crate) static GITHUB_REPEAT_WARNINGS: LazyLock<RepeatWarnRegistry> =
-    LazyLock::new(RepeatWarnRegistry::new);
-
-pub(crate) fn sync_scope(repo: &str) -> String {
-    format!("sync:{repo}")
-}
-
-pub(crate) fn triage_scope(repo: &str) -> String {
-    format!("triage:{repo}")
-}
-
-/// Dedupe key for the "card is terminal but issue is OPEN" warning.
-pub(crate) fn terminal_open_warn_key(issue_number: i64, card_id: &str) -> String {
-    format!("terminal-open:#{issue_number}:{card_id}")
-}
-
-/// Dedupe key for one stale-reconcile GraphQL error string. The error text
-/// carries the issue number (`Could not resolve … number of 4303`), so the
-/// key is effectively `(repo, issue, reason)`.
-pub(crate) fn stale_reconcile_warn_key(error: &str) -> String {
-    format!("stale-reconcile:{error}")
-}
-
-/// Per-cycle collector for `github::sync` repeat warnings. Lives on
-/// `SyncResult`; records every key observed this cycle and, when the cycle
-/// completes successfully, releases keys that were not observed so a
-/// condition that resolves and later recurs warns again. Error paths that
-/// abort a cycle never call [`finish`](Self::finish) — an aborted cycle
-/// proves nothing about resolution.
-#[derive(Debug, Default)]
-pub(crate) struct SyncWarnCycle {
-    keys: HashSet<String>,
-}
-
-impl SyncWarnCycle {
-    /// "card {card_id} is terminal but issue is OPEN" — the same
-    /// (repo, issue, card) recurs every sync cycle until an operator acts.
-    pub(crate) fn terminal_open(&mut self, repo: &str, issue_number: i64, card_id: &str) {
-        let key = terminal_open_warn_key(issue_number, card_id);
-        warn_once_else_debug(
-            &sync_scope(repo),
-            &key,
-            &format!(
-                "[github-sync] {repo}#{issue_number}: card {card_id} is terminal but issue is OPEN"
-            ),
-        );
-        self.keys.insert(key);
-    }
-
-    /// Stale-reconcile GraphQL errors. Each distinct error string (e.g.
-    /// "Could not resolve … Issue 4303") recurs every cycle while the
-    /// referenced issue stays unresolvable; WARN only when at least one error
-    /// is new for this process, DEBUG otherwise.
-    pub(crate) fn stale_reconcile(&mut self, repo: &str, error_count: usize, errors: &[String]) {
-        let scope = sync_scope(repo);
-        let mut any_new = false;
-        for error in errors {
-            let key = stale_reconcile_warn_key(error);
-            if GITHUB_REPEAT_WARNINGS.first_occurrence(&scope, &key) {
-                any_new = true;
-            }
-            self.keys.insert(key);
-        }
-        let message = format!(
-            "[github-sync] {repo}: stale card reconcile had {error_count} non-fatal GraphQL error(s): {}",
-            errors.join("; ")
-        );
-        if any_new {
-            tracing::warn!("{message}");
-        } else {
-            tracing::debug!("{message} (repeat; first occurrence already warned)");
-        }
-    }
-
-    /// Cycle completed: release keys not observed this cycle.
-    pub(crate) fn finish(&self, repo: &str) {
-        GITHUB_REPEAT_WARNINGS.retain(&sync_scope(repo), &self.keys);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn contains(&self, key: &str) -> bool {
-        self.keys.contains(key)
-    }
-}
-
-/// Emits `message` at WARN on the first observation of `(scope, key)` and at
-/// DEBUG afterwards. Returns whether this call warned.
-pub(crate) fn warn_once_else_debug(scope: &str, key: &str, message: &str) -> bool {
-    if GITHUB_REPEAT_WARNINGS.first_occurrence(scope, key) {
-        tracing::warn!("{message}");
+        entries.insert(identity, now);
         true
+    }
+
+    fn clear(&self, repo: &str, matches: impl Fn(&WarningKey) -> bool) {
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(old_repo, key), _| old_repo != repo || !matches(key));
+    }
+}
+
+static GITHUB_REPEAT_WARNINGS: LazyLock<RepeatWarnRegistry> =
+    LazyLock::new(RepeatWarnRegistry::default);
+
+fn log_warning(first: bool, message: &str) -> bool {
+    if first {
+        tracing::warn!("{message}");
     } else {
         tracing::debug!("{message} (repeat; first occurrence already warned)");
-        false
     }
+    first
+}
+
+pub(super) fn terminal_open(repo: &str, issue: i64, card: &str, inconsistent: bool) -> bool {
+    let key = WarningKey::TerminalOpen(issue, card.to_string());
+    if !inconsistent {
+        GITHUB_REPEAT_WARNINGS.clear(repo, |old_key| *old_key == key);
+        return false;
+    }
+    log_warning(
+        GITHUB_REPEAT_WARNINGS.first_occurrence(repo, key, Instant::now()),
+        &format!("[github-sync] {repo}#{issue}: card {card} is terminal but issue is OPEN"),
+    )
+}
+
+pub(super) fn unknown_agent(
+    repo: &str,
+    issue: i64,
+    agent: Option<&str>,
+    source: &'static str,
+) -> bool {
+    let Some(agent) = agent else {
+        GITHUB_REPEAT_WARNINGS.clear(
+            repo,
+            |key| matches!(key, WarningKey::UnknownAgent(old_issue, ..) if *old_issue == issue),
+        );
+        return false;
+    };
+    log_warning(
+        GITHUB_REPEAT_WARNINGS.first_occurrence(
+            repo,
+            WarningKey::UnknownAgent(issue, agent.to_string(), source),
+            Instant::now(),
+        ),
+        &format!(
+            "[triage] Ignoring unknown agent '{agent}' from {source} for {repo} issue #{issue}"
+        ),
+    )
+}
+
+pub(super) fn stale_reconcile(repo: &str, error_count: usize, errors: &[String]) -> bool {
+    if error_count == 0 {
+        return false;
+    }
+    let now = Instant::now();
+    let mut first = false;
+    for error in errors {
+        // Evaluate every error, including when an earlier one was new.
+        first |= GITHUB_REPEAT_WARNINGS.first_occurrence(
+            repo,
+            WarningKey::StaleReconcile(error.clone(), error_count),
+            now,
+        );
+    }
+    // An incomplete error report must remain visible, even without text.
+    if errors.is_empty() {
+        first = GITHUB_REPEAT_WARNINGS.first_occurrence(
+            repo,
+            WarningKey::StaleReconcile(String::new(), error_count),
+            now,
+        );
+    }
+    log_warning(
+        first,
+        &format!(
+            "[github-sync] {repo}: stale card reconcile had {error_count} non-fatal GraphQL error(s): {}",
+            errors.join("; ")
+        ),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
-    #[test]
-    fn first_occurrence_warns_once_per_scope_key() {
-        let registry = RepeatWarnRegistry::new();
-        assert!(registry.first_occurrence("sync:o/r", "#1:terminal-open"));
-        assert!(!registry.first_occurrence("sync:o/r", "#1:terminal-open"));
-        assert!(!registry.first_occurrence("sync:o/r", "#1:terminal-open"));
-        // Same key in another scope (another repo) is independent.
-        assert!(registry.first_occurrence("sync:o/other", "#1:terminal-open"));
-        // A different key in the same scope warns.
-        assert!(registry.first_occurrence("sync:o/r", "#2:terminal-open"));
+    fn terminal(issue: i64) -> WarningKey {
+        WarningKey::TerminalOpen(issue, "card".to_string())
     }
 
     #[test]
-    fn retain_drops_resolved_keys_so_recurrence_warns_again() {
-        let registry = RepeatWarnRegistry::new();
-        assert!(registry.first_occurrence("sync:o/r", "#1"));
-        assert!(registry.first_occurrence("sync:o/r", "#2"));
-
-        // Cycle where only #2 is still observed: #1 resolved.
-        let live: HashSet<String> = ["#2".to_string()].into_iter().collect();
-        registry.retain("sync:o/r", &live);
-        assert!(!registry.is_tracked("sync:o/r", "#1"));
-        assert!(registry.is_tracked("sync:o/r", "#2"));
-
-        // #2 stays deduped; #1 recurring warns again.
-        assert!(!registry.first_occurrence("sync:o/r", "#2"));
-        assert!(registry.first_occurrence("sync:o/r", "#1"));
+    fn repeat_warnings_preserve_repository_issue_card_and_category_identity() {
+        let registry = RepeatWarnRegistry::default();
+        let now = Instant::now();
+        assert!(registry.first_occurrence("owner/repo", terminal(1), now));
+        assert!(!registry.first_occurrence("owner/repo", terminal(1), now));
+        assert!(registry.first_occurrence("other/repo", terminal(1), now));
+        assert!(registry.first_occurrence("owner/repo", terminal(2), now));
+        assert!(registry.first_occurrence(
+            "owner/repo",
+            WarningKey::TerminalOpen(1, "other-card".to_string()),
+            now
+        ));
+        assert!(registry.first_occurrence(
+            "owner/repo",
+            WarningKey::StaleReconcile("card".to_string(), 1),
+            now
+        ));
     }
 
     #[test]
-    fn retain_with_empty_live_set_clears_scope() {
-        let registry = RepeatWarnRegistry::new();
-        assert!(registry.first_occurrence("triage:o/r", "#186:td"));
-        registry.retain("triage:o/r", &HashSet::new());
-        assert!(!registry.is_tracked("triage:o/r", "#186:td"));
-        assert!(registry.first_occurrence("triage:o/r", "#186:td"));
+    fn repeat_observations_do_not_extend_warning_ttl() {
+        let registry = RepeatWarnRegistry::default();
+        let now = Instant::now();
+        assert!(registry.first_occurrence("ttl/repo", terminal(1), now));
+        assert!(!registry.first_occurrence(
+            "ttl/repo",
+            terminal(1),
+            now + WARN_TTL - Duration::from_secs(1)
+        ));
+        assert!(registry.first_occurrence("ttl/repo", terminal(1), now + WARN_TTL));
+        assert!(!registry.first_occurrence("ttl/repo", terminal(1), now + WARN_TTL));
     }
 
     #[test]
-    fn retain_on_unknown_scope_is_noop() {
-        let registry = RepeatWarnRegistry::new();
-        registry.retain("sync:never-seen", &HashSet::new());
-        assert!(registry.first_occurrence("sync:never-seen", "k"));
+    fn partial_or_aborted_cycles_cannot_clear_unobserved_issues() {
+        let registry = RepeatWarnRegistry::default();
+        let now = Instant::now();
+        assert!(registry.first_occurrence("partial/repo", terminal(1), now));
+        assert!(registry.first_occurrence("partial/repo", terminal(2), now));
+        registry.clear("partial/repo", |key| *key == terminal(2));
+        assert!(!registry.first_occurrence("partial/repo", terminal(1), now));
+        assert!(registry.first_occurrence("partial/repo", terminal(2), now));
+        assert!(RepeatWarnRegistry::default().first_occurrence("partial/repo", terminal(1), now));
     }
 
     #[test]
-    fn scopes_are_producer_prefixed() {
-        assert_eq!(sync_scope("o/r"), "sync:o/r");
-        assert_eq!(triage_scope("o/r"), "triage:o/r");
-        assert_ne!(sync_scope("o/r"), triage_scope("o/r"));
+    fn concurrent_duplicate_observations_warn_exactly_once() {
+        let registry = Arc::new(RepeatWarnRegistry::default());
+        let barrier = Arc::new(Barrier::new(8));
+        let now = Instant::now();
+        let handles = (0..8)
+            .map(|_| {
+                let registry = registry.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    registry.first_occurrence("concurrent/repo", terminal(1), now)
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            handles
+                .into_iter()
+                .map(|h| usize::from(h.join().unwrap()))
+                .sum::<usize>(),
+            1
+        );
+    }
+
+    #[test]
+    fn poisoned_registry_keeps_new_warnings_visible() {
+        let registry = Arc::new(RepeatWarnRegistry::default());
+        let poisoned = registry.clone();
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poisoned.entries.lock().unwrap();
+                panic!("simulate interrupted registry update");
+            })
+            .join()
+            .is_err()
+        );
+        let now = Instant::now();
+        assert!(registry.first_occurrence("poisoned/repo", terminal(1), now));
+        assert!(!registry.first_occurrence("poisoned/repo", terminal(1), now));
+        assert!(registry.first_occurrence("poisoned/repo", terminal(2), now));
+    }
+
+    #[test]
+    fn capacity_and_identity_size_are_bounded_without_silencing_new_warnings() {
+        let registry = RepeatWarnRegistry::default();
+        let now = Instant::now();
+        for issue in 0..MAX_ENTRIES + 2 {
+            assert!(registry.first_occurrence("capacity/repo", terminal(issue as i64), now));
+        }
+        assert_eq!(registry.entries.lock().unwrap().len(), MAX_ENTRIES);
+        let huge = WarningKey::StaleReconcile("x".repeat(MAX_IDENTITY_BYTES), 1);
+        assert!(registry.first_occurrence("capacity/repo", huge.clone(), now));
+        assert!(registry.first_occurrence("capacity/repo", huge, now));
+        assert_eq!(registry.entries.lock().unwrap().len(), MAX_ENTRIES);
+        assert!(registry.first_occurrence("capacity/repo", terminal(-1), now + WARN_TTL));
+        assert_eq!(registry.entries.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn terminal_warning_recovery_is_limited_to_observed_card_and_repo() {
+        let repo = "terminal-recovery/repo";
+        assert!(terminal_open(repo, 1, "a", true));
+        assert!(!terminal_open(repo, 1, "a", true));
+        assert!(terminal_open(repo, 1, "b", true));
+        assert!(!terminal_open("terminal-recovery/other", 1, "a", false));
+        assert!(!terminal_open(repo, 1, "a", true));
+        assert!(!terminal_open(repo, 1, "a", false));
+        assert!(terminal_open(repo, 1, "a", true));
+        assert!(!terminal_open(repo, 1, "b", true));
+    }
+
+    #[test]
+    fn unknown_agent_changes_and_recovery_warn_again_without_clearing_other_issues() {
+        let repo = "unknown-recovery/repo";
+        assert!(unknown_agent(repo, 1, Some("td"), "explicit label"));
+        assert!(!unknown_agent(repo, 1, Some("td"), "explicit label"));
+        assert!(unknown_agent(repo, 2, Some("td"), "explicit label"));
+        assert!(unknown_agent(repo, 1, Some("td"), "inferred routing"));
+        assert!(unknown_agent(repo, 1, Some("other"), "explicit label"));
+        assert!(unknown_agent(repo, 1, Some("td"), "explicit label"));
+        assert!(!unknown_agent(repo, 1, None, "resolved"));
+        assert!(unknown_agent(repo, 1, Some("td"), "explicit label"));
+        assert!(!unknown_agent(repo, 2, Some("td"), "explicit label"));
+    }
+
+    #[test]
+    fn stale_errors_preserve_changed_errors_counts_and_rotating_batches() {
+        let repo = "stale-errors/repo";
+        let errors = vec!["issue 1 missing".to_string(), "issue 2 denied".to_string()];
+        assert!(stale_reconcile(repo, 2, &errors));
+        assert!(!stale_reconcile(repo, 2, &errors));
+        let mut reversed = errors.clone();
+        reversed.reverse();
+        assert!(!stale_reconcile(repo, 2, &reversed));
+        assert!(stale_reconcile(
+            repo,
+            2,
+            &[errors[0].clone(), "issue 2 missing".to_string()]
+        ));
+        assert!(stale_reconcile(repo, 1, &errors[..1]));
+        assert!(!stale_reconcile(repo, 0, &[]));
+        assert!(!stale_reconcile(repo, 1, &errors[..1]));
+        assert!(stale_reconcile("stale-errors/other", 1, &errors[..1]));
+    }
+
+    #[test]
+    fn missing_error_details_still_warn_and_dedupe() {
+        assert!(stale_reconcile("empty-errors/repo", 1, &[]));
+        assert!(!stale_reconcile("empty-errors/repo", 1, &[]));
+        assert!(stale_reconcile("empty-errors/repo", 2, &[]));
+    }
+
+    #[test]
+    fn first_and_changed_warnings_are_warn_and_repeats_remain_debug() {
+        let capture = crate::github::test_support::LogCapture::new();
+        tracing::dispatcher::with_default(&capture.dispatch, || {
+            assert!(unknown_agent(
+                "log-level/repo",
+                1,
+                Some("td"),
+                "explicit label"
+            ));
+            assert!(!unknown_agent(
+                "log-level/repo",
+                1,
+                Some("td"),
+                "explicit label"
+            ));
+            assert!(unknown_agent(
+                "log-level/repo",
+                1,
+                Some("new-agent"),
+                "explicit label"
+            ));
+        });
+        let logs = capture.take();
+        assert_eq!(
+            logs.lines().filter(|line| line.contains("WARN")).count(),
+            2,
+            "{logs}"
+        );
+        assert_eq!(
+            logs.lines().filter(|line| line.contains("DEBUG")).count(),
+            1,
+            "{logs}"
+        );
+        assert!(logs.contains("repeat; first occurrence already warned"));
+        assert!(logs.contains("new-agent"));
     }
 }

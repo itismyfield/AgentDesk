@@ -1,13 +1,24 @@
-//! Boot-time audit of routine scripts on disk vs. the `routines` table
-//! (#5727). Kept out of `server/mod.rs` to respect the giant-file gate.
+//! Routine script registry initialization and boot-time registration audit (#5727).
 
 use sqlx::PgPool;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::services::routines::RoutineScriptLoader;
+
+pub(super) fn load_registry(
+    script_dirs: &[PathBuf],
+) -> anyhow::Result<(Arc<RoutineScriptLoader>, usize)> {
+    let loader = Arc::new(RoutineScriptLoader::new_shared(script_dirs)?);
+    let count = loader.load_dirs(script_dirs)?;
+    Ok((loader, count))
+}
 
 /// Boot-time (once per process) WARN listing `*.js` files present under the
 /// configured routine script directories that have no `routines` row. Hot
 /// reloads do not repeat it; `agentdesk doctor` carries the same finding as
 /// the `routine_scripts_registered` check.
-pub(super) async fn warn_once_unregistered(pg_pool: &PgPool, script_dirs: &[std::path::PathBuf]) {
+pub(super) async fn warn_once_unregistered(pg_pool: &PgPool, script_dirs: &[PathBuf]) {
     use crate::services::routines::{
         discover_routine_script_refs, registered_routine_script_refs,
         unregistered_routine_script_refs,

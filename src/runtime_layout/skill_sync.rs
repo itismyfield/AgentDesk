@@ -390,7 +390,7 @@ fn discover_skill_dirs(root: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     Ok(result)
 }
 
-fn discover_workspaces(root: &Path) -> Result<Vec<String>, String> {
+pub(super) fn discover_workspaces(root: &Path) -> Result<Vec<String>, String> {
     let workspaces_root = root.join("workspaces");
     let mut result = Vec::new();
     if !workspaces_root.is_dir() {

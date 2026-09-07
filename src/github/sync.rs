@@ -6,6 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+mod card_state;
+#[cfg(test)]
+mod warning_tests;
+
 const ISSUE_JSON_FIELDS: &str =
     "number,state,title,labels,body,url,closedAt,closedByPullRequestsReferences";
 const PRIMARY_FETCH_LIMIT: u32 = 100;
@@ -313,7 +317,7 @@ async fn sync_loaded_github_issues_for_repo_pg(
                 agent_overrides,
             )
             .await?;
-            let is_terminal = pipeline.is_terminal(&card.status);
+            let is_terminal = card_state::observe(repo, issue, &card, &pipeline);
 
             if issue.state == "CLOSED" && !is_terminal {
                 close_pg_card_for_issue(pool, &card, &pipeline).await?;
@@ -325,7 +329,6 @@ async fn sync_loaded_github_issues_for_repo_pg(
                 );
             } else if issue.state == "OPEN" && is_terminal {
                 result.inconsistency_count += 1;
-                result.warns.terminal_open(repo, issue.number, &card.id);
                 // #1946 (codex C — observability promotion): the OPEN/terminal
                 // mismatch was previously only counted in the result and
                 // emitted as a tracing warning, so production retros for the
@@ -421,8 +424,6 @@ async fn sync_loaded_github_issues_for_repo_pg(
         .execute(pool)
         .await
         .map_err(|error| format!("update last_synced_at: {error}"))?;
-
-    result.warns.finish(repo);
 
     Ok(result)
 }
@@ -872,9 +873,7 @@ fn apply_stale_reconcile_fetch_report(
     result.stale_card_issue_error_count += report.error_count;
 
     if report.error_count > 0 {
-        result
-            .warns
-            .stale_reconcile(repo, report.error_count, &report.errors);
+        super::warn_dedupe::stale_reconcile(repo, report.error_count, &report.errors);
     }
 
     let stale_closed_issue_count = report
@@ -1421,7 +1420,6 @@ pub struct SyncResult {
     pub stale_card_issue_check_count: usize,
     pub stale_card_issue_batch_count: usize,
     pub stale_card_issue_error_count: usize,
-    pub(crate) warns: super::warn_dedupe::SyncWarnCycle,
 }
 
 /// Reason code attached to terminal-card / OPEN-issue mismatch alerts so the
@@ -1669,63 +1667,11 @@ mod terminal_open_alert_tests {
 
         apply_stale_reconcile_fetch_report("owner/repo", &mut result, &mut issues, 3, report);
 
-        use super::super::warn_dedupe::stale_reconcile_warn_key;
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].number, 1);
         assert_eq!(result.stale_card_issue_check_count, 3);
         assert_eq!(result.stale_card_issue_batch_count, 1);
         assert_eq!(result.stale_card_issue_error_count, 1);
-        assert!(
-            result
-                .warns
-                .contains(&stale_reconcile_warn_key("GraphQL unavailable"))
-        );
-    }
-
-    #[test]
-    fn stale_reconcile_errors_are_deduped_per_repo_until_they_clear() {
-        use super::super::warn_dedupe::{
-            GITHUB_REPEAT_WARNINGS, stale_reconcile_warn_key, sync_scope,
-        };
-
-        let repo = "owner/dedupe-repo";
-        let error = "Could not resolve to an issue or pull request with the number of 4303.";
-        let key = stale_reconcile_warn_key(error);
-        let scope = sync_scope(repo);
-        let mut issues = Vec::new();
-
-        let mut first = SyncResult::default();
-        let report = StaleIssueFetchReport {
-            batch_count: 1,
-            error_count: 1,
-            errors: vec![error.to_string()],
-            ..StaleIssueFetchReport::default()
-        };
-        apply_stale_reconcile_fetch_report(repo, &mut first, &mut issues, 1, report);
-        assert!(first.warns.contains(&key));
-        assert!(GITHUB_REPEAT_WARNINGS.is_tracked(&scope, &key));
-        // Second cycle with the same error: still tracked (would log DEBUG).
-        assert!(!GITHUB_REPEAT_WARNINGS.first_occurrence(&scope, &key));
-
-        // Cycle without the error completes: the key is released.
-        SyncResult::default().warns.finish(repo);
-        assert!(!GITHUB_REPEAT_WARNINGS.is_tracked(&scope, &key));
-        // Recurrence warns again (first occurrence after release).
-        assert!(GITHUB_REPEAT_WARNINGS.first_occurrence(&scope, &key));
-        GITHUB_REPEAT_WARNINGS.retain(&scope, &HashSet::new());
-    }
-
-    #[test]
-    fn terminal_open_warn_key_is_scoped_by_issue_and_card() {
-        use super::super::warn_dedupe::terminal_open_warn_key;
-        assert_eq!(
-            terminal_open_warn_key(5490, "3be9c9ee"),
-            "terminal-open:#5490:3be9c9ee"
-        );
-        assert_ne!(
-            terminal_open_warn_key(5490, "card-a"),
-            terminal_open_warn_key(5490, "card-b")
-        );
     }
 
     #[test]

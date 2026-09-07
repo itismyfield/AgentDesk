@@ -1,14 +1,11 @@
-//! Explicit-auth mutation route inventory shared by the HTTP layer and the
-//! service handlers that gate themselves with `require_explicit_bearer_token`.
-//! Lives in `services` so `services::auto_queue` can reference it without a
-//! service→server backflow (audit_maintainability `service_server_backflow`).
+//! Explicit-auth mutation labels shared by the boot audit and handler gates.
+//! Kept in services so auto-queue handlers do not depend on the HTTP layer.
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExplicitAuthMutationRoute {
-    /// Route domain used only for the boot-audit log (`kanban`, `auto-queue`).
+    /// Domain shown in the boot audit.
     pub domain: &'static str,
-    /// Operation label passed to `require_explicit_bearer_token` and echoed
-    /// in its 401 error body.
+    /// Existing operation label echoed in the guard's 401 response.
     pub operation: &'static str,
 }
 
@@ -23,9 +20,8 @@ impl ExplicitAuthMutationRoute {
     pub const KANBAN_FORCE_TRANSITION: Self = Self::new("kanban", "force-transition");
     pub const AUTO_QUEUE_SUBMIT_ORDER: Self = Self::new("auto-queue", "submit_order");
 
-    /// Gate a handler with this route's explicit-auth requirement (Bearer
-    /// token and/or `x-channel-id`, see `services::kanban`). Thin wrapper so
-    /// handlers stay one line and the label cannot drift from the inventory.
+    /// Preserve the existing token/channel policy while sharing the operation
+    /// label with the audit. The explicit guard does not accept Origin/Referer.
     pub(crate) fn require(
         self,
         headers: &axum::http::HeaderMap,
@@ -35,9 +31,8 @@ impl ExplicitAuthMutationRoute {
 }
 
 impl std::fmt::Debug for ExplicitAuthMutationRoute {
-    // Renders as the quoted `"domain: operation"` string the audit log has
-    // always emitted, so log consumers see an unchanged format.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Preserve the legacy quoted "domain: operation" audit log format.
         write!(f, "\"{}: {}\"", self.domain, self.operation)
     }
 }

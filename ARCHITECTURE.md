@@ -200,8 +200,14 @@ src/
 │   ├── transition_executor_pg.rs
 │   └── transition_timeout.rs
 ├── github/
+│   ├── sync/
+│   │   ├── card_state.rs
+│   │   └── warning_tests.rs
+│   ├── triage/
+│   │   └── warning_tests.rs
 │   ├── mod.rs
 │   ├── sync.rs
+│   ├── test_support.rs
 │   ├── triage.rs
 │   └── warn_dedupe.rs
 ├── kanban/
@@ -339,6 +345,8 @@ src/
 │   │   ├── settings.rs
 │   │   ├── skill_usage_analytics.rs
 │   │   ├── skills_api.rs
+│   │   ├── skills_manifest_audit.rs
+│   │   ├── skills_manifest_audit_tests.rs
 │   │   ├── stats.rs
 │   │   ├── termination_events.rs
 │   │   ├── v1.rs
@@ -1010,6 +1018,8 @@ src/
 │   │   │   ├── tests.rs
 │   │   │   └── watcher_cancel.rs
 │   │   ├── tui_prompt_relay/
+│   │   │   ├── rehydration/
+│   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── anchor_completion.rs
