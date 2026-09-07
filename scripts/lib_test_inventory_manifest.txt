@@ -699,6 +699,8 @@ engine::ops::http_ops::tests::loopback_http_post_enforces_total_deadline_against
 engine::ops::http_ops::tests::loopback_http_post_passes_through_non_2xx_json_body
 engine::ops::http_ops::tests::loopback_http_post_returns_body_when_server_closes_after_response
 engine::ops::http_ops::tests::loopback_http_post_returns_on_content_length_before_server_close
+engine::ops::http_ops::tests::policy_http_get_rejects_remote_targets_and_never_follows_redirects
+engine::ops::http_ops::tests::policy_http_get_uses_read_only_loopback_transport_and_js_registration
 engine::ops::http_ops::tests::request_head_speaks_http_1_0_and_closes
 engine::ops::http_ops::tests::resolve_http_post_timeout_clamps_under_tight_deadline
 engine::ops::http_ops::tests::resolve_http_post_timeout_errors_after_deadline_elapses
@@ -969,6 +971,7 @@ server::routes::bind_security_tests::loopback_host_is_never_downgraded
 server::routes::bind_security_tests::loopback_notation_edges_are_not_force_downgraded
 server::routes::bind_security_tests::nonloopback_with_token_binds_requested_host
 server::routes::bind_security_tests::nonloopback_without_token_is_forced_to_loopback
+server::routes::cluster::idle_kill_config_tests::idle_kill_owner_config_requires_explicit_nonempty_trusted_origin
 server::routes::departments::tests::db_error_preserves_500_and_verbatim_message
 server::routes::departments::tests::department_not_found_preserves_404_and_message
 server::routes::departments::tests::ensure_pg_missing_pool_preserves_503_and_message
@@ -6643,6 +6646,8 @@ services::discord::turn_finalizer::delivery_lease::tests::release_compare_and_re
 services::discord::turn_finalizer::delivery_lease::tests::same_key_range_stale_bridge_attempt_cannot_touch_successor
 services::discord::turn_finalizer::delivery_lease::tests::same_turn_stale_range_release_is_noop_after_reacquire
 services::discord::turn_finalizer::delivery_lease::tests::stale_turn_commit_and_release_are_noops_after_reacquire
+services::discord::turn_finalizer::episode::tests::missing_snapshot_is_not_an_observed_legacy_episode
+services::discord::turn_finalizer::episode::tests::rowless_submission_transports_original_episode_without_snapshot
 services::discord::turn_finalizer::finalize::tests::finalize_chokepoint_publishes_mailbox_release_completion_event
 services::discord::turn_finalizer::finalize::tests::guarded_miss_preserves_parent_mapping_and_skips_parent_kickoff
 services::discord::turn_finalizer::finalize::tests::identity_guard_mismatch_does_not_release_wrong_owner_and_logs

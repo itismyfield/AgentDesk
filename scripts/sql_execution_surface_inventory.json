@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "e7b4745b846429c9063a5948cf3c281ea19ec535",
+  "measured_at_sha": "09a47a2ad892c1f45d5bb382473b206caf29dd4d",
   "records": [
     {
       "root": "migrations/postgres",
@@ -2259,7 +2259,16 @@
       "api": "agentdesk.db.query",
       "symbol": "query",
       "classification": "UNRESOLVED",
-      "fingerprint": "sha256:125e889806e6a505805013e4f3fb99f537d8c4204a2a6d5c18b2137c06d9bf7d"
+      "fingerprint": "sha256:655103bc955d1f7a80ae4683d84e46f4819738103eff5fa40e26edb3d4a68159"
+    },
+    {
+      "root": "policies",
+      "kind": "POLICY",
+      "path": "policies/timeouts/idle-kill.js",
+      "api": "agentdesk.db.query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:a262c439494802f98eefe9939a88ebef73f05746a6bc5a706fccdf3e5622a764"
     },
     {
       "root": "policies",

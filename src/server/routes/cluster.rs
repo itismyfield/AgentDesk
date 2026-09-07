@@ -67,6 +67,10 @@ pub async fn list_nodes(
                 Json(json!({
                     "cluster": {
                         "enabled": state.config.cluster.enabled,
+                        "local_instance_id": state.cluster_instance_id,
+                        // Configuration authority only; registry advertisements must
+                        // never supply a missing trusted forwarding origin (#5714).
+                        "configured_forward_owner_ids": configured_forward_owner_ids(&state.config.cluster),
                         "configured_role": state.config.cluster.role,
                         "lease_ttl_secs": lease_ttl_secs,
                         "heartbeat_interval_secs": state.config.cluster.heartbeat_interval_secs.max(1),
@@ -79,6 +83,50 @@ pub async fn list_nodes(
             ))
         }
         Err(error) => Err(AppError::internal(error)),
+    }
+}
+
+fn configured_forward_owner_ids(cluster: &crate::config::ClusterConfig) -> Vec<&str> {
+    cluster
+        .nodes
+        .iter()
+        .filter_map(|(owner, node)| {
+            node.trusted_forward_origin
+                .as_deref()
+                .filter(|origin| !origin.trim().is_empty())
+                .map(|_| owner.as_str())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod idle_kill_config_tests {
+    use super::*;
+
+    #[test]
+    fn idle_kill_owner_config_requires_explicit_nonempty_trusted_origin() {
+        let mut cluster = crate::config::ClusterConfig::default();
+        assert!(configured_forward_owner_ids(&cluster).is_empty());
+        for (owner, origin) in [
+            ("missing", None),
+            ("blank", Some("  ")),
+            ("worker", Some("https://worker.example:8791")),
+        ] {
+            cluster.nodes.insert(
+                owner.into(),
+                crate::config::ClusterNodeConfig {
+                    trusted_forward_origin: origin.map(str::to_string),
+                    ..Default::default()
+                },
+            );
+        }
+        assert_eq!(configured_forward_owner_ids(&cluster), vec!["worker"]);
+        cluster
+            .nodes
+            .get_mut("missing")
+            .unwrap()
+            .trusted_forward_origin = Some("https://recovered.example:8791".into());
+        assert!(configured_forward_owner_ids(&cluster).contains(&"missing"));
     }
 }
 

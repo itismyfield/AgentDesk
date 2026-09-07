@@ -55,7 +55,7 @@ pub(super) enum FinalizeMsg {
         provider: ProviderKind,
         event: TerminalEvent,
         ctx: FinalizeContext,
-        claim_snapshot: Option<SyntheticClaimSnapshot>,
+        evidence: TerminalEvidence,
         shared: Arc<SharedData>,
         ack: oneshot::Sender<FinalizeOutcome>,
     },
