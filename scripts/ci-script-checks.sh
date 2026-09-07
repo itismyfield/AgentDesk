@@ -258,6 +258,7 @@ banner "Intake-outbox done writer per-file call-site allowlist (#5071 T2)"
 banner "Hotfile LOC ratchet guard (#3565)"
 "$PYTHON" scripts/check_hotfile_ratchet.py
 "$PYTHON" -m unittest scripts.test_ratchet_admission
+"$PYTHON" -m unittest scripts.test_pr_cap_check
 "$PYTHON" -m unittest scripts.test_intervention_log
 
 banner "Discord log field-key drift guard (#4218)"
