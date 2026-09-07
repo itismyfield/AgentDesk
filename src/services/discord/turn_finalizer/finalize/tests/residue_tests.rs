@@ -265,6 +265,60 @@ async fn health_still_shows_residual_while_an_inflight_owner_holds_the_release()
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn producer_bound_same_episode_miss_keeps_residue_recovery_owner_r3() {
+    crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root(|| async {
+        let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(5_754_301);
+        let terminal_id = 5_754_302;
+        let queued_id = 5_754_304;
+        let token = seed_active_with_queue(&shared, channel, 5_754_303, queued_id).await;
+        let captured = terminal_snapshot(terminal_id, token.turn_nonce().unwrap());
+        let blocking_row = seed_inflight_row(channel);
+        shared
+            .turn_finalizer
+            .submit_terminal_with_claim_snapshot(
+                TurnKey::new(channel, terminal_id, shared.restart.current_generation),
+                ProviderKind::Claude,
+                TerminalEvent::Complete,
+                FinalizeContext::bridge(),
+                Some(captured),
+                shared.clone(),
+            )
+            .await;
+        assert!(
+            shared
+                .turn_finalizer
+                .guarded_finish_residues()
+                .contains_key(&channel),
+            "producer-bound same-episode ID mismatch must leave a recovery owner"
+        );
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        std::fs::remove_file(blocking_row).expect("release fixture inflight gate");
+        reconcile_once(&shared).await;
+        let snapshot = shared.mailbox(channel).snapshot().await;
+        assert!(snapshot.cancel_token.is_none());
+        assert_eq!(snapshot.intervention_queue.len(), 1);
+        assert_eq!(
+            snapshot.intervention_queue[0].message_id,
+            MessageId::new(queued_id)
+        );
+        assert_eq!(
+            snapshot.intervention_queue[0].text,
+            "queued after residual owner"
+        );
+        assert!(shared.restart.deferred_hook_channels.contains_key(&channel));
+        assert!(
+            !shared
+                .turn_finalizer
+                .guarded_finish_residues()
+                .contains_key(&channel)
+        );
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn guarded_miss_residue_reconcile_releases_same_terminal_episode_and_rearms_queue() {
     crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root(|| async move {
         let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);

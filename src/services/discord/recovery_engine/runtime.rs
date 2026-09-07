@@ -219,13 +219,23 @@ async fn reregister_active_turn_from_inflight_inner(
             finalizer_turn_id,
             "inflight reregister skipped: terminal delivery already committed; clearing stale active turn state"
         );
-        finish_recovered_turn_mailbox(
-            shared,
-            &provider,
-            channel_id,
-            "recovery_terminal_delivery_already_committed",
-        )
-        .await;
+        let _ = shared
+            .turn_finalizer
+            .submit_terminal_with_claim_snapshot(
+                super::turn_finalizer::TurnKey::new(
+                    channel_id,
+                    finalizer_turn_id,
+                    shared.restart.current_generation,
+                ),
+                provider.clone(),
+                super::turn_finalizer::TerminalEvent::Complete,
+                super::turn_finalizer::FinalizeContext::monitor(),
+                Some(super::turn_finalizer::SyntheticClaimSnapshot::from_row(
+                    state,
+                )),
+                shared.clone(),
+            )
+            .await;
         if persist_durable_marker {
             // #5462 S1b: `state` is a snapshot the reconcile scan read earlier
             // (~91ms in the observed accident), so a NEW turn intake accepted in
@@ -531,7 +541,11 @@ mod reregister_ledger_reseed_tests {
         let turn_id = 9_301;
         let mut state = active_turn_state(ch.get(), turn_id);
         state.set_relay_owner_kind(super::inflight::RelayOwnerKind::StandbyRelay);
-        let token = Arc::new(crate::services::provider::CancelToken::new());
+        let token = Arc::new(
+            crate::services::provider::CancelToken::from_persisted_turn_nonce(
+                state.turn_nonce.clone(),
+            ),
+        );
         shared
             .mailbox(ch)
             .restore_active_turn(token, UserId::new(7), MessageId::new(turn_id))
@@ -553,7 +567,8 @@ mod reregister_ledger_reseed_tests {
                     ch,
                     turn_id,
                     shared.restart.current_generation,
-                ),
+                )
+                .with_episode_nonce(state.turn_nonce.as_deref()),
                 ProviderKind::Claude,
                 super::super::turn_finalizer::TerminalEvent::Complete,
                 super::super::turn_finalizer::FinalizeContext::monitor(),

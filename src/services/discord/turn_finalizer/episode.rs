@@ -14,6 +14,9 @@ pub(in crate::services::discord) struct CapturedFinish {
 
 impl CapturedFinish {
     pub(in crate::services::discord) fn publish_release(&self, shared: &SharedData, key: TurnKey) {
+        if self.finish.removed_token.is_none() {
+            return;
+        }
         super::super::turn_completion_events::publish_turn_completion_event(
             shared,
             super::super::turn_completion_events::TurnCompletionEvent::mailbox_released(
@@ -41,10 +44,7 @@ pub(in crate::services::discord) async fn claim_normal_episode(
         .ok_or(())?
         .snapshot()
         .await;
-    if key.user_msg_id == 0
-        || observed.active_user_message_id.map(|id| id.get()) != Some(key.user_msg_id)
-        || !key.matches_episode_nonce(observed.active_turn_nonce.as_deref())
-    {
+    if key.user_msg_id == 0 || !key.matches_episode_nonce(observed.active_turn_nonce.as_deref()) {
         return Err(());
     }
     let row =
@@ -62,10 +62,12 @@ pub(in crate::services::discord) async fn claim_normal_episode(
             observed_before,
         )
         .await;
-    if finish.removed_token.is_none() {
-        return Err(());
-    }
-    if clear_inflight && let Some(row) = row.as_ref() {
+    // Same-episode ID misses retain the ordinary guarded-miss recovery owner.
+    // Only the separately gated reconciler may release that residual anchor.
+    if finish.removed_token.is_some()
+        && clear_inflight
+        && let Some(row) = row.as_ref()
+    {
         let _ = super::super::inflight::clear_inflight_state_for_captured_episode(
             provider,
             key.channel_id.get(),
