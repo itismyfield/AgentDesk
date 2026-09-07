@@ -469,11 +469,68 @@ fn rehydrate_codex_tui_binding_transaction(
                 && existing.runtime_kind == RuntimeHandoffKind::CodexTui
                 && Path::new(&existing.output_path).exists()
             {
-                crate::services::tui_prompt_dedupe::register_tmux_channel(
+                let marker = crate::services::codex_tui::session::read_codex_tui_rollout_marker(
                     tmux_session_name,
-                    channel_id,
-                );
-                return Some((existing, false));
+                )
+                .filter(|marker| {
+                    // The existing binding reserves its own rollout; only a
+                    // different source must pass the foreign-claim check.
+                    let own_claim = HashSet::new();
+                    let claims = if canonical_rollout_claim_path(&marker.rollout_path)
+                        == canonical_rollout_claim_path(Path::new(&existing.output_path))
+                    {
+                        &own_claim
+                    } else {
+                        claimed_rollout_paths
+                    };
+                    matches!(
+                        codex_tui_marker_rehydrate_decision(marker, claims, duplicate_marker_paths),
+                        CodexTuiMarkerRehydrateDecision::Use { .. }
+                    )
+                });
+                let (path, session_id) = marker
+                    .map(|marker| (marker.rollout_path, marker.session_id))
+                    .unwrap_or_else(|| {
+                        (
+                            PathBuf::from(&existing.output_path),
+                            existing.session_id.clone(),
+                        )
+                    });
+                let mut fresh = codex_tui_rehydrated_binding_from_rollout_path(
+                    tmux_session_name,
+                    &path,
+                    session_id,
+                )?;
+                if canonical_rollout_claim_path(Path::new(&existing.output_path))
+                    == canonical_rollout_claim_path(Path::new(&fresh.output_path))
+                    && existing
+                        .session_id
+                        .as_deref()
+                        .zip(fresh.session_id.as_deref())
+                        .is_none_or(|(current, observed)| current.trim() == observed.trim())
+                {
+                    if existing
+                        .relay_output_path
+                        .as_ref()
+                        .is_none_or(|path| Some(path) == fresh.relay_output_path.as_ref())
+                    {
+                        if crate::services::tui_prompt_dedupe::owner_channel_for_tmux_session(
+                            tmux_session_name,
+                        ) != Some(channel_id)
+                        {
+                            crate::services::tui_prompt_dedupe::register_tmux_channel(
+                                tmux_session_name,
+                                channel_id,
+                            );
+                        }
+                        // #5755: None means no recovery in this pass. The sole
+                        // caller continues, without success logging or fallback.
+                        return None;
+                    }
+                    // A new relay namespace must not skip unread rollout bytes.
+                    fresh.last_offset = existing.last_offset;
+                }
+                return Some((fresh, true));
             }
             rehydrated_codex_tui_binding_for_tmux_session(
                 tmux_session_name,
@@ -859,6 +916,9 @@ fn rollout_path_is_claimed_for_other_session(
     claimed_rollout_paths.contains(path)
         || claimed_rollout_paths.contains(&canonical_rollout_claim_path(path))
 }
+
+#[cfg(all(unix, test))]
+mod idempotency_tests;
 
 #[cfg(all(unix, test))]
 mod tests {
