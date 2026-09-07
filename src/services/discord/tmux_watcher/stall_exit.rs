@@ -255,7 +255,11 @@ mod tests {
         );
         state.turn_start_offset = Some(25);
         inflight::save_inflight_state(&state).expect("save owned row");
-        let token = Arc::new(crate::services::provider::CancelToken::new());
+        let token = Arc::new(
+            crate::services::provider::CancelToken::from_persisted_turn_nonce(
+                state.turn_nonce.clone(),
+            ),
+        );
         assert!(
             crate::services::discord::mailbox_try_start_turn_kinded(
                 shared.as_ref(),

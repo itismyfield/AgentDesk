@@ -29,6 +29,7 @@ fn reseed_recovered_finalizer_ledger(
     finalizer_turn_id: u64,
     provider: &ProviderKind,
     relay_owner: super::inflight::RelayOwnerKind,
+    captured_turn_nonce: Option<&str>,
 ) {
     // id-0 would key the channel-only orphan slot. Only seed a full-identity
     // Watcher entry; synthetic live turns use their persisted finalizer_turn_id.
@@ -47,7 +48,8 @@ fn reseed_recovered_finalizer_ledger(
                 channel_id,
                 finalizer_turn_id,
                 shared.restart.current_generation,
-            ),
+            )
+            .with_episode_nonce(captured_turn_nonce),
             provider.clone(),
             relay_owner,
             completion_admission_plan,
@@ -217,13 +219,23 @@ async fn reregister_active_turn_from_inflight_inner(
             finalizer_turn_id,
             "inflight reregister skipped: terminal delivery already committed; clearing stale active turn state"
         );
-        finish_recovered_turn_mailbox(
-            shared,
-            &provider,
-            channel_id,
-            "recovery_terminal_delivery_already_committed",
-        )
-        .await;
+        let _ = shared
+            .turn_finalizer
+            .submit_terminal_with_claim_snapshot(
+                super::turn_finalizer::TurnKey::new(
+                    channel_id,
+                    finalizer_turn_id,
+                    shared.restart.current_generation,
+                ),
+                provider.clone(),
+                super::turn_finalizer::TerminalEvent::Complete,
+                super::turn_finalizer::FinalizeContext::monitor(),
+                Some(super::turn_finalizer::SyntheticClaimSnapshot::from_row(
+                    state,
+                )),
+                shared.clone(),
+            )
+            .await;
         if persist_durable_marker {
             // #5462 S1b: `state` is a snapshot the reconcile scan read earlier
             // (~91ms in the observed accident), so a NEW turn intake accepted in
@@ -245,6 +257,9 @@ async fn reregister_active_turn_from_inflight_inner(
         return false;
     }
     if snapshot.cancel_token.is_some() {
+        if snapshot.active_turn_nonce != state.turn_nonce {
+            return false;
+        }
         if let Some(token) = snapshot.cancel_token.as_ref()
             && snapshot.active_user_message_id == Some(finalizer_msg_id)
         {
@@ -263,6 +278,7 @@ async fn reregister_active_turn_from_inflight_inner(
                 finalizer_turn_id,
                 &provider,
                 state.effective_relay_owner_kind(),
+                state.turn_nonce.as_deref(),
             );
             // #4370: a real-user turn re-bound to the mailbox across a restart.
             if readopted_ledger_record_allowed(state) {
@@ -285,11 +301,14 @@ async fn reregister_active_turn_from_inflight_inner(
             finalizer_turn_id,
             &provider,
             state.effective_relay_owner_kind(),
+            state.turn_nonce.as_deref(),
         );
         return false;
     }
 
-    let cancel_token = Arc::new(CancelToken::new());
+    let cancel_token = Arc::new(CancelToken::from_persisted_turn_nonce(
+        state.turn_nonce.clone(),
+    ));
     super::ensure_cancel_token_bound_from_inflight_state(
         &provider,
         state,
@@ -312,6 +331,7 @@ async fn reregister_active_turn_from_inflight_inner(
             finalizer_turn_id,
             &provider,
             state.effective_relay_owner_kind(),
+            state.turn_nonce.as_deref(),
         );
         // #4370: the mailbox now carries a re-adopted-from-inflight REAL user turn
         // (owner == request_owner_user_id). Record it in the ledger + on-disk
@@ -521,7 +541,11 @@ mod reregister_ledger_reseed_tests {
         let turn_id = 9_301;
         let mut state = active_turn_state(ch.get(), turn_id);
         state.set_relay_owner_kind(super::inflight::RelayOwnerKind::StandbyRelay);
-        let token = Arc::new(crate::services::provider::CancelToken::new());
+        let token = Arc::new(
+            crate::services::provider::CancelToken::from_persisted_turn_nonce(
+                state.turn_nonce.clone(),
+            ),
+        );
         shared
             .mailbox(ch)
             .restore_active_turn(token, UserId::new(7), MessageId::new(turn_id))
@@ -543,7 +567,8 @@ mod reregister_ledger_reseed_tests {
                     ch,
                     turn_id,
                     shared.restart.current_generation,
-                ),
+                )
+                .with_episode_nonce(state.turn_nonce.as_deref()),
                 ProviderKind::Claude,
                 super::super::turn_finalizer::TerminalEvent::Complete,
                 super::super::turn_finalizer::FinalizeContext::monitor(),
@@ -590,7 +615,7 @@ mod reregister_ledger_reseed_tests {
         );
         let outcome = shared
             .turn_finalizer
-            .submit_terminal(
+            .submit_terminal_with_episode_nonce(
                 super::super::turn_finalizer::TurnKey::new(
                     ch,
                     state.finalizer_turn_id,
@@ -599,6 +624,7 @@ mod reregister_ledger_reseed_tests {
                 ProviderKind::Claude,
                 super::super::turn_finalizer::TerminalEvent::Complete,
                 super::super::turn_finalizer::FinalizeContext::watcher(),
+                state.turn_nonce.clone(),
                 shared.clone(),
             )
             .await;

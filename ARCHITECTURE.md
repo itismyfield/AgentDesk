@@ -1022,6 +1022,7 @@ src/
 │   │   │   ├── rehydration/
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── synthetic_start/
+│   │   │   │   ├── claim.rs
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── anchor_completion.rs
 │   │   │   ├── bridge_completion.rs

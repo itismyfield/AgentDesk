@@ -1,6 +1,8 @@
 use super::*;
 
+mod claim;
 mod stale_reclaim;
+pub(super) use claim::claim_tui_direct_synthetic_turn;
 
 use stale_reclaim::release_reclaimable_stale_synthetic_mailbox_owner_if_current;
 pub(super) use stale_reclaim::{
@@ -40,76 +42,27 @@ pub(in crate::services::discord) fn synthetic_start_offset_carry_forward(
     relay_last_offset.max(committed_relay_offset.unwrap_or(0))
 }
 
-pub(super) async fn claim_tui_direct_synthetic_turn(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    prompt_text: &str,
-    anchor_message_id: MessageId,
-    lease: &ExternalInputRelayLease,
+async fn claim_tui_direct_synthetic_turn_prepared(
+    preparation: claim::SyntheticClaimPreparation<'_>,
 ) -> TuiDirectSyntheticTurnClaim {
-    let binding =
-        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
-    let binding =
-        external_input_relay_binding(provider.as_str(), tmux_session_name, channel_id, binding);
-    let output_path = external_input_relay_output_path(
+    let claim::SyntheticClaimPreparation {
+        identity,
+        output_path,
+        start_offset,
+        relay_owner,
+        relay_owner_kind,
+    } = preparation;
+
+    let claim::SyntheticClaimIdentity {
         shared,
-        provider.as_str(),
-        tmux_session_name,
-        channel_id,
-        binding.as_ref(),
-    );
-    let relay_last_offset = external_input_relay_start_offset(provider, binding.as_ref());
-    // #3358 round 2: carry the committed frontier forward, but ONLY for the
-    // CURRENT wrapper generation (stale → `None` → no content skip).
-    // The `tmux` module is `#[cfg(unix)]`; on non-unix targets (windows CI
-    // cross-compile check) there is no committed frontier to carry forward, so
-    // `None` (no carry-forward) is the correct, behavior-preserving default.
-    #[cfg(unix)]
-    let committed_relay_offset = super::super::tmux::committed_frontier_for_current_generation(
-        shared,
+        provider,
         channel_id,
         tmux_session_name,
-    );
-    #[cfg(not(unix))]
-    let committed_relay_offset: Option<u64> = None;
-    let start_offset =
-        synthetic_start_offset_carry_forward(relay_last_offset, committed_relay_offset);
-    if start_offset > relay_last_offset {
-        tracing::info!(
-            provider = %provider.as_str(),
-            channel_id = channel_id.get(),
-            tmux_session_name = %tmux_session_name,
-            anchor_message_id = anchor_message_id.get(),
-            relay_last_offset,
-            committed_relay_offset = committed_relay_offset.unwrap_or(0),
-            start_offset,
-            "#3358 synthetic inflight offset-authority handover: carried committed relay frontier forward"
-        );
-    }
-    // #3876 (codex rework): gate the SessionBoundRelay stamp on a LIVE per-session
-    // producer — NOT the global session-bound flag. The sink only commits when a
-    // production tmux watcher is feeding the supervisor-owned StreamRelay for this
-    // session; with no registered producer the bridge tail must stay the deliverer.
-    let live_producer_present =
-        crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
-            .get_live_producer(tmux_session_name)
-            .is_some();
-    let relay_owner = tui_direct_synthetic_relay_owner(
-        tui_direct_watcher_can_own_output(
-            &shared.tmux_watchers,
-            tmux_session_name,
-            output_path.as_deref(),
-        ),
-        session_bound_discord_delivery_enabled(),
-        live_producer_present,
-    );
-    let relay_owner_kind = match relay_owner {
-        ExternalInputRelayOwner::TmuxWatcher => RelayOwnerKind::Watcher,
-        ExternalInputRelayOwner::SessionBoundRelay => RelayOwnerKind::SessionBoundRelay,
-        _ => RelayOwnerKind::None,
-    };
+        prompt_text,
+        anchor_message_id,
+        lease,
+        register_deferred_start,
+    } = identity;
 
     let cancel_token = Arc::new(CancelToken::new());
     super::super::turn_bridge::bind_cancel_token_tmux_runtime(
@@ -231,9 +184,21 @@ pub(super) async fn claim_tui_direct_synthetic_turn(
     // observed an already-active matching synthetic turn, the fresh local token
     // was not admitted; the mailbox snapshot, not that unused token, is the
     // authority for the nonce persisted below.
-    let active_turn_nonce = super::super::mailbox_snapshot(shared, channel_id)
-        .await
-        .active_turn_nonce;
+    let active_snapshot = super::super::mailbox_snapshot(shared, channel_id).await;
+    if register_deferred_start
+        && (active_snapshot.active_user_message_id != Some(anchor_message_id)
+            || active_snapshot.cancel_token.as_ref().is_none_or(|active| {
+                mailbox_activation_occurred && !Arc::ptr_eq(active, &cancel_token)
+            }))
+    {
+        return TuiDirectSyntheticTurnClaim {
+            relay_owner,
+            claimed: false,
+            turn_start_offset: start_offset,
+        };
+    }
+    let active_turn_nonce = active_snapshot.active_turn_nonce;
+    identity.register_episode(active_turn_nonce.as_deref());
 
     // #3146 Part 1: a TUI-driven turn is now active for this channel (we either
     // just started it via `mailbox_try_start_turn` or already own the matching
@@ -530,23 +495,40 @@ mod tests {
     async fn aged_rowless_synthetic_owner_reclaims_and_finalizes_ledger() {
         let root = tempfile::tempdir().expect("runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let provider = ProviderKind::Claude;
+        let provider = ProviderKind::Codex;
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel_id = ChannelId::new(4_018_201);
-        let tmux = "AgentDesk-claude-4018-aged";
+        let tmux = "AgentDesk-codex-4018-aged";
         let stale_id = MessageId::new(4_018_301);
         let next_id = MessageId::new(4_018_401);
         let stale_token = seed_synthetic_mailbox_owner(&shared, channel_id, stale_id).await;
-        let key = crate::services::discord::turn_finalizer::TurnKey::new(
-            channel_id,
-            stale_id.get(),
-            shared.restart.current_generation,
-        );
-        shared.turn_finalizer.register_start(
-            key,
-            provider.clone(),
-            RelayOwnerKind::Watcher,
-            &shared,
+        let record = crate::services::discord::tui_direct_pending_start::TuiDirectPendingStart {
+            provider: provider.as_str().into(),
+            channel_id: channel_id.get(),
+            tmux_session_name: tmux.into(),
+            prompt_text: "continue".into(),
+            anchor_message_id: stale_id.get(),
+            lease_relay_owner: ExternalInputRelayOwner::BridgeAdapter.as_str().into(),
+            lease_runtime_kind: None,
+            lease_turn_id: None,
+            lease_session_key: None,
+            generation: shared.restart.current_generation,
+            created_at_ms: 0,
+            observed_at_ms: 0,
+            state: crate::services::discord::tui_direct_pending_start::PendingStartState::Waiting,
+            attempt_count: 0,
+        };
+        assert!(pending_start_claim_fn()(&shared, &record).await);
+        let row = inflight::load_inflight_state(&provider, channel_id.get()).unwrap();
+        assert_eq!(row.turn_nonce.as_deref(), stale_token.turn_nonce());
+        assert_eq!(
+            inflight::clear_inflight_state_for_captured_episode(
+                &provider,
+                channel_id.get(),
+                &inflight::InflightTurnIdentity::from_state(&row),
+                stale_token.turn_nonce(),
+            ),
+            inflight::GuardedClearOutcome::Cleared
         );
         assert!(
             shared
@@ -852,6 +834,7 @@ mod tests {
         let token = seed_synthetic_mailbox_owner(&shared, channel_id, turn_id).await;
         let mut state = synthetic_state(channel_id, turn_id, tmux, false);
         state.session_key = Some("session-4019-release".to_string());
+        state.turn_nonce = token.turn_nonce().map(str::to_owned);
         inflight::save_inflight_state(&state).expect("save synthetic inflight");
 
         finish_tui_direct_synthetic_turn_if_current(
@@ -1845,23 +1828,7 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                 lease,
             );
 
-            // #3154 design point 6: register the turn with the single-authority
-            // finalizer BEFORE the claim saves the inflight + (implicitly, via
-            // the lease/inflight) releases the watcher gate — mirrors the bridge
-            // register-before-unpause at turn_bridge/mod.rs.
-            shared.turn_finalizer.register_start(
-                super::super::turn_finalizer::TurnKey::new(
-                    channel_id,
-                    record.anchor_message_id,
-                    shared.restart.current_generation,
-                ),
-                provider.clone(),
-                super::super::inflight::RelayOwnerKind::Watcher,
-                // #3016 phase-5a: prime the reconcile cache at register time.
-                shared,
-            );
-
-            let claim = claim_tui_direct_synthetic_turn(
+            let claim = claim::claim_tui_direct_synthetic_turn_inner::<true>(
                 shared,
                 &provider,
                 channel_id,

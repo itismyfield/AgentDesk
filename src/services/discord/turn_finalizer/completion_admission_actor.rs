@@ -48,6 +48,7 @@ fn canonical_admission_ledger_key(
             .iter()
             .filter(|(ledger_key, entry)| {
                 ledger_key.channel_id == key.channel_id
+                    && ledger_key.episode == key.episode
                     && ledger_key.user_msg_id == key.user_msg_id
                     && entry.turn_key.user_msg_id == key.user_msg_id
             })
@@ -90,7 +91,10 @@ fn update_completion_admission(
         pending_admission
             .entry(ledger_key)
             .or_insert_with(|| PendingCompletionAdmission {
-                turn_key: TurnKey::new(key.channel_id, key.user_msg_id, ledger_key.generation),
+                turn_key: TurnKey {
+                    generation: ledger_key.generation,
+                    ..key
+                },
                 completion_admission: CompletionAdmission::new(CompletionAdmissionPlan::Immediate),
                 updated_at: Instant::now(),
             });
