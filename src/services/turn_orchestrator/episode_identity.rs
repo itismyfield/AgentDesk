@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use poise::serenity_prelude::MessageId;
 
-use super::{ChannelMailboxHandle, ChannelMailboxMsg, FinishTurnResult, QueuePersistenceContext};
+use super::*;
 
 #[derive(Clone, Debug)]
 pub(super) enum TurnNonceGuard {
@@ -27,6 +27,33 @@ pub(super) fn turn_nonce_guard_matches(
 }
 
 impl ChannelMailboxHandle {
+    /// Operator recovery preserves queue payloads, ordering and pending claims.
+    pub(crate) async fn release_turn_lease_if_matches(
+        &self,
+        expected_user_message_id: MessageId,
+        expected_turn_nonce: String,
+        active_started_before: Instant,
+        persistence: QueuePersistenceContext,
+    ) -> FinishTurnResult {
+        self.request(
+            |reply| ChannelMailboxMsg::FinishTurnIfMatches {
+                expected_user_message_id,
+                active_started_before: Some(active_started_before),
+                turn_nonce_guard: TurnNonceGuard::exact(Some(expected_turn_nonce)),
+                preserve_queue: true,
+                persistence,
+                reply,
+            },
+            FinishTurnResult {
+                removed_token: None,
+                has_pending: false,
+                mailbox_online: false,
+                queue_exit_events: Vec::new(),
+                persistence_error: None,
+            },
+        )
+        .await
+    }
     /// Episode-identity + monotonic-start guarded finish for durable repair.
     /// The actor compares both axes before taking the active token, so a stale
     /// row cannot release a same-message-id successor admitted before the sweep.
@@ -42,6 +69,7 @@ impl ChannelMailboxHandle {
                 expected_user_message_id,
                 active_started_before: Some(active_started_before),
                 turn_nonce_guard: TurnNonceGuard::exact(expected_turn_nonce),
+                preserve_queue: false,
                 persistence,
                 reply,
             },
@@ -71,6 +99,7 @@ impl ChannelMailboxHandle {
                 expected_user_message_id,
                 active_started_before: None,
                 turn_nonce_guard: TurnNonceGuard::Ignore,
+                preserve_queue: false,
                 persistence,
                 reply,
             },
@@ -103,6 +132,7 @@ impl ChannelMailboxHandle {
                 expected_user_message_id,
                 active_started_before: Some(active_started_before),
                 turn_nonce_guard: TurnNonceGuard::Ignore,
+                preserve_queue: false,
                 persistence,
                 reply,
             },
@@ -116,6 +146,29 @@ impl ChannelMailboxHandle {
         )
         .await
     }
+}
+
+pub(super) fn persist_queue_or_restore(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    persistence: &QueuePersistenceContext,
+    previous_queue: Vec<Intervention>,
+    operation: &str,
+) -> Result<(), String> {
+    match persist_queue(channel_id, &state.intervention_queue, persistence) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            state.intervention_queue = previous_queue;
+            log_queue_persistence_rollback(operation, channel_id, persistence, &error);
+            Err(error)
+        }
+    }
+}
+
+pub(super) fn reset_watchdog_extension_state(state: &mut ChannelMailboxState) {
+    state.watchdog_deadline_override = None;
+    state.watchdog_extension_count = 0;
+    state.watchdog_extension_total_secs = 0;
 }
 
 #[cfg(test)]

@@ -37,7 +37,10 @@ use dispatch_reservation::{
     pending_dispatch_lease_is_orphaned, reconcile_pending_dispatch_marker_before_take_next,
     record_valve_cleared_pending_dispatch, set_pending_user_dispatch,
 };
-use episode_identity::{TurnNonceGuard, turn_nonce_guard_matches};
+use episode_identity::{
+    TurnNonceGuard, persist_queue_or_restore, reset_watchdog_extension_state,
+    turn_nonce_guard_matches,
+};
 use front_requeue::requeue_intervention_front;
 pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
@@ -1785,6 +1788,7 @@ enum ChannelMailboxMsg {
     /// NEWER turn's token or decrement `global_active`. On mismatch this is a
     /// no-op that returns `removed_token = None`, leaving the live turn intact.
     FinishTurnIfMatches {
+        preserve_queue: bool,
         expected_user_message_id: MessageId,
         active_started_before: Option<Instant>,
         turn_nonce_guard: TurnNonceGuard,
@@ -2016,27 +2020,11 @@ fn log_queue_persistence_rollback(
     );
 }
 
-fn persist_queue_or_restore(
-    state: &mut ChannelMailboxState,
-    channel_id: ChannelId,
-    persistence: &QueuePersistenceContext,
-    previous_queue: Vec<Intervention>,
-    operation: &str,
-) -> Result<(), String> {
-    match persist_queue(channel_id, &state.intervention_queue, persistence) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            state.intervention_queue = previous_queue;
-            log_queue_persistence_rollback(operation, channel_id, persistence, &error);
-            Err(error)
-        }
-    }
-}
-
 fn finalize_turn_state(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
     persistence: Option<&QueuePersistenceContext>,
+    preserve_queue: bool,
 ) -> FinishTurnResult {
     let removed_token = state.cancel_token.take();
     state.active_request_owner = None;
@@ -2048,6 +2036,18 @@ fn finalize_turn_state(
     state.turn_started_at = None;
     state.turn_started_instant = None;
     reset_watchdog_extension_state(state);
+    if preserve_queue {
+        return FinishTurnResult {
+            removed_token,
+            has_pending: state
+                .intervention_queue
+                .iter()
+                .any(|item| item.mode == InterventionMode::Soft),
+            mailbox_online: true,
+            queue_exit_events: Vec::new(),
+            persistence_error: None,
+        };
+    }
     let previous_len = state.intervention_queue.len();
     let previous_queue = state.intervention_queue.clone();
     let pending_result = has_soft_intervention(&mut state.intervention_queue);
@@ -2080,12 +2080,6 @@ fn finalize_turn_state(
         queue_exit_events: pending_result.queue_exit_events,
         persistence_error: None,
     }
-}
-
-fn reset_watchdog_extension_state(state: &mut ChannelMailboxState) {
-    state.watchdog_deadline_override = None;
-    state.watchdog_extension_count = 0;
-    state.watchdog_extension_total_secs = 0;
 }
 
 fn extend_active_watchdog_deadline(
@@ -2927,6 +2921,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         &mut state,
                         channel_id,
                         Some(&persistence),
+                        false,
                     ));
                     if let Some(user_message_id) = finished_user_message_id {
                         consume_pending_dispatch_marker_if_matches(
@@ -2939,6 +2934,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     mark_turn_finished_signal_done(channel_id);
                 }
                 ChannelMailboxMsg::FinishTurnIfMatches {
+                    preserve_queue,
                     expected_user_message_id,
                     active_started_before,
                     turn_nonce_guard,
@@ -2973,8 +2969,9 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             &mut state,
                             channel_id,
                             Some(&persistence),
+                            preserve_queue,
                         ));
-                        if let Some(user_message_id) = finished_user_message_id {
+                        if !preserve_queue && let Some(user_message_id) = finished_user_message_id {
                             consume_pending_dispatch_marker_if_matches(
                                 &mut state,
                                 channel_id,
@@ -3006,6 +3003,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                         &mut state,
                         channel_id,
                         persistence.as_ref(),
+                        false,
                     ));
                     mark_turn_finished_signal_done(channel_id);
                 }
@@ -3019,6 +3017,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                             &mut state,
                             channel_id,
                             persistence.as_ref(),
+                            false,
                         ));
                         mark_turn_finished_signal_done(channel_id);
                     } else {
