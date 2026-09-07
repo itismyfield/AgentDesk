@@ -63,6 +63,7 @@ pub(in crate::services::discord) use self::completion_signal::{
     CompletionSignal, completion_signal_from_transcript,
 };
 use self::episode::TerminalEvidence;
+pub(in crate::services::discord) use self::episode::claim_normal_episode;
 pub(in crate::services::discord) use self::guarded_finish_residue::GuardedFinishResidue;
 pub(in crate::services::discord) use self::guarded_finish_residue::handle_idle_queue_guard_skip;
 // #3479 r9: dormant delivery-lease handlers extracted to the child module; the
@@ -123,6 +124,7 @@ const COMPLETION_ADMISSION_TTL: Duration = Duration::from_secs(10 * 60);
 /// channel's single live entry (see `resolve_ledger_key`), never a literal 0.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::services::discord) struct TurnKey {
+    pub(in crate::services::discord) episode: Option<[u8; 32]>,
     pub(in crate::services::discord) channel_id: ChannelId,
     /// 0 == "unknown identity" (recovery/orphan paths): resolved to the
     /// channel's single live entry instead of a literal-0 key.
@@ -137,10 +139,22 @@ impl TurnKey {
         generation: u64,
     ) -> Self {
         Self {
+            episode: None,
             channel_id,
             user_msg_id,
             generation,
         }
+    }
+
+    /// Bind only identity captured by this producer, never a later live turn.
+    pub(in crate::services::discord) fn with_episode_nonce(mut self, nonce: Option<&str>) -> Self {
+        self.episode = Some(episode::episode_fingerprint(nonce));
+        self
+    }
+
+    pub(in crate::services::discord) fn matches_episode_nonce(self, nonce: Option<&str>) -> bool {
+        self.episode
+            .is_none_or(|expected| expected == episode::episode_fingerprint(nonce))
     }
 
     /// The literal full-identity key for this turn. The finalize ledger keys on
@@ -148,6 +162,7 @@ impl TurnKey {
     /// terminals collapse onto the same live entry.
     pub(in crate::services::discord) fn exact_key(&self) -> LedgerKey {
         LedgerKey {
+            episode: self.episode,
             channel_id: self.channel_id,
             generation: self.generation,
             user_msg_id: self.user_msg_id,
@@ -159,6 +174,7 @@ impl TurnKey {
 /// Full identity so sequential same-channel turns never collide.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(in crate::services::discord) struct LedgerKey {
+    pub(in crate::services::discord) episode: Option<[u8; 32]>,
     pub(in crate::services::discord) channel_id: ChannelId,
     pub(in crate::services::discord) generation: u64,
     pub(in crate::services::discord) user_msg_id: u64,
@@ -217,13 +233,23 @@ pub(in crate::services::discord) fn resolve_channel_only<'a>(
         return key.exact_key();
     }
     let channel_has_terminal = candidates.clone().any(|(lk, is_terminal)| {
-        lk.channel_id == key.channel_id && lk.generation == key.generation && is_terminal
+        lk.channel_id == key.channel_id
+            && lk.generation == key.generation
+            && is_terminal
+            && key
+                .episode
+                .is_none_or(|episode| lk.episode == Some(episode))
     });
     if channel_has_terminal {
         return key.exact_key();
     }
     let mut live_matches = candidates.into_iter().filter(|(lk, is_terminal)| {
-        lk.channel_id == key.channel_id && lk.generation == key.generation && !*is_terminal
+        lk.channel_id == key.channel_id
+            && lk.generation == key.generation
+            && !*is_terminal
+            && key
+                .episode
+                .is_none_or(|episode| lk.episode == Some(episode))
     });
     let Some((only_live, _)) = live_matches.next() else {
         return key.exact_key();
@@ -3061,6 +3087,7 @@ mod tests {
         // The single LIVE (non-finalized) entry belongs to the NEWER turn
         // (user_msg_id 999). No terminal/finalized entry exists for the channel.
         let newer_live = LedgerKey {
+            episode: None,
             channel_id: ch,
             generation,
             user_msg_id: 999,
@@ -3094,6 +3121,7 @@ mod tests {
         // literal orphan key) — the cross-turn safety net. Included so the test
         // documents the full id-0 resolution matrix the guard reasons about.
         let finalized_old = LedgerKey {
+            episode: None,
             channel_id: ch,
             generation,
             user_msg_id: 100,
@@ -3116,11 +3144,13 @@ mod tests {
         let ch = ChannelId::new(4243);
         let generation = 0u64;
         let live_a = LedgerKey {
+            episode: None,
             channel_id: ch,
             generation,
             user_msg_id: 1001,
         };
         let live_b = LedgerKey {
+            episode: None,
             channel_id: ch,
             generation,
             user_msg_id: 1002,

@@ -108,6 +108,7 @@ fn clear_inflight_state_if_matches_identity_turn_nonce_impl_in_root(
     expected: &InflightTurnIdentity,
     expected_turn_nonce: Option<&str>,
     reconcile_current_generation: Option<u64>,
+    exact_nonce: bool,
 ) -> super::reconcile_gate::ReconcileClearOutcome {
     use super::reconcile_gate::ReconcileClearOutcome;
 
@@ -121,6 +122,15 @@ fn clear_inflight_state_if_matches_identity_turn_nonce_impl_in_root(
     let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
         return ReconcileClearOutcome::Delegated(GuardedClearOutcome::Missing);
     };
+    if exact_nonce
+        && expected_turn_nonce.filter(|nonce| !nonce.is_empty())
+            != state
+                .turn_nonce
+                .as_deref()
+                .filter(|nonce| !nonce.is_empty())
+    {
+        return ReconcileClearOutcome::Delegated(GuardedClearOutcome::UserMsgMismatch);
+    }
     if reconcile_current_generation
         .is_some_and(|current| super::reconcile_gate::row_is_current_generation(&state, current))
     {
@@ -161,6 +171,7 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_tur
         expected,
         expected_turn_nonce,
         None,
+        false,
     ) {
         super::reconcile_gate::ReconcileClearOutcome::Delegated(outcome) => outcome,
         super::reconcile_gate::ReconcileClearOutcome::LiveGenerationSkipped { .. } => {
@@ -184,7 +195,31 @@ pub(super) fn clear_inflight_state_if_matches_identity_turn_nonce_for_reconcile_
         expected,
         expected_turn_nonce,
         Some(current_generation),
+        false,
     )
+}
+
+pub(in crate::services::discord) fn clear_inflight_state_for_captured_episode(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    captured_nonce: Option<&str>,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    match clear_inflight_state_if_matches_identity_turn_nonce_impl_in_root(
+        &root,
+        provider,
+        channel_id,
+        expected,
+        captured_nonce,
+        None,
+        true,
+    ) {
+        super::reconcile_gate::ReconcileClearOutcome::Delegated(outcome) => outcome,
+        _ => unreachable!("captured episode clear does not use reconcile generation policy"),
+    }
 }
 
 fn clear_rebind_origin_inflight_state_if_matches_identity_impl_in_root(

@@ -9,9 +9,18 @@ pub(super) async fn handle_terminal(
     evidence: TerminalEvidence,
     shared: &Arc<SharedData>,
 ) -> FinalizeOutcome {
-    // Captured before the producer's yielding work; the next authority slice
-    // consumes this nonce without deriving it from a successor's live state.
-    let _captured_episode = (evidence.episode_captured, evidence.turn_nonce);
+    // A producer lacking episode evidence cannot borrow a known successor's
+    // ledger, nor enter the legacy AlreadyFinalized repair path.
+    if key.episode.is_none()
+        && ledger.keys().any(|known| {
+            known.channel_id == key.channel_id
+                && known.generation == key.generation
+                && known.user_msg_id == key.user_msg_id
+                && known.episode.is_some()
+        })
+    {
+        return FinalizeOutcome::Deferred;
+    }
     let claim_snapshot = evidence.claim_snapshot;
     // #3866: test-only injection point — lets a test drive a real finalize
     // side-effect panic through the live actor loop to prove the catch_unwind

@@ -524,7 +524,7 @@ pub(super) async fn run_post_loop_finalize(
             // watcher (phase 3 routes it) a harmless idempotent no-op.
             let outcome = shared_owned
                 .turn_finalizer
-                .submit_terminal(
+                .submit_terminal_with_claim_snapshot(
                     super::super::turn_finalizer::TurnKey::new(
                         channel_id,
                         inflight_state.effective_finalizer_turn_id(),
@@ -537,6 +537,11 @@ pub(super) async fn run_post_loop_finalize(
                         super::super::turn_finalizer::TerminalEvent::Complete
                     },
                     super::super::turn_finalizer::FinalizeContext::bridge(),
+                    Some(
+                        super::super::turn_finalizer::SyntheticClaimSnapshot::from_row(
+                            &inflight_state,
+                        ),
+                    ),
                     shared_owned.clone(),
                 )
                 .await;
@@ -605,7 +610,7 @@ pub(super) async fn run_post_loop_finalize(
         // into the NEXT turn no longer has a flag to swap.
         let outcome = shared_owned
             .turn_finalizer
-            .submit_terminal(
+            .submit_terminal_with_claim_snapshot(
                 super::super::turn_finalizer::TurnKey::new(
                     channel_id,
                     inflight_state.effective_finalizer_turn_id(),
@@ -618,6 +623,9 @@ pub(super) async fn run_post_loop_finalize(
                     super::super::turn_finalizer::TerminalEvent::Complete
                 },
                 super::super::turn_finalizer::FinalizeContext::bridge(),
+                Some(
+                    super::super::turn_finalizer::SyntheticClaimSnapshot::from_row(&inflight_state),
+                ),
                 shared_owned.clone(),
             )
             .await;

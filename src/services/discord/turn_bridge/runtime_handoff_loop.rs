@@ -539,7 +539,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
                                 channel_id,
                                 inflight_state.effective_finalizer_turn_id(),
                                 shared_owned.restart.current_generation,
-                            ),
+                            ).with_episode_nonce(inflight_state.turn_nonce.as_deref()),
                             provider.clone(),
                             super::inflight::RelayOwnerKind::Watcher,
                             super::turn_finalizer::CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,

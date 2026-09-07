@@ -375,7 +375,8 @@ pub(super) async fn finalize_abandoned_mailbox(
             channel,
             state.effective_finalizer_turn_id(),
             shared.restart.current_generation,
-        );
+        )
+        .with_episode_nonce(state.turn_nonce.as_deref());
         shared
             .turn_finalizer
             .note_mailbox_released(key, shared.clone());

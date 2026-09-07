@@ -1291,7 +1291,8 @@ fn pre_panel_release_decrements_before_same_channel_followup_claims() {
             .insert(channel_id, ChannelId::new(555_4106));
         assert!(
             super::release_restored_watcher_active_turn_before_panel_edit(
-                &shared, &provider, channel_id, turn_a,
+                &shared, &provider, Some(crate::services::discord::turn_finalizer::TurnKey::new(
+                    channel_id, turn_a, shared.restart.current_generation)),
             )
             .await,
             "the pre-panel hoist must release and decrement turn A before the awaited edit"

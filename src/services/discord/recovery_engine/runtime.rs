@@ -29,6 +29,7 @@ fn reseed_recovered_finalizer_ledger(
     finalizer_turn_id: u64,
     provider: &ProviderKind,
     relay_owner: super::inflight::RelayOwnerKind,
+    captured_turn_nonce: Option<&str>,
 ) {
     // id-0 would key the channel-only orphan slot. Only seed a full-identity
     // Watcher entry; synthetic live turns use their persisted finalizer_turn_id.
@@ -47,7 +48,8 @@ fn reseed_recovered_finalizer_ledger(
                 channel_id,
                 finalizer_turn_id,
                 shared.restart.current_generation,
-            ),
+            )
+            .with_episode_nonce(captured_turn_nonce),
             provider.clone(),
             relay_owner,
             completion_admission_plan,
@@ -245,6 +247,9 @@ async fn reregister_active_turn_from_inflight_inner(
         return false;
     }
     if snapshot.cancel_token.is_some() {
+        if snapshot.active_turn_nonce != state.turn_nonce {
+            return false;
+        }
         if let Some(token) = snapshot.cancel_token.as_ref()
             && snapshot.active_user_message_id == Some(finalizer_msg_id)
         {
@@ -263,6 +268,7 @@ async fn reregister_active_turn_from_inflight_inner(
                 finalizer_turn_id,
                 &provider,
                 state.effective_relay_owner_kind(),
+                state.turn_nonce.as_deref(),
             );
             // #4370: a real-user turn re-bound to the mailbox across a restart.
             if readopted_ledger_record_allowed(state) {
@@ -285,11 +291,14 @@ async fn reregister_active_turn_from_inflight_inner(
             finalizer_turn_id,
             &provider,
             state.effective_relay_owner_kind(),
+            state.turn_nonce.as_deref(),
         );
         return false;
     }
 
-    let cancel_token = Arc::new(CancelToken::new());
+    let cancel_token = Arc::new(CancelToken::from_persisted_turn_nonce(
+        state.turn_nonce.clone(),
+    ));
     super::ensure_cancel_token_bound_from_inflight_state(
         &provider,
         state,
@@ -312,6 +321,7 @@ async fn reregister_active_turn_from_inflight_inner(
             finalizer_turn_id,
             &provider,
             state.effective_relay_owner_kind(),
+            state.turn_nonce.as_deref(),
         );
         // #4370: the mailbox now carries a re-adopted-from-inflight REAL user turn
         // (owner == request_owner_user_id). Record it in the ledger + on-disk
