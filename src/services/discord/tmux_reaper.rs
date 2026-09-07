@@ -55,6 +55,7 @@ async fn finalize_stale_busy_turn(
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,
     observed_user_msg_id: serenity::MessageId,
+    observed_turn_nonce: Option<String>,
     tmux_session_name: &str,
     trigger: &'static str,
 ) -> bool {
@@ -67,7 +68,7 @@ async fn finalize_stale_busy_turn(
     );
     let outcome = shared
         .turn_finalizer
-        .submit_terminal(
+        .submit_terminal_with_episode_nonce(
             turn_finalizer::TurnKey::new(
                 channel_id,
                 observed_user_msg_id.get(),
@@ -76,6 +77,7 @@ async fn finalize_stale_busy_turn(
             provider.clone(),
             turn_finalizer::TerminalEvent::Cancel,
             turn_finalizer::FinalizeContext::stale_busy_mailbox(),
+            observed_turn_nonce,
             shared.clone(),
         )
         .await;
@@ -167,6 +169,7 @@ async fn heal_stale_busy_mailbox_with_probe(
         provider,
         channel_id,
         observed_user_msg_id,
+        observed.active_turn_nonce,
         &observed_tmux_session_name,
         trigger,
     )
@@ -999,6 +1002,7 @@ mod tests {
                 &ProviderKind::Claude,
                 channel_id,
                 user_msg_id,
+                token.turn_nonce().map(str::to_owned),
                 "AgentDesk-claude-test-4485",
                 "test",
             )
@@ -1045,6 +1049,7 @@ mod tests {
                 &ProviderKind::Claude,
                 channel_id,
                 stale_user_msg_id,
+                None,
                 "AgentDesk-claude-test-4485",
                 "test",
             )

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "07dcdd4322bd6898ac3c7c151253b2d616a71bd7",
+  "measured_at_sha": "09a47a2ad892c1f45d5bb382473b206caf29dd4d",
   "records": [
     {
       "root": "migrations/postgres",
@@ -2259,7 +2259,16 @@
       "api": "agentdesk.db.query",
       "symbol": "query",
       "classification": "UNRESOLVED",
-      "fingerprint": "sha256:125e889806e6a505805013e4f3fb99f537d8c4204a2a6d5c18b2137c06d9bf7d"
+      "fingerprint": "sha256:655103bc955d1f7a80ae4683d84e46f4819738103eff5fa40e26edb3d4a68159"
+    },
+    {
+      "root": "policies",
+      "kind": "POLICY",
+      "path": "policies/timeouts/idle-kill.js",
+      "api": "agentdesk.db.query",
+      "symbol": "query",
+      "classification": "UNRESOLVED",
+      "fingerprint": "sha256:a262c439494802f98eefe9939a88ebef73f05746a6bc5a706fccdf3e5622a764"
     },
     {
       "root": "policies",
@@ -29250,6 +29259,15 @@
       "api": "sqlx::query_scalar",
       "symbol": "query_scalar",
       "classification": "STATIC",
+      "fingerprint": "sha256:5c8ded73515f9af5bd1b7adc30cbf641843c25514268215a9ba5eef328759206"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/pipeline_override.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
       "fingerprint": "sha256:76de80fdbd415364b58d17ae1a0168cd32d02676a301d6b50f138e55ba83f957"
     },
     {
@@ -30016,6 +30034,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:095f2be564281d9fadfaf7e3db581220f7c4ce02faa5bd7a97e9daf3aaac6ca8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/routines/script_refs.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7fb86d34b3894a869f18e51238ecda95c6340d7a37b080e834dfe1aa4d24fd85"
     },
     {
       "root": "src",

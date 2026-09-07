@@ -12,6 +12,7 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 import generate_inventory_docs as inventory
+from ratchet_admission import parse_cap_table
 ROOT = Path(__file__).resolve().parent.parent
 EVIDENCE = ROOT / "target/giant-file-progress/evidence.json"
 REGISTRY = "scripts/giant_file_registry.toml"
@@ -25,7 +26,11 @@ GUARD_REPIN_ALLOWED = frozenset({
     "scripts/run_relay_authority_mutations.sh",
     "scripts/relay_authority_contract_targets.json",
 })
-FROZEN = ("scripts/audit_maintainability_giant_baseline.toml", "scripts/giant_file_closed_issue_transition_list.txt")
+GIANT_PIN = "scripts/audit_maintainability_giant_baseline.toml"
+TRANSITION = "scripts/giant_file_closed_issue_transition_list.txt"
+FROZEN = (GIANT_PIN, TRANSITION)
+LEDGER = frozenset({REGISTRY, METADATA, TRANSITION, GIANT_PIN})
+MAX_EXT, MAX_RESETS = 92, 2
 BOOTSTRAP_PATHS = frozenset({
     ".github/workflows/ci-main.yml",
     ".github/workflows/ci-pr.yml",
@@ -369,8 +374,162 @@ def progress_errors(base: dict[str, object], candidate: dict[str, object],
         errors.append("registry changed during partial progress")
     return errors
 
+def load_ledger(root: Path, *, snapshot: str = "snapshot") -> dict[str, object]:
+    """Reuse the offline inventory and audit parsers for ledger evidence."""
+    try:
+        # Import inside the caught input path: the candidate consumer interprets
+        # both archives, and an import failure must still produce fail evidence.
+        from audit_maintainability.checks.giant_file_ratchet import load_giant_baseline
+        pins = parse_cap_table((root / GIANT_PIN).read_text(encoding="utf-8"),
+                               "giant_file_ratchet")
+        if not pins:
+            raise ValueError("E8: giant pin authority is empty")
+        if load_giant_baseline(root / GIANT_PIN) != pins:
+            raise ValueError("E8: strict and audit giant pin maps differ")
+    except Exception as error:
+        raise inventory.ParseError(f"invalid giant-file pins ({snapshot}): {error}") from error
+    paths = {"GIANT_FILE_CLOSED_ISSUE_TRANSITION_LIST": root / TRANSITION,
+             "GIANT_FILE_ISSUE_METADATA": root / METADATA}
+    previous = {name: getattr(inventory, name) for name in paths}
+    try:
+        for name, value in paths.items():
+            setattr(inventory, name, value)
+        return {"registry": (root / REGISTRY).read_text(encoding="utf-8"),
+                "transition": inventory.load_giant_file_closed_issue_transition_list(),
+                "ratchets": inventory.load_giant_file_issue_ratchets(),
+                "pins": pins}
+    except ValueError as error:
+        raise inventory.ParseError(f"invalid giant-file ledger: {error}") from error
+    finally:
+        for name, value in previous.items():
+            setattr(inventory, name, value)
+
+def ledger_repair_moves(base: dict[str, object], candidate: dict[str, object],
+                        facts: dict[str, object]) -> list[tuple[str, str, str]] | None:
+    """L1-L4 select only source-free, forward shrink-deadline bookkeeping."""
+    if not facts["changed"] or not facts["changed"] <= LEDGER:
+        return None
+    if base["modules"] != candidate["modules"]:
+        return None
+    before, after = base["registrations"], candidate["registrations"]
+    if set(before) != set(after):
+        return None
+    moved = []
+    for path, old in before.items():
+        new = after[path]
+        if old == new:
+            continue
+        if old[:2] + old[3:] != new[:2] + new[3:]:
+            return None
+        old_date, new_date = inventory._parse_deadline(old[2]), inventory._parse_deadline(new[2])
+        if old[0] != "shrink" or old_date is None or new_date is None or old_date >= new_date:
+            return None
+        moved.append((path, old[2], new[2]))
+    texts = [facts[key]["registry"] for key in ("ledger_base", "ledger_candidate")]
+    normalized = [[clean for line in text.splitlines()
+                   if (clean := inventory._strip_toml_comment(line).strip())] for text in texts]
+    if len(normalized[0]) != len(normalized[1]):
+        return None
+    differences = [(old, new) for old, new in zip(*normalized) if old != new]
+    if len(differences) != len(moved) or any(
+            not re.fullmatch(r'deadline\s*=\s*"\d{4}-\d{2}-\d{2}"', line)
+            for pair in differences for line in pair):
+        return None
+    return moved
+
+_RESET_START = re.compile(r"^\s*#\s*DEADLINE RESET\b")
+_RESET = re.compile(r"^\s*#\s*DEADLINE RESET (\d{4}-\d{2}-\d{2}) -> "
+                    r"(\d{4}-\d{2}-\d{2}) on (\d{4}-\d{2}-\d{2}) \(#([1-9]\d*)\)")
+
+def deadline_markers(text: str) -> dict[str, list[tuple[str, str, str, int, str]]]:
+    """Keep ordered, path-owned records including their original rationale."""
+    lines = text.splitlines(keepends=True)
+    markers = {index for index, line in enumerate(lines) if _RESET_START.match(line)}
+    sections = [index for index, line in enumerate(lines)
+                if inventory._REGISTRY_SECTION_RE.fullmatch(inventory._strip_toml_comment(line).strip())]
+    result, assigned = {}, set()
+    for start, end in zip(sections, sections[1:] + [len(lines)]):
+        if inventory._strip_toml_comment(lines[start]).strip() != "[[entry]]":
+            continue
+        files = [(index, match.group("value")) for index in range(start + 1, end)
+                 if (match := inventory._REGISTRY_KV_RE.fullmatch(
+                     inventory._strip_toml_comment(lines[index]).strip())) and match.group("key") == "file"]
+        if len(files) != 1 or files[0][1] in result:
+            raise inventory.ParseError("E3: deadline markers require a unique entry file")
+        file_line, path = files[0]
+        run = file_line
+        while run > start + 1 and lines[run - 1].lstrip().startswith("#"):
+            run -= 1
+        owned = sorted(markers & set(range(run, file_line)))
+        records = []
+        for index, stop in zip(owned, owned[1:] + [file_line]):
+            match = _RESET.match(lines[index])
+            if match is None or any(inventory._parse_deadline(value) is None
+                                    for value in match.groups()[:3]):
+                raise inventory.ParseError(f"E3/E5: malformed DEADLINE RESET for {path}")
+            old, new, on, issue = match.groups()
+            records.append((old, new, on, int(issue), "".join(lines[index:stop])))
+        result[path] = records
+        assigned.update(owned)
+    if assigned != markers:
+        raise inventory.ParseError("E3: DEADLINE RESET outside its entry's file comment run")
+    return result
+
+def ledger_repair_errors(base: dict[str, object], candidate: dict[str, object],
+                         facts: dict[str, object], moved: list[tuple[str, str, str]]) -> list[str]:
+    errors = []
+    old_ledger, new_ledger = facts["ledger_base"], facts["ledger_candidate"]
+    for path, old, new in moved:
+        if (inventory._parse_deadline(new) - inventory._parse_deadline(old)).days > MAX_EXT:
+            errors.append(f"E1: deadline extension exceeds {MAX_EXT} days: {path}")
+    dates = [{value[2] for value in snapshot["registrations"].values() if value[0] == "shrink"}
+             for snapshot in (base, candidate)]
+    if len(dates[1]) > len(dates[0]):
+        errors.append("E2: distinct shrink deadline count increased")
+    try:
+        old_markers, new_markers = [deadline_markers(ledger["registry"])
+                                    for ledger in (old_ledger, new_ledger)]
+        moved_by_path = {path: (old, new) for path, old, new in moved}
+        for path in base["registrations"]:
+            old, new = old_markers.get(path, []), new_markers.get(path, [])
+            if path in moved_by_path:
+                if len(new) != len(old) + 1 or new[:-1] != old or new[-1][:2] != moved_by_path[path]:
+                    errors.append(f"E3: append exactly one matching deadline record, preserving history: {path}")
+                if len(new) > MAX_RESETS:
+                    errors.append(f"E4: deadline reset count exceeds {MAX_RESETS}: {path}")
+            elif new != old:
+                errors.append(f"E3: unmoved deadline history changed: {path}")
+    except inventory.ParseError as error:
+        errors.append(str(error))
+    old_transition, new_transition = old_ledger["transition"], new_ledger["transition"]
+    removed = old_transition - new_transition
+    if not new_transition <= old_transition:
+        errors.append("E6: transition paths added or replaced")
+    for label, snapshot in (("base", base), ("candidate", candidate)):
+        retired = inventory.giant_file_closed_deadline_ratchet_paths(
+            set(), registered_paths=set(snapshot["registrations"]),
+            transition_paths=old_transition, prod_loc=snapshot["modules"],
+            retain_transition_only=True)
+        if not removed <= retired:
+            errors.append(f"E6: transition deletion lacks measured retirement in {label}: "
+                          + ", ".join(sorted(removed - retired)))
+    for key in inventory.GIANT_FILE_ISSUE_RATCHET_KEYS:
+        if new_ledger["ratchets"][key] > old_ledger["ratchets"][key]:
+            errors.append(f"E7: issue ratchet increased: {key}")
+    old_pins, new_pins = old_ledger["pins"], new_ledger["pins"]
+    for path, value in old_pins.items():
+        if path not in new_pins or new_pins[path] > value:
+            errors.append(f"E8: giant pin removed or increased: {path}")
+    for path in new_pins.keys() - old_pins.keys():
+        if new_pins[path] != candidate["modules"].get(path):
+            errors.append(f"E8: new giant pin differs from measured production LoC: {path}")
+    return errors
+
 def pr_evaluation(base: dict[str, object], candidate: dict[str, object],
                   facts: dict[str, object]) -> tuple[str, list[str]]:
+    moved = ledger_repair_moves(base, candidate, facts)
+    if moved is not None:
+        return "pr_ledger_repair", ledger_repair_errors(base, candidate, facts, moved)
     before, after = set(base["overdue"]), set(candidate["overdue"])
     if after < before:
         return "pr_strict_progress", progress_errors(base, candidate, facts)
@@ -425,6 +584,9 @@ def main() -> int:
                 base_root.mkdir(); archive(base_sha, base_root)
                 base = inventory.giant_file_snapshot(base_root, evaluation_date=today)
                 facts = diff_facts(base_sha, candidate_sha)
+                if facts["changed"] and facts["changed"] <= LEDGER:
+                    facts.update(ledger_base=load_ledger(base_root, snapshot="base"),
+                                 ledger_candidate=load_ledger(candidate_root, snapshot="candidate"))
                 facts["bootstrap"] = not (base_root / EVALUATOR).exists()
                 before, after = set(base["overdue"]), set(candidate["overdue"])
                 retired = before - after
@@ -454,6 +616,8 @@ def main() -> int:
                 selector, errors = pr_evaluation(base, candidate, facts)
                 if errors:
                     raise RuntimeError("; ".join(errors))
+                if selector == "pr_ledger_repair":
+                    retired = set()  # Deadline movement does not retire a source entry.
                 payload.update({"event_base_sha": base_sha, "observed_origin_main_sha": origin_sha,
                     "merge_first_parent": parents[1], "head_sha": head_sha, "merge_sha": candidate_sha,
                     "base_tree": oid(base_sha, "tree"), "base_overdue": base["overdue"],
@@ -466,6 +630,7 @@ def main() -> int:
                 reason = {
                     "pr_ordinary_no_regression": "ordinary PR preserves giant-file debt",
                     "pr_strict_progress": "retirement or 200-line partial progress",
+                    "pr_ledger_repair": "bounded deadline and monotone ledger repair; production unchanged",
                 }[selector]
             elif event == "push" and repository == "itismyfield/AgentDesk":
                 selector = "main_no_regression_record"

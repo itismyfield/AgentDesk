@@ -6,9 +6,13 @@ pub(super) async fn handle_terminal(
     provider: ProviderKind,
     event: TerminalEvent,
     ctx: FinalizeContext,
-    claim_snapshot: Option<SyntheticClaimSnapshot>,
+    evidence: TerminalEvidence,
     shared: &Arc<SharedData>,
 ) -> FinalizeOutcome {
+    // Captured before the producer's yielding work; the next authority slice
+    // consumes this nonce without deriving it from a successor's live state.
+    let _captured_episode = (evidence.episode_captured, evidence.turn_nonce);
+    let claim_snapshot = evidence.claim_snapshot;
     // #3866: test-only injection point — lets a test drive a real finalize
     // side-effect panic through the live actor loop to prove the catch_unwind
     // guard keeps the loop alive. No effect in production builds.

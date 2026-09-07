@@ -28,8 +28,13 @@ const PIPELINE_OVERRIDE_AUDIT_ACTOR: &str = "pipeline";
 pub fn load(path: &Path) -> Result<()> {
     let content =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let config: PipelineConfig =
-        serde_yaml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
+    // #5718 review r2: flatten serde's message into this error's `Display`
+    // instead of leaving it in the `source()` chain. Every operator-facing
+    // consumer prints this with plain `Display` — dcserver startup, `cli/direct.rs`,
+    // the `ensure_loaded()` warning below — so a `with_context` wrapper would
+    // print "parsing <path>" and hide which key was rejected.
+    let config: PipelineConfig = serde_yaml::from_str(&content)
+        .map_err(|error| anyhow::anyhow!("parsing {}: {error}", path.display()))?;
     config.validate()?;
     PIPELINE
         .set(config)
@@ -70,18 +75,6 @@ pub fn ensure_loaded() {
         }
     }
     tracing::warn!("No pipeline YAML found — pipeline features disabled");
-}
-
-/// Parse a pipeline override from JSON (stored in DB).
-/// Returns None if the input is empty/null.
-pub fn parse_override(json_str: &str) -> Result<Option<PipelineOverride>> {
-    let trimmed = json_str.trim();
-    if trimmed.is_empty() || trimmed == "null" || trimmed == "{}" {
-        return Ok(None);
-    }
-    let ovr: PipelineOverride =
-        serde_json::from_str(trimmed).with_context(|| "parsing pipeline override JSON")?;
-    Ok(Some(ovr))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -182,6 +175,11 @@ pub async fn refresh_override_health_report(
     report
 }
 
+/// Read one layer of the resolve chain, falling back to the parent pipeline
+/// when the stored row cannot be read at all. `parse_override` keeps a row that
+/// only carries an undeclared key (#5718 r3); a row that fails even that still
+/// warns here and drops the layer, and either way the row stays visible in
+/// `build_override_health_report`, which parses strictly.
 fn parse_override_for_resolve(
     layer: &str,
     target_id: &str,
@@ -244,7 +242,7 @@ fn build_override_health_report(
     };
 
     for row in rows {
-        match parse_override(&row.json) {
+        match parse_override_strict(&row.json) {
             Ok(Some(ovr)) => {
                 for warning in build_replace_warnings(base, &ovr, row.layer, &row.target_id) {
                     report.warnings.push(format_replace_warning(&warning));
@@ -597,33 +595,21 @@ pub async fn resolve_for_card_pg(
     resolve(repo_ovr.as_ref(), agent_ovr.as_ref())
 }
 
-// ── Override Schema ──────────────────────────────────────────────
-
-/// A partial pipeline config used for repo/agent-level overrides.
-/// Only non-None fields replace the parent's values.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PipelineOverride {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub states: Option<Vec<StateConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transitions: Option<Vec<TransitionConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gates: Option<HashMap<String, GateConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hooks: Option<HashMap<String, HookBindings>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub events: Option<HashMap<String, Vec<String>>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub clocks: Option<HashMap<String, ClockConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeouts: Option<HashMap<String, TimeoutConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase_gate: Option<PhaseGateConfig>,
-}
+/// `PipelineOverride` and its strict/lenient parsers moved to the write boundary
+/// that owns them (#5718); every reader still names them through `crate::pipeline::`.
+pub use crate::services::pipeline_override::{
+    PipelineOverride, parse_override, parse_override_strict,
+};
 
 // ── Schema ───────────────────────────────────────────────────────
 
+/// `deny_unknown_fields` (#5718): `stage_failure_policy:` sat in
+/// `policies/default-pipeline.yaml` while this struct declared no such field,
+/// so serde dropped it on every load and nothing ever read it.
+/// An undeclared top-level key now fails `load()` with the key named, instead
+/// of booting a pipeline that silently ignores part of its own manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PipelineConfig {
     pub name: String,
     pub version: u32,
@@ -643,6 +629,14 @@ pub struct PipelineConfig {
     pub timeouts: HashMap<String, TimeoutConfig>,
     #[serde(default)]
     pub phase_gate: PhaseGateConfig,
+    /// Visual-editor edge metadata carried up from the override layers (#5718
+    /// review r2). `merge()` propagates `PipelineOverride::fsm_edge_bindings`
+    /// into the resolved config, so `to_json()` — what
+    /// `agentdesk.pipeline.getConfig()` hands policy JS and what
+    /// `previewTimeoutDecision` (src/engine/ops/timeouts_ops.rs) deserializes
+    /// straight back into this type — has to declare it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fsm_edge_bindings: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -978,6 +972,10 @@ impl PipelineConfig {
                 .phase_gate
                 .clone()
                 .unwrap_or_else(|| self.phase_gate.clone()),
+            fsm_edge_bindings: ovr
+                .fsm_edge_bindings
+                .clone()
+                .or_else(|| self.fsm_edge_bindings.clone()),
         }
     }
 
@@ -1399,6 +1397,7 @@ mod state_slug_contract_tests {
             clocks: HashMap::new(),
             timeouts: HashMap::new(),
             phase_gate: PhaseGateConfig::default(),
+            fsm_edge_bindings: None,
         };
 
         let err = config.validate().unwrap_err();
@@ -1434,6 +1433,7 @@ mod gate_validation_tests {
             clocks: HashMap::new(),
             timeouts: HashMap::new(),
             phase_gate: PhaseGateConfig::default(),
+            fsm_edge_bindings: None,
         }
     }
 
@@ -1515,3 +1515,443 @@ mod gate_validation_tests {
 }
 
 // ── Tests ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod schema_strictness_tests {
+    use super::*;
+    use std::path::{Path as StdPath, PathBuf};
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// Discover every pipeline manifest tracked under `policies/`. A pipeline
+    /// manifest is a YAML file with a top-level `states:` key — the same
+    /// discriminator used to inventory them for #5718. Discovery (rather than a
+    /// hardcoded list) keeps a newly added example pipeline covered.
+    fn tracked_pipeline_manifests() -> Vec<PathBuf> {
+        fn walk(dir: &StdPath, found: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, found);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                if content.lines().any(|line| line == "states:") {
+                    found.push(path);
+                }
+            }
+        }
+
+        let mut found = Vec::new();
+        walk(&repo_root().join("policies"), &mut found);
+        found.sort();
+        found
+    }
+
+    fn default_pipeline_yaml() -> String {
+        let path = repo_root().join("policies/default-pipeline.yaml");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
+    }
+
+    /// #5718: `deny_unknown_fields` must not reject any manifest this repo
+    /// actually ships. Every tracked pipeline YAML has to deserialize into
+    /// `PipelineConfig` and pass `validate()`.
+    #[test]
+    fn every_tracked_pipeline_yaml_loads_under_deny_unknown_fields() {
+        let manifests = tracked_pipeline_manifests();
+        assert!(
+            manifests.len() >= 3,
+            "expected the tracked pipeline manifests to be discovered, found {manifests:?}"
+        );
+        for path in manifests {
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+            let config: PipelineConfig = serde_yaml::from_str(&content)
+                .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()));
+            config
+                .validate()
+                .unwrap_or_else(|error| panic!("validating {}: {error}", path.display()));
+        }
+    }
+
+    /// #5718 regression pin: `stage_failure_policy:` was accepted-and-dropped by
+    /// serde for the entire time it sat in the shipped manifest. Re-adding it
+    /// must now fail the load with the offending key named, so the failure is
+    /// diagnosable instead of silent.
+    #[test]
+    fn reintroducing_stage_failure_policy_fails_the_load_with_the_key_named() {
+        let content = format!(
+            "{}\nstage_failure_policy:\n  default: fail\n  allowed: [fail, rework, skip]\n",
+            default_pipeline_yaml()
+        );
+        let error = serde_yaml::from_str::<PipelineConfig>(&content)
+            .expect_err("an unknown top-level key must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("stage_failure_policy"),
+            "the parse error must name the rejected key, got: {message}"
+        );
+    }
+
+    /// A key that no longer exists anywhere must be rejected too — the pin above
+    /// must not pass merely because of something specific to that one name.
+    #[test]
+    fn arbitrary_unknown_top_level_key_is_rejected() {
+        let content = format!("{}\nnot_a_pipeline_field: 1\n", default_pipeline_yaml());
+        let error = serde_yaml::from_str::<PipelineConfig>(&content)
+            .expect_err("an unknown top-level key must be rejected");
+        assert!(
+            error.to_string().contains("not_a_pipeline_field"),
+            "the parse error must name the rejected key, got: {error}"
+        );
+    }
+
+    /// `agentdesk.pipeline.getConfig()` hands policy JS `PipelineConfig::to_json`,
+    /// and `previewTimeoutDecision` (src/engine/ops/timeouts_ops.rs) deserializes
+    /// that JSON straight back into `PipelineConfig` on the live timeout sweep.
+    /// `deny_unknown_fields` must not break that round trip.
+    #[test]
+    fn to_json_output_still_deserializes_back_into_pipeline_config() {
+        let config: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let restored: PipelineConfig = serde_json::from_value(config.to_json())
+            .expect("to_json output must deserialize back into PipelineConfig");
+        assert_eq!(restored.name, config.name);
+        assert_eq!(restored.states.len(), config.states.len());
+        assert_eq!(restored.timeouts.len(), config.timeouts.len());
+    }
+
+    /// Overrides carrying only declared sections must keep parsing — the deny
+    /// must not turn every stored override into a parse failure.
+    #[test]
+    fn override_with_known_sections_still_parses() {
+        let parsed = parse_override(r#"{"timeouts":{},"gates":{}}"#)
+            .expect("a known-fields override must parse");
+        assert!(parsed.is_some(), "override must not be treated as empty");
+    }
+
+    /// #5718: an override key that `PipelineOverride` does not declare is a typo
+    /// or a retired field. It must surface as a parse failure (visible in the
+    /// override health report) instead of being dropped.
+    #[test]
+    fn override_with_unknown_section_is_rejected() {
+        let error = parse_override_strict(r#"{"stage_failure_policy":{"default":"fail"}}"#)
+            .expect_err("an unknown override key must be rejected");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("stage_failure_policy"),
+            "the parse error must name the rejected key, got: {message}"
+        );
+    }
+
+    /// The exact body the dashboard's visual pipeline editor PUTs after an
+    /// operator picks `on_error` for the `review -> failed` edge, transcribed from
+    /// `buildOverridePayload` (dashboard/src/components/agent-manager/
+    /// pipeline-visual-editor-model.ts): the eight visual sections it always
+    /// emits, the preserved `fsm_edge_bindings` extra, and the `events` entry
+    /// `updateFsmTransitionEvent` creates alongside the binding.
+    fn dashboard_fsm_editor_save_payload() -> &'static str {
+        r#"{
+            "fsm_edge_bindings": { "review->failed": { "event": "on_error" } },
+            "states": [
+                { "id": "backlog", "label": "Backlog", "terminal": false },
+                { "id": "review", "label": "Review", "terminal": false },
+                { "id": "failed", "label": "Failed", "terminal": false }
+            ],
+            "transitions": [
+                { "from": "backlog", "to": "review", "type": "free", "gates": [] },
+                { "from": "review", "to": "failed", "type": "free", "gates": [] }
+            ],
+            "gates": {
+                "review_pass": {
+                    "type": "builtin",
+                    "check": "review_verdict_pass",
+                    "description": "review approved"
+                }
+            },
+            "hooks": { "review": { "on_enter": ["OnReviewEnter"], "on_exit": [] } },
+            "events": { "on_error": [] },
+            "clocks": { "review": { "set": "on_enter", "mode": "reset" } },
+            "timeouts": {
+                "review": {
+                    "duration": "2h",
+                    "clock": "review",
+                    "max_retries": null,
+                    "on_exhaust": "failed",
+                    "condition": null
+                }
+            },
+            "phase_gate": {
+                "dispatch_to": "reviewer",
+                "dispatch_type": "phase-gate",
+                "pass_verdict": "pass",
+                "checks": ["build"]
+            }
+        }"#
+    }
+
+    /// #5718 review r2 (P1): `deny_unknown_fields` must not reject a save the
+    /// supported FSM editor makes. `fsm_edge_bindings` is dashboard-owned
+    /// metadata with no Rust reader, so it has to survive parse *and*
+    /// re-serialization — a row this server wrote must still parse on the next
+    /// save.
+    #[test]
+    fn dashboard_fsm_editor_save_payload_round_trips_as_an_override() {
+        let payload = dashboard_fsm_editor_save_payload();
+        let parsed = parse_override_strict(payload)
+            .expect("the dashboard FSM editor save payload must parse")
+            .expect("the payload must not be treated as empty");
+
+        let bindings = parsed
+            .fsm_edge_bindings
+            .as_ref()
+            .expect("fsm_edge_bindings must be preserved, not dropped");
+        assert_eq!(
+            bindings
+                .pointer("/review->failed/event")
+                .and_then(serde_json::Value::as_str),
+            Some("on_error"),
+            "the binding must survive verbatim, got: {bindings}"
+        );
+        assert!(
+            parsed
+                .events
+                .as_ref()
+                .is_some_and(|events| events.contains_key("on_error")),
+            "the events entry the same editor action creates must parse too"
+        );
+
+        let reserialized = serde_json::to_value(&parsed).expect("override must re-serialize");
+        let original: serde_json::Value =
+            serde_json::from_str(payload).expect("fixture must be valid JSON");
+        assert_eq!(
+            reserialized["fsm_edge_bindings"], original["fsm_edge_bindings"],
+            "re-serialization must hand the metadata back unchanged"
+        );
+        let round_tripped = parse_override_strict(&reserialized.to_string())
+            .expect("the re-serialized override must parse again")
+            .expect("the re-serialized override must not be empty");
+        assert_eq!(round_tripped.fsm_edge_bindings, parsed.fsm_edge_bindings);
+    }
+
+    /// Declaring `fsm_edge_bindings` must not loosen the deny for anything else:
+    /// the same payload with one extra undeclared key is still rejected, with the
+    /// key named.
+    #[test]
+    fn declaring_fsm_edge_bindings_does_not_admit_other_unknown_keys() {
+        let mut payload: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(dashboard_fsm_editor_save_payload())
+                .expect("fixture must be a JSON object");
+        payload.insert(
+            "stage_failure_policy".to_string(),
+            serde_json::json!({ "default": "fail" }),
+        );
+
+        let error = parse_override_strict(&serde_json::Value::Object(payload).to_string())
+            .expect_err("an unknown override key must still be rejected");
+        assert!(
+            error.to_string().contains("stage_failure_policy"),
+            "the parse error must name the rejected key, got: {error}"
+        );
+    }
+
+    /// #5718 review r2 (P1): the metadata must also survive the resolver. A layer
+    /// carrying it must not be warned-and-dropped, which would take that layer's
+    /// valid sections down with it.
+    #[test]
+    fn resolver_keeps_a_layer_that_carries_fsm_edge_bindings() {
+        let payload = dashboard_fsm_editor_save_payload();
+        assert!(
+            parse_override_for_resolve("repo", "acme/widgets", payload).is_some(),
+            "the resolver must not drop the whole layer over editor metadata"
+        );
+
+        let base: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let report = build_override_health_report(
+            &base,
+            &[OverrideSourceRow {
+                layer: "repo",
+                target_id: "acme/widgets".to_string(),
+                json: payload.to_string(),
+            }],
+        );
+        assert!(
+            report.parse_failures.is_empty(),
+            "editor metadata must not register as a parse failure, got: {:?}",
+            report.parse_failures
+        );
+    }
+
+    /// #5718 review r2 (P1): `merge()` carries the metadata into the resolved
+    /// config, so `PipelineConfig` must declare it too — `getConfig()` serializes
+    /// the resolved config and `previewTimeoutDecision` deserializes that same
+    /// JSON back into `PipelineConfig` on the live timeout sweep.
+    #[test]
+    fn merged_config_round_trips_fsm_edge_bindings_through_to_json() {
+        let base: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let ovr = parse_override(dashboard_fsm_editor_save_payload())
+            .expect("payload parses")
+            .expect("payload is not empty");
+
+        let merged = base.merge(&ovr);
+        assert_eq!(
+            merged.fsm_edge_bindings, ovr.fsm_edge_bindings,
+            "merge must propagate the override's editor metadata"
+        );
+
+        let restored: PipelineConfig = serde_json::from_value(merged.to_json())
+            .expect("resolved config JSON must deserialize back under deny_unknown_fields");
+        assert_eq!(restored.fsm_edge_bindings, merged.fsm_edge_bindings);
+    }
+
+    /// A stored row from before a key was retired: one undeclared key alongside
+    /// sections this build does understand.
+    fn row_with_an_undeclared_key() -> &'static str {
+        r#"{"stage_failure_policy":{"default":"fail"},"gates":{"r3_gate":{"type":"builtin","check":"review_verdict_pass","description":"r3"}}}"#
+    }
+
+    /// #5718 r3 (R1): reading such a row must keep its valid sections. Dropping
+    /// the layer instead silently resolved the card against the parent pipeline
+    /// — every gate, timeout and transition the operator had configured gone,
+    /// with only a log line to say so.
+    #[test]
+    fn stored_override_with_an_undeclared_key_keeps_its_valid_sections() {
+        let payload = row_with_an_undeclared_key();
+        let parsed = parse_override_for_resolve("repo", "acme/widgets", payload)
+            .expect("the layer must survive an undeclared key instead of being dropped");
+        assert!(
+            parsed
+                .gates
+                .as_ref()
+                .is_some_and(|gates| gates.contains_key("r3_gate")),
+            "the row's valid sections must still be applied"
+        );
+
+        // The write boundary is untouched: the same row is still rejected there,
+        // and the health scan still reports it.
+        assert!(
+            parse_override_strict(payload).is_err(),
+            "writes must stay strict"
+        );
+        let base: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let report = build_override_health_report(
+            &base,
+            &[OverrideSourceRow {
+                layer: "repo",
+                target_id: "acme/widgets".to_string(),
+                json: payload.to_string(),
+            }],
+        );
+        assert!(
+            report
+                .parse_failures
+                .iter()
+                .any(|failure| failure.error.contains("stage_failure_policy")),
+            "the lenient read must not hide the row from the health report, got: {:?}",
+            report.parse_failures
+        );
+    }
+
+    /// #5718 r3 (R1): leniency covers undeclared keys only. A row that is broken
+    /// for any other reason — malformed JSON, or a declared key holding the
+    /// wrong shape — must still fail, so a half-understood override is never
+    /// applied.
+    #[test]
+    fn lenient_read_still_rejects_a_row_broken_for_any_other_reason() {
+        assert!(
+            parse_override(r#"{"gates": 5}"#).is_err(),
+            "a declared key holding the wrong shape must still fail"
+        );
+        assert!(
+            parse_override("{not json").is_err(),
+            "malformed JSON must still fail"
+        );
+        assert!(
+            parse_override(r#"{"stage_failure_policy":{},"gates": 5}"#).is_err(),
+            "dropping the undeclared key must not rescue the wrong-shaped one"
+        );
+        assert!(
+            parse_override_for_resolve("repo", "acme/widgets", r#"{"gates": 5}"#).is_none(),
+            "the resolver still falls back to the parent for an unreadable row"
+        );
+    }
+
+    /// #5718 r3 (R2): the transition resolver
+    /// (`kanban::state_machine::resolve_pipeline_with_pg`, which propagates a
+    /// parse error and aborts the transition) and the dispatch resolver
+    /// (`parse_override_for_resolve`, which falls back to the parent) read the
+    /// same stored row through `parse_override`. One row must not stop a
+    /// transition while dispatch applies a different pipeline to the same card.
+    #[test]
+    fn transition_and_dispatch_reads_agree_on_a_row_with_an_undeclared_key() {
+        let payload = row_with_an_undeclared_key();
+        let transition_side = parse_override(payload)
+            .expect("the transition path must not abort on an undeclared key")
+            .expect("the row must not be treated as empty");
+        let dispatch_side = parse_override_for_resolve("repo", "acme/widgets", payload)
+            .expect("the dispatch path must keep the layer");
+
+        assert_eq!(
+            serde_json::to_value(&transition_side).expect("override serializes"),
+            serde_json::to_value(&dispatch_side).expect("override serializes"),
+            "both resolvers must apply the same stored row identically"
+        );
+    }
+
+    /// #5718 review r2 (P2): the operator-facing surfaces print the parse error
+    /// with plain `Display` — `tracing::warn!` in the resolver, `error.to_string()`
+    /// in the health report, and the 400 body from the override write API. The
+    /// rejected key has to survive that formatting, otherwise the report says a
+    /// row failed without saying which key to remove.
+    #[test]
+    fn parse_failure_names_the_rejected_key_under_plain_display() {
+        let error = parse_override_strict(r#"{"stage_failure_policy":{"default":"fail"}}"#)
+            .expect_err("an unknown override key must be rejected");
+        assert!(
+            error.to_string().contains("stage_failure_policy"),
+            "plain Display must name the rejected key, got: {error}"
+        );
+
+        let base: PipelineConfig =
+            serde_yaml::from_str(&default_pipeline_yaml()).expect("default pipeline parses");
+        let report = build_override_health_report(
+            &base,
+            &[OverrideSourceRow {
+                layer: "repo",
+                target_id: "acme/widgets".to_string(),
+                json: r#"{"stage_failure_policy":{"default":"fail"}}"#.to_string(),
+            }],
+        );
+        let failure = report
+            .parse_failures
+            .first()
+            .expect("the malformed row must register a parse failure");
+        assert!(
+            failure.error.contains("stage_failure_policy"),
+            "parse_failures[].error must name the rejected key, got: {}",
+            failure.error
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("stage_failure_policy")),
+            "the health warning must name the rejected key, got: {:?}",
+            report.warnings
+        );
+    }
+}

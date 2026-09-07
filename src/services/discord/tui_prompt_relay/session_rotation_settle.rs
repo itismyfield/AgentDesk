@@ -362,7 +362,7 @@ async fn submit_rotation_settle(
     let identity = super::super::inflight::InflightTurnIdentity::from_state(&state);
     let _ = shared
         .turn_finalizer
-        .submit_terminal(
+        .submit_terminal_with_claim_snapshot(
             super::super::turn_finalizer::TurnKey::new(
                 channel_id,
                 finalizer_turn_id,
@@ -371,6 +371,7 @@ async fn submit_rotation_settle(
             ProviderKind::Claude,
             super::super::turn_finalizer::TerminalEvent::Complete,
             rotation_settle_finalize_context(),
+            Some(super::super::turn_finalizer::SyntheticClaimSnapshot::from_row(&state)),
             shared.clone(),
         )
         .await;

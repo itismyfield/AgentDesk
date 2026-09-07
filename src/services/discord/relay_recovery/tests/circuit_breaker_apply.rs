@@ -288,7 +288,7 @@ async fn first_reserved_dead_frontier_apply_preserves_episode_and_reattaches_wat
         0,
     );
     state.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui);
-    state.turn_nonce = Some("nonce-4465-first".to_string());
+    state.turn_nonce = token.turn_nonce().map(str::to_owned);
     state.set_relay_owner_kind(super::super::super::inflight::RelayOwnerKind::Watcher);
     super::super::super::inflight::save_inflight_state_create_new(&state).expect("seed inflight");
     let (watcher, old_cancel) = test_watcher_handle(&tmux_session, &output_path);

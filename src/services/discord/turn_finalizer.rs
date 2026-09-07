@@ -40,6 +40,7 @@ mod completion_admission;
 mod completion_admission_actor;
 pub(in crate::services::discord) mod completion_signal;
 mod delivery_lease;
+mod episode;
 mod finalize;
 mod finalize_context;
 mod guarded_finish_residue;
@@ -61,6 +62,7 @@ use self::completion_admission_actor::{
 pub(in crate::services::discord) use self::completion_signal::{
     CompletionSignal, completion_signal_from_transcript,
 };
+use self::episode::TerminalEvidence;
 pub(in crate::services::discord) use self::guarded_finish_residue::GuardedFinishResidue;
 pub(in crate::services::discord) use self::guarded_finish_residue::handle_idle_queue_guard_skip;
 // #3479 r9: dormant delivery-lease handlers extracted to the child module; the
@@ -417,33 +419,15 @@ impl TurnFinalizer {
         claim_snapshot: Option<SyntheticClaimSnapshot>,
         shared: Arc<SharedData>,
     ) -> FinalizeOutcome {
-        if let Some(snapshot) = claim_snapshot.as_ref() {
-            cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider, Some(snapshot));
-        }
-        let (ack, rx) = oneshot::channel();
-        if self
-            .tx
-            .send(FinalizeMsg::Terminal {
-                key,
-                provider: provider.clone(),
-                event: event.clone(),
-                ctx,
-                claim_snapshot,
-                shared: shared.clone(),
-                ack,
-            })
-            .is_err()
-        {
-            // Actor task gone: stop submitter-side bookkeeping.
-            return FinalizeOutcome::AlreadyFinalized;
-        }
-        let Ok(out) = rx.await else {
-            return FinalizeOutcome::AlreadyFinalized;
-        };
-        if matches!(out, FinalizeOutcome::AlreadyFinalized) {
-            cleanup::already_finalized_active_state(key, &provider, &event, ctx, &shared).await;
-        }
-        out
+        self.submit_terminal_evidence(
+            key,
+            provider,
+            event,
+            ctx,
+            TerminalEvidence::from_snapshot(claim_snapshot),
+            shared,
+        )
+        .await
     }
 
     /// #3041: route a three-way `CommitDelivery` through the actor so the lease
@@ -704,7 +688,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                         provider,
                         event,
                         ctx,
-                        claim_snapshot,
+                        evidence,
                         shared,
                         ack,
                     } => {
@@ -727,7 +711,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                             provider,
                             event,
                             ctx,
-                            claim_snapshot,
+                            evidence,
                             &shared,
                         ))
                         .catch_unwind()
