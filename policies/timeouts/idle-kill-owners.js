@@ -2,7 +2,7 @@
 // DNS addresses, and owner. Registry advertisements never establish trust.
 module.exports = function createIdleKillOwnerGuard() {
   var warnedOwners = Object.create(null);
-  var warnedUnavailable = false;
+  var lastUnavailableWarningAt = null;
 
   return function loadOwnerGuard(apiPort) {
     var snapshot;
@@ -14,13 +14,15 @@ module.exports = function createIdleKillOwnerGuard() {
         throw new Error("cluster owner configuration unavailable");
       }
     } catch (error) {
-      if (!warnedUnavailable) {
+      var unavailableAt = Date.now();
+      if (lastUnavailableWarningAt === null || unavailableAt < lastUnavailableWarningAt
+          || unavailableAt - lastUnavailableWarningAt >= 60 * 60 * 1000) {
         agentdesk.log.warn("[idle-kill] owner preflight unavailable; skipping idle-kill until recovered: " + error);
-        warnedUnavailable = true;
+        lastUnavailableWarningAt = unavailableAt;
       }
       return null;
     }
-    warnedUnavailable = false;
+    lastUnavailableWarningAt = null;
 
     var cluster = snapshot.cluster;
     var now = Date.now();

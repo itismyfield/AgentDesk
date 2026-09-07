@@ -13,10 +13,10 @@ function row(owner, index = 0) {
     provider: "codex", thread_channel_id: null, last_seen_at: "2000-01-01T00:00:00Z" };
 }
 function fixture(rows, configured = [], nodes = []) {
-  const data = { rows, snapshot: { cluster: { local_instance_id: "leader",
+  const data = { rows, now: NOW, snapshot: { cluster: { local_instance_id: "leader",
     configured_forward_owner_ids: configured, lease_ttl_secs: 30 }, nodes } };
   const harness = loadPolicy("policies/timeouts.js", {
-    config: { server_port: 8791 }, globals: { Date: Clock },
+    config: { server_port: 8791 }, globals: { Date: class extends Clock { static now() { return data.now; } } },
     httpGet(url) {
       assert.equal(url, "http://127.0.0.1:8791/api/cluster/nodes");
       if (data.error) throw new Error("unavailable");
@@ -140,4 +140,25 @@ test("warning state follows current owners and resets after absent-owner recover
   f.data.snapshot.nodes = [];
   f.policy._section_O();
   assert.equal(f.state.logs.warn.length, 4);
+});
+
+test("an old binary missing http.get repeats unavailable WARN hourly and resets after recovery", () => {
+  const f = fixture([row("leader")]);
+  const get = f.agentdesk.http.get;
+  f.agentdesk.http.get = undefined;
+  f.policy._section_O();
+  f.data.now = NOW + 60 * 60 * 1000 - 1;
+  f.policy._section_O();
+  assert.equal(f.state.logs.warn.length, 1);
+  f.data.now++;
+  f.policy._section_O();
+  assert.equal(f.state.logs.warn.length, 2);
+  assert.equal(f.state.httpPosts.length, 0);
+  f.agentdesk.http.get = get;
+  f.policy._section_O();
+  assert.equal(f.state.httpPosts.length, 1);
+  f.agentdesk.http.get = undefined;
+  f.policy._section_O();
+  assert.equal(f.state.logs.warn.length, 3);
+  assert.deepEqual(f.state.logs.error, []);
 });

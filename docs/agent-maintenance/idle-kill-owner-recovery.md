@@ -14,6 +14,11 @@ The kill-tmux route still checks capability, exact origin agreement, address and
 transport restrictions, and current ownership. Registry `api_base_url` values
 never become trusted configuration.
 
+This guard covers missing trusted-origin configuration and unavailable or stale
+heartbeats. Configured peers that fail capability, origin agreement, DNS,
+address, or transport validation still report the forwarding error. Those
+errors require correcting the peer/configuration; origin presence is not readiness.
+
 ## Preparing operator configuration
 
 [Source of truth](../source-of-truth.md) assigns policies to the repository and
@@ -43,6 +48,14 @@ boot-bound (`src/config_live_reload.rs`); a YAML edit requires a server restart
 to update both this preflight and the forwarding authority.
 
 ## Remaining operational verification
+
+The policy requires the binary's `agentdesk.http.get` API and the new cluster
+metadata. Upgrade/restart the binary before separately installing the policy.
+If policy hot reload runs ahead of the binary restart, idle-kill pauses and
+reports `owner preflight unavailable` immediately and once per hour until it
+recovers; per-owner warnings remain once per outage. Confirm preflight works
+and expected owners are eligible, since an absence of kill errors alone does
+not demonstrate that cleanup is running.
 
 Code fixtures cannot establish the peer's live API origin or demonstrate a
 remote tmux kill. Completing #5714 still requires authorized canonical YAML
