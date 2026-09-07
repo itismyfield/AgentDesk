@@ -98,7 +98,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_SOURCE_ZPROFILE` | `src/services/routines/migrated.rs:619` |  |
 | `AGENTDESK_STATUS_INTERVAL_SECS` | `src/services/discord/mod.rs:500` (+1 more) | Minimum interval between Discord placeholder progress edits (AGENTDESK_STATUS_INTERVAL_SECS, default 5s). |
 | `AGENTDESK_TEST_POSTGRES_ACQUIRE_TIMEOUT_MS` | `src/db/postgres.rs:1172` (+1 more) | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
-| `AGENTDESK_TOKEN` | `src/cli/run.rs:142` |  |
+| `AGENTDESK_TOKEN` | `src/cli/run.rs:143` |  |
 | `AGENTDESK_TURN_HARD_CEILING_SECS` | `src/services/discord/mod.rs:532` | Default 6h matches the current effective cap so this is non-destructive by default; lower it via `AGENTDESK_TURN_HARD_CEILING_SECS` to enforce a real backstop. |
 | `AGENTDESK_TURN_IDLE_TIMEOUT_SECS` | `src/services/discord/mod.rs:518` | AGENTDESK_TURN_IDLE_TIMEOUT_SECS. |
 | `AGENTDESK_TURN_TIMEOUT_SECS` | `src/services/discord/mod.rs:509` (+1 more) | AGENTDESK_TURN_TIMEOUT_SECS. |
