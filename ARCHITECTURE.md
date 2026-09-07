@@ -1013,6 +1013,8 @@ src/
 │   │   │   ├── tests.rs
 │   │   │   └── watcher_cancel.rs
 │   │   ├── tui_prompt_relay/
+│   │   │   ├── rehydration/
+│   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── synthetic_start/
 │   │   │   │   └── stale_reclaim.rs
 │   │   │   ├── anchor_completion.rs
