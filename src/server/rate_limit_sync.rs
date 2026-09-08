@@ -1,6 +1,5 @@
-//! Periodic provider rate-limit sync (`rate_limit_sync_loop`) and the Claude
-//! leg's fetch/backoff wiring, split out of `server/mod.rs` so the 429 backoff
-//! (#5727) does not grow that giant file.
+//! Periodic provider rate-limit sync (`rate_limit_sync_loop`) and the Claude leg's fetch/backoff
+//! wiring, split out of `server/mod.rs` so the 429 backoff (#5727) does not grow that giant file.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -55,10 +54,9 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
         first = false;
 
         let now = Instant::now();
-        // #5727: while the gate still defers on Claude's cached telemetry, keep
-        // the base cadence — nothing bounds one iteration, so no longer hold is
-        // *provably* short enough to re-observe that pressure before the stale
-        // window expires, and base is the pre-PR floor.
+        // #5727: while the gate still defers on Claude's cached telemetry, keep the base cadence
+        // — nothing bounds one iteration, so no longer hold is *provably* short enough to
+        // re-observe that pressure before the stale window expires, and base is the pre-PR floor.
         let now_unix = chrono::Utc::now().timestamp();
         let danger = dispatch_gate::effective_danger_pct_pg(pg_pool.as_ref()).await;
         if dispatch_gate::is_deferring("claude", danger, now_unix) {
@@ -128,10 +126,9 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
             }
             Err(e) => {
                 let msg = e.to_string();
-                // Only the genuine "not configured / file missing" case is
-                // suppressed, classified at the source by `io::ErrorKind`;
-                // matching on "oauth_creds.json" here would also swallow
-                // permission, I/O and corrupt creds (#3566 over-suppress fix).
+                // Only the genuine "not configured / file missing" case is suppressed, classified
+                // at the source by `io::ErrorKind`; matching on "oauth_creds.json" here would
+                // also swallow permission, I/O and corrupt creds (#3566 over-suppress fix).
                 let creds_missing =
                     crate::services::provider_auth::is_gemini_unconfigured_error(&e);
                 if creds_missing {
@@ -200,9 +197,9 @@ async fn sync_claude_rate_limit_cache_once(pg_pool: &PgPool) -> Result<usize, an
             Ok(bucket_count)
         }
         Err(e) => {
-            // Telemetry is independent of retry scheduling: a 429 carrying
-            // limit headers is cached anyway, so the gate sees the exhaustion.
-            // A 429 with no buckets (OAuth) writes nothing.
+            // Telemetry is independent of retry scheduling: a 429 carrying limit headers is
+            // cached anyway, so the gate sees the exhaustion. A 429 with no buckets (OAuth)
+            // writes nothing.
             match e.downcast_ref::<rate_limit_backoff::ClaudeUsageRateLimited>() {
                 Some(limited) => {
                     if !limited.buckets.is_empty() {
@@ -236,9 +233,9 @@ fn claude_usage_rate_limited_error(
     }
 }
 
-/// Maps one `count_tokens` response onto buckets. A 429 keeps its telemetry in
-/// the typed error; every other non-2xx is an error too, so the loop reads it
-/// as `OtherError` (preserving a 429 streak), not an empty success.
+/// Maps one `count_tokens` response onto buckets. A 429 keeps its telemetry in the typed error;
+/// every other non-2xx is an error too, so the loop reads it as `OtherError` (preserving a 429
+/// streak), not an empty success.
 fn anthropic_rate_limit_response(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
@@ -409,11 +406,10 @@ mod tests {
         parsed.expect("claude row").1
     }
 
-    /// r5 regression: while the cached row still defers dispatch, no tick
-    /// spacing may push the next Claude attempt past the base cadence — an
-    /// OAuth 429 streak included, since it caches nothing and can only be
-    /// re-observed by trying. With no pressure the 30-minute ladder stands, and
-    /// an unreadable runtime-config counts as pressure.
+    /// r5 regression: while the cached row still defers dispatch, no tick spacing may push the
+    /// next Claude attempt past the base cadence — an OAuth 429 streak included, since it caches
+    /// nothing and can only be re-observed by trying. With no pressure the 30-minute ladder
+    /// stands, and an unreadable runtime-config counts as pressure.
     #[test]
     fn pressure_keeps_the_base_cadence_whatever_the_tick_spacing() {
         let now = 1_000_000_i64;
@@ -423,10 +419,10 @@ mod tests {
         let defers = |row: &gate::ProviderPressureSnapshot, danger, at| {
             gate::is_deferring_snapshot("claude", Some(row), danger, at)
         };
-        // Wake-ups are irregular (the loop sleeps `base` *after* the other
-        // providers' fetches), so 310 and 620 outrun any fixed slack; the OAuth
-        // row caches nothing, so it ages past the 600 s window and still must be
-        // re-observed. (row, `Retry-After`, wake-ups — all of which must fetch)
+        // Wake-ups are irregular (the loop sleeps `base` *after* the other providers' fetches),
+        // so 310 and 620 outrun any fixed slack; the OAuth row caches nothing, so it ages past
+        // the 600 s window and still must be re-observed. (row, `Retry-After`, wake-ups — all of
+        // which must fetch)
         for (row, first, ticks) in [
             (
                 cached(100, now + 3600, now),

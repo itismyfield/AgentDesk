@@ -1,23 +1,22 @@
-//! Backoff schedule for the Claude leg of `rate_limit_sync_loop`. Pure (no
-//! clock, no I/O): the caller injects `now`, so the schedule is testable. The
-//! loop's fixed 120 s cadence drew 429s on ~31% of polls in production.
+//! Backoff schedule for the Claude leg of `rate_limit_sync_loop`. Pure (no clock, no I/O): the
+//! caller injects `now`, so the schedule is testable. The loop's fixed 120 s cadence drew 429s on
+//! ~31% of polls in production.
 //!
-//! Policy: success → base interval (120 s), counters reset; 429 with a usable
-//! `Retry-After` → that long, clamped to the max; 429 without one → exponential
-//! 120/240/480 s … capped at 30 min; any other error → base interval. Only the
-//! Claude fetch is skipped while `not_before` is in the future. That 30-minute
-//! ceiling is the *no-pressure* one: while the cached telemetry still defers
-//! dispatch the caller drops the hold ([`ClaudeSyncBackoff::release_hold`]), so
-//! the leg keeps the base cadence and that pressure stays observable.
+//! Policy: success → base interval (120 s), counters reset; 429 with a usable `Retry-After` →
+//! that long, clamped to the max; 429 without one → exponential 120/240/480 s … capped at 30 min;
+//! any other error → base interval. Only the Claude fetch is skipped while `not_before` is in the
+//! future. That 30-minute ceiling is the *no-pressure* one: while the cached telemetry still
+//! defers dispatch the caller drops the hold ([`ClaudeSyncBackoff::release_hold`]), so the leg
+//! keeps the base cadence and that pressure stays observable.
 use std::time::{Duration, Instant};
 
 pub(crate) const RATE_LIMIT_SYNC_BASE_INTERVAL: Duration = Duration::from_secs(120);
 pub(crate) const RATE_LIMIT_SYNC_MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
 
-/// Typed error returned by the Claude usage fetchers on HTTP 429 so the loop
-/// can tell it from other failures (via `anyhow::Error::downcast_ref`).
-/// `buckets` carries whatever `anthropic-ratelimit-*` telemetry the 429 itself
-/// advertised, so scheduling a retry never costs that observation.
+/// Typed error returned by the Claude usage fetchers on HTTP 429 so the loop can tell it from
+/// other failures (via `anyhow::Error::downcast_ref`). `buckets` carries whatever
+/// `anthropic-ratelimit-*` telemetry the 429 itself advertised, so scheduling a retry never costs
+/// that observation.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ClaudeUsageRateLimited {
     pub(crate) retry_after: Option<Duration>,
@@ -36,9 +35,9 @@ impl std::fmt::Display for ClaudeUsageRateLimited {
 
 impl std::error::Error for ClaudeUsageRateLimited {}
 
-/// Parses an HTTP `Retry-After`: delta-seconds or an HTTP-date (RFC 7231
-/// IMF-fixdate, which `chrono`'s RFC 2822 parser accepts). `now` is injected so
-/// date forms are testable; unparseable or past values return `None`.
+/// Parses an HTTP `Retry-After`: delta-seconds or an HTTP-date (RFC 7231 IMF-fixdate, which
+/// `chrono`'s RFC 2822 parser accepts). `now` is injected so date forms are testable; unparseable
+/// or past values return `None`.
 pub(crate) fn parse_retry_after(
     value: &str,
     now: chrono::DateTime<chrono::Utc>,
@@ -100,16 +99,15 @@ impl ClaudeSyncBackoff {
         self.consecutive_rate_limits
     }
 
-    /// Drops an in-progress hold so this tick attempts: never creates one, and
-    /// leaves the 429 streak and the ladder alone. The caller does this while
-    /// the cached telemetry still defers, since below the base cadence that
-    /// pressure cannot be re-observed at all (#5727).
+    /// Drops an in-progress hold so this tick attempts: never creates one, and leaves the 429
+    /// streak and the ladder alone. The caller does this while the cached telemetry still defers,
+    /// since below the base cadence that pressure cannot be re-observed at all (#5727).
     pub(crate) fn release_hold(&mut self) {
         self.not_before = None;
     }
 
-    /// Records a fetch outcome and returns the delay applied before the next
-    /// Claude attempt (the base interval on success / other errors).
+    /// Records a fetch outcome and returns the delay applied before the next Claude attempt (the
+    /// base interval on success / other errors).
     pub(crate) fn record(&mut self, outcome: ClaudeSyncOutcome, now: Instant) -> Duration {
         match outcome {
             ClaudeSyncOutcome::Success => {
