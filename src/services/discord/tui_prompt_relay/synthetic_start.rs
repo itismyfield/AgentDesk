@@ -249,10 +249,25 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         && existing.turn_source == TurnSource::ExternalInput
         && existing.user_msg_id == anchor_message_id.get()
     {
+        // Re-claiming this anchor is a refresh, not a delivery-owner handoff.
+        let relay_owner = match existing.effective_relay_owner_kind() {
+            RelayOwnerKind::None => ExternalInputRelayOwner::BridgeAdapter,
+            RelayOwnerKind::Watcher => ExternalInputRelayOwner::TmuxWatcher,
+            RelayOwnerKind::SessionBoundRelay => ExternalInputRelayOwner::SessionBoundRelay,
+            RelayOwnerKind::StandbyRelay | RelayOwnerKind::Unknown => {
+                if mailbox_activation_occurred {
+                    finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
+                }
+                return TuiDirectSyntheticTurnClaim {
+                    relay_owner: ExternalInputRelayOwner::Unassigned,
+                    claimed: false,
+                    turn_start_offset: start_offset,
+                };
+            }
+        };
         let expected = super::super::inflight::InflightTurnIdentity::from_state(&existing);
         let mut existing = existing;
         existing.turn_nonce = active_turn_nonce.clone();
-        existing.set_relay_owner_kind(relay_owner_kind);
         existing.session_key = lease.session_key.clone();
         existing.runtime_kind = lease.runtime_kind;
         existing.output_path = output_path
