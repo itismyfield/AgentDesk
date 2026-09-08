@@ -22,6 +22,22 @@ pub(in crate::services::discord) fn idle_feeder_defers_active_row_for_test(
     )
 }
 
+impl SessionBoundDiscordRelaySink {
+    pub(in crate::services::discord) fn delivered_total_for_test(&self) -> u64 {
+        self.delivered_total.load(Ordering::Acquire)
+    }
+
+    pub(in crate::services::discord) fn assert_frame_response_for_test(
+        &self,
+        frame: &StreamFrame,
+        expected: &str,
+    ) {
+        let deliveries = SessionRelayParser::default().ingest_frame(frame);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].response_text, expected);
+    }
+}
+
 pub(super) fn matched(channel_id: &str) -> MatchedChannel {
     let session = ProviderKind::Claude.build_tmux_session_name(channel_id);
     MatchedChannel {
