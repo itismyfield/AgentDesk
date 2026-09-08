@@ -11,6 +11,25 @@ use super::liveness_authority::{CaptureCoordinateObservation, CoordinateStatus};
 
 pub(super) const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
 
+/// Wall-clock ceiling one health build may spend on `tmux has-session` probes,
+/// summed across every provider and channel it walks (#5736).
+///
+/// Sized under the tightest consumer budget that reads a health body:
+/// `scripts/deploy.sh`'s `curl --max-time 3` (`scripts/_defaults.sh` allows 5).
+/// A single probe already self-limits to 3s
+/// ([`crate::services::platform::tmux::session_presence`]), so without a shared
+/// ceiling an N-channel node could serialize N of them and time the consumer out
+/// — which `deploy-release.sh` reads as "API unreachable" and, for the
+/// zero-inflight gate, treats as a reason to SKIP the check. The ceiling is per
+/// build and applies to the detail and public builds alike, so the two never
+/// disagree about a channel because one of them ran out of budget first.
+const TMUX_OBSERVATION_BUDGET: std::time::Duration = std::time::Duration::from_millis(2_000);
+
+/// The deadline every channel probe in one health build shares.
+pub(super) fn tmux_observation_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + TMUX_OBSERVATION_BUDGET
+}
+
 /// #5071 relay-tail S1 (I-4): one channel's relay coordinate, read once.
 ///
 /// Both the offsets [`SessionEnrichment::load`] already took from this entry
@@ -172,8 +191,17 @@ impl SessionEnrichment {
         channel: ChannelId,
     ) -> Self {
         let watcher_binding = shared.tmux_watchers.channel_binding(&channel);
-        let inflight =
-            provider_kind.and_then(|pk| discord::inflight::load_inflight_state(pk, channel.get()));
+        // #5736: the READ-ONLY loader. `load_inflight_state` runs the finalizer
+        // compatibility backfill, which takes a timeout-less file lock and
+        // PERSISTS the row — refreshing `updated_at` and the save generation that
+        // `inflight::rebind_reap` reads as staleness evidence. Health is a
+        // diagnostic observer on both the authenticated detail path and the
+        // unauthenticated public one; observing a legacy row must not make it
+        // look freshly advanced. The parsed value is identical either way:
+        // `parse_inflight_state_content` still resolves `finalizer_turn_id`
+        // in memory, only the write is dropped.
+        let inflight = provider_kind
+            .and_then(|pk| discord::inflight::load_inflight_state_read_only(pk, channel.get()));
         let inflight_tmux_session = inflight
             .as_ref()
             .and_then(|state| state.tmux_session_name.clone());
@@ -357,6 +385,32 @@ impl SessionEnrichment {
         self.tmux_session
             .as_deref()
             .is_some_and(crate::services::platform::tmux::has_session)
+    }
+
+    /// [`Self::tmux_session_present`] off the axum runtime and inside a shared
+    /// per-build deadline (#5736).
+    ///
+    /// `has_session` spawns `tmux` and blocks the calling thread for up to 3s.
+    /// The health builds call it once per channel, and since #5736 the PUBLIC
+    /// `/api/health` build calls it too — an unauthenticated path. Running it on
+    /// a runtime worker is what this module's own docs forbid ("wrapped in
+    /// `spawn_blocking` so it never stalls the axum runtime even if tmux is
+    /// wedged"), so the probe moves to the blocking pool and the await is
+    /// bounded by `deadline`.
+    ///
+    /// Exhausting the deadline reads as `false`, the same answer a probe failure
+    /// already gives. That is the fail-CLOSED direction for the relay verdict:
+    /// `pane_idle_confirmed` is the only operand this feeds
+    /// (`snapshot::relay_verdict_probe_operands`), and withholding it can only
+    /// keep a verdict from reaching `Reachable`, never manufacture one.
+    pub async fn tmux_session_present_within(&self, deadline: tokio::time::Instant) -> bool {
+        let Some(session_name) = self.tmux_session.clone() else {
+            return false;
+        };
+        let probe = tokio::task::spawn_blocking(move || {
+            crate::services::platform::tmux::has_session(&session_name)
+        });
+        matches!(tokio::time::timeout_at(deadline, probe).await, Ok(Ok(true)))
     }
 
     pub fn process_present(&self) -> bool {

@@ -782,6 +782,42 @@ fn transcript_liveness(
     }
 }
 
+/// The only place 4987 §5.1's switch changes a snapshot's polarity (#5071 T4-B6).
+///
+/// The switch is also visible in the response as
+/// `RelayVerdictReport::governs_health_polarity`, on the detail build's mailbox
+/// entry in both modes; what it does NOT do anywhere else is change the aggregate the
+/// caller reads as the process's health. Under `Structural` this returns having
+/// touched neither output — that is what makes the shadow mode a shadow.
+///
+/// One reason per non-green CHANNEL, not per provider: the channel is what an
+/// operator has to look at, and the detail response carries one mailbox entry
+/// per channel. `Degraded`, never `Unhealthy`: 4987 §4.4 asks a
+/// non-`Reachable` relay to set the degraded flag, and taking the process out of
+/// HTTP readiness is authority this switch was not given.
+///
+/// Split out of the per-channel loop so the switch has a seam a test can call
+/// without a full `HealthRegistry`; #5736 added the registry-level pair that
+/// proves both builds reach this seam, not the detail build alone, and moved
+/// this seam beside the switch it reads — `health::snapshot` is a registered
+/// shrink target (#5447) and this is the switch's module, not the snapshot's.
+pub(in crate::services::discord) fn apply_relay_verdict_polarity(
+    composite_governs_polarity: bool,
+    relay_verdict: &RelayVerdict,
+    provider: &str,
+    channel_id: u64,
+    degraded_reasons: &mut Vec<String>,
+    status: &mut super::super::snapshot::HealthStatus,
+) {
+    if composite_governs_polarity && !relay_verdict.permits_health() {
+        degraded_reasons.push(format!(
+            "relay_verdict_{}_{provider}_{channel_id}",
+            relay_verdict.label(),
+        ));
+        *status = status.worsen(super::super::snapshot::HealthStatus::Degraded);
+    }
+}
+
 #[cfg(test)]
 static RELAY_VERDICT_SOURCE_OVERRIDE: std::sync::Mutex<Option<RelayVerdictSource>> =
     std::sync::Mutex::new(None);
