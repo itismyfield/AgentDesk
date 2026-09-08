@@ -7,6 +7,7 @@ import errno
 import http.client
 import io
 import json
+import re
 import stat
 import sys
 import tempfile
@@ -23,6 +24,261 @@ sys.path.insert(0, str(ROOT / "scripts" / "e2e"))
 
 import run_tui_relay as driver  # noqa: E402
 from tui_relay import assertions  # noqa: E402
+from tui_relay import normal_intake_evidence as e36  # noqa: E402
+
+
+class E36DriverContract(unittest.TestCase):
+    def run_e36(self, *, fault=None, mutate=None):
+        scenario = driver.yaml.safe_load((ROOT / "tests/e2e/tui_relay/scenarios/E-36-normal-intake-sequential-ten.yaml").read_text())
+        clock, trace, sent, first, sink = [92.0], [], [], {}, {}
+        state = {"qa_done": False, "qb_done": False}
+        args = Namespace(cell="claude-tui", channel_id="42", thread_channel_id=None, base_url="http://offline.invalid",
+                         dry_run=False, reset_before_each=False, hard_reset_session_each=False, allow_destructive=False,
+                         phase_deadline_s=3540, filter="E-36", _e36_phase_started=92.0,
+                         final_refetches=2, final_refetch_interval_s=1, e36_intake_log="/offline/log")
+        if mutate:
+            mutate(args)
+        outer = self
+
+        class InertEvidence(e36.Evidence):
+            def __init__(self, d, a, channel, record):
+                self.d, self.args, self.channel, self.record = d, a, channel, record
+                self.path, self.root = Path(a.queue_runtime_root) / "source", Path(a.queue_runtime_root)
+                self.log, self.session = self.path, "offline-session"
+                state["record"] = record
+                if fault == "unreadable":
+                    raise ValueError("INFO unavailable")
+            def admission(self, request):
+                request["admission"] = {"user_msg_id": int(request["inbound_message_id"])}
+            def idle(self):
+                return {"status": "idle"}
+            def watcher(self):
+                return {"unread_bytes": 0, "has_pending_queue": False}
+            def join(self, request):
+                key = request["request_key"]
+                outer.assertIn(("completion_pass", key), trace)
+                trace.append(("join", key))
+                clock[0] += 12
+                if fault == "idle_native_replay" and state.get("idle_returned"):
+                    e36.native_chain(self.path, request["native_before"], request, "offline-session")
+                if key == "S10" and fault in {"deadline", "handler_deadline"}:
+                    if fault == "handler_deadline":
+                        raise assertions.AssertionError("observed product failure before handler deadline")
+                    raise driver.PhaseDeadlineExpired("offline E36 deadline")
+                request["native"] = {"input_id": request["inbound_message_id"], "input_locator": {"start": len(sent)}}
+                state["qa_done"] |= key == "QA"
+                state["qb_done"] |= key == "QB"
+            def hold_input(self, request):
+                request["hold_native"] = {"input": request["inbound_message_id"]}
+            def queue(self, request, prior):
+                outer.assertIn(("hold", prior["inbound_message_id"]), trace)
+                if fault == "queue_unknown":
+                    raise ValueError("exact QB commit unavailable")
+                request["queue"] = {"active_prior_message_id": prior["inbound_message_id"]}
+
+        def native(kind, text):
+            return json.dumps({"type": kind, "sessionId": "offline-session", "message": {"content": text}}) + "\n"
+
+        def send(client, channel, prompt):
+            index = len(sent)
+            trace.append(("send", scenario["steps"][index]["request_key"]))
+            sent.append(prompt)
+            if index == 11 and fault in {"sequential_late_poll", "queue_bypass"}:
+                # QA's own turn transcript decides attribution: the bypass fixture injects QB's
+                # input before QA's terminal body, the late-poll fixture leaves them ordered.
+                qa_step, qb_step = scenario["steps"][10], scenario["steps"][11]
+                text = lambda step, key: step[key].replace("{run_id}", "offline")  # noqa: E731
+                turns = {"qa_in": native("user", text(qa_step, "send_discord_prompt")),
+                         "qa_body": native("assistant", text(qa_step, "body_marker")),
+                         "qb_in": native("user", text(qb_step, "send_discord_prompt")),
+                         "qb_body": native("assistant", text(qb_step, "body_marker"))}
+                order = (("qa_in", "qa_body", "qb_in", "qb_body") if fault == "sequential_late_poll"
+                         else ("qa_in", "qb_in", "qb_body", "qa_body"))
+                (Path(args.queue_runtime_root) / "source").write_text("".join(turns[k] for k in order))
+            if fault == "ack" and index == 9:
+                raise OSError("ack unknown")
+            return {"id": str(100 + 10 * index)}
+
+        def fetch(client, channel, **kwargs):
+            rows = []
+            for index, prompt in enumerate(sent):
+                key = scenario["steps"][index]["request_key"]
+                mid = 100 + 10 * index
+                rows.append({"id": str(mid), "content": prompt, "author": {"id": assertions.OUR_BOT_ID, "bot": True}})
+                if ((key == "QA" and len(sent) < 12)
+                        or (key == "QB" and not state["qa_done"]
+                            and fault not in {"sequential_late_poll", "queue_bypass"})):
+                    continue
+                marker = scenario["steps"][index]["body_marker"].replace("{run_id}", "offline")
+                hold = (scenario["steps"][index].get("hold_marker") or "").replace("{run_id}", "offline")
+                if key not in first:
+                    first[key] = clock[0]
+                    trace.append(("body", key))
+                if not (fault == "deleted" and state["qb_done"] and key == "S01"):
+                    rows.append({"id": str(mid + 1), "content": f"{hold}\n{marker}" if hold else marker,
+                                 "author": {"id": "999", "bot": True}})
+                if fault == "page_duplicate" and key == "S01":
+                    seen = state.get("page_dup_fetches", 0)
+                    state["page_dup_fetches"] = seen + 1
+                    rows.append({"id": str(mid + 9), "content": marker if seen == 0 else "edited away",
+                                 "author": {"id": "999", "bot": True}})
+                if clock[0] >= first[key] + 6:
+                    rows.append({"id": str(mid + 2), "content": "✅ 응답 완료", "author": {"id": "999", "bot": True}})
+            if fault == "idle_publication_replay" and state.get("idle_returned"):
+                marker = scenario["steps"][0]["body_marker"].replace("{run_id}", "offline")
+                rows.append({"id": "9999", "content": "late header\n" + marker, "author": {"id": "999", "bot": True}})
+            if client.body_observations is not None:
+                for row in rows:
+                    if (body := assertions.relay_body(row)) is not None:
+                        client.body_observations.setdefault(body, clock[0])
+            return [r for r in rows if int(r["id"]) > int(kwargs.get("after_id") or 0)]
+
+        original_assert, original_wait = driver.run_assertion, driver.wait_for_discord_text_with_tui_idle_draft_guard
+        def scoped(spec, **kwargs):
+            result = original_assert(spec, **kwargs)
+            if "completion_chrome_after_body" in spec:
+                marker = spec["completion_chrome_after_body"]["body_marker"]
+                trace.append(("completion_pass", re.search(r":(S\d+|QA|QB)(?:\]|:)", marker)[1]))
+            return result
+        def wait(**kwargs):
+            result = original_wait(**kwargs)
+            if fault == "join_before_completion":
+                trace.append(("forbidden_join", "S01"))
+                clock[0] += 12
+            return result
+        def hold(**kwargs):
+            trace.append(("hold", kwargs["expected_identity"]["user_msg_id"]))
+            return {"provider_hold_observed": fault != "fast_terminal", "terminal_delivery_committed": fault == "fast_terminal"}
+        def control(client, *args, **kwargs):
+            state["controls"] = state.get("controls", 0) + 1
+            if fault == "handler_deadline" and state["controls"] > 1:
+                raise driver.PhaseDeadlineExpired("offline deadline inside existing handler")
+            return {"id": "1"}
+
+        def idle(**kwargs):
+            state["idle_returned"] = True
+            trace.append(("idle_return", None))
+            if fault == "idle_native_replay":
+                request = state["record"]["discord_prompt_records"][0]
+                user = {"type": "user", "sessionId": "offline-session", "uuid": "input-1",
+                        "message": {"content": request["prompt"]}}
+                work = {"type": "assistant", "sessionId": "offline-session", "uuid": "work-1",
+                        "message": {"content": request["body_marker"]}}
+                rows = [user, work, {**user, "uuid": "input-2"}, {**work, "uuid": "work-2"}]
+                (Path(args.queue_runtime_root) / "source").write_text("".join(json.dumps(row) + "\n" for row in rows))
+            return {"status": "idle"}
+
+        with tempfile.TemporaryDirectory() as root:
+            args.queue_runtime_root = root
+            (Path(root) / "source").write_text("")
+            with (patch("socket.socket", side_effect=AssertionError("network forbidden")),
+                  patch.object(e36, "Evidence", InertEvidence), patch.object(driver.time, "monotonic", side_effect=lambda: clock[0]),
+                  patch.object(driver.time, "sleep", side_effect=lambda t: clock.__setitem__(0, clock[0] + t)),
+                  patch.object(driver.discord.DiscordClient, "send", send), patch.object(driver.discord.DiscordClient, "fetch_messages", fetch),
+                  patch.object(driver.discord.DiscordClient, "send_control", control),
+                  patch.object(driver.discord.DiscordClient, "send_prompt", side_effect=AssertionError("headless forbidden")),
+                  patch.object(driver, "wait_for_provider_hold_state", side_effect=hold), patch.object(driver, "run_assertion", side_effect=scoped),
+                  patch.object(driver, "wait_for_discord_text_with_tui_idle_draft_guard", side_effect=wait),
+                  patch.object(driver, "assert_cell_idle", side_effect=idle),
+                  patch.object(driver, "reset_channel_state", side_effect=AssertionError("reset forbidden"))):
+                try:
+                    result = driver.run_scenario(scenario, args=args, run_id="offline",
+                        client=driver.discord.DiscordClient(args.base_url), partial_result_sink=sink)
+                except driver.PhaseDeadlineExpired:
+                    result = sink["result"]
+        return result, trace, sent, state
+
+    def test_actual_yaml_twelve_normal_inputs_and_immediate_completion(self):
+        result, trace, sent, state = self.run_e36()
+        self.assertEqual(result["status"], "pass", result)
+        self.assertEqual(len(sent), 12)
+        self.assertTrue(all("{run_id}" not in text for text in sent))
+        self.assertIs(result["discord_prompt_records"], state["record"]["discord_prompt_records"])
+        self.assertLess(trace.index(("hold", "200")), trace.index(("send", "QB")))
+        self.assertLess(trace.index(("completion_pass", "S01")), trace.index(("join", "S01")))
+        self.assertEqual(result["completion_rechecks"][0]["refetches"], 3)
+        self.assertEqual(result["completion_rechecks"][0]["deadline_at"], 110)
+
+    def test_final_idle_replays_are_revalidated_before_acceptance(self):
+        for fault, reason in (("idle_publication_replay", "publication"), ("idle_native_replay", "repeated native")):
+            with self.subTest(fault=fault):
+                result, trace, sent, _ = self.run_e36(fault=fault)
+                self.assertEqual(len(sent), 12)
+                self.assertIn(("idle_return", None), trace)
+                self.assertIn(("join", "S01"), trace[trace.index(("idle_return", None)) + 1:])
+                self.assertEqual(result["status"], "fail", result)
+                self.assertEqual(result["failure_attribution"]["source"], "assertion")
+                self.assertIn(reason, result["reason"])
+                self.assertNotEqual(result["e36_acceptance"]["queued_followup"], "pass")
+
+    def test_swapped_join_order_is_real_driver_zero_refetch_red(self):
+        result, _, sent, _ = self.run_e36(fault="join_before_completion")
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(result["completion_rechecks"][0]["refetches"], 0)
+        self.assertEqual(result["completion_rechecks"][0]["outcome"], "EXHAUSTED")
+
+    def test_late_poll_of_two_ordered_turns_passes_but_early_qb_execution_fails(self):
+        # Both fixtures show QA's and QB's completions on the same poll, before the harness
+        # joined QA; only native order separates the product defect from a slow observation.
+        passing, trace, sent, state = self.run_e36(fault="sequential_late_poll")
+        self.assertEqual(len(sent), 12)
+        self.assertLess(trace.index(("body", "QB")), trace.index(("join", "QA")))
+        self.assertEqual(passing["status"], "pass", passing)
+        self.assertEqual(passing["e36_acceptance"]["queued_followup"], "pass")
+        requests = passing["discord_prompt_records"]
+        self.assertEqual(requests[10]["queued_followup_order"]["qb_first_body_id"], 211)
+        self.assertEqual([requests[10]["completion_message_id"], requests[11]["completion_message_id"]],
+                         ["202", "212"])
+        result, trace, sent, state = self.run_e36(fault="queue_bypass")
+        self.assertEqual((len(sent), state["qa_done"]), (12, False))
+        self.assertNotIn(("join", "QA"), trace)
+        self.assertEqual(result["status"], "fail", result)
+        self.assertEqual(result["failure_attribution"]["source"], "assertion")
+        self.assertNotEqual(result["failure_attribution"].get("classification"), "unevaluable")
+        self.assertIn("ownership ambiguous", result["reason"])
+        bypass = result["discord_prompt_records"]
+        self.assertLess(bypass[10]["queued_followup_order"]["qb_input_start"],
+                        bypass[10]["queued_followup_order"]["qa_body_end"])
+        self.assertTrue(bypass[10]["hold_native"])
+        self.assertEqual(bypass[11]["queue"]["active_prior_message_id"], bypass[10]["inbound_message_id"])
+        self.assertNotEqual(result["e36_acceptance"]["queued_followup"], "pass")
+
+    def test_duplicate_in_the_matched_fetch_page_survives_a_later_edit(self):
+        result, _, sent, _ = self.run_e36(fault="page_duplicate")
+        self.assertEqual(len(sent), 12)
+        self.assertEqual(result["status"], "fail", result)
+        self.assertEqual(result["failure_attribution"]["source"], "assertion")
+        self.assertIn("edited duplicate", result["reason"])
+
+    def test_unknown_ack_deadline_and_queue_keep_bound_partial_records(self):
+        for fault, attempts in (("ack", 10), ("deadline", 10), ("handler_deadline", 10), ("queue_unknown", 12)):
+            with self.subTest(fault=fault):
+                result, _, sent, state = self.run_e36(fault=fault)
+                self.assertEqual(result["failure_attribution"]["classification"], "unevaluable", result)
+                self.assertEqual(len(sent), attempts)
+                self.assertIs(result["discord_prompt_records"], state["record"]["discord_prompt_records"])
+                if fault == "ack":
+                    self.assertNotIn("inbound_message_id", result["discord_prompt_records"][-1])
+                if fault == "handler_deadline":
+                    self.assertIn("prior:", result["reason"])
+
+    def test_exhausted_whole_phase_reserve_stops_before_next_send(self):
+        result, _, sent, _ = self.run_e36(mutate=lambda args: setattr(args, "_e36_phase_started", -3300))
+        self.assertEqual(result["failure_attribution"]["classification"], "unevaluable")
+        self.assertEqual(sent, [])
+        self.assertEqual(result["e36_acceptance"]["budget_exhausted_stage"], "S01")
+
+    def test_guard_fast_terminal_and_deleted_final_body_do_not_pass(self):
+        for fault in ("unreadable", "fast_terminal", "deleted"):
+            with self.subTest(fault=fault):
+                result, _, sent, _ = self.run_e36(fault=fault)
+                self.assertEqual(result["status"], "fail", result)
+                self.assertEqual(len(sent), 0 if fault == "unreadable" else 11 if fault == "fast_terminal" else 12)
+        for name, value in (("reset_before_each", True), ("phase_deadline_s", None), ("phase_deadline_s", 3600)):
+            result, _, sent, _ = self.run_e36(mutate=lambda args: setattr(args, name, value))
+            self.assertEqual(result["status"], "fail")
+            self.assertEqual(sent, [])
 
 
 class FakeResponse:
