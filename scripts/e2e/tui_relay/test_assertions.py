@@ -179,11 +179,14 @@ class E36EvidenceContract(unittest.TestCase):
         rows, requests = [], []
         for index, key in enumerate(e36.KEYS, 1):
             mid, marker = index * 10, f"[E36:current:{key}]"
-            rows.extend([_relay_msg(mid + 1, marker), _raw_bot_msg(mid + 2, "✅ 응답 완료")])
+            hold = f"[E36:current:{key}:HOLD]" if key == "QA" else None
+            rows.extend([_relay_msg(mid + 1, f"{hold}\n{marker}" if hold else marker),
+                         _raw_bot_msg(mid + 2, "✅ 응답 완료")])
             requests.append({"request_key": key, "body_marker": marker, "discord_before_id": mid,
                              "discord_closed_after_id": mid + 2, "inbound_message_id": str(mid),
                              "response_ids": [str(mid + 1)], "completion_message_id": str(mid + 2),
-                             "native": {"input_id": f"native-{key}"}, "admission": {"id": mid}})
+                             "native": {"input_id": f"native-{key}"}, "admission": {"id": mid},
+                             **({"hold_marker": hold} if hold else {})})
         requests[10]["hold_native"], requests[11]["queue"] = {"input": "QA"}, {"id": "QB"}
         record = {"discord_prompt_records": requests, "e36_acceptance": {}}
         return rows, record
@@ -222,7 +225,7 @@ class E36EvidenceContract(unittest.TestCase):
         positive.add(_our_msg(999, "driver edit"))
         e36.final_assertion(positive, copy.deepcopy(record), positive.raw_messages)
 
-    def test_late_qa_observation_preserves_exact_commit_without_claiming_active_owner(self):
+    def test_late_qa_observation_keeps_the_exact_commit_as_the_ownership_evidence(self):
         from types import SimpleNamespace
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "intake"
@@ -239,11 +242,94 @@ class E36EvidenceContract(unittest.TestCase):
                         self.assertEqual(request["queue"]["message_id"], "200")
                         return {"mailbox_active_user_msg_id": active}
                     reader.watcher = watcher
-                    with self.assertRaisesRegex(ValueError, "no longer observable"):
-                        reader.queue(request, {"inbound_message_id": "100", "deadline": 20})
+                    reader.queue(request, {"inbound_message_id": "100", "deadline": 20})
                     self.assertEqual(request["queue"]["outcome"], "enqueued")
-                    self.assertNotIn("active_prior_message_id", request["queue"])
+                    self.assertEqual(request["queue"]["active_prior_message_id"], "100")
                     self.assertEqual(request["queue_observation"]["active_message_id"], active)
+                    self.assertFalse(request["queue_observation"]["active_owner_sampled"])
+            path.write_text("")
+            request = {"inbound_message_id": "200", "log_before": e36.cursor(path)}
+            reader.watcher = lambda: {"mailbox_active_user_msg_id": 999}
+            with self.assertRaisesRegex(ValueError, "before any QB commit"):
+                reader.queue(request, {"inbound_message_id": "100", "deadline": 20})
+            self.assertNotIn("queue", request)
+
+    def test_rowless_idle_reads_null_unread_bytes_as_drained_but_a_row_as_unmeasured(self):
+        from types import SimpleNamespace
+        rowless = {"unread_bytes": None, "inflight_state_present": False, "has_pending_queue": False}
+        self.assertTrue(e36.drained(rowless))
+        self.assertFalse(e36.drained({**rowless, "has_pending_queue": True}))
+        self.assertFalse(e36.drained({"unread_bytes": 12, "inflight_state_present": True, "has_pending_queue": False}))
+        for state in ({**rowless, "inflight_state_present": True}, {"unread_bytes": None, "has_pending_queue": False}):
+            with self.assertRaisesRegex(ValueError, "unmeasured"):
+                e36.drained(state)
+        reader = object.__new__(e36.Evidence)
+        reader.args, reader.channel, reader.root = Namespace(base_url="http://offline.invalid", cell="claude-tui"), "42", Path("/offline")
+        reader.d = SimpleNamespace(assert_cell_idle=lambda **kwargs: {"status": "idle"})
+        reader.watcher = lambda: rowless
+        self.assertEqual(reader.idle(), {"status": "idle", "watcher": rowless})
+        reader.watcher = lambda: {**rowless, "has_pending_queue": True}
+        with self.assertRaises(assertions.AssertionError):
+            reader.idle()
+
+    def test_tool_result_user_rows_with_hook_text_do_not_end_the_work_scan(self):
+        prompt, marker = "Reply only [E36:run:S01]", "[E36:run:S01]"
+        user = {"type": "user", "sessionId": "s", "uuid": "input-1", "message": {"content": prompt}}
+        hooked = {"type": "user", "sessionId": "s", "message": {"content": [
+            {"type": "tool_result", "content": "ok"},
+            {"type": "text", "text": "<system-reminder>hook additional context</system-reminder>"}]}}
+        following = {"type": "user", "sessionId": "s", "uuid": "next", "message": {"content": "a later prompt"}}
+        work = {"type": "assistant", "sessionId": "s", "uuid": "work-1", "message": {"content": marker}}
+        request = {"prompt": prompt, "body_marker": marker}
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "native.jsonl"
+            for name, rows, error in (("hook_text", [user, hooked, work], None),
+                                      ("new_input", [user, following, work], ValueError)):
+                with self.subTest(case=name):
+                    path.write_text("")
+                    before = e36.cursor(path)
+                    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+                    if error:
+                        with self.assertRaises(error):
+                            e36.native_chain(path, before, request, "s")
+                    else:
+                        self.assertEqual(e36.native_chain(path, before, request, "s")["work"][0]["id"], "work-1")
+
+    def test_stranded_qa_hold_prefix_counts_as_a_duplicate_publication(self):
+        rows, record = self.publication_fixture()
+        stray = _relay_msg(999, record["discord_prompt_records"][10]["hold_marker"])
+        for name, observed, fresh in (("both", rows + [stray], rows + [stray]),
+                                      ("observed_only", rows + [stray], rows)):
+            with self.subTest(case=name), self.assertRaisesRegex(assertions.AssertionError, "publication"):
+                e36.final_assertion(_window(*observed), copy.deepcopy(record), fresh)
+
+    def test_completion_outside_every_closed_request_window_is_not_dropped(self):
+        rows, record = self.publication_fixture()
+        stray = _raw_bot_msg(999, "✅ 응답 완료")
+        for name, observed, fresh in (("both", rows + [stray], rows + [stray]),
+                                      ("observed_only", rows + [stray], rows),
+                                      ("fresh_only", rows, rows + [stray])):
+            with self.subTest(case=name), self.assertRaisesRegex(assertions.AssertionError, "unattributed completion"):
+                e36.final_assertion(_window(*observed), copy.deepcopy(record), fresh)
+
+    def test_queue_bypass_completion_is_a_product_failure_not_an_ownership_guess(self):
+        from types import SimpleNamespace
+        driver_module = SimpleNamespace(HarnessEvidenceError=RuntimeError)
+        qa = {"inbound_message_id": "110"}
+        self.assertIs(e36.qa_ambiguous_error(qa, {"queue": {"active_prior_message_id": "110"}}, driver_module),
+                      assertions.AssertionError)
+        for qb in ({"queue": {"active_prior_message_id": "999"}}, {}):
+            self.assertIs(e36.qa_ambiguous_error(qa, qb, driver_module), RuntimeError)
+        for bypass, error in ((True, assertions.AssertionError), (False, ValueError)):
+            with self.subTest(bypass=bypass):
+                rows, record = self.publication_fixture()
+                requests = record["discord_prompt_records"]
+                requests[10]["discord_closed_after_id"] = 115
+                requests[11]["queue"] = ({"active_prior_message_id": requests[10]["inbound_message_id"]}
+                                         if bypass else {"id": "QB"})
+                rival = _raw_bot_msg(113, "✅ 응답 완료")
+                with self.assertRaisesRegex(error, "ownership ambiguous"):
+                    e36.final_assertion(_window(*rows, rival), record, rows + [rival])
 
 
 def _wait_predicate(window: assertions.Window, needle: str) -> bool:
