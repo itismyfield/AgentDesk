@@ -452,6 +452,8 @@ src/
 │   │   │   ├── followup_support.rs
 │   │   │   ├── mod.rs
 │   │   │   └── warm_followup.rs
+│   │   ├── session/
+│   │   │   └── auto_compact_launch_tests.rs
 │   │   ├── composer_lock.rs
 │   │   ├── hook_bundle.rs
 │   │   ├── hook_output_guard.rs
