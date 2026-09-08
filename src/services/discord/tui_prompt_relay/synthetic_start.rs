@@ -330,32 +330,19 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         let next_output_path = output_path
             .as_deref()
             .and_then(|path| path.to_str().map(str::to_string));
-        // #5780 r5: `turn_start_offset`/`last_offset` are coordinates INTO
-        // `output_path`, so following a SOURCE ROTATION means re-keying the row onto
-        // the new file's own cursor — and this claim cannot read an atomic
-        // `(path, cursor)` pair. `external_input_relay_output_path` re-registers the
-        // binding, and any other registry writer (the hook server adopting a Claude
-        // continuation, `runtime_binding.rs`) may replace it again before this claim
-        // reads it back; a lost race stamps file B at file A's coordinates, which
-        // `watchers::lifecycle::restore` then resumes from. Decline instead — the
-        // durable row keeps its owner AND its own source, and adopting the new
-        // transcript stays with the rebinding paths that own that transition.
-        if next_output_path.is_some() && next_output_path != existing.output_path {
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel_id = channel_id.get(),
-                tmux_session_name = %tmux_session_name,
-                "declined a TUI-direct relay refresh across a source rotation"
-            );
-            if mailbox_activation_occurred {
-                finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
-            }
-            return TuiDirectSyntheticTurnClaim {
-                relay_owner,
-                claimed: false,
-                turn_start_offset: start_offset,
-            };
-        }
+        // #5780 r6: a SOURCE ROTATION forfeits the path/cursor ADOPTION, not the
+        // ownership refresh. `turn_start_offset`/`last_offset` are coordinates INTO
+        // `output_path` and this claim cannot read an atomic `(path, cursor)` pair
+        // (`external_input_relay_output_path` re-registers the binding, and the hook
+        // server or `runtime_binding.rs` may replace it again before this claim reads
+        // it back), so a refresh restamps NO source — nor clears one when resolution
+        // failed (`None`). r5 returned here, before the save: that froze the birth
+        // owner, and a row still owned by `Watcher` is refused by BOTH
+        // `codex_ownerless_external_input_inflight_needs_rollout_recovery` and
+        // `RelayStallClassifier::classify` (its `watcher_owns_live_relay` disjunct),
+        // so no lane ever picked the rotated tail up. Persist the demotion, then
+        // decline the claim below.
+        let source_rotated = next_output_path.is_some() && next_output_path != existing.output_path;
         let expected = super::super::inflight::InflightTurnIdentity::from_state(&existing);
         let mut existing = existing;
         existing.set_relay_owner_kind(match relay_owner {
@@ -366,7 +353,6 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         existing.turn_nonce = active_turn_nonce.clone();
         existing.session_key = lease.session_key.clone();
         existing.runtime_kind = lease.runtime_kind;
-        existing.output_path = next_output_path;
         // #5780 r2: a refresh must NOT re-key the turn. `turn_start_offset` IS part
         // of `InflightTurnIdentity`, and for Codex TUI `start_offset` is the runtime
         // binding's `last_offset`, which advances mid-turn (offset advance on relayed
@@ -391,6 +377,22 @@ async fn claim_tui_direct_synthetic_turn_prepared(
                 tmux_session_name = %tmux_session_name,
                 ?outcome,
                 "skipped TUI-direct synthetic inflight ownership refresh"
+            );
+            if mailbox_activation_occurred {
+                finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
+            }
+            return TuiDirectSyntheticTurnClaim {
+                relay_owner,
+                claimed: false,
+                turn_start_offset: start_offset,
+            };
+        }
+        if source_rotated {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                "declined a TUI-direct relay refresh across a source rotation"
             );
             if mailbox_activation_occurred {
                 finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;

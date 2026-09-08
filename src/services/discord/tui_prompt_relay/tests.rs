@@ -5296,10 +5296,10 @@ mod native_feeder_birth_regressions {
         }
         if let Some(refresh) = refresh {
             assert!(row.turn_nonce.is_some());
-            let birth_owner = match refresh {
-                RefreshFeeder::LateHandle => RelayOwnerKind::None,
-                RefreshFeeder::WatcherMissing => RelayOwnerKind::Watcher,
-                _ => RelayOwnerKind::SessionBoundRelay,
+            let birth_owner = match feeder {
+                Some((_, false, false, false)) => RelayOwnerKind::Watcher,
+                Some((_, _, _, true)) => RelayOwnerKind::SessionBoundRelay,
+                _ => RelayOwnerKind::None,
             };
             assert_eq!(row.effective_relay_owner_kind(), birth_owner);
             // #5780 r3: only the progress-bearing case posts output before the
@@ -5603,6 +5603,19 @@ mod native_feeder_birth_regressions {
             )]),
             vec![(ExternalInputRelayOwner::SessionBoundRelay, true)],
             "a refresh whose resolved output moved to another file has no atomic (path, cursor) pair to adopt, so it must decline and leave the durable row on its own source"
+        );
+    }
+
+    #[test]
+    fn same_anchor_refresh_demotes_a_rotated_watcher_owner_instead_of_freezing_it() {
+        assert_eq!(
+            run_birth_cases(&[(
+                17,
+                Some((false, false, false, false)),
+                Some(RefreshFeeder::SourceRotated)
+            )]),
+            vec![(ExternalInputRelayOwner::BridgeAdapter, false)],
+            "declining the rotated path must still surrender the durable owner: a row left on Watcher is refused by both the Codex ownerless rollout recovery and the reattach classifier, so the rotated tail would reach no lane at all"
         );
     }
 }
