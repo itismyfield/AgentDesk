@@ -495,21 +495,82 @@ test("review-automation hands the first create-pr failure to an agent/operator",
   assert.equal(state.executions.filter((e) => e.sql.indexOf("blocked_reason = ?") >= 0).pop().params[0], "pr:create_failed:no_open_pr_found");
 });
 
-test("review-automation sweeps stranded terminal create-pr rows into the same handoff", () => {
-  const rows = [{ card_id: "card-old1", last_error: "no_open_pr_found", retry_count: 1 },
-    { card_id: "card-old2", last_error: null, retry_count: 2 }];
+// Fake pr_tracking that honours whichever predicates the sweep SQL actually
+// carries, so dropping a clause changes the candidate set instead of passing
+// against fixed mock rows.
+function createPrTrackingFake(seed) {
+  const table = seed.map((row) => Object.assign({ state: "create-pr", retry_count: 1, last_error: null }, row));
+  return {
+    query(sql) {
+      const states = (/state IN \(([^)]*)\)/.exec(sql) || [null, "'create-pr'"])[1].split(",").map((s) => s.trim().replace(/'/g, ""));
+      return table.filter((row) => states.indexOf(row.state) >= 0
+        && (sql.indexOf("retry_count > 0") < 0 || row.retry_count > 0)
+        && (sql.indexOf("NOT LIKE 'handed-off:%'") < 0 || String(row.last_error || "").indexOf("handed-off:") !== 0)
+      ).slice(0, 20).map((row) => ({ card_id: row.card_id, last_error: row.last_error, retry_count: row.retry_count }));
+    },
+    execute(sql, params) {
+      const row = table.find((item) => item.card_id === params[1]);
+      if (row && ["create-pr", "escalated"].indexOf(row.state) >= 0) row.last_error = params[0];
+    }
+  };
+}
+
+const MARKER_SQL = "UPDATE pr_tracking SET last_error = ?";
+test("review-automation sweeps stranded create-pr rows once and then drops them from the candidate set", () => {
+  const fake = createPrTrackingFake([
+    { card_id: "card-old1", last_error: "no_open_pr_found", retry_count: 1 },
+    { card_id: "card-old2", state: "escalated", last_error: "no_open_pr_found", retry_count: 3 },
+    { card_id: "card-live", retry_count: 0 }
+  ]);
   const { policy, state } = loadPolicy("policies/review-automation.js", {
-    cards: { "card-old1": { id: "card-old1", status: "done" }, "card-old2": { id: "card-old2", status: "done" } },
-    dbQuery: createSqlRouter([{ match: "FROM pr_tracking p JOIN kanban_cards c", result: rows }])
+    cards: { "card-old1": { id: "card-old1", status: "in_progress" }, "card-old2": { id: "card-old2", status: "done" } },
+    dbQuery: createSqlRouter([{ match: "FROM pr_tracking", result: (sql) => fake.query(sql) }]),
+    dbExecute: (sql, params) => { if (sql.indexOf(MARKER_SQL) >= 0) fake.execute(sql, params); }
   });
 
   policy.onTick5min({});
   policy.onTick5min({});
 
-  // Both cards handed off once each — the kv key makes the sweep idempotent.
+  // card-old2 is 'escalated', card-old1's card never reached terminal, card-live
+  // (retry_count 0) is an in-flight dispatch that must be left alone.
   assert.equal(state.deadlockAlerts.length, 2);
   assert.match(state.deadlockAlerts[0].message + state.deadlockAlerts[1].message, /card-old1[\s\S]*card-old2/);
-  const sweeps = state.queries.filter((q) => q.sql.indexOf("FROM pr_tracking p JOIN kanban_cards c") >= 0);
+  const markers = state.executions.filter((e) => e.sql.indexOf(MARKER_SQL) >= 0);
+  assert.equal(markers.length, 2);
+  assert.equal(markers[0].params[0], "handed-off:no_open_pr_found");
+  const sweeps = state.queries.filter((q) => q.sql.indexOf("FROM pr_tracking") >= 0);
   assert.equal(sweeps.length, 2);
-  assert.ok(sweeps[0].sql.indexOf("LIMIT 20") >= 0);
+  assert.ok(sweeps[0].sql.indexOf("LIMIT 20") >= 0 && sweeps[0].sql.indexOf("retry_count > 0") >= 0);
+});
+
+test("review-automation keeps a create-pr failure retryable when the handoff alert is not delivered", () => {
+  const { agentdesk, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-cp2": { id: "card-cp2", status: "review" } },
+    globals: { notifyDeadlockManager: (message) => { state.deadlockAlerts.push({ message }); return false; } },
+    extraAgentdesk: {
+      reviewAutomation: { recordPrCreateFailure: () => ({ ok: true, retry_count: 1, escalated: false }) }
+    }
+  });
+
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp2", "no_open_pr_found");
+
+  assert.equal(state.deadlockAlerts.length, 1);
+  assert.equal(state.kv.size, 0, "an undelivered alert must not seed the dedup key");
+  assert.equal(state.executions.filter((e) => e.sql.indexOf(MARKER_SQL) >= 0).length, 0, "nor the durable marker");
+});
+
+test("review-automation alerts again for a new create-pr failure generation", () => {
+  let retryCount = 0;
+  const { agentdesk, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-cp3": { id: "card-cp3", status: "review" } },
+    extraAgentdesk: {
+      reviewAutomation: { recordPrCreateFailure: () => ({ ok: true, retry_count: ++retryCount, escalated: retryCount >= 3 }) }
+    }
+  });
+
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp3", "no_open_pr_found");
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp3", "no_open_pr_found");
+
+  assert.equal(state.deadlockAlerts.length, 2);
+  assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp3:1", "pr_create_handoff:card-cp3:2"]);
 });

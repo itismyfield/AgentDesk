@@ -94,11 +94,18 @@ function getHumanAlertChannel() {
   return getConfiguredChannelTarget("kanban_human_alert_channel_id", "human alert");
 }
 
+// #5716: agentdesk.message.queue never throws — it returns {ok:true,id} or
+// {error:"..."} (src/engine/ops/message_ops.rs message_queue_raw). Callers that
+// ignore it report a delivery that never happened, so enqueue failure must
+// surface as false here.
+function queuedOk(result) {
+  return !!(result && result.ok === true);
+}
+
 function notifyHumanAlert(message, source) {
   var target = getHumanAlertChannel();
   if (!target) return false;
-  agentdesk.message.queue(target, message, "notify", source || "system");
-  return true;
+  return queuedOk(agentdesk.message.queue(target, message, "notify", source || "system"));
 }
 
 function getDeadlockManagerChannel() {
@@ -108,8 +115,7 @@ function getDeadlockManagerChannel() {
 function notifyDeadlockManager(message, source) {
   var target = getDeadlockManagerChannel();
   if (target) {
-    agentdesk.message.queue(target, message, "announce", source || "system");
-    return true;
+    return queuedOk(agentdesk.message.queue(target, message, "announce", source || "system"));
   }
   return notifyHumanAlert(message, source || "system");
 }
