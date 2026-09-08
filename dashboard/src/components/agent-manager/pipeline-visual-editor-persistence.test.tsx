@@ -787,4 +787,47 @@ describe("override-only FSM edge edits", () => {
 
     expect(view.current?.ctx.pipelineDraft?.states[0].label).toBe("Server v2");
   });
+
+  /**
+   * The Reset half. A same-scope reload can beat the reset's refresh GET, and the
+   * generation guard then drops that response - so the draft the reset discarded
+   * has to be retired at PUT success, or it returns and re-creates the override.
+   */
+  it("retires the draft when a same-scope reload beats the reset refresh", async () => {
+    const inherited = boundPipeline();
+    inherited.states[0].label = "Inherited";
+    mockBoundApi();
+    await mountEditor();
+    await act(async () => {
+      view.current?.actions.updateState("ready", { label: EDITED_LABEL });
+    });
+    expect(persistedDraftEntry()?.pipeline.states[0].label).toBe(EDITED_LABEL);
+
+    // The reset PUT succeeds; hold its follow-up GET open so the reload wins.
+    let releaseResetGet = () => {};
+    const resetGate = new Promise<void>((resolve) => { releaseResetGet = resolve; });
+    vi.mocked(api.getEffectivePipeline).mockResolvedValue({ pipeline: inherited, layers: { default: true, repo: false, agent: false } });
+    vi.mocked(api.getRepoPipeline)
+      .mockResolvedValue({ repo: REPO, pipeline_config: null })
+      .mockImplementationOnce(async () => { await resetGate; return { repo: REPO, pipeline_config: null }; });
+    let resetPromise: Promise<void> | undefined;
+    await act(async () => {
+      resetPromise = view.current?.actions.handleClearOverride();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await refreshInPlace();
+    await act(async () => {
+      releaseResetGet();
+      await resetPromise;
+    });
+
+    expect(persistedDraftEntry()).toBeNull();
+    expect(view.current?.ctx.pipelineDraft?.states[0].label).toBe("Inherited");
+    await act(async () => {
+      view.current?.actions.updateState("done", { label: "After reset" });
+    });
+    const payload = await saveAndReadPayload();
+    expect((payload as unknown as PipelineConfigFull).states[0].label).toBe("Inherited");
+  });
 });
