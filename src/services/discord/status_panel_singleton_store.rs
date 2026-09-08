@@ -114,29 +114,53 @@ pub(in crate::services::discord) fn commit_if_owned_or_current(
     let root = runtime_store::discord_status_panel_singletons_root()
         .ok_or_else(|| "AgentDesk runtime root unavailable".to_string())?;
 
-    match fs::read_to_string(&path) {
+    let binding = match fs::read_to_string(&path) {
         Ok(raw) => {
             let state = serde_json::from_str::<inflight::InflightTurnState>(&raw)
                 .map_err(|error| error.to_string())?;
-            if state.status_message_id != Some(panel_message_id) {
-                return Err("status panel singleton ownership changed".to_string());
+            if state.status_message_id == Some(panel_message_id) {
+                StatusPanelSingletonBinding {
+                    panel_message_id,
+                    generation: state.status_panel_generation,
+                }
+            } else {
+                // #4891: an inflight row that no longer names this panel is
+                // not proof of supersession — the NEXT turn opens its row (and
+                // points it at its own new panel) before the previous turn
+                // commits. Ask the `NotFound` arm's question instead of failing
+                // closed; a truly superseded panel is rejected there because the
+                // newer owner's `bind_if_owned` already moved the binding.
+                current_durable_singleton(
+                    &root,
+                    provider,
+                    token_hash,
+                    channel_id,
+                    panel_message_id,
+                )?
             }
-            let binding = StatusPanelSingletonBinding {
-                panel_message_id,
-                generation: state.status_panel_generation,
-            };
-            bind_in_root(&root, provider, token_hash, channel_id, binding)?;
-            Ok(binding)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let binding = load_in_root(&root, provider, token_hash, channel_id)
-                .filter(|binding| binding.panel_message_id == panel_message_id)
-                .ok_or_else(|| "completed status panel is not the current singleton".to_string())?;
-            bind_in_root(&root, provider, token_hash, channel_id, binding)?;
-            Ok(binding)
+            current_durable_singleton(&root, provider, token_hash, channel_id, panel_message_id)?
         }
-        Err(error) => Err(error.to_string()),
-    }
+        Err(error) => return Err(error.to_string()),
+    };
+    bind_in_root(&root, provider, token_hash, channel_id, binding)?;
+    Ok(binding)
+}
+
+/// #4891: the shared "is this completed panel still the channel's durable
+/// singleton?" check, used by every `commit_if_owned_or_current` arm that cannot
+/// read the panel's generation off a matching inflight row.
+fn current_durable_singleton(
+    root: &Path,
+    provider: &ProviderKind,
+    token_hash: &str,
+    channel_id: u64,
+    panel_message_id: u64,
+) -> Result<StatusPanelSingletonBinding, String> {
+    load_in_root(root, provider, token_hash, channel_id)
+        .filter(|binding| binding.panel_message_id == panel_message_id)
+        .ok_or_else(|| "completed status panel is not the current singleton".to_string())
 }
 
 fn clear_if_current_in_root(
@@ -299,6 +323,89 @@ mod tests {
         assert!(
             commit_if_owned_or_current(&provider, token_hash, channel_id, 802).is_err(),
             "an absent inflight row must not authorize replacing the current singleton"
+        );
+    }
+
+    /// #4891: the NEXT turn's inflight row already points at a DIFFERENT panel
+    /// while the durable singleton still names THIS completed panel. The commit
+    /// must fall back to the durable singleton exactly like the `NotFound` arm;
+    /// failing closed here is what promoted a ledger miss into a completion
+    /// failure and got the live panel deleted as an orphan.
+    #[test]
+    fn commit_falls_back_to_durable_singleton_when_inflight_row_moved_on_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token_hash = "test-token";
+        let channel_id = 48_910;
+        let completed_panel = 1_530_266_420_234_031_306;
+        let next_turn_panel = 1_530_266_449_355_210_913;
+
+        let owner = test_state(channel_id, 40, completed_panel, 11);
+        inflight::save_inflight_state(&owner).expect("persist completing owner");
+        bind_if_owned(&provider, token_hash, channel_id, completed_panel, None)
+            .expect("bind completing owner");
+
+        // The next turn opens its own row on the same channel and points it at a
+        // brand-new panel BEFORE the previous turn's completion commits. It has
+        // not adopted the durable singleton yet.
+        let next_turn = test_state(channel_id, 41, next_turn_panel, 12);
+        inflight::save_inflight_state(&next_turn).expect("persist next turn row");
+
+        assert_eq!(
+            commit_if_owned_or_current(&provider, token_hash, channel_id, completed_panel),
+            Ok(StatusPanelSingletonBinding {
+                panel_message_id: completed_panel,
+                generation: 11,
+            }),
+            "a completed panel that is still the durable singleton must commit even though the inflight row moved on"
+        );
+    }
+
+    /// #4891 counterpart: the fallback must stay ownership-scoped. Once the
+    /// newer turn has actually adopted the singleton, the superseded panel is
+    /// genuinely stale and must still fail closed.
+    #[test]
+    fn commit_still_fails_closed_for_a_truly_superseded_panel_4891() {
+        let _env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime_root = tempfile::tempdir().expect("runtime root");
+        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_ROOT_DIR",
+            runtime_root.path(),
+        );
+        let provider = ProviderKind::Claude;
+        let token_hash = "test-token";
+        let channel_id = 48_911;
+        let superseded_panel = 910;
+        let current_panel = 911;
+
+        let old_owner = test_state(channel_id, 50, superseded_panel, 3);
+        inflight::save_inflight_state(&old_owner).expect("persist old owner");
+        bind_if_owned(&provider, token_hash, channel_id, superseded_panel, None)
+            .expect("bind old owner");
+
+        let new_owner = test_state(channel_id, 51, current_panel, 4);
+        inflight::save_inflight_state(&new_owner).expect("persist new owner");
+        bind_if_owned(&provider, token_hash, channel_id, current_panel, None)
+            .expect("bind new owner");
+
+        assert_eq!(
+            commit_if_owned_or_current(&provider, token_hash, channel_id, superseded_panel),
+            Err("completed status panel is not the current singleton".to_string()),
+            "a panel the newer turn already replaced in the durable singleton must still fail closed"
+        );
+        assert_eq!(
+            load(&provider, token_hash, channel_id).map(|b| b.panel_message_id),
+            Some(current_panel),
+            "the superseded commit must not overwrite the current singleton"
         );
     }
 
