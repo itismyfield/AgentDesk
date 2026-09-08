@@ -648,4 +648,82 @@ describe("override-only FSM edge edits", () => {
     expect(view.current?.ctx.fsmEdgeBindings).toEqual(SERVER_BINDINGS);
     expect(persistedDraftEntry(agentScopeKey)).toBeNull();
   });
+
+  /**
+   * The mutation-refresh freshness guard. `refreshAfterMutation` runs outside the
+   * loading effect, so nothing cancels it when the editor leaves the scope it was
+   * started for. A response that lands late used to apply the old scope's snapshot
+   * over the current screen *and* set `appliedScopeKey` to the old scope, after
+   * which the persistence effect rejected every later edit of the scope actually
+   * on screen — those edits were silently lost when the editor closed.
+   */
+  it("discards a mutation refresh that resolves after the editor left its scope", async () => {
+    const agentId = "agent-1";
+    const agentScopeKey = buildFsmDraftScopeKey(REPO, "agent", agentId);
+    const repoPipeline = boundPipeline();
+    repoPipeline.states[0].label = "Repo server";
+    const agentPipeline = boundPipeline();
+    agentPipeline.states[0].label = "Agent server";
+    const overrideFor = (pipeline: PipelineConfigFull) =>
+      buildOverridePayload(pipeline, { fsm_edge_bindings: SERVER_BINDINGS });
+
+    vi.spyOn(api, "getEffectivePipeline").mockImplementation(async (_repo, forAgentId) => ({
+      pipeline: forAgentId ? agentPipeline : repoPipeline,
+      layers: { default: true, repo: true, agent: false },
+    }));
+    vi.spyOn(api, "getRepoPipeline").mockResolvedValue({ repo: REPO, pipeline_config: overrideFor(repoPipeline) });
+    vi.spyOn(api, "getAgentPipeline").mockResolvedValue({ agent_id: agentId, pipeline_config: overrideFor(agentPipeline) });
+    vi.spyOn(api, "getPipelineStages").mockResolvedValue([]);
+    vi.spyOn(api, "setRepoPipeline").mockResolvedValue({ ok: true });
+
+    await mountEditor(agentId);
+    expect(view.current?.ctx.pipelineDraft?.states[0].label).toBe("Repo server");
+
+    await act(async () => {
+      view.current?.actions.updateState("ready", { label: "Repo edit" });
+    });
+
+    // The repo PUT succeeds, but hold its follow-up GET open.
+    let releaseRepoGet = () => {};
+    const repoGetGate = new Promise<void>((resolve) => {
+      releaseRepoGet = resolve;
+    });
+    vi.mocked(api.getRepoPipeline).mockImplementationOnce(async () => {
+      await repoGetGate;
+      return { repo: REPO, pipeline_config: overrideFor(repoPipeline) };
+    });
+
+    let savePromise: Promise<void> | undefined;
+    await act(async () => {
+      savePromise = view.current?.actions.handleSave();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(api.setRepoPipeline).toHaveBeenCalledTimes(1);
+
+    // The level switch is not disabled while saving, so the agent scope loads first.
+    await act(async () => {
+      view.current?.actions.setLevel("agent");
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(view.current?.ctx.loading).toBe(false);
+    expect(view.current?.ctx.pipelineDraft?.states[0].label).toBe("Agent server");
+
+    await act(async () => {
+      releaseRepoGet();
+      await savePromise;
+    });
+
+    // The repo response neither reaches the agent screen nor claims it.
+    expect(view.current?.ctx.pipelineDraft?.states[0].label).toBe("Agent server");
+    expect(persistedDraftEntry(agentScopeKey)).toBeNull();
+
+    await act(async () => {
+      view.current?.actions.updateState("ready", { label: "Agent edit" });
+    });
+
+    expect(persistedDraftEntry(agentScopeKey)?.pipeline.states[0].label).toBe("Agent edit");
+  });
 });

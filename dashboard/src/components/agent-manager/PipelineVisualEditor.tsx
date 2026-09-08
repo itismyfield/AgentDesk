@@ -109,6 +109,11 @@ export default function PipelineVisualEditor({
     [repo, selectedAgentId],
   );
   const fsmDraftScopeKey = useMemo(() => buildScopeKey(level), [buildScopeKey, level]);
+  // #5743 r3: the scope key and the generation of the newest editor-state request.
+  // The loading effect cancels its own stale responses through effect cleanup;
+  // a mutation refresh has no cleanup, so it proves currency against these.
+  const activeScopeKeyRef = useRef<string | null>(null);
+  const editorRequestGenerationRef = useRef(0);
 
   useEffect(() => {
     persistedFsmDraftStoreRef.current = persistedFsmDraftStore;
@@ -262,6 +267,8 @@ export default function PipelineVisualEditor({
   }, [repo, selectedAgentId, setPersistedPipelineSnapshotStore]);
 
   useEffect(() => {
+    activeScopeKeyRef.current = fsmDraftScopeKey;
+    editorRequestGenerationRef.current += 1;
     if (!repo) {
       resetEditorState();
       setLoading(false);
@@ -503,10 +510,24 @@ export default function PipelineVisualEditor({
   ]);
 
   async function refreshAfterMutation(nextLevel: EditLevel = level) {
-    const snapshot = await fetchSnapshot(nextLevel);
     const nextScopeKey = buildScopeKey(nextLevel);
+    const generation = ++editorRequestGenerationRef.current;
+    const snapshot = await fetchSnapshot(nextLevel);
+    // The snapshot belongs to `nextScopeKey`, so caching it stays correct even
+    // when the editor has moved on.
     if (nextScopeKey) {
       persistSnapshot(nextScopeKey, nextLevel, snapshot);
+    }
+    // #5743 r3: applying a response for a scope the editor already left would both
+    // show that scope's snapshot on the current screen and pin `appliedScopeKey`
+    // to it, which blocks the persistence effect for the scope actually on screen
+    // until a reload. Discard it the way the loading effect discards a cancelled
+    // response.
+    if (
+      generation !== editorRequestGenerationRef.current
+      || nextScopeKey !== activeScopeKeyRef.current
+    ) {
+      return;
     }
     applySnapshot(snapshot, "fetch", null, nextScopeKey);
   }
