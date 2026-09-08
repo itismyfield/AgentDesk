@@ -46,7 +46,8 @@ use status_panel::{StatusPanelState, render_status_panel};
 mod probe_fixtures_tests;
 #[cfg(test)]
 pub(in crate::services::discord) use probe_fixtures_tests::{
-    multiline_panels_for_probe_tests, rendered_answers_for_probe_tests, rendered_panels_for_probe_tests,
+    multiline_panels_for_probe_tests, rendered_answers_for_probe_tests,
+    rendered_panels_for_probe_tests,
 };
 pub(in crate::services::discord) use task_panel::TaskPanelInfo;
 use task_panel::{TaskPanelSnapshot, clean_task_panel_value};
