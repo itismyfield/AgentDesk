@@ -274,6 +274,10 @@ fn compose_merged_footer_status_block(indicator: &str, panel_text: &str) -> Opti
 }
 
 fn merged_footer_header_line(indicator: &str, header_line: &str) -> Option<String> {
+    // A detached live panel is reclaimable; its header reused on an answer is not.
+    let header_line = header_line
+        .strip_suffix(super::formatting::PLACEHOLDER_PROBE_MARKER)
+        .unwrap_or(header_line);
     let header = strip_panel_header_status_marker(header_line)?;
     if header.is_empty() {
         None
@@ -1084,6 +1088,23 @@ mod tests {
         assert!(!footer_header(&block).contains('🟢'));
         assert!(!block.contains("계속 처리 중"));
         assert!(block.contains("\n\n-# Subagents\n-# └ review inspect"));
+    }
+
+    #[test]
+    fn footer_strips_only_exact_panel_header_marker_suffix() {
+        let marker = super::super::formatting::PLACEHOLDER_PROBE_MARKER;
+        let suffix =
+            super::compose_footer_status_block("⠸", &format!("-# 🔧 activity{marker}\ntime"));
+        assert!(!suffix.contains(marker));
+        let embedded = super::compose_footer_status_block(
+            "⠸",
+            &format!("-# 🔧 activity{marker} kept\nbody{marker}"),
+        );
+        assert_eq!(
+            embedded.matches(marker).count(),
+            2,
+            "only the header suffix belongs to this boundary"
+        );
     }
 
     #[test]

@@ -586,6 +586,9 @@ pub(super) fn render_status_panel(
     // activity line (or `None` for headless/synthetic/id-0 turns).
     turn_trigger_line: Option<String>,
 ) -> String {
+    // Eligibility follows the snapshot, before Codex's display-only projection:
+    // a completed turn can retain a stale Task and display a Running header.
+    let mark_placeholder = !snapshot.status.is_terminal();
     let codex_subagent_projection = matches!(provider, ProviderKind::Codex)
         && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. });
     let codex_task_projection = matches!(provider, ProviderKind::Codex)
@@ -608,8 +611,11 @@ pub(super) fn render_status_panel(
     let visible_last_tool = (!codex_task_projection)
         .then_some(snapshot.last_tool.as_ref())
         .flatten();
-    let activity_line =
+    let mut activity_line =
         super::freshness::render_activity_line_with_last_tool(&header_status, visible_last_tool);
+    if mark_placeholder {
+        activity_line.push_str(super::super::formatting::PLACEHOLDER_PROBE_MARKER);
+    }
     let time_lines = time_line.lines().collect::<Vec<_>>();
     let mut header_lines = std::iter::once(activity_line.as_str())
         .chain(time_lines)

@@ -2722,6 +2722,23 @@ fn orphan_turn_placeholder_reclaim_decision() {
 }
 
 #[test]
+fn orphan_reclaim_preserves_actual_panel_footer_answers() {
+    for answer in
+        crate::services::discord::placeholder_live_events::rendered_answers_for_probe_tests()
+    {
+        assert!(
+            !watcher_should_reclaim_orphan_turn_placeholder(
+                true,
+                Some(MessageId::new(5305)),
+                false,
+                &answer
+            ),
+            "real answer must not authorize placeholder deletion: {answer:?}"
+        );
+    }
+}
+
+#[test]
 fn no_inflight_terminal_response_drops_restored_response_seed() {
     let restored = "previous turn";
     let mut full_response = "previous turnfresh turn".to_string();

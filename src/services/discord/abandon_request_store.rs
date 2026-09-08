@@ -600,6 +600,9 @@ pub(in crate::services::discord) async fn drain(
 }
 
 #[cfg(test)]
+mod probe_contract_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
