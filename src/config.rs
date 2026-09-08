@@ -1891,11 +1891,8 @@ pub struct RuntimeSettingsConfig {
     /// Raw numeric values are preserved here; zero clamps to the minimum, not off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_window_claude: Option<u64>,
-    /// Minimum token occupancy at which context compaction may be requested.
-    ///
-    /// Unset uses the live consumer default (currently 300_000 tokens for
-    /// Claude). This is deliberately provider-neutral because other providers
-    /// can share the lower-bound policy without inheriting Claude's transport.
+    /// Provider-neutral minimum token occupancy for requesting context compaction.
+    /// Unset uses the live consumer default (currently 300_000 tokens for Claude).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_lower_bound_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1940,16 +1937,13 @@ pub struct RuntimeSettingsConfig {
     /// Read live for each turn through `config_live_reload::current()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_context_recent_pairs: Option<u64>,
-    /// Optional override (seconds) for the Follow-up TUI prompt-readiness wait.
-    /// When unset (or `0`), both the Claude and Codex TUI follow-up waits keep
-    /// the compiled-in 45s default (`FOLLOWUP_PROMPT_READY_TIMEOUT`). Read live
-    /// via `config_live_reload::current()` so an `agentdesk.yaml` edit applies
-    /// on the next readiness wait without a restart.
+    /// Follow-up TUI readiness timeout in seconds; unset or zero uses the Claude
+    /// and Codex default of 45s (`FOLLOWUP_PROMPT_READY_TIMEOUT`).
+    /// Read live via `config_live_reload::current()` each wait; no restart needed.
     ///
-    /// Note: the Claude follow-up wait is still bounded by an independent 900s
-    /// busy-turn ceiling (`PROMPT_READY_ACTIVE_TURN_WAIT_CEILING`), but the Codex
-    /// follow-up wait has no such ceiling, so a very large value lets a long
-    /// prior Codex turn block the follow-up wait for the full configured duration.
+    /// Claude's wait also has an independent 900s busy-turn ceiling
+    /// (`PROMPT_READY_ACTIVE_TURN_WAIT_CEILING`). Codex has no such ceiling:
+    /// a long prior turn can block its follow-up for the full configured duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub followup_prompt_ready_timeout_secs: Option<u64>,
     /// Master rollback flag for the read-only DB active-session mismatch audit
