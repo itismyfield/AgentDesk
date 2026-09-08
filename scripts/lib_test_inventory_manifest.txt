@@ -4612,6 +4612,8 @@ services::discord::router::message_handler::voice_announcement_scope::tests::res
 services::discord::router::message_handler::voice_announcement_scope::tests::stored_announcement_without_metadata_is_dropped
 services::discord::router::message_handler::watchdog::cold_start_retry_tests::cold_start_retry_does_not_repause_existing_live_handoff_watcher
 services::discord::router::message_handler::watchdog::cold_start_retry_tests::deferred_paused_watcher_attach_retries_when_tmux_goes_live
+services::discord::router::message_handler::watchdog::cold_start_retry_tests::headless_retry_after_precheck_preserves_handoff_incarnation
+services::discord::router::message_handler::watchdog::cold_start_retry_tests::message_retry_after_precheck_preserves_handoff_incarnation
 services::discord::router::message_handler::watchdog::relay_state_contract_refs::contract_symbols_exist
 services::discord::router::message_handler::watchdog::timeout_notice_tests::headless_watchdog_timeout_notice_visibility_requires_visible_surface
 services::discord::router::message_handler::watchdog::timeout_notice_tests::watchdog_alert_messages_carry_non_turn_provenance
