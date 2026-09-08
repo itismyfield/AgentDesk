@@ -409,15 +409,16 @@ fn write_launch_script(
     // revisited. Track upstream PY6 changes and reflect them in this
     // comment + the unit tests.
     let mut env_exports = String::new();
-    // Compact-window isolation fence (#4591 revision): an interactive TUI can
-    // change model after launch, so a launch-model-derived absolute window
-    // would go stale. This launch therefore never exports an absolute window —
-    // it only unsets any value inherited from dcserver or the operator shell,
-    // leaving AgentDesk's exact-token `/compact` steering as the sole compact
-    // authority and Claude Code's own defaults underneath it.
+    // #5172 R1: snapshot the YAML provider setting for each new launch. Its
+    // absolute value is independent of the launch model and later model changes.
+    let runtime = crate::config::load_graceful().runtime;
+    let compact_window =
+        crate::services::claude_compact_context::tui_launch_auto_compact_window_from_setting(
+            runtime.context_compact_window_claude,
+        );
     crate::services::claude_compact_context::append_auto_compact_window_shell_env(
         &mut env_exports,
-        None,
+        Some(compact_window),
     );
     let mut escaped_claude_bin = String::new();
     config
@@ -439,11 +440,23 @@ fn write_launch_script(
 }
 
 #[cfg(test)]
+#[path = "session/auto_compact_launch_tests.rs"]
+mod auto_compact_launch_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     fn context_state_guard() -> std::sync::MutexGuard<'static, ()> {
         crate::services::claude_compact_context::state_test_guard()
+    }
+
+    fn pin_provider_config_after_env_lock(root: &Path) -> crate::config::TestEnvVarGuard {
+        let path = super::auto_compact_launch_tests::write_provider_setting(root, None);
+        crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+            "AGENTDESK_CONFIG",
+            &path,
+        )
     }
 
     fn sample_config() -> ClaudeTuiLaunchConfig {
@@ -507,8 +520,10 @@ mod tests {
 
     #[test]
     fn prepare_launch_writes_settings_and_script() {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
+        let _config_path = pin_provider_config_after_env_lock(dir.path());
         let config = sample_config();
         let hook_settings_path = dir.path().join("settings.json");
         let launch_script_path = dir.path().join("launch.sh");
@@ -565,8 +580,10 @@ mod tests {
 
     #[test]
     fn launch_script_fences_the_absolute_compact_window() {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
+        let _config_path = pin_provider_config_after_env_lock(dir.path());
         let mut config = sample_config();
         config.model = Some("sonnet".to_string());
         let launch_script_path = dir.path().join("launch.sh");
@@ -579,23 +596,21 @@ mod tests {
         .unwrap();
 
         let script = std::fs::read_to_string(&launch_script_path).unwrap();
-        assert!(script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
-        assert!(
-            !script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="),
-            "a TUI launch must leave the exact-token steering path as the sole compact authority"
-        );
+        super::auto_compact_launch_tests::assert_window(&script, 700_000);
         assert!(!script.contains("CLAUDE_CODE_EXTENDED_CACHE_TTL"));
     }
 
     #[test]
     fn launch_script_model_switch_cannot_leave_a_stale_auto_compact_window() {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
+        let _config_path = pin_provider_config_after_env_lock(dir.path());
         let mut config = sample_config();
         let launch_script_path = dir.path().join("launch.sh");
 
-        // A TUI launch never derives an absolute window from its launch model,
-        // so the script exports only the isolation fence.
+        // Every TUI launch fences inherited values and exports the absolute
+        // provider setting independently of its launch model.
         write_launch_script(
             &launch_script_path,
             &config,
@@ -604,12 +619,9 @@ mod tests {
         .unwrap();
         let sonnet_script = std::fs::read_to_string(&launch_script_path).unwrap();
         assert!(sonnet_script.contains("'--model' 'sonnet'"));
-        assert!(sonnet_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
-        assert!(!sonnet_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
+        super::auto_compact_launch_tests::assert_window(&sonnet_script, 700_000);
 
-        // `/model` can change the live TUI's model after this script has
-        // launched, so a different launch selector must not start exporting an
-        // absolute window that the session's current model could invalidate.
+        // A different selector keeps the same model-independent absolute value.
         config.model = Some("opus".to_string());
         write_launch_script(
             &launch_script_path,
@@ -620,8 +632,7 @@ mod tests {
         let opus_script = std::fs::read_to_string(&launch_script_path).unwrap();
         assert!(opus_script.contains("'--model' 'opus'"));
         assert!(!opus_script.contains("'--model' 'sonnet'"));
-        assert!(opus_script.contains("unset CLAUDE_CODE_AUTO_COMPACT_WINDOW\n"));
-        assert!(!opus_script.contains("export CLAUDE_CODE_AUTO_COMPACT_WINDOW="));
+        super::auto_compact_launch_tests::assert_window(&opus_script, 700_000);
         assert!(!opus_script.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"));
     }
 
@@ -658,8 +669,10 @@ mod tests {
 
     #[test]
     fn continuation_cutover_rewrites_both_artifacts_and_is_idempotent() {
+        let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
+        let _config_path = pin_provider_config_after_env_lock(dir.path());
         let old_session_id = uuid::Uuid::new_v4().to_string();
         let new_session_id = uuid::Uuid::new_v4().to_string();
         let files = ClaudeTuiSessionFiles {
@@ -776,9 +789,11 @@ mod tests {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        let _context_guard = context_state_guard();
         let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
         let previous_host = std::env::var_os("HOSTNAME");
         let root = tempfile::tempdir().unwrap();
+        let _config_path = pin_provider_config_after_env_lock(root.path());
         unsafe {
             std::env::set_var("AGENTDESK_ROOT_DIR", root.path());
             std::env::set_var("HOSTNAME", "issue-2143-host");
