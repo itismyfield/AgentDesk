@@ -1061,8 +1061,12 @@ time for diagnostics; neither is a stored approval value.
     helper additionally fires the Claude-only AgentDesk-side `/compact` injection
     when exact token usage crosses the model-aware threshold formed from
     `context_compact_percent_claude` and
-    `context_compact_lower_bound_tokens` (default 300,000). Claude launch scripts
-    use `CLAUDE_CODE_AUTO_COMPACT_WINDOW` only when that absolute window is valid;
+    `context_compact_lower_bound_tokens` (default 300,000). New Claude TUI launch
+    scripts always unset then export `CLAUDE_CODE_AUTO_COMPACT_WINDOW` from the
+    YAML-only `runtime.context_compact_window_claude` setting (default 700,000,
+    clamped at launch to 100,000..=1,000,000), independently of model. Existing
+    panes are unchanged; AgentDesk-side automatic injection remains until native
+    compaction and continuation are demonstrated (#5172 R2);
     see `src/services/claude_compact_trigger.rs` and
     `src/services/claude_compact_context.rs`.
     +19 from #3296: the aborted-anchor reconcile chokepoint — on a body-visible
