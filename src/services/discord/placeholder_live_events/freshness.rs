@@ -30,6 +30,48 @@ use poise::serenity_prelude::ChannelId;
 use super::common::{escape_status_panel_markdown, tool_prefix, truncate_chars};
 use super::status_panel::{CompletedKind, DerivedStatus, LastToolCall};
 
+pub(super) fn render_panel_activity_line(
+    snapshot: &super::status_panel::StatusPanelState,
+    provider: &crate::services::provider::ProviderKind,
+) -> String {
+    // Eligibility follows the snapshot, before Codex's display-only projection:
+    // a completed turn can retain a stale Task and display a Running header.
+    let mark_placeholder = !snapshot.status.is_terminal();
+    let codex_subagent_projection =
+        matches!(provider, crate::services::provider::ProviderKind::Codex)
+            && matches!(snapshot.status, DerivedStatus::SubagentRunning { .. });
+    let codex_task_projection = matches!(provider, crate::services::provider::ProviderKind::Codex)
+        && snapshot
+            .last_tool
+            .as_ref()
+            .is_some_and(|tool| super::status_events::is_task_tool(&tool.name));
+    let header_status = if codex_subagent_projection || codex_task_projection {
+        DerivedStatus::Running
+    } else {
+        snapshot.status.clone()
+    };
+    // #4601: the header opens with the derived-status ACTIVITY label, followed by
+    // the request anchor when present, then the start/update TIME fields. Keep the
+    // entire header in one section so each field occupies the immediately following
+    // physical line and section-wise truncation preserves the header atomically.
+    // #4367: Codex subagent evidence stays hidden after launch acknowledgement,
+    // terminal completion, and later turns. Status alone cannot provide the gate
+    // because `last_tool` persists for the provider session.
+    let visible_last_tool = (!codex_task_projection)
+        .then_some(snapshot.last_tool.as_ref())
+        .flatten();
+    let mut activity_line = render_activity_line_with_last_tool(&header_status, visible_last_tool);
+    if mark_placeholder {
+        // Insert before LF/CRLF so footer composition can remove this header suffix.
+        let first_line_end = activity_line.lines().next().unwrap_or("").len();
+        activity_line.insert_str(
+            first_line_end,
+            super::super::formatting::PLACEHOLDER_PROBE_MARKER,
+        );
+    }
+    activity_line
+}
+
 impl super::PlaceholderLiveEvents {
     /// #3983: builds the panel's time line from the channel's STABLE last-activity
     /// unix stamp (set once when the content arrived, never recomputed at render

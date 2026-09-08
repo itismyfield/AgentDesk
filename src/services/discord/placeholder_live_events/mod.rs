@@ -43,13 +43,12 @@ use status_panel::{CompletedKind, DerivedStatus};
 use status_panel::{StatusPanelState, render_status_panel};
 
 #[cfg(test)]
-pub(in crate::services::discord) fn rendered_activity_lines_for_panel_shape_tests()
--> Vec<(String, bool)> {
-    DerivedStatus::panel_shape_test_variants()
-        .into_iter()
-        .map(|(status, terminal)| (freshness::render_activity_line(&status), terminal))
-        .collect()
-}
+mod probe_fixtures_tests;
+#[cfg(test)]
+pub(in crate::services::discord) use probe_fixtures_tests::{
+    multiline_panels_for_probe_tests, rendered_answers_for_probe_tests,
+    rendered_panels_for_probe_tests,
+};
 pub(in crate::services::discord) use task_panel::TaskPanelInfo;
 use task_panel::{TaskPanelSnapshot, clean_task_panel_value};
 
