@@ -18,6 +18,7 @@ the fixture itself rather than reaching the real file.
 from __future__ import annotations
 
 import fcntl
+import contextlib
 import functools
 import os
 import signal
@@ -348,7 +349,48 @@ class SerializationTests(TokenTestCase):
 
 
 class ReentrantContractTests(TokenTestCase):
-    """Pending #5663 requirement; deliberately RED on the non-reentrant wrapper."""
+    """One-hop opt-in, using the real CLI with only its token path isolated."""
+
+    def isolated_cli(self, entered: Path | None = None) -> Path:
+        source = (SCRIPTS / "build_token.py").read_text()
+        constant = f'CANONICAL_TOKEN_PATH = "{CANONICAL}"'
+        self.assertEqual(source.count(constant), 1)
+        replacement = f"CANONICAL_TOKEN_PATH = {str(self.token)!r}"
+        sealed = source.replace(constant, replacement)
+        self.assertEqual(sealed.replace(replacement, constant), source)
+        # Functions remain byte-identical; only the constant and entry seal differ.
+        seal = """
+_open_before_seal = os.open
+def _sealed_open(path, *args, **kwargs):
+    if "adk-build-token.lock" in str(path):
+        raise AssertionError("fixture breach: canonical token open")
+    return _open_before_seal(path, *args, **kwargs)
+os.open = _sealed_open
+"""
+        if entered is not None:
+            seal += (f"if LEASE_ENV in os.environ:\n    with open({str(entered)!r}, 'w') as out:\n"
+                     "        out.write('%d %d' % (os.getpid(), os.getppid()))\n")
+        wrapper = self.tmp / "build_token.py"
+        wrapper.write_text(sealed.replace('if __name__ == "__main__":', seal + '\nif __name__ == "__main__":'))
+        return wrapper
+
+    @contextlib.contextmanager
+    def offer(self, holder: int):
+        with bt.delegated_spawn(holder, [sys.executable, str(SCRIPTS / "build_token.py")], {}) as offered:
+            yield offered
+
+    def receive(self, raw: str, command: list[str] | None = None, *, delegate: bool = False) -> int:
+        real_open = os.open
+        unexpected = self.tmp / "unexpected.command"
+        def sealed_open(path, *args, **kwargs):
+            self.assertNotIn("adk-build-token.lock", str(path), "fixture breach")
+            return real_open(path, *args, **kwargs)
+        with mock.patch.dict(os.environ, {bt.LEASE_ENV: raw}), mock.patch.object(os, "open", sealed_open):
+            rc = bt.run(command or [sys.executable, "-c", f"open({str(unexpected)!r}, 'w').write('ran')"],
+                        env={bt.WAIT_TIMEOUT_ENV: "1"}, path=str(self.token), delegate_lease=delegate)
+        if command is None:
+            self.assertFalse(unexpected.exists(), "rejected lease ran the protected command")
+        return rc
 
     def test_nested_cli_completes_under_outer_lease_without_self_deadlock(self) -> None:
         entered, completed = self.tmp / "inner.entered", self.tmp / "command.completed"
@@ -369,20 +411,19 @@ try:
 finally:
     os.close(fd)
 """
-        protected = [sys.executable, "-c", sentinel, str(self.token), str(completed)]
-        # Both subprocesses execute the real main/parse/run/hold_token code.
-        # The existing seal only binds run(path=temporary_inode) and refuses a
-        # canonical-token open. No inherited-FD option or bypass flag is invented.
-        inner_body = (
-            f"with open({str(entered)!r}, 'w') as entered:\n"
-            "    entered.write('%d %d' % (os.getpid(), os.getppid()))\n"
-            f"raise SystemExit(bt.main(['build_token.py', '--', *{protected!r}]))\n"
+        scan = self.tmp / "leaf.fds"
+        leaf = (_CHILD_FD_SCAN + f"\nassert {bt.LEASE_ENV!r} not in os.environ\n"
+                f"sys.argv = [sys.argv[0], sys.argv[2], {str(completed)!r}]\n" + sentinel)
+        protected = [sys.executable, "-c", leaf, str(scan), str(self.token)]
+        wrapper = self.isolated_cli(entered)
+        inner = [sys.executable, str(wrapper), "--", *protected]
+        outer = subprocess.Popen(
+            [sys.executable, str(wrapper), "--delegate-lease", "--", *inner],
+            env={**os.environ, bt.WAIT_TIMEOUT_ENV: "1", bt.DIAG_FD_ENV: ""},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
-        inner = [sys.executable, "-c", _SEAL + inner_body, str(self.token)]
-        outer = self.driver(
-            f"raise SystemExit(bt.main(['build_token.py', '--', *{inner!r}]))",
-            env={bt.WAIT_TIMEOUT_ENV: "1", bt.DIAG_FD_ENV: ""},
-        )
+        self.addCleanup(outer.stdout.close)
+        self.addCleanup(outer.stderr.close)
         self.addCleanup(outer.wait, timeout=10)
         self.addCleanup(outer.terminate)
         _, err = outer.communicate(timeout=15)
@@ -400,6 +441,103 @@ finally:
         )
         self.assertTrue(completed.exists(), "nested protected command was never run")
         self.assertEqual(completed.read_text(), "ran\n", "protected command must run once")
+        self.assertEqual(scan.read_text(), "[]", "delegated leaf inherited a lease FD")
+
+    def test_malformed_carriers_and_non_wrapper_delegation_are_refused(self) -> None:
+        for raw in ("", "1", "1:1:3:11:0:0:" + "a" * 32,
+                    "1:1:1000000:1000001:0:0:" + "a" * 32):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.receive(raw), bt.EXIT_TOKEN_UNUSABLE)
+        marker = self.tmp / "shell.ran"
+        self.assertEqual(bt.run(["/bin/sh", "-c", f"touch {marker}"], path=str(self.token),
+                                delegate_lease=True), bt.EXIT_TOKEN_UNUSABLE)
+        self.assertFalse(marker.exists())
+
+    def test_foreign_open_and_unlocked_leases_reject_genuine_tickets(self) -> None:
+        for held in (True, False):
+            with self.subTest(held=held):
+                issuer = self.open_token()
+                if held:
+                    fcntl.flock(issuer, fcntl.LOCK_EX)
+                with self.offer(issuer) as (env, _):
+                    parts = env[bt.LEASE_ENV].split(":")
+                    foreign = fcntl.fcntl(self.open_token(), fcntl.F_DUPFD_CLOEXEC, 10)
+                    ticket = fcntl.fcntl(int(parts[3]), fcntl.F_DUPFD_CLOEXEC, 10)
+                    parts[2:4] = [str(foreign), str(ticket)]
+                    self.assertEqual(self.receive(":".join(parts)), bt.EXIT_TOKEN_UNUSABLE)
+                fcntl.flock(issuer, fcntl.LOCK_UN)
+
+    def test_ticket_nonce_generation_and_identity_rejections_close_received_fds(self) -> None:
+        with bt.hold_token(str(self.token), {}) as issuer:
+            for field, value in ((1, "2"), (4, "-1"), (6, "b" * 32), (6, "")):
+                with self.subTest(field=field), self.offer(issuer) as (env, _):
+                    parts = env[bt.LEASE_ENV].split(":")
+                    owned = [fcntl.fcntl(int(parts[i]), fcntl.F_DUPFD_CLOEXEC, 10) for i in (2, 3)]
+                    parts[2:4] = list(map(str, owned))
+                    parts[field] = value
+                    self.assertEqual(self.receive(":".join(parts)), bt.EXIT_TOKEN_UNUSABLE)
+                    for fd in owned:
+                        with self.assertRaises(OSError):
+                            os.fstat(fd)
+
+    def test_only_one_sibling_consumes_the_ticket_and_outer_lease_survives(self) -> None:
+        wrapper, marker = self.isolated_cli(), self.tmp / "sibling.ran"
+        leaf = [sys.executable, "-c", f"open({str(marker)!r}, 'a').write('ran\\n')"]
+        with bt.hold_token(str(self.token), {}) as issuer, self.offer(issuer) as (env, fds):
+            siblings = [subprocess.Popen([sys.executable, str(wrapper), "--", *leaf],
+                        env={**os.environ, **env, bt.WAIT_TIMEOUT_ENV: "1"}, pass_fds=fds,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(2)]
+            for child in siblings:
+                self.addCleanup(child.wait, timeout=10)
+                self.addCleanup(child.terminate)
+                self.addCleanup(child.stdout.close)
+                self.addCleanup(child.stderr.close)
+                child.communicate(timeout=15)
+            self.assertEqual(sorted(child.returncode for child in siblings), [0, 69])
+            self.assertEqual(marker.read_text(), "ran\n")
+            probe = self.open_token()
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_process_carrier_is_used_with_explicit_child_env_and_leaf_is_stripped(self) -> None:
+        out = self.tmp / "leaf.env"
+        command = [sys.executable, "-c", f"import os; open({str(out)!r}, 'w').write(str({bt.LEASE_ENV!r} in os.environ))"]
+        with bt.hold_token(str(self.token), {}) as issuer, self.offer(issuer) as (env, _):
+            parts = env[bt.LEASE_ENV].split(":")
+            parts[2:4] = [str(fcntl.fcntl(int(parts[i]), fcntl.F_DUPFD_CLOEXEC, 10)) for i in (2, 3)]
+            self.assertEqual(self.receive(":".join(parts), command), 0)
+            self.assertEqual(out.read_text(), "False")
+
+    def test_inherited_receiver_cannot_issue_a_second_generation(self) -> None:
+        with bt.hold_token(str(self.token), {}) as issuer, self.offer(issuer) as (env, _):
+            parts = env[bt.LEASE_ENV].split(":")
+            owned = [fcntl.fcntl(int(parts[i]), fcntl.F_DUPFD_CLOEXEC, 10) for i in (2, 3)]
+            parts[2:4] = list(map(str, owned))
+            self.assertEqual(self.receive(":".join(parts), delegate=True), 69)
+            for fd in owned:
+                with self.assertRaises(OSError):
+                    os.fstat(fd)
+
+    def test_option_boundary_windows_refusal_and_spawn_failure_cleanup(self) -> None:
+        with mock.patch.object(bt, "run", return_value=7) as run:
+            self.assertEqual(bt.main(["build_token.py", "--", "--delegate-lease", "arg"]), 7)
+            self.assertEqual(run.call_args.args[0], ["--delegate-lease", "arg"])
+            self.assertFalse(run.call_args.kwargs["delegate_lease"])
+        with mock.patch.object(sys, "platform", "win32"):
+            self.assertEqual(bt.run(["unused"], delegate_lease=True), 69)
+            with mock.patch.dict(os.environ, {bt.LEASE_ENV: "stale"}):
+                self.assertEqual(bt.run(["unused"]), 69)
+        with bt.hold_token(str(self.token), {}) as issuer:
+            passed = []
+            def fail_spawn(*args, **kwargs):
+                passed.extend(kwargs["pass_fds"])
+                raise OSError("spawn refused")
+            with mock.patch.object(subprocess, "Popen", side_effect=fail_spawn), self.assertRaises(bt.BuildTokenError):
+                bt.run_protected([sys.executable, bt.__file__], {}, bt._Supervisor(), issuer)
+            self.assertEqual(len(passed), 2)
+            for fd in passed:
+                with self.assertRaises(OSError):
+                    os.fstat(fd)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "SIGEMT is Darwin-specific here")
