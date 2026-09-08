@@ -165,11 +165,14 @@ mod tests {
             assert_eq!(backoff.record(limited(None), at), secs(expected));
             assert!(!backoff.should_attempt(at + secs(expected - 1)));
             assert!(backoff.should_attempt(at + secs(expected)));
+            assert_eq!(backoff.remaining(at), secs(expected));
+            backoff.release_hold(); // Pressure clears hold, not the saturated ladder.
+            assert!(backoff.should_attempt(at));
             at += secs(expected);
         }
         assert_eq!(backoff.consecutive_rate_limits(), 6);
-        assert_eq!(backoff.remaining(at - secs(1800)), secs(1800));
-        assert_eq!(backoff.remaining(at - secs(800)), secs(800));
+        assert_eq!(backoff.record(limited(None), at), secs(1800)); // Calm again.
+        assert!(!backoff.should_attempt(at + secs(1799)));
     }
 
     #[test]

@@ -10,7 +10,6 @@ pub(crate) mod maintenance;
 pub(crate) mod multinode_regression;
 mod outbox_actionable_delivery;
 mod outbox_delivery_alert;
-mod rate_limit_backoff;
 mod rate_limit_sync;
 pub(crate) mod resource_locks;
 pub mod routes;

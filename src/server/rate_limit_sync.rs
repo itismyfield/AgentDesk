@@ -1,6 +1,6 @@
 //! Periodic provider rate-limit sync (`rate_limit_sync_loop`) and the Claude leg's fetch/backoff
 //! wiring. Slice A of #5727 moved these bodies here verbatim; this slice adds the 429 backoff
-//! ([`super::rate_limit_backoff`]) and the pressure floor that keeps the base cadence while the
+//! ([`self::backoff`]) and the pressure floor that keeps the base cadence while the
 //! dispatch gate still defers on Claude's cached telemetry.
 
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use sqlx::PgPool;
 
 use crate::services::dispatch_gate;
 
-use super::rate_limit_backoff;
+pub(crate) mod backoff;
 use super::{
     CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT, GEMINI_CREDS_MISSING_WARNED,
     claude_rate_limit_refresh_lock, fetch_codex_oauth_usage, fetch_gemini_rate_limits,
@@ -23,8 +23,8 @@ type Buckets = Vec<serde_json::Value>;
 /// Classifies one Claude sync result for the backoff schedule.
 fn classify_claude_sync_result(
     result: &Result<usize, anyhow::Error>,
-) -> rate_limit_backoff::ClaudeSyncOutcome {
-    use rate_limit_backoff::{ClaudeSyncOutcome, ClaudeUsageRateLimited};
+) -> backoff::ClaudeSyncOutcome {
+    use backoff::{ClaudeSyncOutcome, ClaudeUsageRateLimited};
     match result {
         Ok(_) => ClaudeSyncOutcome::Success,
         Err(error) => match error.downcast_ref::<ClaudeUsageRateLimited>() {
@@ -36,18 +36,27 @@ fn classify_claude_sync_result(
     }
 }
 
-/// The danger threshold the loop feeds the gate predicate each tick.
-///
-/// Named so the wiring itself is pinnable: the loop must resolve the gate's *effective* threshold
-/// from the persisted runtime-config (`dispatch_gate::effective_danger_pct_pg`), not the YAML
-/// accessor `dispatch_gate::danger_pct()`. Reverting this body to the latter is the r5 P1-1
-/// regression, and `unreadable_runtime_config_resolves_to_no_threshold` goes red on it.
+/// Resolves the same persisted threshold as activation; SQL failure yields pressure.
 async fn claude_effective_danger_pct(pg_pool: &PgPool) -> Option<u64> {
     dispatch_gate::effective_danger_pct_pg(pg_pool).await
 }
 
+/// One tick's resolver → pressure → hold decision, shared by the loop and its regression test.
+async fn claude_tick_should_attempt<F: std::future::Future<Output = Option<u64>>>(
+    backoff: &mut backoff::ClaudeSyncBackoff,
+    now: std::time::Instant,
+    resolve: impl FnOnce() -> F,
+    pressure: impl FnOnce(Option<u64>) -> bool,
+) -> bool {
+    let danger = resolve().await;
+    if pressure(danger) {
+        backoff.release_hold();
+    }
+    backoff.should_attempt(now)
+}
+
 pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
-    use rate_limit_backoff::{
+    use backoff::{
         ClaudeSyncBackoff, ClaudeSyncOutcome, RATE_LIMIT_SYNC_BASE_INTERVAL,
         RATE_LIMIT_SYNC_MAX_BACKOFF,
     };
@@ -70,11 +79,14 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
         // — nothing bounds one iteration, so no longer hold is *provably* short enough to
         // re-observe that pressure before the stale window expires, and base is the pre-PR floor.
         let now_unix = chrono::Utc::now().timestamp();
-        let danger = claude_effective_danger_pct(pg_pool.as_ref()).await;
-        if dispatch_gate::is_deferring("claude", danger, now_unix) {
-            claude_backoff.release_hold();
-        }
-        if claude_backoff.should_attempt(now) {
+        if claude_tick_should_attempt(
+            &mut claude_backoff,
+            now,
+            || claude_effective_danger_pct(pg_pool.as_ref()),
+            |danger| dispatch_gate::is_deferring("claude", danger, now_unix),
+        )
+        .await
+        {
             let claude_result =
                 sync_claude_rate_limit_cache_once_serialized(pg_pool.as_ref()).await;
             let outcome = classify_claude_sync_result(&claude_result);
@@ -212,7 +224,7 @@ async fn sync_claude_rate_limit_cache_once(pg_pool: &PgPool) -> Result<usize, an
             // Telemetry is independent of retry scheduling: a 429 carrying limit headers is
             // cached anyway, so the gate sees the exhaustion. A 429 with no buckets (OAuth)
             // writes nothing.
-            match e.downcast_ref::<rate_limit_backoff::ClaudeUsageRateLimited>() {
+            match e.downcast_ref::<backoff::ClaudeUsageRateLimited>() {
                 Some(limited) => {
                     if !limited.buckets.is_empty() {
                         let data = serde_json::json!({ "buckets": limited.buckets }).to_string();
@@ -234,12 +246,12 @@ async fn sync_claude_rate_limit_cache_once(pg_pool: &PgPool) -> Result<usize, an
 fn claude_usage_rate_limited_error(
     headers: &reqwest::header::HeaderMap,
     buckets: Buckets,
-) -> rate_limit_backoff::ClaudeUsageRateLimited {
+) -> backoff::ClaudeUsageRateLimited {
     let retry_after = headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| rate_limit_backoff::parse_retry_after(value, chrono::Utc::now()));
-    rate_limit_backoff::ClaudeUsageRateLimited {
+        .and_then(|value| backoff::parse_retry_after(value, chrono::Utc::now()));
+    backoff::ClaudeUsageRateLimited {
         retry_after,
         buckets,
     }
@@ -330,12 +342,10 @@ async fn fetch_claude_oauth_usage(token: &str) -> Result<Buckets, anyhow::Error>
 
 #[cfg(test)]
 mod tests {
-    use super::super::rate_limit_backoff::{
-        ClaudeSyncBackoff, ClaudeSyncOutcome, ClaudeUsageRateLimited,
-    };
+    use super::backoff::{ClaudeSyncBackoff, ClaudeSyncOutcome, ClaudeUsageRateLimited};
     use super::{
         anthropic_rate_limit_response, classify_claude_sync_result, claude_effective_danger_pct,
-        claude_usage_rate_limited_error,
+        claude_tick_should_attempt, claude_usage_rate_limited_error,
     };
     use crate::services::dispatch_gate as gate;
     use reqwest::{StatusCode, header::HeaderMap};
@@ -486,8 +496,8 @@ mod tests {
     /// EFFECTIVE one — the persisted runtime-config the activation path
     /// resolves, not the YAML accessor — and the persisted staleness window is
     /// deliberately not one of the predicate's inputs.
-    #[test]
-    fn effective_config_comes_from_the_persisted_runtime_overrides() {
+    #[tokio::test]
+    async fn effective_config_comes_from_the_persisted_runtime_overrides() {
         let now = 1_000_000_i64;
         let persisted = |raw: &str| {
             let value: serde_json::Value = serde_json::from_str(raw).expect("runtime-config");
@@ -504,6 +514,31 @@ mod tests {
         let hot = cached(97, now + 3600, now);
         assert!(defers(&hot, danger));
         assert!(!defers(&hot, Some(100)));
+        let t0 = Instant::now();
+        let mut backoff = ClaudeSyncBackoff::new(secs(120), secs(1800));
+        backoff.record(
+            ClaudeSyncOutcome::RateLimited {
+                retry_after: Some(secs(1800)),
+            },
+            t0,
+        );
+        let mut resolved = false;
+        assert!(
+            claude_tick_should_attempt(
+                &mut backoff,
+                t0 + secs(120),
+                || {
+                    resolved = true;
+                    std::future::ready(danger)
+                },
+                |threshold| defers(&hot, threshold)
+            )
+            .await
+        );
+        assert!(
+            resolved,
+            "tick must invoke the persisted resolver, not YAML's 100"
+        );
         // The staleness window comes back from the same parser but is not an
         // input: a row older than 300 s — or than the 600 s default — still has
         // to be re-observed, so it must not switch the base cadence off.
