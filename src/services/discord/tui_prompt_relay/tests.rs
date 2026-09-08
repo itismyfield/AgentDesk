@@ -5181,10 +5181,19 @@ mod native_feeder_birth_regressions {
         }
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum RefreshFeeder {
+        Missing,
+        Cancelled,
+        Unchanged,
+        OtherAnchor,
+    }
+
     async fn observe_real_birth(
         root: &Path,
         case: u64,
         feeder: Option<(bool, bool, bool, bool)>,
+        refresh: Option<RefreshFeeder>,
     ) -> (ExternalInputRelayOwner, bool) {
         let channel = ChannelId::new(5_071_080_000 + case);
         let anchor = MessageId::new(5_071_081_000 + case);
@@ -5252,7 +5261,7 @@ mod native_feeder_birth_regressions {
         let mut lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
         lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
         lease.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
-        let claim = super::super::synthetic_start::claim_tui_direct_synthetic_turn(
+        let mut claim = super::super::synthetic_start::claim_tui_direct_synthetic_turn(
             &shared,
             &ProviderKind::Codex,
             channel,
@@ -5262,7 +5271,7 @@ mod native_feeder_birth_regressions {
             &lease,
         )
         .await;
-        let row =
+        let mut row =
             super::super::super::inflight::load_inflight_state(&ProviderKind::Codex, channel.get())
                 .expect("real claim persisted its own row");
         let mailbox = super::super::super::mailbox_snapshot(&shared, channel).await;
@@ -5286,13 +5295,6 @@ mod native_feeder_birth_regressions {
         assert!(!row.terminal_delivery_committed);
         assert!(idle_feeder_defers_active_row_for_test(&matched, &row));
         assert_eq!(relay.metrics().snapshot().frames_received, 0);
-        let yielded =
-            super::super::synthetic_start::wait_for_tui_direct_synthetic_non_bridge_claim(
-                &ProviderKind::Codex,
-                channel,
-                &session,
-            )
-            .await;
         if let Some((paused, _, cancelled, _)) = feeder {
             let handle = shared.tmux_watchers.get(&channel).expect("feeder retained");
             assert_eq!(handle.output_path, watcher_path.display().to_string());
@@ -5301,6 +5303,91 @@ mod native_feeder_birth_regressions {
         } else {
             assert!(!shared.tmux_watchers.has_live_watcher_handle(&session));
         }
+        if let Some(refresh) = refresh {
+            assert!(row.turn_nonce.is_some());
+            assert_eq!(
+                row.effective_relay_owner_kind(),
+                RelayOwnerKind::SessionBoundRelay
+            );
+            row.full_response = "already sent; pending suffix".into();
+            row.response_sent_offset = "already sent;".len();
+            super::super::super::inflight::save_inflight_state(&row).unwrap();
+            let progress = (
+                row.full_response.clone(),
+                row.response_sent_offset,
+                row.turn_nonce.clone(),
+            );
+            match refresh {
+                RefreshFeeder::Missing => {
+                    shared.tmux_watchers.remove(&channel).unwrap();
+                }
+                RefreshFeeder::Cancelled => shared
+                    .tmux_watchers
+                    .get(&channel)
+                    .unwrap()
+                    .cancel
+                    .store(true, Ordering::Release),
+                RefreshFeeder::Unchanged | RefreshFeeder::OtherAnchor => {}
+            }
+            assert!(registry.get_live_producer(&session).is_some());
+            let refreshed = super::super::synthetic_start::claim_tui_direct_synthetic_turn(
+                &shared,
+                &ProviderKind::Codex,
+                channel,
+                &session,
+                "report progress",
+                if refresh == RefreshFeeder::OtherAnchor {
+                    MessageId::new(anchor.get() + 100)
+                } else {
+                    anchor
+                },
+                &lease,
+            )
+            .await;
+            assert_eq!(refreshed.claimed, refresh != RefreshFeeder::OtherAnchor);
+            row = super::super::super::inflight::load_inflight_state(
+                &ProviderKind::Codex,
+                channel.get(),
+            )
+            .unwrap();
+            assert_eq!(
+                (
+                    row.full_response.clone(),
+                    row.response_sent_offset,
+                    row.turn_nonce.clone()
+                ),
+                progress
+            );
+            assert_eq!(
+                (row.user_msg_id, row.turn_start_offset, row.last_offset),
+                (anchor.get(), Some(0), 0)
+            );
+            assert_eq!(
+                super::super::super::mailbox_snapshot(&shared, channel)
+                    .await
+                    .active_turn_nonce,
+                row.turn_nonce
+            );
+            assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+            if refresh != RefreshFeeder::OtherAnchor {
+                claim = refreshed;
+            }
+            assert_eq!(
+                row.effective_relay_owner_kind(),
+                match claim.relay_owner {
+                    ExternalInputRelayOwner::SessionBoundRelay => RelayOwnerKind::SessionBoundRelay,
+                    ExternalInputRelayOwner::BridgeAdapter => RelayOwnerKind::None,
+                    other => panic!("unexpected refresh owner {other:?}"),
+                }
+            );
+        }
+        let yielded =
+            super::super::synthetic_start::wait_for_tui_direct_synthetic_non_bridge_claim(
+                &ProviderKind::Codex,
+                channel,
+                &session,
+            )
+            .await;
         registry.deregister(&session);
         relay.shutdown().await;
         if feeder.is_none_or(|(_, _, cancelled, _)| cancelled) {
@@ -5309,27 +5396,9 @@ mod native_feeder_birth_regressions {
         (claim.relay_owner, yielded)
     }
 
-    #[test]
-    fn registered_passive_consumer_without_native_feeder_keeps_bridge_progress_path() {
-        let root = tempfile::tempdir().expect("isolated runtime root");
-        let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let observed = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(observe_real_birth(root.path(), 1, None));
-        assert_eq!(
-            observed,
-            (ExternalInputRelayOwner::BridgeAdapter, false),
-            "a registered passive consumer without a matching native feeder must not own this active episode and make the native observer yield"
-        );
-    }
-
-    #[test]
-    fn matching_native_feeder_preserves_fresh_paused_and_stale_heartbeat_owners() {
+    fn run_birth_cases(
+        cases: &[(u64, Option<(bool, bool, bool, bool)>, Option<RefreshFeeder>)],
+    ) -> Vec<(ExternalInputRelayOwner, bool)> {
         let root = tempfile::tempdir().expect("isolated runtime root");
         let _env = crate::config::set_agentdesk_root_for_test(root.path());
         let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
@@ -5339,60 +5408,71 @@ mod native_feeder_birth_regressions {
             .enable_all()
             .build()
             .unwrap();
-        for (case, paused, stale_heartbeat) in
-            [(2, false, false), (3, true, false), (4, true, true)]
-        {
-            let (owner, yielded) = runtime.block_on(observe_real_birth(
-                root.path(),
-                case,
-                Some((paused, stale_heartbeat, false, false)),
-            ));
-            assert_ne!(owner, ExternalInputRelayOwner::BridgeAdapter);
-            assert!(
-                yielded,
-                "a real matching feeder retains the sole non-bridge route"
-            );
-        }
+        cases
+            .iter()
+            .map(|(case, feeder, refresh)| {
+                runtime.block_on(observe_real_birth(root.path(), *case, *feeder, *refresh))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn registered_passive_consumer_without_native_feeder_keeps_bridge_progress_path() {
+        assert_eq!(
+            run_birth_cases(&[(1, None, None)]),
+            vec![(ExternalInputRelayOwner::BridgeAdapter, false)],
+            "a registered passive consumer without a matching native feeder must not own this active episode and make the native observer yield"
+        );
+    }
+
+    #[test]
+    fn matching_native_feeder_preserves_fresh_paused_and_stale_heartbeat_owners() {
+        let observed = run_birth_cases(&[
+            (2, Some((false, false, false, false)), None),
+            (3, Some((true, false, false, false)), None),
+            (4, Some((true, true, false, false)), None),
+        ]);
+        assert_eq!(
+            observed,
+            vec![
+                (ExternalInputRelayOwner::TmuxWatcher, true),
+                (ExternalInputRelayOwner::TmuxWatcher, true),
+                (ExternalInputRelayOwner::SessionBoundRelay, true),
+            ]
+        );
     }
 
     #[test]
     fn cancelled_handle_birth_keeps_bridge_progress_path() {
-        // A second changed case, expected GREEN after the fix; not a control
-        // and not part of the frozen 8c61 native RED1 count.
-        let root = tempfile::tempdir().unwrap();
-        let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let observed = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(observe_real_birth(
-                root.path(),
-                5,
-                Some((false, false, true, false)),
-            ));
-        assert_eq!(observed, (ExternalInputRelayOwner::BridgeAdapter, false));
+        // A second changed case, not part of the frozen 8c61 native RED1 count.
+        assert_eq!(
+            run_birth_cases(&[(5, Some((false, false, true, false)), None)]),
+            vec![(ExternalInputRelayOwner::BridgeAdapter, false)],
+        );
     }
 
     #[test]
     fn path_mismatch_preserves_legacy_owner_pending_source_correspondence() {
         // Characterize unchanged selection only, not healthy source delivery.
-        let root = tempfile::tempdir().unwrap();
-        let _env = crate::config::set_agentdesk_root_for_test(root.path());
-        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let observed = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(observe_real_birth(
-                root.path(),
-                6,
-                Some((false, false, false, true)),
-            ));
-        assert_eq!(observed, (ExternalInputRelayOwner::SessionBoundRelay, true));
+        assert_eq!(
+            run_birth_cases(&[(6, Some((false, false, false, true)), None)]),
+            vec![(ExternalInputRelayOwner::SessionBoundRelay, true)],
+        );
+    }
+
+    #[test]
+    fn same_anchor_session_bound_refresh_preserves_owner_after_feeder_loss() {
+        let feeder = Some((true, true, false, false));
+        let observed = run_birth_cases(&[
+            (7, feeder, Some(RefreshFeeder::Missing)),
+            (8, feeder, Some(RefreshFeeder::Cancelled)),
+            (9, feeder, Some(RefreshFeeder::Unchanged)),
+            (10, feeder, Some(RefreshFeeder::OtherAnchor)),
+        ]);
+        assert_eq!(
+            observed,
+            vec![(ExternalInputRelayOwner::SessionBoundRelay, true); 4],
+            "same-anchor refresh must retain the existing SessionBound owner after feeder loss; missing/cancelled are changed cases, unchanged/other-anchor are controls"
+        );
     }
 }
