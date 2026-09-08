@@ -1119,11 +1119,11 @@ mod tests {
         #[cfg(unix)]
         #[test]
         fn birth_late_handle_sink_and_watcher_defer_to_real_bridge_then_suffix_progresses_5071() {
+            use super::super::unix_journal::SessionBoundDiscordRelaySink;
             use crate::services::cluster::stream_relay::{
                 RelaySink, RelaySinkOutcome, StreamFrame,
             };
             use crate::services::discord::inflight::{self, RelayOwnerKind, TurnSource};
-            use crate::services::discord::session_relay_sink::SessionBoundDiscordRelaySink;
             use crate::services::discord::tmux::tmux_watcher::tests::{
                 WatcherShortReplaceResult, send_birth_companion_for_test,
             };
