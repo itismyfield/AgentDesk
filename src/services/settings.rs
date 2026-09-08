@@ -123,34 +123,6 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str, Option<&str>)] = &[
         "PM Decision Gate",
         None,
     ),
-    (
-        "merge_automation_enabled",
-        "automation",
-        "자동 머지 활성화",
-        "Merge Automation Enabled",
-        Some("false"),
-    ),
-    (
-        "merge_strategy",
-        "automation",
-        "자동 머지 전략",
-        "Merge Strategy",
-        Some("squash"),
-    ),
-    (
-        "merge_strategy_mode",
-        "automation",
-        "자동 머지 경로",
-        "Merge Strategy Mode",
-        Some("direct-first"),
-    ),
-    (
-        "merge_allowed_authors",
-        "automation",
-        "자동 머지 허용 작성자",
-        "Merge Allowed Authors",
-        None,
-    ),
     ("server_port", "system", "서버 포트", "Server Port", None),
     (
         "requested_timeout_min",
@@ -556,10 +528,6 @@ fn yaml_section_value(config: &crate::config::Config, key: &str) -> Option<Strin
         "review_enabled" => stringified_bool(config.review.enabled),
         "max_review_rounds" => stringified_number(config.review.max_rounds),
         "pm_decision_gate_enabled" => stringified_bool(config.kanban.pm_decision_gate_enabled),
-        "merge_automation_enabled" => stringified_bool(config.automation.enabled),
-        "merge_strategy" => config.automation.strategy.clone(),
-        "merge_strategy_mode" => config.automation.strategy_mode.clone(),
-        "merge_allowed_authors" => config.automation.allowed_authors.clone(),
         "requested_timeout_min" => stringified_number(config.runtime.requested_timeout_min),
         "in_progress_stale_min" => stringified_number(config.runtime.in_progress_stale_min),
         "long_turn_alert_interval_min" => {
@@ -1239,13 +1207,13 @@ mod tests {
     fn settings_response_dtos_serialize_existing_contract_fields() {
         let response = SettingsConfigEntriesResponse {
             entries: vec![SettingsConfigEntry {
-                key: "merge_strategy".to_string(),
-                value: Some("rebase".to_string()),
-                category: "automation".to_string(),
-                label_ko: "자동 머지 전략".to_string(),
-                label_en: "Merge Strategy".to_string(),
-                default_value: Some("squash".to_string()),
-                baseline: Some("squash".to_string()),
+                key: "max_review_rounds".to_string(),
+                value: Some("5".to_string()),
+                category: "review".to_string(),
+                label_ko: "최대 리뷰 라운드".to_string(),
+                label_en: "Max Review Rounds".to_string(),
+                default_value: Some("3".to_string()),
+                baseline: Some("3".to_string()),
                 baseline_source: Some("hardcoded".to_string()),
                 override_active: true,
                 editable: true,
@@ -1254,8 +1222,8 @@ mod tests {
         };
 
         let value = serde_json::to_value(response).expect("serialize settings config response");
-        assert_eq!(value["entries"][0]["key"], json!("merge_strategy"));
-        assert_eq!(value["entries"][0]["default"], json!("squash"));
+        assert_eq!(value["entries"][0]["key"], json!("max_review_rounds"));
+        assert_eq!(value["entries"][0]["default"], json!("3"));
         assert_eq!(
             value["entries"][0]["restart_behavior"],
             json!("persist-live-override")
