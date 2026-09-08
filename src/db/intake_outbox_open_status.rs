@@ -48,7 +48,8 @@ mod tests {
         //   4. Index WHERE clause uses the shared constant (not legacy literal)
         //   5. Index name is preserved (needed for 23505 error classification in Rust)
         //   6. Migration 0107 adds only the nullable clock and two NOT VALID CHECKs
-        //   7. Migrations 0108/0109 each contain one fail-closed concurrent index build
+        //   7. Migrations 0108/0109/0113 each contain one fail-closed concurrent index build
+        //   8. Migration 0113 terminal predicate matches the typed status classification
         // DOES NOT VALIDATE (requires PG integration):
         //   - Constraint actually admits dispatched after apply
         //   - Index partial predicate works correctly on queries
@@ -172,7 +173,41 @@ mod tests {
             ),
             "index discriminator name must be preserved for 23505 error classification"
         );
-        for (version, migration) in [(108, migration_0108), (109, migration_0109)] {
+        let migration_0113 =
+            repo_source("migrations/postgres/0113_intake_outbox_terminal_retention_index.sql");
+        let terminal_sql = migration_0113
+            .split_once("WHERE status IN (")
+            .expect("0113 terminal predicate")
+            .1
+            .split_once(");")
+            .expect("0113 terminal list end")
+            .0;
+        let terminal_statuses = crate::db::intake_outbox_status::IntakeOutboxStatus::ALL
+            .into_iter()
+            .filter(|status| !status.is_open())
+            .map(|status| status.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            quoted_statuses(terminal_sql)
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            terminal_statuses,
+            "0113 predicate must match the typed terminal states"
+        );
+        let concurrent_migrations = [
+            (108, migration_0108),
+            (109, migration_0109),
+            (113, migration_0113),
+        ];
+        assert_eq!(
+            concurrent_migrations
+                .iter()
+                .map(|(version, _)| *version)
+                .collect::<Vec<_>>(),
+            [108, 109, 113],
+            "concurrent migration guard coverage must include 0113"
+        );
+        for (version, migration) in concurrent_migrations {
             assert_eq!(
                 migration.lines().next(),
                 Some("-- no-transaction"),

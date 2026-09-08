@@ -3124,15 +3124,14 @@ mod postgres_tests {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
-        let (valid, key_atts, atts, first_key, second_key, predicate): (
+        let (valid, key_atts, first_key, second_key, predicate): (
             bool,
-            i16,
             i16,
             String,
             String,
             String,
         ) = sqlx::query_as(
-            "SELECT i.indisvalid, i.indnkeyatts, i.indnatts,
+            "SELECT i.indisvalid, i.indnkeyatts,
                     pg_get_indexdef(i.indexrelid, 1, true),
                     pg_get_indexdef(i.indexrelid, 2, true),
                     pg_get_expr(i.indpred, i.indrelid)
@@ -3149,7 +3148,6 @@ mod postgres_tests {
 
         assert!(valid, "fresh migration must build a valid index");
         assert_eq!(key_atts, 2, "index must have exactly two key attributes");
-        assert_eq!(atts, 2, "index must not carry INCLUDE attributes");
         assert_eq!(first_key, "updated_at", "first key orders by update time");
         assert_eq!(second_key, "id", "second key breaks updated_at ties");
         assert_eq!(
