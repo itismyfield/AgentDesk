@@ -723,6 +723,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_settle_warn_reports_the_post_fold_drain_observation() {
+        // Synthetic pair, not one real fold: `record_rotation_drain_progress`
+        // (tui_prompt_dedupe/session_rotation.rs:262) zeroes the counter whenever
+        // the frontier advances, so 512 -> 1024 cannot coexist with a counter left
+        // at the stall bound. That impossible-in-one-fold shape is the point: it is
+        // what proves the two outputs are chosen independently -- frontier from the
+        // record's running max, counter from the post-fold view.
         let pre_fold = crate::services::tui_prompt_dedupe::ClaudeSessionRotation {
             tmux_session_name: "pane-5213".to_string(),
             old_session_id: Some("4648aa76".to_string()),
@@ -754,8 +760,14 @@ mod tests {
 
     /// #5213: pin the WARN SITE, not just the helper. The emission needs a live
     /// `SharedData` and the finalizer, so it cannot be exercised from a unit
-    /// test; this lexical tripwire fails the moment either field is re-sourced
-    /// from the pre-fold `rotation` record — the exact regression being fixed.
+    /// test. What this lexical tripwire actually covers is the text between the
+    /// helper binding and the WARN it feeds, and only two regressions in it:
+    /// re-sourcing either field from the pre-fold `rotation` record, and
+    /// re-binding or mutating either local after the helper returned. It sees
+    /// nothing before the helper call, so a shadowed `rotation`/`view` or a
+    /// stale value laundered through a differently named alias still passes —
+    /// the same declared limit as the `inflight/removal.rs:1052` tripwire. The
+    /// helper's own arithmetic is covered by the test above.
     #[cfg(unix)]
     #[test]
     fn the_settle_warn_site_sources_both_drain_fields_from_the_post_fold_helper() {
@@ -776,16 +788,19 @@ mod tests {
             "re-sourcing either field from the pre-fold record is #5213; \
              wiring={wiring}"
         );
-        assert!(
-            wiring
-                .matches("\n        observed_drain_frontier,\n")
-                .count()
-                == 1
-                && wiring
-                    .matches("\n        polls_without_drain_progress,\n")
-                    .count()
-                    == 1,
-            "the WARN must carry both bound locals, unshadowed; wiring={wiring}"
-        );
+        for field in ["observed_drain_frontier", "polls_without_drain_progress"] {
+            assert_eq!(
+                wiring.matches(field).count(),
+                1,
+                "between the helper binding and the WARN, `{field}` may appear exactly \
+                 once - as the bare WARN field. Any second mention (a shadowing `let`, \
+                 a re-bind, a mutation) is #5213; wiring={wiring}"
+            );
+            assert!(
+                wiring.contains(&format!("\n        {field},\n")),
+                "the WARN must carry `{field}` as the bare local the helper bound, not \
+                 a re-assigned tracing field; wiring={wiring}"
+            );
+        }
     }
 }
