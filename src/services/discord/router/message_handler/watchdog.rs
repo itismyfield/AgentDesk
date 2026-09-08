@@ -900,7 +900,9 @@ fn attach_paused_turn_watcher_inner(
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let paused = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let resume_offset = Arc::new(std::sync::Mutex::new(None::<u64>));
-        let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let pause_epoch = Arc::new(std::sync::atomic::AtomicU64::new(u64::from(
+            !allow_cold_start_retry,
+        )));
         let turn_delivered = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let last_heartbeat_ts_ms = Arc::new(std::sync::atomic::AtomicI64::new(
             super::super::super::tmux_watcher_now_ms(),
@@ -970,6 +972,12 @@ fn attach_paused_turn_watcher_inner(
                 }
             }
         }
+    }
+
+    // Deferred retries prepare their pause before claim and never pause a later owner.
+    // Immediate turn starts still open a pause window before provider input.
+    if !allow_cold_start_retry {
+        return watcher_owner_channel_id;
     }
 
     if let Some(watcher) = shared.tmux_watchers.get(&watcher_owner_channel_id) {
@@ -1123,6 +1131,11 @@ mod timeout_notice_tests {
 
 #[cfg(all(test, unix))]
 mod cold_start_retry_tests {
+    //! #5776: the after-precheck fixtures model completed runtime handoff state
+    //! before invoking the real deferred attach; they do not replay scheduler timing.
+    //! A retry must preserve that incarnation. A fresh retry still starts paused
+    //! at epoch 1. Preparing that state before claim also avoids a late registry
+    //! write to a replacement installed after the retry's own claim.
     use super::*;
     use crate::services::discord::{tmux, tmux_watcher_now_ms};
     use std::sync::{LazyLock, Mutex, MutexGuard};
