@@ -248,44 +248,144 @@ pub async fn channel_messages(
         }
     };
 
-    let upstream_status = response.status();
-    let rate_remaining = response
-        .headers()
-        .get("x-ratelimit-remaining")
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string());
-    let rate_reset_after = response
-        .headers()
-        .get("x-ratelimit-reset-after")
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.to_string());
+    let messages = channel_messages_outcome(channel_id.get(), response).await?;
+    Ok((StatusCode::OK, Json(json!({"messages": messages}))))
+}
 
-    match response.json::<serde_json::Value>().await {
-        Ok(data) => {
-            let count = data.as_array().map(|a| a.len()).unwrap_or(0);
-            tracing::info!(
-                channel_id = channel_id.get(),
-                status = %upstream_status,
-                count,
-                rate_remaining = rate_remaining.as_deref().unwrap_or(""),
-                rate_reset_after = rate_reset_after.as_deref().unwrap_or(""),
-                "[#2723] channel_messages ← upstream"
-            );
-            Ok((StatusCode::OK, Json(json!({"messages": data}))))
-        }
+/// Decode the upstream response and interpret it (#5702, #5787).
+///
+/// Split out of the handler so a stub upstream can exercise the real
+/// `reqwest` decode path: the status and its retry hint have to survive a body
+/// that is not JSON at all, which is what Cloudflare serves for an edge 429.
+async fn channel_messages_outcome(
+    channel_id: u64,
+    response: reqwest::Response,
+) -> AppResult<Value> {
+    let upstream_status = response.status();
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.to_string())
+    };
+    let rate_remaining = header("x-ratelimit-remaining");
+    let rate_reset_after = header("x-ratelimit-reset-after");
+    let retry_after = header("retry-after");
+
+    let body = match response.json::<serde_json::Value>().await {
+        Ok(data) => Some(data),
         Err(error) => {
             tracing::warn!(
-                channel_id = channel_id.get(),
+                channel_id,
                 status = %upstream_status,
                 error = %error,
                 "[#2723] channel_messages discord response decode failed"
             );
-            Err(AppError::new(
-                StatusCode::BAD_GATEWAY,
-                ErrorCode::Discord,
-                "discord response decode failed",
-            ))
+            None
         }
+    };
+
+    let count = body
+        .as_ref()
+        .and_then(|body| body.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    tracing::info!(
+        channel_id,
+        status = %upstream_status,
+        count,
+        rate_remaining = rate_remaining.as_deref().unwrap_or(""),
+        rate_reset_after = rate_reset_after.as_deref().unwrap_or(""),
+        "[#2723] channel_messages ← upstream"
+    );
+
+    interpret_channel_messages_response(upstream_status, retry_after.as_deref(), body)
+}
+
+/// Interpret the upstream `GET /channels/{id}/messages` response (#5702).
+///
+/// The route used to answer `200 {"messages": <body>}` whatever the upstream
+/// status was, so a Discord `429 {"retry_after": ...}` object reached callers
+/// as a successful, empty-looking message list. Non-2xx statuses now propagate
+/// with their retry hint even when the body never decoded as JSON (`body` is
+/// `None`, #5787), and a success must carry a JSON array.
+fn interpret_channel_messages_response(
+    upstream_status: StatusCode,
+    retry_after: Option<&str>,
+    body: Option<Value>,
+) -> AppResult<Value> {
+    if !upstream_status.is_success() {
+        let status = if upstream_status.is_client_error() || upstream_status.is_server_error() {
+            upstream_status
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        let retry_hint = retry_after.and_then(retry_after_seconds).or_else(|| {
+            body.as_ref()
+                .and_then(|body| body.get("retry_after"))
+                .and_then(json_retry_after_seconds)
+        });
+        let mut error = AppError::new(
+            status,
+            ErrorCode::Discord,
+            format!("discord upstream returned {}", upstream_status.as_u16()),
+        )
+        .with_context("upstream_status", upstream_status.as_u16());
+        if let Some(retry_hint) = retry_hint {
+            error = error.with_context("retry_after", retry_hint);
+        }
+        return Err(error);
+    }
+
+    let Some(body) = body else {
+        return Err(AppError::new(
+            StatusCode::BAD_GATEWAY,
+            ErrorCode::Discord,
+            "discord response decode failed",
+        ));
+    };
+
+    if !body.is_array() {
+        return Err(AppError::new(
+            StatusCode::BAD_GATEWAY,
+            ErrorCode::Discord,
+            "discord returned a non-array message list",
+        )
+        .with_context("upstream_status", upstream_status.as_u16()));
+    }
+
+    Ok(body)
+}
+
+/// Normalize a `Retry-After` header to seconds (#5787).
+///
+/// RFC 9110 allows delta-seconds or an HTTP-date; the E2E harness only knows
+/// how to wait on a number, so a date becomes the seconds left until it (never
+/// negative) and an unparsable value is dropped so the body hint can be used.
+fn retry_after_seconds(raw: &str) -> Option<f64> {
+    let raw = raw.trim();
+    if let Ok(seconds) = raw.parse::<f64>() {
+        return (seconds.is_finite() && seconds >= 0.0).then_some(seconds);
+    }
+    let at = chrono::DateTime::parse_from_rfc2822(raw)
+        .map(|at| at.timestamp())
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(raw, "%a, %d %b %Y %H:%M:%S GMT")
+                .map(|at| at.and_utc().timestamp())
+        })
+        .ok()?;
+    Some(((at - chrono::Utc::now().timestamp()) as f64).max(0.0))
+}
+
+/// Normalize a JSON body `retry_after` (number or string) to seconds (#5787).
+fn json_retry_after_seconds(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number
+            .as_f64()
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0),
+        Value::String(raw) => retry_after_seconds(raw),
+        _ => None,
     }
 }
 
@@ -366,6 +466,151 @@ mod tests {
         assert_eq!(snowflake_or_none(&"12 OR 1=1".to_string()), None);
         assert_eq!(snowflake_or_none(&"123abc".to_string()), None);
         assert_eq!(snowflake_or_none(&"".to_string()), None);
+    }
+
+    /// Serve one canned HTTP response so a test can drive the real `reqwest`
+    /// decode path instead of handing the helper a ready-made `Value`.
+    async fn stub_upstream(raw: &'static [u8]) -> reqwest::Response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub upstream");
+        let addr = listener.local_addr().expect("stub upstream address");
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept stub request");
+            let _ = socket.read(&mut [0u8; 1024]).await;
+            let _ = socket.write_all(raw).await;
+        });
+
+        reqwest::Client::new()
+            .get(format!("http://{addr}/messages"))
+            .send()
+            .await
+            .expect("stub upstream response")
+    }
+
+    #[tokio::test]
+    async fn channel_messages_outcome_keeps_rate_limit_status_for_non_json_body() {
+        // Cloudflare answers an edge 429 with an HTML page, so the decode fails
+        // after the status and Retry-After are already in hand (#5787).
+        let response = stub_upstream(
+            b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/html\r\n\
+Retry-After: 2\r\nConnection: close\r\n\r\n<html>error 1015</html>",
+        )
+        .await;
+
+        let error = channel_messages_outcome(7, response)
+            .await
+            .expect_err("a rate-limited upstream is not a success");
+
+        assert_eq!(error.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error.context().get("upstream_status"), Some(&json!(429)));
+        assert_eq!(error.context().get("retry_after"), Some(&json!(2.0)));
+    }
+
+    #[tokio::test]
+    async fn channel_messages_outcome_rejects_non_json_success_body() {
+        let response = stub_upstream(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html>ok</html>",
+        )
+        .await;
+
+        let error = channel_messages_outcome(7, response)
+            .await
+            .expect_err("a success body that is not JSON is not a message list");
+
+        assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(error.message(), "discord response decode failed");
+    }
+
+    #[test]
+    fn channel_messages_response_normalizes_http_date_retry_after() {
+        // The harness waits on a number, so an HTTP-date header has to reach
+        // `context.retry_after` as seconds rather than as a date string (#5787).
+        let at = chrono::Utc::now() + chrono::Duration::seconds(30);
+        let header = at.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let dated = interpret_channel_messages_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(&header),
+            Some(json!({"retry_after": 1.5})),
+        )
+        .expect_err("429 must not be wrapped as a 200 message list");
+        let seconds = dated
+            .context()
+            .get("retry_after")
+            .and_then(Value::as_f64)
+            .expect("an HTTP-date Retry-After must arrive as seconds");
+        assert!(
+            (28.0..=30.0).contains(&seconds),
+            "unexpected delay {seconds}"
+        );
+
+        // A date already in the past is a zero wait, never a negative one.
+        let past = interpret_channel_messages_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some("Sun, 09 Sep 2001 01:46:40 GMT"),
+            None,
+        )
+        .expect_err("429 must not be wrapped as a 200 message list");
+        assert_eq!(past.context().get("retry_after"), Some(&json!(0.0)));
+
+        // An unparsable header is dropped so the body hint still applies, and a
+        // string body hint is normalized the same way.
+        let unparsable = interpret_channel_messages_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some("soon"),
+            Some(json!({"retry_after": "1.5"})),
+        )
+        .expect_err("429 must not be wrapped as a 200 message list");
+        assert_eq!(unparsable.context().get("retry_after"), Some(&json!(1.5)));
+    }
+
+    #[test]
+    fn channel_messages_response_passes_through_array_bodies() {
+        let empty = interpret_channel_messages_response(StatusCode::OK, None, Some(json!([])))
+            .expect("an empty array is a valid message list");
+        assert_eq!(empty, json!([]));
+
+        let filled =
+            interpret_channel_messages_response(StatusCode::OK, None, Some(json!([{"id":"1"}])))
+                .expect("a populated array is a valid message list");
+        assert_eq!(filled.as_array().map(|a| a.len()), Some(1));
+    }
+
+    #[test]
+    fn channel_messages_response_propagates_upstream_rate_limit() {
+        let body = json!({"message": "You are being rate limited.", "retry_after": 1.5});
+        let error = interpret_channel_messages_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some("3"),
+            Some(body.clone()),
+        )
+        .expect_err("429 must not be wrapped as a 200 message list");
+
+        assert_eq!(error.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error.context().get("upstream_status"), Some(&json!(429)));
+        // The header wins over the body hint when both are present.
+        assert_eq!(error.context().get("retry_after"), Some(&json!(3.0)));
+
+        // Retry hint falls back to the body when Discord omits the header.
+        let from_body =
+            interpret_channel_messages_response(StatusCode::TOO_MANY_REQUESTS, None, Some(body))
+                .expect_err("429 must not be wrapped as a 200 message list");
+        assert_eq!(from_body.context().get("retry_after"), Some(&json!(1.5)));
+    }
+
+    #[test]
+    fn channel_messages_response_rejects_non_array_success_body() {
+        let error = interpret_channel_messages_response(
+            StatusCode::OK,
+            None,
+            Some(json!({"messages": []})),
+        )
+        .expect_err("an object body is not a message list");
+
+        assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(error.context().get("upstream_status"), Some(&json!(200)));
     }
 
     #[test]
