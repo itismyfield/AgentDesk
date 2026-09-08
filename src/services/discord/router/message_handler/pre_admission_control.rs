@@ -69,8 +69,7 @@ pub(super) fn route(
     if has_preloaded_uploads {
         return PreAdmissionRoute::Continue(GoalCommandKind::NotGoal);
     }
-    // 5/6. Codex control registry, shared verbatim with the terminal wrapper;
-    //      everything else continues, every Claude-channel slash line included.
+    // 5/6. Codex control registry, shared verbatim with the wrapper; else continue.
     if !matches!(provider, ProviderKind::Codex) {
         return PreAdmissionRoute::Continue(GoalCommandKind::NotGoal);
     }

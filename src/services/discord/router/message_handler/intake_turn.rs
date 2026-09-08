@@ -1193,17 +1193,17 @@ pub(super) async fn handle_text_message(
     session_strategy_reason = runtime.3;
     let (channel_name, tmux_session_name) = (runtime.4, runtime.5);
     let adk_session_key = build_adk_session_key(shared, channel_id, &provider, None).await;
-    let turn_goal_kind = match pre_admission_control::resolve(
-        (http, shared, &provider, !pending_uploads.is_empty()),
-        (channel_id, fast_mode_channel_id, user_msg_id),
-        (user_text, dispatch_id_for_thread.as_deref()),
-        (dispatch_reset_provider_state, dispatch_recreate_tmux),
-        session_id.clone(),
-    )
-    .await
-    {
-        pre_admission_control::PreAdmission::HandledLocally => return Ok(()),
-        pre_admission_control::PreAdmission::Continue(kind) => kind,
+    let pre_admission_control::PreAdmission::Continue(turn_goal_kind) =
+        pre_admission_control::resolve(
+            (http, shared, &provider, !pending_uploads.is_empty()),
+            (channel_id, fast_mode_channel_id, user_msg_id),
+            (user_text, dispatch_id_for_thread.as_deref()),
+            (dispatch_reset_provider_state, dispatch_recreate_tmux),
+            session_id.clone(),
+        )
+        .await
+    else {
+        return Ok(());
     };
     // #5660 [R2]: turn committed — take the channel input state and prepend it.
     let (taken_uploads, session_was_cleared) =
