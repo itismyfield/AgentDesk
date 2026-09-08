@@ -1679,6 +1679,12 @@ services::claude_tui::prompt_readiness::tests::normalization_preserves_malformed
 services::claude_tui::prompt_readiness::tests::normalization_preserves_unknown_status_suffix_4822
 services::claude_tui::prompt_readiness::tests::normalization_preserves_untrusted_lookalikes_and_invalid_context_tokens_4822
 services::claude_tui::prompt_readiness::tests::production_capture_normalizes_context_panel_through_shared_formatter_4822
+services::claude_tui::session::auto_compact_launch_tests::absolute_window_is_identical_for_model_free_sonnet_and_opus_launches
+services::claude_tui::session::auto_compact_launch_tests::configured_window_is_clamped_only_when_generating_a_launch
+services::claude_tui::session::auto_compact_launch_tests::default_absolute_window_is_exported_without_a_model
+services::claude_tui::session::auto_compact_launch_tests::explicit_absolute_window_override_and_inclusive_bounds_reach_the_script
+services::claude_tui::session::auto_compact_launch_tests::new_launch_override_does_not_rewrite_an_existing_launch_artifact
+services::claude_tui::session::auto_compact_launch_tests::runtime_config_retains_the_explicit_absolute_window_without_changing_empty_semantics
 services::claude_tui::session::tests::continuation_cutover_repairs_a_partial_artifact_update
 services::claude_tui::session::tests::continuation_cutover_rewrites_both_artifacts_and_is_idempotent
 services::claude_tui::session::tests::launch_script_fences_the_absolute_compact_window
@@ -2198,6 +2204,7 @@ services::cswap::tests::list_cache_miss_is_single_flight
 services::cswap::tests::list_payload_accepts_fractional_usage_age_seconds_4126
 services::cswap::tests::switch_single_flight_times_out_second_switch
 services::cswap::tests::usage_age_seconds_recomputes_at_serve_time
+services::discord::abandon_request_store::probe_contract_tests::drain_http_contract_covers_live_terminal_prose_fences_and_transient_failures
 services::discord::abandon_request_store::tests::abandoned_card_renders_terminal_marker
 services::discord::abandon_request_store::tests::completed_terminal_request_upgrades_abort_for_same_panel
 services::discord::abandon_request_store::tests::defer_only_for_exact_live_anchor
@@ -2812,6 +2819,7 @@ services::discord::health::stall_liveness::redrive_grace::tests::stale_identity_
 services::discord::health::stall_liveness::tests::advancing_relay_offset_defers_cleanup
 services::discord::health::stall_liveness::tests::capture_advance_history_defers_on_threshold_first_tick
 services::discord::health::stall_liveness::tests::capture_offset_advancing_protects_only_proven_alive_turns
+services::discord::health::stall_liveness::tests::current_provider_source_progress_survives_capture_unknown_5712
 services::discord::health::stall_liveness::tests::dead_pane_open_tool_keeps_existing_force_clean_timing
 services::discord::health::stall_liveness::tests::deploy_restart_40min_turn_survives
 services::discord::health::stall_liveness::tests::draining_undelivered_backlog_keeps_deferring_across_ticks_until_drained
@@ -3676,6 +3684,7 @@ services::discord::placeholder_live_events::tests::live_panel_render_preserves_s
 services::discord::placeholder_live_events::tests::live_status_panel_never_leaks_dangling_fence_when_bloated
 services::discord::placeholder_live_events::tests::monitor_handoff_live_events_stays_under_description_limit_with_long_command
 services::discord::placeholder_live_events::tests::monitor_tool_summaries_redact_command_fields_before_markdown
+services::discord::placeholder_live_events::tests::multiline_activity_marker_stays_on_first_header_and_out_of_answer_footer
 services::discord::placeholder_live_events::tests::newer_panel_cache_invalidation_survives_stale_clear
 services::discord::placeholder_live_events::tests::normalize_summary_stays_single_line_for_panel_cells
 services::discord::placeholder_live_events::tests::panel_cache_invalidation_forces_byte_stable_render_once
@@ -3731,6 +3740,8 @@ services::discord::placeholder_live_events::tests::status_panel_free_renderer_or
 services::discord::placeholder_live_events::tests::status_panel_heartbeat_without_new_events_is_stable
 services::discord::placeholder_live_events::tests::status_panel_keeps_latest_task_tool_entries_under_cap
 services::discord::placeholder_live_events::tests::status_panel_keeps_latest_ten_subagents
+services::discord::placeholder_live_events::tests::status_panel_marker_survives_utf16_truncation_and_costs_four_units
+services::discord::placeholder_live_events::tests::status_panel_marker_uses_snapshot_before_codex_task_projection
 services::discord::placeholder_live_events::tests::status_panel_omits_context_line_when_token_data_is_absent
 services::discord::placeholder_live_events::tests::status_panel_omits_recovery_line_when_count_is_zero_or_missing
 services::discord::placeholder_live_events::tests::status_panel_omits_session_line_when_lifecycle_details_are_absent
@@ -3864,6 +3875,8 @@ services::discord::placeholder_sweeper::is_message_still_placeholder_tests::live
 services::discord::placeholder_sweeper::is_message_still_placeholder_tests::marker_is_authoritative_regardless_of_header_wording
 services::discord::placeholder_sweeper::is_message_still_placeholder_tests::spinner_prefixed_placeholder_is_placeholder
 services::discord::placeholder_sweeper::is_message_still_placeholder_tests::spinner_without_space_is_not_placeholder
+services::discord::placeholder_sweeper::panel_shape::tests::actual_panel_footer_and_answers_are_not_placeholders
+services::discord::placeholder_sweeper::panel_shape::tests::legacy_markerless_prefixes_preserve_compatibility_without_last_tool_prose
 services::discord::placeholder_sweeper::panel_shape::tests::renderer_activity_variants_and_panel_shape_classifier_stay_in_sync
 services::discord::placeholder_sweeper::probe_classification_tests::permanent_statuses_classified_as_gone
 services::discord::placeholder_sweeper::probe_classification_tests::transient_statuses_classified_as_retryable
@@ -3896,6 +3909,7 @@ services::discord::prompt_builder::dispatch_contract_tests::foreign_workspace_fu
 services::discord::prompt_builder::dispatch_contract_tests::fresh_codex_turn_receives_provider_portable_memento_contract
 services::discord::prompt_builder::dispatch_contract_tests::full_memento_prompt_carries_tool_feedback_contract
 services::discord::prompt_builder::dispatch_contract_tests::full_prompt_manifest_records_shared_knowledge_and_longterm_catalog
+services::discord::prompt_builder::dispatch_contract_tests::implementation_and_rework_render_one_pr_merge_contract_for_every_merge_strategy_mode_input
 services::discord::prompt_builder::dispatch_contract_tests::issue_4310_role_and_sak_layers_survive_memento_health_changes
 services::discord::prompt_builder::dispatch_contract_tests::issue_4313_agentdesk_prompt_has_single_policy_owner
 services::discord::prompt_builder::dispatch_contract_tests::issue_4313_prompt_policy_contract
@@ -4619,6 +4633,8 @@ services::discord::router::message_handler::voice_announcement_scope::tests::res
 services::discord::router::message_handler::voice_announcement_scope::tests::stored_announcement_without_metadata_is_dropped
 services::discord::router::message_handler::watchdog::cold_start_retry_tests::cold_start_retry_does_not_repause_existing_live_handoff_watcher
 services::discord::router::message_handler::watchdog::cold_start_retry_tests::deferred_paused_watcher_attach_retries_when_tmux_goes_live
+services::discord::router::message_handler::watchdog::cold_start_retry_tests::headless_retry_after_precheck_preserves_handoff_incarnation
+services::discord::router::message_handler::watchdog::cold_start_retry_tests::message_retry_after_precheck_preserves_handoff_incarnation
 services::discord::router::message_handler::watchdog::relay_state_contract_refs::contract_symbols_exist
 services::discord::router::message_handler::watchdog::timeout_notice_tests::headless_watchdog_timeout_notice_visibility_requires_visible_surface
 services::discord::router::message_handler::watchdog::timeout_notice_tests::watchdog_alert_messages_carry_non_turn_provenance
@@ -4980,6 +4996,7 @@ services::discord::single_message_panel::tests::footer_status_block_empty_panel_
 services::discord::single_message_panel::tests::footer_status_block_keeps_spinner_first
 services::discord::single_message_panel::tests::footer_status_block_repairs_dangling_fence_after_clamp_3394
 services::discord::single_message_panel::tests::footer_status_block_stays_within_discord_limit
+services::discord::single_message_panel::tests::footer_strips_only_exact_panel_header_marker_suffix
 services::discord::single_message_panel::tests::latest_tool_footer_header_is_recognized_after_spinner_merge
 services::discord::single_message_panel::tests::legacy_context_footer_is_stripped_during_format_transition_4846
 services::discord::single_message_panel::tests::migration_does_not_carry_delivered_terminal_marks_to_new_target
@@ -5509,6 +5526,7 @@ services::discord::tmux::tmux_watcher::tests::no_inflight_terminal_response_drop
 services::discord::tmux::tmux_watcher::tests::no_inflight_user_boundary_without_fresh_text_drops_already_delivered_restored_response_seed
 services::discord::tmux::tmux_watcher::tests::no_inflight_user_boundary_without_fresh_text_preserves_body_bearing_seed_for_relay
 services::discord::tmux::tmux_watcher::tests::normal_completion_finalizes_with_both_legacy_flags_false
+services::discord::tmux::tmux_watcher::tests::orphan_reclaim_preserves_actual_panel_footer_answers
 services::discord::tmux::tmux_watcher::tests::orphan_reclaim_real_tail_still_preserves_body_seed_4081
 services::discord::tmux::tmux_watcher::tests::orphan_turn_placeholder_reclaim_decision
 services::discord::tmux::tmux_watcher::tests::persisted_bridge_frozen_prefix_ids_merge_into_watcher_cleanup_list
@@ -8059,6 +8077,7 @@ services::tui_prompt_dedupe::tests::extracts_codex_rollout_top_level_entry_id
 services::tui_prompt_dedupe::tests::extracts_codex_rollout_user_message_text
 services::tui_prompt_dedupe::tests::extracts_non_meta_claude_array_user_message_after_slash_command
 services::tui_prompt_dedupe::tests::extracts_qwen_jsonl_user_message_text
+services::tui_prompt_dedupe::tests::hook_re_report_restates_the_adopted_session_authority
 services::tui_prompt_dedupe::tests::ignores_claude_interrupt_marker_without_relay_lease
 services::tui_prompt_dedupe::tests::ignores_claude_transcript_interrupt_marker_user_message_text
 services::tui_prompt_dedupe::tests::ignores_claude_transcript_meta_user_message_text

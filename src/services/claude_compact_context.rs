@@ -1,10 +1,11 @@
-//! Launch-bound Claude context-window resolution for auto compaction.
+//! Claude context windows for launch settings and AgentDesk auto compaction.
 //!
+//! New TUI launches use a model-independent absolute provider setting.
 //! AgentDesk records a launch marker for every Claude pane it starts. The
 //! auto-compact trigger uses that marker to tell a managed pane (whose launch
-//! this process controlled) apart from an unmanaged one, and resolves windows
-//! from Claude's own native model table. Completion reads are synchronous and
-//! purely local, so the watcher path never performs I/O.
+//! this process controlled) apart from an unmanaged one. Immutable headless
+//! launches resolve windows from Claude's native model table. Completion reads
+//! are synchronous and local, so the watcher path never performs I/O.
 
 use std::collections::HashMap;
 use std::process::Command;
@@ -17,6 +18,7 @@ const NATIVE_STANDARD_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const ONE_MILLION_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
 const CLAUDE_AUTO_COMPACT_MIN_TOKENS: u64 = 100_000;
 pub(crate) const CLAUDE_AUTO_COMPACT_MAX_TOKENS: u64 = 1_000_000;
+const DEFAULT_TUI_AUTO_COMPACT_WINDOW_TOKENS: u64 = 700_000;
 const LAUNCH_PROVENANCE_TTL: Duration = Duration::from_secs(4 * 60 * 60);
 const MAX_LAUNCH_PROVENANCE: usize = 512;
 pub(crate) const CLAUDE_AUTO_COMPACT_WINDOW_ENV: &str = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
@@ -142,6 +144,16 @@ pub(crate) fn launch_auto_compact_window_for_session(
     register_launch_provenance(launch_key);
     compact_percent
         .and_then(|percent| launch_auto_compact_window(model, percent, compact_lower_bound_tokens))
+}
+
+/// Resolve the absolute setting for a new TUI launch without model inference.
+pub(crate) fn tui_launch_auto_compact_window_from_setting(configured: Option<u64>) -> u64 {
+    configured
+        .unwrap_or(DEFAULT_TUI_AUTO_COMPACT_WINDOW_TOKENS)
+        .clamp(
+            CLAUDE_AUTO_COMPACT_MIN_TOKENS,
+            CLAUDE_AUTO_COMPACT_MAX_TOKENS,
+        )
 }
 
 /// Render an isolation fence for shell-based launches. An inherited absolute
