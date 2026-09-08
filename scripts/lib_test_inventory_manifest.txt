@@ -939,6 +939,7 @@ server::rate_limit_backoff::tests::starts_ready_and_success_keeps_base_interval
 server::rate_limit_backoff::tests::success_after_backoff_returns_to_base_interval
 server::rate_limit_header_tests::parses_openai_relative_reset_duration
 server::rate_limit_header_tests::parses_rfc3339_reset_timestamp
+server::rate_limit_sync::tests::api_key_429_keeps_pressure_buckets_and_the_backoff_streak
 server::rate_limit_sync::tests::classifies_claude_sync_results_for_backoff
 server::rate_limit_sync::tests::rate_limited_error_reads_retry_after_header
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder

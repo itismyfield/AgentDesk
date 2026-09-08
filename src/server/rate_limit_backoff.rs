@@ -1,21 +1,16 @@
 //! Backoff schedule for the Claude leg of `rate_limit_sync_loop`.
 //!
-//! The loop polls `https://api.anthropic.com/api/oauth/usage` on a fixed
-//! 120 s tick. In production that endpoint answered 429 for ~31% of polls
-//! (3-day sample: 1,980 ok vs 907 rate limited) because the loop kept
-//! hammering it at the same cadence after every 429 and warned each time.
+//! The loop polls `https://api.anthropic.com/api/oauth/usage` on a fixed 120 s
+//! tick. In production that endpoint answered 429 for ~31% of polls (3-day
+//! sample: 1,980 ok vs 907 rate limited) because the loop kept hammering it at
+//! the same cadence after every 429 and warned each time. This module is pure
+//! (no clock, no I/O): the caller injects `now`, so the schedule is testable.
 //!
-//! This module is pure (no clock, no I/O): the caller injects `now` so the
-//! schedule can be unit-tested deterministically.
-//!
-//! Policy:
-//! * success → next attempt after the base interval (120 s), counters reset;
-//! * 429 with a usable `Retry-After` → wait that long (clamped to the max);
-//! * 429 without one → exponential: 120 s, 240 s, 480 s … capped at 30 min;
-//! * any other error → base interval (unchanged from before);
-//! * the loop keeps ticking every 120 s for the other providers and simply
-//!   skips the Claude fetch while `not_before` is in the future, so an
-//!   effective wait is rounded up to the next tick.
+//! Policy: success → base interval (120 s), counters reset; 429 with a usable
+//! `Retry-After` → that long, clamped to the max; 429 without one → exponential
+//! 120/240/480 s … capped at 30 min; any other error → base interval. The loop
+//! keeps ticking every 120 s for the other providers and skips only the Claude
+//! fetch while `not_before` is in the future, so a wait rounds up to the tick.
 
 use std::time::{Duration, Instant};
 
@@ -24,9 +19,12 @@ pub(crate) const RATE_LIMIT_SYNC_MAX_BACKOFF: Duration = Duration::from_secs(30 
 
 /// Typed error returned by the Claude usage fetchers on HTTP 429 so the loop
 /// can distinguish it from other failures (via `anyhow::Error::downcast_ref`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `buckets` carries whatever `anthropic-ratelimit-*` telemetry the 429 itself
+/// advertised, so scheduling the retry never costs us that observation.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ClaudeUsageRateLimited {
     pub(crate) retry_after: Option<Duration>,
+    pub(crate) buckets: Vec<serde_json::Value>,
 }
 
 impl std::fmt::Display for ClaudeUsageRateLimited {
@@ -315,6 +313,7 @@ mod tests {
     fn rate_limited_error_round_trips_through_anyhow() {
         let error = anyhow::Error::new(ClaudeUsageRateLimited {
             retry_after: Some(secs(42)),
+            buckets: Vec::new(),
         });
         let typed = error
             .downcast_ref::<ClaudeUsageRateLimited>()

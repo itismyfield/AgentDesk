@@ -17,6 +17,8 @@ use super::{
     parse_header_reset, refresh_dispatch_gate_snapshots, upsert_rate_limit_cache_entry,
 };
 
+type Buckets = Vec<serde_json::Value>;
+
 /// Classifies one Claude sync result for the backoff schedule.
 fn classify_claude_sync_result(
     result: &Result<usize, anyhow::Error>,
@@ -199,38 +201,79 @@ async fn sync_claude_rate_limit_cache_once(pg_pool: &PgPool) -> Result<usize, an
             Ok(bucket_count)
         }
         Err(e) => {
-            // 429s are logged by the periodic loop with backoff context
-            // (WARN on the first of a streak, INFO afterwards); everything
-            // else stays a WARN here so dashboard-triggered refreshes and the
-            // loop share one message.
-            if e.downcast_ref::<rate_limit_backoff::ClaudeUsageRateLimited>()
-                .is_some()
-            {
-                tracing::debug!("[rate-limit-sync] Claude rate_limit fetch failed: {e}");
-            } else {
-                tracing::warn!("[rate-limit-sync] Claude rate_limit fetch failed: {e}");
+            // Telemetry is independent of retry scheduling: a 429 that carried
+            // limit headers is cached anyway, so the dispatch gate sees the
+            // exhaustion rather than the pre-429 snapshot. A 429 with no buckets
+            // (OAuth usage) writes nothing — throttled is not exhausted.
+            match e.downcast_ref::<rate_limit_backoff::ClaudeUsageRateLimited>() {
+                Some(limited) => {
+                    if !limited.buckets.is_empty() {
+                        let data = serde_json::json!({ "buckets": limited.buckets }).to_string();
+                        let now = chrono::Utc::now().timestamp();
+                        upsert_rate_limit_cache_entry(pg_pool, "claude", &data, now).await;
+                    }
+                    // The loop logs 429s with backoff context (WARN, then INFO).
+                    tracing::debug!("[rate-limit-sync] Claude rate_limit fetch failed: {e}");
+                }
+                // Other failures: one WARN shared with forced refreshes.
+                None => tracing::warn!("[rate-limit-sync] Claude rate_limit fetch failed: {e}"),
             }
             Err(e)
         }
     }
 }
 
-/// Builds the typed 429 error from a rate-limited response's headers.
+/// Builds the typed 429 error, carrying any pressure buckets the response advertised.
 fn claude_usage_rate_limited_error(
     headers: &reqwest::header::HeaderMap,
+    buckets: Buckets,
 ) -> rate_limit_backoff::ClaudeUsageRateLimited {
     let retry_after = headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| rate_limit_backoff::parse_retry_after(value, chrono::Utc::now()));
-    rate_limit_backoff::ClaudeUsageRateLimited { retry_after }
+    rate_limit_backoff::ClaudeUsageRateLimited {
+        retry_after,
+        buckets,
+    }
 }
 
-/// Fetch rate limits from the Anthropic API via the count_tokens endpoint (free, no token cost).
-/// Parses `anthropic-ratelimit-*` response headers into bucket format.
-async fn fetch_anthropic_rate_limits(
-    api_key: &str,
-) -> Result<Vec<serde_json::Value>, anyhow::Error> {
+/// Maps one `count_tokens` response onto buckets. A 429 keeps its telemetry
+/// inside the typed error; every other non-2xx is an error too, so the loop
+/// reads it as `OtherError` (preserving a 429 streak), not an empty success.
+fn anthropic_rate_limit_response(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Buckets, anyhow::Error> {
+    let mut buckets = Vec::new();
+    for name in ["requests", "tokens"] {
+        let key = |field| format!("anthropic-ratelimit-{name}-{field}");
+        let Some(limit) = parse_header_i64(headers, &key("limit")) else {
+            continue;
+        };
+        let remaining = parse_header_i64(headers, &key("remaining")).unwrap_or(limit);
+        buckets.push(serde_json::json!({
+            "name": name,
+            "limit": limit,
+            "used": limit - remaining,
+            "remaining": remaining,
+            "reset": parse_header_reset(headers, &key("reset")),
+        }));
+    }
+
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(anyhow::Error::new(claude_usage_rate_limited_error(
+            headers, buckets,
+        )));
+    }
+    if !status.is_success() {
+        return Err(anyhow::anyhow!("Anthropic count_tokens returned {status}"));
+    }
+    Ok(buckets)
+}
+
+/// Fetch rate limits via the Anthropic count_tokens endpoint (free, no tokens).
+async fn fetch_anthropic_rate_limits(api_key: &str) -> Result<Buckets, anyhow::Error> {
     let client = reqwest::Client::new();
     let resp = client
         .post("https://api.anthropic.com/v1/messages/count_tokens")
@@ -244,49 +287,12 @@ async fn fetch_anthropic_rate_limits(
         .send()
         .await?;
 
-    if resp.status() == 429 {
-        return Err(anyhow::Error::new(claude_usage_rate_limited_error(
-            resp.headers(),
-        )));
-    }
-
-    let headers = resp.headers().clone();
-    let mut buckets = Vec::new();
-
-    // Parse requests bucket
-    if let Some(limit) = parse_header_i64(&headers, "anthropic-ratelimit-requests-limit") {
-        let remaining =
-            parse_header_i64(&headers, "anthropic-ratelimit-requests-remaining").unwrap_or(limit);
-        let reset = parse_header_reset(&headers, "anthropic-ratelimit-requests-reset");
-        buckets.push(serde_json::json!({
-            "name": "requests",
-            "limit": limit,
-            "used": limit - remaining,
-            "remaining": remaining,
-            "reset": reset,
-        }));
-    }
-
-    // Parse tokens bucket
-    if let Some(limit) = parse_header_i64(&headers, "anthropic-ratelimit-tokens-limit") {
-        let remaining =
-            parse_header_i64(&headers, "anthropic-ratelimit-tokens-remaining").unwrap_or(limit);
-        let reset = parse_header_reset(&headers, "anthropic-ratelimit-tokens-reset");
-        buckets.push(serde_json::json!({
-            "name": "tokens",
-            "limit": limit,
-            "used": limit - remaining,
-            "remaining": remaining,
-            "reset": reset,
-        }));
-    }
-
-    Ok(buckets)
+    anthropic_rate_limit_response(resp.status(), resp.headers())
 }
 
 /// Fetch Claude usage via OAuth API (subscription-based, no API key needed).
 /// Returns utilization-based buckets (5h, 7d).
-async fn fetch_claude_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>, anyhow::Error> {
+async fn fetch_claude_oauth_usage(token: &str) -> Result<Buckets, anyhow::Error> {
     let client = reqwest::Client::builder()
         .timeout(CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT)
         .build()?;
@@ -302,6 +308,7 @@ async fn fetch_claude_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>,
     if resp.status() == 429 {
         return Err(anyhow::Error::new(claude_usage_rate_limited_error(
             resp.headers(),
+            Vec::new(),
         )));
     }
     if !resp.status().is_success() {
@@ -317,9 +324,25 @@ async fn fetch_claude_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>,
 
 #[cfg(test)]
 mod tests {
-    use super::super::rate_limit_backoff::{ClaudeSyncOutcome, ClaudeUsageRateLimited};
-    use super::{classify_claude_sync_result, claude_usage_rate_limited_error};
-    use std::time::Duration;
+    use super::super::rate_limit_backoff::{
+        ClaudeSyncBackoff, ClaudeSyncOutcome, ClaudeUsageRateLimited,
+    };
+    use super::{
+        anthropic_rate_limit_response, classify_claude_sync_result, claude_usage_rate_limited_error,
+    };
+    use reqwest::{StatusCode, header::HeaderMap};
+    use std::time::{Duration, Instant};
+
+    fn secs(value: u64) -> Duration {
+        Duration::from_secs(value)
+    }
+
+    /// Production path: one API-key response → sync result → backoff outcome.
+    fn outcome(status: StatusCode, headers: &HeaderMap) -> ClaudeSyncOutcome {
+        classify_claude_sync_result(
+            &anthropic_rate_limit_response(status, headers).map(|buckets| buckets.len()),
+        )
+    }
 
     #[test]
     fn classifies_claude_sync_results_for_backoff() {
@@ -333,6 +356,7 @@ mod tests {
         );
         let rate_limited = anyhow::Error::new(ClaudeUsageRateLimited {
             retry_after: Some(Duration::from_secs(90)),
+            buckets: Vec::new(),
         });
         assert_eq!(
             classify_claude_sync_result(&Err(rate_limited)),
@@ -341,8 +365,11 @@ mod tests {
             }
         );
         // Context wrapping must not hide the typed 429.
-        let wrapped = anyhow::Error::new(ClaudeUsageRateLimited { retry_after: None })
-            .context("forced refresh");
+        let wrapped = anyhow::Error::new(ClaudeUsageRateLimited {
+            retry_after: None,
+            buckets: Vec::new(),
+        })
+        .context("forced refresh");
         assert_eq!(
             classify_claude_sync_result(&Err(wrapped)),
             ClaudeSyncOutcome::RateLimited { retry_after: None }
@@ -351,14 +378,60 @@ mod tests {
 
     #[test]
     fn rate_limited_error_reads_retry_after_header() {
-        let mut headers = reqwest::header::HeaderMap::new();
-        assert_eq!(claude_usage_rate_limited_error(&headers).retry_after, None);
+        let mut headers = HeaderMap::new();
+        assert_eq!(
+            claude_usage_rate_limited_error(&headers, Vec::new()).retry_after,
+            None
+        );
         headers.insert(reqwest::header::RETRY_AFTER, "45".parse().unwrap());
         assert_eq!(
-            claude_usage_rate_limited_error(&headers).retry_after,
+            claude_usage_rate_limited_error(&headers, Vec::new()).retry_after,
             Some(Duration::from_secs(45))
         );
         headers.insert(reqwest::header::RETRY_AFTER, "garbage".parse().unwrap());
-        assert_eq!(claude_usage_rate_limited_error(&headers).retry_after, None);
+        assert_eq!(
+            claude_usage_rate_limited_error(&headers, Vec::new()).retry_after,
+            None
+        );
+    }
+
+    #[test]
+    fn api_key_429_keeps_pressure_buckets_and_the_backoff_streak() {
+        let mut headers = HeaderMap::new();
+        headers.insert("anthropic-ratelimit-requests-limit", "100".parse().unwrap());
+        headers.insert(
+            "anthropic-ratelimit-requests-remaining",
+            "0".parse().unwrap(),
+        );
+        headers.insert(reqwest::header::RETRY_AFTER, "600".parse().unwrap());
+        // Exhaustion still reaches the dispatch gate instead of being dropped...
+        let error = anthropic_rate_limit_response(StatusCode::TOO_MANY_REQUESTS, &headers)
+            .expect_err("a 429 must still schedule a retry");
+        let limited = error
+            .downcast_ref::<ClaudeUsageRateLimited>()
+            .expect("429 is the typed rate-limit error");
+        assert_eq!(limited.buckets.len(), 1);
+        assert_eq!(limited.buckets[0]["used"], 100);
+        assert_eq!(limited.buckets[0]["remaining"], 0);
+        // ...and the loop still backs off for the advertised Retry-After.
+        assert_eq!(limited.retry_after, Some(secs(600)));
+
+        // 429 -> 500 -> 429: the 500 must not read as a successful sync (which
+        // would reset the ladder), so the last 429 has to resume at 240 s.
+        headers.remove(reqwest::header::RETRY_AFTER);
+        let mut backoff = ClaudeSyncBackoff::new(secs(120), secs(1800));
+        let t0 = Instant::now();
+        let mut step = |status, at| backoff.record(outcome(status, &headers), at);
+        assert_eq!(step(StatusCode::TOO_MANY_REQUESTS, t0), secs(120));
+        assert_eq!(
+            step(StatusCode::INTERNAL_SERVER_ERROR, t0 + secs(120)),
+            secs(120)
+        );
+        assert_eq!(
+            step(StatusCode::TOO_MANY_REQUESTS, t0 + secs(240)),
+            secs(240)
+        );
+        drop(step);
+        assert_eq!(backoff.consecutive_rate_limits(), 2);
     }
 }
