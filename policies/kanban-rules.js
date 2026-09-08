@@ -664,7 +664,8 @@ var rules = {
         [payload.card_id]
       );
 
-      // #401: Auto-merge now handled by merge-automation.js (direct merge + PR fallback)
+      // #401/#5716: kanban-rules performs no merge. Merging always goes through
+      // a pull request that an agent babysits; there is no automated merge policy.
 
       var retrospectiveResult = agentdesk.runtime.recordCardRetrospective(
         payload.card_id,

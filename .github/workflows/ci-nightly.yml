@@ -274,9 +274,6 @@ jobs:
         timeout-minutes: 15
         run: "cargo test --lib multinode_regression:: -- --nocapture --test-threads=1"
 
-      - name: Merge gate policy invariants
-        run: node --test policies/__tests__/merge-automation.test.js
-
       - name: Stop PostgreSQL service
         if: always()
         run: ./scripts/ci/postgres-service.sh stop
