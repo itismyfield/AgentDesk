@@ -22,6 +22,24 @@ pub use crate::eventbus::{
     BatchBuffer, BroadcastEvent, BroadcastTx, emit_event, new_broadcast, spawn_batch_flusher,
 };
 
+/// Whether a `/ws` upgrade may proceed for the configured token.
+///
+/// `/ws` is registered without `auth_middleware`, so this per-connection check
+/// is the only gate on the route and there is no boot-snapshot second line of
+/// defence behind it (#5750). The comparison therefore uses the same
+/// `constant_time_token_eq` helper as `routes/auth.rs`; the plain `!=` it
+/// replaced let a caller-controlled token short-circuit on the first mismatched
+/// byte. An unset or empty configured token leaves the route open, which is the
+/// pre-existing contract and is unchanged here.
+fn ws_token_authorized(expected: Option<&str>, supplied: &str) -> bool {
+    match expected {
+        Some(expected) if !expected.is_empty() => {
+            crate::utils::auth::constant_time_token_eq(expected, supplied)
+        }
+        _ => true,
+    }
+}
+
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(tx): State<BroadcastTx>,
@@ -30,17 +48,13 @@ pub async fn ws_handler(
 ) -> impl IntoResponse {
     // Check auth token if configured
     let config = crate::config::load_graceful();
-    if let Some(expected) = config.server.auth_token.as_deref() {
-        if !expected.is_empty() {
-            let token = query.get("token").map(|s| s.as_str()).unwrap_or("");
-            if token != expected {
-                return axum::response::Response::builder()
-                    .status(401)
-                    .body(axum::body::Body::from("unauthorized"))
-                    .unwrap()
-                    .into_response();
-            }
-        }
+    let supplied = query.get("token").map(|s| s.as_str()).unwrap_or("");
+    if !ws_token_authorized(config.server.auth_token.as_deref(), supplied) {
+        return axum::response::Response::builder()
+            .status(401)
+            .body(axum::body::Body::from("unauthorized"))
+            .unwrap()
+            .into_response();
     }
 
     // #2050 P1 finding 2 — accept `?since=<id>` (or legacy `?last_event_id=`)
@@ -136,5 +150,38 @@ async fn handle_socket(socket: WebSocket, tx: BroadcastTx, last_event_id: Option
     tokio::select! {
         _ = &mut send_task => { recv_task.abort(); }
         _ = &mut recv_task => { send_task.abort(); }
+    }
+}
+
+#[cfg(test)]
+mod ws_auth_gate_tests {
+    use super::ws_token_authorized;
+
+    #[test]
+    fn configured_token_rejects_wrong_missing_and_prefix_tokens() {
+        let expected = Some("dashboard-secret-token");
+
+        assert!(!ws_token_authorized(expected, ""));
+        assert!(!ws_token_authorized(expected, "dashboard-secret-taken"));
+        assert!(!ws_token_authorized(expected, "dashboard-secret"));
+        assert!(!ws_token_authorized(expected, "dashboard-secret-token-x"));
+    }
+
+    #[test]
+    fn configured_token_accepts_only_the_exact_token() {
+        assert!(ws_token_authorized(
+            Some("dashboard-secret-token"),
+            "dashboard-secret-token"
+        ));
+    }
+
+    /// The open-route contract this fix deliberately does not change: an unset
+    /// or empty `server.auth_token` leaves `/ws` unauthenticated (#5750 is the
+    /// write-back that silently produced the unset state, not the state itself).
+    #[test]
+    fn unset_or_empty_configured_token_leaves_the_route_open() {
+        assert!(ws_token_authorized(None, ""));
+        assert!(ws_token_authorized(None, "anything"));
+        assert!(ws_token_authorized(Some(""), ""));
     }
 }

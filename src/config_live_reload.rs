@@ -295,7 +295,13 @@ fn routines_restart_fingerprint(routines: &RoutinesConfig) -> RoutinesRestartFin
 /// non-logging fingerprints.
 pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str> {
     let mut changed = Vec::new();
-    if section_changed(&old.server, &new.server) {
+    // #5750 — `server.auth_token` is `#[serde(skip_serializing)]`, so it is
+    // absent from both sides of the serialized comparison and its arrival or
+    // removal is invisible there. Compare presence only; the secret value never
+    // enters a comparison or a log line.
+    if section_changed(&old.server, &new.server)
+        || old.server.auth_token.is_some() != new.server.auth_token.is_some()
+    {
         changed.push("server");
     }
     if section_changed(&old.database, &new.database) {

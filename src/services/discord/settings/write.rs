@@ -54,6 +54,81 @@ fn config_io_error(path: &Path, err: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(format!("{}: {}", path.display(), err))
 }
 
+/// Mutable entry for `key` under `parent`, created as null when absent.
+///
+/// A `parent` that is not a mapping is replaced with an empty one, matching what
+/// the whole-`Config` round-trip this replaced did to a malformed section.
+fn yaml_child<'a>(parent: &'a mut serde_yaml::Value, key: &str) -> &'a mut serde_yaml::Value {
+    if !parent.is_mapping() {
+        *parent = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    let key = serde_yaml::Value::String(key.to_string());
+    let map = parent
+        .as_mapping_mut()
+        .expect("value was just normalized to a mapping");
+    if !map.contains_key(&key) {
+        map.insert(key.clone(), serde_yaml::Value::Null);
+    }
+    map.get_mut(&key).expect("entry exists after the insert")
+}
+
+fn yaml_set(parent: &mut serde_yaml::Value, key: &str, value: serde_yaml::Value) {
+    *yaml_child(parent, key) = value;
+}
+
+fn yaml_remove(parent: &mut serde_yaml::Value, key: &str) {
+    if let Some(map) = parent.as_mapping_mut() {
+        map.remove(&serde_yaml::Value::String(key.to_string()));
+    }
+}
+
+/// Patch only the keys this write-back owns and leave the rest of the YAML
+/// document tree alone.
+///
+/// Issue #5750 — re-serializing the whole `Config` dropped every
+/// `#[serde(skip_serializing)]` secret from disk (`config.rs:125`
+/// `server.auth_token`, `config.rs:242` `discord.bots.*.token`) and also baked
+/// `load_from_path`'s runtime-relative path resolution into the operator's file.
+/// Keys outside the Discord bot auth block are now untouched. serde_yaml still
+/// does not round-trip comments, so comments are lost on any save that reaches
+/// this function.
+fn patch_bot_settings_yaml(
+    original: &str,
+    bot_name: &str,
+    owner_id_to_set: Option<u64>,
+    settings: &DiscordBotSettings,
+) -> Result<String, serde_yaml::Error> {
+    let mut document: serde_yaml::Value = serde_yaml::from_str(original)?;
+
+    let discord = yaml_child(&mut document, "discord");
+    if let Some(owner_id) = owner_id_to_set {
+        yaml_set(discord, "owner_id", serde_yaml::to_value(owner_id)?);
+    }
+
+    let bot = yaml_child(yaml_child(discord, "bots"), bot_name);
+    yaml_set(
+        bot,
+        "provider",
+        serde_yaml::to_value(settings.provider.as_str())?,
+    );
+    match settings.agent.as_deref() {
+        Some(agent) => yaml_set(bot, "agent", serde_yaml::to_value(agent)?),
+        None => yaml_remove(bot, "agent"),
+    }
+
+    let auth = crate::config::DiscordBotAuthConfig {
+        allowed_channel_ids: Some(settings.allowed_channel_ids.clone()),
+        require_mention_channel_ids: Some(settings.require_mention_channel_ids.clone()),
+        allowed_user_ids: Some(settings.allowed_user_ids.clone()),
+        allowed_tools: Some(normalize_allowed_tools(&settings.allowed_tools)),
+        allow_all_users: Some(settings.allow_all_users),
+        allowed_bot_ids: Some(settings.allowed_bot_ids.clone()),
+    };
+    yaml_set(bot, "auth", serde_yaml::to_value(&auth)?);
+
+    serde_yaml::to_string(&document)
+}
+
 fn persist_bot_auth_to_yaml_checked(
     token: &str,
     settings: &DiscordBotSettings,
@@ -61,12 +136,14 @@ fn persist_bot_auth_to_yaml_checked(
     let Some(path) = super::config_path_for_write() else {
         return Ok(());
     };
+    if !path.is_file() {
+        // No file means no configured bot this write-back could own; the old
+        // `Config::default()` branch reached the same early return below.
+        return Ok(());
+    }
 
-    let mut config = if path.is_file() {
-        crate::config::load_from_path(&path).map_err(|err| config_io_error(&path, err))?
-    } else {
-        crate::config::Config::default()
-    };
+    let original = fs::read_to_string(&path)?;
+    let config = crate::config::load_from_path(&path).map_err(|err| config_io_error(&path, err))?;
 
     let Some(bot_name) = super::resolved_config_bot_name(&config, token) else {
         // Do not mutate YAML for tokens that are not managed by agentdesk.yaml.
@@ -77,22 +154,13 @@ fn persist_bot_auth_to_yaml_checked(
 
     // Keep the onboarding-configured owner stable; runtime settings should only
     // fill the owner when the YAML is still unset.
-    if config.discord.owner_id.is_none() {
-        config.discord.owner_id = settings.owner_user_id;
-    }
+    let owner_id_to_set = match config.discord.owner_id {
+        Some(_) => None,
+        None => settings.owner_user_id,
+    };
 
-    if let Some(bot) = config.discord.bots.get_mut(&bot_name) {
-        bot.provider = Some(settings.provider.as_str().to_string());
-        bot.agent = settings.agent.clone();
-        bot.auth.allowed_channel_ids = Some(settings.allowed_channel_ids.clone());
-        bot.auth.require_mention_channel_ids = Some(settings.require_mention_channel_ids.clone());
-        bot.auth.allowed_user_ids = Some(settings.allowed_user_ids.clone());
-        bot.auth.allowed_tools = Some(normalize_allowed_tools(&settings.allowed_tools));
-        bot.auth.allow_all_users = Some(settings.allow_all_users);
-        bot.auth.allowed_bot_ids = Some(settings.allowed_bot_ids.clone());
-    }
-
-    let rendered = serde_yaml::to_string(&config).map_err(|err| config_io_error(&path, err))?;
+    let rendered = patch_bot_settings_yaml(&original, &bot_name, owner_id_to_set, settings)
+        .map_err(|err| config_io_error(&path, err))?;
     write_bytes_atomically(&path, rendered.as_bytes())
 }
 
