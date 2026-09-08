@@ -109,11 +109,6 @@ export default function PipelineVisualEditor({
     [repo, selectedAgentId],
   );
   const fsmDraftScopeKey = useMemo(() => buildScopeKey(level), [buildScopeKey, level]);
-  // #5743 r3: the scope key and the generation of the newest editor-state request.
-  // The loading effect cancels its own stale responses through effect cleanup;
-  // a mutation refresh has no cleanup, so it proves currency against these.
-  const activeScopeKeyRef = useRef<string | null>(null);
-  const editorRequestGenerationRef = useRef(0);
 
   useEffect(() => {
     persistedFsmDraftStoreRef.current = persistedFsmDraftStore;
@@ -267,8 +262,6 @@ export default function PipelineVisualEditor({
   }, [repo, selectedAgentId, setPersistedPipelineSnapshotStore]);
 
   useEffect(() => {
-    activeScopeKeyRef.current = fsmDraftScopeKey;
-    editorRequestGenerationRef.current += 1;
     if (!repo) {
       resetEditorState();
       setLoading(false);
@@ -510,40 +503,10 @@ export default function PipelineVisualEditor({
   ]);
 
   async function refreshAfterMutation(nextLevel: EditLevel = level) {
-    const nextScopeKey = buildScopeKey(nextLevel);
-    // #5743 r4: the server already accepted this mutation, so retire the draft of
-    // *the scope it just confirmed* here instead of when the refresh GET lands -
-    // other scopes keep their unsaved edits. A same-scope reload can beat that GET
-    // and the guard below then drops the response that used to do the retiring.
-    if (nextScopeKey) {
-      // The loading effect reads this ref synchronously, so retire it there too.
-      persistedFsmDraftStoreRef.current = removeDraftScope(persistedFsmDraftStoreRef.current, nextScopeKey);
-      setPersistedFsmDraftStore((store) => removeDraftScope(normalizePersistedFsmDraftStore(store), nextScopeKey));
-    }
-    // Adopting the shown edits as the baseline is what stops the persistence
-    // effect from writing the retired entry straight back on the next commit.
-    if (nextScopeKey === activeScopeKeyRef.current && pipelineDraft) {
-      setSavedPipeline(clonePipelineConfig(pipelineDraft));
-      setSavedOverrideExtras({ ...overrideExtras });
-      setSavedStageDrafts(cloneStageDrafts(stageDrafts));
-    }
-    const generation = ++editorRequestGenerationRef.current;
     const snapshot = await fetchSnapshot(nextLevel);
-    // The snapshot belongs to `nextScopeKey`, so caching it stays correct even
-    // when the editor has moved on.
+    const nextScopeKey = buildScopeKey(nextLevel);
     if (nextScopeKey) {
       persistSnapshot(nextScopeKey, nextLevel, snapshot);
-    }
-    // #5743 r3: applying a response for a scope the editor already left would both
-    // show that scope's snapshot on the current screen and pin `appliedScopeKey`
-    // to it, which blocks the persistence effect for the scope actually on screen
-    // until a reload. Discard it the way the loading effect discards a cancelled
-    // response.
-    if (
-      generation !== editorRequestGenerationRef.current
-      || nextScopeKey !== activeScopeKeyRef.current
-    ) {
-      return;
     }
     applySnapshot(snapshot, "fetch", null, nextScopeKey);
   }
