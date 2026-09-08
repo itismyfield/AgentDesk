@@ -2811,6 +2811,7 @@ services::discord::health::stall_liveness::redrive_grace::tests::stale_identity_
 services::discord::health::stall_liveness::tests::advancing_relay_offset_defers_cleanup
 services::discord::health::stall_liveness::tests::capture_advance_history_defers_on_threshold_first_tick
 services::discord::health::stall_liveness::tests::capture_offset_advancing_protects_only_proven_alive_turns
+services::discord::health::stall_liveness::tests::current_provider_source_progress_survives_capture_unknown_5712
 services::discord::health::stall_liveness::tests::dead_pane_open_tool_keeps_existing_force_clean_timing
 services::discord::health::stall_liveness::tests::deploy_restart_40min_turn_survives
 services::discord::health::stall_liveness::tests::draining_undelivered_backlog_keeps_deferring_across_ticks_until_drained

@@ -547,7 +547,7 @@ pub(super) fn log_stall_watchdog_liveness_deferred(
     );
 }
 
-pub(super) fn log_stall_watchdog_force_cleanup_judgment(
+pub(super) fn log_stall_watchdog_page_judgment(
     provider: &ProviderKind,
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
@@ -575,7 +575,7 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
         basis.restart_grace_active,
     );
     tracing::warn!(
-        event = "stall_watchdog_force_cleanup_judgment",
+        event = "stall_watchdog_page_judgment",
         reason_code = "1446_stall_watchdog",
         provider = provider.as_str(),
         channel_id = channel_id.get(),
@@ -613,9 +613,9 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
         deferral_count = ?decision.and_then(StallWatchdogLivenessDecision::deferral_count),
         max_deferrals = decision.map(|decision| decision.max_deferrals).unwrap_or(0),
         shadow_verdict,
-        existing_decision = "force_cleanup",
+        existing_decision = "page_suspected_stall",
         shadow_reasons,
-        "  [{ts}] ⚡ STALL-WATCHDOG: shadow_verdict={shadow_verdict} existing_decision=force_cleanup; forced cleanup for desynced channel {}",
+        "  [{ts}] ⚡ STALL-WATCHDOG: shadow_verdict={shadow_verdict} existing_decision=page_suspected_stall; suspected stall, page-only, no cleanup for channel {}",
         channel_id,
     );
 }
@@ -1583,9 +1583,8 @@ mod tests {
     /// absolute backstop — it is no longer the tick count that triggers cleanup.
     /// We first prove that far more than the old 20-tick cap of deferrals all
     /// stay `Defer` while the turn's age is below the backstop, then that a turn
-    /// whose age has crossed `STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS` (a genuine
-    /// forever-spinner, #3582 R1 finite ceiling) force-cleans and logs the
-    /// reason. [acceptance 3]
+    /// whose age has crossed `STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS` becomes
+    /// eligible for page-only reporting and logs the reason. [acceptance 3]
     #[test]
     fn liveness_force_clean_after_absolute_backstop_and_logs_reason() {
         let provider = ProviderKind::Codex;
@@ -1645,7 +1644,7 @@ mod tests {
 
         let basis = StallWatchdogJudgmentBasis::from_snapshot(&snap, now, now - 10_000);
         let logs = capture_warns(|| {
-            log_stall_watchdog_force_cleanup_judgment(
+            log_stall_watchdog_page_judgment(
                 &provider,
                 channel,
                 &snap,
@@ -1655,14 +1654,113 @@ mod tests {
                 600,
             );
         });
-        assert!(
-            logs.contains("stall_watchdog_force_cleanup_judgment"),
-            "{logs}"
-        );
+        assert!(logs.contains("stall_watchdog_page_judgment"), "{logs}");
+        assert!(logs.contains("page_suspected_stall"), "{logs}");
+        assert!(logs.contains("page-only, no cleanup"), "{logs}");
+        assert!(!logs.contains("force_cleanup"), "{logs}");
         assert!(
             logs.contains("liveness_absolute_backstop_reached=true"),
             "{logs}"
         );
+    }
+
+    #[test]
+    fn current_provider_source_progress_survives_capture_unknown_5712() {
+        let _root = isolated_runtime_root();
+        for (provider, channel_number) in [
+            (ProviderKind::Claude, 57_120),
+            (ProviderKind::Codex, 57_121),
+        ] {
+            let channel = ChannelId::new(channel_number);
+            for capture_offset in [None, Some(0)] {
+                let tmux = format!("AgentDesk-{}-5712-{capture_offset:?}", provider.as_str());
+                clear_stall_watchdog_liveness_state(&provider, channel, Some(&tmux));
+                let file = tempfile::NamedTempFile::new().expect("isolated source transcript");
+                let now = chrono::Utc::now().timestamp();
+                let mut inflight = inflight_with_output(
+                    channel.get(),
+                    &tmux,
+                    Some(file.path().display().to_string()),
+                );
+                inflight.provider = provider.as_str().to_string();
+                let mut snap = snapshot(channel.get(), &tmux, capture_offset);
+                snap.provider = provider.as_str().to_string();
+                snap.relay_health.provider = provider.as_str().to_string();
+                snap.last_relay_offset = 0;
+                snap.relay_health.last_relay_offset = 0;
+
+                let progressing = evaluate_stall_watchdog_liveness(
+                    &provider,
+                    channel,
+                    &snap,
+                    Some(&inflight),
+                    now,
+                    STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                    STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+                    Some(600),
+                );
+                assert!(
+                    progressing.should_defer(),
+                    "{provider:?} {capture_offset:?}"
+                );
+                assert_eq!(progressing.evidence.pane_offset_advanced_age_secs, None);
+                assert_eq!(progressing.evidence.relay_offset_advanced_age_secs, None);
+                assert_eq!(
+                    progressing
+                        .evidence
+                        .reason_codes_csv(STALL_WATCHDOG_POSITIVE_LIVENESS_SECS),
+                    "transcript_mtime_recent"
+                );
+
+                // Age the real source beyond the inclusive, whole-second budget.
+                file.as_file()
+                    .set_modified(
+                        std::time::SystemTime::now()
+                            - std::time::Duration::from_secs(
+                                STALL_WATCHDOG_POSITIVE_LIVENESS_SECS + 5,
+                            ),
+                    )
+                    .expect("age source transcript beyond the freshness budget");
+                let stale_now = chrono::Utc::now().timestamp();
+                let stale = evaluate_stall_watchdog_liveness(
+                    &provider,
+                    channel,
+                    &snap,
+                    Some(&inflight),
+                    stale_now,
+                    STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                    STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+                    Some(721),
+                );
+                assert_eq!(stale.action, StallWatchdogLivenessAction::ProceedNoEvidence);
+                assert!(
+                    stale
+                        .evidence
+                        .transcript_mtime_age_secs
+                        .is_some_and(|age| age > STALL_WATCHDOG_POSITIVE_LIVENESS_SECS)
+                );
+
+                // Unknown source also has no positive evidence; it is not healthy
+                // delivery, a confirmed dead owner, or permission to clear a turn.
+                inflight.output_path = None;
+                let unknown = evaluate_stall_watchdog_liveness(
+                    &provider,
+                    channel,
+                    &snap,
+                    Some(&inflight),
+                    stale_now,
+                    STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                    STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+                    None,
+                );
+                assert_eq!(
+                    unknown.action,
+                    StallWatchdogLivenessAction::ProceedNoEvidence
+                );
+                assert_eq!(unknown.evidence.transcript_mtime_age_secs, None);
+                clear_stall_watchdog_liveness_state(&provider, channel, Some(&tmux));
+            }
+        }
     }
 
     #[test]
