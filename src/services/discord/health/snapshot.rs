@@ -20,7 +20,7 @@ use super::reachability::ledger::{ledger_file_exists, ledger_path};
 #[cfg(unix)]
 use super::reachability::verdict::ReachabilityVerdict;
 use super::redaction;
-use super::session_enrichment::{self, SessionEnrichment};
+use super::session_enrichment::{self, HealthSnapshotOptions, SessionEnrichment};
 use super::stall_verdict;
 use super::transcript_binding_stall::{self, resolve_bound_selector};
 use super::unpaired_active_token;
@@ -821,18 +821,22 @@ pub async fn active_request_owner_for_channel(
 
 /// Build the detailed health check snapshot for authenticated/local diagnostics.
 pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSnapshot {
-    build_health_snapshot_with_options(registry, true).await
+    build_health_snapshot_with_options(registry, HealthSnapshotOptions::new(true)).await
 }
 
 /// Build the public health check snapshot without the detail-only payload.
 pub async fn build_public_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSnapshot {
-    build_health_snapshot_with_options(registry, false).await
+    build_health_snapshot_with_options(registry, HealthSnapshotOptions::new(false)).await
 }
 
-async fn build_health_snapshot_with_options(
+pub(super) async fn build_health_snapshot_with_options(
     registry: &HealthRegistry,
-    include_mailbox_details: bool,
+    options: HealthSnapshotOptions,
 ) -> DiscordHealthSnapshot {
+    let HealthSnapshotOptions {
+        include_mailbox_details,
+        mut tmux,
+    } = options;
     let uptime_secs = registry.started_at.elapsed().as_secs();
     let version = env!("CARGO_PKG_VERSION");
 
@@ -847,18 +851,14 @@ async fn build_health_snapshot_with_options(
     let mut recovery_duration = 0.0f64;
     let mut mailbox_entries = Vec::new();
     let mut provider_active_turns = 0usize;
-    // #5071 T4-B6: read the 4987 §5.1 switch once per snapshot, so every entry
-    // in one response answers under the same authority even if the live config
-    // is edited mid-poll. #5736: it is also the ONLY reason the public build has
-    // to walk channels at all, so under `Structural` — where the polarity pass
-    // is a no-op — the public build skips the walk and keeps its pre-#5736 cost.
+    // Read the authority switch once per snapshot. Structural polarity is a
+    // no-op, so the public build skips channel observation entirely (#5736).
     #[cfg(unix)]
     let composite_governs_polarity = relay_verdict_source().governs_health_polarity();
     #[cfg(unix)]
     let observe_channels = include_mailbox_details || composite_governs_polarity;
     #[cfg(not(unix))]
     let observe_channels = include_mailbox_details;
-    let tmux_deadline = session_enrichment::tmux_observation_deadline();
 
     if providers.is_empty() {
         degraded_reasons.push("no_providers_registered".to_string());
@@ -882,7 +882,7 @@ async fn build_health_snapshot_with_options(
             let channel = *channel_id;
             let session =
                 SessionEnrichment::load(&entry.shared, provider_kind.as_ref(), channel).await;
-            let tmux_present = session.tmux_session_present_within(tmux_deadline).await;
+            let tmux_present = session.tmux_session_present_within(&mut tmux).await;
             let desynced = session.desynced(tmux_present, session.watcher_attached);
             let mailbox_has_cancel_token = snapshot.cancel_token.is_some();
             let queue_depth = snapshot.intervention_queue.len();

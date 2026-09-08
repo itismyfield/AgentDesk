@@ -15,7 +15,6 @@
         "src/services/discord/commands/control.rs": 2,
         "src/services/discord/health/recovery.rs": 4,
         "src/services/discord/health/relay_auto_heal.rs": 2,
-        "src/services/discord/health/session_enrichment.rs": 2,
         "src/services/discord/health/snapshot.rs": 2,
         "src/services/discord/recovery_engine/manual_rebind/mod.rs": 1,
         "src/services/discord/recovery_engine/manual_rebind/post_adoption_guard_tests.rs": 2,

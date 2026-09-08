@@ -11,35 +11,48 @@ use super::liveness_authority::{CaptureCoordinateObservation, CoordinateStatus};
 
 pub(super) const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
 
-/// Wall-clock ceiling one health build may spend on `tmux has-session` probes,
-/// summed across every provider and channel it walks (#5736).
-///
-/// Sized under the tightest consumer that reads a health body: `deploy.sh`'s
-/// `curl --max-time 3`. A single probe already self-limits to 3s
-/// ([`crate::services::platform::tmux::session_presence`]), so without a shared
-/// ceiling an N-channel node serializes N of them and times the consumer out —
-/// which `deploy-release.sh` reads as "API unreachable" and treats as a reason
-/// to SKIP its zero-inflight gate. Per build, and the SAME for both builds, so
-/// they never disagree about a channel because one ran out of budget first.
+/// Cumulative probe wait budget; detail-only work does not consume it (#5736).
+/// Separate polls can still differ with probe latency or registry changes.
 const TMUX_OBSERVATION_BUDGET: std::time::Duration = std::time::Duration::from_millis(2_000);
 
-/// The deadline every channel probe in one health build shares.
-pub(super) fn tmux_observation_deadline() -> tokio::time::Instant {
-    tokio::time::Instant::now() + TMUX_OBSERVATION_BUDGET
+pub(super) struct HealthSnapshotOptions {
+    pub include_mailbox_details: bool,
+    pub tmux: TmuxObservationBudget,
 }
 
-/// The budgeted probe itself, reachable without a full [`SessionEnrichment`].
+impl HealthSnapshotOptions {
+    pub fn new(include_mailbox_details: bool) -> Self {
+        Self {
+            include_mailbox_details,
+            tmux: TmuxObservationBudget {
+                remaining: TMUX_OBSERVATION_BUDGET,
+                probe: crate::services::platform::tmux::has_session,
+            },
+        }
+    }
+}
+
+pub(super) struct TmuxObservationBudget {
+    remaining: std::time::Duration,
+    probe: fn(&str) -> bool,
+}
+
 pub(super) async fn probe_tmux_session_within(
     session_name: Option<&str>,
-    deadline: tokio::time::Instant,
+    budget: &mut TmuxObservationBudget,
 ) -> bool {
+    if budget.remaining.is_zero() {
+        return false;
+    }
     let Some(session_name) = session_name.map(str::to_string) else {
         return false;
     };
-    let probe = tokio::task::spawn_blocking(move || {
-        crate::services::platform::tmux::has_session(&session_name)
-    });
-    matches!(tokio::time::timeout_at(deadline, probe).await, Ok(Ok(true)))
+    let started = tokio::time::Instant::now();
+    let probe_fn = budget.probe;
+    let probe = tokio::task::spawn_blocking(move || probe_fn(&session_name));
+    let result = tokio::time::timeout(budget.remaining, probe).await;
+    budget.remaining = budget.remaining.saturating_sub(started.elapsed());
+    matches!(result, Ok(Ok(true)))
 }
 
 /// #5071 relay-tail S1 (I-4): one channel's relay coordinate, read once.
@@ -393,28 +406,10 @@ impl SessionEnrichment {
         }
     }
 
-    pub fn tmux_session_present(&self) -> bool {
-        self.tmux_session
-            .as_deref()
-            .is_some_and(crate::services::platform::tmux::has_session)
-    }
-
-    /// [`Self::tmux_session_present`] off the axum runtime and inside a shared
-    /// per-build deadline (#5736).
-    ///
-    /// `has_session` spawns `tmux` and blocks the caller for up to 3s. Since
-    /// #5736 the PUBLIC — unauthenticated — build calls it once per channel too,
-    /// and running it on a runtime worker is what `snapshot`'s own module docs
-    /// forbid ("wrapped in `spawn_blocking` so it never stalls the axum runtime
-    /// even if tmux is wedged").
-    ///
-    /// Exhausting the deadline reads as `false`, the same answer a probe failure
-    /// already gives, and that is the fail-CLOSED direction: this feeds only
-    /// `pane_idle_confirmed` (`snapshot::relay_verdict_probe_operands`), so
-    /// withholding it can keep a verdict from reaching `Reachable` but never
-    /// manufacture one.
-    pub async fn tmux_session_present_within(&self, deadline: tokio::time::Instant) -> bool {
-        probe_tmux_session_within(self.tmux_session.as_deref(), deadline).await
+    /// Probe off the runtime, charging only probe wait against the build budget.
+    /// Exhaustion withholds the idle witness; an already running probe may finish later.
+    pub async fn tmux_session_present_within(&self, budget: &mut TmuxObservationBudget) -> bool {
+        probe_tmux_session_within(self.tmux_session.as_deref(), budget).await
     }
 
     pub fn process_present(&self) -> bool {
@@ -565,36 +560,57 @@ mod tests {
         assert_eq!(liveness_as_alive(PaneLiveness::ProbeError), None);
     }
 
-    /// #5736 r2: the shared observation budget is what keeps an N-channel PUBLIC
-    /// poll from serializing N three-second `tmux has-session` probes past the
-    /// consumer's `curl --max-time 3`. Restoring the blocking, budget-less
-    /// `tmux_session_present` makes the exhausted-budget case answer `true`.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_exhausted_tmux_budget_withholds_a_live_session() {
-        if !crate::services::platform::tmux::is_available() {
-            eprintln!("skipping tmux observation budget witness: tmux unavailable");
-            return;
+        let mut budget = HealthSnapshotOptions::new(false).tmux;
+        budget.probe = |_| true;
+        // Model detail-only work between probes, outside probe accounting.
+        tokio::time::advance(TMUX_OBSERVATION_BUDGET * 2).await;
+        tokio::time::resume();
+        assert!(probe_tmux_session_within(Some("fake-live"), &mut budget).await);
+        budget.remaining = std::time::Duration::ZERO;
+        budget.probe = |_| panic!("exhausted budget spawned a probe");
+        assert!(!probe_tmux_session_within(Some("fake-live"), &mut budget).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_snapshot_wires_the_tmux_budget_and_probe() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        let registry = super::super::HealthRegistry::new();
+        let shared = discord::make_shared_data_for_tests();
+        let channel = ChannelId::new(5_736_000_000_000_003);
+        shared.mailboxes.handle(channel);
+        shared
+            .tmux_watchers
+            .insert(channel, watcher_handle("fake-live", NATIVE_TRANSCRIPT));
+        registry.register("codex".to_string(), shared).await;
+        for available in [true, false] {
+            let mut options = HealthSnapshotOptions::new(true);
+            options.tmux.remaining = if available {
+                TMUX_OBSERVATION_BUDGET
+            } else {
+                std::time::Duration::ZERO
+            };
+            options.tmux.probe = |_| {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                true
+            };
+            CALLS.store(0, Ordering::SeqCst);
+            if available {
+                tokio::time::advance(TMUX_OBSERVATION_BUDGET * 2).await;
+                tokio::time::resume();
+            }
+            let snapshot =
+                super::super::snapshot::build_health_snapshot_with_options(&registry, options)
+                    .await;
+            assert_eq!(CALLS.load(Ordering::SeqCst), usize::from(available));
+            let json = serde_json::to_value(snapshot).unwrap();
+            assert_eq!(json["mailboxes"].as_array().unwrap().len(), 1);
+            let mailbox = &json["mailboxes"][0];
+            assert_eq!(mailbox["tmux_present"], available);
+            assert_eq!(mailbox["relay_health"]["tmux_alive"], available);
         }
-        let name = format!("AgentDesk-5736-budget-{}", std::process::id());
-        let _ = crate::services::platform::tmux::kill_session(&name, "#5736 budget fixture reset");
-        crate::services::platform::tmux::create_session(&name, None, "sleep 30")
-            .expect("create budget fixture session");
-
-        assert!(
-            probe_tmux_session_within(
-                Some(&name),
-                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
-            )
-            .await,
-            "a live session must read as present inside the budget"
-        );
-        assert!(
-            !probe_tmux_session_within(Some(&name), tokio::time::Instant::now()).await,
-            "an exhausted budget must withhold the witness instead of probing"
-        );
-
-        let _ =
-            crate::services::platform::tmux::kill_session(&name, "#5736 budget fixture cleanup");
     }
 
     const NATIVE_TRANSCRIPT: &str = "/tmp/agentdesk-b0-native.jsonl";

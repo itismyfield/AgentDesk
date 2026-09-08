@@ -2780,6 +2780,7 @@ services::discord::health::session_enrichment::tests::health_load_carries_the_li
 services::discord::health::session_enrichment::tests::health_load_records_transcript_source_divergence_only_when_the_paths_split
 services::discord::health::session_enrichment::tests::health_reads_the_live_watcher_transcript_off_the_channel_binding
 services::discord::health::session_enrichment::tests::health_reports_no_watcher_transcript_for_a_channel_without_a_binding
+services::discord::health::session_enrichment::tests::health_snapshot_wires_the_tmux_budget_and_probe
 services::discord::health::session_enrichment::tests::inflight_a_alive_watcher_b_dead_mismatch_probes_a
 services::discord::health::session_enrichment::tests::only_exact_dead_or_absent_maps_to_dead
 services::discord::health::session_enrichment::tests::the_health_poll_reports_an_absent_coordinate_as_absent
