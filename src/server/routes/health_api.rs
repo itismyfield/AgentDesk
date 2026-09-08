@@ -2828,19 +2828,16 @@ mod tests {
         assert_eq!(public["degraded"], json!(true));
     }
 
-    /// #5736: the relay-verdict axis has to survive the SERIALIZATION, not just
+    /// #5736 r2: the relay-verdict axis must survive the SERIALIZATION, not just
     /// the snapshot build.
     ///
-    /// The r2 review's point: `snapshot.rs` proves the two BUILDS agree, but the
-    /// body an operator and every deploy gate actually read is
-    /// `public_health_json`'s projection of the detail JSON. Nothing pinned the
-    /// hop between them, so re-dropping `degraded_reasons` there — or teaching
+    /// `snapshot.rs` proves the two BUILDS agree, but the body an operator and
+    /// every deploy gate read is `public_health_json`'s projection. Nothing
+    /// pinned that hop, so re-dropping `degraded_reasons` there — or teaching
     /// `sanitize_public_degraded_reasons` to filter the non-`provider:` reasons
-    /// it currently passes through verbatim — would reopen #5736 with the
-    /// snapshot-level test still green.
-    ///
-    /// The reasons are the exact shape `apply_relay_verdict_polarity` emits,
-    /// including the `{provider}_{channel_id}` suffix.
+    /// it passes through verbatim — reopens #5736 with the snapshot-level test
+    /// still green. The reasons below are the exact shape the polarity pass
+    /// emits, `{provider}_{channel_id}` suffix included.
     #[test]
     fn public_health_json_carries_the_relay_verdict_axis_onto_the_summary() {
         let detail = json!({
@@ -2868,13 +2865,10 @@ mod tests {
         assert_eq!(public["degraded"], json!(true));
     }
 
-    /// #5736: and the two ROUTES have to project the same snapshot.
+    /// #5736 r2: and the two ROUTES must project the same snapshot.
     ///
-    /// `health_response` assembles the body once per URL; the URL selects the
-    /// projection, not the source. This drives both URLs off ONE registry
-    /// through the real router and pins that the summary reports the same
-    /// `status` and the same `degraded_reasons` the detail body does — the axis
-    /// itself is covered by the snapshot-level pair in
+    /// The URL selects the projection, not the source. This drives both URLs off
+    /// ONE registry through the real router. The relay axis itself is covered by
     /// `health::snapshot::tests::summary_and_detail_agree_on_the_composite_relay_verdict_polarity`,
     /// which needs registry internals this module cannot reach.
     #[test]

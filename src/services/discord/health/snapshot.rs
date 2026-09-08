@@ -1513,21 +1513,18 @@ mod tests {
         });
     }
 
-    /// #5736 r2: the public build OBSERVES the in-flight row, it does not
-    /// rewrite it.
+    /// #5736 r2: a health poll OBSERVES the in-flight row, it does not rewrite it.
     ///
     /// `SessionEnrichment::load` reached `inflight::load_inflight_state`, whose
-    /// finalizer compatibility backfill takes a timeout-less file lock and
-    /// PERSISTS the row it just read. Hoisting the polarity pass onto the public
-    /// build put that write behind an UNAUTHENTICATED `GET /api/health`: every
-    /// poll gave a legacy row a fresh `updated_at` and save generation, and
-    /// `inflight::rebind_reap` reads `updated_at` as the evidence that a row is
-    /// still advancing — so merely looking at a stalled turn made it look alive.
+    /// finalizer backfill takes a timeout-less file lock and PERSISTS the row it
+    /// read. Hoisting the polarity pass put that write behind an UNAUTHENTICATED
+    /// `GET /api/health`: every poll gave a legacy row a fresh `updated_at`, and
+    /// `inflight::rebind_reap` reads `updated_at` as evidence the row is still
+    /// advancing — so merely looking at a stalled turn made it look alive.
     ///
-    /// Byte equality is the assertion because one comparison covers
-    /// `updated_at`, the save generation and `finalizer_turn_id` at once. Both
-    /// builds are checked: the detail path is a diagnostic too, and it carried
-    /// the same write before this change.
+    /// Byte equality covers `updated_at`, the save generation and
+    /// `finalizer_turn_id` at once. Both builds are checked: the detail path is
+    /// a diagnostic too and carried the same write.
     #[cfg(unix)]
     #[test]
     fn a_health_poll_leaves_a_legacy_inflight_row_byte_identical() {
@@ -1561,15 +1558,13 @@ mod tests {
                 );
                 crate::services::discord::inflight::save_inflight_state(&state)
                     .expect("persist inflight fixture");
-                let root =
-                    crate::services::discord::inflight::inflight_runtime_root()
-                        .expect("inflight runtime root");
-                let path =
-                    crate::services::discord::inflight::inflight_state_path(
-                        &root,
-                        &provider,
-                        channel.get(),
-                    );
+                let root = crate::services::discord::inflight::inflight_runtime_root()
+                    .expect("inflight runtime root");
+                let path = crate::services::discord::inflight::inflight_state_path(
+                    &root,
+                    &provider,
+                    channel.get(),
+                );
 
                 // Clear the finalizer id the writer resolved. That is exactly the
                 // shape `parse_inflight_state_content_with_finalizer_backfill`

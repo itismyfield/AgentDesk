@@ -14,20 +14,32 @@ pub(super) const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
 /// Wall-clock ceiling one health build may spend on `tmux has-session` probes,
 /// summed across every provider and channel it walks (#5736).
 ///
-/// Sized under the tightest consumer budget that reads a health body:
-/// `scripts/deploy.sh`'s `curl --max-time 3` (`scripts/_defaults.sh` allows 5).
-/// A single probe already self-limits to 3s
+/// Sized under the tightest consumer that reads a health body: `deploy.sh`'s
+/// `curl --max-time 3`. A single probe already self-limits to 3s
 /// ([`crate::services::platform::tmux::session_presence`]), so without a shared
-/// ceiling an N-channel node could serialize N of them and time the consumer out
-/// — which `deploy-release.sh` reads as "API unreachable" and, for the
-/// zero-inflight gate, treats as a reason to SKIP the check. The ceiling is per
-/// build and applies to the detail and public builds alike, so the two never
-/// disagree about a channel because one of them ran out of budget first.
+/// ceiling an N-channel node serializes N of them and times the consumer out —
+/// which `deploy-release.sh` reads as "API unreachable" and treats as a reason
+/// to SKIP its zero-inflight gate. Per build, and the SAME for both builds, so
+/// they never disagree about a channel because one ran out of budget first.
 const TMUX_OBSERVATION_BUDGET: std::time::Duration = std::time::Duration::from_millis(2_000);
 
 /// The deadline every channel probe in one health build shares.
 pub(super) fn tmux_observation_deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + TMUX_OBSERVATION_BUDGET
+}
+
+/// The budgeted probe itself, reachable without a full [`SessionEnrichment`].
+pub(super) async fn probe_tmux_session_within(
+    session_name: Option<&str>,
+    deadline: tokio::time::Instant,
+) -> bool {
+    let Some(session_name) = session_name.map(str::to_string) else {
+        return false;
+    };
+    let probe = tokio::task::spawn_blocking(move || {
+        crate::services::platform::tmux::has_session(&session_name)
+    });
+    matches!(tokio::time::timeout_at(deadline, probe).await, Ok(Ok(true)))
 }
 
 /// #5071 relay-tail S1 (I-4): one channel's relay coordinate, read once.
@@ -390,27 +402,19 @@ impl SessionEnrichment {
     /// [`Self::tmux_session_present`] off the axum runtime and inside a shared
     /// per-build deadline (#5736).
     ///
-    /// `has_session` spawns `tmux` and blocks the calling thread for up to 3s.
-    /// The health builds call it once per channel, and since #5736 the PUBLIC
-    /// `/api/health` build calls it too — an unauthenticated path. Running it on
-    /// a runtime worker is what this module's own docs forbid ("wrapped in
-    /// `spawn_blocking` so it never stalls the axum runtime even if tmux is
-    /// wedged"), so the probe moves to the blocking pool and the await is
-    /// bounded by `deadline`.
+    /// `has_session` spawns `tmux` and blocks the caller for up to 3s. Since
+    /// #5736 the PUBLIC — unauthenticated — build calls it once per channel too,
+    /// and running it on a runtime worker is what `snapshot`'s own module docs
+    /// forbid ("wrapped in `spawn_blocking` so it never stalls the axum runtime
+    /// even if tmux is wedged").
     ///
     /// Exhausting the deadline reads as `false`, the same answer a probe failure
-    /// already gives. That is the fail-CLOSED direction for the relay verdict:
-    /// `pane_idle_confirmed` is the only operand this feeds
-    /// (`snapshot::relay_verdict_probe_operands`), and withholding it can only
-    /// keep a verdict from reaching `Reachable`, never manufacture one.
+    /// already gives, and that is the fail-CLOSED direction: this feeds only
+    /// `pane_idle_confirmed` (`snapshot::relay_verdict_probe_operands`), so
+    /// withholding it can keep a verdict from reaching `Reachable` but never
+    /// manufacture one.
     pub async fn tmux_session_present_within(&self, deadline: tokio::time::Instant) -> bool {
-        let Some(session_name) = self.tmux_session.clone() else {
-            return false;
-        };
-        let probe = tokio::task::spawn_blocking(move || {
-            crate::services::platform::tmux::has_session(&session_name)
-        });
-        matches!(tokio::time::timeout_at(deadline, probe).await, Ok(Ok(true)))
+        probe_tmux_session_within(self.tmux_session.as_deref(), deadline).await
     }
 
     pub fn process_present(&self) -> bool {
@@ -559,6 +563,38 @@ mod tests {
     fn only_exact_dead_or_absent_maps_to_dead() {
         assert_eq!(liveness_as_alive(PaneLiveness::DeadOrAbsent), Some(false));
         assert_eq!(liveness_as_alive(PaneLiveness::ProbeError), None);
+    }
+
+    /// #5736 r2: the shared observation budget is what keeps an N-channel PUBLIC
+    /// poll from serializing N three-second `tmux has-session` probes past the
+    /// consumer's `curl --max-time 3`. Restoring the blocking, budget-less
+    /// `tmux_session_present` makes the exhausted-budget case answer `true`.
+    #[tokio::test]
+    async fn an_exhausted_tmux_budget_withholds_a_live_session() {
+        if !crate::services::platform::tmux::is_available() {
+            eprintln!("skipping tmux observation budget witness: tmux unavailable");
+            return;
+        }
+        let name = format!("AgentDesk-5736-budget-{}", std::process::id());
+        let _ = crate::services::platform::tmux::kill_session(&name, "#5736 budget fixture reset");
+        crate::services::platform::tmux::create_session(&name, None, "sleep 30")
+            .expect("create budget fixture session");
+
+        assert!(
+            probe_tmux_session_within(
+                Some(&name),
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .await,
+            "a live session must read as present inside the budget"
+        );
+        assert!(
+            !probe_tmux_session_within(Some(&name), tokio::time::Instant::now()).await,
+            "an exhausted budget must withhold the witness instead of probing"
+        );
+
+        let _ =
+            crate::services::platform::tmux::kill_session(&name, "#5736 budget fixture cleanup");
     }
 
     const NATIVE_TRANSCRIPT: &str = "/tmp/agentdesk-b0-native.jsonl";
