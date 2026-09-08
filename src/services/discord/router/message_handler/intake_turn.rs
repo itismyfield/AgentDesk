@@ -1,8 +1,5 @@
 use super::super::super::queue_marker;
-use super::super::super::turn_view_reconciler::{
-    note_intake_turn_cleared_current as tv_clear_current,
-    note_intake_turn_started_current_with_attempt as tv_start_current_with_attempt,
-};
+use super::super::super::turn_view_reconciler::note_intake_turn_started_current_with_attempt as tv_start_current_with_attempt;
 use super::voice_announcement_route::route_voice_transcript_announcement_once;
 use super::*;
 
@@ -410,12 +407,19 @@ pub(super) async fn handle_text_message(
         .await;
         return Ok(());
     }
-    // #5660 [R1]: look the session up; its turn input is taken below the gate.
+    // #5660 [R1]: ordinary inputs own their session state before later awaits.
     let session_info = {
         let mut data = shared.core.lock().await;
         load_session_runtime_state(&mut data.sessions, channel_id)
     };
     let mut pending_uploads = preloaded_uploads;
+    let mut session_was_cleared = None;
+    if !pre_admission_control::may_complete_locally(user_text) {
+        let (taken_uploads, cleared) =
+            pre_admission_control::take_channel_input_state(shared, original_channel_id).await;
+        pending_uploads.splice(0..0, taken_uploads);
+        session_was_cleared = Some(cleared);
+    }
     let provider = settings_provider;
     let dispatch_id_for_thread = super::super::super::adk_session::parse_dispatch_id(user_text);
     let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {
@@ -1205,10 +1209,15 @@ pub(super) async fn handle_text_message(
     else {
         return Ok(());
     };
-    // #5660 [R2]: turn committed — take the channel input state and prepend it.
-    let (taken_uploads, session_was_cleared) =
-        pre_admission_control::take_channel_input_state(shared, original_channel_id).await;
-    pending_uploads.splice(0..0, taken_uploads);
+    // #5660 [R2]: classification passed; the mailbox claim still follows below.
+    let session_was_cleared = if let Some(cleared) = session_was_cleared {
+        cleared
+    } else {
+        let (taken_uploads, cleared) =
+            pre_admission_control::take_channel_input_state(shared, original_channel_id).await;
+        pending_uploads.splice(0..0, taken_uploads);
+        cleared
+    };
     let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);
     if force_fresh_provider_session {
         record_fresh_session_context_boundary(shared, channel_id).await?;

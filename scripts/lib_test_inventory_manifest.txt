@@ -4572,6 +4572,7 @@ services::discord::router::message_handler::pre_admission_control::pre_admission
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::every_non_continue_route_is_locally_completable
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::guard_position_and_one_way_upload_ownership_are_pinned
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::intake_turn_keeps_the_gate_above_the_deferred_take
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::resolve_local_controls_clear_pending_turn_view
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::route_branch_table_is_pinned
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::runtime_transition_takes_uploads_only_inside_the_busy_arm
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::uploads_only_take_leaves_cleared_in_the_session

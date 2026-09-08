@@ -30,8 +30,8 @@ pub(super) enum PreAdmission {
 /// The routing table; the first matching branch wins and the order is the
 /// contract. `has_preloaded_uploads` describes the local `pending_uploads`
 /// vector at the gate, which after `[R1]` holds exactly the uploads this
-/// invocation was handed (live intake attachments, or a queued Intervention's
-/// payload) — never the channel session's, which is taken below this gate.
+/// invocation was handed, plus session uploads for ordinary inputs. Locally
+/// completable inputs leave session state untouched until classification passes.
 pub(super) fn route(
     provider: &ProviderKind,
     channel_codex_goals_setting: Option<bool>,
@@ -101,9 +101,9 @@ pub(super) fn may_complete_locally(user_text: &str) -> bool {
     }
 }
 
-/// `[R2]`: takes the channel's turn input state once the turn is committed —
-/// the block that used to sit at the top of `handle_text_message`, moved below
-/// the gate so a locally completed input consumes nothing. Must be called with
+/// `[R1]/[R2]`: takes ordinary input state early; locally completable input
+/// state is deferred until classification passes, so a locally completed input
+/// consumes nothing. Must be called with
 /// the ORIGINAL channel id, never a dispatch thread it was redirected to.
 pub(super) async fn take_channel_input_state(
     shared: &Arc<SharedData>,
@@ -232,6 +232,18 @@ pub(super) async fn resolve(
             PreAdmission::HandledLocally
         }
         control => {
+            if should_add_turn_pending_reaction(dispatch_id_for_thread)
+                && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
+            {
+                tv_clear_current(
+                    shared,
+                    http,
+                    channel_id,
+                    user_msg_id,
+                    "intake_local_control",
+                )
+                .await;
+            }
             if let Some((reason, notice)) = codex_control_notice(&control) {
                 send_pre_admission_notice(http, shared, channel_id, reason, &notice).await;
             }
@@ -417,24 +429,95 @@ mod pre_admission_control_tests {
         assert!(data.sessions[&channel].cleared);
     }
 
+    #[tokio::test]
+    async fn resolve_local_controls_clear_pending_turn_view() {
+        use crate::services::discord::turn_view_reconciler::{
+            TurnViewState, note_intake_turn_started_current_with_attempt,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        let (shared, channel) = fixture(Some(session_with(&["U"], true))).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http = Arc::new(
+            serenity::HttpBuilder::new("test-token")
+                .proxy(format!("http://{}", listener.local_addr().unwrap()))
+                .client(
+                    reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_millis(100))
+                        .build()
+                        .unwrap(),
+                )
+                .ratelimiter_disabled(true)
+                .build(),
+        );
+        for (index, text) in ["/model", "/frobnicate"].into_iter().enumerate() {
+            let message = MessageId::new(566_000_000_000_101 + index as u64);
+            note_intake_turn_started_current_with_attempt(&shared, &http, channel, message, "test")
+                .await;
+            let state = || {
+                shared
+                    .turn_view_reconciler
+                    .ops()
+                    .iter()
+                    .filter(|op| op.target.message_id == message && op.emoji == '\u{23f3}')
+                    .fold(TurnViewState::None, |_, op| {
+                        if op.add {
+                            TurnViewState::Pending
+                        } else {
+                            TurnViewState::None
+                        }
+                    })
+            };
+            assert_eq!(state(), TurnViewState::Pending);
+            assert!(matches!(
+                resolve(
+                    (&http, &shared, &ProviderKind::Codex, false),
+                    (channel, channel, message),
+                    (text, None),
+                    NO_RESET,
+                    None,
+                )
+                .await,
+                PreAdmission::HandledLocally
+            ));
+            assert_eq!(state(), TurnViewState::None);
+            let data = shared.core.lock().await;
+            assert_eq!(data.sessions[&channel].pending_uploads, ["U"]);
+            assert!(data.sessions[&channel].cleared);
+        }
+    }
+
     fn offset(source: &str, token: &str) -> usize {
         source
             .find(token)
             .unwrap_or_else(|| panic!("missing token: {token}"))
     }
 
-    /// (f3) S3-20a/20b/20g/M12: gate above the deferred take, no second session
-    /// take, attachment flag read before it, and the prepend order kept.
+    /// Ordinary input takes early; only locally completable input defers state.
+    /// Both sites use the original channel and preserve prepend order.
     #[test]
     fn intake_turn_keeps_the_gate_above_the_deferred_take() {
         let src = include_str!("intake_turn.rs");
         let flag = "(http, shared, &provider, !pending_uploads.is_empty())";
         let take = "take_channel_input_state(";
-        assert!(offset(src, "pre_admission_control::resolve(") < offset(src, take));
-        assert!(offset(src, flag) < offset(src, take));
+        let early = offset(
+            src,
+            "if !pre_admission_control::may_complete_locally(user_text) {",
+        );
+        let gate = offset(src, "pre_admission_control::resolve(");
+        let deferred = src.rfind(take).unwrap();
+        assert!(early < offset(src, take) && offset(src, take) < gate);
+        assert!(src[early..gate].contains("session_was_cleared = Some(cleared);"));
+        assert!(gate < offset(src, "if let Some(cleared) = session_was_cleared"));
+        assert!(gate < deferred && offset(src, flag) < deferred);
+        assert_eq!(
+            src.matches("take_channel_input_state(shared, original_channel_id)")
+                .count(),
+            2
+        );
         assert_eq!(src.matches(flag).count(), 1);
         assert_eq!(src.matches("mem::take(&mut s.pending_uploads").count(), 0);
-        assert_eq!(src.matches("splice(0..0, taken_uploads)").count(), 1);
+        assert_eq!(src.matches("splice(0..0, taken_uploads)").count(), 2);
     }
 
     /// (f3) S3-20c'/20d: the conditional handoff take lives inside the busy arm
@@ -449,6 +532,17 @@ mod pre_admission_control_tests {
         assert!(offset(src, "may_complete_locally(") < offset(src, take));
         assert!(offset(src, take) < offset(src, "race_loss::handle_race_loss_enqueue("));
         assert_eq!(src.matches(take).count(), 1);
+        assert!(
+            src.split(take)
+                .nth(1)
+                .unwrap()
+                .split(')')
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .collect::<String>()
+                .eq("shared,original_channel_id,")
+        );
         assert_eq!(src.matches("may_complete_locally(").count(), 1);
     }
 
@@ -463,8 +557,8 @@ mod pre_admission_control_tests {
         assert!(offset(src, &lifecycle) < offset(src, &guard));
         assert!(offset(src, &guard) < offset(src, &classify));
         assert_eq!(src.matches(&guard).count(), 1);
-        for tail in ["push", "extend"] {
-            let write = format!("{}{}", ".pending_uploads.", tail);
+        for tail in [".push(", ".extend(", ".splice(", " ="] {
+            let write = format!("{}{}", ".pending_uploads", tail);
             assert_eq!(src.matches(&write).count(), 0, "{write}");
         }
     }
