@@ -167,8 +167,7 @@ banner "State/lint hardening guard"
 banner "Policy DB capability manifest guard (#3734)"
 "$PYTHON" scripts/check_policy_db_capabilities.py --no-silent-growth \
   --require-manifest policies/timeouts/active-monitor.cap.yaml \
-  --require-manifest policies/review-automation.cap.yaml \
-  --require-manifest policies/merge-automation.cap.yaml
+  --require-manifest policies/review-automation.cap.yaml
 "$PYTHON" -m unittest tests.test_policy_db_capabilities
 
 banner "SQL execution surface inventory baseline (#5358)"
@@ -212,9 +211,6 @@ banner "Reachability canonical Rust<->Python equivalence gate (#5071 T4-B2a)"
 # anchoring on real source and would therefore be silently skipped.
 "$PYTHON" scripts/check_reachability_canonical_equivalence.py
 "$PYTHON" -m unittest tests.test_reachability_canonical_equivalence
-
-banner "Merge automation policy tests (#4250)"
-node --test policies/__tests__/merge-automation.test.js
 
 banner "Idle-kill owner and timeout policy regressions (#5714)"
 node --test policies/__tests__/idle-kill-owners.test.js policies/__tests__/timeouts.test.js

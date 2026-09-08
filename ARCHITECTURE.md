@@ -367,6 +367,7 @@ src/
 │   ├── multinode_regression.rs
 │   ├── outbox_actionable_delivery.rs
 │   ├── outbox_delivery_alert.rs
+│   ├── rate_limit_sync.rs
 │   ├── resource_locks.rs
 │   ├── routine_script_audit.rs
 │   ├── startup_preflight.rs
@@ -497,6 +498,8 @@ src/
 │   │   ├── session_routing.rs
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
+│   ├── codex_tmux_wrapper/
+│   │   └── input.rs
 │   ├── codex_tui/
 │   │   ├── rollout_tail/
 │   │   │   └── parser.rs
@@ -1296,7 +1299,6 @@ src/
 │   │   ├── relay_recovery_reattach_apply.rs
 │   │   ├── replace_outcome_policy.rs
 │   │   ├── response_sanitizer.rs
-│   │   ├── restart_ctrl.rs
 │   │   ├── restart_mode.rs
 │   │   ├── restart_report.rs
 │   │   ├── role_map.rs

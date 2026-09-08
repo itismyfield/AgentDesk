@@ -5,6 +5,7 @@ source_events:
   - onReviewEnter
   - onDispatchCompleted
   - onReviewVerdict
+  - onTick5min
 db:
   read:
     tables:
@@ -12,10 +13,12 @@ db:
       - kanban_cards
       - kanban_reviews
       - pipeline_stages
+      - pr_tracking
       - task_dispatches
   write:
     tables:
       - kanban_cards
+      - pr_tracking
   raw_sql:
     mode: legacy
     capabilities:
@@ -23,8 +26,8 @@ db:
     markers_required: false
     rationale: broad legacy review lifecycle DB access pinned by no-silent-growth baseline
     no_silent_growth:
-      callsites: 31
-      fingerprint: sha256:1623a50a036bb6f9c4b0959ab41aad48df3998b7bbf4fdced2125697a4566eee
+      callsites: 32
+      fingerprint: sha256:12ac5769777c89b9ba3a619e3f952f839cd2d3e0829a0620986eb97c3d931497
 exec:
   allow:
     - gh

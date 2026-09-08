@@ -28,6 +28,54 @@ pub(crate) const OBSERVATION_ONLY_LOCAL_SLASH_COMMANDS: [&str; 1] = ["/model"];
 /// lifecycle gate.
 pub(crate) const SESSION_RESETTING_SLASH_COMMANDS: [&str; 1] = ["/clear"];
 
+/// #5660: Codex TUI controls that complete locally inside the wrapper.
+///
+/// Deliberately a registry separate from [`LOCAL_ONLY_SLASH_COMMANDS`], which
+/// `local_only_whitelist_matches_passthrough_command_set` pins to the Claude
+/// passthrough variant set. The classification primitives below are shared
+/// across providers; the command registries are not.
+pub(crate) const CODEX_LOCAL_CONTROLS: [&str; 2] = ["/model", "/help"];
+
+/// #5660 rule R3: single-segment filesystem roots that must reach the provider
+/// as prompt text instead of being read as a command. Stored lowercase and
+/// matched case-insensitively, so `/TMP` and `/users` are protected too. An
+/// enumerated list, never a `Path::exists` probe: routing must not vary with
+/// host filesystem state.
+pub(crate) const FS_ROOT_SEGMENTS: [&str; 20] = [
+    "applications",
+    "bin",
+    "dev",
+    "etc",
+    "home",
+    "library",
+    "mnt",
+    "opt",
+    "private",
+    "proc",
+    "root",
+    "run",
+    "sbin",
+    "srv",
+    "system",
+    "tmp",
+    "usr",
+    "users",
+    "var",
+    "volumes",
+];
+
+/// #5660: how one raw Codex wrapper input line must be routed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CodexInputClass {
+    /// Forward to the provider as a turn, exactly as before this issue.
+    ProviderPrompt,
+    /// Completes locally in the wrapper; no provider turn is created.
+    LocalControl { name: String, args: String },
+    /// Command-shaped but outside the registry. Rejected explicitly with the
+    /// raw spelling echoed back, never forwarded as a prompt.
+    UnsupportedControl { raw_name: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LocalOnlySlashControl {
     pub(crate) kind: String,
@@ -215,7 +263,63 @@ fn first_xml_tag_token(text: &str, tag: &str) -> Option<String> {
     (!token.is_empty()).then(|| token.to_string())
 }
 
-fn raw_slash_invocation(value: &str) -> Option<(String, String)> {
+/// #5660: classifies one Codex wrapper input line.
+///
+/// The default is inverted relative to an allowlist: anything command-shaped is
+/// handled (run locally or refused by name), and only tokens that resolve as
+/// filesystem paths escape to the provider. An allowlist cannot satisfy
+/// "unsupported `/...` must not fall through" — falling through is exactly what
+/// an allowlist does with everything it does not list. Terminal input (S2) and,
+/// once the upstream admission gate lands, Discord intake (S3) call this same
+/// function, so the two origins cannot drift on what counts as a command.
+pub(crate) fn classify_codex_input(text: &str) -> CodexInputClass {
+    let normalized = strip_terminal_controls(text);
+    let normalized = normalized.trim();
+    // External prompts are base64-framed and routinely multi-line. Only a
+    // single line can be a command, and reading just its first line would
+    // silently drop the rest of the body.
+    if normalized.contains('\n') || normalized.contains('\r') {
+        return CodexInputClass::ProviderPrompt;
+    }
+    // Start-anchored by construction: this returns None unless the very first
+    // token begins with `/`, so a slash quoted mid-sentence stays a prompt.
+    let Some((raw_name, args)) = raw_slash_invocation_parts(normalized) else {
+        return CodexInputClass::ProviderPrompt;
+    };
+    if is_fs_path_token(&raw_name) {
+        return CodexInputClass::ProviderPrompt;
+    }
+    let norm_name = raw_name.to_ascii_lowercase();
+    if CODEX_LOCAL_CONTROLS.contains(&norm_name.as_str()) {
+        CodexInputClass::LocalControl {
+            name: norm_name,
+            args,
+        }
+    } else {
+        CodexInputClass::UnsupportedControl { raw_name }
+    }
+}
+
+/// #5660 rule R: must this command token be preserved as a filesystem path?
+/// Judged on the raw spelling, before any case normalization. R3 compares only
+/// the leading ASCII alphanumeric run, so `/tmp에`, `/ETC를` and `/opt)` stay
+/// paths; `/model에` runs to `model`, not a root, so it stays command-shaped.
+fn is_fs_path_token(raw_name: &str) -> bool {
+    let rest = &raw_name[1..];
+    let root_run = rest
+        .find(|ch: char| !ch.is_ascii_alphanumeric())
+        .map_or(rest, |end| &rest[..end]);
+    rest.contains('/')
+        || raw_name.contains('.')
+        || FS_ROOT_SEGMENTS
+            .iter()
+            .any(|root| root_run.eq_ignore_ascii_case(root))
+}
+
+/// The split and start-anchoring rule of record. Returns the command token
+/// exactly as written; only [`raw_slash_invocation`] lowercases, so case
+/// normalization has a single home.
+pub(crate) fn raw_slash_invocation_parts(value: &str) -> Option<(String, String)> {
     let value = value.trim();
     let (name, args) = match value.split_once(char::is_whitespace) {
         Some((name, args)) => (name, args),
@@ -224,7 +328,11 @@ fn raw_slash_invocation(value: &str) -> Option<(String, String)> {
     if !name.starts_with('/') || name.len() <= 1 {
         return None;
     }
-    Some((name.to_ascii_lowercase(), args.trim().to_string()))
+    Some((name.to_string(), args.trim().to_string()))
+}
+
+fn raw_slash_invocation(value: &str) -> Option<(String, String)> {
+    raw_slash_invocation_parts(value).map(|(name, args)| (name.to_ascii_lowercase(), args))
 }
 
 #[cfg(test)]
@@ -263,5 +371,111 @@ mod tests {
         .unwrap();
         assert_eq!(raw.kind, "/effort");
         assert_eq!(wrapper.kind, "/effort");
+    }
+
+    #[test]
+    fn codex_local_controls_carry_the_normalized_name_and_the_raw_args() {
+        assert_eq!(
+            classify_codex_input("/model"),
+            CodexInputClass::LocalControl {
+                name: "/model".to_string(),
+                args: String::new(),
+            }
+        );
+        assert_eq!(
+            classify_codex_input("/model gpt-5.6-codex"),
+            CodexInputClass::LocalControl {
+                name: "/model".to_string(),
+                args: "gpt-5.6-codex".to_string(),
+            }
+        );
+        assert_eq!(
+            classify_codex_input("/help"),
+            CodexInputClass::LocalControl {
+                name: "/help".to_string(),
+                args: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn absolute_path_prompts_are_never_taken_as_codex_commands() {
+        for prompt in [
+            "/Users/itismyfield/x.rs 읽어줘",
+            "/tmp/a.log 봐줘",
+            "/etc/hosts.bak 을 비교해줘",
+            "/tmp 용량을 설명해줘",
+            "/Users 목록을 설명해줘",
+            "/users 목록",
+            "/TMP 용량",
+            "/Volumes 설명해줘",
+            "//example.com 열어줘",
+            "/foo/i 정규식을 설명해줘",
+            "/tmp에 뭐가 있어?",
+            "/Users에서 찾아줘",
+            "/ETC를 봐줘",
+            "/opt) 를 봐줘",
+        ] {
+            assert_eq!(
+                classify_codex_input(prompt),
+                CodexInputClass::ProviderPrompt,
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_shaped_input_outside_the_registry_is_refused_not_forwarded() {
+        let long_name = format!("/{}", "a".repeat(33));
+        for raw in [
+            "/frobnicate",
+            "/모델",
+            "/1status",
+            "/data",
+            "/optimize",
+            "/model에",
+            &long_name,
+        ] {
+            assert_eq!(
+                classify_codex_input(raw),
+                CodexInputClass::UnsupportedControl {
+                    raw_name: raw.to_string(),
+                },
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_mid_sentence_and_multiline_slashes_stay_provider_prompts() {
+        for prompt in [
+            "이 파일에서 /model 을 찾아줘",
+            "\"/model\" 의미를 설명해줘",
+            "./x 읽어줘",
+            "../x 읽어줘",
+            "~/x 읽어줘",
+            "https://example.com 열어줘",
+            "/model\n실제 요청",
+            "/",
+        ] {
+            assert_eq!(
+                classify_codex_input(prompt),
+                CodexInputClass::ProviderPrompt,
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn splitting_the_primitive_leaves_the_claude_lowercasing_contract_intact() {
+        assert_eq!(
+            raw_slash_invocation("/Model X"),
+            Some(("/model".to_string(), "X".to_string()))
+        );
+        assert_eq!(
+            raw_slash_invocation_parts("/Model X"),
+            Some(("/Model".to_string(), "X".to_string()))
+        );
+        assert_eq!(raw_slash_invocation_parts("/"), None);
     }
 }
