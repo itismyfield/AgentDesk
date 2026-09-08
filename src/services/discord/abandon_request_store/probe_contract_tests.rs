@@ -158,12 +158,15 @@ async fn assert_drain_case(index: usize, case: Case, shared: &Arc<super::super::
         owner.started_at = record.episode.started_at.clone();
         owner.status_message_id = Some(record.msg_id);
         owner.status_panel_generation = record.episode.status_panel_generation;
-        owner.save_generation = record.episode.save_generation + revision_delta;
+        let expected_generation = record.episode.save_generation + revision_delta;
+        // The canonical seed writer increments the supplied revision on disk.
+        // Seed its predecessor so same/new-revision fences retain their meaning.
+        owner.save_generation = expected_generation - 1;
         save_inflight_state(&owner).expect("seed actual owner under isolated root");
         let loaded = super::super::inflight::load_inflight_state(&provider, channel).unwrap();
         assert_eq!(
             (loaded.user_msg_id, loaded.save_generation),
-            (owner.user_msg_id, owner.save_generation)
+            (owner.user_msg_id, expected_generation)
         );
     }
     enqueue(&provider, &token, channel, record.clone()).expect("durable enqueue");
