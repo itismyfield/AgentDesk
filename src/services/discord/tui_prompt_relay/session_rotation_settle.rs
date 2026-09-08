@@ -730,7 +730,7 @@ mod tests {
             old_last_offset: 1024,
             new_session_id: "67f48e65".to_string(),
             new_output_path: "/tmp/67f48e65.jsonl".to_string(),
-            observed_drain_frontier: 1024,
+            observed_drain_frontier: 512,
             polls_without_drain_progress: ROTATION_DRAIN_STALL_POLLS - 1,
         };
         let post_fold = ClaudeRotationView {
@@ -749,6 +749,43 @@ mod tests {
             settle_warn_drain_observation(&pre_fold, post_fold),
             (1024, ROTATION_DRAIN_STALL_POLLS),
             "the WARN must report the counter the settle decision read"
+        );
+    }
+
+    /// #5213: pin the WARN SITE, not just the helper. The emission needs a live
+    /// `SharedData` and the finalizer, so it cannot be exercised from a unit
+    /// test; this lexical tripwire fails the moment either field is re-sourced
+    /// from the pre-fold `rotation` record — the exact regression being fixed.
+    #[cfg(unix)]
+    #[test]
+    fn the_settle_warn_site_sources_both_drain_fields_from_the_post_fold_helper() {
+        let wiring = include_str!("session_rotation_settle.rs")
+            .split_once("let (observed_drain_frontier, polls_without_drain_progress) =")
+            .expect("the settle WARN must bind both drain fields before emitting")
+            .1
+            .split_once("and that many bytes of the frozen transcript were abandoned")
+            .expect("that binding must stay ahead of the settle WARN it feeds")
+            .0;
+        assert!(
+            wiring.contains("settle_warn_drain_observation(rotation, view);"),
+            "both fields must come from the post-fold helper; wiring={wiring}"
+        );
+        assert!(
+            !wiring.contains("rotation.observed_drain_frontier")
+                && !wiring.contains("rotation.polls_without_drain_progress"),
+            "re-sourcing either field from the pre-fold record is #5213; \
+             wiring={wiring}"
+        );
+        assert!(
+            wiring
+                .matches("\n        observed_drain_frontier,\n")
+                .count()
+                == 1
+                && wiring
+                    .matches("\n        polls_without_drain_progress,\n")
+                    .count()
+                    == 1,
+            "the WARN must carry both bound locals, unshadowed; wiring={wiring}"
         );
     }
 }

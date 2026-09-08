@@ -5922,6 +5922,7 @@ services::discord::tui_prompt_relay::session_rotation_settle::tests::a_stalled_d
 services::discord::tui_prompt_relay::session_rotation_settle::tests::rehydration_does_not_revert_an_adopted_binding_after_the_settle_pass_runs
 services::discord::tui_prompt_relay::session_rotation_settle::tests::rotation_without_a_pinned_inflight_rebinds_immediately
 services::discord::tui_prompt_relay::session_rotation_settle::tests::the_settle_warn_reports_the_post_fold_drain_observation
+services::discord::tui_prompt_relay::session_rotation_settle::tests::the_settle_warn_site_sources_both_drain_fields_from_the_post_fold_helper
 services::discord::tui_prompt_relay::session_rotation_settle::tests::undelivered_bytes_in_the_frozen_transcript_are_drained_before_the_rotation_settles
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row_is_reclaimable_matches_stale_session_bound_orphan_on_caller_session
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row_is_reclaimable_skips_foreign_session
