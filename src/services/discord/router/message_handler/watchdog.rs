@@ -1234,6 +1234,108 @@ mod cold_start_retry_tests {
             watcher.paused.load(std::sync::atomic::Ordering::Relaxed),
             "reattached restored-turn watcher must stay paused until turn bridge hands off"
         );
+        assert_eq!(
+            watcher
+                .pause_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a fresh deferred attach must establish the first turn's pause epoch"
+        );
+    }
+
+    fn assert_retry_after_precheck_preserves_handoff(source: &'static str) {
+        let _guard = RetryTestGuard::new();
+        let shared = super::super::super::super::make_shared_data_for_tests();
+        let channel = serenity::ChannelId::new(1485506232256168202);
+        let tmux_name = format!("AgentDesk-cold-start-after-precheck-{source}");
+        let runtime_path = "/tmp/agentdesk-after-precheck-runtime.jsonl";
+        set_test_paused_watcher_tmux_live_override(Some(&[tmux_name.as_str()]));
+
+        // R1: the scheduled retry has passed its owner precheck.
+        assert_eq!(active_watcher_owner_for_tmux(&shared, &tmux_name), None);
+
+        // H2: runtime handoff installs a healthy watcher and finishes unpausing
+        // it before R resumes. Use the real registry claim to establish W.
+        let active = test_watcher_handle(&tmux_name, runtime_path, false);
+        active
+            .pause_epoch
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        let cancel = active.cancel.clone();
+        let paused = active.paused.clone();
+        let pause_epoch = active.pause_epoch.clone();
+        let epoch_before = pause_epoch.load(std::sync::atomic::Ordering::Relaxed);
+        let claim = tmux::claim_or_reuse_watcher(
+            &shared.tmux_watchers,
+            channel,
+            active,
+            &ProviderKind::Codex,
+            "turn_bridge_tmux_ready",
+        );
+        assert!(
+            claim.should_spawn(),
+            "handoff must install the first watcher"
+        );
+        assert_eq!(claim.owner_channel_id(), channel);
+        assert!(!paused.load(std::sync::atomic::Ordering::Relaxed));
+
+        // R2: execute the production deferred-retry caller after H2. Its
+        // provisional wrapper path must not replace the runtime transcript.
+        let owner = attach_paused_turn_watcher_inner(
+            PausedTurnWatcherAttachRequest {
+                shared: shared.clone(),
+                http: Arc::new(poise::serenity_prelude::Http::new("Bot test-token")),
+                provider: ProviderKind::Codex,
+                channel_id: channel,
+                tmux_session_name: tmux_name.clone(),
+                output_path: "/tmp/agentdesk-after-precheck-provisional.jsonl".to_string(),
+                initial_offset: 0,
+                source,
+                thread_parent_channel_id: None,
+            },
+            false,
+        );
+
+        assert_eq!(owner, channel);
+        assert_eq!(
+            active_watcher_owner_for_tmux(&shared, &tmux_name),
+            Some(channel)
+        );
+        assert_eq!(
+            shared.tmux_watchers.len(),
+            1,
+            "retry must preserve one watcher"
+        );
+        let watcher = shared
+            .tmux_watchers
+            .get(&channel)
+            .expect("handoff owner remains");
+        assert!(Arc::ptr_eq(&watcher.cancel, &cancel));
+        assert!(Arc::ptr_eq(&watcher.paused, &paused));
+        assert!(Arc::ptr_eq(&watcher.pause_epoch, &pause_epoch));
+        assert!(!watcher.cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(watcher.tmux_session_name, tmux_name);
+        assert_eq!(watcher.output_path, runtime_path);
+        assert!(
+            !watcher.paused.load(std::sync::atomic::Ordering::Relaxed),
+            "{source}: retry after owner precheck must preserve the completed handoff's unpaused state"
+        );
+        assert_eq!(
+            watcher
+                .pause_epoch
+                .load(std::sync::atomic::Ordering::Relaxed),
+            epoch_before,
+            "{source}: deferred retry must not begin another turn's pause epoch"
+        );
+    }
+
+    #[tokio::test]
+    async fn message_retry_after_precheck_preserves_handoff_incarnation() {
+        assert_retry_after_precheck_preserves_handoff("turn_start_message");
+    }
+
+    #[tokio::test]
+    async fn headless_retry_after_precheck_preserves_handoff_incarnation() {
+        assert_retry_after_precheck_preserves_handoff("turn_start_headless");
     }
 
     #[tokio::test]
