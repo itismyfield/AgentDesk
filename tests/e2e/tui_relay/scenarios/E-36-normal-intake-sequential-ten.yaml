@@ -1,0 +1,56 @@
+id: E-36
+title: Ten reset-free normal Discord turns and a separate queued follow-up
+agent_mode: real_live
+coverage_class: live
+cells: [claude-tui]
+isolation: required
+e36_normal_intake:
+  sequential_count: 10
+  queued_followup: true
+  reset_free: true
+  intake_log_format: adk-tracing-text-v1
+steps:
+  - request_key: S01
+    send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S01]"
+    body_marker: "[E2E:E36:{run_id}:S01]"
+  - request_key: S02
+    send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S02]"
+    body_marker: "[E2E:E36:{run_id}:S02]"
+  - request_key: S03
+    send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S03]"
+    body_marker: "[E2E:E36:{run_id}:S03]"
+  - request_key: S04
+    send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S04]"
+    body_marker: "[E2E:E36:{run_id}:S04]"
+  - request_key: S05
+    send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S05]"
+    body_marker: "[E2E:E36:{run_id}:S05]"
+  - request_key: S06
+    send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S06]"
+    body_marker: "[E2E:E36:{run_id}:S06]"
+  - request_key: S07
+    send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S07]"
+    body_marker: "[E2E:E36:{run_id}:S07]"
+  - request_key: S08
+    send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S08]"
+    body_marker: "[E2E:E36:{run_id}:S08]"
+  - request_key: S09
+    send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S09]"
+    body_marker: "[E2E:E36:{run_id}:S09]"
+  - request_key: S10
+    send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:S10]"
+    body_marker: "[E2E:E36:{run_id}:S10]"
+  - request_key: QA
+    send_discord_prompt: |
+      E2E E36 timed response fixture. Follow these steps exactly:
+      1. First emit exactly one line: [E2E:E36:{run_id}:QA:HOLD]
+      2. Immediately use your normal shell tool: python3 -c "import time; time.sleep(20)"
+      3. Do not emit the DONE marker before the command returns.
+      4. After it returns emit exactly one line: [E2E:E36:{run_id}:QA:DONE]
+    hold_marker: "[E2E:E36:{run_id}:QA:HOLD]"
+    body_marker: "[E2E:E36:{run_id}:QA:DONE]"
+  - request_key: QB
+    send_discord_prompt: "Reply with exactly [E2E:E36:{run_id}:QB]"
+    body_marker: "[E2E:E36:{run_id}:QB]"
+assertions:
+  - no_duplicate_content: true
