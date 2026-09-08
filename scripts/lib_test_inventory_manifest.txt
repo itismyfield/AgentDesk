@@ -970,6 +970,9 @@ server::routes::departments::tests::department_not_found_preserves_404_and_messa
 server::routes::departments::tests::ensure_pg_missing_pool_preserves_503_and_message
 server::routes::departments::tests::no_fields_to_update_preserves_400_and_message
 server::routes::departments::tests::reorder_tx_errors_preserve_500_and_prefixed_messages
+server::routes::discord::tests::channel_messages_response_passes_through_array_bodies
+server::routes::discord::tests::channel_messages_response_propagates_upstream_rate_limit
+server::routes::discord::tests::channel_messages_response_rejects_non_array_success_body
 server::routes::discord::tests::parse_channel_id_validates_u64
 server::routes::discord::tests::snowflake_or_none_accepts_digits_only
 server::routes::discord::tests::snowflake_or_none_rejects_injection_attempts

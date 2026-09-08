@@ -259,20 +259,14 @@ pub async fn channel_messages(
         .get("x-ratelimit-reset-after")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
 
-    match response.json::<serde_json::Value>().await {
-        Ok(data) => {
-            let count = data.as_array().map(|a| a.len()).unwrap_or(0);
-            tracing::info!(
-                channel_id = channel_id.get(),
-                status = %upstream_status,
-                count,
-                rate_remaining = rate_remaining.as_deref().unwrap_or(""),
-                rate_reset_after = rate_reset_after.as_deref().unwrap_or(""),
-                "[#2723] channel_messages ← upstream"
-            );
-            Ok((StatusCode::OK, Json(json!({"messages": data}))))
-        }
+    let data = match response.json::<serde_json::Value>().await {
+        Ok(data) => data,
         Err(error) => {
             tracing::warn!(
                 channel_id = channel_id.get(),
@@ -280,13 +274,73 @@ pub async fn channel_messages(
                 error = %error,
                 "[#2723] channel_messages discord response decode failed"
             );
-            Err(AppError::new(
+            return Err(AppError::new(
                 StatusCode::BAD_GATEWAY,
                 ErrorCode::Discord,
                 "discord response decode failed",
-            ))
+            ));
         }
+    };
+
+    let count = data.as_array().map(|a| a.len()).unwrap_or(0);
+    tracing::info!(
+        channel_id = channel_id.get(),
+        status = %upstream_status,
+        count,
+        rate_remaining = rate_remaining.as_deref().unwrap_or(""),
+        rate_reset_after = rate_reset_after.as_deref().unwrap_or(""),
+        "[#2723] channel_messages ← upstream"
+    );
+
+    let messages =
+        interpret_channel_messages_response(upstream_status, retry_after.as_deref(), data)?;
+    Ok((StatusCode::OK, Json(json!({"messages": messages}))))
+}
+
+/// Interpret the upstream `GET /channels/{id}/messages` response (#5702).
+///
+/// The route used to answer `200 {"messages": <body>}` whatever the upstream
+/// status was, so a Discord `429 {"retry_after": ...}` object reached callers
+/// as a successful, empty-looking message list. Non-2xx statuses now propagate
+/// with their retry hint, and a success must carry a JSON array.
+fn interpret_channel_messages_response(
+    upstream_status: StatusCode,
+    retry_after: Option<&str>,
+    body: Value,
+) -> AppResult<Value> {
+    if !upstream_status.is_success() {
+        let status = if upstream_status.is_client_error() || upstream_status.is_server_error() {
+            upstream_status
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        let retry_hint = retry_after.map(str::to_string).or_else(|| {
+            body.get("retry_after")
+                .filter(|value| !value.is_null())
+                .map(|value| value.to_string())
+        });
+        let mut error = AppError::new(
+            status,
+            ErrorCode::Discord,
+            format!("discord upstream returned {}", upstream_status.as_u16()),
+        )
+        .with_context("upstream_status", upstream_status.as_u16());
+        if let Some(retry_hint) = retry_hint {
+            error = error.with_context("retry_after", retry_hint);
+        }
+        return Err(error);
     }
+
+    if !body.is_array() {
+        return Err(AppError::new(
+            StatusCode::BAD_GATEWAY,
+            ErrorCode::Discord,
+            "discord returned a non-array message list",
+        )
+        .with_context("upstream_status", upstream_status.as_u16()));
+    }
+
+    Ok(body)
 }
 
 /// Snowflake validator — Discord IDs are decimal u64. Anything else is
@@ -366,6 +420,48 @@ mod tests {
         assert_eq!(snowflake_or_none(&"12 OR 1=1".to_string()), None);
         assert_eq!(snowflake_or_none(&"123abc".to_string()), None);
         assert_eq!(snowflake_or_none(&"".to_string()), None);
+    }
+
+    #[test]
+    fn channel_messages_response_passes_through_array_bodies() {
+        let empty = interpret_channel_messages_response(StatusCode::OK, None, json!([]))
+            .expect("an empty array is a valid message list");
+        assert_eq!(empty, json!([]));
+
+        let filled = interpret_channel_messages_response(StatusCode::OK, None, json!([{"id":"1"}]))
+            .expect("a populated array is a valid message list");
+        assert_eq!(filled.as_array().map(|a| a.len()), Some(1));
+    }
+
+    #[test]
+    fn channel_messages_response_propagates_upstream_rate_limit() {
+        let body = json!({"message": "You are being rate limited.", "retry_after": 1.5});
+        let error = interpret_channel_messages_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some("1.5"),
+            body.clone(),
+        )
+        .expect_err("429 must not be wrapped as a 200 message list");
+
+        assert_eq!(error.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error.context().get("upstream_status"), Some(&json!(429)));
+        assert_eq!(error.context().get("retry_after"), Some(&json!("1.5")));
+
+        // Retry hint falls back to the body when Discord omits the header.
+        let from_body =
+            interpret_channel_messages_response(StatusCode::TOO_MANY_REQUESTS, None, body)
+                .expect_err("429 must not be wrapped as a 200 message list");
+        assert_eq!(from_body.context().get("retry_after"), Some(&json!("1.5")));
+    }
+
+    #[test]
+    fn channel_messages_response_rejects_non_array_success_body() {
+        let error =
+            interpret_channel_messages_response(StatusCode::OK, None, json!({"messages": []}))
+                .expect_err("an object body is not a message list");
+
+        assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(error.context().get("upstream_status"), Some(&json!(200)));
     }
 
     #[test]
