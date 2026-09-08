@@ -256,7 +256,8 @@ async fn claim_tui_direct_synthetic_turn_prepared(
             RelayOwnerKind::SessionBoundRelay => ExternalInputRelayOwner::SessionBoundRelay,
             RelayOwnerKind::StandbyRelay | RelayOwnerKind::Unknown => {
                 if mailbox_activation_occurred {
-                    finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
+                    finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id)
+                        .await;
                 }
                 return TuiDirectSyntheticTurnClaim {
                     relay_owner: ExternalInputRelayOwner::Unassigned,
