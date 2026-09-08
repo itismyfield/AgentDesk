@@ -207,10 +207,10 @@ function markPrCreateFailed(cardId, error, stampGen) {
 
   // 4. #5716 slice B: 재시도 소비자가 없으므로 실패 세대마다 운영자 이관.
   //    dedup 키의 세대 성분은 retry_count가 아니라 pr_tracking.dispatch_generation (새 dispatch가 count를 0으로 리셋).
-  //    세대가 없는 실패(pre-handoff: missing_branch / dispatch_failed / 공개 파사드, 또는 record op가 아무것도
-  //    기록하지 못한 경우)는 행의 직전 세대를 재사용하지 않고 'pre:<실패 클래스>' 네임스페이스를 쓴다 —
-  //    직전 세대 키는 그 세대의 알림이 이미 심었으므로 재사용하면 새 실패가 TTL(7일) 동안 무음이 된다.
-  handOffPrCreateFailure(cardId, error, result.retry_count, stampGen);  // C7
+  //    세대가 없는 pre-handoff 실패는 직전 세대를 재사용하지 않고 'pre:<실패 클래스>' 를 쓴다 — 직전 세대 키는
+  //    이미 알림을 심었으므로 재사용하면 새 실패가 TTL(7일) 동안 무음이 되기 때문. r6: record op 가 아무것도
+  //    기록하지 못한 실패는 스탬프가 있으면 'pre:record_failed:<세대>' 로 세대를 보존하고, step 2·3 의 mutation
+  //    이 throw 해도 유일한 알림이 남도록 C7 을 step 2 앞에서 호출한다. 반환은 'deduped'/true/false 3-값이다.
 }
 ```
 
