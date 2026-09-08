@@ -9,7 +9,9 @@ use crate::db::session_agent_resolution::resolve_agent_id_for_session_pg;
 const FETCH_RECENT_CHANNEL_PAIRS_SQL: &str = "SELECT transcript.user_message,
             transcript.assistant_message,
             transcript.created_at,
-            clear_boundary.cleared_at
+            clear_boundary.cleared_at,
+            transcript.id,
+            clear_boundary.cleared_through_id
      FROM session_transcripts AS transcript
      LEFT JOIN channel_session_clear_boundaries AS clear_boundary
        ON clear_boundary.channel_id = transcript.channel_id
@@ -24,6 +26,8 @@ type ChannelTranscriptPairRow = (
     String,
     Option<chrono::DateTime<chrono::Utc>>,
     Option<chrono::DateTime<chrono::Utc>>,
+    i64,
+    Option<i64>,
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,21 +99,49 @@ pub(crate) async fn record_channel_clear_boundary(
         ));
     }
 
-    let mut tx = pool
-        .begin()
+    let tx = begin_channel_clear_boundary_tx(pool).await?;
+    finish_channel_clear_boundary_tx(tx, channel_id).await
+}
+
+/// #5707 phase 1 of a boundary write: open the transaction, take no lock yet.
+/// The transaction's `NOW()` — the value that becomes `cleared_at` — is already
+/// frozen here, which is why it can be earlier than a transcript this clear
+/// ends up covering.
+pub(crate) async fn begin_channel_clear_boundary_tx(
+    pool: &PgPool,
+) -> Result<Transaction<'_, Postgres>> {
+    pool.begin()
         .await
-        .map_err(|error| anyhow!("begin channel clear boundary transaction failed: {error}"))?;
+        .map_err(|error| anyhow!("begin channel clear boundary transaction failed: {error}"))
+}
+
+/// #5707 phase 2: take the channel lock, advance both durable markers, commit.
+/// `cleared_through_id` is `MAX(session_transcripts.id)` read after the lock, so
+/// it covers every transcript row serialized before this clear.
+pub(crate) async fn finish_channel_clear_boundary_tx(
+    mut tx: Transaction<'_, Postgres>,
+    channel_id: &str,
+) -> Result<()> {
     lock_channel_transcript_clear_fence(&mut tx, channel_id)
         .await
         .map_err(|error| anyhow!("lock channel clear boundary failed: {error}"))?;
     sqlx::query(
-        "INSERT INTO channel_session_clear_boundaries (channel_id, cleared_at)
-         VALUES ($1, NOW())
+        "INSERT INTO channel_session_clear_boundaries (
+             channel_id, cleared_at, cleared_through_id, clear_generation
+         )
+         SELECT $1, NOW(), COALESCE(MAX(id), 0), 1
+           FROM session_transcripts
+          WHERE channel_id = $1
          ON CONFLICT (channel_id) DO UPDATE SET
              cleared_at = GREATEST(
                  channel_session_clear_boundaries.cleared_at,
                  EXCLUDED.cleared_at
-             )",
+             ),
+             cleared_through_id = GREATEST(
+                 channel_session_clear_boundaries.cleared_through_id,
+                 EXCLUDED.cleared_through_id
+             ),
+             clear_generation = channel_session_clear_boundaries.clear_generation + 1",
     )
     .bind(channel_id)
     .execute(&mut *tx)
@@ -160,7 +192,9 @@ where
 const FETCH_CHANNEL_PAIRS_UP_TO_FRONTIER_SQL: &str = "SELECT transcript.user_message,
             transcript.assistant_message,
             transcript.created_at,
-            clear_boundary.cleared_at
+            clear_boundary.cleared_at,
+            transcript.id,
+            clear_boundary.cleared_through_id
      FROM session_transcripts AS transcript
      LEFT JOIN channel_session_clear_boundaries AS clear_boundary
        ON clear_boundary.channel_id = transcript.channel_id
@@ -210,16 +244,32 @@ pub(crate) async fn fetch_channel_pairs_up_to_frontier_tx(
     ))
 }
 
+// #5707: two independent conditions, both required.
+//
+// `created_at > cleared_at` is the legacy timestamp axis and stays. It cannot
+// see a clear that froze `NOW()` before a transcript committed but only took
+// the channel lock afterwards, because both values are transaction-begin times
+// and neither follows the lock order.
+//
+// `id > cleared_through_id` closes exactly that reversal: the clear reads
+// `MAX(session_transcripts.id)` while holding the lock, so any row it was
+// serialized after is at or below the recorded frontier. Rows written before
+// migration 0114 compare against the `0` default, which every id exceeds.
 fn channel_pairs_after_clear_boundary(
     rows: Vec<ChannelTranscriptPairRow>,
 ) -> Vec<ChannelTranscriptPair> {
     rows.into_iter()
-        .filter(|(_, _, created_at, cleared_at)| match cleared_at {
-            None => true,
-            Some(cleared_at) => created_at.is_some_and(|created_at| created_at > *cleared_at),
-        })
+        .filter(
+            |(_, _, created_at, cleared_at, id, cleared_through_id)| match cleared_at {
+                None => true,
+                Some(cleared_at) => {
+                    created_at.is_some_and(|created_at| created_at > *cleared_at)
+                        && *id > cleared_through_id.unwrap_or(0)
+                }
+            },
+        )
         .map(
-            |(user_message, assistant_message, _created_at, _cleared_at)| ChannelTranscriptPair {
+            |(user_message, assistant_message, ..)| ChannelTranscriptPair {
                 user_message,
                 assistant_message,
             },
@@ -729,18 +779,32 @@ mod tests {
                 "allowed".to_string(),
                 Some(after),
                 Some(cleared_at),
+                7,
+                Some(5),
+            ),
+            (
+                "covered-by-frontier".to_string(),
+                "blocked".to_string(),
+                Some(after),
+                Some(cleared_at),
+                5,
+                Some(5),
             ),
             (
                 "at-boundary".to_string(),
                 "blocked".to_string(),
                 Some(cleared_at),
                 Some(cleared_at),
+                4,
+                Some(5),
             ),
             (
                 "pre-clear".to_string(),
                 "blocked".to_string(),
                 Some(before),
                 Some(cleared_at),
+                3,
+                Some(5),
             ),
         ];
 
@@ -754,7 +818,9 @@ mod tests {
                 user_message: "post-clear".to_string(),
                 assistant_message: "allowed".to_string(),
             }],
-            "a later fresh session must not cross the persisted /clear boundary"
+            "a later fresh session must not cross the persisted /clear boundary; \
+             a row at or below the recorded frontier stays hidden even when its \
+             created_at is later than cleared_at"
         );
         assert!(
             FETCH_RECENT_CHANNEL_PAIRS_SQL
@@ -773,12 +839,16 @@ mod tests {
                 "blocked".to_string(),
                 Some(cleared_at),
                 Some(cleared_at),
+                2,
+                Some(0),
             ),
             (
                 "before-goal-fresh".to_string(),
                 "blocked".to_string(),
                 Some(cleared_at - chrono::Duration::seconds(1)),
                 Some(cleared_at),
+                1,
+                Some(0),
             ),
         ];
 
@@ -813,8 +883,9 @@ mod tests {
     }
 }
 
+// Test-only PostgreSQL setup and assertions intentionally fail fast.
 #[cfg(test)]
-#[allow(clippy::expect_used)] // Test-only PostgreSQL setup and assertions intentionally fail fast.
+#[allow(clippy::expect_used)]
 mod clear_fence_pg_tests {
     use super::*;
 
@@ -865,6 +936,19 @@ mod clear_fence_pg_tests {
         fetch_recent_channel_pairs(pool, channel_id, 10)
             .await
             .expect("fetch recent pairs") // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+    }
+
+    /// `(clear_generation, cleared_through_id)` for a channel's boundary row.
+    async fn boundary_markers(pool: &PgPool, channel_id: &str) -> (i64, i64) {
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT clear_generation, cleared_through_id
+               FROM channel_session_clear_boundaries
+              WHERE channel_id = $1",
+        )
+        .bind(channel_id)
+        .fetch_one(pool)
+        .await
+        .expect("read clear boundary markers") // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -971,6 +1055,121 @@ mod clear_fence_pg_tests {
         .await
         .expect("count persisted transcript"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
         assert_eq!(row_count, 1);
+        pool.close().await;
+        db.drop().await;
+    }
+    /// #5707 (F3): the reversal `created_at > cleared_at` cannot see.
+    ///
+    /// The clear freezes its `NOW()` first, a transcript commits on another
+    /// connection, and only then does the clear take the channel lock. The
+    /// first assertion pins that the timestamp axis alone would expose the row;
+    /// the second pins that the frontier marker covers it anyway.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clear_that_locks_after_an_earlier_begin_still_hides_the_committed_pair_pg() {
+        let (db, pool) = create_pool().await;
+        let channel_id = "4533004";
+
+        // Seed a boundary so the clear under test takes the ON CONFLICT branch.
+        record_channel_clear_boundary(Some(&pool), channel_id)
+            .await
+            .expect("seed clear boundary"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+
+        let mut clear_tx = begin_channel_clear_boundary_tx(&pool)
+            .await
+            .expect("begin clear boundary transaction"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+        let clear_begin_at = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>("SELECT NOW()")
+            .fetch_one(&mut *clear_tx)
+            .await
+            .expect("read the clear transaction timestamp"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+
+        // Barrier: a turn that started after the seeded boundary commits while
+        // the clear is parked between its two phases.
+        let stored = persist_turn_db(
+            Some(&pool),
+            entry(
+                "reversed-clear",
+                channel_id,
+                (clear_begin_at + chrono::Duration::seconds(1)).timestamp_millis(),
+            ),
+        )
+        .await
+        .expect("persist a transcript between the two clear phases"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+        assert!(
+            stored,
+            "the transcript must commit before the clear takes the channel lock"
+        );
+
+        finish_channel_clear_boundary_tx(clear_tx, channel_id)
+            .await
+            .expect("finish clear boundary transaction"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+
+        let created_after_cleared = sqlx::query_scalar::<_, bool>(
+            "SELECT transcript.created_at > clear_boundary.cleared_at
+               FROM session_transcripts AS transcript
+               JOIN channel_session_clear_boundaries AS clear_boundary
+                 ON clear_boundary.channel_id = transcript.channel_id
+              WHERE transcript.channel_id = $1",
+        )
+        .bind(channel_id)
+        .fetch_one(&pool)
+        .await
+        .expect("compare the transcript and boundary timestamps"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+        assert!(
+            created_after_cleared,
+            "this schedule is only a regression while created_at > cleared_at"
+        );
+        assert!(
+            channel_pairs(&pool, channel_id).await.is_empty(),
+            "a clear that locks after the transcript committed must still cover it"
+        );
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// #5707 (F6): both markers move on every boundary write.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boundary_markers_advance_on_every_clear_pg() {
+        let (db, pool) = create_pool().await;
+        let channel_id = "4533005";
+        let mut observed: Vec<(i64, i64)> = Vec::new();
+
+        for round in 0..3 {
+            record_channel_clear_boundary(Some(&pool), channel_id)
+                .await
+                .expect("record clear boundary"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+            observed.push(boundary_markers(&pool, channel_id).await);
+
+            let turn_id = format!("marker-round-{round}");
+            let stored = persist_turn_db(
+                Some(&pool),
+                entry(
+                    &turn_id,
+                    channel_id,
+                    (chrono::Utc::now() + chrono::Duration::minutes(1)).timestamp_millis(),
+                ),
+            )
+            .await
+            .expect("persist a transcript between two clears"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+            assert!(
+                stored,
+                "each round must add the transcript row that the next clear has to cover"
+            );
+        }
+
+        let generations: Vec<i64> = observed.iter().map(|(generation, _)| *generation).collect();
+        assert_eq!(
+            generations,
+            vec![1, 2, 3],
+            "clear_generation must advance exactly once per boundary write"
+        );
+        assert_eq!(
+            observed[0].1, 0,
+            "the first clear has no transcript row to cover"
+        );
+        assert!(
+            observed[1].1 > observed[0].1 && observed[2].1 > observed[1].1,
+            "cleared_through_id must advance as transcripts commit between clears, got {observed:?}"
+        );
         pool.close().await;
         db.drop().await;
     }
