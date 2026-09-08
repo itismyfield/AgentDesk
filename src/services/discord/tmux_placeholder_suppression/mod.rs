@@ -4,7 +4,9 @@ use serenity::MessageId;
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::provider::ProviderKind;
 
-use super::super::formatting::{build_streaming_placeholder_text, truncate_str};
+use super::super::formatting::{
+    build_streaming_placeholder_text, byte_index_at_discord_message_units, discord_message_units,
+};
 use crate::services::discord;
 
 #[cfg(test)]
@@ -64,29 +66,31 @@ pub(super) fn rewrite_placeholder_as_terminal_suppressed(
     let cleaned = discord::single_message_panel::strip_placeholder_terminal_status(text, provider);
     let trimmed = cleaned.trim_end();
     if trimmed.ends_with(label) {
-        return trimmed.to_string();
+        return trimmed[..byte_index_at_discord_message_units(trimmed, discord::DISCORD_MSG_LIMIT)]
+            .to_string();
     }
     if trimmed.is_empty() {
         // #1009: label itself may exceed DISCORD_MSG_LIMIT when monitor entries
         // balloon — guard here too (the with-body branch below already guards).
         let limit = discord::DISCORD_MSG_LIMIT;
-        if label.len() > limit {
-            return truncate_str(label, limit);
+        if discord_message_units(label) > limit {
+            return label[..byte_index_at_discord_message_units(label, limit)].to_string();
         }
         return label.to_string();
     }
 
     let suffix = format!("\n\n{label}");
-    let max_base_len = discord::DISCORD_MSG_LIMIT.saturating_sub(suffix.len());
-    let base = if trimmed.len() > max_base_len {
-        truncate_str(trimmed, max_base_len)
+    let max_base_len = discord::DISCORD_MSG_LIMIT.saturating_sub(discord_message_units(&suffix));
+    let base = if discord_message_units(trimmed) > max_base_len {
+        trimmed[..byte_index_at_discord_message_units(trimmed, max_base_len)].to_string()
     } else {
         trimmed.to_string()
     };
     let composed = format!("{base}{suffix}");
-    // Final belt-and-suspenders guard (rare: suffix.len() ≥ DISCORD_MSG_LIMIT).
-    if composed.len() > discord::DISCORD_MSG_LIMIT {
-        truncate_str(&composed, discord::DISCORD_MSG_LIMIT)
+    // Final guard also bounds a suffix that alone exhausts the unit budget.
+    if discord_message_units(&composed) > discord::DISCORD_MSG_LIMIT {
+        composed[..byte_index_at_discord_message_units(&composed, discord::DISCORD_MSG_LIMIT)]
+            .to_string()
     } else {
         composed
     }
@@ -351,6 +355,56 @@ mod placeholder_suppression_tests {
     use super::*;
 
     const TEST_SESSION: &str = "adk-claude-test";
+
+    #[test]
+    fn streaming_status_and_tmux_placeholder_suppression_unicode_units() {
+        let limit = discord::DISCORD_MSG_LIMIT;
+        // Body budget zero must not reserve even an ellipsis.
+        for size in [1998, 1988] {
+            let status = "한".repeat(size);
+            let rendered = build_streaming_placeholder_text("본문", &status);
+            assert!(discord_message_units(&rendered) <= limit);
+            assert_eq!(rendered, format!("\n\n{status}"));
+        }
+        for status in ["한".repeat(2001), "\u{1f680}".repeat(1001)] {
+            let rendered = build_streaming_placeholder_text("본문", &status);
+            assert!(discord_message_units(&rendered) <= limit);
+            assert!(!rendered.contains("본문"));
+        }
+        let status = "한\u{1f680}".repeat(100);
+        let body = "가".repeat(2000);
+        let plan = discord::formatting::plan_streaming_rollover(&body, &status).unwrap();
+        // 300 footer units + 2 separator units + 10 margin, not 200 scalars.
+        assert_eq!(plan.frozen_chunk, "가".repeat(1688));
+        assert_eq!(plan.split_at, "가".repeat(1688).len());
+        assert!(discord_message_units(&plan.display_snapshot) <= limit);
+
+        let rewrite = |text: &str, label: &str| {
+            rewrite_placeholder_as_terminal_suppressed(text, label, &ProviderKind::Claude)
+        };
+        for label in [
+            "한".repeat(1500),
+            "한".repeat(2000),
+            "\u{1f680}".repeat(1000),
+        ] {
+            assert_eq!(rewrite("", &label), label);
+        }
+        for body in ["한".repeat(1997), "\u{1f680}".repeat(998) + "한"] {
+            let rendered = rewrite(&body, "끝");
+            assert_eq!(rendered, format!("{body}\n\n끝"));
+            assert_eq!(discord_message_units(&rendered), limit);
+            assert_eq!(rewrite(&rendered, "끝"), rendered);
+        }
+        let clipped = rewrite(&"한".repeat(2100), "끝");
+        assert_eq!(clipped, format!("{}\n\n끝", "한".repeat(1997)));
+        let clipped = rewrite(&"\u{1f680}".repeat(1000), "끝");
+        assert_eq!(clipped, format!("{}\n\n끝", "\u{1f680}".repeat(998)));
+        for label in ["한".repeat(2100), "\u{1f680}".repeat(1100)] {
+            for body in ["", "본문", label.as_str()] {
+                assert!(discord_message_units(&rewrite(body, &label)) <= limit);
+            }
+        }
+    }
 
     fn footer_status_block() -> String {
         let long_tail = "└ cargo test --lib tmux ".repeat(120);
