@@ -5,6 +5,8 @@
 //! - the shared in-memory process session registry
 //! - normalized output-file tailing/parsing for wrapper JSONL streams
 
+pub(crate) mod auth_profiles;
+
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{
     StreamMessage, TaskNotificationKind, status_events_from_workflow_json,
