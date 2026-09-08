@@ -30,6 +30,7 @@ from tui_relay.test_driver_health import (  # noqa: E402
     _busy_mailbox, _fake_urlopen_for, _health_detail, _idle_mailbox,
     HarnessOutcomeContract, PhasePartialEvidenceContract,  # noqa: F401
 )
+from tui_relay import normal_intake_evidence as e36  # noqa: E402
 # ci-script-checks.sh runs this module; expose the offline fetch regressions too.
 from tui_relay.test_discord_client import DiscordClientFetchMessages, _Response  # noqa: E402, F401
 from tui_relay.test_known_gap import E22KnownGapContract  # noqa: E402, F401
@@ -87,6 +88,290 @@ def _window(*messages: dict) -> assertions.Window:
     for message in messages:
         window.add(message)
     return window
+
+
+class E36EvidenceContract(unittest.TestCase):
+    def test_native_input_work_join_rejects_repeat_wrong_session_and_missing_work(self):
+        prompt, marker = "Reply only [E36:run:S01]", "[E36:run:S01]"
+        user = {"type": "user", "sessionId": "session", "uuid": "input-1", "message": {"content": prompt}}
+        work = {"type": "assistant", "sessionId": "session", "uuid": "work-1", "message": {"content": marker}}
+        tool = {"type": "user", "message": {"content": [{"type": "tool_result", "content": prompt}]}}
+        request = {"prompt": prompt, "body_marker": marker}
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "native.jsonl"
+            for name, rows, error in (
+                ("valid", [user, tool, work], None), ("repeat", [user, work, user, work], assertions.AssertionError),
+                ("foreign", [{**user, "sessionId": "foreign"}, work], assertions.AssertionError),
+                ("no_input", [work], ValueError), ("no_work", [user, tool], ValueError)):
+                with self.subTest(case=name):
+                    path.write_text("")
+                    before = e36.cursor(path)
+                    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+                    if error:
+                        with self.assertRaises(error):
+                            e36.native_chain(path, before, request, "session")
+                    else:
+                        result = e36.native_chain(path, before, request, "session")
+                        self.assertEqual(result["input_id"], "input-1")
+                        self.assertEqual(result["work"][0]["id"], "work-1")
+
+    def test_strict_native_reader_preserves_partial_suffix_and_rejects_lost_generation(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "native"
+            path.write_text("")
+            before = e36.cursor(path)
+            path.write_text('{"type":"user"}\n{')
+            self.assertEqual(len(list(e36.tail(path, before))), 1)
+            replacement = Path(root) / "replacement"
+            replacement.write_text('{"type":"user"}\n')
+            replacement.replace(path)
+            with self.assertRaisesRegex(ValueError, "generation"):
+                list(e36.tail(path, before))
+            before = {**e36.cursor(path), "offset": 0}
+            path.write_text('not-json\n')
+            with self.assertRaises(ValueError):
+                e36.native_chain(path, before, {"prompt": "request", "body_marker": "reply"}, "session")
+
+    def test_actual_queue_consumer_distinguishes_commit_refusal_and_unavailable_log(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "intake"
+            reader = object.__new__(e36.Evidence)
+            reader.log, reader.channel = path, "42"
+            reader.watcher = lambda: {"mailbox_active_user_msg_id": 100}
+            for name, fields, error in (
+                ("accepted", 'message_id=200 source="busy_active_turn" outcome="enqueued" persistence_error="none"', None),
+                ("refused", 'message_id=200 source="busy_active_turn" outcome="refused" persistence_error="none"', assertions.AssertionError),
+                ("wrong_source", 'message_id=200 source="drain_mode" outcome="enqueued" persistence_error="none"', assertions.AssertionError),
+                ("wrong_id", 'message_id=201 source="busy_active_turn" outcome="enqueued" persistence_error="none"', ValueError),
+                ("unavailable", None, ValueError)):
+                with self.subTest(case=name):
+                    clock = [0.0]
+                    reader.d = SimpleNamespace(time=SimpleNamespace(monotonic=lambda: clock[0],
+                        sleep=lambda t: clock.__setitem__(0, clock[0] + t)))
+                    path.write_text("")
+                    request = {"inbound_message_id": "200", "log_before": e36.cursor(path)}
+                    if fields:
+                        path.write_text(f'\x1b[32mINFO\x1b[0m {e36.LOG_TARGET}: {e36.LOG_MESSAGE} channel_id=42 {fields}\n')
+                    prior = {"inbound_message_id": "100", "deadline": 20}
+                    if error:
+                        with self.assertRaises(error):
+                            reader.queue(request, prior)
+                    else:
+                        reader.queue(request, prior)
+                        self.assertEqual(request["queue"]["active_prior_message_id"], "100")
+                    if name in ("wrong_id", "unavailable"):
+                        self.assertNotIn("queue", request)
+
+    def test_request_window_filters_prior_and_shared_chrome_and_detects_deleted_body(self):
+        global_window = _window(_relay_msg(11, "old"), _raw_bot_msg(12, "✅ 응답 완료"),
+                                _relay_msg(21, "new"), _raw_bot_msg(22, "✅ 응답 완료"))
+        request = {"discord_before_id": 20, "discord_closed_after_id": 22, "body_marker": "new"}
+        sub = e36.request_window(global_window, request)
+        self.assertEqual(e36.completion_id(sub, request), "22")
+        with self.assertRaises(assertions.AssertionError):
+            e36.completion_id(e36.request_window(global_window, request, [_raw_bot_msg(22, "✅ 응답 완료")]), request)
+        reused = {"discord_before_id": 22, "body_marker": "later"}
+        with self.assertRaises(assertions.AssertionError):
+            e36.completion_id(e36.request_window(global_window, reused), reused)
+
+    def publication_fixture(self):
+        rows, requests = [], []
+        for index, key in enumerate(e36.KEYS, 1):
+            mid, marker = index * 10, f"[E36:current:{key}]"
+            hold = f"[E36:current:{key}:HOLD]" if key == "QA" else None
+            rows.extend([_relay_msg(mid + 1, f"{hold}\n{marker}" if hold else marker),
+                         _raw_bot_msg(mid + 2, "✅ 응답 완료")])
+            requests.append({"request_key": key, "body_marker": marker, "discord_before_id": mid,
+                             "discord_closed_after_id": mid + 2, "inbound_message_id": str(mid),
+                             "response_ids": [str(mid + 1)], "completion_message_id": str(mid + 2),
+                             "native": {"input_id": f"native-{key}"}, "admission": {"id": mid},
+                             **({"hold_marker": hold} if hold else {})})
+        requests[10]["hold_native"], requests[11]["queue"] = {"input": "QA"}, {"id": "QB"}
+        record = {"discord_prompt_records": requests, "e36_acceptance": {}}
+        return rows, record
+
+    def test_final_global_publication_detects_late_different_header_duplicates(self):
+        rows, record = self.publication_fixture()
+        requests = record["discord_prompt_records"]
+        e36.final_assertion(_window(*rows), record, rows)  # unchanged positive control
+        late = _relay_msg(999, "different publication header\n" + requests[0]["body_marker"])
+        self.assertGreater(int(late["id"]), requests[0]["discord_closed_after_id"])
+        for name, observed, fresh in (
+            ("late_both", rows + [late], rows + [late]),
+            ("late_observed_only", rows + [late], rows),
+            ("late_fresh_only", rows, rows + [late]),
+            ("deleted", rows, rows[1:]),
+            ("replacement_id", rows, rows[1:] + [late])):
+            with self.subTest(case=name), self.assertRaises(assertions.AssertionError):
+                e36.final_assertion(_window(*observed), copy.deepcopy(record), fresh)
+
+    def test_observed_duplicate_cannot_disappear_through_message_edit(self):
+        rows, record = self.publication_fixture()
+        marker = record["discord_prompt_records"][0]["body_marker"]
+        for same_id in (False, True):
+            with self.subTest(same_id=same_id):
+                window = _window(*rows)
+                mid = 11 if same_id else 999
+                window.add(_relay_msg(mid, marker + "\n" + marker if same_id else "different header\n" + marker))
+                window.add(rows[0] if same_id else _relay_msg(mid, "edited away"))
+                self.assertTrue(window.message_updates)
+                with self.assertRaisesRegex(assertions.AssertionError, "observed edited duplicate"):
+                    e36.final_assertion(window, copy.deepcopy(record), window.raw_messages)
+        positive = _window(*rows)
+        positive.add(_relay_msg(11, "valid edit\n" + marker))
+        positive.add(rows[0])
+        positive.add(_our_msg(999, marker))
+        positive.add(_our_msg(999, "driver edit"))
+        e36.final_assertion(positive, copy.deepcopy(record), positive.raw_messages)
+
+    def test_late_qa_observation_keeps_the_exact_commit_as_the_ownership_evidence(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "intake"
+            reader = object.__new__(e36.Evidence)
+            reader.log, reader.channel = path, "42"
+            reader.d = SimpleNamespace(time=SimpleNamespace(monotonic=lambda: 0, sleep=MagicMock()))
+            for active in (200, None):
+                with self.subTest(active=active):
+                    path.write_text("")
+                    request = {"inbound_message_id": "200", "log_before": e36.cursor(path)}
+                    path.write_text(f'INFO {e36.LOG_TARGET}: {e36.LOG_MESSAGE} channel_id=42 message_id=200 '
+                                    'source="busy_active_turn" outcome="enqueued" persistence_error="none"\n')
+                    def watcher():
+                        self.assertEqual(request["queue"]["message_id"], "200")
+                        return {"mailbox_active_user_msg_id": active}
+                    reader.watcher = watcher
+                    reader.queue(request, {"inbound_message_id": "100", "deadline": 20})
+                    self.assertEqual(request["queue"]["outcome"], "enqueued")
+                    self.assertEqual(request["queue"]["active_prior_message_id"], "100")
+                    self.assertEqual(request["queue_observation"]["active_message_id"], active)
+                    self.assertFalse(request["queue_observation"]["active_owner_sampled"])
+            path.write_text("")
+            request = {"inbound_message_id": "200", "log_before": e36.cursor(path)}
+            reader.watcher = lambda: {"mailbox_active_user_msg_id": 999}
+            with self.assertRaisesRegex(ValueError, "before any QB commit"):
+                reader.queue(request, {"inbound_message_id": "100", "deadline": 20})
+            self.assertNotIn("queue", request)
+
+    def test_rowless_idle_reads_null_unread_bytes_as_drained_but_a_row_as_unmeasured(self):
+        from types import SimpleNamespace
+        rowless = {"unread_bytes": None, "inflight_state_present": False, "has_pending_queue": False}
+        self.assertTrue(e36.drained(rowless))
+        self.assertFalse(e36.drained({**rowless, "has_pending_queue": True}))
+        self.assertFalse(e36.drained({"unread_bytes": 12, "inflight_state_present": True, "has_pending_queue": False}))
+        for state in ({**rowless, "inflight_state_present": True}, {"unread_bytes": None, "has_pending_queue": False}):
+            with self.assertRaisesRegex(ValueError, "unmeasured"):
+                e36.drained(state)
+        reader = object.__new__(e36.Evidence)
+        reader.args, reader.channel, reader.root = Namespace(base_url="http://offline.invalid", cell="claude-tui"), "42", Path("/offline")
+        reader.d = SimpleNamespace(assert_cell_idle=lambda **kwargs: {"status": "idle"})
+        reader.watcher = lambda: rowless
+        self.assertEqual(reader.idle(), {"status": "idle", "watcher": rowless})
+        reader.watcher = lambda: {**rowless, "has_pending_queue": True}
+        with self.assertRaises(assertions.AssertionError):
+            reader.idle()
+
+    def test_tool_result_user_rows_with_hook_text_do_not_end_the_work_scan(self):
+        prompt, marker = "Reply only [E36:run:S01]", "[E36:run:S01]"
+        user = {"type": "user", "sessionId": "s", "uuid": "input-1", "message": {"content": prompt}}
+        hooked = {"type": "user", "sessionId": "s", "message": {"content": [
+            {"type": "tool_result", "content": "ok"},
+            {"type": "text", "text": "<system-reminder>hook additional context</system-reminder>"}]}}
+        following = {"type": "user", "sessionId": "s", "uuid": "next", "message": {"content": "a later prompt"}}
+        work = {"type": "assistant", "sessionId": "s", "uuid": "work-1", "message": {"content": marker}}
+        request = {"prompt": prompt, "body_marker": marker}
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "native.jsonl"
+            for name, rows, error in (("hook_text", [user, hooked, work], None),
+                                      ("new_input", [user, following, work], ValueError)):
+                with self.subTest(case=name):
+                    path.write_text("")
+                    before = e36.cursor(path)
+                    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+                    if error:
+                        with self.assertRaises(error):
+                            e36.native_chain(path, before, request, "s")
+                    else:
+                        self.assertEqual(e36.native_chain(path, before, request, "s")["work"][0]["id"], "work-1")
+
+    def test_stranded_qa_hold_prefix_counts_as_a_duplicate_publication(self):
+        rows, record = self.publication_fixture()
+        stray = _relay_msg(999, record["discord_prompt_records"][10]["hold_marker"])
+        for name, observed, fresh in (("both", rows + [stray], rows + [stray]),
+                                      ("observed_only", rows + [stray], rows)):
+            with self.subTest(case=name), self.assertRaisesRegex(assertions.AssertionError, "publication"):
+                e36.final_assertion(_window(*observed), copy.deepcopy(record), fresh)
+
+    def test_completion_outside_every_closed_request_window_is_not_dropped(self):
+        rows, record = self.publication_fixture()
+        stray = _raw_bot_msg(999, "✅ 응답 완료")
+        for name, observed, fresh in (("both", rows + [stray], rows + [stray]),
+                                      ("observed_only", rows + [stray], rows),
+                                      ("fresh_only", rows, rows + [stray])):
+            with self.subTest(case=name), self.assertRaisesRegex(assertions.AssertionError, "unattributed completion"):
+                e36.final_assertion(_window(*observed), copy.deepcopy(record), fresh)
+        # An edit cannot retire chrome we already observed and stored.
+        edited = _window(*rows, stray)
+        edited.add({**stray, "content": "edited away"})
+        self.assertTrue(edited.message_updates)
+        with self.subTest(case="edited_away"), self.assertRaisesRegex(assertions.AssertionError, "unattributed completion"):
+            e36.final_assertion(edited, copy.deepcopy(record), edited.raw_messages)
+        ours = _window(*rows, _our_msg(998, "✅ 응답 완료"))
+        ours.add(_our_msg(998, "driver edit"))  # our own driver edits are not product chrome
+        e36.final_assertion(ours, copy.deepcopy(record), ours.raw_messages)
+
+    def test_qa_hold_prefix_may_land_on_its_own_id_but_never_on_two(self):
+        rows, record = self.publication_fixture()
+        qa = record["discord_prompt_records"][10]
+        hold, marker = qa["hold_marker"], qa["body_marker"]
+        # #5731 contract B: message1 keeps the PRE prefix, message2 carries the terminal body.
+        split = [row for row in rows if str(row["id"]) not in ("111", "112")] + [
+            _relay_msg(111, hold), _relay_msg(113, marker), _raw_bot_msg(114, "✅ 응답 완료")]
+        qa.update(response_ids=["113"], completion_message_id="114", discord_closed_after_id=114)
+        e36.final_assertion(_window(*split), copy.deepcopy(record), split)
+        # E-22 shape: the prefix is stranded on one ID while a second ID republishes it. The
+        # rest are edits: history may not hide a duplicate, nor stand in for a retired prefix.
+        gone = [row for row in split if row["id"] != "111"]
+        for name, observed, fresh in (
+                ("stranded", split + [_relay_msg(115, f"{hold}\nrepublished")], None),
+                ("edit_hid_duplicate", split + [_relay_msg(111, f"{hold}\n{hold}"), _relay_msg(111, hold)], split),
+                ("edited_away", split + [_relay_msg(111, "preview cleared")],
+                 gone + [_relay_msg(111, "preview cleared")]),
+                ("deleted", split, gone)):
+            with self.subTest(case=name), self.assertRaisesRegex(assertions.AssertionError, "hold publication"):
+                e36.final_assertion(_window(*observed), copy.deepcopy(record), fresh or observed)
+
+    def test_two_ordered_turns_on_one_page_are_attributed_not_called_a_queue_bypass(self):
+        from types import SimpleNamespace
+        qa = {"prompt": "ask QA", "body_marker": "[QA]", "discord_before_id": 1000}
+        qb = {"prompt": "ask QB", "body_marker": "[QB]"}
+        window = _window(_relay_msg(1001, "[QA]"), _raw_bot_msg(1003, "✅ 응답 완료"),
+                         _relay_msg(1004, "[QB]"), _raw_bot_msg(1005, "✅ 응답 완료"))
+        row = lambda kind, text: {"type": kind, "sessionId": "s", "message": {"content": text}}  # noqa: E731
+        ordered = [row("user", "ask QA"), row("assistant", "[QA]"), row("user", "ask QB"), row("assistant", "[QB]")]
+        early = [row("user", "ask QA"), row("user", "ask QB"), row("assistant", "[QB]"), row("assistant", "[QA]")]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "native.jsonl"
+            path.write_text("")
+            qa["native_before"] = qb["native_before"] = e36.cursor(path)
+            evidence = SimpleNamespace(path=path, session="s", d=SimpleNamespace(HarnessEvidenceError=RuntimeError))
+            narrow = e36.sequential_boundary(evidence, qa, qb)
+            for name, native, error in (("sequential", ordered, None), ("early", early, assertions.AssertionError),
+                                        ("no_native_order", ordered[:1], RuntimeError)):
+                with self.subTest(case=name):
+                    path.write_text("".join(json.dumps(entry) + "\n" for entry in native))
+                    request = dict(qa)
+                    self.assertEqual(len(e36.completion_candidates(e36.request_window(window, request))), 2)
+                    if error:
+                        with self.assertRaises(error):
+                            narrow(window, request)
+                        continue
+                    narrow(window, request)
+                    self.assertEqual(request["queued_followup_order"]["qb_first_body_id"], 1004)
+                    self.assertEqual(request["discord_closed_after_id"], 1003)
+                    request["response_ids"] = ["1001"]
+                    self.assertEqual(e36.completion_id(e36.request_window(window, request), request), "1003")
 
 
 def _wait_predicate(window: assertions.Window, needle: str) -> bool:
