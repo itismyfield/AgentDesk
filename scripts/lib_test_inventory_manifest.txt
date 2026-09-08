@@ -6034,6 +6034,7 @@ services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::can
 services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::matching_native_feeder_preserves_fresh_paused_and_stale_heartbeat_owners
 services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::path_mismatch_preserves_legacy_owner_pending_source_correspondence
 services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::registered_passive_consumer_without_native_feeder_keeps_bridge_progress_path
+services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::same_anchor_refresh_keeps_bridge_with_late_handle_and_watcher_after_loss
 services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::same_anchor_session_bound_refresh_preserves_owner_after_feeder_loss
 services::discord::tui_prompt_relay::tests::notification_strip_drops_bare_control_bytes_but_keeps_whitespace
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_clears_recorded_lease_on_drop
@@ -6406,7 +6407,7 @@ services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_owner_
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_owner_flush_persists_and_clears_dirty
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::strict_fence_loses_authority_before_visible_mutation
-services::discord::turn_bridge::stream_tick::guarded_persist::tests::synthetic_birth_successor_and_owner_handoff_refuse_final_visible_fence_5071
+services::discord::turn_bridge::stream_tick::guarded_persist::tests::synthetic_successor_and_handoff_preserve_durable_row_at_strict_fence_5071
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::the_shipped_dial_admits_no_channel_to_the_stream_loop_enforcement_cohort
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::the_tick_reads_the_enforcement_cohort_once_and_both_gate_sites_use_that_read
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection

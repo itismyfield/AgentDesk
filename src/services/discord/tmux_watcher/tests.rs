@@ -38,6 +38,51 @@ use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 use serenity::all::{ChannelId, Http, MessageId, UserId};
 
+pub(in crate::services::discord) use super::terminal_send::WatcherShortReplaceResult;
+
+pub(in crate::services::discord) async fn send_birth_companion_for_test(
+    gateway: &dyn crate::services::discord::gateway::TurnGateway,
+    shared: &std::sync::Arc<crate::services::discord::SharedData>,
+    target: (&ProviderKind, ChannelId, MessageId),
+    session: &str,
+    key: crate::services::discord::DeliveryLeaseKey,
+    body: &str,
+    range: (u64, u64),
+) -> WatcherShortReplaceResult {
+    let (provider, channel, anchor) = target;
+    let authority = super::loop_poll_prologue::WatcherSourceAuthority {
+        generation_mtime_ns:
+            crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(
+                session,
+            ),
+        reset_incarnation: shared.relay_frontier_token(channel).reset_incarnation,
+        source_stamp: None,
+    };
+    let turn = crate::services::discord::turn_finalizer::TurnKey::new(
+        channel,
+        key.user_msg_id,
+        key.generation,
+    );
+    super::terminal_send::deliver_short_replace_via_controller(
+        gateway,
+        shared,
+        provider,
+        channel,
+        session,
+        anchor,
+        body,
+        body,
+        &shared.delivery_lease(channel),
+        turn,
+        Some(key),
+        5071,
+        authority,
+        range.0,
+        range.1,
+    )
+    .await
+}
+
 struct AgentdeskRootGuard(Option<std::ffi::OsString>);
 
 impl AgentdeskRootGuard {

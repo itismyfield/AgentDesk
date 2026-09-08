@@ -70,11 +70,7 @@ pub(super) mod completion_producer;
 mod single_message_footer_tests;
 
 #[path = "tmux_watcher/terminal_send.rs"]
-#[cfg(not(test))]
 mod terminal_send;
-#[path = "tmux_watcher/terminal_send.rs"]
-#[cfg(test)]
-pub(in crate::services::discord) mod terminal_send;
 
 #[path = "tmux_watcher/terminal_delivery_types.rs"]
 mod terminal_delivery_types;
@@ -2541,4 +2537,4 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
 #[cfg(test)]
 #[path = "tmux_watcher/tests.rs"]
-mod tests;
+pub(in crate::services::discord) mod tests;

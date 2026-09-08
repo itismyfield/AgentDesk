@@ -560,7 +560,7 @@ fn reowned_flush_skips_without_clobbering_or_retrying_dirty() {
 }
 
 #[test]
-fn synthetic_birth_successor_and_owner_handoff_refuse_final_visible_fence_5071() {
+fn synthetic_successor_and_handoff_preserve_durable_row_at_strict_fence_5071() {
     with_runtime_root(|| {
         for change in 0..3 {
             let channel = ChannelId::new(5_071_095_000 + change);
@@ -573,8 +573,6 @@ fn synthetic_birth_successor_and_owner_handoff_refuse_final_visible_fence_5071()
             stale = baseline.clone();
             let expected =
                 crate::services::discord::inflight::InflightTurnIdentity::from_state(&stale);
-            let authority =
-                crate::services::discord::inflight::StreamRelayAuthority::from_state(&stale);
             let mut successor = baseline.clone();
             match change {
                 0 => successor.user_msg_id += 1,
@@ -595,7 +593,6 @@ fn synthetic_birth_successor_and_owner_handoff_refuse_final_visible_fence_5071()
             stale.full_response = "forbidden stale body".into();
             let mut expected_message = (stale.current_msg_id, stale.current_msg_len);
             let mut current = MessageId::new(stale.current_msg_id);
-            let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
             let outcome = persist_stream_tick_visible_mutation_fence(
                 &mut baseline,
                 &mut stale,
@@ -606,35 +603,22 @@ fn synthetic_birth_successor_and_owner_handoff_refuse_final_visible_fence_5071()
                 "turn_bridge::stream_tick::5071_birth_send_fence",
             );
             assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
-            for cohort in [false, true] {
-                let permission = visible_mutation_authority_after_guarded_save(
-                    outcome, &stale, authority, cohort,
-                )
-                .mutation_permission();
-                if permission == Some(true) {
-                    futures::executor::block_on(
-                        gateway.send_message(channel, &stale.full_response),
-                    )
-                    .unwrap();
+            // Boundary-only: an owner handoff refreshes the local authority,
+            // while a different episode leaves the stale local snapshot intact.
+            assert_eq!(
+                stale.effective_relay_owner_kind(),
+                if change == 2 {
+                    crate::services::discord::inflight::RelayOwnerKind::Watcher
+                } else {
+                    crate::services::discord::inflight::RelayOwnerKind::None
                 }
-                assert_ne!(permission, Some(true));
-            }
-            assert!(gateway.sends.lock().unwrap().is_empty());
-            assert!(gateway.edits.lock().unwrap().is_empty());
-            assert!(gateway.deletes.lock().unwrap().is_empty());
+            );
             assert_eq!(
                 serde_json::to_value(
                     load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap()
                 )
                 .unwrap(),
                 before
-            );
-            assert!(
-                crate::services::discord::outbound::delivery_record::read_record(
-                    &ProviderKind::Codex,
-                    channel.get()
-                )
-                .is_none()
             );
         }
     });

@@ -5164,7 +5164,7 @@ mod native_feeder_birth_regressions {
     use crate::services::cluster::relay_producer_registry::global_relay_producer_registry;
     use crate::services::cluster::session_matcher::MatchedChannel;
     use crate::services::cluster::stream_relay::{DiscardSink, spawn_stream_relay};
-    use crate::services::discord::session_relay_sink::{
+    use crate::services::discord::session_relay_sink::tests::{
         idle_feeder_defers_active_row_for_test, swap_session_bound_delivery_for_test,
     };
 
@@ -5187,6 +5187,8 @@ mod native_feeder_birth_regressions {
         Cancelled,
         Unchanged,
         OtherAnchor,
+        LateHandle,
+        WatcherMissing,
     }
 
     async fn observe_real_birth(
@@ -5305,10 +5307,12 @@ mod native_feeder_birth_regressions {
         }
         if let Some(refresh) = refresh {
             assert!(row.turn_nonce.is_some());
-            assert_eq!(
-                row.effective_relay_owner_kind(),
-                RelayOwnerKind::SessionBoundRelay
-            );
+            let birth_owner = match refresh {
+                RefreshFeeder::LateHandle => RelayOwnerKind::None,
+                RefreshFeeder::WatcherMissing => RelayOwnerKind::Watcher,
+                _ => RelayOwnerKind::SessionBoundRelay,
+            };
+            assert_eq!(row.effective_relay_owner_kind(), birth_owner);
             row.full_response = "already sent; pending suffix".into();
             row.response_sent_offset = "already sent;".len();
             super::super::super::inflight::save_inflight_state(&row).unwrap();
@@ -5318,7 +5322,7 @@ mod native_feeder_birth_regressions {
                 row.turn_nonce.clone(),
             );
             match refresh {
-                RefreshFeeder::Missing => {
+                RefreshFeeder::Missing | RefreshFeeder::WatcherMissing => {
                     shared.tmux_watchers.remove(&channel).unwrap();
                 }
                 RefreshFeeder::Cancelled => shared
@@ -5328,6 +5332,11 @@ mod native_feeder_birth_regressions {
                     .cancel
                     .store(true, Ordering::Release),
                 RefreshFeeder::Unchanged | RefreshFeeder::OtherAnchor => {}
+                RefreshFeeder::LateHandle => {
+                    shared
+                        .tmux_watchers
+                        .insert(channel, test_watcher_handle(&session, &native));
+                }
             }
             assert!(registry.get_live_producer(&session).is_some());
             let refreshed = super::super::synthetic_start::claim_tui_direct_synthetic_turn(
@@ -5377,6 +5386,7 @@ mod native_feeder_birth_regressions {
                 match claim.relay_owner {
                     ExternalInputRelayOwner::SessionBoundRelay => RelayOwnerKind::SessionBoundRelay,
                     ExternalInputRelayOwner::BridgeAdapter => RelayOwnerKind::None,
+                    ExternalInputRelayOwner::TmuxWatcher => RelayOwnerKind::Watcher,
                     other => panic!("unexpected refresh owner {other:?}"),
                 }
             );
@@ -5473,6 +5483,24 @@ mod native_feeder_birth_regressions {
             observed,
             vec![(ExternalInputRelayOwner::SessionBoundRelay, true); 4],
             "same-anchor refresh must retain the existing SessionBound owner after feeder loss; missing/cancelled are changed cases, unchanged/other-anchor are controls"
+        );
+    }
+
+    #[test]
+    fn same_anchor_refresh_keeps_bridge_with_late_handle_and_watcher_after_loss() {
+        assert_eq!(
+            run_birth_cases(&[
+                (11, None, Some(RefreshFeeder::LateHandle)),
+                (
+                    12,
+                    Some((false, false, false, false)),
+                    Some(RefreshFeeder::WatcherMissing)
+                ),
+            ]),
+            vec![
+                (ExternalInputRelayOwner::BridgeAdapter, false),
+                (ExternalInputRelayOwner::TmuxWatcher, true),
+            ]
         );
     }
 }

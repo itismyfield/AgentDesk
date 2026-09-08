@@ -73,27 +73,6 @@ pub(in crate::services::discord) fn session_bound_discord_delivery_enabled() -> 
     SESSION_BOUND_DISCORD_DELIVERY_ENABLED.load(Ordering::Acquire)
 }
 
-#[cfg(test)]
-pub(in crate::services::discord) fn swap_session_bound_delivery_for_test(enabled: bool) -> bool {
-    SESSION_BOUND_DISCORD_DELIVERY_ENABLED.swap(enabled, Ordering::AcqRel)
-}
-
-#[cfg(test)]
-pub(in crate::services::discord) fn idle_feeder_defers_active_row_for_test(
-    matched: &crate::services::cluster::session_matcher::MatchedChannel,
-    state: &InflightTurnState,
-) -> bool {
-    matches!(
-        idle_jsonl_apply_active_inflight_gate(
-            &mut HashMap::new(),
-            matched,
-            state.channel_id,
-            state,
-        ),
-        idle_jsonl::IdleJsonlInflightGateDecision::DeferUntilCommitted
-    )
-}
-
 pub(in crate::services::discord) fn session_bound_discord_relay_can_own_terminal_delivery(
     inflight: Option<&InflightTurnState>,
     tmux_session_name: &str,
@@ -567,11 +546,6 @@ impl SessionBoundDiscordRelaySink {
             #[cfg(test)]
             test_force_legacy_replace: false,
         }
-    }
-
-    #[cfg(test)]
-    pub(in crate::services::discord) fn delivered_total_for_test(&self) -> u64 {
-        self.delivered_total.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -1533,4 +1507,4 @@ fn delivery_lease_key_for_frame(
 #[cfg(test)]
 mod delivery_orchestration_tests;
 #[cfg(test)]
-mod tests;
+pub(in crate::services::discord) mod tests;

@@ -1124,7 +1124,7 @@ mod tests {
             };
             use crate::services::discord::inflight::{self, RelayOwnerKind, TurnSource};
             use crate::services::discord::session_relay_sink::SessionBoundDiscordRelaySink;
-            use crate::services::discord::tmux::tmux_watcher::terminal_send::{
+            use crate::services::discord::tmux::tmux_watcher::tests::{
                 WatcherShortReplaceResult, send_birth_companion_for_test,
             };
             use crate::services::tui_prompt_dedupe as dedupe;
@@ -1198,15 +1198,16 @@ mod tests {
                         assert!(matches!(cell.read(), LeaseSnapshot::Leased { holder: LeaseHolder::Bridge { .. }, .. }));
                         assert_eq!(bridge.bodies.lock().unwrap().len(), usize::from(start > 0));
                         if start == 0 {
-                            // The actual Bridge POST is paused before its first visible body.
+                            // Sink routing refuses the external Bridge lease; the parser emits real text.
+                            sink.assert_frame_response_for_test(&frame, "answer");
                             assert_eq!(sink.deliver(&frame).await.unwrap(), RelaySinkOutcome::TerminalNotDelivered);
                             assert_eq!(sink.delivered_total_for_test(), 0);
                             assert!(dr::read_record(&provider, CH).is_none());
                             assert_eq!(serde_json::to_value(inflight::load_inflight_state(&provider, CH).unwrap()).unwrap(), before);
                             assert_eq!(dedupe::external_input_relay_lease(provider.as_str(), session, CH), Some(external.clone()));
                         }
-                        let result = send_birth_companion_for_test(&watcher, &shared, &provider,
-                            (ch(), MessageId::new(anchor)), session, key.clone(), body, (start + 16, end)).await;
+                        let result = send_birth_companion_for_test(&watcher, &shared,
+                            (&provider, ch(), MessageId::new(anchor)), session, key.clone(), body, (start + 16, end)).await;
                         assert_eq!(result, WatcherShortReplaceResult::B2Skip);
                         assert_eq!(watcher.replace_calls.load(Ordering::SeqCst), 0);
                         assert_eq!(shared.committed_relay_offset(ch()), start);
@@ -1230,8 +1231,8 @@ mod tests {
                 std::fs::write(continuation.output_path.as_ref().unwrap(), [b'x'; 128]).unwrap();
                 inflight::save_inflight_state(&continuation).unwrap();
                 let suffix = &continuation.full_response[continuation.response_sent_offset..];
-                let result = send_birth_companion_for_test(&watcher, &shared, &provider,
-                    (ch(), MessageId::new(MSG + 2)), session, key, suffix, (96, 128)).await;
+                let result = send_birth_companion_for_test(&watcher, &shared,
+                    (&provider, ch(), MessageId::new(MSG + 2)), session, key, suffix, (96, 128)).await;
                 assert_eq!(result, WatcherShortReplaceResult::Delivered);
                 assert_eq!(*watcher.bodies.lock().unwrap(), vec![(MSG + 2, " tail".to_string())]);
                 assert_eq!(bridge.replace_calls.load(Ordering::SeqCst), 2);
