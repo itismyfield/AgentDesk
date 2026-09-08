@@ -165,6 +165,83 @@ fn claude_hook_payload_can_advance_multiple_continuation_hops_but_not_rewind() {
     );
 }
 
+/// #5212. Every hook after the first one takes the "already adopted" early
+/// return, so that branch is the only thing keeping the adopted-session
+/// authority young. Without its write the authority is a write-once fact
+/// stamped at the first adoption: a pane outliving `ROTATION_RECORD_TTL` loses
+/// it to the prune while Claude still runs the adopted session, and rehydration
+/// reverts delivery to the launch script's stale UUID (#5188). The prune has
+/// one observable effect — the pane's authority is gone — so the test puts the
+/// store in that state through the production retirement path and re-reports.
+/// A branch that restates the authority writes the record back; one that only
+/// reads leaves it missing for the rest of the pane's life.
+#[test]
+fn hook_re_report_restates_the_adopted_session_authority() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let _rotations = lock_claude_session_rotations_for_tests();
+    reset_state();
+    let tmp = tempfile::tempdir().unwrap();
+    let command_session = uuid::Uuid::new_v4().to_string();
+    let payload_session = uuid::Uuid::new_v4().to_string();
+    let adopted_path = tmp.path().join(format!("{payload_session}.jsonl"));
+    std::fs::write(&adopted_path, b"{}\n").unwrap();
+    let tmux = format!("tmux-5212-readopt-{}", std::process::id());
+    // The pane already adopted `payload_session`; the live Claude process still
+    // addresses hooks with its cached launch-time UUID.
+    register_provider_session("claude", &command_session, &tmux);
+    register_tmux_runtime_binding(
+        &tmux,
+        TuiRuntimeBinding {
+            runtime_kind: RuntimeHandoffKind::ClaudeTui,
+            output_path: adopted_path.display().to_string(),
+            relay_output_path: None,
+            input_fifo_path: None,
+            session_id: Some(payload_session.clone()),
+            last_offset: 12,
+            relay_last_offset: Some(12),
+        },
+    );
+
+    let adopted = adopt_claude_continuation_session(&command_session, &payload_session)
+        .expect("a re-report of the adopted session still resolves the pane");
+    assert_eq!(adopted, (tmux.clone(), adopted_path.display().to_string()));
+    assert!(
+        claude_session_rotation_for_tmux(&tmux).is_none(),
+        "this branch records no rotation, so its own authority write is the \
+         only one on this path"
+    );
+    assert_eq!(
+        hook_adopted_claude_session_id(&tmux).as_deref(),
+        Some(payload_session.as_str()),
+        "a hook that re-reports an already-adopted session must still state the \
+         adopted-session authority"
+    );
+
+    // What ROTATION_RECORD_TTL leaves behind 12h after a write-once stamp.
+    assert!(forget_hook_adopted_claude_session_id(&tmux));
+    assert!(hook_adopted_claude_session_id(&tmux).is_none());
+
+    // The pane is alive and keeps reporting, which is what makes 12h
+    // unreachable in production.
+    adopt_claude_continuation_session(&command_session, &payload_session)
+        .expect("a still-bound pane keeps adopting on every later hook");
+    assert_eq!(
+        hook_adopted_claude_session_id(&tmux).as_deref(),
+        Some(payload_session.as_str()),
+        "the re-report must RESTATE the authority with a fresh record, not read \
+         it: an authority written once at adoption is pruned at \
+         ROTATION_RECORD_TTL and rehydration reverts the pane to the launch \
+         script's frozen transcript (#5188)"
+    );
+    assert_eq!(
+        runtime_binding_for_tmux_session(&tmux).unwrap().last_offset,
+        12,
+        "and the refresh must not rewind the adopted continuation cursor"
+    );
+}
+
 #[test]
 fn provider_session_mapping_survives_prompt_purge_ttl() {
     let _guard = TEST_LOCK
