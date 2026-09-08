@@ -849,6 +849,7 @@ src/
 │   │   │   │   ├── headless_turn.rs
 │   │   │   │   ├── intake_turn.rs
 │   │   │   │   ├── latency_spans.rs
+│   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
