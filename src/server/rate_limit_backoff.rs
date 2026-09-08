@@ -1,20 +1,21 @@
 //! Backoff schedule for the Claude leg of `rate_limit_sync_loop`. Pure (no
 //! clock, no I/O): the caller injects `now`, so the schedule is testable. In
 //! production the usage endpoint answered 429 for ~31% of polls (3-day sample:
-//! 1,980 ok vs 907 limited) because the loop kept the same 120 s cadence.
+//! 1,980 ok vs 907 limited) because the loop held the same 120 s cadence.
 //!
 //! Policy: success → base interval (120 s), counters reset; 429 with a usable
 //! `Retry-After` → that long, clamped to the max; 429 without one → exponential
 //! 120/240/480 s … capped at 30 min; any other error → base interval. Only the
-//! Claude fetch is skipped while `not_before` is in the future, so a wait rounds
-//! up to the 120 s tick.
+//! Claude fetch is skipped while `not_before` is in the future. That 30-minute
+//! ceiling is the *no-pressure* one: while the cached telemetry still defers
+//! dispatch, the caller shortens the hold via [`ClaudeSyncBackoff::cap_hold`].
 use std::time::{Duration, Instant};
 
 pub(crate) const RATE_LIMIT_SYNC_BASE_INTERVAL: Duration = Duration::from_secs(120);
 pub(crate) const RATE_LIMIT_SYNC_MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
 
 /// Typed error returned by the Claude usage fetchers on HTTP 429 so the loop
-/// can distinguish it from other failures (via `anyhow::Error::downcast_ref`).
+/// can tell it from other failures (via `anyhow::Error::downcast_ref`).
 /// `buckets` carries whatever `anthropic-ratelimit-*` telemetry the 429 itself
 /// advertised, so scheduling a retry never costs that observation.
 #[derive(Debug, Clone, PartialEq)]
@@ -35,7 +36,7 @@ impl std::fmt::Display for ClaudeUsageRateLimited {
 
 impl std::error::Error for ClaudeUsageRateLimited {}
 
-/// Parses an HTTP `Retry-After` value: delta-seconds or an HTTP-date (RFC 7231
+/// Parses an HTTP `Retry-After`: delta-seconds or an HTTP-date (RFC 7231
 /// IMF-fixdate, which `chrono`'s RFC 2822 parser accepts). `now` is injected so
 /// date forms are testable; unparseable or past values return `None`.
 pub(crate) fn parse_retry_after(
@@ -100,9 +101,9 @@ impl ClaudeSyncBackoff {
     }
 
     /// Shortens an in-progress hold to at most `cap` from `now`, returning the
-    /// resulting delay. Used when a 429 cached still-unexpired exhaustion: the
-    /// gate drops telemetry older than its stale window, so the next observation
-    /// has to land inside that window even if `Retry-After` asked for longer.
+    /// resulting delay; it never lengthens one. `cap` is the deadline by which
+    /// still-deferring telemetry must be re-observed, set by the gate's stale
+    /// window rather than by `Retry-After`.
     pub(crate) fn cap_hold(&mut self, cap: Duration, now: Instant) -> Duration {
         let capped = now + cap;
         if self
@@ -125,9 +126,8 @@ impl ClaudeSyncBackoff {
                 self.base
             }
             ClaudeSyncOutcome::OtherError => {
-                // Not a rate limit: keep the regular cadence but do not
-                // reset an in-progress 429 streak either (a transient
-                // network error between 429s should not restart at 120 s).
+                // Not a rate limit: keep the cadence, but do not reset an
+                // in-progress 429 streak either.
                 self.not_before = None;
                 self.base
             }
@@ -190,11 +190,20 @@ mod tests {
         assert!(backoff.should_attempt(t0));
         assert_eq!(backoff.record(ClaudeSyncOutcome::Success, t0), secs(120));
         backoff.record(limited(None), t0);
-        backoff.record(limited(None), t0 + secs(120));
+        // An unrelated error keeps the cadence and clears the hold, but must
+        // not restart the 429 ladder either.
+        assert_eq!(
+            backoff.record(ClaudeSyncOutcome::OtherError, t0 + secs(120)),
+            secs(120)
+        );
+        assert!(backoff.should_attempt(t0 + secs(120)));
+        assert_eq!(backoff.consecutive_rate_limits(), 1);
+        assert_eq!(backoff.record(limited(None), t0 + secs(120)), secs(240));
         backoff.record(limited(None), t0 + secs(360));
         assert_eq!(backoff.consecutive_rate_limits(), 3);
 
-        let t_ok = t0 + secs(840);
+        // Success mid-hold (not_before is t0+840) releases it immediately.
+        let t_ok = t0 + secs(600);
         assert_eq!(backoff.record(ClaudeSyncOutcome::Success, t_ok), secs(120));
         assert!(backoff.should_attempt(t_ok));
         assert_eq!(backoff.consecutive_rate_limits(), 0);
@@ -204,44 +213,22 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_header_is_honoured_within_bounds() {
+    fn retry_after_is_clamped_and_leaves_the_ladder_alone() {
         let mut backoff = backoff();
         let t0 = Instant::now();
-        // Longer than the base: honoured as-is.
+        // Honoured as-is above the base, rounded up below it, clamped at max.
         assert_eq!(backoff.record(limited(Some(300)), t0), secs(300));
         assert!(!backoff.should_attempt(t0 + secs(299)));
         assert!(backoff.should_attempt(t0 + secs(300)));
-        // Shorter than the base tick: rounded up to the base.
         assert_eq!(backoff.record(limited(Some(5)), t0), secs(120));
-        // Absurdly long: clamped to the 30-minute ceiling.
         assert_eq!(backoff.record(limited(Some(86_400)), t0), secs(1800));
         assert_eq!(backoff.consecutive_rate_limits(), 3);
+        // A header-driven hold never advances the exponential ladder: the next
+        // header-less 429 starts at the base, not at 240 s.
+        assert_eq!(backoff.record(limited(None), t0 + secs(1800)), secs(120));
     }
 
-    #[test]
-    fn retry_after_does_not_advance_the_exponential_ladder() {
-        let mut backoff = backoff();
-        let t0 = Instant::now();
-        backoff.record(limited(Some(600)), t0);
-        // Next header-less 429 starts the ladder at the base, not 240 s.
-        assert_eq!(backoff.record(limited(None), t0 + secs(600)), secs(120));
-    }
-
-    #[test]
-    fn other_errors_keep_base_cadence_without_resetting_streak() {
-        let mut backoff = backoff();
-        let t0 = Instant::now();
-        backoff.record(limited(None), t0);
-        assert_eq!(
-            backoff.record(ClaudeSyncOutcome::OtherError, t0 + secs(120)),
-            secs(120)
-        );
-        assert!(backoff.should_attempt(t0 + secs(120)));
-        assert_eq!(backoff.consecutive_rate_limits(), 1);
-        // The ladder position survives the unrelated error.
-        assert_eq!(backoff.record(limited(None), t0 + secs(240)), secs(240));
-    }
-
+    /// The parser, plus the typed 429's anyhow round-trip and Display.
     #[test]
     fn parses_retry_after_seconds_and_http_date() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-05T06:00:00Z")
@@ -263,16 +250,14 @@ mod tests {
                 "{value:?}"
             );
         }
-    }
-
-    #[test]
-    fn rate_limited_error_round_trips_through_anyhow() {
+        let buckets = Vec::new();
+        let retry_after = Some(secs(42));
         let error = anyhow::Error::new(ClaudeUsageRateLimited {
-            retry_after: Some(secs(42)),
-            buckets: Vec::new(),
+            retry_after,
+            buckets,
         });
         let typed = error.downcast_ref::<ClaudeUsageRateLimited>();
-        assert_eq!(typed.and_then(|typed| typed.retry_after), Some(secs(42)));
+        assert_eq!(typed.and_then(|typed| typed.retry_after), retry_after);
         assert!(error.to_string().contains("429, retry-after 42s"));
     }
 }

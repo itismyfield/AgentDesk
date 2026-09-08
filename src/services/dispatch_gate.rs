@@ -222,6 +222,29 @@ pub fn set_provider_pressure_snapshot(snapshot: HashMap<String, ProviderPressure
     *lock.write().unwrap_or_else(|p| p.into_inner()) = snapshot;
 }
 
+/// When `provider`'s cached telemetry was observed, if that telemetry would
+/// defer dispatch. Read off the hot path by the rate-limit sync loop, which has
+/// to re-observe such pressure before it ages out of the stale window (#5727).
+/// Staleness is excluded on purpose: an aged-out row is what must be refetched.
+pub fn deferring_observation(provider: &str, now: i64) -> Option<i64> {
+    let lock = pressure_map();
+    let map = lock.read().unwrap_or_else(|p| p.into_inner());
+    deferring_observation_of(provider, map.get(provider), now)
+}
+
+/// Pure half of [`deferring_observation`], so callers can pin the contract.
+pub fn deferring_observation_of(
+    provider: &str,
+    snapshot: Option<&ProviderPressureSnapshot>,
+    now: i64,
+) -> Option<i64> {
+    let snapshot = snapshot?;
+    evaluate_provider_pressure(provider, Some(snapshot), danger_pct(), i64::MAX, now)
+        .verdict
+        .is_defer()
+        .then_some(snapshot.fetched_at)
+}
+
 /// Replace the in-memory agent_id -> provider snapshot. Called off the hot path
 /// by the rate-limit sync loop.
 pub fn set_agent_provider_snapshot(snapshot: HashMap<String, String>) {

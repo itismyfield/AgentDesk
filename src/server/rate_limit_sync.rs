@@ -1,7 +1,6 @@
 //! Periodic provider rate-limit sync (`rate_limit_sync_loop`) and the Claude
 //! leg's fetch/backoff wiring, split out of `server/mod.rs` so the 429 backoff
-//! (#5727) does not grow that giant file. Shared helpers it depends on (cache
-//! upsert, header parsers, other providers' fetchers, refresh lock) stay there.
+//! (#5727) does not grow that giant file. The shared helpers stay there.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -46,8 +45,7 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
 
     let interval = RATE_LIMIT_SYNC_BASE_INTERVAL;
     // Run immediately on startup, then every 2 minutes. The Claude leg also
-    // backs off after 429s (Retry-After or exponential up to 30 min) while the
-    // other providers keep the 2-minute cadence.
+    // backs off after 429s while the other providers keep that cadence.
     let mut first = true;
     let mut claude_backoff = ClaudeSyncBackoff::new(interval, RATE_LIMIT_SYNC_MAX_BACKOFF);
 
@@ -58,21 +56,27 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
         first = false;
 
         let now = Instant::now();
+        // #5727: pressure the gate still Defers on must be re-observed inside
+        // its stale window. The snapshot was refreshed at the end of the last
+        // tick, so reading it here costs no DB round trip.
+        let now_unix = chrono::Utc::now().timestamp();
+        if let Some(cap) = observation_deadline_cap(
+            dispatch_gate::deferring_observation("claude", now_unix),
+            now_unix,
+            interval,
+            Duration::from_secs(dispatch_gate::stale_sec().max(0) as u64),
+        ) {
+            claude_backoff.cap_hold(cap, now);
+        }
         if claude_backoff.should_attempt(now) {
             let claude_result =
                 sync_claude_rate_limit_cache_once_serialized(pg_pool.as_ref()).await;
             let outcome = classify_claude_sync_result(&claude_result);
             let is_rate_limited = matches!(outcome, ClaudeSyncOutcome::RateLimited { .. });
             let at = Instant::now();
-            let mut delay = claude_backoff.record(outcome, at);
-            let stale = Duration::from_secs(dispatch_gate::stale_sec().max(0) as u64);
-            let now_unix = chrono::Utc::now().timestamp();
-            if let Some(cap) = exhaustion_hold_cap(&claude_result, now_unix, interval, stale) {
-                delay = claude_backoff.cap_hold(cap, at);
-            }
+            let delay = claude_backoff.record(outcome, at);
             if is_rate_limited {
-                // First 429 of a streak is WARN, the rest INFO: a sustained
-                // rate limit must not flood the log every tick.
+                // First 429 of a streak is WARN, the rest INFO.
                 let consecutive = claude_backoff.consecutive_rate_limits();
                 if consecutive <= 1 {
                     tracing::warn!(
@@ -128,12 +132,11 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
             }
             Err(e) => {
                 let msg = e.to_string();
-                // Only the genuine "not configured / file missing" case (no
-                // $HOME, or NotFound on oauth_creds.json) is suppressed, and it
-                // is classified at the source by `io::ErrorKind`: matching on
-                // "oauth_creds.json" broadly here would also swallow permission,
-                // I/O and corrupt-credential failures, which keep WARNing
-                // (#3566 over-suppress fix, codex r2).
+                // Only the genuine "not configured / file missing" case is
+                // suppressed, classified at the source by `io::ErrorKind`:
+                // matching on "oauth_creds.json" here would also swallow
+                // permission, I/O and corrupt-credential failures, which keep
+                // WARNing (#3566 over-suppress fix, codex r2).
                 let creds_missing =
                     crate::services::provider_auth::is_gemini_unconfigured_error(&e);
                 if creds_missing {
@@ -204,10 +207,9 @@ async fn sync_claude_rate_limit_cache_once(pg_pool: &PgPool) -> Result<usize, an
             Ok(bucket_count)
         }
         Err(e) => {
-            // Telemetry is independent of retry scheduling: a 429 that carried
-            // limit headers is cached anyway, so the gate sees the exhaustion,
-            // not the pre-429 snapshot. A 429 with no buckets (OAuth usage)
-            // writes nothing — throttled is not exhausted.
+            // Telemetry is independent of retry scheduling: a 429 carrying
+            // limit headers is cached anyway, so the gate sees the exhaustion.
+            // A 429 with no buckets (OAuth) writes nothing — not exhausted.
             match e.downcast_ref::<rate_limit_backoff::ClaudeUsageRateLimited>() {
                 Some(limited) => {
                     if !limited.buckets.is_empty() {
@@ -226,30 +228,21 @@ async fn sync_claude_rate_limit_cache_once(pg_pool: &PgPool) -> Result<usize, an
     }
 }
 
-/// Hold cap for a 429 that cached still-unexpired exhaustion. The gate reads
-/// telemetry older than its stale window as absent and re-Allows, so that
-/// pressure must be re-observed inside the window even when `Retry-After` asks
-/// for half an hour: cap the hold one tick short of it (one request per window;
-/// a repeated 429 re-caches the buckets). `None` leaves the backoff alone —
-/// OAuth 429s carry no buckets, and an expired reset is the gate's own Allow.
-fn exhaustion_hold_cap(
-    result: &Result<usize, anyhow::Error>,
+/// How long the Claude fetch may stay held off, given when the still-deferring
+/// telemetry was last observed. The gate re-Allows once that row outlives its
+/// stale window, so the next attempt is pinned to a deadline off the
+/// observation, not to `Retry-After`; two ticks of slack absorb a loop period
+/// that is `base` *plus* the other providers' fetches. Past the deadline the
+/// cap is zero (base cadence, the fail-safe); `None` leaves the hold alone.
+fn observation_deadline_cap(
+    observed_at: Option<i64>,
     now: i64,
     base: Duration,
     stale: Duration,
 ) -> Option<Duration> {
-    let limited = result
-        .as_ref()
-        .err()?
-        .downcast_ref::<rate_limit_backoff::ClaudeUsageRateLimited>()?;
-    limited
-        .buckets
-        .iter()
-        .any(|bucket| {
-            bucket["remaining"].as_i64().is_some_and(|left| left <= 0)
-                && bucket["reset"].as_i64().is_some_and(|reset| reset > now)
-        })
-        .then(|| stale.saturating_sub(base).max(base))
+    let deadline = observed_at? + stale.as_secs() as i64 - 2 * base.as_secs() as i64;
+    let left = deadline.saturating_sub(now).max(0) as u64;
+    Some(Duration::from_secs(left))
 }
 
 /// Builds the typed 429 error, carrying any pressure buckets the response advertised.
@@ -267,9 +260,9 @@ fn claude_usage_rate_limited_error(
     }
 }
 
-/// Maps one `count_tokens` response onto buckets. A 429 keeps its telemetry
-/// inside the typed error; every other non-2xx is an error too, so the loop
-/// reads it as `OtherError` (preserving a 429 streak), not an empty success.
+/// Maps one `count_tokens` response onto buckets. A 429 keeps its telemetry in
+/// the typed error; every other non-2xx is an error too, so the loop reads it
+/// as `OtherError` (preserving a 429 streak), not an empty success.
 fn anthropic_rate_limit_response(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
@@ -319,8 +312,7 @@ async fn fetch_anthropic_rate_limits(api_key: &str) -> Result<Buckets, anyhow::E
     anthropic_rate_limit_response(resp.status(), resp.headers())
 }
 
-/// Fetch Claude usage via OAuth API (subscription-based, no API key needed).
-/// Returns utilization-based buckets (5h, 7d).
+/// Fetch Claude usage via the OAuth API (subscription): 5h/7d utilization.
 async fn fetch_claude_oauth_usage(token: &str) -> Result<Buckets, anyhow::Error> {
     let client = reqwest::Client::builder()
         .timeout(CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT)
@@ -358,8 +350,9 @@ mod tests {
     };
     use super::{
         anthropic_rate_limit_response, classify_claude_sync_result,
-        claude_usage_rate_limited_error, exhaustion_hold_cap,
+        claude_usage_rate_limited_error, observation_deadline_cap,
     };
+    use crate::services::dispatch_gate as gate;
     use reqwest::{StatusCode, header::HeaderMap};
     use std::time::{Duration, Instant};
 
@@ -368,50 +361,36 @@ mod tests {
     }
 
     fn rate_limited(retry_after: Option<Duration>) -> anyhow::Error {
+        let buckets = Vec::new();
         anyhow::Error::new(ClaudeUsageRateLimited {
             retry_after,
-            buckets: Vec::new(),
+            buckets,
         })
     }
 
     #[test]
     fn classifies_claude_sync_results_for_backoff() {
         let classify = |result| classify_claude_sync_result(&result);
+        let after = |retry_after| ClaudeSyncOutcome::RateLimited { retry_after };
         assert_eq!(classify(Ok(2)), ClaudeSyncOutcome::Success);
         assert_eq!(
             classify(Err(anyhow::anyhow!("no Claude credentials found"))),
             ClaudeSyncOutcome::OtherError
         );
-        assert_eq!(
-            classify(Err(rate_limited(Some(secs(90))))),
-            ClaudeSyncOutcome::RateLimited {
-                retry_after: Some(secs(90)),
-            }
-        );
+        let held = secs(90);
+        assert_eq!(classify(Err(rate_limited(Some(held)))), after(Some(held)));
         // Context wrapping must not hide the typed 429.
-        assert_eq!(
-            classify(Err(rate_limited(None).context("forced refresh"))),
-            ClaudeSyncOutcome::RateLimited { retry_after: None }
-        );
-    }
-
-    /// API-key 429 headers for an exhausted requests bucket; `reset_at` is the
-    /// RFC3339 reset, in unix seconds (epoch reads as no usable reset).
-    fn exhausted_headers(reset_at: i64) -> HeaderMap {
-        let reset = chrono::DateTime::from_timestamp(reset_at, 0)
-            .expect("representable reset")
-            .to_rfc3339();
-        let mut headers = HeaderMap::new();
-        headers.insert("anthropic-ratelimit-requests-limit", "100".parse().unwrap());
-        headers.insert("anthropic-ratelimit-requests-reset", reset.parse().unwrap());
-        let zero = "0".parse().expect("valid header value");
-        headers.insert("anthropic-ratelimit-requests-remaining", zero);
-        headers
+        let wrapped = rate_limited(None).context("forced refresh");
+        assert_eq!(classify(Err(wrapped)), after(None));
     }
 
     #[test]
     fn api_key_429_keeps_pressure_buckets_and_the_backoff_streak() {
-        let mut headers = exhausted_headers(0);
+        // An exhausted requests bucket, with no readable reset.
+        let mut headers = HeaderMap::new();
+        headers.insert("anthropic-ratelimit-requests-limit", "100".parse().unwrap());
+        let zero = "0".parse().expect("valid header value");
+        headers.insert("anthropic-ratelimit-requests-remaining", zero);
         headers.insert(reqwest::header::RETRY_AFTER, "600".parse().unwrap());
         // The exhaustion telemetry rides along inside the typed error.
         let error = anthropic_rate_limit_response(StatusCode::TOO_MANY_REQUESTS, &headers)
@@ -437,7 +416,6 @@ mod tests {
             (StatusCode::INTERNAL_SERVER_ERROR, 120, 120),
             (StatusCode::TOO_MANY_REQUESTS, 240, 240),
         ] {
-            // The whole production path: response → sync result → outcome.
             let synced = anthropic_rate_limit_response(status, &headers).map(|b| b.len());
             let recorded = backoff.record(classify_claude_sync_result(&synced), t0 + secs(at));
             assert_eq!(recorded, secs(delay), "{status} at {at}s");
@@ -445,49 +423,64 @@ mod tests {
         assert_eq!(backoff.consecutive_rate_limits(), 2);
     }
 
-    /// r3 regression: a long `Retry-After` must not outlive the gate's stale
-    /// window, or the exhaustion this 429 just cached reads as absent telemetry
-    /// and the gate Allows again while the bucket is still empty.
+    /// One cached Claude row, as the gate parses it (`used` is the percent).
+    fn cached(used: i64, reset: i64, fetched_at: i64) -> gate::ProviderPressureSnapshot {
+        let payload = serde_json::json!({
+            "provider": "claude",
+            "buckets": [{"name": "5h", "limit": 100, "used": used, "reset": reset}],
+            "fetched_at": fetched_at,
+        });
+        let parsed = gate::snapshot_from_provider_payload(&payload);
+        parsed.expect("claude row").1
+    }
+
+    /// r4 regression: while the cached row still defers, the next attempt is
+    /// pinned to an observation deadline, so the pressure cannot age out of the
+    /// gate's window and fail open. With no pressure the long hold stands.
     #[test]
-    fn unexpired_exhaustion_caps_the_hold_inside_the_gate_stale_window() {
-        use crate::services::dispatch_gate as gate;
+    fn deferring_telemetry_pins_the_next_attempt_to_an_observation_deadline() {
+        let (base, stale, now) = (secs(120), secs(600), 1_000_000_i64);
+        let cap = |snapshot: &gate::ProviderPressureSnapshot, at| {
+            let observed = gate::deferring_observation_of("claude", Some(snapshot), at);
+            observation_deadline_cap(observed, at, base, stale)
+        };
+        let limited = |after: Option<u64>| ClaudeSyncOutcome::RateLimited {
+            retry_after: after.map(secs),
+        };
+        // No pressure, and exhaustion whose window is provably over, leave the
+        // backoff alone; an unreadable reset defers, so it is capped.
+        assert_eq!(cap(&cached(40, now + 3600, now), now), None);
+        assert_eq!(cap(&cached(100, now - 1, now), now), None);
+        assert_eq!(cap(&cached(100, 0, now), now), Some(secs(360)));
 
-        let now = chrono::Utc::now().timestamp();
-        let mut headers = exhausted_headers(now + 3600);
-        headers.insert(reqwest::header::RETRY_AFTER, "1800".parse().unwrap());
-        let error = anthropic_rate_limit_response(StatusCode::TOO_MANY_REQUESTS, &headers)
-            .expect_err("a 429 is still an error");
-        let buckets = error
-            .downcast_ref::<ClaudeUsageRateLimited>()
-            .expect("429 is the typed rate-limit error")
-            .buckets
-            .clone();
-        let result = Err::<usize, _>(error);
-
-        let stale = gate::DEFAULT_STALE_SEC;
-        let mut backoff = ClaudeSyncBackoff::new(secs(120), secs(1800));
-        let t0 = Instant::now();
-        let recorded = backoff.record(classify_claude_sync_result(&result), t0);
-        assert_eq!(recorded, secs(1800), "Retry-After alone parks 30 min out");
-        let stale_d = secs(stale as u64);
-        let cap = exhaustion_hold_cap(&result, now, secs(120), stale_d)
-            .expect("an exhausted bucket with a future reset caps the hold");
-        let expired = exhaustion_hold_cap(&result, now + 3601, secs(120), stale_d);
-        assert_eq!(expired, None, "an elapsed reset is the gate's own Allow");
-        assert_eq!(backoff.cap_hold(cap, t0), secs(480));
-        let wider = backoff.cap_hold(secs(1800), t0);
-        assert_eq!(wider, secs(480), "capping only ever shortens a hold");
-
-        // Why 480 s: the cached bucket defers only while it is fresh.
-        let payload =
-            serde_json::json!({"provider": "claude", "buckets": buckets, "fetched_at": now});
-        let (_, snap) =
-            gate::snapshot_from_provider_payload(&payload).expect("claude pressure snapshot");
-        let snap = Some(&snap);
-        let danger = gate::DEFAULT_DANGER_PCT;
-        let gated = |at| gate::evaluate_provider_pressure("claude", snap, danger, stale, at);
-        // Fresh telemetry defers; one second past the window it Allows again.
-        assert!(gated(now + 480).verdict.is_defer());
-        assert!(!gated(now + stale + 1).verdict.is_defer());
+        // Fetch schedule under a 429 streak, as (row age, first `Retry-After`,
+        // loop wake-ups, ticks that must fetch). Wake-ups are 159 s apart —
+        // the loop sleeps `base` *after* the other providers — yet the
+        // re-observation must beat the 600 s window; an OAuth 429 caches
+        // nothing, so its deadline stays at the last success.
+        let ladder = vec![0_i64, 120, 240, 360, 480];
+        for (fetched_at, first, ticks, want) in [
+            (now, Some(1800_u64), vec![159_i64, 318, 477], vec![477_i64]),
+            (now - 120, None, ladder.clone(), ladder.clone()),
+        ] {
+            let snapshot = cached(100, now + 3600, fetched_at);
+            let mut backoff = ClaudeSyncBackoff::new(base, secs(1800));
+            let t0 = Instant::now();
+            if let Some(after) = first {
+                assert_eq!(backoff.record(limited(Some(after)), t0), secs(after));
+            }
+            let mut fired = Vec::new();
+            for tick in ticks {
+                let at = t0 + secs(tick as u64);
+                if let Some(shorter) = cap(&snapshot, now + tick) {
+                    backoff.cap_hold(shorter, at);
+                }
+                if backoff.should_attempt(at) {
+                    fired.push(tick);
+                    backoff.record(limited(None), at);
+                }
+            }
+            assert_eq!(fired, want, "row fetched at {fetched_at}");
+        }
     }
 }
