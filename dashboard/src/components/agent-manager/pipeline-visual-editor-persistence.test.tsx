@@ -145,9 +145,9 @@ function seedCachedSnapshot(rawOverride: unknown) {
   );
 }
 
-function mockApi(rawOverride: unknown) {
+function mockApi(rawOverride: unknown, pipeline: PipelineConfigFull = makePipeline()) {
   vi.spyOn(api, "getEffectivePipeline").mockResolvedValue({
-    pipeline: makePipeline(),
+    pipeline,
     layers: { default: true, repo: true, agent: false },
   });
   vi.spyOn(api, "getRepoPipeline").mockResolvedValue({ repo: REPO, pipeline_config: rawOverride });
@@ -188,10 +188,14 @@ async function saveAndReadPayload(): Promise<Record<string, unknown>> {
   return calls[calls.length - 1][1] as Record<string, unknown>;
 }
 
-function persistedDraftExtras(): Record<string, unknown> {
+function persistedDraftEntry(): PersistedFsmDraftEntry | null {
   const raw = window.localStorage.getItem(STORAGE_KEYS.fsmDraft) ?? "{}";
   const store = JSON.parse(raw) as { entries?: Record<string, PersistedFsmDraftEntry> };
-  return store.entries?.[SCOPE_KEY]?.overrideExtras ?? {};
+  return store.entries?.[SCOPE_KEY] ?? null;
+}
+
+function persistedDraftExtras(): Record<string, unknown> {
+  return persistedDraftEntry()?.overrideExtras ?? {};
 }
 
 beforeEach(() => {
@@ -533,5 +537,69 @@ describe("locally created override extras", () => {
     expect(Object.hasOwn(payload, "retry_budget")).toBe(false);
     expect(Object.hasOwn(restoredExtras, "retry_budget")).toBe(false);
     expect((payload as unknown as PipelineConfigFull).states[0].label).toBe(EDITED_LABEL);
+  });
+});
+
+/**
+ * #5743. Rebinding an FSM edge to an event the server pipeline already declares
+ * writes only `overrideExtras`: `updateFsmTransitionEvent` leaves `pipelineDraft`
+ * alone when `events[nextEvent]` exists, so neither the pipeline nor the stage
+ * signature moves and the persistence effect used to delete the whole draft
+ * scope. Detection must run against the server snapshot's extras, so that going
+ * back to the server value still retires the scope instead of stranding a draft.
+ */
+describe("override-only FSM edge edits", () => {
+  const SERVER_BINDINGS = { "ready->done": { event: "on_dispatch" } };
+
+  /** The server already declares both events, so neither rebind touches the pipeline. */
+  function boundPipeline(): PipelineConfigFull {
+    const pipeline = makePipeline();
+    pipeline.events = { on_dispatch: [], on_error: [] };
+    return pipeline;
+  }
+
+  function mockBoundApi() {
+    mockApi(buildOverridePayload(boundPipeline(), { fsm_edge_bindings: SERVER_BINDINGS }), boundPipeline());
+  }
+
+  async function rebind(event: string) {
+    await act(async () => {
+      view.current?.actions.updateFsmTransitionEvent(0, event);
+    });
+  }
+
+  it("keeps a rebind to an already declared event across a remount", async () => {
+    mockBoundApi();
+    await mountEditor();
+    expect(view.current?.ctx.fsmEdgeBindings).toEqual(SERVER_BINDINGS);
+
+    await rebind("on_error");
+
+    // The edit is override-only: no pipeline or stage signature moved.
+    expect(view.current?.ctx.hasVisibleChanges).toBe(false);
+    expect(view.current?.ctx.pipelineDraft?.events).toEqual({ on_dispatch: [], on_error: [] });
+    expect(persistedDraftExtras().fsm_edge_bindings).toEqual({ "ready->done": { event: "on_error" } });
+
+    await unmountEditor();
+    await mountEditor();
+
+    expect(view.current?.ctx.fsmEdgeBindings).toEqual({ "ready->done": { event: "on_error" } });
+    expect(persistedDraftExtras().fsm_edge_bindings).toEqual({ "ready->done": { event: "on_error" } });
+  });
+
+  // Out of scope here: `handleSave` still PUTs only when `pipelineChanged`, so an
+  // override-only edit survives a remount but has no way to reach the server yet.
+
+  it("retires the draft scope once the extras match the server snapshot again", async () => {
+    mockBoundApi();
+    await mountEditor();
+    expect(persistedDraftEntry()).toBeNull();
+
+    await rebind("on_error");
+    expect(persistedDraftEntry()).not.toBeNull();
+
+    await rebind("on_dispatch");
+    expect(view.current?.ctx.fsmEdgeBindings).toEqual(SERVER_BINDINGS);
+    expect(persistedDraftEntry()).toBeNull();
   });
 });

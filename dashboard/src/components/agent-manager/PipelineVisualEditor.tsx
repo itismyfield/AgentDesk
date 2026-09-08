@@ -66,6 +66,7 @@ export default function PipelineVisualEditor({
   const [savedPipeline, setSavedPipeline] = useState<PipelineConfigFull | null>(null);
   const [layers, setLayers] = useState({ default: true, repo: false, agent: false });
   const [overrideExtras, setOverrideExtras] = useState<Record<string, unknown>>({});
+  const [savedOverrideExtras, setSavedOverrideExtras] = useState<Record<string, unknown>>({});
   const [serverExtraKeys, setServerExtraKeys] = useState<string[] | null>(null);
   const [overrideExists, setOverrideExists] = useState(false);
   const [allRepoStages, setAllRepoStages] = useState<PipelineStage[]>([]);
@@ -163,6 +164,7 @@ export default function PipelineVisualEditor({
     setSavedPipeline(null);
     setLayers({ default: true, repo: false, agent: false });
     setOverrideExtras({});
+    setSavedOverrideExtras({});
     setServerExtraKeys(null);
     setOverrideExists(false);
     setAllRepoStages([]);
@@ -197,6 +199,9 @@ export default function PipelineVisualEditor({
           : { ...persistedDraft.overrideExtras }
         : serverExtras,
     );
+    // #5743 baseline: the extras the shown snapshot carries. Change detection
+    // compares against this, never against "extras are non-empty".
+    setSavedOverrideExtras(serverExtras);
     // A known local key stays local even if a later GET happens to carry it.
     // Pre-field drafts can also learn matching values and known legacy fields.
     setServerExtraKeys(
@@ -337,6 +342,12 @@ export default function PipelineVisualEditor({
     savedPipelineSignature !== null &&
     pipelineDraftSignature !== savedPipelineSignature;
   const stagesChanged = stageDraftSignature !== savedStageDraftSignature;
+  // #5743: an override-only edit (e.g. rebinding an FSM edge to an event the
+  // server pipeline already declares) moves neither signature above.
+  const overrideExtrasChanged = useMemo(
+    () => !equalJsonValues(overrideExtras, savedOverrideExtras),
+    [overrideExtras, savedOverrideExtras],
+  );
   const visibleStagesChanged = !isFsmVariant && stagesChanged;
   const hasVisibleChanges = pipelineChanged || visibleStagesChanged;
   const activeLayers = [
@@ -431,7 +442,7 @@ export default function PipelineVisualEditor({
     if (!repo || !fsmDraftScopeKey || !pipelineDraft || loading) {
       return;
     }
-    if (!pipelineChanged && !stagesChanged) {
+    if (!pipelineChanged && !stagesChanged && !overrideExtrasChanged) {
       setPersistedFsmDraftStore((currentStore) =>
         removeDraftScope(normalizePersistedFsmDraftStore(currentStore), fsmDraftScopeKey),
       );
@@ -466,6 +477,7 @@ export default function PipelineVisualEditor({
     level,
     loading,
     overrideExtras,
+    overrideExtrasChanged,
     pipelineChanged,
     pipelineDraft,
     repo,
