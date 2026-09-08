@@ -5184,7 +5184,7 @@ mod native_feeder_birth_regressions {
     async fn observe_real_birth(
         root: &Path,
         case: u64,
-        feeder: Option<(bool, bool)>,
+        feeder: Option<(bool, bool, bool, bool)>,
     ) -> (ExternalInputRelayOwner, bool) {
         let channel = ChannelId::new(5_071_080_000 + case);
         let anchor = MessageId::new(5_071_081_000 + case);
@@ -5224,9 +5224,15 @@ mod native_feeder_birth_regressions {
         };
         let shared = super::super::super::make_shared_data_for_tests_with_storage(None);
         assert!(shared.pg_pool.is_none());
-        if let Some((paused, stale_heartbeat)) = feeder {
-            let handle = test_watcher_handle(&session, &native);
+        let watcher_path = if feeder.is_some_and(|(_, _, _, mismatch)| mismatch) {
+            root.join(format!("previous-rollout-{case}.jsonl"))
+        } else {
+            native.clone()
+        };
+        if let Some((paused, stale_heartbeat, cancelled, _)) = feeder {
+            let handle = test_watcher_handle(&session, &watcher_path);
             handle.paused.store(paused, Ordering::Relaxed);
+            handle.cancel.store(cancelled, Ordering::Relaxed);
             if stale_heartbeat {
                 handle.last_heartbeat_ts_ms.store(0, Ordering::Relaxed);
             }
@@ -5287,16 +5293,19 @@ mod native_feeder_birth_regressions {
                 &session,
             )
             .await;
-        if let Some((paused, _)) = feeder {
+        if let Some((paused, _, cancelled, _)) = feeder {
             let handle = shared.tmux_watchers.get(&channel).expect("feeder retained");
-            assert_eq!(handle.output_path, native.display().to_string());
+            assert_eq!(handle.output_path, watcher_path.display().to_string());
             assert_eq!(handle.paused.load(Ordering::Relaxed), paused);
-            assert!(!handle.cancel.load(Ordering::Relaxed));
+            assert_eq!(handle.cancel.load(Ordering::Relaxed), cancelled);
         } else {
             assert!(!shared.tmux_watchers.has_live_watcher_handle(&session));
         }
         registry.deregister(&session);
         relay.shutdown().await;
+        if feeder.is_none_or(|(_, _, cancelled, _)| cancelled) {
+            assert_eq!(row.effective_relay_owner_kind(), RelayOwnerKind::None);
+        }
         (claim.relay_owner, yielded)
     }
 
@@ -5336,7 +5345,7 @@ mod native_feeder_birth_regressions {
             let (owner, yielded) = runtime.block_on(observe_real_birth(
                 root.path(),
                 case,
-                Some((paused, stale_heartbeat)),
+                Some((paused, stale_heartbeat, false, false)),
             ));
             assert_ne!(owner, ExternalInputRelayOwner::BridgeAdapter);
             assert!(
@@ -5344,5 +5353,46 @@ mod native_feeder_birth_regressions {
                 "a real matching feeder retains the sole non-bridge route"
             );
         }
+    }
+
+    #[test]
+    fn cancelled_handle_birth_keeps_bridge_progress_path() {
+        // A second changed case, expected GREEN after the fix; not a control
+        // and not part of the frozen 8c61 native RED1 count.
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let observed = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(observe_real_birth(
+                root.path(),
+                5,
+                Some((false, false, true, false)),
+            ));
+        assert_eq!(observed, (ExternalInputRelayOwner::BridgeAdapter, false));
+    }
+
+    #[test]
+    fn path_mismatch_preserves_legacy_owner_pending_source_correspondence() {
+        // Characterize unchanged selection only, not healthy source delivery.
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let observed = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(observe_real_birth(
+                root.path(),
+                6,
+                Some((false, false, false, true)),
+            ));
+        assert_eq!(observed, (ExternalInputRelayOwner::SessionBoundRelay, true));
     }
 }

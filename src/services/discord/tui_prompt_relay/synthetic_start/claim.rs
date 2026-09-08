@@ -90,14 +90,16 @@ pub(super) async fn claim_tui_direct_synthetic_turn_inner<const DEFERRED: bool>(
             "#3358 synthetic inflight offset-authority handover: carried committed relay frontier forward"
         );
     }
-    // #3876 (codex rework): gate the SessionBoundRelay stamp on a LIVE per-session
-    // producer — NOT the global session-bound flag. The sink only commits when a
-    // production tmux watcher is feeding the supervisor-owned StreamRelay for this
-    // session; with no registered producer the bridge tail must stay the deliverer.
-    let live_producer_present =
+    // First birth requires both a non-shutdown queue consumer and an actual
+    // uncancelled same-session watcher handle. Registration alone can leave the
+    // passive consumer unfed while the active-row gate defers the idle feeder.
+    let session_bound_feed_admissible =
         crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
             .get_live_producer(tmux_session_name)
-            .is_some();
+            .is_some()
+            && shared
+                .tmux_watchers
+                .has_uncancelled_watcher_handle(tmux_session_name);
     let relay_owner = tui_direct_synthetic_relay_owner(
         tui_direct_watcher_can_own_output(
             &shared.tmux_watchers,
@@ -105,7 +107,7 @@ pub(super) async fn claim_tui_direct_synthetic_turn_inner<const DEFERRED: bool>(
             output_path.as_deref(),
         ),
         session_bound_discord_delivery_enabled(),
-        live_producer_present,
+        session_bound_feed_admissible,
     );
     let relay_owner_kind = match relay_owner {
         ExternalInputRelayOwner::TmuxWatcher => RelayOwnerKind::Watcher,

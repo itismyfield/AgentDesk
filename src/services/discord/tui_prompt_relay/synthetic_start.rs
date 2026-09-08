@@ -2068,9 +2068,11 @@ pub(super) fn tui_direct_watcher_can_own_output(
 ///
 /// * `watcher_can_own` (from [`tui_direct_watcher_can_own_output`]) → the live
 ///   watcher relays this turn's output → `TmuxWatcher` (unchanged).
-/// * else, when session-bound Discord delivery is enabled AND a LIVE
-///   session-bound StreamRelay producer exists for this tmux session
-///   (`live_producer_present`) → `SessionBoundRelay`. The synthetic inflight IS
+/// * else, when session-bound Discord delivery is enabled AND a non-shutdown
+///   StreamRelay producer and an uncancelled watcher handle exist for this tmux
+///   session (`session_bound_feed_admissible`) → `SessionBoundRelay`. This birth
+///   observation does not prove source correspondence or ongoing feed health.
+///   The synthetic inflight IS
 ///   being created here, so the session-bound relay sink can legitimately be its
 ///   terminal owner (the `relay_ownership` observer restriction that keeps
 ///   `BridgeAdapter` only applies BEFORE any inflight exists). The sink gate
@@ -2081,23 +2083,18 @@ pub(super) fn tui_direct_watcher_can_own_output(
 ///   holds: the bridge tail stands down (`bridge_adapter_owns_external_turn`
 ///   → false) and the watcher yields (`tmux::watcher_should_yield_to_inflight_state`
 ///   yields for a `SessionBoundRelay` owner), so the sink is the sole committer.
-/// * else (no live producer, or session-bound delivery disabled) →
-///   `BridgeAdapter`. CRITICAL regression guard (codex review): the session-bound
-///   StreamRelay is a PASSIVE MPSC consumer fed ONLY by a live production
-///   tmux watcher (`tmux_watcher::forward_chunk_to_supervisor_relay`); with no
-///   live producer registered (`relay_producer_registry::get_live_producer` → `None`,
-///   e.g. a STALL-WATCHDOG force-clean detached the watcher) a `SessionBoundRelay`
-///   stamp would STARVE the sink AND stand the bridge tail down → answer loss.
-///   `BridgeAdapter` keeps the watcher-INDEPENDENT transcript-direct bridge tail
-///   (`claude_idle_tail.rs`, gated only on owner-kind) as the backstop deliverer.
+/// * else → `BridgeAdapter`. StreamRelay is a passive queue consumer; the idle
+///   feeder defers active rows, so registration without a watcher can starve the
+///   sink while standing the native bridge tail down. Keep the existing direct
+///   tail eligible. Existing SessionBound rows are not reassigned here.
 pub(super) fn tui_direct_synthetic_relay_owner(
     watcher_can_own: bool,
     session_bound_discord_delivery_enabled: bool,
-    live_producer_present: bool,
+    session_bound_feed_admissible: bool,
 ) -> ExternalInputRelayOwner {
     if watcher_can_own {
         ExternalInputRelayOwner::TmuxWatcher
-    } else if session_bound_discord_delivery_enabled && live_producer_present {
+    } else if session_bound_discord_delivery_enabled && session_bound_feed_admissible {
         ExternalInputRelayOwner::SessionBoundRelay
     } else {
         ExternalInputRelayOwner::BridgeAdapter

@@ -783,6 +783,14 @@ impl TmuxWatcherRegistry {
         self.by_tmux_session.contains_key(tmux_session_name)
     }
 
+    /// Birth admission only: observe the actual same-session handle and its
+    /// cancellation flag together. This is not a feed-health or lifetime lease.
+    pub(in crate::services::discord) fn has_uncancelled_watcher_handle(&self, tmux_session_name: &str) -> bool {
+        self.by_tmux_session
+            .get(tmux_session_name)
+            .is_some_and(|entry| !entry.cancel.load(std::sync::atomic::Ordering::Acquire))
+    }
+
     pub(in crate::services::discord) fn tmux_session_is_stale(&self, tmux_session_name: &str) -> Option<bool> {
         self.by_tmux_session
             .get(tmux_session_name)
