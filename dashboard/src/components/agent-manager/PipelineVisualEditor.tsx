@@ -67,6 +67,9 @@ export default function PipelineVisualEditor({
   const [layers, setLayers] = useState({ default: true, repo: false, agent: false });
   const [overrideExtras, setOverrideExtras] = useState<Record<string, unknown>>({});
   const [savedOverrideExtras, setSavedOverrideExtras] = useState<Record<string, unknown>>({});
+  // #5743 r2: the scope key the editor state below was applied for. `loading` is
+  // not a scope guard — it only flips on the commit after the scope key moves.
+  const [appliedScopeKey, setAppliedScopeKey] = useState<string | null>(null);
   const [serverExtraKeys, setServerExtraKeys] = useState<string[] | null>(null);
   const [overrideExists, setOverrideExists] = useState(false);
   const [allRepoStages, setAllRepoStages] = useState<PipelineStage[]>([]);
@@ -165,6 +168,7 @@ export default function PipelineVisualEditor({
     setLayers({ default: true, repo: false, agent: false });
     setOverrideExtras({});
     setSavedOverrideExtras({});
+    setAppliedScopeKey(null);
     setServerExtraKeys(null);
     setOverrideExists(false);
     setAllRepoStages([]);
@@ -176,7 +180,8 @@ export default function PipelineVisualEditor({
   function applySnapshot(
     snapshot: EditorSnapshot,
     source: "cache" | "fetch",
-    persistedDraft: PersistedFsmDraftEntry | null = null,
+    persistedDraft: PersistedFsmDraftEntry | null,
+    scopeKey: string | null,
   ) {
     const visibleStages = filterVisibleStages(snapshot.repoStages, selectedAgentId).map(stageDraftFromApi);
     const draftPipeline = persistedDraft ? clonePipelineConfig(persistedDraft.pipeline) : snapshot.pipeline;
@@ -202,6 +207,7 @@ export default function PipelineVisualEditor({
     // #5743 baseline: the extras the shown snapshot carries. Change detection
     // compares against this, never against "extras are non-empty".
     setSavedOverrideExtras(serverExtras);
+    setAppliedScopeKey(scopeKey);
     // A known local key stays local even if a later GET happens to carry it.
     // Pre-field drafts can also learn matching values and known legacy fields.
     setServerExtraKeys(
@@ -273,7 +279,7 @@ export default function PipelineVisualEditor({
     setLoading(true);
     setError(null);
     if (cachedSnapshot) {
-      applySnapshot(cloneEditorSnapshot(cachedSnapshot), "cache", persistedDraft);
+      applySnapshot(cloneEditorSnapshot(cachedSnapshot), "cache", persistedDraft, fsmDraftScopeKey);
     } else {
       resetEditorState();
     }
@@ -287,7 +293,7 @@ export default function PipelineVisualEditor({
         if (fsmDraftScopeKey) {
           persistSnapshot(fsmDraftScopeKey, level, snapshot);
         }
-        applySnapshot(snapshot, "fetch", persistedDraft);
+        applySnapshot(snapshot, "fetch", persistedDraft, fsmDraftScopeKey);
       } catch (cause) {
         if (!cancelled) {
           setError(
@@ -442,6 +448,12 @@ export default function PipelineVisualEditor({
     if (!repo || !fsmDraftScopeKey || !pipelineDraft || loading) {
       return;
     }
+    // #5743 r2: the scope key can move a whole commit before the loading effect's
+    // reset lands. Writing (or retiring) the target scope from state that belongs
+    // to the previous scope records one scope's edits under the other's key.
+    if (appliedScopeKey !== fsmDraftScopeKey) {
+      return;
+    }
     if (!pipelineChanged && !stagesChanged && !overrideExtrasChanged) {
       setPersistedFsmDraftStore((currentStore) =>
         removeDraftScope(normalizePersistedFsmDraftStore(currentStore), fsmDraftScopeKey),
@@ -473,6 +485,7 @@ export default function PipelineVisualEditor({
       };
     });
   }, [
+    appliedScopeKey,
     fsmDraftScopeKey,
     level,
     loading,
@@ -495,7 +508,7 @@ export default function PipelineVisualEditor({
     if (nextScopeKey) {
       persistSnapshot(nextScopeKey, nextLevel, snapshot);
     }
-    applySnapshot(snapshot, "fetch");
+    applySnapshot(snapshot, "fetch", null, nextScopeKey);
   }
 
   const actions = usePipelineVisualEditorActions({

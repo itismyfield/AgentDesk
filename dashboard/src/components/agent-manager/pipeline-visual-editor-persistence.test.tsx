@@ -158,7 +158,7 @@ function mockApi(rawOverride: unknown, pipeline: PipelineConfigFull = makePipeli
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
-async function mountEditor() {
+async function mountEditor(selectedAgentId: string | null = null) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -169,7 +169,7 @@ async function mountEditor() {
         locale="ko"
         repo={REPO}
         agents={[]}
-        selectedAgentId={null}
+        selectedAgentId={selectedAgentId}
         variant="fsm"
       />,
     );
@@ -188,10 +188,10 @@ async function saveAndReadPayload(): Promise<Record<string, unknown>> {
   return calls[calls.length - 1][1] as Record<string, unknown>;
 }
 
-function persistedDraftEntry(): PersistedFsmDraftEntry | null {
+function persistedDraftEntry(scopeKey: string = SCOPE_KEY): PersistedFsmDraftEntry | null {
   const raw = window.localStorage.getItem(STORAGE_KEYS.fsmDraft) ?? "{}";
   const store = JSON.parse(raw) as { entries?: Record<string, PersistedFsmDraftEntry> };
-  return store.entries?.[SCOPE_KEY] ?? null;
+  return store.entries?.[scopeKey] ?? null;
 }
 
 function persistedDraftExtras(): Record<string, unknown> {
@@ -601,5 +601,51 @@ describe("override-only FSM edge edits", () => {
     await rebind("on_dispatch");
     expect(view.current?.ctx.fsmEdgeBindings).toEqual(SERVER_BINDINGS);
     expect(persistedDraftEntry()).toBeNull();
+  });
+
+  /**
+   * The scope-transition guard. On the render that moves `fsmDraftScopeKey`, the
+   * editor still holds the previous scope's draft, extras and `loading=false`:
+   * the loading effect's `setLoading(true)`/`resetEditorState()` only land on the
+   * next commit, so they cannot stop the persistence effect that runs beside them.
+   * Without a scope-applied marker the repo edit is written under the agent scope,
+   * and a later successful GET restores it there as an agent draft.
+   */
+  it("never records a repo-scope edit under the agent scope it switches to", async () => {
+    const agentId = "agent-1";
+    // The scope key carries the selected agent on both levels.
+    const repoScopeKey = buildFsmDraftScopeKey(REPO, "repo", agentId);
+    const agentScopeKey = buildFsmDraftScopeKey(REPO, "agent", agentId);
+    const repoEdit = { "ready->done": { event: "on_error" } };
+    mockBoundApi();
+    const agentPipeline = vi.spyOn(api, "getAgentPipeline")
+      .mockRejectedValue(new Error("transient agent pipeline failure"));
+
+    await mountEditor(agentId);
+    await rebind("on_error");
+    expect(persistedDraftEntry(repoScopeKey)?.overrideExtras.fsm_edge_bindings).toEqual(repoEdit);
+
+    // Agent scope has no snapshot cache, and its GET fails.
+    await act(async () => {
+      view.current?.actions.setLevel("agent");
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(view.current?.ctx.error).toBe("transient agent pipeline failure");
+    expect(persistedDraftEntry(agentScopeKey)).toBeNull();
+    expect(persistedDraftEntry(repoScopeKey)?.overrideExtras.fsm_edge_bindings).toEqual(repoEdit);
+
+    // Re-entering the agent scope with a working GET shows the server binding.
+    agentPipeline.mockResolvedValue({
+      agent_id: agentId,
+      pipeline_config: buildOverridePayload(boundPipeline(), { fsm_edge_bindings: SERVER_BINDINGS }),
+    });
+    await refreshInPlace();
+
+    expect(view.current?.ctx.error).toBe(null);
+    expect(view.current?.ctx.fsmEdgeBindings).toEqual(SERVER_BINDINGS);
+    expect(persistedDraftEntry(agentScopeKey)).toBeNull();
   });
 });
