@@ -75,7 +75,6 @@ src/services/discord/router/message_handler/voice_announcement_route.rs
 src/services/discord/session_runtime.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
 src/services/discord/turn_bridge/recovery_text.rs
-src/services/maintenance/jobs/db_retention.rs
 src/services/pipeline_routes.rs
 src/services/session_resume.rs
 src/services/settings.rs
