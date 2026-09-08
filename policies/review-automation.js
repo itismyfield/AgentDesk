@@ -55,7 +55,7 @@ function reviewLoopFingerprintInfo(cardId) {
   // #751: Prefer the latest completed work dispatch's head_sha. It is
   // updated immediately on every implementation/rework completion. The
   // pr_tracking.head_sha value is only refreshed by the CI recovery
-  // polling path (merge-automation onTick1min) and can lag multiple
+  // polling path (ci-recovery) and can lag multiple
   // rework cycles behind during fast review/rework loops, causing the
   // fingerprint to stay stale and trip the loop guard on genuinely
   // different heads.
@@ -123,6 +123,11 @@ function recordReviewLoopEntry(cardId, newRound) {
 var reviewAutomation = {
   name: "review-automation",
   priority: 50,
+
+  // #5716: bounded sweep for create-pr rows stranded by the removed retry loop.
+  onTick5min: function() {
+    try { sweepStrandedPrCreateFailures(); } catch (e) { agentdesk.log.warn("[review] sweep failed: " + e); }
+  },
 
   // typed-facade-slice:start review-entry
   // ── Review Enter — counter-model review trigger ───────────
@@ -391,60 +396,34 @@ var reviewAutomation = {
         || (latestWork && latestWork.head_sha);
 
       if (!repoId || !branch) {
-        // #701: Seed pr_tracking with last_error so merge-automation's
-        // retry loop has a row to find. Use markPrCreateFailed to ensure
-        // the card is terminal — the retry loop skips non-terminal cards.
+        // #5716 slice B: do NOT pre-seed the cause with a separate upsert. recordPrCreateFailure writes
+        // last_error AND retry_count in one transaction; a crash between an upsert and that op left a
+        // recorded failure at retry_count = 0, which the sweep never sees. That upsert's last_error was
+        // overwritten by the same op microseconds later anyway, and since branch/head_sha are assigned
+        // without COALESCE it also clobbered them with the very nulls that led here.
         //
         // Lifecycle guard: only force terminal if the card is still in a
         // PR-pending state. A delayed create-pr failure that arrives
         // AFTER the card has been reopened for rework must not overwrite
         // the newer workflow (terminal transitions cancel live dispatches
         // and clear review state).
-        upsertPrTracking(
-          dispatch.kanban_card_id,
-          repoId,
-          worktreePath,
-          branch,
-          tracking ? tracking.pr_number : null,
-          trackedSha,
-          "create-pr",
-          "create-pr completed without canonical repo/branch"
-        );
         agentdesk.log.warn("[review] Create-PR completed but canonical tracking is incomplete for card " + dispatch.kanban_card_id);
         if (isCardEligibleForPrFailureTerminalize(dispatch.kanban_card_id)) {
           markPrCreateFailed(dispatch.kanban_card_id, "missing_canonical_tracking", stampGen);
         } else {
-          agentdesk.log.info(
-            "[review] Skipping terminal transition for card " + dispatch.kanban_card_id +
-            " — card has moved past review lifecycle (likely reopened); pr_tracking row retained for retry"
-          );
+          recordPrCreateFailureForSweep(dispatch.kanban_card_id, "missing_canonical_tracking", stampGen);
         }
         return;
       }
 
       var pr = findOpenPrByTrackedBranch(repoId, branch);
       if (!pr) {
-        // #701: Same reasoning — seed pr_tracking and (only if lifecycle
-        // still matches) force terminal so merge-automation can retry
-        // create-pr.
-        upsertPrTracking(
-          dispatch.kanban_card_id,
-          repoId,
-          worktreePath,
-          branch,
-          tracking ? tracking.pr_number : null,
-          trackedSha,
-          "create-pr",
-          "create-pr completed but no open PR found for branch " + branch
-        );
+        // #5716 slice B: single-op failure record — see the note above.
         agentdesk.log.warn("[review] Create-PR completed but no open PR was found for card " + dispatch.kanban_card_id + " branch " + branch);
         if (isCardEligibleForPrFailureTerminalize(dispatch.kanban_card_id)) {
           markPrCreateFailed(dispatch.kanban_card_id, "no_open_pr_found", stampGen);
         } else {
-          agentdesk.log.info(
-            "[review] Skipping terminal transition for card " + dispatch.kanban_card_id +
-            " — card has moved past review lifecycle (likely reopened); pr_tracking row retained for retry"
-          );
+          recordPrCreateFailureForSweep(dispatch.kanban_card_id, "no_open_pr_found", stampGen);
         }
         return;
       }
@@ -988,9 +967,8 @@ function upsertPrTracking(cardId, repoId, worktreePath, branch, prNumber, headSh
 //     present, agent + repo resolvable) but the final step broke — typically
 //     the `agentdesk.dispatch.create` throw, or a surprising metadata gap on
 //     an already-tracked worktree. On dispatch failure the helper upserts
-//     pr_tracking with last_error so merge-automation.processTrackedMergeQueue
-//     has a row to retry; callers should mark the card terminal + blocked
-//     (via markPrCreateFailed) so the retry loop picks it up.
+//     pr_tracking with last_error so the failure keeps its cause; callers must
+//     mark it terminal + blocked via markPrCreateFailed, which hands off (#5716).
 function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
   if (noopVerification) {
     agentdesk.log.info("[review] Card " + cardId + " passed noop_verification — skipping create-pr dispatch");
@@ -1019,9 +997,8 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
   // agent is a genuine anomaly, not a benign noop — there is shippable
   // work but no one to drive the create-pr dispatch. Returning noop here
   // would silently drop the card to done with no PR and no retry row.
-  // Seed pr_tracking with last_error so merge-automation's retry loop
-  // can pick it up once an agent is assigned (or operators can see the
-  // card's pr:create_failed marker). Callers must treat error → terminal
+  // Seed pr_tracking with last_error so operators see the cause behind the
+  // card's pr:create_failed marker. Callers must treat error → terminal
   // + blocked_reason via markPrCreateFailed.
   // #2051 Finding 7 (P2): `no_agent` is not a retryable failure — automated
   // retry will not assign an agent. The legacy path leaned on the 3-retry
@@ -1115,9 +1092,9 @@ function attemptCreatePrDispatchForReviewPass(cardId, noopVerification) {
 // non-review terminal target, or reopened for rework and now back in an
 // in-progress state), a stale late-arriving create-pr failure must NOT
 // retroactively terminalize — terminal transitions cancel active
-// implementation/rework dispatches and clear review state. We still keep
-// the pr_tracking row around so merge-automation's retry loop can pick
-// it up once the card returns to the review lifecycle naturally.
+// implementation/rework dispatches and clear review state. Callers still
+// record the failure on pr_tracking (recordPrCreateFailureOnly) so the #5716
+// stranded-row sweep hands the card off without terminalizing it.
 function isCardEligibleForPrFailureTerminalize(cardId) {
   var cfg = agentdesk.pipeline.resolveForCard(cardId);
   var terminalState = agentdesk.pipeline.terminalState(cfg);
@@ -1150,14 +1127,137 @@ function isCardEligibleForPrFailureTerminalize(cardId) {
     || currentStatus === reviewPassTarget;
 }
 
+// #5716: record a create-pr failure on pr_tracking WITHOUT terminalizing the
+// card — retry_count > 0 is what the sweep looks for, so a caller that must
+// skip the terminal transition still reaches a handoff.
+function recordPrCreateFailureOnly(cardId, errorMsg, stampGen) {
+  try {
+    return agentdesk.reviewAutomation.recordPrCreateFailure(cardId, errorMsg, stampGen || "");
+  } catch (e) {
+    agentdesk.log.error("[review] recordPrCreateFailure threw for card " + cardId + ": " + e);
+    return null;
+  }
+}
+
+// #5716 r5: dedup namespace for a failure with no dispatch generation of its own — reading the row back
+// returned the PREVIOUS, already-alerted generation, which swallowed the new alert for the 7-day TTL.
+function preHandoffGeneration(prefix, errorMsg) {
+  return "pre:" + prefix + String(errorMsg || "unknown").split(":")[0];
+}
+
+// #5716 r6: folding every stamped record failure onto the failure class merged consecutive generations into
+// one 7-day key, so G2's alert was deduped away — and the rolled-back record leaves retry_count 0, invisible
+// to the sweep too. Keep the stamp in the record-failed namespace ("pre:" cannot occur in a UUID stamp).
+function recordFailedGeneration(stampGen, errorMsg) {
+  return stampGen ? ("pre:record_failed:" + stampGen) : preHandoffGeneration("record_failed:", errorMsg);
+}
+
+// #5716 r7: a stale-generation noop (review_automation_ops.rs rolls the tx back) is a VERDICT — "a newer
+// dispatch owns this row" — not a record failure: handing off pages about a dead generation AND lets
+// markPrCreateHandedOff stamp the LIVE row's last_error. Both failure paths return on it, from one rule.
+function isStaleGenerationNoop(cardId, result, stampGen, where) {
+  if (!result || !result.noop) return false;
+  agentdesk.log.info("[review] " + where + " noop for card " + cardId + " — stale generation (stamp=" + (stampGen || "") + ")");
+  return true;
+}
+
+// #5716 r5: a record op that recorded nothing leaves retry_count at 0 (invisible to the sweep) and this branch stamps no blocked_reason either — hand off now instead of logging a record that did not happen.
+function recordPrCreateFailureForSweep(cardId, errorMsg, stampGen) {
+  var recordResult = recordPrCreateFailureOnly(cardId, errorMsg, stampGen);
+  if (isStaleGenerationNoop(cardId, recordResult, stampGen, "recordPrCreateFailureForSweep")) return;
+  if (recordResult) {
+    agentdesk.log.info("[review] card " + cardId + " has moved past the review lifecycle (likely reopened); create-pr failure recorded on pr_tracking for the #5716 sweep");
+    return;
+  }
+  handOffPrCreateFailure(cardId, errorMsg, null, recordFailedGeneration(stampGen, errorMsg));
+}
+
+// #5716: durable marker so a handed-off row leaves the sweep candidate set —
+// without it ORDER BY updated_at / LIMIT 20 re-selects the same oldest rows
+// forever and the 21st never lands. The next recordPrCreateFailure overwrites
+// last_error and re-arms the row for that generation.
+function markPrCreateHandedOff(cardId, errorMsg) {
+  agentdesk.db.execute(
+    "UPDATE pr_tracking SET last_error = ?, updated_at = datetime('now') " +
+    "WHERE card_id = ? AND state IN ('create-pr', 'escalated')",
+    ["handed-off:" + errorMsg, cardId]
+  );
+}
+
+// #5716: escalate()/flushEscalations drops pending entries for terminal cards (loadManualInterventionState
+// reports them inactive), so notifyDeadlockManager is the durable handoff. The kv key carries
+// pr_tracking.dispatch_generation — the per-dispatch UUID — and NOT retry_count:
+// seed_pg_pr_tracking_handoff_state, refresh_pg_pr_tracking_reuse_state_if_active and reseed_pr_tracking_pg
+// all reset retry_count to 0, so every generation's FIRST failure is retry_count=1 and a card's second
+// failure inside one kv TTL window collided with the first and went silent. The durable sweep marker is
+// written only alongside a fresh alert: on a dedup hit the row deliberately stays a sweep candidate, so a
+// colliding key (the ':?' fallback, used when no generation is recorded) returns after the TTL instead of
+// being excluded forever. Returns true when the generation is settled (alerted now or already alerted);
+// false ONLY when the alert was not delivered, which keeps the row in the sweep candidate set.
+function handOffPrCreateFailure(cardId, errorMsg, retryCount, generation) {
+  var dedupKey = "pr_create_handoff:" + cardId + ":" + (generation || preHandoffGeneration("", errorMsg));
+  if (agentdesk.kv.get(dedupKey)) {
+    // Still a sweep candidate (no marker ⇒ it self-heals once the kv TTL lapses), but bumped so it stops
+    // pinning the head of ORDER BY updated_at LIMIT 20 — 20 such rows starved every newer stranded card.
+    agentdesk.db.execute("UPDATE pr_tracking SET updated_at = datetime('now') WHERE card_id = ? AND dispatch_generation = ?", [cardId, generation || ""]);
+    return "deduped";
+  }
+  var card = agentdesk.cards.get(cardId);
+  var delivered = notifyDeadlockManager(
+    "⚠️ [Create-PR Handoff] " + (card && card.github_issue_number ? ("#" + card.github_issue_number + " ") : "") + cardId +
+      "\nagent: " + ((card && card.assigned_agent_id) || "(unassigned)") +
+      "\nerror: " + errorMsg + " (retry_count=" + (retryCount == null ? "?" : retryCount) + ")" +
+      "\nno automatic retry — an agent or operator must retry or close this card",
+    "review-automation"
+  );
+  if (!delivered) {
+    agentdesk.log.error("[review] Create-PR handoff alert for card " + cardId +
+      " was NOT delivered (no alert channel, or the outbox enqueue failed) — leaving the row for the next sweep");
+    return false;
+  }
+  // #5716 r7: the alert is enqueued from here on, so a throw in the dedup/marker bookkeeping must NOT be
+  // reported back as an undelivered alert — it only leaves the row a sweep candidate, the safe direction.
+  try { agentdesk.kv.set(dedupKey, errorMsg, 604800); markPrCreateHandedOff(cardId, errorMsg); }
+  catch (e) { agentdesk.log.error("[review] create-pr handoff bookkeeping failed for card " + cardId + " AFTER the alert was enqueued (no dedup key, no sweep marker): " + e); }
+  return true;
+}
+
+// #5716: bounded sweep for create-pr rows stranded by the removed retry loop.
+// Candidacy lives on pr_tracking alone — retry_count > 0 is the durable "a
+// failure was recorded" signal (handoffCreatePr resets it to 0 on each new
+// dispatch; completion moves the row to 'wait-ci'). That covers what the old
+// card-status/blocked_reason join missed — cards that never reached terminal,
+// rows the Rust retry_count>=3 threshold moved to 'escalated', rows whose
+// blocked_reason was lost to a crash before the marker UPDATE — and dropping
+// the global terminalState equality covers per-card pipeline overrides and
+// multi-terminal pipelines. The 30-day floor is a ROLLING window on updated_at, not a removal boundary: it
+// caps the deploy-time page storm from historical failures, and it also expires a failure nobody could
+// alert (no alert channel) 30 days after its last write — see the PR body.
+function sweepStrandedPrCreateFailures() {
+  var rows = agentdesk.db.query(
+    "SELECT card_id, last_error, retry_count, dispatch_generation FROM pr_tracking " +
+    "WHERE state IN ('create-pr', 'escalated') AND retry_count > 0 " +
+    "AND COALESCE(last_error, '') NOT LIKE 'handed-off:%' " +
+    "AND updated_at > datetime('now', '-30 days') " +
+    "ORDER BY updated_at LIMIT 20",
+    []
+  );
+  var handed = 0;
+  var deduped = 0;
+  for (var i = 0; i < rows.length; i++) {
+    var err = rows[i].last_error || "stranded create-pr tracking row";
+    var outcome = handOffPrCreateFailure(rows[i].card_id, err, rows[i].retry_count, rows[i].dispatch_generation);
+    if (outcome === "deduped") deduped++; else if (outcome) handed++;
+  }
+  if (handed > 0) agentdesk.log.warn("[review] Handed off " + handed + " stranded create-pr card(s) (#5716)");
+  if (deduped > 0) agentdesk.log.info("[review] " + deduped + " create-pr row(s) were already alerted for their generation — bumped behind newer candidates (#5716)");
+  return handed;
+}
+
 // #701: Shared helper for PR-handoff errors. Moves the card to its
 // configured terminal state AND stamps blocked_reason='pr:create_failed:...'
-// so (a) merge-automation.processTrackedMergeQueue can retry the row (the
-// retry loop requires terminal status), (b) the failure is visible on the
-// kanban instead of being silently swallowed, and (c) humans / escalation
-// policies can surface it. For genuine dispatch failures the helper
-// upserts pr_tracking with last_error before returning error, so the
-// retry loop has a row to find.
+// so the failure is visible on the kanban. For genuine dispatch failures the
+// helper upserts pr_tracking with last_error first, so the handoff has a cause.
 //
 // Ordering: setStatus(terminal) FIRST, then write blocked_reason. Terminal
 // transitions clear blocked_reason as part of their cleanup (see the
@@ -1167,11 +1267,14 @@ function isCardEligibleForPrFailureTerminalize(cardId) {
 // #743: JS orchestration (C4 literal). Order is:
 //   1. recordPrCreateFailure — stale-guards via stampGen (or skips guard on
 //      null stamp); seeds retry row if the handoff tx rolled back; increments
-//      retry_count and flips state='escalated' at >= 3.
+//      retry_count and flips pr_tracking.state='escalated' at >= 3.
 //   2. setStatus(terminal, force=true) — terminal transitions clear
 //      blocked_reason, which is why step 3 must follow.
-//   3. setBlockedReason — different marker for escalated vs normal failure.
-//   4. escalateToManualIntervention on escalate (C7).
+//   3. blocked_reason UPDATE — escalated vs normal failure marker.
+//   4. handOffPrCreateFailure — agent/operator handoff on EVERY failure generation (the dedup key carries
+//      pr_tracking.dispatch_generation, not retry_count, which every new dispatch resets to 0): #5716
+//      removed processTrackedMergeQueue, the only consumer of terminal `state='create-pr'` rows, so
+//      nothing else will retry this card. r6: when step 1 recorded nothing, this runs BEFORE steps 2-3.
 //
 // stampGen can be null/undefined for pre-handoff failures (e.g. the handoff
 // bridge op threw); recordPrCreateFailure handles that by skipping the stale
@@ -1182,64 +1285,41 @@ function markPrCreateFailed(cardId, reason, stampGen) {
   var errorMsg = reason || "unknown";
 
   // 1. Record failure — atomic retry_count++ and escalate decision.
-  var result = null;
-  try {
-    result = agentdesk.reviewAutomation.recordPrCreateFailure(cardId, errorMsg, stampGen || "");
-  } catch (e) {
-    agentdesk.log.error("[review] recordPrCreateFailure threw for card " + cardId + ": " + e);
-  }
+  var result = recordPrCreateFailureOnly(cardId, errorMsg, stampGen);
 
   // Stale generation — the card has moved on, do not terminalize.
-  if (result && result.noop) {
-    agentdesk.log.info(
-      "[review] markPrCreateFailed noop for card " + cardId +
-      " — stale generation (stamp=" + (stampGen || "") + ")"
-    );
-    return;
-  }
+  if (isStaleGenerationNoop(cardId, result, stampGen, "markPrCreateFailed")) return;
+
+  var retryCount = result ? result.retry_count : null;
+
+  // #5716 r6: when the record op recorded NOTHING the handoff is this failure's only trace (retry_count stays 0, so the sweep
+  // never sees the row) — it alerts BEFORE the mutations below, whose throw would otherwise eat it. Guarded against the reverse.
+  var handedOff = null;
+  try {
+    if (!result) handedOff = handOffPrCreateFailure(cardId, errorMsg, retryCount, recordFailedGeneration(stampGen, errorMsg));
+  } catch (e) { agentdesk.log.error("[review] create-pr handoff threw before terminalizing card " + cardId + ": " + e); }
 
   // 2. Terminalize.
   agentdesk.kanban.setStatus(cardId, terminalState, true);
 
   // 3. Stamp blocked_reason AFTER setStatus (setStatus clears blocked_reason).
-  if (result && result.escalated) {
-    agentdesk.db.execute(
-      "UPDATE kanban_cards SET blocked_reason = 'pr:create_failed_escalated:max_retries', " +
-      "updated_at = datetime('now') WHERE id = ?",
-      [cardId]
-    );
-    agentdesk.log.warn(
-      "[review] Card " + cardId + " escalated after " + result.retry_count +
-      " create-pr failures (last error: " + errorMsg + ")"
-    );
-    // 4. Human notification via the existing JS escalation surface.
-    try {
-      escalateToManualIntervention(
-        cardId,
-        "create-pr escalated after " + result.retry_count + " failures: " + errorMsg
-      );
-    } catch (e) {
-      agentdesk.log.warn("[review] escalateToManualIntervention failed: " + e);
-    }
-    // Human escalation can overwrite blocked_reason with a readable message.
-    // Restore the machine-readable marker so merge automation stays in the
-    // create-pr failure lane.
-    agentdesk.db.execute(
-      "UPDATE kanban_cards SET blocked_reason = 'pr:create_failed_escalated:max_retries', " +
-      "updated_at = datetime('now') WHERE id = ?",
-      [cardId]
-    );
-  } else {
-    var blockedReason = "pr:create_failed:" + errorMsg;
-    agentdesk.db.execute(
-      "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
-      [blockedReason, cardId]
-    );
-    agentdesk.log.warn(
-      "[review] Card " + cardId + " marked " + blockedReason + " and moved to " + terminalState +
-      " (retry_count=" + (result ? result.retry_count : "?") + ")"
-    );
-  }
+  var blockedReason = (result && result.escalated)
+    ? "pr:create_failed_escalated:max_retries"
+    : "pr:create_failed:" + errorMsg;
+  agentdesk.db.execute(
+    "UPDATE kanban_cards SET blocked_reason = ?, updated_at = datetime('now') WHERE id = ?",
+    [blockedReason, cardId]
+  );
+
+  // 4. Agent/operator handoff — see the #5716 note above. stampGen IS the dispatch generation when the
+  // caller has one; an unstamped failure falls back to its own class namespace, never to the row's stale one.
+  if (result) handedOff = handOffPrCreateFailure(cardId, errorMsg, retryCount, stampGen);
+
+  agentdesk.log.warn("[review] Card " + cardId + " marked " + blockedReason + " → " + terminalState +
+    " (retry_count=" + (retryCount == null ? "?" : retryCount) +
+    ", handoff=" + (handedOff === "deduped" ? "already-alerted for this generation"
+      : handedOff ? "agent/operator" : retryCount ? "UNDELIVERED — sweep will retry"
+      : "UNDELIVERED — and retry_count 0 keeps the row out of the sweep too") + ")");
 }
 
 function findOpenPrByTrackedBranch(repoId, branch) {
@@ -1472,10 +1552,8 @@ function processVerdict(cardId, verdict, result, options) {
         // entirely — there is no e2e-test to create the PR later.
         // Safe relative to ci-recovery: the pipeline stage is cleared in the
         // same statement above, so the card has no active pipeline ownership.
-        // All 3 outcomes go terminal so merge-automation.processTrackedMergeQueue
-        // can retry `state='create-pr'` rows (it requires terminal status);
-        // errors additionally stamp blocked_reason='pr:create_failed:...'
-        // for visibility.
+        // All 3 outcomes go terminal; errors additionally stamp
+        // blocked_reason='pr:create_failed:...' and hand off (#5716).
         var prResultNoRs = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
         prDispatched = (prResultNoRs.status === "dispatched");
         if (prResultNoRs.status === "dispatched") {
@@ -1590,7 +1668,7 @@ function processVerdict(cardId, verdict, result, options) {
       // that have completed all configured pipeline stages at review time).
       // noop → terminal (legacy behavior: no work / no repo / no agent =
       // nothing to PR). error → markPrCreateFailed (terminal + blocked_reason
-      // so the card is visible AND merge-automation can retry).
+      // so the card is visible AND handed to an agent/operator, #5716).
       var prResultNoStages = attemptCreatePrDispatchForReviewPass(cardId, noopVerification);
       prDispatched = (prResultNoStages.status === "dispatched");
       if (prResultNoStages.status === "dispatched") {
@@ -1813,8 +1891,8 @@ if (typeof agentdesk !== "undefined" && agentdesk && typeof agentdesk.registerPo
 // #701: Expose the create-pr dispatch helper so pipeline stage policies can
 // hand cards back into the PR/CI flow after non-skip pipeline stages
 // (e2e-test, normal agent) complete. Without this, cards finishing pipeline
-// stages reach terminal state with no PR or tracking row, and ci-recovery /
-// merge-automation never get a chance to close the loop.
+// stages reach terminal state with no PR or tracking row, and ci-recovery
+// never gets a chance to close the loop.
 //
 // Returns the structured { status, reason? } object from
 // attemptCreatePrDispatchForReviewPass. Callers MUST distinguish
@@ -1826,8 +1904,8 @@ agentdesk.reviewAutomation = agentdesk.reviewAutomation || {};
 agentdesk.reviewAutomation.attemptCreatePr = function(cardId) {
   return attemptCreatePrDispatchForReviewPass(cardId, false);
 };
-agentdesk.reviewAutomation.markPrCreateFailed = function(cardId, reason) {
-  markPrCreateFailed(cardId, reason);
+agentdesk.reviewAutomation.markPrCreateFailed = function(cardId, reason, stampGen) {
+  markPrCreateFailed(cardId, reason, stampGen);
 };
 
 if (typeof module !== "undefined" && module.exports) {

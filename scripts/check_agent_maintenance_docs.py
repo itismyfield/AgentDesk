@@ -132,7 +132,6 @@ DOC_TOUCH_RULES: tuple[TouchRule, ...] = (
             "src/services/cluster/intake_worker_capabilities.rs",
             "src/services/discord/runtime_bootstrap.rs",
             "migrations/postgres/0093_intake_outbox_preserve_on_cancel.sql",
-            "policies/merge-automation.js",
             "src/server/routes/dispatches/outbox.rs",
         ),
         required_doc="docs/agent-maintenance/multinode-transition.md",
