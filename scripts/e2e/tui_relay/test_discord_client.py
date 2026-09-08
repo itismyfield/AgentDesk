@@ -245,6 +245,53 @@ class DiscordClientFetchMessages(unittest.TestCase):
                 self.assertEqual(self.client.fetch_messages("channel"), [])
                 self.sleep.assert_called_once_with(delay)
 
+    @staticmethod
+    def app_error_rate_limit(delay="1.5", *, upstream_status=429):
+        # AppError envelope src/server/routes/discord.rs emits after #5702:
+        # the retry hint lives under `context`, not at the top level.
+        return {
+            "error": "discord upstream returned 429",
+            "code": "discord",
+            "context": {"upstream_status": upstream_status, "retry_after": delay},
+        }
+
+    def test_app_error_429_envelope_supplies_retry_delay(self):
+        for delay, expected in (("1.5", 1.5), (2.25, 2.25)):
+            with self.subTest(delay=delay):
+                self.sleep.reset_mock()
+                self.urlopen.reset_mock()
+                self.urlopen.side_effect = [
+                    self.http_error(self.app_error_rate_limit(delay)),
+                    _Response([]),
+                ]
+                self.assertEqual(self.client.fetch_messages("channel"), [])
+                self.sleep.assert_called_once_with(expected)
+                self.assertEqual(self.urlopen.call_count, 2)
+
+    def test_app_error_envelope_carries_normalized_and_date_retry_after(self):
+        # The route normalizes a delta-seconds or HTTP-date Retry-After into
+        # numeric seconds (#5787); an HTTP-date reaching `context` from an older
+        # server is still a delay rather than an "invalid delay" hard failure.
+        for delay, expected in ((3.0, 3.0), ("Sun, 09 Sep 2001 01:46:43 GMT", 3.0)):
+            with self.subTest(delay=delay):
+                self.sleep.reset_mock()
+                self.urlopen.reset_mock()
+                self.urlopen.side_effect = [
+                    self.http_error(self.app_error_rate_limit(delay)),
+                    _Response([]),
+                ]
+                self.assertEqual(self.client.fetch_messages("channel"), [])
+                self.sleep.assert_called_once_with(expected)
+                self.assertEqual(self.urlopen.call_count, 2)
+
+    def test_app_error_context_without_rate_limit_status_is_not_a_delay(self):
+        self.urlopen.side_effect = [
+            self.http_error(self.app_error_rate_limit("9", upstream_status=500)),
+        ]
+        with self.assertRaisesRegex(RuntimeError, "missing rate-limit delay"):
+            self.client.fetch_messages("channel")
+        self.sleep.assert_not_called()
+
     def test_reset_delay_is_not_shortened_by_other_metadata(self):
         for response in (
             self.http_error(self.rate_limit(1), headers={"X-RateLimit-Reset-After": "4.25", "Retry-After": "2"}),
