@@ -49,6 +49,25 @@ pub(super) async fn acquire_after_redirect_or_requeue(
                 channel_id = channel_id.get(),
                 "session transition is busy; preserving intake immediately as a durable queued intervention"
             );
+            // #5660 [R3']: with the take deferred, the channel session may still
+            // hold uploads. This branch hands the input to a durable Intervention
+            // that another node can replay, so uploads must travel with it —
+            // but only for input that can actually become a provider turn.
+            // Loading them onto an input that completes locally would drop them
+            // when the replay returns early. `cleared` has no Intervention field
+            // and stays in the session either way.
+            let merged: Vec<String> = if pre_admission_control::may_complete_locally(user_text) {
+                pending_uploads.to_vec()
+            } else {
+                pre_admission_control::take_channel_input_state_uploads_only(
+                    shared,
+                    original_channel_id,
+                )
+                .await
+                .into_iter()
+                .chain(pending_uploads.iter().cloned())
+                .collect()
+            };
             race_loss::handle_race_loss_enqueue(
                 http,
                 shared,
@@ -63,7 +82,7 @@ pub(super) async fn acquire_after_redirect_or_requeue(
                 reply_context,
                 has_reply_boundary,
                 merge_consecutive,
-                pending_uploads,
+                &merged,
                 voice_announcement,
                 reply_to_user_message,
                 dispatch_id_for_thread,

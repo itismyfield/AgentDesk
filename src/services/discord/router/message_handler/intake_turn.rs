@@ -410,23 +410,12 @@ pub(super) async fn handle_text_message(
         .await;
         return Ok(());
     }
-    // Get session info, allowed tools, and pending uploads
-    let (session_info, mut pending_uploads, session_was_cleared) = {
+    // #5660 [R1]: look the session up; its turn input is taken below the gate.
+    let session_info = {
         let mut data = shared.core.lock().await;
-        let info = load_session_runtime_state(&mut data.sessions, channel_id);
-        let (uploads, was_cleared) = data
-            .sessions
-            .get_mut(&channel_id)
-            .map(|s| {
-                let was_cleared = s.cleared;
-                s.cleared = false;
-                (std::mem::take(&mut s.pending_uploads), was_cleared)
-            })
-            .unwrap_or_default();
-        drop(data);
-        (info, uploads, was_cleared)
+        load_session_runtime_state(&mut data.sessions, channel_id)
     };
-    pending_uploads.extend(preloaded_uploads);
+    let mut pending_uploads = preloaded_uploads;
     let provider = settings_provider;
     let dispatch_id_for_thread = super::super::super::adk_session::parse_dispatch_id(user_text);
     let dispatch_info_cached = if let Some(ref did) = dispatch_id_for_thread {
@@ -1204,36 +1193,22 @@ pub(super) async fn handle_text_message(
     session_strategy_reason = runtime.3;
     let (channel_name, tmux_session_name) = (runtime.4, runtime.5);
     let adk_session_key = build_adk_session_key(shared, channel_id, &provider, None).await;
-    let turn_goal_kind = if !dispatch_reset_provider_state && !dispatch_recreate_tmux {
-        classify_codex_goal_command_for_provider(
-            &provider,
-            user_text,
-            super::super::super::commands::channel_codex_goals_setting(
-                shared,
-                fast_mode_channel_id,
-            )
-            .await,
-        )
-    } else {
-        GoalCommandKind::NotGoal
+    let turn_goal_kind = match pre_admission_control::resolve(
+        (http, shared, &provider, !pending_uploads.is_empty()),
+        (channel_id, fast_mode_channel_id, user_msg_id),
+        (user_text, dispatch_id_for_thread.as_deref()),
+        (dispatch_reset_provider_state, dispatch_recreate_tmux),
+        session_id.clone(),
+    )
+    .await
+    {
+        pre_admission_control::PreAdmission::HandledLocally => return Ok(()),
+        pre_admission_control::PreAdmission::Continue(kind) => kind,
     };
-    if let GoalCommandKind::Lifecycle(command) = turn_goal_kind {
-        if should_add_turn_pending_reaction(dispatch_id_for_thread.as_deref())
-            && !super::super::super::voice_barge_in::is_synthetic_voice_message_id(user_msg_id)
-        {
-            tv_clear_current(shared, http, channel_id, user_msg_id, "intake_goal").await;
-        }
-        consume_codex_goal_lifecycle_command(
-            http,
-            shared,
-            &provider,
-            channel_id,
-            command,
-            session_id.clone(),
-        )
-        .await;
-        return Ok(());
-    }
+    // #5660 [R2]: turn committed — take the channel input state and prepend it.
+    let (taken_uploads, session_was_cleared) =
+        pre_admission_control::take_channel_input_state(shared, original_channel_id).await;
+    pending_uploads.splice(0..0, taken_uploads);
     let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);
     if force_fresh_provider_session {
         record_fresh_session_context_boundary(shared, channel_id).await?;
