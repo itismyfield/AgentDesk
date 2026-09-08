@@ -49,7 +49,7 @@ import yaml  # type: ignore[import-untyped]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tui_relay import assertions, discord, durable_delivery, fixtures, known_gap, lease, tmux  # noqa: E402
+from tui_relay import assertions, discord, durable_delivery, fixtures, known_gap, lease, normal_intake_evidence, tmux  # noqa: E402
 
 
 SUPPORTED_CELLS: tuple[str, ...] = (
@@ -121,6 +121,8 @@ TUI_IDLE_DRAFT_GUARD_POLL_S = float(
 )
 DIRECT_INPUT_NOTIFICATION_MARKER = "터미널에 직접 주입된 입력"
 REPORT_RECORD_KEYS: tuple[str, ...] = (
+    "discord_prompt_records",
+    "e36_acceptance",
     "known_gaps",
     "known_gap_rechecks",
     "completion_rechecks",
@@ -218,6 +220,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8791")
+    parser.add_argument("--e36-intake-log", help="Explicit readable adk-tracing-text-v1 dcserver log for E36")
     parser.add_argument(
         "--cell",
         required=True,
@@ -2805,6 +2808,7 @@ def wait_for_discord_text_with_tui_idle_draft_guard(
     )
     while time.monotonic() < deadline:
         messages = client.fetch_messages(channel_id, after_id=after_id, limit=100)
+        matched: dict[str, Any] | None = None
         for message in sorted(messages, key=lambda m: int(m.get("id", "0"))):
             mid = str(message.get("id") or "")
             previous = observed_by_id.get(mid)
@@ -2813,8 +2817,12 @@ def wait_for_discord_text_with_tui_idle_draft_guard(
             if mid:
                 observed_by_id[mid] = message
             observed.append(message)
-            if predicate(message):
-                return message, observed
+            if matched is None and predicate(message):
+                matched = message
+        # A duplicate later in this same page is evidence we already hold; returning on the
+        # first match would discard it before the caller can record it (#5705 E36 P1).
+        if matched is not None:
+            return matched, observed
 
         now = time.monotonic()
         if now >= next_guard_at:
@@ -2920,6 +2928,14 @@ def run_scenario(
         return result
     result["channel_id"] = target_channel_id
     result["provider_identity"] = provider_identity(cell, target_channel_id)
+
+    if scenario.get("e36_normal_intake"):
+        try:
+            normal_intake_evidence.validate(scenario, args)
+        except assertions.AssertionError as error:
+            result.update(status="fail", reason=str(error), discord_prompt_records=[])
+            result["failure_attribution"] = _failure_attribution("config", str(error))
+            return result
 
     gate_violation = required_agent_mode_violation(
         declared=declared_agent_mode,
@@ -3297,12 +3313,22 @@ def run_one_cell(
             "status": "unevaluable", "reason": "response not observed",
         }
         record["dirty_active_residue"] = {"possible": True, "cleanup_attempted": False}
+    e36 = None
+    if scenario.get("e36_normal_intake"):
+        record["discord_prompt_records"] = []
+        record["e36_acceptance"] = {"sequential10": "pending", "queued_followup": "pending"}
     if partial_record_sink is not None:
         partial_record_sink["record"] = record
 
     if dry_run:
         print(f"[dry-run] {scenario_id} ({cell}): would send setup → steps → teardown")
         return record
+
+    if scenario.get("e36_normal_intake"):
+        try:
+            e36 = normal_intake_evidence.Evidence(sys.modules[__name__], args, channel_id, record)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise HarnessEvidenceError(f"E36 required source unavailable: {error}") from error
 
     setup_resp = client.send_control(channel_id, setup_marker)
     setup_marker_id = str(setup_resp.get("message_id") or setup_resp.get("id") or "")
@@ -3373,7 +3399,16 @@ def run_one_cell(
     last_turn_identity: dict[str, str] | None = None
     last_sent_prompt: str | None = None
 
-    for step in scenario.get("steps") or []:
+    if e36 is not None:
+        _prepare_first_prompt_window()
+        try:
+            normal_intake_evidence.run(e36, scenario, client, window, record, run_id, after_id)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise HarnessEvidenceError(f"E36 required source unavailable: {error}") from error
+        _refresh_agent_mode_record(record, scenario=scenario, declared_agent_mode=declared_agent_mode, dry_run=False)
+        _refresh_coverage_class_record(record, scenario=scenario, declared_coverage_class=declared_coverage_class, dry_run=False)
+
+    for step in ([] if e36 is not None else scenario.get("steps") or []):
         if not isinstance(step, dict):
             continue
         controlled_evidence = _controlled_harness_step_evidence(step)
@@ -3398,9 +3433,10 @@ def run_one_cell(
             window.mark_prompt_sent()
             last_sent_prompt = str(step["send_discord_prompt"]).replace("{run_id}", run_id)
             response = client.send(channel_id, last_sent_prompt)
-            record["durable_record_probe"]["inbound_prompt_id"] = str(
-                response.get("message_id") or response.get("id") or ""
-            )
+            if scenario.get("durable_delivery_probe"):
+                record["durable_record_probe"]["inbound_prompt_id"] = str(
+                    response.get("message_id") or response.get("id") or ""
+                )
             _mark_real_provider_contacted(record, declared_agent_mode=declared_agent_mode, dry_run=dry_run)
             time.sleep(3)
         elif "send_prompt" in step:
@@ -3856,14 +3892,24 @@ def run_one_cell(
 
     final_refetches = int(getattr(args, "final_refetches", 2))
     final_refetch_interval_s = float(getattr(args, "final_refetch_interval_s", 1.0))
+    final_rows = []
     for attempt in range(final_refetches):
         if attempt > 0:
             time.sleep(final_refetch_interval_s)
-        _ingest_observed(client.fetch_messages(channel_id, after_id=after_id, limit=100))
+        final_rows = client.fetch_messages(channel_id, after_id=after_id, limit=100)
+        _ingest_observed(final_rows)
 
     _update_record_window_snapshot(record, window)
 
     try:
+        if e36 is not None:
+            try:
+                normal_intake_evidence.final_assertion(window, record, final_rows)
+                for request in record["discord_prompt_records"]:
+                    e36.join(request)
+                normal_intake_evidence.drained(e36.watcher())
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                raise HarnessEvidenceError(f"E36 final evidence unavailable: {error}") from error
         enabled_features = frozenset(
             feature.strip()
             for feature in os.environ.get("AGENTDESK_E2E_FEATURES", "").split(",")
@@ -3887,6 +3933,24 @@ def run_one_cell(
             runtime_root=Path(args.queue_runtime_root),
         )
         record["post_scenario_idle"] = idle_check
+        if e36 is not None:
+            try:
+                settled = normal_intake_evidence.drained(e36.watcher())
+            except ValueError as error:
+                raise HarnessEvidenceError(f"E36 final watcher unmeasured: {error}") from error
+            if not settled:
+                raise assertions.AssertionError("E36 final watcher queue/input not empty")
+            try:
+                # The idle wait is part of the observed run, not a blind acceptance gap.
+                for request in record["discord_prompt_records"]:
+                    e36.join(request)
+                settled_rows = client.fetch_messages(channel_id, after_id=after_id, limit=100)
+                _ingest_observed(settled_rows)
+                normal_intake_evidence.final_assertion(window, record, settled_rows)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                raise HarnessEvidenceError(f"E36 post-idle evidence unavailable: {error}") from error
+            _update_record_window_snapshot(record, window)  # the accepted summary is the last one observed
+            record["e36_acceptance"].update(sequential10="pass", queued_followup="pass", post_idle_revalidated=True)
         if scenario.get("durable_delivery_probe"):
             record["dirty_active_residue"] = {"possible": False, "cleanup_attempted": False}
         record["assertions"].append(
@@ -4567,6 +4631,11 @@ def main() -> int:
     print(f"[e2e] cell={cell} run_id={run_id} output={output_dir}")
 
     scenarios = load_scenarios(scenarios_dir, cell=cell)
+    if not wanted:
+        # E36 claims the whole phase (3540s, exclusive single scenario, a 20s provider hold)
+        # and needs --e36-intake-log, so a default sweep cannot carry it. Run it as its own
+        # lane: --cell claude-tui --filter E-36 --phase-deadline-s 3540 --e36-intake-log <log>.
+        scenarios = [s for s in scenarios if not s.get("e36_normal_intake")]
     if wanted:
         scenarios = [s for s in scenarios if str(s.get("id")) in wanted]
     print(f"[e2e] {len(scenarios)} scenarios applicable to {cell}")
@@ -4581,6 +4650,11 @@ def main() -> int:
     )
 
     lease_token = f"{cell}-{run_id}"
+    if any(s.get("e36_normal_intake") for s in scenarios):
+        args._e36_phase_started = time.monotonic()
+        if len(scenarios) != 1:
+            raise ValueError("E36 requires an exclusive single-scenario phase")
+        normal_intake_evidence.validate(scenarios[0], args)
     results: list[dict[str, Any]] = []
     partial_result_sink: dict[str, Any] = {}
     active_scenario: dict[str, Any] | None = None
