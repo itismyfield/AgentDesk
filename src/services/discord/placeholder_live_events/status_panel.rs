@@ -614,7 +614,12 @@ pub(super) fn render_status_panel(
     let mut activity_line =
         super::freshness::render_activity_line_with_last_tool(&header_status, visible_last_tool);
     if mark_placeholder {
-        activity_line.push_str(super::super::formatting::PLACEHOLDER_PROBE_MARKER);
+        // Insert before LF/CRLF so footer composition can remove this header suffix.
+        let first_line_end = activity_line.lines().next().unwrap_or("").len();
+        activity_line.insert_str(
+            first_line_end,
+            super::super::formatting::PLACEHOLDER_PROBE_MARKER,
+        );
     }
     let time_lines = time_line.lines().collect::<Vec<_>>();
     let mut header_lines = std::iter::once(activity_line.as_str())

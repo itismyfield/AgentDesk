@@ -275,6 +275,7 @@ fn compose_merged_footer_status_block(indicator: &str, panel_text: &str) -> Opti
 
 fn merged_footer_header_line(indicator: &str, header_line: &str) -> Option<String> {
     // A detached live panel is reclaimable; its header reused on an answer is not.
+    let header_line = header_line.trim_end();
     let header_line = header_line
         .strip_suffix(super::formatting::PLACEHOLDER_PROBE_MARKER)
         .unwrap_or(header_line);
