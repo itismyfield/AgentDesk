@@ -2127,7 +2127,7 @@ pub(crate) async fn run_stall_watchdog_pass(
         if !stall_alert::should_page_suspected_stall(liveness_decision.as_ref()) {
             continue;
         }
-        stall_liveness::log_stall_watchdog_force_cleanup_judgment(
+        stall_liveness::log_stall_watchdog_page_judgment(
             provider,
             channel_id,
             &snapshot,
