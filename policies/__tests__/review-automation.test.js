@@ -476,3 +476,40 @@ test("review-automation skips recordEntry when shouldAdvanceRound would exceed m
   assert.equal(state.manualInterventions[0].cardId, "card-cap");
   assert.ok(/Max review rounds/.test(state.manualInterventions[0].reason));
 });
+
+// #5716 slice B: processTrackedMergeQueue was the only consumer of terminal
+// state='create-pr' rows, so retry_count can no longer reach >= 3 on its own.
+test("review-automation hands the first create-pr failure to an agent/operator", () => {
+  const { agentdesk, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-cp1": { id: "card-cp1", status: "review", assigned_agent_id: "agent-cp1", github_issue_number: 5716 } },
+    extraAgentdesk: {
+      reviewAutomation: { recordPrCreateFailure: () => ({ ok: true, retry_count: 1, escalated: false }) }
+    }
+  });
+
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp1", "no_open_pr_found");
+
+  assert.deepEqual(state.statusCalls, [{ cardId: "card-cp1", status: "done", force: true }]);
+  assert.equal(state.deadlockAlerts.length, 1);
+  assert.match(state.deadlockAlerts[0].message, /Create-PR Handoff[\s\S]*no automatic retry/);
+  assert.equal(state.executions.filter((e) => e.sql.indexOf("blocked_reason = ?") >= 0).pop().params[0], "pr:create_failed:no_open_pr_found");
+});
+
+test("review-automation sweeps stranded terminal create-pr rows into the same handoff", () => {
+  const rows = [{ card_id: "card-old1", last_error: "no_open_pr_found", retry_count: 1 },
+    { card_id: "card-old2", last_error: null, retry_count: 2 }];
+  const { policy, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-old1": { id: "card-old1", status: "done" }, "card-old2": { id: "card-old2", status: "done" } },
+    dbQuery: createSqlRouter([{ match: "FROM pr_tracking p JOIN kanban_cards c", result: rows }])
+  });
+
+  policy.onTick5min({});
+  policy.onTick5min({});
+
+  // Both cards handed off once each — the kv key makes the sweep idempotent.
+  assert.equal(state.deadlockAlerts.length, 2);
+  assert.match(state.deadlockAlerts[0].message + state.deadlockAlerts[1].message, /card-old1[\s\S]*card-old2/);
+  const sweeps = state.queries.filter((q) => q.sql.indexOf("FROM pr_tracking p JOIN kanban_cards c") >= 0);
+  assert.equal(sweeps.length, 2);
+  assert.ok(sweeps[0].sql.indexOf("LIMIT 20") >= 0);
+});

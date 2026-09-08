@@ -305,15 +305,13 @@
 ### `multinode / merge_review_side_effects`
 
 - feature: `multinode / merge_review_side_effects`
-- canonical_modules: `policies/merge-automation.js:46` handles terminal cards,
-  `policies/merge-automation.js:522` retries direct pushes, and
-  `policies/merge-automation.js:1761` enables auto-merge. GitHub issue mutation
-  lives in `src/github/mod.rs:166`, `src/github/mod.rs:218`,
-  `src/github/dod.rs:122`, and the issue creation route at
-  `src/server/routes/github.rs:212`.
-- legacy_modules: none. The JS policy is the active automation surface.
-- do_not_edit_without_migration_plan: `policies/merge-automation.js` merge,
-  PR-tracking, review-gate, and worktree cleanup paths.
+- canonical_modules: none in JS — `policies/merge-automation.js` (terminal
+  cards, direct pushes, auto-merge) was removed in #5716 slice B. GitHub issue
+  mutation lives in `src/github/mod.rs:166`, `src/github/mod.rs:218`,
+  `src/github/dod.rs:122`, and `src/server/routes/github.rs:212`.
+- legacy_modules: none. The removed policy was the last JS merge surface.
+- do_not_edit_without_migration_plan: `policies/review-automation.js` create-pr
+  handoff and `policies/00-pr-tracking.js` tracking paths (#5716 slice B).
 - active_callsite_coverage: single-node policy engine. The current flow assumes
   one automation owner is allowed to run `git push`, `gh issue edit`, `gh issue
   create`, and `gh pr merge --auto`.
@@ -444,7 +442,7 @@
 | --- | --- | --- |
 | Discord gateway singleton | `src/services/discord/runtime_bootstrap.rs`, `src/services/discord/runtime_bootstrap/gateway_lease.rs`, `src/services/discord/runtime_bootstrap/shutdown.rs` | Two nodes starting a gateway for the same provider can duplicate command intake, watcher startup, and shutdown cleanup unless #877 fences gateway ownership to the leader. |
 | Supervised workers singleton | `src/server/worker_registry.rs:151`, `src/server/mod.rs:202`, `src/server/mod.rs:209` | Cluster-enabled worker nodes skip `leader_only` supervised workers unless they hold the startup leader lease; lease-loss self-fencing for already-running loops remains follow-up work. |
-| Merge/review side effects local | `policies/merge-automation.js:46`, `policies/merge-automation.js:522`, `policies/merge-automation.js:1761` | Duplicate policy runners can race direct pushes, PR auto-merge, review notifications, and worktree cleanup. |
+| Merge/review side effects local | removed (`policies/merge-automation.js`, #5716 slice B) | Historical: duplicate policy runners could race direct pushes, PR auto-merge, review notifications, and worktree cleanup. No automated merge surface remains. |
 | GitHub issue/body mutation local | `src/github/mod.rs:166`, `src/github/mod.rs:218`, `src/github/dod.rs:122`, `src/server/routes/github.rs:275` | Multiple nodes can create, close, comment, or edit issue bodies unless calls are leader-only or idempotent. |
 | Tmux/provider sessions local | `src/services/discord/mod.rs:538`, `src/services/discord/router/message_handler.rs:1420`, `src/services/claude.rs:1166`, `src/services/claude.rs:1300` | Live provider state depends on local tmux panes, FIFOs, output files, watcher handles, and wrapper processes. |
 | MCP routing local | `src/services/mcp_config.rs:34`, `src/services/mcp_config.rs:71`, `src/services/memory/memento.rs:262`, `src/services/discord/mcp_credential_watcher.rs:349` | MCP availability, config mutation, cached MCP session IDs, and credential watcher notifications are node/provider local. |
@@ -453,8 +451,8 @@
 
 ## Leader-Only Side Effects
 
-- GitHub merge and auto-merge: `policies/merge-automation.js:46`,
-  `policies/merge-automation.js:522`, `policies/merge-automation.js:1761`.
+- GitHub merge and auto-merge: removed with `policies/merge-automation.js`
+  in #5716 slice B; no automated merge surface remains.
 - GitHub issue/body mutation: `src/github/mod.rs:166`,
   `src/github/mod.rs:218`, `src/github/dod.rs:122`,
   `src/server/routes/github.rs:275`.
@@ -575,11 +573,10 @@
 - A merge may only proceed when the required phase evidence exists for the same
   head SHA that will be merged.
 - Current anchors: PR tracking treats `head_sha` as authoritative at
-  `policies/00-pr-tracking.js:37`; latest completed work head SHA is loaded at
-  `policies/merge-automation.js:271`; merge readiness rejects tracked/current
-  SHA mismatch at `policies/merge-automation.js:1190`.
-- Enablement condition: #881/#882/#883 define phase-run evidence and make
-  merge-automation require that evidence before direct merge or auto-merge.
+  `policies/00-pr-tracking.js:37`; the head-SHA load and merge-readiness
+  mismatch check went with `policies/merge-automation.js` in #5716 slice B.
+- Enablement condition: #881/#882/#883 defined phase-run evidence for
+  merge-automation; with that policy removed the condition has no consumer.
 
 ## Multinode Issue Map
 
@@ -889,8 +886,8 @@ redeploy leaves the old values live in the plist.
   issue draft before peer propagation/source-manifest work continues. Core API
   probes and the alert POST use same-port loopback `Origin` authentication
   without reading or exposing `server.auth_token`.
-- #4250 merge-automation gh-off-tick cache + slow-hook WARN de-noise: the
-  `merge-automation` policy 5-minute tick now reads Codex-review snapshots from a
+- #4250 merge-automation gh-off-tick cache + slow-hook WARN de-noise (history:
+  policy removed in #5716 slice B): its 5-minute tick read Codex-review snapshots from a
   `kv_meta`-backed cache (30-minute TTL) and refreshes at most one PR per tick via
   a persistent round-robin cursor, instead of fanning out synchronous `gh` API
   calls every tick; each `gh` exec is bounded to 1500 ms; the engine's repeating
