@@ -100,10 +100,10 @@ API 미응답 시 gate skip(복구 배포 false-block 방지). `$DEV_PORT` 할�
 | C1 | `upsertPrTracking` facade COALESCE | `00-pr-tracking.js:36` | signature 불변, 새 컬럼은 Rust bridge op만 write |
 | C2 | `create_dispatch_core` 자체 tx | `dispatch_create.rs:160,579` | `_on_conn` variant 분리 + thin shim |
 | C3 | `processTrackedMergeQueue` terminal only | `merge-automation.js:1711` | handoffCreatePr가 status 안 건드림 |
-| C4 | `markPrCreateFailed`는 terminal force 전이 | `review-automation.js:772` | JS orchestration 유지 (setStatus 포함) |
+| C4 | `markPrCreateFailed`는 terminal force 전이 | `review-automation.js:772` | JS orchestration 유지 (setStatus 포함). #5716 slice B 이후 4단계 = `handOffPrCreateFailure` (아래 C7) |
 | C5 | dispatch active dedupe | `dispatch_create.rs:80,213` | handoffCreatePr **idempotent reuse**. reseedPrTracking이 cancel 동반 |
 | C6 | degraded 경로 pr_tracking 미생성 | `deploy-pipeline.js:332` | JS 전용 처리, pr_tracking 건드리지 않음 |
-| C7 | escalation = state + notification 짝 | `ci-recovery.js:332,465` | 기존 JS `escalateToManualIntervention` 재사용 |
+| C7 | escalation = state + notification 짝 | `ci-recovery.js:332,465` | #5716 slice B 에서 `escalateToManualIntervention` → `handOffPrCreateFailure` 로 교체: terminal 카드의 pending escalation 은 `flushEscalations` 가 drop 하므로 `notifyDeadlockManager` 배달 성공만이 이관 성립 |
 | C8 | `OnDispatchCompleted` success-only | `dispatch_status.rs` | failure는 JS catch에서 bridge op 호출 |
 
 ## Rust bridge ops
@@ -193,22 +193,36 @@ function markPrCreateFailed(cardId, error, stampGen) {
   var terminalTarget = resolveTerminalTarget(card);
 
   // 1. 먼저 retry row seed/retry++ (C4 literal: row before terminal)
-  var result = agentdesk.reviewAutomation.recordPrCreateFailure(cardId, error, stampGen);
+  var result = recordPrCreateFailureOnly(cardId, error, stampGen);   // op 가 throw 하면 null
+
+  // 1a. noop 분기 — stale generation: 더 새 dispatch 가 그 행의 주인이므로 기록도 이관도 없이 반환한다(이관하면 산 세대의 last_error 를 죽은 세대 오류로 덮는다).
+  if (result && result.noop) { log.info('markPrCreateFailed noop — stale generation'); return; }
+
+  // 1b. null 분기 — 기록이 없어 retry_count 가 0 이면 스윕이 행을 영영 못 보므로 C7 이관이 유일한 흔적이다.
+  //     step 2·3 의 mutation 이 throw 해도 남도록 그 앞에서, 반대 방향도 막도록 try/catch 로 호출한다.
+  var handedOff = null;
+  if (!result) try { handedOff = handOffPrCreateFailure(cardId, error, null, recordFailedGeneration(stampGen, error)); }
+               catch (e) { log.error('create-pr handoff threw before terminalizing: ' + e); }
 
   // 2. Terminalize
   agentdesk.kanban.setStatus(cardId, terminalTarget, true);
 
-  // 3. Blocked reason (setStatus가 clear하므로 뒤에 set)
-  if (result.escalated) {
-    agentdesk.kanban.setBlockedReason(cardId, 'pr:create_failed_escalated:max_retries');
-    escalateToManualIntervention(cardId, 'create-pr max retries');  // C7
-  } else {
-    agentdesk.kanban.setBlockedReason(cardId, 'pr:create_failed:' + truncate(error, 120));
-  }
+  // 3. Blocked reason (setStatus가 clear하므로 뒤에 set). result 는 null 일 수 있으므로 escalated 는 가드해서 읽는다.
+  agentdesk.kanban.setBlockedReason(cardId, (result && result.escalated)
+    ? 'pr:create_failed_escalated:max_retries'
+    : 'pr:create_failed:' + truncate(error, 120));
+
+  // 4. #5716 slice B: 기록에 성공한 실패 세대마다 운영자 이관 (재시도 소비자가 없다).
+  //    dedup 키의 세대 성분은 retry_count가 아니라 pr_tracking.dispatch_generation (새 dispatch가 count를 0으로 리셋).
+  //    세대가 없는 pre-handoff 실패는 직전 세대를 재사용하지 않고 'pre:<실패 클래스>' 를 쓴다 — 직전 세대 키는
+  //    이미 알림을 심었으므로 재사용하면 새 실패가 TTL(7일) 동안 무음이 되기 때문. 기록 실패(null)는 스탬프가
+  //    있으면 'pre:record_failed:<세대>' 로 세대를 보존한다. 반환은 'deduped'/true/false 3-값이며, 알림
+  //    enqueue 이후 dedup 키·스윕 마커 쓰기가 throw 해도 true 다(배달은 이미 일어났다).
+  if (result) handedOff = handOffPrCreateFailure(cardId, error, result.retry_count, stampGen);
 }
 ```
 
-Crash safety: 모든 중간 step 실패에서 retry loop가 tracking에서 복구.
+Crash safety: 실패 원인과 retry_count는 recordPrCreateFailure 한 트랜잭션에서 함께 커밋되므로 이후 step에서 죽어도 #5716 스윕(state IN ('create-pr','escalated') AND retry_count > 0, updated_at 30일 이내)이 회수한다. 다만 그 op 자체가 실패하면 retry_count가 0에 머물러 스윕이 볼 수 없으므로, 그 분기는 기록을 성공으로 로그하지 않고 즉시 C7 이관을 호출한다.
 
 ## Success 상태 전이표 (kanban_cards.status 기준)
 
