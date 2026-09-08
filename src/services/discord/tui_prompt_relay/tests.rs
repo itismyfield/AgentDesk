@@ -5174,6 +5174,8 @@ mod native_feeder_birth_regressions {
         LateHandle,
         WatcherMissing,
         OffsetAdvanced,
+        ProgressRetained,
+        SourceRotated,
     }
 
     async fn observe_real_birth(
@@ -5186,6 +5188,7 @@ mod native_feeder_birth_regressions {
         let anchor = MessageId::new(5_071_081_000 + case);
         let session = format!("AgentDesk-codex-feeder-birth-{case}");
         let native = root.join(format!("native-rollout-{case}.jsonl"));
+        let rotated = root.join(format!("rotated-rollout-{case}.jsonl"));
         let transcript = concat!(
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"report progress\"}]}}\n",
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"current episode progress\"}]}}\n",
@@ -5298,17 +5301,41 @@ mod native_feeder_birth_regressions {
                 _ => RelayOwnerKind::SessionBoundRelay,
             };
             assert_eq!(row.effective_relay_owner_kind(), birth_owner);
-            row.full_response = "already sent; pending suffix".into();
-            row.response_sent_offset = "already sent;".len();
-            super::super::super::inflight::save_inflight_state(&row).unwrap();
+            // #5780 r3: only the progress-bearing case posts output before the
+            // refresh; every other case must stay inside the ownerless-recovery
+            // shape so a demotion there is a real re-arm, not a paper one.
+            if refresh == RefreshFeeder::ProgressRetained {
+                row.full_response = "already sent; pending suffix".into();
+                row.response_sent_offset = "already sent;".len();
+                super::super::super::inflight::save_inflight_state(&row).unwrap();
+            }
             let progress = (
                 row.full_response.clone(),
                 row.response_sent_offset,
                 row.turn_nonce.clone(),
             );
             match refresh {
-                RefreshFeeder::Missing | RefreshFeeder::WatcherMissing => {
+                RefreshFeeder::Missing
+                | RefreshFeeder::WatcherMissing
+                | RefreshFeeder::ProgressRetained => {
                     shared.tmux_watchers.remove(&channel).unwrap();
+                }
+                // #5780 r3: the wrapper rotated its rollout mid-turn; the row must
+                // follow the new source AND that source's own resume point.
+                RefreshFeeder::SourceRotated => {
+                    std::fs::write(&rotated, transcript).expect("rotated source fixture");
+                    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                        &session,
+                        crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                            runtime_kind: RuntimeHandoffKind::CodexTui,
+                            output_path: rotated.display().to_string(),
+                            relay_output_path: None,
+                            input_fifo_path: None,
+                            session_id: Some(format!("native-feeder-session-{case}")),
+                            last_offset: 512,
+                            relay_last_offset: None,
+                        },
+                    );
                 }
                 RefreshFeeder::Cancelled => shared
                     .tmux_watchers
@@ -5347,7 +5374,13 @@ mod native_feeder_birth_regressions {
                 &lease,
             )
             .await;
-            assert_eq!(refreshed.claimed, refresh != RefreshFeeder::OtherAnchor);
+            assert_eq!(
+                refreshed.claimed,
+                !matches!(
+                    refresh,
+                    RefreshFeeder::OtherAnchor | RefreshFeeder::ProgressRetained
+                )
+            );
             row = super::super::super::inflight::load_inflight_state(
                 &ProviderKind::Codex,
                 channel.get(),
@@ -5361,11 +5394,22 @@ mod native_feeder_birth_regressions {
                 ),
                 progress
             );
-            // A refresh re-keys nothing: `turn_start_offset` is identity and
-            // `last_offset` is this turn's delivery frontier.
+            // A SAME-SOURCE refresh re-keys nothing: `turn_start_offset` is identity
+            // and `last_offset` is this turn's delivery frontier. A source rotation
+            // must re-key, because both are coordinates into `output_path`.
+            let (start, source) = if refresh == RefreshFeeder::SourceRotated {
+                (512, rotated.as_path())
+            } else {
+                (0, native.as_path())
+            };
             assert_eq!(
-                (row.user_msg_id, row.turn_start_offset, row.last_offset),
-                (anchor.get(), Some(0), 0)
+                (
+                    row.user_msg_id,
+                    row.turn_start_offset,
+                    row.last_offset,
+                    row.output_path.as_deref()
+                ),
+                (anchor.get(), Some(start), start, source.to_str())
             );
             assert_eq!(
                 super::super::super::mailbox_snapshot(&shared, channel)
@@ -5385,6 +5429,13 @@ mod native_feeder_birth_regressions {
                     ExternalInputRelayOwner::TmuxWatcher => RelayOwnerKind::Watcher,
                     other => panic!("unexpected refresh owner {other:?}"),
                 }
+            );
+            // #5780 r3: a demotion is only reported when the row actually lands in
+            // the population the Codex ownerless rollout tail scans — Codex has no
+            // watcher-independent bridge tail to fall back on.
+            assert_eq!(
+                super::super::synthetic_start::codex_ownerless_external_input_inflight_needs_rollout_recovery(&row, &session),
+                row.effective_relay_owner_kind() == RelayOwnerKind::None
             );
         }
         let yielded =
@@ -5508,6 +5559,32 @@ mod native_feeder_birth_regressions {
                 (ExternalInputRelayOwner::BridgeAdapter, false),
             ],
             "a late handle does not take the turn from the bridge, and a watcher owner that lost its handle must not keep the bridge standing down"
+        );
+    }
+
+    #[test]
+    fn same_anchor_refresh_keeps_unfed_owner_when_no_relayer_can_be_armed() {
+        assert_eq!(
+            run_birth_cases(&[(
+                14,
+                Some((true, false, false, true)),
+                Some(RefreshFeeder::ProgressRetained)
+            )]),
+            vec![(ExternalInputRelayOwner::SessionBoundRelay, true)],
+            "a Codex row that already posted output has no ownerless re-arm path, so refresh must leave the durable owner alone instead of reporting a claim it cannot back"
+        );
+    }
+
+    #[test]
+    fn same_anchor_refresh_rekeys_offsets_onto_a_rotated_source() {
+        assert_eq!(
+            run_birth_cases(&[(
+                15,
+                Some((true, false, false, true)),
+                Some(RefreshFeeder::SourceRotated)
+            )]),
+            vec![(ExternalInputRelayOwner::SessionBoundRelay, true)],
+            "a refresh that re-points the row at a new rollout must carry that source's own cursor, never the previous file's bytes"
         );
     }
 }

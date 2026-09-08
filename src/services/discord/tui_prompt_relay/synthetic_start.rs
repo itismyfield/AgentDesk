@@ -277,8 +277,39 @@ async fn claim_tui_direct_synthetic_turn_prepared(
             {
                 ExternalInputRelayOwner::SessionBoundRelay
             }
-            RelayOwnerKind::None | RelayOwnerKind::Watcher | RelayOwnerKind::SessionBoundRelay => {
-                ExternalInputRelayOwner::BridgeAdapter
+            RelayOwnerKind::None => ExternalInputRelayOwner::BridgeAdapter,
+            // #5780 r3: demoting is only a RECOVERY when the ownerless row can still
+            // be re-armed. A row that already posted output cannot (see
+            // `tui_direct_refresh_demotion_can_rearm`), and demoting it also drops it
+            // out of `orphan_relay_reclaim`'s `SessionBoundRelay`-only population
+            // while reporting `claimed = true` (i.e. "a tail is armed"). Keep the
+            // durable owner untouched and decline instead, so the row stays exactly
+            // where the existing orphan paths already look for it.
+            owner @ (RelayOwnerKind::Watcher | RelayOwnerKind::SessionBoundRelay) => {
+                if tui_direct_refresh_demotion_can_rearm(provider, &existing) {
+                    ExternalInputRelayOwner::BridgeAdapter
+                } else {
+                    tracing::warn!(
+                        provider = %provider.as_str(),
+                        channel_id = channel_id.get(),
+                        tmux_session_name = %tmux_session_name,
+                        ?owner,
+                        "kept an unfed TUI-direct relay owner; demoting it would arm no relayer"
+                    );
+                    if mailbox_activation_occurred {
+                        finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id)
+                            .await;
+                    }
+                    return TuiDirectSyntheticTurnClaim {
+                        relay_owner: if owner == RelayOwnerKind::Watcher {
+                            ExternalInputRelayOwner::TmuxWatcher
+                        } else {
+                            ExternalInputRelayOwner::SessionBoundRelay
+                        },
+                        claimed: false,
+                        turn_start_offset: start_offset,
+                    };
+                }
             }
             RelayOwnerKind::StandbyRelay | RelayOwnerKind::Unknown => {
                 if mailbox_activation_occurred {
@@ -302,9 +333,20 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         existing.turn_nonce = active_turn_nonce.clone();
         existing.session_key = lease.session_key.clone();
         existing.runtime_kind = lease.runtime_kind;
-        existing.output_path = output_path
+        let next_output_path = output_path
             .as_deref()
             .and_then(|path| path.to_str().map(str::to_string));
+        // #5780 r3: `turn_start_offset`/`last_offset` are coordinates INTO
+        // `output_path`. Carrying them across a SOURCE ROTATION re-points the row at
+        // file B while keeping file A's bytes, and `watchers::lifecycle::restore`
+        // resumes at `last_offset` whenever B is at least that long — skipping
+        // everything B wrote below it. Preserve the cursor only for a same-source
+        // refresh; a new source is re-keyed onto its own binding, as before r2.
+        if next_output_path.is_some() && next_output_path != existing.output_path {
+            existing.last_offset = start_offset;
+            existing.turn_start_offset = Some(start_offset);
+        }
+        existing.output_path = next_output_path;
         // #5780 r2: a refresh must NOT re-key the turn. `turn_start_offset` IS part
         // of `InflightTurnIdentity`, and for Codex TUI `start_offset` is the runtime
         // binding's `last_offset`, which advances mid-turn (offset advance on relayed
@@ -2132,6 +2174,25 @@ pub(super) fn tui_direct_session_bound_feed_admissible(
         && crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
             .get_live_producer(tmux_session_name)
             .is_some()
+}
+
+/// #5780 r3: would demoting this row to `None` actually arm a relayer?
+///
+/// Only Claude has a watcher-independent bridge tail; `claude_idle_tail` rejects
+/// every other provider outright. Codex's sole ownerless recovery is the rollout
+/// tail, and it — like `rebind_reap::ownerless_external_input_inflight_is_stale_at`
+/// — refuses any row that already carries delivery progress, because recovery
+/// re-keys the turn to the prompt line and would re-send what was already posted.
+pub(super) fn tui_direct_refresh_demotion_can_rearm(
+    provider: &ProviderKind,
+    state: &InflightTurnState,
+) -> bool {
+    provider == &ProviderKind::Claude
+        || (state.current_msg_id == 0
+            && state.response_sent_offset == 0
+            && state.full_response.trim().is_empty()
+            && state.last_watcher_relayed_offset.is_none()
+            && !state.terminal_delivery_committed)
 }
 
 /// #3876: select first-birth ownership from three caller-supplied signals.
