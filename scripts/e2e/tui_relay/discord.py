@@ -41,6 +41,17 @@ def _fetch_retry_delay(headers, body: Any) -> float:
     ]
     if isinstance(body, dict) and "retry_after" in body:
         values.append(("retry_after", body["retry_after"]))
+    # #5702: the route now propagates upstream 429 as an AppError envelope
+    # ({"error", "code", "context"}), so the retry hint sits in `context`
+    # rather than at the top level. The wrapped-200 source above is kept so a
+    # pre-#5702 server still retries.
+    context = body.get("context") if isinstance(body, dict) else None
+    if (
+        isinstance(context, Mapping)
+        and context.get("upstream_status") == 429
+        and "retry_after" in context
+    ):
+        values.append(("context.retry_after", context["retry_after"]))
     if not values:
         raise ValueError("missing rate-limit delay")
     delays = []
