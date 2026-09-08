@@ -8070,6 +8070,7 @@ services::tui_prompt_dedupe::tests::extracts_codex_rollout_top_level_entry_id
 services::tui_prompt_dedupe::tests::extracts_codex_rollout_user_message_text
 services::tui_prompt_dedupe::tests::extracts_non_meta_claude_array_user_message_after_slash_command
 services::tui_prompt_dedupe::tests::extracts_qwen_jsonl_user_message_text
+services::tui_prompt_dedupe::tests::hook_re_report_restates_the_adopted_session_authority
 services::tui_prompt_dedupe::tests::ignores_claude_interrupt_marker_without_relay_lease
 services::tui_prompt_dedupe::tests::ignores_claude_transcript_interrupt_marker_user_message_text
 services::tui_prompt_dedupe::tests::ignores_claude_transcript_meta_user_message_text
