@@ -193,24 +193,32 @@ function markPrCreateFailed(cardId, error, stampGen) {
   var terminalTarget = resolveTerminalTarget(card);
 
   // 1. 먼저 retry row seed/retry++ (C4 literal: row before terminal)
-  var result = agentdesk.reviewAutomation.recordPrCreateFailure(cardId, error, stampGen);
+  var result = recordPrCreateFailureOnly(cardId, error, stampGen);   // op 가 throw 하면 null
+
+  // 1a. noop 분기 — stale generation: 더 새 dispatch 가 그 행의 주인이므로 기록도 이관도 없이 반환한다(이관하면 산 세대의 last_error 를 죽은 세대 오류로 덮는다).
+  if (result && result.noop) { log.info('markPrCreateFailed noop — stale generation'); return; }
+
+  // 1b. null 분기 — 기록이 없어 retry_count 가 0 이면 스윕이 행을 영영 못 보므로 C7 이관이 유일한 흔적이다.
+  //     step 2·3 의 mutation 이 throw 해도 남도록 그 앞에서, 반대 방향도 막도록 try/catch 로 호출한다.
+  var handedOff = null;
+  if (!result) try { handedOff = handOffPrCreateFailure(cardId, error, null, recordFailedGeneration(stampGen, error)); }
+               catch (e) { log.error('create-pr handoff threw before terminalizing: ' + e); }
 
   // 2. Terminalize
   agentdesk.kanban.setStatus(cardId, terminalTarget, true);
 
-  // 3. Blocked reason (setStatus가 clear하므로 뒤에 set)
-  if (result.escalated) {
-    agentdesk.kanban.setBlockedReason(cardId, 'pr:create_failed_escalated:max_retries');
-  } else {
-    agentdesk.kanban.setBlockedReason(cardId, 'pr:create_failed:' + truncate(error, 120));
-  }
+  // 3. Blocked reason (setStatus가 clear하므로 뒤에 set). result 는 null 일 수 있으므로 escalated 는 가드해서 읽는다.
+  agentdesk.kanban.setBlockedReason(cardId, (result && result.escalated)
+    ? 'pr:create_failed_escalated:max_retries'
+    : 'pr:create_failed:' + truncate(error, 120));
 
-  // 4. #5716 slice B: 재시도 소비자가 없으므로 실패 세대마다 운영자 이관.
+  // 4. #5716 slice B: 기록에 성공한 실패 세대마다 운영자 이관 (재시도 소비자가 없다).
   //    dedup 키의 세대 성분은 retry_count가 아니라 pr_tracking.dispatch_generation (새 dispatch가 count를 0으로 리셋).
   //    세대가 없는 pre-handoff 실패는 직전 세대를 재사용하지 않고 'pre:<실패 클래스>' 를 쓴다 — 직전 세대 키는
-  //    이미 알림을 심었으므로 재사용하면 새 실패가 TTL(7일) 동안 무음이 되기 때문. r6: record op 가 아무것도
-  //    기록하지 못한 실패는 스탬프가 있으면 'pre:record_failed:<세대>' 로 세대를 보존하고, step 2·3 의 mutation
-  //    이 throw 해도 유일한 알림이 남도록 C7 을 step 2 앞에서 호출한다. 반환은 'deduped'/true/false 3-값이다.
+  //    이미 알림을 심었으므로 재사용하면 새 실패가 TTL(7일) 동안 무음이 되기 때문. 기록 실패(null)는 스탬프가
+  //    있으면 'pre:record_failed:<세대>' 로 세대를 보존한다. 반환은 'deduped'/true/false 3-값이며, 알림
+  //    enqueue 이후 dedup 키·스윕 마커 쓰기가 throw 해도 true 다(배달은 이미 일어났다).
+  if (result) handedOff = handOffPrCreateFailure(cardId, error, result.retry_count, stampGen);
 }
 ```
 
