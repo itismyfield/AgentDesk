@@ -75,7 +75,7 @@
 | `PATCH` | `/api/departments/{id}` | `departments::update_department` | `src/server/routes/departments.rs:112` | `src/server/routes/domains/admin.rs:42` |
 | `GET` | `/api/discord/bindings` | `discord::list_bindings` | `src/server/routes/discord.rs:19` | `src/server/routes/domains/integrations.rs:42` |
 | `POST` | `/api/discord/bot-tokens/reload` | `health_api::reload_discord_bot_tokens_handler` | `src/server/routes/health_api.rs:1746` | `src/server/routes/domains/ops.rs:47` |
-| `GET` | `/api/discord/channels/{id}` | `discord::channel_info` | `src/server/routes/discord.rs:307` | `src/server/routes/domains/integrations.rs:47` |
+| `GET` | `/api/discord/channels/{id}` | `discord::channel_info` | `src/server/routes/discord.rs:407` | `src/server/routes/domains/integrations.rs:47` |
 | `GET` | `/api/discord/channels/{id}/messages` | `discord::channel_messages` | `src/server/routes/discord.rs:182` | `src/server/routes/domains/integrations.rs:43` |
 | `POST` | `/api/discord/send` | `health_api::send_handler` | `src/server/routes/health_api.rs:1694` | `src/server/routes/domains/ops.rs:46` |
 | `POST` | `/api/discord/send-dm` | `health_api::senddm_handler` | `src/server/routes/health_api.rs:1891` | `src/server/routes/domains/ops.rs:56` |
