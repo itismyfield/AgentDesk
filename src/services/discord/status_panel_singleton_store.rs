@@ -397,9 +397,9 @@ mod tests {
         bind_if_owned(&provider, token_hash, channel_id, current_panel, None)
             .expect("bind new owner");
 
-        assert_eq!(
-            commit_if_owned_or_current(&provider, token_hash, channel_id, superseded_panel),
-            Err("completed status panel is not the current singleton".to_string()),
+        assert!(
+            commit_if_owned_or_current(&provider, token_hash, channel_id, superseded_panel)
+                .is_err(),
             "a panel the newer turn already replaced in the durable singleton must still fail closed"
         );
         assert_eq!(

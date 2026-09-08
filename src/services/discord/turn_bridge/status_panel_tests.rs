@@ -30,6 +30,8 @@ struct StatusPanelFallbackGateway {
     sent_messages: Arc<Mutex<Vec<String>>>,
     edited_message_ids: Arc<Mutex<Vec<MessageId>>>,
     edit_error: Option<String>,
+    edited_bodies: Mutex<Vec<String>>,
+    deleted_ids: Mutex<Vec<MessageId>>,
     send_id: MessageId,
     can_chain_locally: bool,
 }
@@ -49,6 +51,8 @@ impl Default for StatusPanelFallbackGateway {
             sent_messages: Arc::new(Mutex::new(Vec::new())),
             edited_message_ids: Arc::new(Mutex::new(Vec::new())),
             edit_error: None,
+            edited_bodies: Mutex::new(Vec::new()),
+            deleted_ids: Mutex::new(Vec::new()),
             send_id: MessageId::new(1_500_000_000_000_999),
             can_chain_locally: true,
         }
@@ -76,8 +80,9 @@ impl TurnGateway for StatusPanelFallbackGateway {
         &'a self,
         _channel_id: ChannelId,
         message_id: MessageId,
-        _content: &'a str,
+        content: &'a str,
     ) -> TestGatewayFuture<'a, Result<(), String>> {
+        self.edited_bodies.lock().unwrap().push(content.to_string());
         let edited_message_ids = self.edited_message_ids.clone();
         let edit_error = self.edit_error.clone();
         Box::pin(async move {
@@ -90,6 +95,15 @@ impl TurnGateway for StatusPanelFallbackGateway {
                 None => Ok(()),
             }
         })
+    }
+
+    fn delete_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        id: MessageId,
+    ) -> TestGatewayFuture<'a, Result<(), String>> {
+        self.deleted_ids.lock().unwrap().push(id);
+        Box::pin(async { Ok(()) })
     }
 
     fn replace_message_with_outcome<'a>(
@@ -1324,6 +1338,8 @@ async fn ledger_commit_failure_does_not_delete_a_completed_panel_4891() {
     )
     .await;
 
+    assert!(gateway.edited_bodies.lock().unwrap()[0].contains("완료"));
+    assert!(gateway.deleted_ids.lock().unwrap().is_empty());
     let ledger = crate::services::discord::status_panel_singleton_store::load;
     assert_eq!(
         ledger(&provider, &shared.token_hash, channel_id.get()),
