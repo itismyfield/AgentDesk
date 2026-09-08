@@ -20,6 +20,9 @@ Scope stays bounded: SIGKILL/SIGSTOP cannot be caught, synchronous faults are
 excluded, and supervision reaches the wrapper and its direct child only.
 Descendants outliving that child are not covered and no process-group kill is
 used, because the build's group intentionally holds an sccache daemon.
+
+An explicit --delegate-lease permits one cooperative wrapper hop. Ordinary
+children inherit no lease; this does not make whole-deploy wrapping or ABBA safe.
 """
 
 from __future__ import annotations
@@ -27,7 +30,10 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import secrets
+import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -38,6 +44,7 @@ WAIT_TIMEOUT_ENV = "ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS"
 # Names an inherited fd for contention notices, for callers that pipe the
 # build log (build-release.sh runs cargo through `tail -1`). Absent: stderr.
 DIAG_FD_ENV = "ADK_BUILD_TOKEN_DIAG_FD"
+LEASE_ENV = "ADK_BUILD_TOKEN_LEASE"
 DEFAULT_WAIT_TIMEOUT_SECS = 14400.0
 WAIT_POLL_SECS = 0.5
 WAIT_NOTICE_SECS = 300.0
@@ -236,7 +243,88 @@ def _exit_code(returncode: int) -> int:
     return 128 - returncode if returncode < 0 else returncode
 
 
-def run_protected(command: Sequence[str], env: Mapping[str, str], supervisor: _Supervisor) -> int:
+@contextlib.contextmanager
+def inherited_lease(raw: str, path: str) -> Iterator[int]:
+    """Consume one hop; prove current exclusivity, not historical OFD ownership."""
+    import fcntl
+
+    try:
+        with contextlib.ExitStack() as cleanup:
+            version, generation, lease, ticket, dev, ino, nonce = raw.split(":")
+            fd, ticket_fd = int(lease), int(ticket)
+            if fd < 10 or ticket_fd < 10 or fd == ticket_fd:
+                raise BuildTokenError("invalid lease descriptors")
+            cleanup.callback(os.close, fd)
+            cleanup.callback(os.close, ticket_fd)
+            if (version, generation) != ("1", "1") or len(nonce) != 32:
+                raise BuildTokenError("invalid lease generation or nonce")
+            held, receipt = os.fstat(fd), os.fstat(ticket_fd)
+            if (not stat.S_ISREG(held.st_mode) or not stat.S_ISFIFO(receipt.st_mode)
+                    or (held.st_dev, held.st_ino) != (int(dev), int(ino))
+                    or fcntl.fcntl(ticket_fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY):
+                raise BuildTokenError("invalid lease identity or ticket type")
+            assert_live_token(fd, path)
+            os.set_inheritable(fd, False)
+            os.set_inheritable(ticket_fd, False)
+            os.set_blocking(ticket_fd, False)
+            if not secrets.compare_digest(os.read(ticket_fd, 33), nonce.encode("ascii")):
+                raise BuildTokenError("lease ticket was consumed or mismatched")
+            probe = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+            cleanup.callback(os.close, probe)
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise BuildTokenError("inherited lease is not currently held")
+            # A foreign shared OFD can lose its shared lock on conversion; only
+            # cooperative issuers of exclusive leases belong to this protocol.
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert_live_token(fd, path)
+            yield fd
+            # Close only: LOCK_UN here would also unlock the issuer's OFD.
+    except (OSError, ValueError, OverflowError) as exc:
+        raise BuildTokenError(f"invalid inherited lease: {exc}") from exc
+
+
+@contextlib.contextmanager
+def delegated_spawn(fd: int | None, command: Sequence[str],
+                    env: Mapping[str, str]) -> Iterator[tuple[dict[str, str], tuple[int, ...]]]:
+    """Transfer two dedicated descriptors only to this Python wrapper."""
+    child_env = dict(env)
+    child_env.pop(LEASE_ENV, None)
+    if fd is None:
+        yield child_env, ()
+        return
+    import fcntl
+
+    try:
+        if (len(command) < 2
+                or os.path.realpath(shutil.which(command[0]) or command[0]) != os.path.realpath(sys.executable)
+                or os.path.realpath(command[1]) != os.path.realpath(__file__)):
+            raise BuildTokenError("lease delegation requires this cooperative Python wrapper")
+        # ExitStack closes both transfer duplicates even when Popen fails.
+        with contextlib.ExitStack() as cleanup:
+            lease_fd = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 10)
+            cleanup.callback(os.close, lease_fd)
+            read_fd, write_fd = os.pipe()
+            with os.fdopen(read_fd, "rb"), os.fdopen(write_fd, "wb") as writer:
+                ticket_fd = fcntl.fcntl(read_fd, fcntl.F_DUPFD_CLOEXEC, 10)
+                cleanup.callback(os.close, ticket_fd)
+                nonce = secrets.token_hex(16)
+                writer.write(nonce.encode("ascii"))
+            held = os.fstat(fd)
+            child_env[LEASE_ENV] = f"1:1:{lease_fd}:{ticket_fd}:{held.st_dev}:{held.st_ino}:{nonce}"
+            try:
+                yield child_env, (lease_fd, ticket_fd)
+            finally:
+                cleanup.close()  # Popen success/failure: close both transfer dups.
+    except (OSError, ValueError, OverflowError) as exc:
+        raise BuildTokenError(f"lease delegation failed: {exc}") from exc
+
+
+def run_protected(command: Sequence[str], env: Mapping[str, str], supervisor: _Supervisor,
+                  delegate_fd: int | None = None) -> int:
     """Run one foreground child and reap it before the caller releases the token."""
     # Block the supervised signals across the spawn. Without this a signal
     # landing between Popen returning and the assignment below would find no
@@ -248,12 +336,13 @@ def run_protected(command: Sequence[str], env: Mapping[str, str], supervisor: _S
         # The blocked mask is inherited across exec -- subprocess only restores
         # dispositions, not the mask -- so the child would silently ignore the
         # very signals it must still receive. Clear it in the child before exec.
-        child = subprocess.Popen(
-            list(command), env=dict(env), close_fds=True,
-            preexec_fn=lambda: signal.pthread_sigmask(
-                signal.SIG_UNBLOCK, supervisor.installed),
-        )
-        supervisor.child = child
+        with delegated_spawn(delegate_fd, command, env) as (child_env, inherited_fds):
+            child = subprocess.Popen(
+                list(command), env=child_env, close_fds=True, pass_fds=inherited_fds,
+                preexec_fn=lambda: signal.pthread_sigmask(
+                    signal.SIG_UNBLOCK, supervisor.installed),
+            )
+            supervisor.child = child
     finally:
         signal.pthread_sigmask(signal.SIG_UNBLOCK, supervisor.installed)
     try:
@@ -267,10 +356,15 @@ def run_protected(command: Sequence[str], env: Mapping[str, str], supervisor: _S
 
 
 def run(command: Sequence[str], env: Mapping[str, str] | None = None,
-        path: str = CANONICAL_TOKEN_PATH) -> int:
+        path: str = CANONICAL_TOKEN_PATH, *, delegate_lease: bool = False) -> int:
     """Run `command` while holding the build token at `path`."""
     child_env = dict(os.environ if env is None else env)
+    carrier = os.environ.get(LEASE_ENV)  # Caller env= is never incoming authority.
+    child_env.pop(LEASE_ENV, None)
     if sys.platform == "win32":
+        if delegate_lease or carrier is not None:
+            print("build token: inherited POSIX leases are unsupported on Windows", file=sys.stderr)
+            return EXIT_TOKEN_UNUSABLE
         from build_token_win32 import BuildTokenWindowsError, supervise_windows
         try:
             return supervise_windows(list(command), child_env)
@@ -279,9 +373,12 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
             return EXIT_TOKEN_UNUSABLE
     with _supervised() as supervisor:
         try:
-            with hold_token(path, child_env) as fd:
+            lease = inherited_lease(carrier, path) if carrier is not None else hold_token(path, child_env)
+            with lease as fd:
+                if carrier is not None and delegate_lease:
+                    raise BuildTokenError("an inherited lease cannot be delegated again")
                 assert_live_token(fd, path)
-                rc = run_protected(command, child_env, supervisor)
+                rc = run_protected(command, child_env, supervisor, fd if delegate_lease else None)
         except BuildTokenTimeout as exc:
             print(f"build token: {exc}", file=sys.stderr)
             rc = EXIT_TOKEN_TIMEOUT
@@ -308,12 +405,16 @@ def parse_command(argv: Sequence[str]) -> list[str]:
 
 
 def main(argv: Sequence[str]) -> int:
+    args = list(argv)
+    delegate = len(args) > 1 and args[1] == "--delegate-lease"
+    if delegate:  # Only before --; everything after -- remains command argv.
+        del args[1]
     try:
-        command = parse_command(argv)
+        command = parse_command(args)
     except BuildTokenError as exc:
         print(f"build token: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    return run(command)
+    return run(command, delegate_lease=delegate)
 
 
 if __name__ == "__main__":
