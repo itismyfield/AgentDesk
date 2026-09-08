@@ -424,9 +424,8 @@ mod pre_admission_control_tests {
             .unwrap_or_else(|| panic!("missing token: {token}"))
     }
 
-    /// (f3) S3-20a/20b/20g: the gate stays above the deferred take, the giant
-    /// never takes session uploads again, and the attachment flag is read
-    /// before the take — below it, session uploads would count as attachments.
+    /// (f3) S3-20a/20b/20g/M12: gate above the deferred take, no second session
+    /// take, attachment flag read before it, and the prepend order kept.
     #[test]
     fn intake_turn_keeps_the_gate_above_the_deferred_take() {
         let src = include_str!("intake_turn.rs");
@@ -436,6 +435,7 @@ mod pre_admission_control_tests {
         assert!(offset(src, flag) < offset(src, take));
         assert_eq!(src.matches(flag).count(), 1);
         assert_eq!(src.matches("mem::take(&mut s.pending_uploads").count(), 0);
+        assert_eq!(src.matches("splice(0..0, taken_uploads)").count(), 1);
     }
 
     /// (f3) S3-20c'/20d: the conditional handoff take lives inside the busy arm
