@@ -476,3 +476,258 @@ test("review-automation skips recordEntry when shouldAdvanceRound would exceed m
   assert.equal(state.manualInterventions[0].cardId, "card-cap");
   assert.ok(/Max review rounds/.test(state.manualInterventions[0].reason));
 });
+
+// #5716 slice B: processTrackedMergeQueue was the only consumer of terminal
+// state='create-pr' rows, so retry_count can no longer reach >= 3 on its own.
+test("review-automation hands the first create-pr failure to an agent/operator", () => {
+  const { agentdesk, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-cp1": { id: "card-cp1", status: "review", assigned_agent_id: "agent-cp1", github_issue_number: 5716 } },
+    extraAgentdesk: {
+      reviewAutomation: { recordPrCreateFailure: () => ({ ok: true, retry_count: 1, escalated: false }) }
+    }
+  });
+
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp1", "no_open_pr_found");
+
+  assert.deepEqual(state.statusCalls, [{ cardId: "card-cp1", status: "done", force: true }]);
+  assert.equal(state.deadlockAlerts.length, 1);
+  assert.match(state.deadlockAlerts[0].message, /Create-PR Handoff[\s\S]*no automatic retry/);
+  assert.equal(state.executions.filter((e) => e.sql.indexOf("blocked_reason = ?") >= 0).pop().params[0], "pr:create_failed:no_open_pr_found");
+});
+
+// Fake pr_tracking that honours whichever predicates the sweep SQL actually
+// carries, so dropping a clause changes the candidate set instead of passing
+// against fixed mock rows.
+function createPrTrackingFake(seed) {
+  const table = seed.map((row) => Object.assign({ state: "create-pr", retry_count: 1, last_error: null, dispatch_generation: "", age_days: 1 }, row));
+  return {
+    query(sql) {
+      const states = (/state IN \(([^)]*)\)/.exec(sql) || [null, "'create-pr'"])[1].split(",").map((s) => s.trim().replace(/'/g, ""));
+      return table.filter((row) => states.indexOf(row.state) >= 0
+        && (sql.indexOf("retry_count > 0") < 0 || row.retry_count > 0)
+        && (sql.indexOf("NOT LIKE 'handed-off:%'") < 0 || String(row.last_error || "").indexOf("handed-off:") !== 0)
+        && (sql.indexOf("'-30 days'") < 0 || row.age_days < 30)
+      ).slice(0, 20).map((row) => ({ card_id: row.card_id, last_error: row.last_error, retry_count: row.retry_count,
+        dispatch_generation: sql.indexOf("dispatch_generation FROM") >= 0 ? row.dispatch_generation : undefined }));
+    },
+    execute(sql, params) {
+      const row = table.find((item) => item.card_id === params[1]);
+      if (row && ["create-pr", "escalated"].indexOf(row.state) >= 0) row.last_error = params[0];
+    }
+  };
+}
+
+const MARKER_SQL = "UPDATE pr_tracking SET last_error = ?";
+test("review-automation sweeps stranded create-pr rows once and then drops them from the candidate set", () => {
+  const fake = createPrTrackingFake([
+    { card_id: "card-old1", last_error: "no_open_pr_found", retry_count: 1 },
+    { card_id: "card-old2", state: "escalated", last_error: "no_open_pr_found", retry_count: 3 },
+    { card_id: "card-live", retry_count: 0 },
+    { card_id: "card-dup", last_error: "no_open_pr_found", dispatch_generation: "gen-d" },
+    { card_id: "card-aged", last_error: "no_open_pr_found", age_days: 40 }
+  ]);
+  const { policy, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-old1": { id: "card-old1", status: "in_progress" }, "card-old2": { id: "card-old2", status: "done" } },
+    dbQuery: createSqlRouter([{ match: "FROM pr_tracking", result: (sql) => fake.query(sql) }]),
+    dbExecute: (sql, params) => { if (sql.indexOf(MARKER_SQL) >= 0) fake.execute(sql, params); }
+  });
+
+  state.kv.set("pr_create_handoff:card-dup:gen-d", "no_open_pr_found");
+  policy.onTick5min({});
+  policy.onTick5min({});
+
+  // card-old2 is 'escalated', card-old1's card never reached terminal, card-live
+  // (retry_count 0) is an in-flight dispatch that must be left alone.
+  assert.equal(state.deadlockAlerts.length, 2);
+  assert.match(state.deadlockAlerts[0].message + state.deadlockAlerts[1].message, /card-old1[\s\S]*card-old2/);
+  const markers = state.executions.filter((e) => e.sql.indexOf(MARKER_SQL) >= 0);
+  assert.equal(markers.length, 2);
+  assert.equal(markers[0].params[0], "handed-off:no_open_pr_found");
+  const sweeps = state.queries.filter((q) => q.sql.indexOf("FROM pr_tracking") >= 0);
+  assert.equal(sweeps.length, 2);
+  assert.ok(sweeps[0].sql.indexOf("LIMIT 20") >= 0 && sweeps[0].sql.indexOf("retry_count > 0") >= 0);
+  // #5716 r5: card-dup is a kv dedup hit and card-aged is past the 30-day floor — neither is a handoff.
+  assert.equal(state.logs.warn.filter((line) => line.indexOf("Handed off 2 stranded") >= 0).length, 1);
+  assert.deepEqual(state.executions.filter((e) => e.sql.indexOf("SET updated_at = datetime('now') WHERE card_id") >= 0)
+    .map((e) => e.params.join("/")), ["card-dup/gen-d", "card-dup/gen-d"], "a dedup hit is bumped behind newer candidates");
+});
+
+test("review-automation keeps a create-pr failure retryable when the handoff alert is not delivered", () => {
+  const { agentdesk, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-cp2": { id: "card-cp2", status: "review" } },
+    globals: { notifyDeadlockManager: (message) => { state.deadlockAlerts.push({ message }); return false; } },
+    extraAgentdesk: {
+      reviewAutomation: { recordPrCreateFailure: () => ({ ok: true, retry_count: 1, escalated: false }) }
+    }
+  });
+
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp2", "no_open_pr_found");
+
+  assert.equal(state.deadlockAlerts.length, 1);
+  assert.equal(state.kv.size, 0, "an undelivered alert must not seed the dedup key");
+  assert.equal(state.executions.filter((e) => e.sql.indexOf(MARKER_SQL) >= 0).length, 0, "nor the durable marker");
+});
+
+// #5716 slice B: handoffCreatePr / reuse-refresh / reseed each stamp a fresh dispatch_generation AND
+// reset retry_count to 0, so every generation's first failure is retry_count=1 — only the generation
+// tells them apart. The third call repeats gen-b: deduped, and deliberately left without the durable
+// marker so a colliding key self-heals after the kv TTL. r5: calls 4 and 5 (no stamp / record op recorded
+// nothing) must not fall back to the row's stale gen-b key, which its own alert already seeded. r6: call 5
+// keeps its own stamp inside the record-failed namespace, so consecutive stamped record failures stay apart.
+test("review-automation alerts again for a new create-pr failure generation", () => {
+  let recorded = true;
+  let retryCount = 0;
+  const { agentdesk, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-cp3": { id: "card-cp3", status: "review" } },
+    prTracking: { load: () => ({ card_id: "card-cp3", dispatch_generation: "gen-b" }) },
+    extraAgentdesk: {
+      reviewAutomation: { recordPrCreateFailure: () => (recorded ? { ok: true, retry_count: ++retryCount, escalated: false } : null) }
+    }
+  });
+
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp3", "no_open_pr_found", "gen-a");
+  retryCount = 0;
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp3", "no_open_pr_found", "gen-b");
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp3", "no_open_pr_found", "gen-b");
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp3", "dispatch_failed: bridge down");
+  recorded = false;
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp3", "no_open_pr_found", "gen-b");
+
+  assert.equal(state.deadlockAlerts.length, 4);
+  assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp3:gen-a", "pr_create_handoff:card-cp3:gen-b",
+    "pr_create_handoff:card-cp3:pre:dispatch_failed", "pr_create_handoff:card-cp3:pre:record_failed:gen-b"]);
+  assert.equal(state.executions.filter((e) => e.sql.indexOf(MARKER_SQL) >= 0).length, 4, "dedup skip writes no marker");
+});
+
+// #5716 slice B: the completion failure paths must not commit the cause with a separate upsert — a crash
+// between that upsert and the retry_count bump left a recorded failure at retry_count=0, invisible forever.
+test("review-automation commits a create-pr completion failure in one op with no pre-count upsert", () => {
+  const upserts = [];
+  const { policy, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-cp4": { id: "card-cp4", status: "review", assigned_agent_id: "agent-cp4" } },
+    prTracking: {
+      load: () => ({ card_id: "card-cp4", repo_id: "o/r", branch: "feat/x", dispatch_generation: "gen-x" }),
+      upsert: (...args) => { upserts.push(args); return {}; },
+      findOpenPrByBranch: () => null
+    },
+    dbQuery: createSqlRouter([
+      { match: "FROM task_dispatches WHERE id = ?", result: [{ id: "d-cp4", kanban_card_id: "card-cp4", dispatch_type: "create-pr", result: null, context: '{"dispatch_generation":"gen-x"}' }] },
+      { match: "SELECT repo_id, github_issue_url", result: [{ repo_id: "o/r", github_issue_url: null }] },
+      { match: "AND dispatch_type IN ('implementation', 'rework')", result: [] },
+      { match: "SELECT status FROM kanban_cards", result: [{ status: "review" }] }
+    ]),
+    extraAgentdesk: { reviewAutomation: { recordPrCreateFailure: () => ({ ok: true, retry_count: 1, escalated: false }) } }
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "d-cp4" });
+
+  assert.deepEqual(upserts, [], "the cause must be written by recordPrCreateFailure alone");
+  assert.equal(state.deadlockAlerts.length, 1);
+  assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp4:gen-x"]);
+});
+
+// #5716 r5: the record-only branch stamps no blocked_reason, so a record op that recorded nothing leaves the failure in neither table AND at retry_count 0 — invisible to the sweep. Hand off immediately.
+const buildCreatePrCompletion = (cardId, recordPrCreateFailure) => loadPolicy("policies/review-automation.js", {
+  cards: { [cardId]: { id: cardId, status: "in_progress", assigned_agent_id: "agent-" + cardId } },
+  prTracking: { load: () => ({ card_id: cardId, repo_id: "o/r", branch: "feat/x", dispatch_generation: "gen-y" }), findOpenPrByBranch: () => null },
+  dbQuery: createSqlRouter([
+    { match: "FROM task_dispatches WHERE id = ?", result: [{ id: "d-" + cardId, kanban_card_id: cardId, dispatch_type: "create-pr", result: null, context: '{"dispatch_generation":"gen-y"}' }] },
+    { match: "SELECT repo_id, github_issue_url", result: [{ repo_id: "o/r", github_issue_url: null }] },
+    { match: "AND dispatch_type IN ('implementation', 'rework')", result: [] },
+    { match: "SELECT status FROM kanban_cards", result: [{ status: "in_progress" }] }
+  ]),
+  extraAgentdesk: { reviewAutomation: { recordPrCreateFailure } }
+});
+
+test("review-automation hands off a create-pr failure the record op did not record", () => {
+  const { policy, state } = buildCreatePrCompletion("card-cp5", () => { throw new Error("tx begin failed"); });
+  policy.onDispatchCompleted({ dispatch_id: "d-card-cp5" });
+  assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp5:pre:record_failed:gen-y"]);
+  assert.equal(state.statusCalls.length, 0, "the record-only branch must not terminalize");
+  assert.equal(state.logs.info.filter((l) => l.indexOf("recorded on pr_tracking") >= 0).length, 0, "no false record log");
+});
+
+// #5716 r7 (gpt P1-1): a stale-generation noop is the opposite case — a VERDICT that a NEWER dispatch owns the
+// row, not a record failure. Handing off pages about a dead generation AND lets markPrCreateHandedOff stamp
+// the live row's last_error with its error, so this path must return exactly as markPrCreateFailed already does.
+test("review-automation stays silent when a create-pr failure record is a stale-generation noop", () => {
+  const { policy, state } = buildCreatePrCompletion("card-cp8", () => ({ ok: true, noop: true, reason: "stale_generation" }));
+  policy.onDispatchCompleted({ dispatch_id: "d-card-cp8" });
+  assert.equal(state.deadlockAlerts.length, 0, "a stale-generation noop must not page an operator");
+  assert.equal(state.kv.size, 0, "nor seed a dedup key");
+  assert.equal(state.executions.filter((e) => e.sql.indexOf(MARKER_SQL) >= 0).length, 0, "nor stamp the live generation's row");
+  assert.equal(state.statusCalls.length, 0, "nor mutate the card");
+});
+
+// #5716 r6 (gpt P1-1): folding every stamped record failure onto the failure class merged G1 and G2 into
+// ONE 7-day dedup key, so G2's alert was deduped away — and the sweep cannot recover it either, because the
+// rolled-back record leaves retry_count at 0. The stamp inside the namespace is what makes G2 audible.
+test("review-automation alerts separately for each stamped generation whose failure record threw", () => {
+  const { agentdesk, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-cp6": { id: "card-cp6", status: "review" } },
+    prTracking: { load: () => ({ card_id: "card-cp6", dispatch_generation: "gen-1" }) },
+    extraAgentdesk: { reviewAutomation: { recordPrCreateFailure: () => { throw new Error("tx begin failed"); } } }
+  });
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp6", "no_open_pr_found", "gen-1");
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp6", "no_open_pr_found", "gen-2");
+
+  assert.equal(state.deadlockAlerts.length, 2, "a second dispatch generation is a second handoff");
+  assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp6:pre:record_failed:gen-1",
+    "pr_create_handoff:card-cp6:pre:record_failed:gen-2"]);
+});
+
+// #5716 r6 (gpt P1-2): a record op that recorded nothing leaves the handoff alert as the failure's ONLY
+// trace (retry_count 0 hides the row from the sweep), so a later mutation throw must not consume it.
+test("review-automation still hands off a create-pr failure when the terminal mutations throw", () => {
+  const build = (dbExecute, kanban) => loadPolicy("policies/review-automation.js", {
+    cards: { "card-cp7": { id: "card-cp7", status: "review" } },
+    dbExecute,
+    extraAgentdesk: Object.assign(
+      { reviewAutomation: { recordPrCreateFailure: () => { throw new Error("tx begin failed"); } } }, kanban || {})
+  });
+  const onStatusThrow = build(undefined, { kanban: {
+    setStatus: () => { throw new Error("setStatus failed"); }, setReviewStatus() {}, getCard: () => null } });
+  assert.throws(() => onStatusThrow.agentdesk.reviewAutomation.markPrCreateFailed("card-cp7", "no_open_pr_found", "gen-s"));
+  assert.equal(onStatusThrow.state.deadlockAlerts.length, 1, "a setStatus throw must not eat the only signal");
+
+  const onMarkerThrow = build((sql) => {
+    if (sql.indexOf("blocked_reason = ?") >= 0) throw new Error("blocked_reason UPDATE failed"); return { changes: 1 }; });
+  assert.throws(() => onMarkerThrow.agentdesk.reviewAutomation.markPrCreateFailed("card-cp7", "no_open_pr_found", "gen-m"));
+  assert.equal(onMarkerThrow.state.deadlockAlerts.length, 1, "nor may a blocked_reason UPDATE throw");
+});
+
+// #5716 r7 (claude P2 #3): nothing exercised the r6 try/catch, so deleting it survived — and a throw AFTER
+// notifyDeadlockManager returned true logged "UNDELIVERED — sweep will retry", wrong twice (it WAS enqueued,
+// and retry_count 0 keeps the row out of the sweep).
+test("review-automation terminalizes a card whose create-pr handoff throws and logs delivery honestly", () => {
+  const recordThrows = { reviewAutomation: { recordPrCreateFailure: () => { throw new Error("tx begin failed"); } } };
+  const onHandoffThrow = loadPolicy("policies/review-automation.js", { cards: { "card-cp9": { id: "card-cp9", status: "review" } }, extraAgentdesk: Object.assign({ kv: { get: () => { throw new Error("kv.get failed"); }, set() {}, delete() {} } }, recordThrows) });
+  onHandoffThrow.agentdesk.reviewAutomation.markPrCreateFailed("card-cp9", "no_open_pr_found", "gen-t");
+  assert.equal(onHandoffThrow.state.statusCalls.length, 1, "a handoff throw must not skip the terminal transition");
+  assert.equal(onHandoffThrow.state.executions.filter((e) => e.sql.indexOf("blocked_reason = ?") >= 0).length, 1, "nor the blocked_reason stamp");
+
+  const onMarkerThrow = loadPolicy("policies/review-automation.js", { cards: { "card-cp10": { id: "card-cp10", status: "review" } }, extraAgentdesk: recordThrows,
+    dbExecute: (sql) => { if (sql.indexOf(MARKER_SQL) >= 0) throw new Error("marker UPDATE failed"); return { changes: 1 }; } });
+  onMarkerThrow.agentdesk.reviewAutomation.markPrCreateFailed("card-cp10", "no_open_pr_found", "gen-u");
+  assert.equal(onMarkerThrow.state.deadlockAlerts.length, 1);
+  assert.equal(onMarkerThrow.state.logs.warn.filter((l) => l.indexOf("handoff=agent/operator") >= 0).length, 1,
+    "an enqueued alert whose bookkeeping threw is delivered, not UNDELIVERED");
+});
+
+// #5716: notifyDeadlockManager is the durable create-PR handoff. agentdesk.message.queue returns
+// {ok:true,id} or {error:"..."} (src/engine/ops/message_ops.rs), so an enqueue failure must surface as
+// false instead of a claimed delivery. Loads the real 00-escalation.js — the harness stubs the helper out.
+test("00-escalation notifyDeadlockManager reports enqueue failures as undelivered", () => {
+  const source = require("fs").readFileSync(__dirname + "/../00-escalation.js", "utf8");
+  const build = new Function("require", "module", "agentdesk", source + "; return { notifyDeadlockManager };");
+  const withQueueResult = (queueResult) => build(require, {}, {
+    registerPolicy() {}, config: { get: () => "chan-1" }, cards: { get: () => null },
+    log: { warn() {}, info() {}, error() {}, debug() {} },
+    message: { queue: () => queueResult },
+    db: { query: () => [], execute() {} },
+    kv: { get: () => null, set() {}, delete() {} }
+  });
+
+  assert.equal(withQueueResult({ error: "outbox unavailable" }).notifyDeadlockManager("m", "s"), false);
+  assert.equal(withQueueResult({ ok: true, id: 7 }).notifyDeadlockManager("m", "s"), true);
+});
