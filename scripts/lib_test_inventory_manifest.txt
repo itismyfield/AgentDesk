@@ -6028,6 +6028,8 @@ services::discord::tui_prompt_relay::tests::local_only_slash_prompt_skips_model_
 services::discord::tui_prompt_relay::tests::local_slash_control_note_allows_same_kind_after_window
 services::discord::tui_prompt_relay::tests::local_slash_control_note_emission_is_wired_through_prepare_gate
 services::discord::tui_prompt_relay::tests::local_slash_control_note_path_dedupes_and_seals_dropped_half
+services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::matching_native_feeder_preserves_fresh_paused_and_stale_heartbeat_owners
+services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::registered_passive_consumer_without_native_feeder_keeps_bridge_progress_path
 services::discord::tui_prompt_relay::tests::notification_strip_drops_bare_control_bytes_but_keeps_whitespace
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_clears_recorded_lease_on_drop
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_disarm_preserves_lease

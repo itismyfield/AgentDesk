@@ -73,6 +73,27 @@ pub(in crate::services::discord) fn session_bound_discord_delivery_enabled() -> 
     SESSION_BOUND_DISCORD_DELIVERY_ENABLED.load(Ordering::Acquire)
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) fn swap_session_bound_delivery_for_test(enabled: bool) -> bool {
+    SESSION_BOUND_DISCORD_DELIVERY_ENABLED.swap(enabled, Ordering::AcqRel)
+}
+
+#[cfg(test)]
+pub(in crate::services::discord) fn idle_feeder_defers_active_row_for_test(
+    matched: &crate::services::cluster::session_matcher::MatchedChannel,
+    state: &InflightTurnState,
+) -> bool {
+    matches!(
+        idle_jsonl_apply_active_inflight_gate(
+            &mut HashMap::new(),
+            matched,
+            state.channel_id,
+            state,
+        ),
+        idle_jsonl::IdleJsonlInflightGateDecision::DeferUntilCommitted
+    )
+}
+
 pub(in crate::services::discord) fn session_bound_discord_relay_can_own_terminal_delivery(
     inflight: Option<&InflightTurnState>,
     tmux_session_name: &str,

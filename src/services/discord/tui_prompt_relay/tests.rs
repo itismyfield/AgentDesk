@@ -5157,3 +5157,192 @@ fn synthetic_start_offset_carry_forward_never_regresses() {
         "a lagging committed frontier must never drag the synthetic start backwards"
     );
 }
+
+#[cfg(unix)]
+mod native_feeder_birth_regressions {
+    use super::*;
+    use crate::services::cluster::relay_producer_registry::global_relay_producer_registry;
+    use crate::services::cluster::session_matcher::MatchedChannel;
+    use crate::services::cluster::stream_relay::{DiscardSink, spawn_stream_relay};
+    use crate::services::discord::session_relay_sink::{
+        idle_feeder_defers_active_row_for_test, swap_session_bound_delivery_for_test,
+    };
+
+    struct TestStateGuard {
+        session: String,
+        delivery_enabled_before: bool,
+    }
+
+    impl Drop for TestStateGuard {
+        fn drop(&mut self) {
+            global_relay_producer_registry().deregister(&self.session);
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&self.session);
+            swap_session_bound_delivery_for_test(self.delivery_enabled_before);
+        }
+    }
+
+    async fn observe_real_birth(
+        root: &Path,
+        case: u64,
+        feeder: Option<(bool, bool)>,
+    ) -> (ExternalInputRelayOwner, bool) {
+        let channel = ChannelId::new(5_071_080_000 + case);
+        let anchor = MessageId::new(5_071_081_000 + case);
+        let session = format!("AgentDesk-codex-feeder-birth-{case}");
+        let native = root.join(format!("native-rollout-{case}.jsonl"));
+        let transcript = concat!(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"report progress\"}]}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"current episode progress\"}]}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"current episode progress\"}}\n",
+        );
+        std::fs::write(&native, transcript).expect("native source fixture");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        crate::services::codex_tui::rollout_tail::replay_rollout_file(&native, 0, &sender)
+            .expect("production Codex parser accepts the source");
+        drop(sender);
+        assert!(
+            receiver.iter().any(|frame| matches!(frame,
+                StreamMessage::Text { content } if content.contains("current episode progress")
+            )),
+            "the native source must contain eligible progress, not only control frames"
+        );
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            &session,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::CodexTui,
+                output_path: native.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(format!("native-feeder-session-{case}")),
+                last_offset: 0,
+                relay_last_offset: None,
+            },
+        );
+        let _state_guard = TestStateGuard {
+            session: session.clone(),
+            delivery_enabled_before: swap_session_bound_delivery_for_test(true),
+        };
+        let shared = super::super::super::make_shared_data_for_tests_with_storage(None);
+        assert!(shared.pg_pool.is_none());
+        if let Some((paused, stale_heartbeat)) = feeder {
+            let handle = test_watcher_handle(&session, &native);
+            handle.paused.store(paused, Ordering::Relaxed);
+            if stale_heartbeat {
+                handle.last_heartbeat_ts_ms.store(0, Ordering::Relaxed);
+            }
+            shared.tmux_watchers.insert(channel, handle);
+        }
+        let matched = MatchedChannel {
+            channel_id: channel.get().to_string(),
+            agent_id: format!("feeder-birth-{case}"),
+            provider: ProviderKind::Codex,
+            expected_session_name: session.clone(),
+            expected_rollout_path: root.join("absent-wrapper.jsonl").display().to_string(),
+        };
+        let relay = spawn_stream_relay(matched.clone(), Arc::new(DiscardSink));
+        let registry = global_relay_producer_registry();
+        registry.register(session.clone(), relay.producer());
+        assert!(registry.get_live_producer(&session).is_some());
+        let mut lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
+        lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
+        lease.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
+        let claim = super::super::synthetic_start::claim_tui_direct_synthetic_turn(
+            &shared,
+            &ProviderKind::Codex,
+            channel,
+            &session,
+            "report progress",
+            anchor,
+            &lease,
+        )
+        .await;
+        let row =
+            super::super::super::inflight::load_inflight_state(&ProviderKind::Codex, channel.get())
+                .expect("real claim persisted its own row");
+        let mailbox = super::super::super::mailbox_snapshot(&shared, channel).await;
+        assert!(claim.claimed);
+        assert_eq!(row.user_msg_id, anchor.get());
+        assert_eq!(mailbox.active_user_message_id, Some(anchor));
+        assert_eq!(row.turn_nonce, mailbox.active_turn_nonce);
+        assert_eq!(row.output_path.as_deref(), native.to_str());
+        assert_eq!(row.turn_start_offset, Some(0));
+        assert!(mailbox.intervention_queue.is_empty());
+        assert!(
+            !mailbox
+                .cancel_token
+                .as_ref()
+                .unwrap()
+                .cancelled
+                .load(Ordering::Relaxed)
+        );
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        assert_eq!(row.response_sent_offset, 0);
+        assert!(!row.terminal_delivery_committed);
+        assert!(idle_feeder_defers_active_row_for_test(&matched, &row));
+        assert_eq!(relay.metrics().snapshot().frames_received, 0);
+        let yielded =
+            super::super::synthetic_start::wait_for_tui_direct_synthetic_non_bridge_claim(
+                &ProviderKind::Codex,
+                channel,
+                &session,
+            )
+            .await;
+        if let Some((paused, _)) = feeder {
+            let handle = shared.tmux_watchers.get(&channel).expect("feeder retained");
+            assert_eq!(handle.output_path, native.display().to_string());
+            assert_eq!(handle.paused.load(Ordering::Relaxed), paused);
+            assert!(!handle.cancel.load(Ordering::Relaxed));
+        } else {
+            assert!(!shared.tmux_watchers.has_live_watcher_handle(&session));
+        }
+        registry.deregister(&session);
+        relay.shutdown().await;
+        (claim.relay_owner, yielded)
+    }
+
+    #[test]
+    fn registered_passive_consumer_without_native_feeder_keeps_bridge_progress_path() {
+        let root = tempfile::tempdir().expect("isolated runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let observed = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(observe_real_birth(root.path(), 1, None));
+        assert_eq!(
+            observed,
+            (ExternalInputRelayOwner::BridgeAdapter, false),
+            "a registered passive consumer without a matching native feeder must not own this active episode and make the native observer yield"
+        );
+    }
+
+    #[test]
+    fn matching_native_feeder_preserves_fresh_paused_and_stale_heartbeat_owners() {
+        let root = tempfile::tempdir().expect("isolated runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (case, paused, stale_heartbeat) in
+            [(2, false, false), (3, true, false), (4, true, true)]
+        {
+            let (owner, yielded) = runtime.block_on(observe_real_birth(
+                root.path(),
+                case,
+                Some((paused, stale_heartbeat)),
+            ));
+            assert_ne!(owner, ExternalInputRelayOwner::BridgeAdapter);
+            assert!(
+                yielded,
+                "a real matching feeder retains the sole non-bridge route"
+            );
+        }
+    }
+}
