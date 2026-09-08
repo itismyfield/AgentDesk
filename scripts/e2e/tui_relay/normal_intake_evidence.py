@@ -154,23 +154,29 @@ def completion_id(sub, request):
 
 
 def hold_publication_ids(window, observed, rows, marker):
-    """Message IDs that ever carried QA's hold prefix, final views plus recorded edits."""
-    ids = set()
-    for view in (window.raw_messages, rows):
-        for row in view:
-            body = assertions.relay_body(row)
-            if body is None or marker not in body:
-                continue
-            if body.count(marker) != 1:
-                raise assertions.AssertionError(f"E36 repeated hold publication in {row['id']}")
-            ids.add(str(row["id"]))
+    """IDs carrying QA's hold prefix: one bearer per final view, never repeated in any state.
+
+    Edit history proves duplicates the product later edited away, so it may not stand in for
+    the prefix still being published: both contracts keep the PRE text in the final view.
+    """
+    def bearer(mid, body):
+        if body is None or marker not in body:
+            return False
+        if body.count(marker) != 1:
+            raise assertions.AssertionError(f"E36 repeated hold publication in {mid}")
+        return True
+
+    final = [{str(row["id"]) for row in view if bearer(str(row["id"]), assertions.relay_body(row))}
+             for view in (window.raw_messages, rows)]
+    if any(len(view) != 1 for view in final):
+        raise assertions.AssertionError(f"E36 hold publication changed in a final view: {[sorted(v) for v in final]}")
+    ids = set().union(*final)
     for update in window.message_updates:
         mid = str(update["id"])
         if mid not in observed:
             continue
         for field in ("before", "after"):
-            body = assertions.relay_body({**observed[mid], "content": update.get(field) or ""})
-            if body is not None and marker in body:
+            if bearer(mid, assertions.relay_body({**observed[mid], "content": update.get(field) or ""})):
                 ids.add(mid)
     return ids
 

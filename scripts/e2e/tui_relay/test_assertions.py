@@ -330,10 +330,17 @@ class E36EvidenceContract(unittest.TestCase):
             _relay_msg(111, hold), _relay_msg(113, marker), _raw_bot_msg(114, "✅ 응답 완료")]
         qa.update(response_ids=["113"], completion_message_id="114", discord_closed_after_id=114)
         e36.final_assertion(_window(*split), copy.deepcopy(record), split)
-        # E-22 shape: the prefix is stranded on one ID while a second ID republishes it.
-        stranded = split + [_relay_msg(115, f"{hold}\nrepublished")]
-        with self.assertRaisesRegex(assertions.AssertionError, "hold publication"):
-            e36.final_assertion(_window(*stranded), copy.deepcopy(record), stranded)
+        # E-22 shape: the prefix is stranded on one ID while a second ID republishes it. The
+        # rest are edits: history may not hide a duplicate, nor stand in for a retired prefix.
+        gone = [row for row in split if row["id"] != "111"]
+        for name, observed, fresh in (
+                ("stranded", split + [_relay_msg(115, f"{hold}\nrepublished")], None),
+                ("edit_hid_duplicate", split + [_relay_msg(111, f"{hold}\n{hold}"), _relay_msg(111, hold)], split),
+                ("edited_away", split + [_relay_msg(111, "preview cleared")],
+                 gone + [_relay_msg(111, "preview cleared")]),
+                ("deleted", split, gone)):
+            with self.subTest(case=name), self.assertRaisesRegex(assertions.AssertionError, "hold publication"):
+                e36.final_assertion(_window(*observed), copy.deepcopy(record), fresh or observed)
 
     def test_two_ordered_turns_on_one_page_are_attributed_not_called_a_queue_bypass(self):
         from types import SimpleNamespace
