@@ -80,7 +80,7 @@ pub fn run(
 
     let expanded_dir = crate::utils::format::expand_tilde_string(working_dir);
 
-    let (prompt_tx, prompt_rx) = mpsc::channel::<String>();
+    let (prompt_tx, prompt_rx) = mpsc::channel::<input::CodexPrompt>();
 
     input::spawn_terminal_input_reader(input_mode, &prompt_tx);
 
@@ -133,25 +133,38 @@ pub fn run(
         crate::services::tmux_common::WrapperSentinel::ReadyForInput { provider: "codex" },
     );
 
+    let control_ctx = input::ControlContext {
+        codex_model,
+        reasoning_effort,
+    };
     let mut followup_error: Option<String> = None;
     while let Ok(next_prompt) = prompt_rx.recv() {
-        if let Err(err) = run_turn(
-            &mut output,
-            codex_bin,
-            codex_model,
-            reasoning_effort,
-            developer_instructions,
-            &expanded_dir,
-            next_prompt.trim(),
-            &mut thread_id,
-            fast_mode_enabled,
-            goals_enabled,
-            compact_token_limit,
-            add_dirs,
-        ) {
-            emit_result_error(&mut output, &err);
-            followup_error = Some(err);
-            break;
+        let dispatched = input::dispatch_prompt(next_prompt, control_ctx, |text| {
+            run_turn(
+                &mut output,
+                codex_bin,
+                codex_model,
+                reasoning_effort,
+                developer_instructions,
+                &expanded_dir,
+                text,
+                &mut thread_id,
+                fast_mode_enabled,
+                goals_enabled,
+                compact_token_limit,
+                add_dirs,
+            )
+        });
+        match dispatched {
+            Ok(input::DispatchOutcome::RanTurn) => {}
+            // #5660: handled inside the wrapper — no turn ran, so no
+            // ready_for_input sentinel is due either.
+            Ok(input::DispatchOutcome::HandledLocally { .. }) => continue,
+            Err(err) => {
+                emit_result_error(&mut output, &err);
+                followup_error = Some(err);
+                break;
+            }
         }
         // #2442 (H3) — same as above for follow-up turns.
         crate::services::tmux_common::emit_wrapper_sentinel(
@@ -255,14 +268,8 @@ fn run_turn(
 ) -> Result<(), String> {
     emit_status("[sending...]");
 
-    let default_reasoning_effort = codex_model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|_| "high");
-    let effective_reasoning_effort = reasoning_effort
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or(default_reasoning_effort);
+    let effective_reasoning_effort =
+        input::effective_reasoning_effort(reasoning_effort, codex_model);
     let add_dir_refs = add_dirs.iter().map(String::as_str).collect::<Vec<_>>();
     let args = build_codex_exec_args(
         &CodexLaunchOptions::new(prompt)
