@@ -411,11 +411,7 @@ var reviewAutomation = {
         if (isCardEligibleForPrFailureTerminalize(dispatch.kanban_card_id)) {
           markPrCreateFailed(dispatch.kanban_card_id, "missing_canonical_tracking", stampGen);
         } else {
-          recordPrCreateFailureOnly(dispatch.kanban_card_id, "missing_canonical_tracking", stampGen);
-          agentdesk.log.info(
-            "[review] Skipping terminal transition for card " + dispatch.kanban_card_id +
-            " — card has moved past review lifecycle (likely reopened); failure recorded on pr_tracking for the #5716 handoff sweep"
-          );
+          recordPrCreateFailureForSweep(dispatch.kanban_card_id, "missing_canonical_tracking", stampGen);
         }
         return;
       }
@@ -427,11 +423,7 @@ var reviewAutomation = {
         if (isCardEligibleForPrFailureTerminalize(dispatch.kanban_card_id)) {
           markPrCreateFailed(dispatch.kanban_card_id, "no_open_pr_found", stampGen);
         } else {
-          recordPrCreateFailureOnly(dispatch.kanban_card_id, "no_open_pr_found", stampGen);
-          agentdesk.log.info(
-            "[review] Skipping terminal transition for card " + dispatch.kanban_card_id +
-            " — card has moved past review lifecycle (likely reopened); failure recorded on pr_tracking for the #5716 handoff sweep"
-          );
+          recordPrCreateFailureForSweep(dispatch.kanban_card_id, "no_open_pr_found", stampGen);
         }
         return;
       }
@@ -1147,6 +1139,21 @@ function recordPrCreateFailureOnly(cardId, errorMsg, stampGen) {
   }
 }
 
+// #5716 r5: dedup namespace for a failure with no dispatch generation of its own — reading the row back
+// returned the PREVIOUS, already-alerted generation, which swallowed the new alert for the 7-day TTL.
+function preHandoffGeneration(prefix, errorMsg) {
+  return "pre:" + prefix + String(errorMsg || "unknown").split(":")[0];
+}
+
+// #5716 r5: a record op that recorded nothing leaves retry_count at 0 (invisible to the sweep) and this branch stamps no blocked_reason either — hand off now instead of logging a record that did not happen.
+function recordPrCreateFailureForSweep(cardId, errorMsg, stampGen) {
+  if (recordPrCreateFailureOnly(cardId, errorMsg, stampGen)) {
+    agentdesk.log.info("[review] card " + cardId + " has moved past the review lifecycle (likely reopened); create-pr failure recorded on pr_tracking for the #5716 sweep");
+    return;
+  }
+  handOffPrCreateFailure(cardId, errorMsg, null, preHandoffGeneration("record_failed:", errorMsg));
+}
+
 // #5716: durable marker so a handed-off row leaves the sweep candidate set —
 // without it ORDER BY updated_at / LIMIT 20 re-selects the same oldest rows
 // forever and the 21st never lands. The next recordPrCreateFailure overwrites
@@ -1170,8 +1177,13 @@ function markPrCreateHandedOff(cardId, errorMsg) {
 // being excluded forever. Returns true when the generation is settled (alerted now or already alerted);
 // false ONLY when the alert was not delivered, which keeps the row in the sweep candidate set.
 function handOffPrCreateFailure(cardId, errorMsg, retryCount, generation) {
-  var dedupKey = "pr_create_handoff:" + cardId + ":" + (generation || "?");
-  if (agentdesk.kv.get(dedupKey)) return true;
+  var dedupKey = "pr_create_handoff:" + cardId + ":" + (generation || preHandoffGeneration("", errorMsg));
+  if (agentdesk.kv.get(dedupKey)) {
+    // Still a sweep candidate (no marker ⇒ it self-heals once the kv TTL lapses), but bumped so it stops
+    // pinning the head of ORDER BY updated_at LIMIT 20 — 20 such rows starved every newer stranded card.
+    agentdesk.db.execute("UPDATE pr_tracking SET updated_at = datetime('now') WHERE card_id = ? AND dispatch_generation = ?", [cardId, generation || ""]);
+    return "deduped";
+  }
   var card = agentdesk.cards.get(cardId);
   var delivered = notifyDeadlockManager(
     "⚠️ [Create-PR Handoff] " + (card && card.github_issue_number ? ("#" + card.github_issue_number + " ") : "") + cardId +
@@ -1198,8 +1210,9 @@ function handOffPrCreateFailure(cardId, errorMsg, retryCount, generation) {
 // rows the Rust retry_count>=3 threshold moved to 'escalated', rows whose
 // blocked_reason was lost to a crash before the marker UPDATE — and dropping
 // the global terminalState equality covers per-card pipeline overrides and
-// multi-terminal pipelines. The 30-day floor scopes the sweep to rows stranded by this removal: older rows
-// predate it, and without a floor every historical create-pr failure would page an operator after deploy.
+// multi-terminal pipelines. The 30-day floor is a ROLLING window on updated_at, not a removal boundary: it
+// caps the deploy-time page storm from historical failures, and it also expires a failure nobody could
+// alert (no alert channel) 30 days after its last write — see the PR body.
 function sweepStrandedPrCreateFailures() {
   var rows = agentdesk.db.query(
     "SELECT card_id, last_error, retry_count, dispatch_generation FROM pr_tracking " +
@@ -1210,11 +1223,14 @@ function sweepStrandedPrCreateFailures() {
     []
   );
   var handed = 0;
+  var deduped = 0;
   for (var i = 0; i < rows.length; i++) {
     var err = rows[i].last_error || "stranded create-pr tracking row";
-    if (handOffPrCreateFailure(rows[i].card_id, err, rows[i].retry_count, rows[i].dispatch_generation)) handed++;
+    var outcome = handOffPrCreateFailure(rows[i].card_id, err, rows[i].retry_count, rows[i].dispatch_generation);
+    if (outcome === "deduped") deduped++; else if (outcome) handed++;
   }
   if (handed > 0) agentdesk.log.warn("[review] Handed off " + handed + " stranded create-pr card(s) (#5716)");
+  if (deduped > 0) agentdesk.log.info("[review] " + deduped + " create-pr row(s) were already alerted for their generation — bumped behind newer candidates (#5716)");
   return handed;
 }
 
@@ -1274,14 +1290,10 @@ function markPrCreateFailed(cardId, reason, stampGen) {
   );
 
   // 4. Agent/operator handoff — see the #5716 note above. stampGen IS the dispatch generation when the
-  // caller has one (recordPrCreateFailure just stale-guarded it against pr_tracking); pre-handoff failures
-  // pass none, so read the row we just wrote.
-  var generation = stampGen || null;
-  if (!generation) {
-    var genRow = loadPrTracking(cardId);
-    generation = genRow ? genRow.dispatch_generation : null;
-  }
-  var handedOff = handOffPrCreateFailure(cardId, errorMsg, retryCount, generation);
+  // caller has one. A pre-handoff failure passes none, and a record op that recorded nothing leaves the row
+  // invisible to the sweep — both get their own namespace rather than the row's stale, already-alerted one.
+  var handedOff = handOffPrCreateFailure(cardId, errorMsg, retryCount,
+    result ? stampGen : preHandoffGeneration("record_failed:", errorMsg));
 
   agentdesk.log.warn("[review] Card " + cardId + " marked " + blockedReason + " → " + terminalState +
     " (retry_count=" + (retryCount == null ? "?" : retryCount) +
@@ -1870,8 +1882,8 @@ agentdesk.reviewAutomation = agentdesk.reviewAutomation || {};
 agentdesk.reviewAutomation.attemptCreatePr = function(cardId) {
   return attemptCreatePrDispatchForReviewPass(cardId, false);
 };
-agentdesk.reviewAutomation.markPrCreateFailed = function(cardId, reason) {
-  markPrCreateFailed(cardId, reason);
+agentdesk.reviewAutomation.markPrCreateFailed = function(cardId, reason, stampGen) {
+  markPrCreateFailed(cardId, reason, stampGen);
 };
 
 if (typeof module !== "undefined" && module.exports) {
