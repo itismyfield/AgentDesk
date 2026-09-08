@@ -1152,10 +1152,20 @@ function recordFailedGeneration(stampGen, errorMsg) {
   return stampGen ? ("pre:record_failed:" + stampGen) : preHandoffGeneration("record_failed:", errorMsg);
 }
 
-// #5716 r5: a record op that recorded nothing leaves retry_count at 0 (invisible to the sweep) and this branch stamps no blocked_reason either — hand off now instead of logging a record that did not happen. r6: a stale-generation noop rolls its transaction back, so it records nothing either — not a record.
+// #5716 r7: a stale-generation noop (review_automation_ops.rs rolls the tx back) is a VERDICT — "a newer
+// dispatch owns this row" — not a record failure: handing off pages about a dead generation AND lets
+// markPrCreateHandedOff stamp the LIVE row's last_error. Both failure paths return on it, from one rule.
+function isStaleGenerationNoop(cardId, result, stampGen, where) {
+  if (!result || !result.noop) return false;
+  agentdesk.log.info("[review] " + where + " noop for card " + cardId + " — stale generation (stamp=" + (stampGen || "") + ")");
+  return true;
+}
+
+// #5716 r5: a record op that recorded nothing leaves retry_count at 0 (invisible to the sweep) and this branch stamps no blocked_reason either — hand off now instead of logging a record that did not happen.
 function recordPrCreateFailureForSweep(cardId, errorMsg, stampGen) {
   var recordResult = recordPrCreateFailureOnly(cardId, errorMsg, stampGen);
-  if (recordResult && !recordResult.noop) {
+  if (isStaleGenerationNoop(cardId, recordResult, stampGen, "recordPrCreateFailureForSweep")) return;
+  if (recordResult) {
     agentdesk.log.info("[review] card " + cardId + " has moved past the review lifecycle (likely reopened); create-pr failure recorded on pr_tracking for the #5716 sweep");
     return;
   }
@@ -1205,8 +1215,10 @@ function handOffPrCreateFailure(cardId, errorMsg, retryCount, generation) {
       " was NOT delivered (no alert channel, or the outbox enqueue failed) — leaving the row for the next sweep");
     return false;
   }
-  agentdesk.kv.set(dedupKey, errorMsg, 604800);
-  markPrCreateHandedOff(cardId, errorMsg);
+  // #5716 r7: the alert is enqueued from here on, so a throw in the dedup/marker bookkeeping must NOT be
+  // reported back as an undelivered alert — it only leaves the row a sweep candidate, the safe direction.
+  try { agentdesk.kv.set(dedupKey, errorMsg, 604800); markPrCreateHandedOff(cardId, errorMsg); }
+  catch (e) { agentdesk.log.error("[review] create-pr handoff bookkeeping failed for card " + cardId + " AFTER the alert was enqueued (no dedup key, no sweep marker): " + e); }
   return true;
 }
 
@@ -1276,13 +1288,7 @@ function markPrCreateFailed(cardId, reason, stampGen) {
   var result = recordPrCreateFailureOnly(cardId, errorMsg, stampGen);
 
   // Stale generation — the card has moved on, do not terminalize.
-  if (result && result.noop) {
-    agentdesk.log.info(
-      "[review] markPrCreateFailed noop for card " + cardId +
-      " — stale generation (stamp=" + (stampGen || "") + ")"
-    );
-    return;
-  }
+  if (isStaleGenerationNoop(cardId, result, stampGen, "markPrCreateFailed")) return;
 
   var retryCount = result ? result.retry_count : null;
 
@@ -1312,7 +1318,8 @@ function markPrCreateFailed(cardId, reason, stampGen) {
   agentdesk.log.warn("[review] Card " + cardId + " marked " + blockedReason + " → " + terminalState +
     " (retry_count=" + (retryCount == null ? "?" : retryCount) +
     ", handoff=" + (handedOff === "deduped" ? "already-alerted for this generation"
-      : handedOff ? "agent/operator" : "UNDELIVERED — sweep will retry") + ")");
+      : handedOff ? "agent/operator" : retryCount ? "UNDELIVERED — sweep will retry"
+      : "UNDELIVERED — and retry_count 0 keeps the row out of the sweep too") + ")");
 }
 
 function findOpenPrByTrackedBranch(repoId, branch) {
