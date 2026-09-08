@@ -5173,6 +5173,7 @@ mod native_feeder_birth_regressions {
         OtherAnchor,
         LateHandle,
         WatcherMissing,
+        OffsetAdvanced,
     }
 
     async fn observe_real_birth(
@@ -5316,6 +5317,15 @@ mod native_feeder_birth_regressions {
                     .cancel
                     .store(true, Ordering::Release),
                 RefreshFeeder::Unchanged | RefreshFeeder::OtherAnchor => {}
+                // #5755/#5780: Codex TUI's synthetic start offset IS the runtime
+                // binding's `last_offset`, which advances while the turn runs.
+                RefreshFeeder::OffsetAdvanced => assert!(
+                    crate::services::tui_prompt_dedupe::advance_tmux_runtime_binding_offset(
+                        &session,
+                        &native.display().to_string(),
+                        64,
+                    )
+                ),
                 RefreshFeeder::LateHandle => {
                     shared
                         .tmux_watchers
@@ -5351,6 +5361,8 @@ mod native_feeder_birth_regressions {
                 ),
                 progress
             );
+            // A refresh re-keys nothing: `turn_start_offset` is identity and
+            // `last_offset` is this turn's delivery frontier.
             assert_eq!(
                 (row.user_msg_id, row.turn_start_offset, row.last_offset),
                 (anchor.get(), Some(0), 0)
@@ -5420,7 +5432,7 @@ mod native_feeder_birth_regressions {
     }
 
     #[test]
-    fn matching_native_feeder_preserves_fresh_paused_and_stale_heartbeat_owners() {
+    fn matching_native_feeder_admits_live_handles_and_rejects_stale_heartbeat() {
         let observed = run_birth_cases(&[
             (2, Some((false, false, false, false)), None),
             (3, Some((true, false, false, false)), None),
@@ -5431,8 +5443,9 @@ mod native_feeder_birth_regressions {
             vec![
                 (ExternalInputRelayOwner::TmuxWatcher, true),
                 (ExternalInputRelayOwner::TmuxWatcher, true),
-                (ExternalInputRelayOwner::SessionBoundRelay, true),
-            ]
+                (ExternalInputRelayOwner::BridgeAdapter, false),
+            ],
+            "a handle whose poll loop stopped feeding (stale heartbeat, not yet cancelled) must not stamp a session-bound owner"
         );
     }
 
@@ -5455,23 +5468,32 @@ mod native_feeder_birth_regressions {
     }
 
     #[test]
-    fn same_anchor_session_bound_refresh_preserves_owner_after_feeder_loss() {
-        let feeder = Some((true, true, false, false));
+    fn same_anchor_refresh_downgrades_session_bound_owner_after_feeder_loss() {
+        // Live handle tailing a different rollout: watcher cannot own this output,
+        // so birth stamps SessionBound over a genuinely feedable producer.
+        let feeder = Some((true, false, false, true));
         let observed = run_birth_cases(&[
             (7, feeder, Some(RefreshFeeder::Missing)),
             (8, feeder, Some(RefreshFeeder::Cancelled)),
             (9, feeder, Some(RefreshFeeder::Unchanged)),
             (10, feeder, Some(RefreshFeeder::OtherAnchor)),
+            (13, feeder, Some(RefreshFeeder::OffsetAdvanced)),
         ]);
         assert_eq!(
             observed,
-            vec![(ExternalInputRelayOwner::SessionBoundRelay, true); 4],
-            "same-anchor refresh must retain the existing SessionBound owner after feeder loss; missing/cancelled are changed cases, unchanged/other-anchor are controls"
+            vec![
+                (ExternalInputRelayOwner::BridgeAdapter, false),
+                (ExternalInputRelayOwner::BridgeAdapter, false),
+                (ExternalInputRelayOwner::SessionBoundRelay, true),
+                (ExternalInputRelayOwner::SessionBoundRelay, true),
+                (ExternalInputRelayOwner::SessionBoundRelay, true),
+            ],
+            "refresh keeps a SessionBound owner only while its feeder survives; a missing or cancelled feeder must hand the turn back to the bridge tail instead of stranding it with no relayer"
         );
     }
 
     #[test]
-    fn same_anchor_refresh_keeps_bridge_with_late_handle_and_watcher_after_loss() {
+    fn same_anchor_refresh_keeps_bridge_late_handle_and_downgrades_watcher_after_loss() {
         assert_eq!(
             run_birth_cases(&[
                 (11, None, Some(RefreshFeeder::LateHandle)),
@@ -5483,8 +5505,9 @@ mod native_feeder_birth_regressions {
             ]),
             vec![
                 (ExternalInputRelayOwner::BridgeAdapter, false),
-                (ExternalInputRelayOwner::TmuxWatcher, true),
-            ]
+                (ExternalInputRelayOwner::BridgeAdapter, false),
+            ],
+            "a late handle does not take the turn from the bridge, and a watcher owner that lost its handle must not keep the bridge standing down"
         );
     }
 }

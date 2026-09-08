@@ -1159,7 +1159,7 @@ mod tests {
                     turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(crate::services::discord::tmux_watcher_now_ms())),
                 });
-                assert!(shared.tmux_watchers.has_uncancelled_watcher_handle(session));
+                assert_eq!(shared.tmux_watchers.tmux_session_live_for_relay(session), Some(true));
                 let sink = SessionBoundDiscordRelaySink::new(Arc::new(crate::services::discord::health::HealthRegistry::new()));
                 let frame = StreamFrame {
                     session_name: session.to_string(),

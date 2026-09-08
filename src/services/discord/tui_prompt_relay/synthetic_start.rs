@@ -249,11 +249,37 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         && existing.turn_source == TurnSource::ExternalInput
         && existing.user_msg_id == anchor_message_id.get()
     {
-        // Re-claiming this anchor is a refresh, not a delivery-owner handoff.
+        // Re-claiming this anchor is a refresh, not a delivery-owner handoff: keep
+        // the durable owner rather than re-running the birth selection. #5780 r2 —
+        // keep it only while this refresh's own feeder observation still admits it.
+        // A Watcher/SessionBound row whose feeder vanished (handle gone, cancelled,
+        // poll loop stalled past the stale heartbeat, rollout path rotated away from
+        // the row output) has no relayer, and no tick-time recovery downgrades that
+        // shape while the producer stays registered (`orphan_relay_reclaim` requires
+        // producer absence), so pinning it would strand the turn with zero relayers.
+        // Falling back to `BridgeAdapter`/`None` re-arms the watcher-independent tail
+        // and leaves a rejoining watcher to the delivery-lease arbitration.
         let relay_owner = match existing.effective_relay_owner_kind() {
-            RelayOwnerKind::None => ExternalInputRelayOwner::BridgeAdapter,
-            RelayOwnerKind::Watcher => ExternalInputRelayOwner::TmuxWatcher,
-            RelayOwnerKind::SessionBoundRelay => ExternalInputRelayOwner::SessionBoundRelay,
+            RelayOwnerKind::Watcher
+                if tui_direct_watcher_can_own_output(
+                    &shared.tmux_watchers,
+                    tmux_session_name,
+                    output_path.as_deref(),
+                ) =>
+            {
+                ExternalInputRelayOwner::TmuxWatcher
+            }
+            RelayOwnerKind::SessionBoundRelay
+                if tui_direct_session_bound_feed_admissible(
+                    &shared.tmux_watchers,
+                    tmux_session_name,
+                ) =>
+            {
+                ExternalInputRelayOwner::SessionBoundRelay
+            }
+            RelayOwnerKind::None | RelayOwnerKind::Watcher | RelayOwnerKind::SessionBoundRelay => {
+                ExternalInputRelayOwner::BridgeAdapter
+            }
             RelayOwnerKind::StandbyRelay | RelayOwnerKind::Unknown => {
                 if mailbox_activation_occurred {
                     finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id)
@@ -268,14 +294,24 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         };
         let expected = super::super::inflight::InflightTurnIdentity::from_state(&existing);
         let mut existing = existing;
+        existing.set_relay_owner_kind(match relay_owner {
+            ExternalInputRelayOwner::TmuxWatcher => RelayOwnerKind::Watcher,
+            ExternalInputRelayOwner::SessionBoundRelay => RelayOwnerKind::SessionBoundRelay,
+            _ => RelayOwnerKind::None,
+        });
         existing.turn_nonce = active_turn_nonce.clone();
         existing.session_key = lease.session_key.clone();
         existing.runtime_kind = lease.runtime_kind;
         existing.output_path = output_path
             .as_deref()
             .and_then(|path| path.to_str().map(str::to_string));
-        existing.last_offset = start_offset;
-        existing.turn_start_offset = Some(start_offset);
+        // #5780 r2: a refresh must NOT re-key the turn. `turn_start_offset` IS part
+        // of `InflightTurnIdentity`, and for Codex TUI `start_offset` is the runtime
+        // binding's `last_offset`, which advances mid-turn (offset advance on relayed
+        // bytes, rehydration resetting to file length). Restamping it fences out the
+        // stream tick that still holds the pre-refresh identity (#5755's Suppressed
+        // symptom) and moves this turn's start past bytes nobody relayed; restamping
+        // `last_offset` drags the delivery frontier the same way. Both stay durable.
         // #3099 codex re-review (P2): keep this turn's own injected `⏳` message id
         // pinned so completion cleanup never reads a later injection's overwrite of
         // the shared prompt-anchor slot.
@@ -2078,18 +2114,39 @@ pub(super) fn tui_direct_watcher_can_own_output(
     }
 }
 
+/// #5780 r2: may a `SessionBoundRelay` row actually be fed right now?
+///
+/// The passive queue consumer only sees frames a tmux watcher pushes into it, so
+/// a registered producer alone is not enough — and neither is an *uncancelled*
+/// handle whose poll loop stopped: `loop_poll_prologue` restamps the heartbeat on
+/// every poll, so a heartbeat older than `TMUX_WATCHER_STALE_HEARTBEAT_MS` (60s)
+/// means nothing is feeding that producer. Reuse the watcher path's own liveness
+/// predicate so a stalled feeder cannot stamp an unfed session-bound owner.
+pub(super) fn tui_direct_session_bound_feed_admissible(
+    watchers: &super::super::TmuxWatcherRegistry,
+    tmux_session_name: &str,
+) -> bool {
+    watchers
+        .tmux_session_live_for_relay(tmux_session_name)
+        .is_some_and(|live| live)
+        && crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
+            .get_live_producer(tmux_session_name)
+            .is_some()
+}
+
 /// #3876: select first-birth ownership from three caller-supplied signals.
 ///
 /// * A watcher able to own this output keeps `TmuxWatcher`.
-/// * Otherwise, enabled delivery plus a non-shutdown producer and an
-///   uncancelled same-session watcher handle selects `SessionBoundRelay`.
+/// * Otherwise, enabled delivery plus a non-shutdown producer and a LIVE
+///   same-session watcher handle selects `SessionBoundRelay`.
 /// * Otherwise, keep the watcher-independent `BridgeAdapter` tail eligible.
 ///
-/// This snapshot proves neither source correspondence nor ongoing feed health.
-/// StreamRelay is a passive queue consumer; the idle feeder defers active rows,
-/// so registration without a watcher can starve a SessionBound row.
-/// On SessionBound birth the sink owns terminal delivery; existing ownership
-/// guards make the bridge and watcher yield. Same-anchor refresh keeps its owner.
+/// This snapshot proves source correspondence for neither owner, and liveness is
+/// an observation, not a lease. StreamRelay is a passive queue consumer; the idle
+/// feeder defers active rows, so registration without a live watcher starves a
+/// SessionBound row. On SessionBound birth the sink owns terminal delivery;
+/// existing ownership guards make the bridge and watcher yield. Same-anchor
+/// refresh keeps its own owner as long as that owner's feeder is still admissible.
 pub(super) fn tui_direct_synthetic_relay_owner(
     watcher_can_own: bool,
     session_bound_discord_delivery_enabled: bool,
