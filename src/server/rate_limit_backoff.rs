@@ -1,14 +1,14 @@
 //! Backoff schedule for the Claude leg of `rate_limit_sync_loop`. Pure (no
-//! clock, no I/O): the caller injects `now`, so the schedule is testable. In
-//! production the usage endpoint answered 429 for ~31% of polls (3-day sample:
-//! 1,980 ok vs 907 limited) because the loop held the same 120 s cadence.
+//! clock, no I/O): the caller injects `now`, so the schedule is testable. The
+//! loop's fixed 120 s cadence drew 429s on ~31% of polls in production.
 //!
 //! Policy: success → base interval (120 s), counters reset; 429 with a usable
 //! `Retry-After` → that long, clamped to the max; 429 without one → exponential
 //! 120/240/480 s … capped at 30 min; any other error → base interval. Only the
 //! Claude fetch is skipped while `not_before` is in the future. That 30-minute
 //! ceiling is the *no-pressure* one: while the cached telemetry still defers
-//! dispatch, the caller shortens the hold via [`ClaudeSyncBackoff::cap_hold`].
+//! dispatch the caller drops the hold ([`ClaudeSyncBackoff::release_hold`]), so
+//! the leg keeps the base cadence and that pressure stays observable.
 use std::time::{Duration, Instant};
 
 pub(crate) const RATE_LIMIT_SYNC_BASE_INTERVAL: Duration = Duration::from_secs(120);
@@ -100,19 +100,12 @@ impl ClaudeSyncBackoff {
         self.consecutive_rate_limits
     }
 
-    /// Shortens an in-progress hold to at most `cap` from `now`, returning the
-    /// resulting delay; it never lengthens one. `cap` is the deadline by which
-    /// still-deferring telemetry must be re-observed, set by the gate's stale
-    /// window rather than by `Retry-After`.
-    pub(crate) fn cap_hold(&mut self, cap: Duration, now: Instant) -> Duration {
-        let capped = now + cap;
-        if self
-            .not_before
-            .is_some_and(|not_before| not_before > capped)
-        {
-            self.not_before = Some(capped);
-        }
-        self.remaining(now)
+    /// Drops an in-progress hold so this tick attempts: never creates one, and
+    /// leaves the 429 streak and the ladder alone. The caller does this while
+    /// the cached telemetry still defers, since below the base cadence that
+    /// pressure cannot be re-observed at all (#5727).
+    pub(crate) fn release_hold(&mut self) {
+        self.not_before = None;
     }
 
     /// Records a fetch outcome and returns the delay applied before the next
@@ -160,7 +153,6 @@ mod tests {
         Duration::from_secs(value)
     }
 
-    /// A 429 outcome, with or without a usable `Retry-After`.
     fn limited(retry_after: Option<u64>) -> ClaudeSyncOutcome {
         ClaudeSyncOutcome::RateLimited {
             retry_after: retry_after.map(secs),
@@ -191,7 +183,7 @@ mod tests {
         assert_eq!(backoff.record(ClaudeSyncOutcome::Success, t0), secs(120));
         backoff.record(limited(None), t0);
         // An unrelated error keeps the cadence and clears the hold, but must
-        // not restart the 429 ladder either.
+        // not restart the 429 ladder.
         assert_eq!(
             backoff.record(ClaudeSyncOutcome::OtherError, t0 + secs(120)),
             secs(120)
