@@ -439,6 +439,10 @@ fn write_launch_script(
 }
 
 #[cfg(test)]
+#[path = "session/auto_compact_launch_tests.rs"]
+mod auto_compact_launch_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
