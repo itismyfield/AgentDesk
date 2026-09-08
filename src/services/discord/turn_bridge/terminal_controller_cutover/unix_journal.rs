@@ -69,15 +69,9 @@
 //! `scripts/ci-script-checks.sh`.
 
 #[cfg(unix)]
-use super::super::super::session_relay_sink as sink;
-
-#[cfg(unix)]
-pub(super) use sink::journal::controller::{
+pub(super) use super::super::super::session_relay_sink::journal::controller::{
     ControllerDisposition as Disposition, begin_controller_terminal, settle_controller_terminal,
 };
-
-#[cfg(all(test, unix))]
-pub(super) use sink::SessionBoundDiscordRelaySink;
 
 /// The non-unix observation type: an uninhabited enum, so the only value of
 /// `Option<NoJournalOnThisPlatform>` is `None`. This is the type-level statement

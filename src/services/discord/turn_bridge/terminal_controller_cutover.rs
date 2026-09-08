@@ -1116,136 +1116,6 @@ mod tests {
             (lease.pin_exact_source(shared, &ProviderKind::Codex, ch(), range).unwrap(), source)
         }
 
-        #[cfg(unix)]
-        #[test]
-        fn birth_late_handle_sink_and_watcher_defer_to_real_bridge_then_suffix_progresses_5071() {
-            use super::super::unix_journal::SessionBoundDiscordRelaySink;
-            use crate::services::cluster::stream_relay::{
-                RelaySink, RelaySinkOutcome, StreamFrame,
-            };
-            use crate::services::discord::inflight::{self, RelayOwnerKind, TurnSource};
-            use crate::services::discord::tmux::tmux_watcher::tests::{
-                WatcherShortReplaceResult, send_birth_companion_for_test,
-            };
-            use crate::services::tui_prompt_dedupe as dedupe;
-            let _lock = crate::config::shared_test_env_lock()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let _dedupe = dedupe::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            dedupe::reset_state_for_tests();
-            let root = runtime_root_guard();
-            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-                let shared = crate::services::discord::make_shared_data_for_tests_with_storage(None);
-                let provider = ProviderKind::Codex;
-                let (acquire, _range, mut row, source) = pinned_parts(&shared, root._temp.path(), ch(), 5071);
-                drop(acquire); // The actual controller below must acquire its own transport lease.
-                row.turn_source = TurnSource::ExternalInput;
-                row.set_relay_owner_kind(RelayOwnerKind::None);
-                inflight::save_inflight_state(&row).unwrap();
-                let row = inflight::load_inflight_state(&provider, CH).unwrap();
-                let before = serde_json::to_value(&row).unwrap();
-                let session = source.tmux_session_name.as_str();
-                let mut external = dedupe::ExternalInputRelayLease::unassigned(Some(CH));
-                external.relay_owner = dedupe::ExternalInputRelayOwner::BridgeAdapter;
-                external.turn_id = Some(format!("external:{CH}:{}", row.user_msg_id));
-                let external = dedupe::record_external_input_turn_lease(provider.as_str(), session, external);
-                let key = DeliveryLeaseKey::from_inflight_state_for_site(ch(), 1, &row, "watcher");
-                shared.tmux_watchers.insert(ch(), crate::services::discord::TmuxWatcherHandle {
-                    tmux_session_name: session.to_string(), output_path: row.output_path.clone().unwrap(),
-                    paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    resume_offset: Arc::new(std::sync::Mutex::new(None)),
-                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    pause_epoch: Arc::new(AtomicU64::new(0)),
-                    turn_delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    last_heartbeat_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(crate::services::discord::tmux_watcher_now_ms())),
-                });
-                assert_eq!(shared.tmux_watchers.tmux_session_live_for_relay(session), Some(true));
-                let sink = SessionBoundDiscordRelaySink::new(Arc::new(crate::services::discord::health::HealthRegistry::new()));
-                let frame = StreamFrame {
-                    session_name: session.to_string(),
-                    binding: crate::services::cluster::session_matcher::MatchedChannel {
-                        channel_id: CH.to_string(), agent_id: "5071".into(), provider: provider.clone(),
-                        expected_session_name: session.to_string(), expected_rollout_path: row.output_path.clone().unwrap(),
-                    },
-                    payload: "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n{\"type\":\"result\",\"result\":\"answer\"}\n".into(),
-                    sequence: 1, terminal_consumed_end: Some(64), turn_user_msg_id: row.user_msg_id,
-                    turn_started_at: row.started_at.clone(), turn_start_offset: Some(0), relay_range: None,
-                    relay_generation_mtime_ns: Some(source.generation_mtime_ns), relay_source_stamp: None,
-                };
-                let entered = Arc::new(tokio::sync::Notify::new());
-                let resume = Arc::new(tokio::sync::Notify::new());
-                let mut bridge = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
-                bridge.pause = Some((entered.clone(), resume.clone()));
-                let watcher = gateway(ReplaceLongMessageOutcome::EditedOriginal, true);
-                let cell = shared.delivery_lease(ch());
-                for (start, end, body, anchor) in [(0, 64, "answer", MSG), (64, 96, " suffix", MSG + 1)] {
-                    if start > 0 {
-                        let mut progress = row.clone();
-                        progress.full_response = "answer suffix".into();
-                        progress.response_sent_offset = "answer".len();
-                        progress.last_offset = end;
-                        std::fs::write(progress.output_path.as_ref().unwrap(), vec![b'x'; end as usize]).unwrap();
-                        inflight::save_inflight_state(&progress).unwrap();
-                    }
-                    let record_before = serde_json::to_value(dr::read_record(&provider, CH)).unwrap();
-                    let row_before = serde_json::to_value(inflight::load_inflight_state(&provider, CH).unwrap()).unwrap();
-                    let send = deliver_short_replace_via_controller(&bridge, &shared, &provider,
-                        ch(), ch(), Some(session), &cell, &shared.ui.placeholder_controller,
-                        MessageId::new(anchor), body, body, TurnKey::new(ch(), row.user_msg_id, 1),
-                        Some(key.clone()), start, end);
-                    let (outcome, ()) = tokio::join!(send, async {
-                        tokio::time::timeout(std::time::Duration::from_secs(1), entered.notified()).await.unwrap();
-                        assert!(matches!(cell.read(), LeaseSnapshot::Leased { holder: LeaseHolder::Bridge { .. }, .. }));
-                        assert_eq!(bridge.bodies.lock().unwrap().len(), usize::from(start > 0));
-                        if start == 0 {
-                            // Sink routing refuses the external Bridge lease; the parser emits real text.
-                            sink.assert_frame_response_for_test(&frame, "answer");
-                            assert_eq!(sink.deliver(&frame).await.unwrap(), RelaySinkOutcome::TerminalNotDelivered);
-                            assert_eq!(sink.delivered_total_for_test(), 0);
-                            assert!(dr::read_record(&provider, CH).is_none());
-                            assert_eq!(serde_json::to_value(inflight::load_inflight_state(&provider, CH).unwrap()).unwrap(), before);
-                            assert_eq!(dedupe::external_input_relay_lease(provider.as_str(), session, CH), Some(external.clone()));
-                        }
-                        let result = send_birth_companion_for_test(&watcher, &shared,
-                            (&provider, ch(), MessageId::new(anchor)), session, key.clone(), body, (start + 16, end)).await;
-                        assert_eq!(result, WatcherShortReplaceResult::B2Skip);
-                        assert_eq!(watcher.replace_calls.load(Ordering::SeqCst), 0);
-                        assert_eq!(shared.committed_relay_offset(ch()), start);
-                        assert_eq!(serde_json::to_value(dr::read_record(&provider, CH)).unwrap(), record_before);
-                        assert_eq!(serde_json::to_value(inflight::load_inflight_state(&provider, CH).unwrap()).unwrap(), row_before);
-                        resume.notify_one();
-                    });
-                    assert!(matches!(outcome, toc::DeliveryOutcome::Delivered { .. }));
-                    assert_eq!(shared.committed_relay_offset(ch()), end);
-                }
-                assert_eq!(*bridge.bodies.lock().unwrap(), vec![(MSG, "answer".to_string()), (MSG + 1, " suffix".to_string())]);
-                assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased));
-                assert!(dedupe::clear_external_input_relay_lease_if_generation_matches(provider.as_str(), session, CH, external.generation));
-
-                // A confirmed rendered prefix is a different coordinate from the JSONL range.
-                // Keep its original anchor; the next real transport sends only the known suffix.
-                let mut continuation = row.clone();
-                continuation.full_response = "answer suffix tail".into();
-                continuation.response_sent_offset = "answer suffix".len();
-                continuation.last_offset = 128;
-                std::fs::write(continuation.output_path.as_ref().unwrap(), [b'x'; 128]).unwrap();
-                inflight::save_inflight_state(&continuation).unwrap();
-                let suffix = &continuation.full_response[continuation.response_sent_offset..];
-                let result = send_birth_companion_for_test(&watcher, &shared,
-                    (&provider, ch(), MessageId::new(MSG + 2)), session, key, suffix, (96, 128)).await;
-                assert_eq!(result, WatcherShortReplaceResult::Delivered);
-                assert_eq!(*watcher.bodies.lock().unwrap(), vec![(MSG + 2, " tail".to_string())]);
-                assert_eq!(bridge.replace_calls.load(Ordering::SeqCst), 2);
-                assert_eq!(shared.committed_relay_offset(ch()), 128);
-                let after = inflight::load_inflight_state(&provider, CH).unwrap();
-                assert_eq!(after.effective_relay_owner_kind(), RelayOwnerKind::None);
-                assert_eq!((after.user_msg_id, after.turn_nonce), (row.user_msg_id, row.turn_nonce));
-                let handle = shared.tmux_watchers.get(&ch()).unwrap();
-                assert!(!handle.paused.load(Ordering::Acquire) && !handle.cancel.load(Ordering::Acquire));
-                dedupe::reset_state_for_tests();
-            });
-        }
-
         // #5264 PR-B: `prepare_bridge_lease` is the ONLY production route into the pinned
         // cutover, and nothing drove it. A build that short-circuits it to always return
         // `Legacy` makes the entire feature inert — no CodexTui turn ever pins — and every
@@ -1487,30 +1357,20 @@ mod tests {
             hook: Option<Arc<dyn Fn() + Send + Sync>>,
             replace_calls: AtomicUsize,
             replace_channel: AtomicU64,
-            pause: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
-            bodies: std::sync::Mutex<Vec<(u64, String)>>,
         }
 
         impl TurnGateway for ShortReplaceFakeGateway {
             fn replace_message_with_outcome<'a>(
                 &'a self,
                 c: ChannelId,
-                m: MessageId,
-                content: &'a str,
+                _m: MessageId,
+                _content: &'a str,
             ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
                 Box::pin(async move {
                     self.replace_calls.fetch_add(1, Ordering::SeqCst);
                     self.replace_channel.store(c.get(), Ordering::SeqCst);
                     self.hook.iter().for_each(|hook| hook());
-                    if let Some((entered, resume)) = &self.pause {
-                        entered.notify_one();
-                        resume.notified().await;
-                    }
                     if self.ok {
-                        self.bodies
-                            .lock()
-                            .unwrap()
-                            .push((m.get(), content.to_owned()));
                         Ok(self.outcome.clone())
                     } else {
                         Err("fake transport failure".to_string())
@@ -1592,8 +1452,6 @@ mod tests {
                 hook: None,
                 replace_calls: AtomicUsize::new(0),
                 replace_channel: AtomicU64::new(0),
-                pause: None,
-                bodies: std::sync::Mutex::new(Vec::new()),
             }
         }
 

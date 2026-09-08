@@ -2537,4 +2537,4 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
 #[cfg(test)]
 #[path = "tmux_watcher/tests.rs"]
-pub(in crate::services::discord) mod tests;
+mod tests;
