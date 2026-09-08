@@ -347,6 +347,61 @@ class SerializationTests(TokenTestCase):
         self.assertGreater(waited, 0.5, "second wrapper did not wait for the first")
 
 
+class ReentrantContractTests(TokenTestCase):
+    """Pending #5663 requirement; deliberately RED on the non-reentrant wrapper."""
+
+    def test_nested_cli_completes_under_outer_lease_without_self_deadlock(self) -> None:
+        entered, completed = self.tmp / "inner.entered", self.tmp / "command.completed"
+        before = self.token.stat()
+        # This is a Python sentinel, not Cargo or a deploy simulation. Its
+        # independent open must still see a live lease when it finally runs.
+        sentinel = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        with open(sys.argv[2], "a") as completed:
+            completed.write("ran\\n")
+    else:
+        raise AssertionError("nested command ran without a live outer lease")
+finally:
+    os.close(fd)
+"""
+        protected = [sys.executable, "-c", sentinel, str(self.token), str(completed)]
+        # Both subprocesses execute the real main/parse/run/hold_token code.
+        # The existing seal only binds run(path=temporary_inode) and refuses a
+        # canonical-token open. No inherited-FD option or bypass flag is invented.
+        inner_body = (
+            f"with open({str(entered)!r}, 'w') as entered:\n"
+            "    entered.write('%d %d' % (os.getpid(), os.getppid()))\n"
+            f"raise SystemExit(bt.main(['build_token.py', '--', *{protected!r}]))\n"
+        )
+        inner = [sys.executable, "-c", _SEAL + inner_body, str(self.token)]
+        outer = self.driver(
+            f"raise SystemExit(bt.main(['build_token.py', '--', *{inner!r}]))",
+            env={bt.WAIT_TIMEOUT_ENV: "1", bt.DIAG_FD_ENV: ""},
+        )
+        self.addCleanup(outer.wait, timeout=10)
+        self.addCleanup(outer.terminate)
+        _, err = outer.communicate(timeout=15)
+        self.assertNotIn("fixture breach", err)
+        self.assertTrue(entered.exists(), f"inner wrapper never started: {err}")
+        inner_pid, parent_pid = map(int, entered.read_text().split())
+        self.assertNotEqual(inner_pid, outer.pid)
+        self.assertEqual(parent_pid, outer.pid, "inner must be the real protected child")
+        after = self.token.stat()
+        self.assertEqual((before.st_dev, before.st_ino), (after.st_dev, after.st_ino))
+        self.assertEqual(
+            outer.returncode, 0,
+            "accepted nested invocation must finish while the outer wrapper owns "
+            f"the same token, instead of timing out reacquiring it: {err}",
+        )
+        self.assertTrue(completed.exists(), "nested protected command was never run")
+        self.assertEqual(completed.read_text(), "ran\n", "protected command must run once")
+
+
 @unittest.skipUnless(sys.platform == "darwin", "SIGEMT is Darwin-specific here")
 class SigemtLifetimeTests(TokenTestCase):
     """The exact regression: SIGEMT to the wrapper must not free a live build."""
