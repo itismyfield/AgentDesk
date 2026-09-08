@@ -3670,6 +3670,7 @@ services::discord::placeholder_live_events::tests::live_panel_render_preserves_s
 services::discord::placeholder_live_events::tests::live_status_panel_never_leaks_dangling_fence_when_bloated
 services::discord::placeholder_live_events::tests::monitor_handoff_live_events_stays_under_description_limit_with_long_command
 services::discord::placeholder_live_events::tests::monitor_tool_summaries_redact_command_fields_before_markdown
+services::discord::placeholder_live_events::tests::multiline_activity_marker_stays_on_first_header_and_out_of_answer_footer
 services::discord::placeholder_live_events::tests::newer_panel_cache_invalidation_survives_stale_clear
 services::discord::placeholder_live_events::tests::normalize_summary_stays_single_line_for_panel_cells
 services::discord::placeholder_live_events::tests::panel_cache_invalidation_forces_byte_stable_render_once

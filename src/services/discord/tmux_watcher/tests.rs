@@ -2723,8 +2723,15 @@ fn orphan_turn_placeholder_reclaim_decision() {
 
 #[test]
 fn orphan_reclaim_preserves_actual_panel_footer_answers() {
+    use crate::services::discord::single_message_panel::compose_footer_status_block as compose;
+    let multiline =
+        crate::services::discord::placeholder_live_events::multiline_panels_for_probe_tests()
+            .into_iter()
+            .map(|panel| format!("실제 답변\n{}", compose("⠸", &panel)));
     for answer in
         crate::services::discord::placeholder_live_events::rendered_answers_for_probe_tests()
+            .into_iter()
+            .chain(multiline)
     {
         assert!(
             !watcher_should_reclaim_orphan_turn_placeholder(

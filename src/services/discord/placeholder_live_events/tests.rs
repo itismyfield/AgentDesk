@@ -665,6 +665,28 @@ fn status_panel_codex_active_omits_processing_tail_after_recent_block() {
 }
 
 #[test]
+fn multiline_activity_marker_stays_on_first_header_and_out_of_answer_footer() {
+    use super::super::{
+        placeholder_sweeper::is_message_still_placeholder as probe,
+        single_message_panel::compose_footer_status_block as compose,
+    };
+    let marker = super::super::formatting::PLACEHOLDER_PROBE_MARKER;
+    for (index, panel) in multiline_panels_for_probe_tests().into_iter().enumerate() {
+        let prefix = ["🧵 subagent 실행 중", "🧬 workflow 실행 중"][index % 2];
+        let first_line = panel.lines().next().unwrap();
+        assert!(first_line.ends_with(marker), "{panel:?}");
+        assert_eq!(panel.matches(marker).count(), 1);
+        assert!(probe(&panel));
+        let visible = format!("-# {prefix} (first\n-# second)\n-# time");
+        assert_eq!(panel.replace(marker, ""), visible);
+        let footer = compose("⠸", &panel);
+        assert!(!footer.contains(marker), "{footer:?}");
+        assert!(!probe(&footer));
+        assert!(!probe(&format!("실제 답변\n{footer}")));
+    }
+}
+
+#[test]
 fn status_panel_marker_uses_snapshot_before_codex_task_projection() {
     use super::super::{
         formatting::PLACEHOLDER_PROBE_MARKER, placeholder_sweeper::is_message_still_placeholder,

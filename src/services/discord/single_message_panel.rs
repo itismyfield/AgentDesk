@@ -1094,7 +1094,7 @@ mod tests {
     fn footer_strips_only_exact_panel_header_marker_suffix() {
         let marker = super::super::formatting::PLACEHOLDER_PROBE_MARKER;
         let suffix =
-            super::compose_footer_status_block("⠸", &format!("-# 🔧 activity{marker}\ntime"));
+            super::compose_footer_status_block("⠸", &format!("-# 🔧 activity{marker}\r\ntime"));
         assert!(!suffix.contains(marker));
         let embedded = super::compose_footer_status_block(
             "⠸",

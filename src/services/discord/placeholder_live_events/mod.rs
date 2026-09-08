@@ -86,6 +86,28 @@ pub(in crate::services::discord) fn rendered_panels_for_probe_tests() -> Vec<(St
 }
 
 #[cfg(test)]
+pub(in crate::services::discord) fn multiline_panels_for_probe_tests() -> Vec<String> {
+    let mut panels = Vec::new();
+    for separator in ["\n", "\r\n"] {
+        for status in [
+            DerivedStatus::SubagentRunning {
+                desc: format!("first{separator}second"),
+            },
+            DerivedStatus::WorkflowRunning {
+                label: format!("first{separator}second"),
+            },
+        ] {
+            let mut snapshot = StatusPanelState::default();
+            snapshot.status = status;
+            let panel = render_status_panel(snapshot, &ProviderKind::Claude, "time".into(), None);
+            panels.push(panel);
+        }
+    }
+    assert_eq!(panels.len(), 4);
+    panels
+}
+
+#[cfg(test)]
 pub(in crate::services::discord) fn rendered_answers_for_probe_tests() -> Vec<String> {
     let panel = rendered_panels_for_probe_tests().remove(0).0;
     let footer = super::single_message_panel::compose_footer_status_block("⠸", &panel);
