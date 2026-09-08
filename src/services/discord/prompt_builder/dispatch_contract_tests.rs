@@ -1437,3 +1437,48 @@ fn foreign_workspace_full_prompt_omits_repo_relative_doc_paths() {
         "foreign workspace must not reference docs/memory-scope.md, got: {prompt}"
     );
 }
+
+#[test]
+fn implementation_and_rework_render_one_pr_merge_contract_for_every_merge_strategy_mode_input() {
+    // #5716: merge_strategy_mode no longer selects a completion contract.
+    let dispatch_contexts = [
+        None,
+        Some(r#"{"merge_strategy_mode":""}"#),
+        Some(r#"{"merge_strategy_mode":"unknown-mode"}"#),
+        Some(r#"{"merge_strategy_mode":"direct-first"}"#),
+        Some(r#"{"merge_strategy_mode":"pr-always"}"#),
+    ];
+
+    let mut rendered = Vec::new();
+    for dispatch_type in ["implementation", "rework"] {
+        for dispatch_context in dispatch_contexts {
+            let current_task = CurrentTaskContext {
+                dispatch_id: Some("dispatch-5716"),
+                dispatch_context,
+                ..CurrentTaskContext::default()
+            };
+            let contract = render_dispatch_contract(Some(dispatch_type), &current_task)
+                .expect("dispatch contract");
+            let case = format!("{dispatch_type}/{dispatch_context:?}");
+
+            assert!(
+                contract.contains("처음부터 별도 브랜치에서 작업하고"),
+                "{case} lost the PR contract: {contract}"
+            );
+            for banned in [
+                "git push origin HEAD:main",
+                "direct-first",
+                "PR fallback",
+                "merge_strategy_mode",
+            ] {
+                assert!(!contract.contains(banned), "{case} injected `{banned}`");
+            }
+            rendered.push(contract);
+        }
+    }
+
+    assert!(
+        rendered.windows(2).all(|pair| pair[0] == pair[1]),
+        "merge_strategy_mode still varies the rendered dispatch contract"
+    );
+}
