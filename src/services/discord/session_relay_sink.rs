@@ -570,6 +570,11 @@ impl SessionBoundDiscordRelaySink {
     }
 
     #[cfg(test)]
+    pub(in crate::services::discord) fn delivered_total_for_test(&self) -> u64 {
+        self.delivered_total.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
     fn with_lease_test_probe(
         health_registry: Arc<HealthRegistry>,
         lease_test_probe: Arc<SinkLeaseTestProbe>,

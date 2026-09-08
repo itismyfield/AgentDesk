@@ -6405,6 +6405,7 @@ services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_owner_
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_owner_flush_persists_and_clears_dirty
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::second_rollover_failure_keeps_bound_m2_and_deletes_only_unbound_m3
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::strict_fence_loses_authority_before_visible_mutation
+services::discord::turn_bridge::stream_tick::guarded_persist::tests::synthetic_birth_successor_and_owner_handoff_refuse_final_visible_fence_5071
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::the_shipped_dial_admits_no_channel_to_the_stream_loop_enforcement_cohort
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::the_tick_reads_the_enforcement_cohort_once_and_both_gate_sites_use_that_read
 services::discord::turn_bridge::stream_tick::guarded_persist::tests::visible_authority_distinguishes_bridge_self_delegation_and_foreign_projection
@@ -6436,6 +6437,7 @@ services::discord::turn_bridge::task_notification_lifecycle::task_notification_k
 services::discord::turn_bridge::task_notification_lifecycle::task_notification_kind_lifecycle_tests::kind_releases_immediately_when_queue_was_already_singleton
 services::discord::turn_bridge::task_notification_lifecycle::task_notification_kind_lifecycle_tests::lower_priority_child_close_preserves_higher_priority_kind
 services::discord::turn_bridge::task_notification_lifecycle::task_notification_kind_lifecycle_tests::non_terminal_status_keeps_kind_and_does_not_pop
+services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::birth_late_handle_sink_and_watcher_defer_to_real_bridge_then_suffix_progresses_5071
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::bridge_long_chunks_acquire_transient_no_send
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::bridge_long_chunks_controller_delivered_deletes_anchor_and_advances
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::bridge_long_chunks_delete_failure_still_commits

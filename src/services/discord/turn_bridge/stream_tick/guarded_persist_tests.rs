@@ -560,6 +560,87 @@ fn reowned_flush_skips_without_clobbering_or_retrying_dirty() {
 }
 
 #[test]
+fn synthetic_birth_successor_and_owner_handoff_refuse_final_visible_fence_5071() {
+    with_runtime_root(|| {
+        for change in 0..3 {
+            let channel = ChannelId::new(5_071_095_000 + change);
+            let mut stale = owner_state(channel.get(), 5_071_095_100 + change);
+            stale.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+            stale.turn_nonce = Some("birth-actor-nonce".into());
+            stale.current_msg_id = 5_071_095_200 + change;
+            save_inflight_state(&stale).unwrap();
+            let mut baseline = load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap();
+            stale = baseline.clone();
+            let expected =
+                crate::services::discord::inflight::InflightTurnIdentity::from_state(&stale);
+            let authority =
+                crate::services::discord::inflight::StreamRelayAuthority::from_state(&stale);
+            let mut successor = baseline.clone();
+            match change {
+                0 => successor.user_msg_id += 1,
+                1 => successor.turn_start_offset = Some(4096),
+                _ => successor.set_relay_owner_kind(
+                    crate::services::discord::inflight::RelayOwnerKind::Watcher,
+                ),
+            }
+            if change < 2 {
+                successor.turn_nonce = Some("successor-actor-nonce".into());
+            }
+            successor.full_response = "successor-owned body".into();
+            save_inflight_state(&successor).unwrap();
+            let before = serde_json::to_value(
+                load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap(),
+            )
+            .unwrap();
+            stale.full_response = "forbidden stale body".into();
+            let mut expected_message = (stale.current_msg_id, stale.current_msg_len);
+            let mut current = MessageId::new(stale.current_msg_id);
+            let gateway = super::super::provider_output_guard_tests::CapturingGateway::default();
+            let outcome = persist_stream_tick_visible_mutation_fence(
+                &mut baseline,
+                &mut stale,
+                &expected,
+                &mut expected_message,
+                &mut current,
+                channel,
+                "turn_bridge::stream_tick::5071_birth_send_fence",
+            );
+            assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+            for cohort in [false, true] {
+                let permission = visible_mutation_authority_after_guarded_save(
+                    outcome, &stale, authority, cohort,
+                )
+                .mutation_permission();
+                if permission == Some(true) {
+                    futures::executor::block_on(
+                        gateway.send_message(channel, &stale.full_response),
+                    )
+                    .unwrap();
+                }
+                assert_ne!(permission, Some(true));
+            }
+            assert!(gateway.sends.lock().unwrap().is_empty());
+            assert!(gateway.edits.lock().unwrap().is_empty());
+            assert!(gateway.deletes.lock().unwrap().is_empty());
+            assert_eq!(
+                serde_json::to_value(
+                    load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap()
+                )
+                .unwrap(),
+                before
+            );
+            assert!(
+                crate::services::discord::outbound::delivery_record::read_record(
+                    &ProviderKind::Codex,
+                    channel.get()
+                )
+                .is_none()
+            );
+        }
+    });
+}
+
+#[test]
 fn same_owner_clear_after_bind_survives_dirty_flush() {
     with_runtime_root(|| {
         let channel = ChannelId::new(4_259_103);
