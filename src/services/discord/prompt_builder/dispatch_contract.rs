@@ -5,18 +5,11 @@ pub(super) const DISPATCH_CONTRACT_COMMON: &str = "- 구현이 불필요하고 �
      - tracked 변경이 남아 있으면 noop를 사용하지 않는다.\n\
      - 관련 검증(`cargo build`, 좁은 테스트 등)을 직접 실행하고 결과를 최종 응답에 포함한다.\n\
      - `▶ Ready for input (type message + Enter)` 는 완료 마커가 아니다.";
-pub(super) const DIRECT_FIRST_COMPLETION_CONTRACT: &str = "- `merge_strategy_mode=direct-first` 기본 계약:\n\
-     - origin/main 기준으로 worktree에 타 작업이 섞이지 않았는지 확인한다.\n\
-     - 커밋 메시지는 `#<issue> <title>` 형식을 사용한다.\n\
-     - 완료 조건은 `git commit` 뒤 `git push origin HEAD:main` 성공이다.\n\
-     - `git push` 가 non-fast-forward, pre-push hook, 권한 오류 등으로 실패하면 그대로 멈추지 말고 자동으로 PR fallback 경로로 전환한다.\n\
-     - PR fallback: `origin/main` 위에 clean branch를 다시 만들고 cherry-pick 후 push, PR open, auto-merge enable 까지 진행한다.\n\
-     - direct push 와 PR fallback 이 모두 실패하면 대기 상태로 두지 말고 실패 사유를 명시적으로 남긴다.";
-pub(super) const PR_ALWAYS_COMPLETION_CONTRACT: &str = "- `merge_strategy_mode=pr-always` 계약:\n\
-     - 처음부터 별도 브랜치에서 작업하고 `main` 에 직접 커밋하지 않는다.\n\
+pub(super) const PR_MERGE_COMPLETION_CONTRACT: &str = "- 머지 계약 (설정과 무관하게 항상 적용):\n\
+     - 처음부터 별도 브랜치에서 작업하고 `main` 에 직접 커밋하거나 push 하지 않는다.\n\
      - 구현/검증 후 브랜치를 push 하고 PR 을 연다.\n\
-     - PR 생성 후 review 요청과 auto-merge enable 까지 수행한다.\n\
-     - 이 모드의 완료 조건은 direct push 가 아니라 `PR open + auto-merge enabled` 이다.";
+     - PR 생성 후 review 요청까지 수행하고, CI·리뷰 결과를 직접 babysitting 한다(실패하면 같은 PR 에서 수리 후 재시도).\n\
+     - 완료 조건은 direct push 가 아니라 `PR open + babysitting` 이다.";
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CurrentTaskContext<'a> {
@@ -341,21 +334,6 @@ pub(super) fn render_dispatch_contract(
 ) -> Option<String> {
     match dispatch_type {
         Some("implementation") | Some("rework") => {
-            let merge_strategy_mode = parse_dispatch_context(current_task.dispatch_context)
-                .and_then(|context| {
-                    context
-                        .get("merge_strategy_mode")
-                        .and_then(|value| value.as_str())
-                        .map(str::to_string)
-                })
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "direct-first".to_string());
-            let mode_contract = if merge_strategy_mode == "pr-always" {
-                PR_ALWAYS_COMPLETION_CONTRACT
-            } else {
-                DIRECT_FIRST_COMPLETION_CONTRACT
-            };
             let patch_guidance = current_task.dispatch_id.map(|dispatch_id| {
                 format!(
                     "- 완료 시 `PATCH /api/dispatches/{dispatch_id}` result 에 `completed_commit`(최종 HEAD SHA)을 반드시 포함한다.\n\
@@ -363,7 +341,7 @@ pub(super) fn render_dispatch_contract(
                 )
             });
             Some(format!(
-                "[Dispatch Contract]\n{DISPATCH_CONTRACT_COMMON}\n{mode_contract}{}",
+                "[Dispatch Contract]\n{DISPATCH_CONTRACT_COMMON}\n{PR_MERGE_COMPLETION_CONTRACT}{}",
                 patch_guidance
                     .map(|guidance| format!("\n{guidance}"))
                     .unwrap_or_default()
