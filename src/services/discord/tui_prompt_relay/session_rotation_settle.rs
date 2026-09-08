@@ -298,7 +298,7 @@ async fn settle_one_claude_session_rotation(
             // was dropped is on the record instead of being inferred.
             let undelivered_bytes = old_transcript_len.saturating_sub(delivered_frontier);
             let settled =
-                submit_rotation_settle(shared, channel_id, rotation, undelivered_bytes).await;
+                submit_rotation_settle(shared, channel_id, rotation, undelivered_bytes, view).await;
             if settled {
                 crate::services::tui_prompt_dedupe::clear_claude_session_rotation(
                     &rotation.tmux_session_name,
@@ -324,6 +324,24 @@ async fn settle_one_claude_session_rotation(
     }
 }
 
+/// #5213: the drain observation the settle WARN must report. The ledger fold runs
+/// BEFORE the plan, so `rotation` — captured at the top of the poll — is one
+/// observation stale here and logged 19 for the very poll whose 20 tripped
+/// `ROTATION_DRAIN_STALL_POLLS`. `view` carries the post-fold pair the decision
+/// consumed. Reporting only: no threshold, plan, or control flow reads this.
+#[cfg(unix)]
+fn settle_warn_drain_observation(
+    rotation: &crate::services::tui_prompt_dedupe::ClaudeSessionRotation,
+    view: ClaudeRotationView,
+) -> (u64, u32) {
+    (
+        rotation
+            .observed_drain_frontier
+            .max(view.delivered_frontier),
+        view.polls_without_drain_progress,
+    )
+}
+
 /// Settle the inflight pinned to the frozen transcript.
 ///
 /// Re-reads the row under the identity it is about to finalize and re-checks the
@@ -336,6 +354,7 @@ async fn submit_rotation_settle(
     channel_id: ChannelId,
     rotation: &crate::services::tui_prompt_dedupe::ClaudeSessionRotation,
     undelivered_bytes: u64,
+    view: ClaudeRotationView,
 ) -> bool {
     let Some(state) =
         super::super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
@@ -359,6 +378,8 @@ async fn submit_rotation_settle(
         );
         return false;
     }
+    let (observed_drain_frontier, polls_without_drain_progress) =
+        settle_warn_drain_observation(rotation, view);
     let identity = super::super::inflight::InflightTurnIdentity::from_state(&state);
     let _ = shared
         .turn_finalizer
@@ -393,8 +414,8 @@ async fn submit_rotation_settle(
         new_transcript_path = %rotation.new_output_path,
         gone_or_changed,
         undelivered_bytes,
-        observed_drain_frontier = rotation.observed_drain_frontier,
-        polls_without_drain_progress = rotation.polls_without_drain_progress,
+        observed_drain_frontier,
+        polls_without_drain_progress,
         "#5188: settled the inflight pinned to a frozen Claude transcript after a session \
          rotation; it could never have received a terminal (the file it waited on stopped \
          growing), so the channel would otherwise have aborted every later turn. \
@@ -695,5 +716,91 @@ mod tests {
             ClaudeRotationPlan::SettleStaleInflight,
             "at the bound the tail is declared dead and the channel is released"
         );
+    }
+
+    /// #5213: the settle WARN must carry the drain observation the settle
+    /// DECISION read, not the pre-fold record that logs 19 for a 20-poll trip.
+    #[cfg(unix)]
+    #[test]
+    fn the_settle_warn_reports_the_post_fold_drain_observation() {
+        // Synthetic pair, not one real fold: `record_rotation_drain_progress`
+        // (tui_prompt_dedupe/session_rotation.rs:262) zeroes the counter whenever
+        // the frontier advances, so 512 -> 1024 cannot coexist with a counter left
+        // at the stall bound. That impossible-in-one-fold shape is the point: it is
+        // what proves the two outputs are chosen independently -- frontier from the
+        // record's running max, counter from the post-fold view.
+        let pre_fold = crate::services::tui_prompt_dedupe::ClaudeSessionRotation {
+            tmux_session_name: "pane-5213".to_string(),
+            old_session_id: Some("4648aa76".to_string()),
+            old_output_path: "/tmp/4648aa76.jsonl".to_string(),
+            old_last_offset: 1024,
+            new_session_id: "67f48e65".to_string(),
+            new_output_path: "/tmp/67f48e65.jsonl".to_string(),
+            observed_drain_frontier: 512,
+            polls_without_drain_progress: ROTATION_DRAIN_STALL_POLLS - 1,
+        };
+        let post_fold = ClaudeRotationView {
+            old_transcript_len: 8192,
+            delivered_frontier: 1024,
+            inflight_bound_to_old_transcript: true,
+            polls_without_drain_progress: ROTATION_DRAIN_STALL_POLLS,
+            ..view()
+        };
+        assert_eq!(
+            plan_claude_session_rotation(post_fold),
+            ClaudeRotationPlan::SettleStaleInflight,
+            "the fixture must be the poll that actually trips the stall bound"
+        );
+        assert_eq!(
+            settle_warn_drain_observation(&pre_fold, post_fold),
+            (1024, ROTATION_DRAIN_STALL_POLLS),
+            "the WARN must report the counter the settle decision read"
+        );
+    }
+
+    /// #5213: pin the WARN SITE, not just the helper. The emission needs a live
+    /// `SharedData` and the finalizer, so it cannot be exercised from a unit
+    /// test. What this lexical tripwire actually covers is the text between the
+    /// helper binding and the WARN it feeds, and only two regressions in it:
+    /// re-sourcing either field from the pre-fold `rotation` record, and
+    /// re-binding or mutating either local after the helper returned. It sees
+    /// nothing before the helper call, so a shadowed `rotation`/`view` or a
+    /// stale value laundered through a differently named alias still passes —
+    /// the same declared limit as the `inflight/removal.rs:1052` tripwire. The
+    /// helper's own arithmetic is covered by the test above.
+    #[cfg(unix)]
+    #[test]
+    fn the_settle_warn_site_sources_both_drain_fields_from_the_post_fold_helper() {
+        let wiring = include_str!("session_rotation_settle.rs")
+            .split_once("let (observed_drain_frontier, polls_without_drain_progress) =")
+            .expect("the settle WARN must bind both drain fields before emitting")
+            .1
+            .split_once("and that many bytes of the frozen transcript were abandoned")
+            .expect("that binding must stay ahead of the settle WARN it feeds")
+            .0;
+        assert!(
+            wiring.contains("settle_warn_drain_observation(rotation, view);"),
+            "both fields must come from the post-fold helper; wiring={wiring}"
+        );
+        assert!(
+            !wiring.contains("rotation.observed_drain_frontier")
+                && !wiring.contains("rotation.polls_without_drain_progress"),
+            "re-sourcing either field from the pre-fold record is #5213; \
+             wiring={wiring}"
+        );
+        for field in ["observed_drain_frontier", "polls_without_drain_progress"] {
+            assert_eq!(
+                wiring.matches(field).count(),
+                1,
+                "between the helper binding and the WARN, `{field}` may appear exactly \
+                 once - as the bare WARN field. Any second mention (a shadowing `let`, \
+                 a re-bind, a mutation) is #5213; wiring={wiring}"
+            );
+            assert!(
+                wiring.contains(&format!("\n        {field},\n")),
+                "the WARN must carry `{field}` as the bare local the helper bound, not \
+                 a re-assigned tracing field; wiring={wiring}"
+            );
+        }
     }
 }
