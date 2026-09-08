@@ -273,9 +273,9 @@ pub(super) enum DispatchOutcome {
     },
 }
 
-/// Reasoning effort a Codex turn actually runs with; `run_turn` and the
-/// `/model` report share it, so the two cannot drift. An explicit effort always
-/// wins, and the `high` default applies only when a model was pinned.
+/// Reasoning effort a Codex turn actually runs with; today `run_turn` and the
+/// `/model` report both compute it here, so their defaults agree by shared use,
+/// not by construction. Explicit effort wins; `high` needs a pinned model.
 pub(super) fn effective_reasoning_effort<'a>(
     reasoning_effort: Option<&'a str>,
     codex_model: Option<&str>,
@@ -369,9 +369,9 @@ fn render_controls_notice(refused: Option<&str>) -> String {
     format!("{head}\n[지원 명령: {supported}]\n{PATH_RULE_NOTE}")
 }
 
-const PATH_RULE_NOTE: &str = "[열거된 루트(/tmp, /Users, /etc …)와 하위 경로·점을 포함한 \
-토큰(/data/x, /a.log)만 프롬프트로 전달됩니다. 그 외 단일 세그먼트 /이름 은 명령으로 \
-해석되어 거부됩니다. 경로였다면 하위 경로를 붙이거나 문장 앞에 단어를 두세요.]";
+const PATH_RULE_NOTE: &str = "[앞쪽 영숫자 부분이 열거된 루트인 토큰(/tmp, /tmp에, /run-foo)과 \
+하위 경로·점 토큰(/data/x, /a.log)은 프롬프트로 전달됩니다. 그 밖의 단일 세그먼트 /이름 은 위 \
+지원 명령이 아니면 거부됩니다. 경로였다면 하위 경로를 붙이거나 문장 앞에 단어를 두세요.]";
 
 #[cfg(test)]
 mod tests {
@@ -457,7 +457,7 @@ mod tests {
         assert!(status_of(&help).contains("/model"));
         assert!(ran_help.is_empty());
         let (help_args, _) = dispatch_terminal("/help 이거 어떻게 해", ctx(None, None));
-        assert!(status_of(&help_args).contains("적용되지 않았습니다"));
+        assert!(status_of(&help_args).contains("'이거 어떻게 해' 은 적용되지 않았습니다"));
     }
 
     #[test]

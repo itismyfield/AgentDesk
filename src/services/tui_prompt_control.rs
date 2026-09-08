@@ -432,6 +432,7 @@ mod tests {
             "/모델",
             "/1status",
             "/data",
+            "/optimize",
             "/model에",
             &long_name,
         ] {
