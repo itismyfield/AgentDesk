@@ -26,7 +26,7 @@ pub(super) fn execute_streaming_local_tmux(
     let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
         tmux_session_name,
         &auth_overlay.profile_id,
-    ) || !session_exists;
+    );
     let force_fresh_provider_session = force_fresh_provider_session || !profile_matches;
     let resume_session_id = if force_fresh_provider_session {
         None
@@ -315,6 +315,14 @@ pub(super) fn execute_streaming_local_process(
 ) -> Result<(), String> {
     use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
 
+    let overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
+        ProviderKind::Qwen,
+        session_name,
+    )?;
+    let profile_matches =
+        crate::services::session_backend::auth_profiles::prepare(session_name, &overlay.profile_id);
+    let force_fresh_provider_session = force_fresh_provider_session || !profile_matches;
+
     let resume_session_id = if force_fresh_provider_session {
         None
     } else {
@@ -385,10 +393,6 @@ pub(super) fn execute_streaming_local_process(
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
 
-    let overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
-        ProviderKind::Qwen,
-        session_name,
-    )?;
     let config = SessionConfig {
         session_name: session_name.to_string(),
         working_dir: working_dir.to_string(),
@@ -430,6 +434,11 @@ pub(super) fn execute_streaming_local_process(
 
     let backend = ProcessBackend::new();
     let handle = backend.create_session(&config)?;
+    let handle = crate::services::session_backend::auth_profiles::record_launch(
+        session_name,
+        &overlay.profile_id,
+        handle,
+    )?;
 
     register_child_pid(cancel_token.as_deref(), handle.pid());
 

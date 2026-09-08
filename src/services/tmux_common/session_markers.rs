@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// Return whether a live tmux wrapper was created for the requested auth
+/// Return whether a provider wrapper was created for the requested auth
 /// profile.  A legacy wrapper without a marker is safe to reuse only for the
 /// implicit default profile; named profiles must start a fresh provider
 /// session rather than silently continue under another account.
@@ -19,7 +19,7 @@ pub(crate) fn tmux_session_auth_profile_matches(
     }
 }
 
-/// Persist the selected profile beside a newly-created tmux wrapper so warm
+/// Persist the selected profile beside a newly-created provider wrapper so warm
 /// follow-ups are never routed across account boundaries.
 pub(crate) fn write_tmux_session_auth_profile(
     session_name: &str,
