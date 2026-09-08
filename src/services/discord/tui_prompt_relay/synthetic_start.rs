@@ -2078,31 +2078,18 @@ pub(super) fn tui_direct_watcher_can_own_output(
     }
 }
 
-/// #3876: resolve the relay owner stamped on a freshly-created TUI-direct /
-/// warm-followup synthetic inflight. PURE so the birth-site decision is
-/// unit-testable; the call site supplies the three signals.
+/// #3876: select first-birth ownership from three caller-supplied signals.
 ///
-/// * `watcher_can_own` (from [`tui_direct_watcher_can_own_output`]) → the live
-///   watcher relays this turn's output → `TmuxWatcher` (unchanged).
-/// * else, when session-bound Discord delivery is enabled AND a non-shutdown
-///   StreamRelay producer and an uncancelled watcher handle exist for this tmux
-///   session (`session_bound_feed_admissible`) → `SessionBoundRelay`. This birth
-///   observation does not prove source correspondence or ongoing feed health.
-///   The synthetic inflight IS
-///   being created here, so the session-bound relay sink can legitimately be its
-///   terminal owner (the `relay_ownership` observer restriction that keeps
-///   `BridgeAdapter` only applies BEFORE any inflight exists). The sink gate
-///   `session_bound_discord_relay_can_own_terminal_delivery` then ACCEPTS the
-///   row and commits the harvested body — fixing the prior `RelayOwnerKind::None`
-///   drop (`route="none"`, `terminal_commit_ack=false`) that left a
-///   placeholder-only delivery to be swept (data loss). Single-relayer invariant
-///   holds: the bridge tail stands down (`bridge_adapter_owns_external_turn`
-///   → false) and the watcher yields (`tmux::watcher_should_yield_to_inflight_state`
-///   yields for a `SessionBoundRelay` owner), so the sink is the sole committer.
-/// * else → `BridgeAdapter`. StreamRelay is a passive queue consumer; the idle
-///   feeder defers active rows, so registration without a watcher can starve the
-///   sink while standing the native bridge tail down. Keep the existing direct
-///   tail eligible. Existing SessionBound rows are not reassigned here.
+/// * A watcher able to own this output keeps `TmuxWatcher`.
+/// * Otherwise, enabled delivery plus a non-shutdown producer and an
+///   uncancelled same-session watcher handle selects `SessionBoundRelay`.
+/// * Otherwise, keep the watcher-independent `BridgeAdapter` tail eligible.
+///
+/// This snapshot proves neither source correspondence nor ongoing feed health.
+/// StreamRelay is a passive queue consumer; the idle feeder defers active rows,
+/// so registration without a watcher can starve a SessionBound row.
+/// On SessionBound birth the sink owns terminal delivery; existing ownership
+/// guards make the bridge and watcher yield. Same-anchor refresh keeps its owner.
 pub(super) fn tui_direct_synthetic_relay_owner(
     watcher_can_own: bool,
     session_bound_discord_delivery_enabled: bool,
