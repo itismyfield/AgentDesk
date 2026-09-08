@@ -384,3 +384,94 @@ pub(crate) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
         }
     }
 }
+
+#[cfg(test)]
+mod yaml_write_back_secret_tests {
+    use super::*;
+
+    /// A settings YAML that carries both `#[serde(skip_serializing)]` secrets in
+    /// the tree: `server.auth_token` (`config.rs:125`) and `discord.bots.*.token`
+    /// (`config.rs:242`).
+    const FIXTURE: &str = concat!(
+        "server:\n",
+        "  host: 0.0.0.0\n",
+        "  port: 8791\n",
+        "  auth_token: dashboard-secret-token\n",
+        "  allow_insecure_nonloopback_bind: true\n",
+        "discord:\n",
+        "  bots:\n",
+        "    main:\n",
+        "      token: discord-bot-secret\n",
+        "      provider: claude\n",
+    );
+
+    const BOT_TOKEN: &str = "discord-bot-secret";
+
+    fn settings_with_new_allowlist() -> DiscordBotSettings {
+        DiscordBotSettings {
+            allowed_channel_ids: vec![4242],
+            ..DiscordBotSettings::default()
+        }
+    }
+
+    /// #5750 — a Discord settings write-back must not delete secrets it never
+    /// read back. The whole-`Config` re-serialization it replaced dropped every
+    /// `skip_serializing` field, which silently disarmed the `/ws` auth gate
+    /// (`src/server/ws.rs:33`) without a restart.
+    #[test]
+    fn bot_settings_write_back_keeps_skip_serializing_secrets_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agentdesk.yaml");
+        fs::write(&path, FIXTURE).expect("write fixture");
+        let _config_env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
+
+        persist_bot_auth_to_yaml_checked(BOT_TOKEN, &settings_with_new_allowlist())
+            .expect("write-back should succeed");
+
+        let reloaded = crate::config::load_from_path(&path).expect("reload written yaml");
+        let bot = reloaded
+            .discord
+            .bots
+            .get("main")
+            .expect("bot entry survives the write-back");
+
+        assert_eq!(
+            bot.auth.allowed_channel_ids,
+            Some(vec![4242]),
+            "the write-back must actually apply the new allowlist"
+        );
+        assert_eq!(
+            reloaded.server.auth_token.as_deref(),
+            Some("dashboard-secret-token"),
+            "#5750: server.auth_token must survive a Discord settings write-back"
+        );
+        assert_eq!(
+            bot.token.as_deref(),
+            Some(BOT_TOKEN),
+            "#5750: discord.bots.*.token must survive a Discord settings write-back"
+        );
+    }
+
+    /// Keys this write-back does not own stay byte-identical, including sections
+    /// the `Config` schema does not model.
+    #[test]
+    fn bot_settings_write_back_preserves_unowned_document_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agentdesk.yaml");
+        fs::write(
+            &path,
+            format!("{FIXTURE}unmodelled_section:\n  keep_me: true\n"),
+        )
+        .expect("write fixture");
+        let _config_env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
+
+        persist_bot_auth_to_yaml_checked(BOT_TOKEN, &settings_with_new_allowlist())
+            .expect("write-back should succeed");
+
+        let rendered = fs::read_to_string(&path).expect("read written yaml");
+        assert!(
+            rendered.contains("keep_me"),
+            "unmodelled keys must survive the write-back, got:\n{rendered}"
+        );
+    }
+}

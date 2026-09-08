@@ -916,6 +916,29 @@ mod tests {
         assert_eq!(restart_required_changes(&old, &new), vec!["discord"]);
     }
 
+    /// #5750 — `server.auth_token` is `#[serde(skip_serializing)]`, so the
+    /// serialized-equality comparison in `section_changed` cannot see it appear
+    /// or disappear. A write-back that dropped the token from disk therefore
+    /// reloaded as "applied, no restart required" while the `/ws` gate went
+    /// open. Presence is compared; the secret value never is.
+    #[test]
+    fn restart_required_changes_detects_server_auth_token_presence_flip() {
+        let mut old = Config::default();
+        old.server.auth_token = Some("dashboard-secret-token".to_string());
+        let mut new = old.clone();
+        new.server.auth_token = None;
+
+        assert_eq!(restart_required_changes(&old, &new), vec!["server"]);
+        assert_eq!(restart_required_changes(&new, &old), vec!["server"]);
+
+        let mut rotated = old.clone();
+        rotated.server.auth_token = Some("rotated-secret-token".to_string());
+        assert!(
+            restart_required_changes(&old, &rotated).is_empty(),
+            "value rotation is not a presence flip and stays out of the comparison"
+        );
+    }
+
     #[test]
     fn restart_required_changes_ignores_discord_bot_hashmap_order() {
         let mut old = Config::default();
