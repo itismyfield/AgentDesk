@@ -109,7 +109,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 
 | Variable | Defined at | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | `src/server/rate_limit_sync.rs:136` (+1 more) | Priority: 1) OAuth token (Claude Code subscription), 2) ANTHROPIC_API_KEY. |
+| `ANTHROPIC_API_KEY` | `src/server/rate_limit_sync.rs:196` (+1 more) | Priority: 1) OAuth token (Claude Code subscription), 2) ANTHROPIC_API_KEY. |
 | `APPDATA` | `src/services/platform/binary_resolver.rs:1186` |  |
 | `CARGO_MANIFEST_DIR` | `src/services/maintenance/jobs/target_sweep.rs:55` | Order matters: `CARGO_MANIFEST_DIR` is set by cargo during dev/test runs (resolving the actual checkout) but is UNSET in the deployed release binary, so it cle… |
 | `CLAUDE_CONFIG_DIR` | `src/services/claude_tui/hook_output_guard.rs:57` (+3 more) | The Claude home this host reads rollout transcripts under, honouring the `CLAUDE_CONFIG_DIR` override. |
@@ -117,14 +117,14 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `COKACDIR_DEBUG` | `src/services/claude.rs:242` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
 | `COMPUTERNAME` | `src/services/tmux_common.rs:1136` |  |
 | `DATABASE_URL` | `src/db/postgres.rs:1138` |  |
-| `GEMINI_CLIENT_ID` | `src/server/mod.rs:1503` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
-| `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1504` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
+| `GEMINI_CLIENT_ID` | `src/server/mod.rs:1504` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
+| `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1505` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs:665` |  |
 | `HOME` | `src/cli/doctor/orchestrator.rs:500` (+10 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
-| `HOSTNAME` | `src/server/mod.rs:2936` (+5 more) | Opens this turn's buffer and evicts whatever predecessor was left on this channel by a bridge exit that never reached post-loop finalize. |
+| `HOSTNAME` | `src/server/mod.rs:2937` (+5 more) | Opens this turn's buffer and evicts whatever predecessor was left on this channel by a bridge exit that never reached post-loop finalize. |
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs:1114` (+2 more) |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs:200` (+1 more) |  |
-| `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs:42` | --- Codex rate limits --- Priority: 1) ~/.codex/auth.json (Codex CLI subscription), 2) OPENAI_API_KEY |
+| `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs:112` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
 | `PATH` | `src/cli/doctor/orchestrator.rs:1689` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs:16` (+4 more) |  |
 | `POSTGRES_TEST_DATABASE_URL_BASE` | `src/db/postgres.rs:1152` | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
