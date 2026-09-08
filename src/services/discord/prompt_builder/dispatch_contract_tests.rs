@@ -1461,10 +1461,17 @@ fn implementation_and_rework_render_one_pr_merge_contract_for_every_merge_strate
                 .expect("dispatch contract");
             let case = format!("{dispatch_type}/{dispatch_context:?}");
 
-            assert!(
-                contract.contains("처음부터 별도 브랜치에서 작업하고"),
-                "{case} lost the PR contract: {contract}"
-            );
+            for required in [
+                "`main` 에 직접 커밋하거나 push 하지 않는다",
+                "브랜치를 push 하고 PR 을 연다",
+                "CI·리뷰 결과를 직접 babysitting 한다",
+                "실패하면 같은 PR 에서 수리 후 재시도",
+            ] {
+                assert!(
+                    contract.contains(required),
+                    "{case} lost `{required}`: {contract}"
+                );
+            }
             for banned in [
                 "git push origin HEAD:main",
                 "direct-first",
