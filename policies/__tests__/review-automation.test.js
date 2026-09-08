@@ -572,7 +572,8 @@ test("review-automation keeps a create-pr failure retryable when the handoff ale
 // reset retry_count to 0, so every generation's first failure is retry_count=1 — only the generation
 // tells them apart. The third call repeats gen-b: deduped, and deliberately left without the durable
 // marker so a colliding key self-heals after the kv TTL. r5: calls 4 and 5 (no stamp / record op recorded
-// nothing) must not fall back to the row's stale gen-b key, which its own alert already seeded.
+// nothing) must not fall back to the row's stale gen-b key, which its own alert already seeded. r6: call 5
+// keeps its own stamp inside the record-failed namespace, so consecutive stamped record failures stay apart.
 test("review-automation alerts again for a new create-pr failure generation", () => {
   let recorded = true;
   let retryCount = 0;
@@ -594,7 +595,7 @@ test("review-automation alerts again for a new create-pr failure generation", ()
 
   assert.equal(state.deadlockAlerts.length, 4);
   assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp3:gen-a", "pr_create_handoff:card-cp3:gen-b",
-    "pr_create_handoff:card-cp3:pre:dispatch_failed", "pr_create_handoff:card-cp3:pre:record_failed:no_open_pr_found"]);
+    "pr_create_handoff:card-cp3:pre:dispatch_failed", "pr_create_handoff:card-cp3:pre:record_failed:gen-b"]);
   assert.equal(state.executions.filter((e) => e.sql.indexOf(MARKER_SQL) >= 0).length, 4, "dedup skip writes no marker");
 });
 
@@ -641,9 +642,46 @@ test("review-automation hands off a create-pr failure the record op did not reco
 
   policy.onDispatchCompleted({ dispatch_id: "d-cp5" });
 
-  assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp5:pre:record_failed:no_open_pr_found"]);
+  assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp5:pre:record_failed:gen-y"]);
   assert.equal(state.statusCalls.length, 0, "the record-only branch must not terminalize");
   assert.equal(state.logs.info.filter((l) => l.indexOf("recorded on pr_tracking") >= 0).length, 0, "no false record log");
+});
+
+// #5716 r6 (gpt P1-1): folding every stamped record failure onto the failure class merged G1 and G2 into
+// ONE 7-day dedup key, so G2's alert was deduped away — and the sweep cannot recover it either, because the
+// rolled-back record leaves retry_count at 0. The stamp inside the namespace is what makes G2 audible.
+test("review-automation alerts separately for each stamped generation whose failure record threw", () => {
+  const { agentdesk, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-cp6": { id: "card-cp6", status: "review" } },
+    prTracking: { load: () => ({ card_id: "card-cp6", dispatch_generation: "gen-1" }) },
+    extraAgentdesk: { reviewAutomation: { recordPrCreateFailure: () => { throw new Error("tx begin failed"); } } }
+  });
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp6", "no_open_pr_found", "gen-1");
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp6", "no_open_pr_found", "gen-2");
+
+  assert.equal(state.deadlockAlerts.length, 2, "a second dispatch generation is a second handoff");
+  assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp6:pre:record_failed:gen-1",
+    "pr_create_handoff:card-cp6:pre:record_failed:gen-2"]);
+});
+
+// #5716 r6 (gpt P1-2): a record op that recorded nothing leaves the handoff alert as the failure's ONLY
+// trace (retry_count 0 hides the row from the sweep), so a later mutation throw must not consume it.
+test("review-automation still hands off a create-pr failure when the terminal mutations throw", () => {
+  const build = (dbExecute, kanban) => loadPolicy("policies/review-automation.js", {
+    cards: { "card-cp7": { id: "card-cp7", status: "review" } },
+    dbExecute,
+    extraAgentdesk: Object.assign(
+      { reviewAutomation: { recordPrCreateFailure: () => { throw new Error("tx begin failed"); } } }, kanban || {})
+  });
+  const onStatusThrow = build(undefined, { kanban: {
+    setStatus: () => { throw new Error("setStatus failed"); }, setReviewStatus() {}, getCard: () => null } });
+  assert.throws(() => onStatusThrow.agentdesk.reviewAutomation.markPrCreateFailed("card-cp7", "no_open_pr_found", "gen-s"));
+  assert.equal(onStatusThrow.state.deadlockAlerts.length, 1, "a setStatus throw must not eat the only signal");
+
+  const onMarkerThrow = build((sql) => {
+    if (sql.indexOf("blocked_reason = ?") >= 0) throw new Error("blocked_reason UPDATE failed"); return { changes: 1 }; });
+  assert.throws(() => onMarkerThrow.agentdesk.reviewAutomation.markPrCreateFailed("card-cp7", "no_open_pr_found", "gen-m"));
+  assert.equal(onMarkerThrow.state.deadlockAlerts.length, 1, "nor may a blocked_reason UPDATE throw");
 });
 
 // #5716: notifyDeadlockManager is the durable create-PR handoff. agentdesk.message.queue returns

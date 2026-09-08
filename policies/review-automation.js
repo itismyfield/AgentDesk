@@ -1145,13 +1145,21 @@ function preHandoffGeneration(prefix, errorMsg) {
   return "pre:" + prefix + String(errorMsg || "unknown").split(":")[0];
 }
 
-// #5716 r5: a record op that recorded nothing leaves retry_count at 0 (invisible to the sweep) and this branch stamps no blocked_reason either — hand off now instead of logging a record that did not happen.
+// #5716 r6: folding every stamped record failure onto the failure class merged consecutive generations into
+// one 7-day key, so G2's alert was deduped away — and the rolled-back record leaves retry_count 0, invisible
+// to the sweep too. Keep the stamp in the record-failed namespace ("pre:" cannot occur in a UUID stamp).
+function recordFailedGeneration(stampGen, errorMsg) {
+  return stampGen ? ("pre:record_failed:" + stampGen) : preHandoffGeneration("record_failed:", errorMsg);
+}
+
+// #5716 r5: a record op that recorded nothing leaves retry_count at 0 (invisible to the sweep) and this branch stamps no blocked_reason either — hand off now instead of logging a record that did not happen. r6: a stale-generation noop rolls its transaction back, so it records nothing either — not a record.
 function recordPrCreateFailureForSweep(cardId, errorMsg, stampGen) {
-  if (recordPrCreateFailureOnly(cardId, errorMsg, stampGen)) {
+  var recordResult = recordPrCreateFailureOnly(cardId, errorMsg, stampGen);
+  if (recordResult && !recordResult.noop) {
     agentdesk.log.info("[review] card " + cardId + " has moved past the review lifecycle (likely reopened); create-pr failure recorded on pr_tracking for the #5716 sweep");
     return;
   }
-  handOffPrCreateFailure(cardId, errorMsg, null, preHandoffGeneration("record_failed:", errorMsg));
+  handOffPrCreateFailure(cardId, errorMsg, null, recordFailedGeneration(stampGen, errorMsg));
 }
 
 // #5716: durable marker so a handed-off row leaves the sweep candidate set —
@@ -1254,7 +1262,7 @@ function sweepStrandedPrCreateFailures() {
 //   4. handOffPrCreateFailure — agent/operator handoff on EVERY failure generation (the dedup key carries
 //      pr_tracking.dispatch_generation, not retry_count, which every new dispatch resets to 0): #5716
 //      removed processTrackedMergeQueue, the only consumer of terminal `state='create-pr'` rows, so
-//      nothing else will retry this card.
+//      nothing else will retry this card. r6: when step 1 recorded nothing, this runs BEFORE steps 2-3.
 //
 // stampGen can be null/undefined for pre-handoff failures (e.g. the handoff
 // bridge op threw); recordPrCreateFailure handles that by skipping the stale
@@ -1276,11 +1284,19 @@ function markPrCreateFailed(cardId, reason, stampGen) {
     return;
   }
 
+  var retryCount = result ? result.retry_count : null;
+
+  // #5716 r6: when the record op recorded NOTHING the handoff is this failure's only trace (retry_count stays 0, so the sweep
+  // never sees the row) — it alerts BEFORE the mutations below, whose throw would otherwise eat it. Guarded against the reverse.
+  var handedOff = null;
+  try {
+    if (!result) handedOff = handOffPrCreateFailure(cardId, errorMsg, retryCount, recordFailedGeneration(stampGen, errorMsg));
+  } catch (e) { agentdesk.log.error("[review] create-pr handoff threw before terminalizing card " + cardId + ": " + e); }
+
   // 2. Terminalize.
   agentdesk.kanban.setStatus(cardId, terminalState, true);
 
   // 3. Stamp blocked_reason AFTER setStatus (setStatus clears blocked_reason).
-  var retryCount = result ? result.retry_count : null;
   var blockedReason = (result && result.escalated)
     ? "pr:create_failed_escalated:max_retries"
     : "pr:create_failed:" + errorMsg;
@@ -1290,14 +1306,13 @@ function markPrCreateFailed(cardId, reason, stampGen) {
   );
 
   // 4. Agent/operator handoff — see the #5716 note above. stampGen IS the dispatch generation when the
-  // caller has one. A pre-handoff failure passes none, and a record op that recorded nothing leaves the row
-  // invisible to the sweep — both get their own namespace rather than the row's stale, already-alerted one.
-  var handedOff = handOffPrCreateFailure(cardId, errorMsg, retryCount,
-    result ? stampGen : preHandoffGeneration("record_failed:", errorMsg));
+  // caller has one; an unstamped failure falls back to its own class namespace, never to the row's stale one.
+  if (result) handedOff = handOffPrCreateFailure(cardId, errorMsg, retryCount, stampGen);
 
   agentdesk.log.warn("[review] Card " + cardId + " marked " + blockedReason + " → " + terminalState +
     " (retry_count=" + (retryCount == null ? "?" : retryCount) +
-    ", handoff=" + (handedOff ? "agent/operator" : "UNDELIVERED — sweep will retry") + ")");
+    ", handoff=" + (handedOff === "deduped" ? "already-alerted for this generation"
+      : handedOff ? "agent/operator" : "UNDELIVERED — sweep will retry") + ")");
 }
 
 function findOpenPrByTrackedBranch(repoId, branch) {
