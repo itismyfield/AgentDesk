@@ -3394,13 +3394,8 @@ fn synthetic_watcher_claim_requires_live_watcher_covering_output() {
     ));
 }
 
-/// #3876 (codex rework): the birth-site relay-owner decision for a TUI-direct /
-/// warm-followup synthetic inflight is gated on a LIVE per-session producer, NOT
-/// the global session-bound flag. `SessionBoundRelay` (sink commits) only when
-/// the watcher cannot own AND session-bound delivery is enabled AND a live
-/// producer exists; otherwise `BridgeAdapter` so the watcher-independent
-/// transcript-direct bridge tail stays the deliverer (regression guard against
-/// the producer-starve answer-loss).
+/// Historical test ID; the third signal now means first-birth feed admissibility:
+/// a non-shutdown producer plus an uncancelled same-session watcher handle.
 #[test]
 fn synthetic_relay_owner_gates_session_bound_on_live_producer() {
     use super::synthetic_start::tui_direct_synthetic_relay_owner;
@@ -3419,17 +3414,12 @@ fn synthetic_relay_owner_gates_session_bound_on_live_producer() {
         tui_direct_synthetic_relay_owner(true, false, false),
         ExternalInputRelayOwner::TmuxWatcher,
     );
-    // (b) THE FIX (demoed watcher-alive-path-mismatch case): watcher cannot own +
-    // session-bound enabled + a LIVE producer exists (the sink can actually
-    // commit) → SessionBoundRelay.
+    // Enabled and admissible feed selects the SessionBound route.
     assert_eq!(
         tui_direct_synthetic_relay_owner(false, true, true),
         ExternalInputRelayOwner::SessionBoundRelay,
     );
-    // (a) REGRESSION GUARD (watcher-detached / STALL-WATCHDOG force-clean): watcher
-    // cannot own + NO live producer → BridgeAdapter, so the watcher-independent
-    // transcript-direct bridge tail still delivers (a SessionBoundRelay stamp here
-    // would starve the sink AND stand the tail down → answer loss).
+    // No admissible feed keeps the Bridge route eligible.
     assert_eq!(
         tui_direct_synthetic_relay_owner(false, true, false),
         ExternalInputRelayOwner::BridgeAdapter,
@@ -3507,14 +3497,8 @@ fn idle_bridge_stands_down_for_every_resolved_non_bridge_synthetic_claim() {
     );
 }
 
-/// #3876 regression pin (terminal delivery, both directions):
-/// * producer-present: the `SessionBoundRelay` synthetic owner makes the unchanged
-///   sink ownership gate ACCEPT terminal delivery (body committed, not
-///   placeholder-only) while exactly one relayer remains (bridge tail stands down).
-/// * producer-absent: the owner falls back to `BridgeAdapter`, the sink gate would
-///   REJECT the ownerless `None` shape (the data loss), and the watcher-independent
-///   bridge tail is the SOLE relayer (`observer_should_spawn_bridge_tail` true) — so
-///   the answer is still delivered (no regression).
+/// Pin route eligibility for admissible/absent feed using the unchanged sink gate.
+/// This selector/gate test does not claim an actual transport receipt.
 #[cfg(unix)]
 #[test]
 fn synthetic_owner_delivery_path_matches_producer_presence() {
