@@ -207,11 +207,14 @@ function markPrCreateFailed(cardId, error, stampGen) {
 
   // 4. #5716 slice B: 재시도 소비자가 없으므로 실패 세대마다 운영자 이관.
   //    dedup 키의 세대 성분은 retry_count가 아니라 pr_tracking.dispatch_generation (새 dispatch가 count를 0으로 리셋).
+  //    세대가 없는 실패(pre-handoff: missing_branch / dispatch_failed / 공개 파사드, 또는 record op가 아무것도
+  //    기록하지 못한 경우)는 행의 직전 세대를 재사용하지 않고 'pre:<실패 클래스>' 네임스페이스를 쓴다 —
+  //    직전 세대 키는 그 세대의 알림이 이미 심었으므로 재사용하면 새 실패가 TTL(7일) 동안 무음이 된다.
   handOffPrCreateFailure(cardId, error, result.retry_count, stampGen);  // C7
 }
 ```
 
-Crash safety: 실패 원인과 retry_count는 recordPrCreateFailure 한 트랜잭션에서 함께 커밋되므로 이후 step에서 죽어도 #5716 스윕(state IN ('create-pr','escalated') AND retry_count > 0, updated_at 30일 이내)이 회수한다.
+Crash safety: 실패 원인과 retry_count는 recordPrCreateFailure 한 트랜잭션에서 함께 커밋되므로 이후 step에서 죽어도 #5716 스윕(state IN ('create-pr','escalated') AND retry_count > 0, updated_at 30일 이내)이 회수한다. 다만 그 op 자체가 실패하면 retry_count가 0에 머물러 스윕이 볼 수 없으므로, 그 분기는 기록을 성공으로 로그하지 않고 즉시 C7 이관을 호출한다.
 
 ## Success 상태 전이표 (kanban_cards.status 기준)
 
