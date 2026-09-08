@@ -283,8 +283,12 @@ async fn claim_tui_direct_synthetic_turn_prepared(
             // `tui_direct_refresh_demotion_can_rearm`), and demoting it also drops it
             // out of `orphan_relay_reclaim`'s `SessionBoundRelay`-only population
             // while reporting `claimed = true` (i.e. "a tail is armed"). Keep the
-            // durable owner untouched and decline instead, so the row stays exactly
-            // where the existing orphan paths already look for it.
+            // durable owner untouched and decline instead. #5780 r4: that does NOT
+            // hand the row to orphan reclaim — `session_bound_relay_external_input_
+            // orphan_shape_at` also requires an empty body and a zero sent offset, so
+            // a progress-bearing row is outside that population either way. It keeps
+            // the row where its own returning feeder and the delivery-owner gate can
+            // still finish it, instead of stamping a recovery nothing performs.
             owner @ (RelayOwnerKind::Watcher | RelayOwnerKind::SessionBoundRelay) => {
                 if tui_direct_refresh_demotion_can_rearm(provider, &existing) {
                     ExternalInputRelayOwner::BridgeAdapter
@@ -323,6 +327,35 @@ async fn claim_tui_direct_synthetic_turn_prepared(
                 };
             }
         };
+        let next_output_path = output_path
+            .as_deref()
+            .and_then(|path| path.to_str().map(str::to_string));
+        // #5780 r5: `turn_start_offset`/`last_offset` are coordinates INTO
+        // `output_path`, so following a SOURCE ROTATION means re-keying the row onto
+        // the new file's own cursor — and this claim cannot read an atomic
+        // `(path, cursor)` pair. `external_input_relay_output_path` re-registers the
+        // binding, and any other registry writer (the hook server adopting a Claude
+        // continuation, `runtime_binding.rs`) may replace it again before this claim
+        // reads it back; a lost race stamps file B at file A's coordinates, which
+        // `watchers::lifecycle::restore` then resumes from. Decline instead — the
+        // durable row keeps its owner AND its own source, and adopting the new
+        // transcript stays with the rebinding paths that own that transition.
+        if next_output_path.is_some() && next_output_path != existing.output_path {
+            tracing::warn!(
+                provider = %provider.as_str(),
+                channel_id = channel_id.get(),
+                tmux_session_name = %tmux_session_name,
+                "declined a TUI-direct relay refresh across a source rotation"
+            );
+            if mailbox_activation_occurred {
+                finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
+            }
+            return TuiDirectSyntheticTurnClaim {
+                relay_owner,
+                claimed: false,
+                turn_start_offset: start_offset,
+            };
+        }
         let expected = super::super::inflight::InflightTurnIdentity::from_state(&existing);
         let mut existing = existing;
         existing.set_relay_owner_kind(match relay_owner {
@@ -333,19 +366,6 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         existing.turn_nonce = active_turn_nonce.clone();
         existing.session_key = lease.session_key.clone();
         existing.runtime_kind = lease.runtime_kind;
-        let next_output_path = output_path
-            .as_deref()
-            .and_then(|path| path.to_str().map(str::to_string));
-        // #5780 r3: `turn_start_offset`/`last_offset` are coordinates INTO
-        // `output_path`. Carrying them across a SOURCE ROTATION re-points the row at
-        // file B while keeping file A's bytes, and `watchers::lifecycle::restore`
-        // resumes at `last_offset` whenever B is at least that long — skipping
-        // everything B wrote below it. Preserve the cursor only for a same-source
-        // refresh; a new source is re-keyed onto its own binding, as before r2.
-        if next_output_path.is_some() && next_output_path != existing.output_path {
-            existing.last_offset = start_offset;
-            existing.turn_start_offset = Some(start_offset);
-        }
         existing.output_path = next_output_path;
         // #5780 r2: a refresh must NOT re-key the turn. `turn_start_offset` IS part
         // of `InflightTurnIdentity`, and for Codex TUI `start_offset` is the runtime
@@ -481,6 +501,30 @@ mod tests {
 
     fn synthetic_owner() -> UserId {
         UserId::new(TUI_DIRECT_SYNTHETIC_OWNER_USER_ID)
+    }
+
+    // #5780 r5: the Claude arm of `tui_direct_refresh_demotion_can_rearm` is gated
+    // by delivery evidence too. A confirmed sink POST stamps ONLY
+    // `session_bound_delivered` (`persist_sink_delivery`), leaving every mirrored
+    // body field pristine, and re-arming the Claude tail on such a row posts a
+    // SECOND intake placeholder for a turn that was already delivered.
+    #[test]
+    fn claude_refresh_demotion_stops_re_arming_a_row_the_sink_already_delivered() {
+        let mut state = synthetic_state(
+            ChannelId::new(5_780_000_017),
+            MessageId::new(5_780_000_018),
+            "AgentDesk-claude-delivered-marker-5780",
+            false,
+        );
+        assert!(tui_direct_refresh_demotion_can_rearm(
+            &ProviderKind::Claude,
+            &state
+        ));
+        state.session_bound_delivered = true;
+        assert!(!tui_direct_refresh_demotion_can_rearm(
+            &ProviderKind::Claude,
+            &state
+        ));
     }
 
     fn old_owner_started_at() -> Option<chrono::DateTime<chrono::Utc>> {
@@ -2184,10 +2228,15 @@ pub(super) fn tui_direct_session_bound_feed_admissible(
 /// — refuses any row that already carries delivery progress, because recovery
 /// re-keys the turn to the prompt line and would re-send what was already posted.
 ///
-/// #5780 r4: the durable `session_bound_delivered` marker is delivery evidence too
-/// — a confirmed sink POST stamps only that and can leave the mirrored body fields
-/// pristine, so a delivered turn would otherwise still look re-armable (which
-/// `orphan_relay_reclaim`'s own #3976 conjunct exists to prevent).
+/// #5780 r4/r5: the durable `session_bound_delivered` marker is delivery evidence
+/// too — `persist_sink_delivery` stamps it on ANY confirmed POST (terminal or
+/// incremental) and can leave the mirrored body fields pristine, so a delivered
+/// turn would otherwise still look re-armable (which `orphan_relay_reclaim`'s own
+/// #3976 conjunct exists to prevent). It gates the CLAUDE arm too, deliberately:
+/// the Claude tail posts a FRESH intake placeholder and builds a new bridge
+/// inflight (`claude_idle_bridge::send_intake_placeholder`), so re-arming a row
+/// that already posted duplicates the card instead of finishing the turn. Only a
+/// Claude row carrying NO delivery evidence re-arms.
 pub(super) fn tui_direct_refresh_demotion_can_rearm(
     provider: &ProviderKind,
     state: &InflightTurnState,

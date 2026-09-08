@@ -4138,37 +4138,6 @@ fn claude_rehydrate_start_offset_uses_current_eof() {
     );
 }
 
-// #5780 r4: Claude's transcript resolver re-registers the runtime binding DURING
-// the claim, after the caller read its pre-resolution copy.
-#[cfg(unix)]
-#[test]
-fn resolved_transcript_rotation_takes_the_new_transcripts_cursor() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    let session = "AgentDesk-claude-resolved-rotation-5780";
-    let channel = ChannelId::new(5_780_000_016);
-    let (bound, freshest) = (dir.path().join("a.jsonl"), dir.path().join("b.jsonl"));
-    std::fs::write(&bound, "a".repeat(8192)).expect("bound transcript");
-    std::fs::write(&freshest, "b".repeat(16384)).expect("freshest transcript");
-    use super::claude_idle_runtime::refresh_claude_runtime_binding as rebind;
-    rebind(session, channel, &bound, None);
-    let stale = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
-        .expect("pre-resolution binding");
-    rebind(session, channel, &freshest, None); // what the resolver does next
-    let paired = binding_for_resolved_output(session, Some(stale.clone()), Some(&freshest));
-    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
-    assert_eq!(
-        (
-            external_input_relay_start_offset(&ProviderKind::Claude, Some(&stale)),
-            external_input_relay_start_offset(&ProviderKind::Claude, paired.as_ref())
-        ),
-        (8192, 16384),
-        "the row must take the RESOLVED transcript's cursor, not the stale copy's"
-    );
-}
-
 // #4549/#4841: `/compact` rewrites the same transcript path to a shorter
 // historical snapshot. Either direct cursor regression or its same-generation
 // durable evidence must fast-forward to the new EOF instead of restarting at
@@ -5359,8 +5328,8 @@ mod native_feeder_birth_regressions {
                 | RefreshFeeder::DeliveredMarkerOnly => {
                     shared.tmux_watchers.remove(&channel).unwrap();
                 }
-                // #5780 r3: the wrapper rotated its rollout mid-turn; the row must
-                // follow the new source AND that source's own resume point.
+                // #5780 r5: the wrapper rotated its rollout mid-turn. The refresh
+                // must DECLINE rather than re-key onto the new file.
                 RefreshFeeder::SourceRotated => {
                     std::fs::write(&rotated, transcript).expect("rotated source fixture");
                     crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
@@ -5420,6 +5389,7 @@ mod native_feeder_birth_regressions {
                     RefreshFeeder::OtherAnchor
                         | RefreshFeeder::ProgressRetained
                         | RefreshFeeder::DeliveredMarkerOnly
+                        | RefreshFeeder::SourceRotated
                 )
             );
             row = super::super::super::inflight::load_inflight_state(
@@ -5435,14 +5405,11 @@ mod native_feeder_birth_regressions {
                 ),
                 progress
             );
-            // A SAME-SOURCE refresh re-keys nothing: `turn_start_offset` is identity
-            // and `last_offset` is this turn's delivery frontier. A source rotation
-            // must re-key, because both are coordinates into `output_path`.
-            let (start, source) = if refresh == RefreshFeeder::SourceRotated {
-                (512, rotated.as_path())
-            } else {
-                (0, native.as_path())
-            };
+            // #5780 r5: a refresh re-keys NOTHING. `turn_start_offset` is identity
+            // and `last_offset` is this turn's delivery frontier; both are
+            // coordinates into `output_path`, and no claim can read an atomic
+            // `(path, cursor)` pair, so a rotated source is declined outright and
+            // the durable row keeps file A and file A's offsets.
             assert_eq!(
                 (
                     row.user_msg_id,
@@ -5450,7 +5417,7 @@ mod native_feeder_birth_regressions {
                     row.last_offset,
                     row.output_path.as_deref()
                 ),
-                (anchor.get(), Some(start), start, source.to_str())
+                (anchor.get(), Some(0), 0, native.to_str())
             );
             assert_eq!(
                 super::super::super::mailbox_snapshot(&shared, channel)
@@ -5627,7 +5594,7 @@ mod native_feeder_birth_regressions {
     }
 
     #[test]
-    fn same_anchor_refresh_rekeys_offsets_onto_a_rotated_source() {
+    fn same_anchor_refresh_declines_when_the_source_rotated_under_it() {
         assert_eq!(
             run_birth_cases(&[(
                 15,
@@ -5635,7 +5602,7 @@ mod native_feeder_birth_regressions {
                 Some(RefreshFeeder::SourceRotated)
             )]),
             vec![(ExternalInputRelayOwner::SessionBoundRelay, true)],
-            "a refresh that re-points the row at a new rollout must carry that source's own cursor, never the previous file's bytes"
+            "a refresh whose resolved output moved to another file has no atomic (path, cursor) pair to adopt, so it must decline and leave the durable row on its own source"
         );
     }
 }

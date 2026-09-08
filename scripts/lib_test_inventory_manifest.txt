@@ -5920,6 +5920,7 @@ services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::pending_start_reclaim_orphan_fn_uses_real_ordering_for_session_bound_orphan
 services::discord::tui_prompt_relay::synthetic_start::tests::aged_rowless_synthetic_owner_reclaims_and_finalizes_ledger
 services::discord::tui_prompt_relay::synthetic_start::tests::claim_adopting_existing_mailbox_does_not_increment_global_active
+services::discord::tui_prompt_relay::synthetic_start::tests::claude_refresh_demotion_stops_re_arming_a_row_the_sink_already_delivered
 services::discord::tui_prompt_relay::synthetic_start::tests::finalized_reclaim_of_readopted_real_owner_does_not_suppress_completion_footer
 services::discord::tui_prompt_relay::synthetic_start::tests::monitor_auto_turn_slot_is_not_reclaimed_even_when_aged
 services::discord::tui_prompt_relay::synthetic_start::tests::path_b_absent_row_in_ledger_aged_reclaims_and_evicts
@@ -6041,11 +6042,11 @@ services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::can
 services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::matching_native_feeder_admits_live_handles_and_rejects_stale_heartbeat
 services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::path_mismatch_preserves_legacy_owner_pending_source_correspondence
 services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::registered_passive_consumer_without_native_feeder_keeps_bridge_progress_path
+services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::same_anchor_refresh_declines_when_the_source_rotated_under_it
 services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::same_anchor_refresh_downgrades_session_bound_owner_after_feeder_loss
 services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::same_anchor_refresh_keeps_bridge_late_handle_and_downgrades_watcher_after_loss
 services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::same_anchor_refresh_keeps_the_owner_of_an_already_delivered_row
 services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::same_anchor_refresh_keeps_unfed_owner_when_no_relayer_can_be_armed
-services::discord::tui_prompt_relay::tests::native_feeder_birth_regressions::same_anchor_refresh_rekeys_offsets_onto_a_rotated_source
 services::discord::tui_prompt_relay::tests::notification_strip_drops_bare_control_bytes_but_keeps_whitespace
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_clears_recorded_lease_on_drop
 services::discord::tui_prompt_relay::tests::observed_lease_early_return_guard_disarm_preserves_lease
@@ -6054,7 +6055,6 @@ services::discord::tui_prompt_relay::tests::owner_channel_chokepoint_triggers_dr
 services::discord::tui_prompt_relay::tests::registry_is_authoritative_for_owner_channel_resolution
 services::discord::tui_prompt_relay::tests::registry_miss_but_dedupe_hit_drops_and_does_not_use_mirror
 services::discord::tui_prompt_relay::tests::relay_prompt_decision_skips_model_two_half_transcript
-services::discord::tui_prompt_relay::tests::resolved_transcript_rotation_takes_the_new_transcripts_cursor
 services::discord::tui_prompt_relay::tests::slash_command_control_kind_distinguishes_distinct_unknown_commands
 services::discord::tui_prompt_relay::tests::slash_command_control_kind_is_stable_across_double_post_halves
 services::discord::tui_prompt_relay::tests::slash_command_control_note_loop_and_generic_stdout_show_body
