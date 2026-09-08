@@ -892,8 +892,8 @@ redeploy leaves the old values live in the plist.
   a persistent round-robin cursor, instead of fanning out synchronous `gh` API
   calls every tick; each `gh` exec is bounded to 1500 ms; the engine's repeating
   "policy hook slow" WARN is rate-limited to every Nth occurrence.
-  Classification: **leader-only / singleton-tick** — the merge-automation policy
-  tick is a single control-plane owner, and the new review-snapshot cache and
+  Classification (as it stood before removal): **leader-only / singleton-tick** —
+  the merge-automation policy tick was a single control-plane owner, and its
   round-robin cursor live in `kv_meta` under the same ownership as the policy's
   existing `kv_meta` state (merge-request queue, allowed authors); no new PG
   lease, cross-node routing rule, or leader-election authority is introduced, and

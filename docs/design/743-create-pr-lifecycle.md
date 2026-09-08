@@ -100,10 +100,10 @@ API 미응답 시 gate skip(복구 배포 false-block 방지). `$DEV_PORT` 할�
 | C1 | `upsertPrTracking` facade COALESCE | `00-pr-tracking.js:36` | signature 불변, 새 컬럼은 Rust bridge op만 write |
 | C2 | `create_dispatch_core` 자체 tx | `dispatch_create.rs:160,579` | `_on_conn` variant 분리 + thin shim |
 | C3 | `processTrackedMergeQueue` terminal only | `merge-automation.js:1711` | handoffCreatePr가 status 안 건드림 |
-| C4 | `markPrCreateFailed`는 terminal force 전이 | `review-automation.js:772` | JS orchestration 유지 (setStatus 포함) |
+| C4 | `markPrCreateFailed`는 terminal force 전이 | `review-automation.js:772` | JS orchestration 유지 (setStatus 포함). #5716 slice B 이후 4단계 = `handOffPrCreateFailure` (아래 C7) |
 | C5 | dispatch active dedupe | `dispatch_create.rs:80,213` | handoffCreatePr **idempotent reuse**. reseedPrTracking이 cancel 동반 |
 | C6 | degraded 경로 pr_tracking 미생성 | `deploy-pipeline.js:332` | JS 전용 처리, pr_tracking 건드리지 않음 |
-| C7 | escalation = state + notification 짝 | `ci-recovery.js:332,465` | 기존 JS `escalateToManualIntervention` 재사용 |
+| C7 | escalation = state + notification 짝 | `ci-recovery.js:332,465` | #5716 slice B 에서 `escalateToManualIntervention` → `handOffPrCreateFailure` 로 교체: terminal 카드의 pending escalation 은 `flushEscalations` 가 drop 하므로 `notifyDeadlockManager` 배달 성공만이 이관 성립 |
 | C8 | `OnDispatchCompleted` success-only | `dispatch_status.rs` | failure는 JS catch에서 bridge op 호출 |
 
 ## Rust bridge ops
@@ -201,10 +201,12 @@ function markPrCreateFailed(cardId, error, stampGen) {
   // 3. Blocked reason (setStatus가 clear하므로 뒤에 set)
   if (result.escalated) {
     agentdesk.kanban.setBlockedReason(cardId, 'pr:create_failed_escalated:max_retries');
-    escalateToManualIntervention(cardId, 'create-pr max retries');  // C7
   } else {
     agentdesk.kanban.setBlockedReason(cardId, 'pr:create_failed:' + truncate(error, 120));
   }
+
+  // 4. #5716 slice B: 재시도 소비자가 없으므로 실패 세대마다 운영자 이관.
+  handOffPrCreateFailure(cardId, error, result.retry_count);  // C7
 }
 ```
 
