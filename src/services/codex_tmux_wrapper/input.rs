@@ -311,8 +311,11 @@ where
         (PromptOrigin::Terminal, CodexInputClass::LocalControl { name, args }) => {
             if name == "/model" {
                 render_model_status(ctx, &args)
-            } else {
+            } else if args.is_empty() {
                 render_controls_notice(None)
+            } else {
+                let notice = render_controls_notice(None);
+                format!("{notice}\n[인수 '{args}' 은 적용되지 않았습니다.]")
             }
         }
         (PromptOrigin::Terminal, CodexInputClass::UnsupportedControl { raw_name }) => {
@@ -366,9 +369,9 @@ fn render_controls_notice(refused: Option<&str>) -> String {
     format!("{head}\n[지원 명령: {supported}]\n{PATH_RULE_NOTE}")
 }
 
-const PATH_RULE_NOTE: &str = "[단일 세그먼트 경로(/tmp, /Users …)는 프롬프트로 전달됩니다. \
-그 외 /이름 은 명령으로 해석됩니다. 경로를 뜻했다면 하위 경로를 붙이거나(/data/…) \
-문장 앞에 단어를 두세요.]";
+const PATH_RULE_NOTE: &str = "[열거된 루트(/tmp, /Users, /etc …)와 하위 경로·점을 포함한 \
+토큰(/data/x, /a.log)만 프롬프트로 전달됩니다. 그 외 단일 세그먼트 /이름 은 명령으로 \
+해석되어 거부됩니다. 경로였다면 하위 경로를 붙이거나 문장 앞에 단어를 두세요.]";
 
 #[cfg(test)]
 mod tests {
@@ -453,6 +456,8 @@ mod tests {
         let (help, ran_help) = dispatch_terminal("/help", ctx(Some("model-A"), None));
         assert!(status_of(&help).contains("/model"));
         assert!(ran_help.is_empty());
+        let (help_args, _) = dispatch_terminal("/help 이거 어떻게 해", ctx(None, None));
+        assert!(status_of(&help_args).contains("적용되지 않았습니다"));
     }
 
     #[test]

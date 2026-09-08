@@ -301,14 +301,19 @@ pub(crate) fn classify_codex_input(text: &str) -> CodexInputClass {
 }
 
 /// #5660 rule R: must this command token be preserved as a filesystem path?
-/// Judged on the raw spelling, before any case normalization.
+/// Judged on the raw spelling, before any case normalization. R3 compares only
+/// the leading ASCII alphanumeric run, so `/tmp에`, `/ETC를` and `/opt)` stay
+/// paths; `/model에` runs to `model`, not a root, so it stays command-shaped.
 fn is_fs_path_token(raw_name: &str) -> bool {
     let rest = &raw_name[1..];
+    let root_run = rest
+        .find(|ch: char| !ch.is_ascii_alphanumeric())
+        .map_or(rest, |end| &rest[..end]);
     rest.contains('/')
         || raw_name.contains('.')
         || FS_ROOT_SEGMENTS
             .iter()
-            .any(|root| rest.eq_ignore_ascii_case(root))
+            .any(|root| root_run.eq_ignore_ascii_case(root))
 }
 
 /// The split and start-anchoring rule of record. Returns the command token
@@ -406,6 +411,10 @@ mod tests {
             "/Volumes 설명해줘",
             "//example.com 열어줘",
             "/foo/i 정규식을 설명해줘",
+            "/tmp에 뭐가 있어?",
+            "/Users에서 찾아줘",
+            "/ETC를 봐줘",
+            "/opt) 를 봐줘",
         ] {
             assert_eq!(
                 classify_codex_input(prompt),
@@ -418,7 +427,14 @@ mod tests {
     #[test]
     fn command_shaped_input_outside_the_registry_is_refused_not_forwarded() {
         let long_name = format!("/{}", "a".repeat(33));
-        for raw in ["/frobnicate", "/모델", "/1status", "/data", &long_name] {
+        for raw in [
+            "/frobnicate",
+            "/모델",
+            "/1status",
+            "/data",
+            "/model에",
+            &long_name,
+        ] {
             assert_eq!(
                 classify_codex_input(raw),
                 CodexInputClass::UnsupportedControl {
