@@ -665,6 +665,135 @@ fn status_panel_codex_active_omits_processing_tail_after_recent_block() {
 }
 
 #[test]
+fn multiline_activity_marker_stays_on_first_header_and_out_of_answer_footer() {
+    use super::super::{
+        placeholder_sweeper::is_message_still_placeholder as probe,
+        single_message_panel::compose_footer_status_block as compose,
+    };
+    let marker = super::super::formatting::PLACEHOLDER_PROBE_MARKER;
+    for (index, panel) in multiline_panels_for_probe_tests().into_iter().enumerate() {
+        let prefix = ["🧵 subagent 실행 중", "🧬 workflow 실행 중"][index % 2];
+        let first_line = panel.lines().next().unwrap();
+        assert!(first_line.ends_with(marker), "{panel:?}");
+        assert_eq!(panel.matches(marker).count(), 1);
+        assert!(probe(&panel));
+        let visible = format!("-# {prefix} (first\n-# second)\n-# time");
+        assert_eq!(panel.replace(marker, ""), visible);
+        let footer = compose("⠸", &panel);
+        assert!(!footer.contains(marker), "{footer:?}");
+        assert!(!probe(&footer));
+        assert!(!probe(&format!("실제 답변\n{footer}")));
+    }
+}
+
+#[test]
+fn status_panel_marker_uses_snapshot_before_codex_task_projection() {
+    use super::super::{
+        formatting::PLACEHOLDER_PROBE_MARKER, placeholder_sweeper::is_message_still_placeholder,
+    };
+    for kind in [CompletedKind::Foreground, CompletedKind::Background] {
+        for stale_task in [false, true] {
+            let mut snapshot = StatusPanelState::default();
+            snapshot.status = DerivedStatus::Completed { kind };
+            if stale_task {
+                snapshot.last_tool = Some(super::status_panel::LastToolCall {
+                    name: "Task".into(),
+                    summary: None,
+                });
+            }
+            let panel = render_status_panel(snapshot, &ProviderKind::Codex, "time".into(), None);
+            assert!(!panel.contains(PLACEHOLDER_PROBE_MARKER), "{panel:?}");
+            assert!(!is_message_still_placeholder(&panel), "{panel:?}");
+            assert!(
+                panel.starts_with(if stale_task {
+                    "-# 🔧 마지막 도구"
+                } else {
+                    "-# ✅"
+                }),
+                "{panel:?}"
+            );
+        }
+    }
+    for status in [
+        DerivedStatus::Running,
+        DerivedStatus::ToolRunning {
+            name: "Bash".into(),
+            summary: None,
+        },
+    ] {
+        let mut snapshot = StatusPanelState::default();
+        snapshot.status = status;
+        let panel = render_status_panel(snapshot, &ProviderKind::Codex, "time".into(), None);
+        assert!(
+            panel
+                .lines()
+                .next()
+                .unwrap()
+                .ends_with(PLACEHOLDER_PROBE_MARKER)
+        );
+        assert!(is_message_still_placeholder(&panel));
+    }
+}
+
+#[test]
+fn status_panel_marker_survives_utf16_truncation_and_costs_four_units() {
+    use super::super::formatting::{PLACEHOLDER_PROBE_MARKER, discord_message_units};
+    let mut snapshot = StatusPanelState::default();
+    snapshot.task = Some(TaskPanelSnapshot {
+        dispatch_id: "fixture".into(),
+        card_id: None,
+        dispatch_type: None,
+        owner_instance_id: None,
+        card_title: None,
+        dispatch_title: None,
+        github_issue_number: None,
+    });
+    let short = render_status_panel(snapshot.clone(), &ProviderKind::Claude, "τ".into(), None);
+    let unmarked = short.replace(PLACEHOLDER_PROBE_MARKER, "");
+    assert_eq!(
+        discord_message_units(&short) - discord_message_units(&unmarked),
+        4
+    );
+    let time = format!(
+        "τ{}",
+        "x".repeat(STATUS_PANEL_MAX_CHARS - discord_message_units(&unmarked))
+    );
+    assert_eq!(
+        discord_message_units(&unmarked.replace("τ", &time)),
+        STATUS_PANEL_MAX_CHARS
+    );
+    let panel = render_status_panel(snapshot.clone(), &ProviderKind::Claude, time.clone(), None);
+    assert!(
+        !panel.contains("Task"),
+        "four marker units must drop the trailing task section"
+    );
+    snapshot.task = None;
+    assert_eq!(
+        panel,
+        render_status_panel(snapshot.clone(), &ProviderKind::Claude, time, None)
+    );
+    for (time, trigger) in [
+        ("😀".repeat(2_100), None),
+        (
+            "time".into(),
+            Some(format!("턴 트리거: {}", "😀".repeat(2_100))),
+        ),
+    ] {
+        let panel = render_status_panel(snapshot.clone(), &ProviderKind::Claude, time, trigger);
+        assert!(discord_message_units(&panel) <= STATUS_PANEL_MAX_CHARS);
+        assert!(
+            panel
+                .lines()
+                .next()
+                .unwrap()
+                .ends_with(PLACEHOLDER_PROBE_MARKER)
+        );
+        assert_eq!(panel.matches(PLACEHOLDER_PROBE_MARKER).count(), 1);
+        assert!(panel.lines().all(|line| line.starts_with("-# ")));
+    }
+}
+
+#[test]
 fn status_panel_truncates_long_body_without_processing_tail() {
     assert_eq!(STATUS_PANEL_MAX_CHARS, super::super::DISCORD_MSG_LIMIT);
     let astral_overflow = format!("😀{}", "x".repeat(STATUS_PANEL_MAX_CHARS - 1));
@@ -9795,10 +9924,14 @@ fn status_panel_free_renderer_orders_header_fields_on_separate_lines() {
         "턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)\n마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)".to_string(),
         Some("턴 트리거: https://discord.com/channels/1/2/3".to_string()),
     );
+    let marked_header = format!(
+        "-# 🔧 마지막 도구 (아직 없음){}",
+        super::super::formatting::PLACEHOLDER_PROBE_MARKER
+    );
     assert_eq!(
         out.lines().take(4).collect::<Vec<_>>(),
         vec![
-            "-# 🔧 마지막 도구 (아직 없음)",
+            marked_header.as_str(),
             "-# 턴 트리거: https://discord.com/channels/1/2/3",
             "-# 턴 시작 : 11-15 07:13:20 (<t:1700000000:R>)",
             "-# 마지막 업데이트 : 11-15 07:18:20 (<t:1700000300:R>)",

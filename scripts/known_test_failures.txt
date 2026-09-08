@@ -49,17 +49,16 @@
 # widened lane can land; each needs its own fix.
 # ---------------------------------------------------------------------------
 #
-# #5305: This test is red not because the classifier PREFIXES lacks an entry.
-# The real drift is that `render_status_panel` gives its header the `-# `
-# subtext prefix, while `is_message_still_placeholder` only calls trim_start()
-# and does not remove `-# `, making the classifier a dead branch throughout
-# the v2 panel path. Adding the prefix makes the contract test pass but has
-# measured production effect 0; it would instead open a window for a model
-# answer beginning `🔧 마지막 도구 (…)` to be mistaken for a placeholder and
-# overwritten by the sweeper. It is deliberately not added. Removing `-# `
-# would suddenly classify many panels as StillPlaceholder and broaden
-# destructive edits, so that root fix needs a separate design.
-always | services::discord::placeholder_sweeper::panel_shape::tests::renderer_activity_variants_and_panel_shape_classifier_stay_in_sync | lane=non-pg-sweep | #5305 | v2 status-panel drift tracked in #5305: render_status_panel emits a -# subtext header that the sweeper does not strip, so this direct rendered-line classifier contract is red while the production v2 route remains unreachable. Adding the last-tool prefix has measured production effect 0 and can misclassify a model answer; stripping the prefix needs a separate destructive-edit design.
+# #5305: The former bare-activity test failed because the legacy PREFIXES omit
+# the current last-tool label. Separately, full v2 panels had a -# header and no
+# marker, so the common probe missed them. Matching last-tool prose or globally
+# stripping -# would broaden classification of answers and is not the repair.
+# The replacement consumes all macro samples through the actual renderer with
+# independent terminal expectations; footer/prose negatives and all six legacy
+# positive shapes preserve the relevant contracts. The obsolete requirement
+# that every current bare label be a legacy prefix is intentionally retired.
+# The replacement and real HTTP drain contract passed fresh native validation;
+# its former exact always entry is retired, not widened or changed to flaky.
 #
 # ---------------------------------------------------------------------------
 # parallel-only: pass under --test-threads=1, fail in the full parallel sweep.
