@@ -18,6 +18,8 @@ const FETCH_RECENT_CHANNEL_PAIRS_SQL: &str = "SELECT transcript.user_message,
      WHERE transcript.channel_id = $1
        AND BTRIM(transcript.user_message) <> ''
        AND BTRIM(transcript.assistant_message) <> ''
+       AND (clear_boundary.cleared_through_id IS NULL
+            OR transcript.id > clear_boundary.cleared_through_id)
      ORDER BY transcript.created_at DESC, transcript.id DESC
      LIMIT $2";
 
@@ -122,6 +124,12 @@ pub(crate) async fn finish_channel_clear_boundary_tx(
     mut tx: Transaction<'_, Postgres>,
     channel_id: &str,
 ) -> Result<()> {
+    let channel_id = channel_id.trim();
+    if channel_id.is_empty() {
+        return Err(anyhow!(
+            "channel clear boundary requires non-empty channel_id"
+        ));
+    }
     lock_channel_transcript_clear_fence(&mut tx, channel_id)
         .await
         .map_err(|error| anyhow!("lock channel clear boundary failed: {error}"))?;
@@ -202,6 +210,8 @@ const FETCH_CHANNEL_PAIRS_UP_TO_FRONTIER_SQL: &str = "SELECT transcript.user_mes
        AND transcript.id <= $2
        AND BTRIM(transcript.user_message) <> ''
        AND BTRIM(transcript.assistant_message) <> ''
+       AND (clear_boundary.cleared_through_id IS NULL
+            OR transcript.id > clear_boundary.cleared_through_id)
      ORDER BY transcript.created_at DESC, transcript.id DESC
      LIMIT $3";
 
@@ -251,7 +261,7 @@ pub(crate) async fn fetch_channel_pairs_up_to_frontier_tx(
 // the channel lock afterwards, because both values are transaction-begin times
 // and neither follows the lock order.
 //
-// `id > cleared_through_id` closes exactly that reversal: the clear reads
+// SQL applies `id > cleared_through_id` before LIMIT: the clear reads
 // `MAX(session_transcripts.id)` while holding the lock, so any row it was
 // serialized after is at or below the recorded frontier. Rows written before
 // migration 0114 compare against the `0` default, which every id exceeds.
@@ -259,15 +269,10 @@ fn channel_pairs_after_clear_boundary(
     rows: Vec<ChannelTranscriptPairRow>,
 ) -> Vec<ChannelTranscriptPair> {
     rows.into_iter()
-        .filter(
-            |(_, _, created_at, cleared_at, id, cleared_through_id)| match cleared_at {
-                None => true,
-                Some(cleared_at) => {
-                    created_at.is_some_and(|created_at| created_at > *cleared_at)
-                        && *id > cleared_through_id.unwrap_or(0)
-                }
-            },
-        )
+        .filter(|(_, _, created_at, cleared_at, ..)| match cleared_at {
+            None => true,
+            Some(cleared_at) => created_at.is_some_and(|created_at| created_at > *cleared_at),
+        })
         .map(
             |(user_message, assistant_message, ..)| ChannelTranscriptPair {
                 user_message,
@@ -783,14 +788,6 @@ mod tests {
                 Some(5),
             ),
             (
-                "covered-by-frontier".to_string(),
-                "blocked".to_string(),
-                Some(after),
-                Some(cleared_at),
-                5,
-                Some(5),
-            ),
-            (
                 "at-boundary".to_string(),
                 "blocked".to_string(),
                 Some(cleared_at),
@@ -818,9 +815,7 @@ mod tests {
                 user_message: "post-clear".to_string(),
                 assistant_message: "allowed".to_string(),
             }],
-            "a later fresh session must not cross the persisted /clear boundary; \
-             a row at or below the recorded frontier stays hidden even when its \
-             created_at is later than cleared_at"
+            "a later fresh session must not cross the persisted timestamp boundary"
         );
         assert!(
             FETCH_RECENT_CHANNEL_PAIRS_SQL
@@ -1058,6 +1053,7 @@ mod clear_fence_pg_tests {
         pool.close().await;
         db.drop().await;
     }
+
     /// #5707 (F3): the reversal `created_at > cleared_at` cannot see.
     ///
     /// The clear freezes its `NOW()` first, a transcript commits on another
@@ -1170,7 +1166,61 @@ mod clear_fence_pg_tests {
             observed[1].1 > observed[0].1 && observed[2].1 > observed[1].1,
             "cleared_through_id must advance as transcripts commit between clears, got {observed:?}"
         );
+        assert_eq!(channel_pairs(&pool, channel_id).await.len(), 1);
         pool.close().await;
         db.drop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clear_frontier_filters_before_limit_preserving_later_commit_pg() -> Result<()> {
+        let (db, pool) = create_pool().await;
+        let channel_id = "4533006";
+        let clear_tx = begin_channel_clear_boundary_tx(&pool).await?;
+        let mut writer_b = pool.begin().await?;
+        let b_started = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>("SELECT NOW()")
+            .fetch_one(&mut *writer_b)
+            .await?;
+        let mut a = entry("limit-A", channel_id, b_started.timestamp_millis());
+        a.user_message = "A must be excluded";
+        assert!(persist_turn_db(Some(&pool), a).await?);
+        finish_channel_clear_boundary_tx(clear_tx, channel_id).await?;
+        let (_, covered_id) = boundary_markers(&pool, channel_id).await;
+        assert!(covered_id > 0);
+        // B resumes the production lock + INSERT path only after C commits.
+        lock_channel_transcript_clear_fence(&mut writer_b, channel_id).await?;
+        let mut b = entry("limit-B", channel_id, b_started.timestamp_millis());
+        b.user_message = "B must survive";
+        let prepared = prepare_persist_entry_pg(&pool, &b)
+            .await?
+            .ok_or_else(|| anyhow!("B must prepare"))?;
+        persist_turn_pg_on(&mut *writer_b, &prepared).await?;
+        writer_b.commit().await?;
+
+        let rows = sqlx::query_as::<_, ChannelTranscriptPairRow>(
+            "SELECT t.user_message, t.assistant_message, t.created_at, b.cleared_at,
+                    t.id, b.cleared_through_id FROM session_transcripts t
+             JOIN channel_session_clear_boundaries b ON b.channel_id = t.channel_id
+             WHERE t.channel_id = $1 ORDER BY t.created_at DESC, t.id DESC",
+        )
+        .bind(channel_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].4, covered_id); // A equals the excluded frontier.
+        assert!(rows[1].4 > covered_id);
+        assert!(rows[0].2 > rows[1].2 && rows[1].2 > rows[1].3);
+        let mut tx = pool.begin().await?;
+        let recent = fetch_recent_channel_pairs(&pool, channel_id, 1).await?;
+        let bounded =
+            fetch_channel_pairs_up_to_frontier_tx(&mut tx, channel_id, rows[1].4, 1).await?;
+        let expected = vec![ChannelTranscriptPair {
+            user_message: "B must survive".to_string(),
+            assistant_message: "private answer".to_string(),
+        }];
+        assert_eq!((recent, bounded), (expected.clone(), expected));
+        tx.commit().await?;
+        pool.close().await;
+        db.drop().await;
+        Ok(())
     }
 }
