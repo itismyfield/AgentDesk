@@ -37,13 +37,15 @@ fn isolated_root() -> (std::sync::MutexGuard<'static, ()>, RuntimeRootGuard) {
     )
 }
 
+type RecordedRequests = Vec<(Method, String, Option<Value>)>;
+
 #[derive(Clone)]
 struct WireState {
     channel: u64,
     message: u64,
     content: String,
     fail: Option<Method>,
-    requests: Arc<Mutex<Vec<(Method, String, Option<Value>)>>>,
+    requests: Arc<Mutex<RecordedRequests>>,
 }
 
 impl WireState {
