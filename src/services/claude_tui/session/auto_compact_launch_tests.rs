@@ -20,11 +20,16 @@ fn launch_config(root: &Path, model: Option<&str>) -> ClaudeTuiLaunchConfig {
 
 fn write_provider_setting(root: &Path, value: Option<u64>) -> PathBuf {
     let path = root.join("agentdesk.yaml");
-    let mut config = serde_json::json!({ "data": { "dir": root.join("data") } });
+    let mut config = serde_json::json!({
+        "server": {},
+        "data": { "dir": root.join("data") }
+    });
     if let Some(value) = value {
         config["runtime"] = serde_json::json!({ (SETTING): value });
     }
     fs::write(&path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    serde_yaml::from_str::<crate::config::Config>(&fs::read_to_string(&path).unwrap())
+        .expect("the exact provider fixture must parse as Config before checking launch output");
     path
 }
 
