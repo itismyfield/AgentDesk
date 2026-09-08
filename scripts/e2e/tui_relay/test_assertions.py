@@ -311,25 +311,60 @@ class E36EvidenceContract(unittest.TestCase):
                                       ("fresh_only", rows, rows + [stray])):
             with self.subTest(case=name), self.assertRaisesRegex(assertions.AssertionError, "unattributed completion"):
                 e36.final_assertion(_window(*observed), copy.deepcopy(record), fresh)
+        # An edit cannot retire chrome we already observed and stored.
+        edited = _window(*rows, stray)
+        edited.add({**stray, "content": "edited away"})
+        self.assertTrue(edited.message_updates)
+        with self.subTest(case="edited_away"), self.assertRaisesRegex(assertions.AssertionError, "unattributed completion"):
+            e36.final_assertion(edited, copy.deepcopy(record), edited.raw_messages)
+        ours = _window(*rows, _our_msg(998, "✅ 응답 완료"))
+        ours.add(_our_msg(998, "driver edit"))  # our own driver edits are not product chrome
+        e36.final_assertion(ours, copy.deepcopy(record), ours.raw_messages)
 
-    def test_queue_bypass_completion_is_a_product_failure_not_an_ownership_guess(self):
+    def test_qa_hold_prefix_may_land_on_its_own_id_but_never_on_two(self):
+        rows, record = self.publication_fixture()
+        qa = record["discord_prompt_records"][10]
+        hold, marker = qa["hold_marker"], qa["body_marker"]
+        # #5731 contract B: message1 keeps the PRE prefix, message2 carries the terminal body.
+        split = [row for row in rows if str(row["id"]) not in ("111", "112")] + [
+            _relay_msg(111, hold), _relay_msg(113, marker), _raw_bot_msg(114, "✅ 응답 완료")]
+        qa.update(response_ids=["113"], completion_message_id="114", discord_closed_after_id=114)
+        e36.final_assertion(_window(*split), copy.deepcopy(record), split)
+        # E-22 shape: the prefix is stranded on one ID while a second ID republishes it.
+        stranded = split + [_relay_msg(115, f"{hold}\nrepublished")]
+        with self.assertRaisesRegex(assertions.AssertionError, "hold publication"):
+            e36.final_assertion(_window(*stranded), copy.deepcopy(record), stranded)
+
+    def test_two_ordered_turns_on_one_page_are_attributed_not_called_a_queue_bypass(self):
         from types import SimpleNamespace
-        driver_module = SimpleNamespace(HarnessEvidenceError=RuntimeError)
-        qa = {"inbound_message_id": "110"}
-        self.assertIs(e36.qa_ambiguous_error(qa, {"queue": {"active_prior_message_id": "110"}}, driver_module),
-                      assertions.AssertionError)
-        for qb in ({"queue": {"active_prior_message_id": "999"}}, {}):
-            self.assertIs(e36.qa_ambiguous_error(qa, qb, driver_module), RuntimeError)
-        for bypass, error in ((True, assertions.AssertionError), (False, ValueError)):
-            with self.subTest(bypass=bypass):
-                rows, record = self.publication_fixture()
-                requests = record["discord_prompt_records"]
-                requests[10]["discord_closed_after_id"] = 115
-                requests[11]["queue"] = ({"active_prior_message_id": requests[10]["inbound_message_id"]}
-                                         if bypass else {"id": "QB"})
-                rival = _raw_bot_msg(113, "✅ 응답 완료")
-                with self.assertRaisesRegex(error, "ownership ambiguous"):
-                    e36.final_assertion(_window(*rows, rival), record, rows + [rival])
+        qa = {"prompt": "ask QA", "body_marker": "[QA]", "discord_before_id": 1000}
+        qb = {"prompt": "ask QB", "body_marker": "[QB]"}
+        window = _window(_relay_msg(1001, "[QA]"), _raw_bot_msg(1003, "✅ 응답 완료"),
+                         _relay_msg(1004, "[QB]"), _raw_bot_msg(1005, "✅ 응답 완료"))
+        row = lambda kind, text: {"type": kind, "sessionId": "s", "message": {"content": text}}  # noqa: E731
+        ordered = [row("user", "ask QA"), row("assistant", "[QA]"), row("user", "ask QB"), row("assistant", "[QB]")]
+        early = [row("user", "ask QA"), row("user", "ask QB"), row("assistant", "[QB]"), row("assistant", "[QA]")]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "native.jsonl"
+            path.write_text("")
+            qa["native_before"] = qb["native_before"] = e36.cursor(path)
+            evidence = SimpleNamespace(path=path, session="s", d=SimpleNamespace(HarnessEvidenceError=RuntimeError))
+            narrow = e36.sequential_boundary(evidence, qa, qb)
+            for name, native, error in (("sequential", ordered, None), ("early", early, assertions.AssertionError),
+                                        ("no_native_order", ordered[:1], RuntimeError)):
+                with self.subTest(case=name):
+                    path.write_text("".join(json.dumps(entry) + "\n" for entry in native))
+                    request = dict(qa)
+                    self.assertEqual(len(e36.completion_candidates(e36.request_window(window, request))), 2)
+                    if error:
+                        with self.assertRaises(error):
+                            narrow(window, request)
+                        continue
+                    narrow(window, request)
+                    self.assertEqual(request["queued_followup_order"]["qb_first_body_id"], 1004)
+                    self.assertEqual(request["discord_closed_after_id"], 1003)
+                    request["response_ids"] = ["1001"]
+                    self.assertEqual(e36.completion_id(e36.request_window(window, request), request), "1003")
 
 
 def _wait_predicate(window: assertions.Window, needle: str) -> bool:
