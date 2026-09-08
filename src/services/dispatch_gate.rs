@@ -222,6 +222,32 @@ pub fn set_provider_pressure_snapshot(snapshot: HashMap<String, ProviderPressure
     *lock.write().unwrap_or_else(|p| p.into_inner()) = snapshot;
 }
 
+/// Whether `provider`'s cached telemetry defers dispatch right now, at the caller's effective
+/// `danger_pct` (a parameter, not `danger_pct()`, so an off-activation caller cannot drift from
+/// the gate; `None` when that read failed). Read by the rate-limit sync loop, which must not poll
+/// below its base cadence while such pressure stands (#5727); staleness is excluded (`i64::MAX`)
+/// because an aged-out row is exactly what has to be re-observed.
+pub fn is_deferring(provider: &str, danger_pct: Option<u64>, now: i64) -> bool {
+    let lock = pressure_map();
+    let map = lock.read().unwrap_or_else(|p| p.into_inner());
+    is_deferring_snapshot(provider, map.get(provider), danger_pct, now)
+}
+
+/// Pure half of [`is_deferring`], so callers can pin the contract. An unknown threshold defers: a
+/// failed config read may not decide to fail open.
+pub fn is_deferring_snapshot(
+    provider: &str,
+    snapshot: Option<&ProviderPressureSnapshot>,
+    danger_pct: Option<u64>,
+    now: i64,
+) -> bool {
+    danger_pct.is_none_or(|danger_pct| {
+        evaluate_provider_pressure(provider, snapshot, danger_pct, i64::MAX, now)
+            .verdict
+            .is_defer()
+    })
+}
+
 /// Replace the in-memory agent_id -> provider snapshot. Called off the hot path
 /// by the rate-limit sync loop.
 pub fn set_agent_provider_snapshot(snapshot: HashMap<String, String>) {
@@ -746,6 +772,24 @@ pub fn persisted_runtime_overrides(
         danger_pct(),
         stale_sec(),
     )
+}
+
+/// The gate's effective danger threshold for an async caller holding a pool: persisted
+/// runtime-config first (same `kv_meta` row, same [`persisted_runtime_overrides`] parser the
+/// activation path uses), then YAML, then the default. `None` is the read failing; the enable
+/// flag and stale window come back from the same parser, unused (see [`is_deferring`]).
+pub async fn effective_danger_pct_pg(pg_pool: &sqlx::PgPool) -> Option<u64> {
+    let raw = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM kv_meta WHERE key = 'runtime-config' \
+         AND (expires_at IS NULL OR expires_at > NOW()) LIMIT 1",
+    )
+    .fetch_optional(pg_pool)
+    .await
+    .inspect_err(|error| tracing::warn!(%error, "[dispatch-gate] runtime-config unreadable"))
+    .ok()?;
+    let parsed = raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let (_enabled, danger, _stale) = persisted_runtime_overrides(parsed.as_ref());
+    Some(danger.unwrap_or_else(danger_pct))
 }
 
 fn persisted_runtime_overrides_with_fallbacks(

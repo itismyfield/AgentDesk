@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "09a47a2ad892c1f45d5bb382473b206caf29dd4d",
+  "measured_at_sha": "1e7b5e546761b2fb10802e1d7a278c95cd34bc4c",
   "records": [
     {
       "root": "migrations/postgres",
@@ -26857,6 +26857,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:e75738049b22657e4733d82c8fa39c95d8c9724a3ba334ea02c9c2ba0416753c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/dispatch_gate.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:e1a3b7a229fef155263306b541f204184499dfcac92fe0ada035ef3c07469b66"
     },
     {
       "root": "src",
