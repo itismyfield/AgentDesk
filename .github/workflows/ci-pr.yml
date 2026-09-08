@@ -177,6 +177,9 @@ jobs:
               - 'src/services/discord/watchers/dispatched_origin_ghost.rs'
               - 'src/services/discord/watchers/dispatched_origin_ghost_tests.rs'
               - 'src/services/maintenance/jobs/worktree_orphan_sweep.rs'
+              # #5320 slice 2: maintenance jobs reach the database, so select the
+              # whole directory and stop leaving new siblings out of the PG lane.
+              - 'src/services/maintenance/jobs/**'
               - 'src/services/pipeline_override.rs'
               # #5025: terminal-delivery evidence routing and every local
               # producer/epilogue sibling run in `test_fast`, whose registered
