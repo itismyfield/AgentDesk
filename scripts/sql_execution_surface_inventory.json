@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "09a47a2ad892c1f45d5bb382473b206caf29dd4d",
+  "measured_at_sha": "04d92a88d78ca09ad9cc80ed94dd478002b3466e",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1039,6 +1039,15 @@
     },
     {
       "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0113_intake_outbox_terminal_retention_index.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:42e174e4beabb6c31524e958f14b1858dd24dc946cb6ca958773d30b3ec381dd"
+    },
+    {
+      "root": "migrations/postgres",
       "kind": "MIGRATION_METADATA",
       "path": "migrations/postgres/checksum-repair-allowlist.json",
       "api": "migration.non_sql_tracked",
@@ -1053,7 +1062,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:0d1e77c736c10d5792a924e400dadbd2c5cc2ae499cb4d60ee1e2bf0d9153408"
+      "fingerprint": "sha256:5f669c9b5ae5199414a380b3a2ae33e5f3e7c6173fb7e80f88ff402ef5da9d8e"
     },
     {
       "root": "policies",
@@ -8686,6 +8695,15 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:57987ced16b13548f4997a71cd484fa2a0c556ec405f81847c32a862e9a70841"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:584ab6b4ea93a9ea3eb9caefc4226183b5ea7e45763384c9fa0fbfd627faaf9e"
     },
     {
       "root": "src",
