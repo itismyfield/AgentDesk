@@ -62,7 +62,10 @@ def _fetch_retry_delay(headers, body: Any) -> float:
             try:
                 delay = float(value)
             except ValueError:
-                if name != "Retry-After":
+                # #5787: the route normalizes Retry-After to seconds before it
+                # reaches `context`, but a pre-#5787 server can still forward an
+                # HTTP-date there — that is a delay, not a malformed value.
+                if name not in ("Retry-After", "context.retry_after"):
                     raise
                 reset_at = parsedate_to_datetime(value)
                 if reset_at.tzinfo is None:

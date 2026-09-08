@@ -268,6 +268,22 @@ class DiscordClientFetchMessages(unittest.TestCase):
                 self.sleep.assert_called_once_with(expected)
                 self.assertEqual(self.urlopen.call_count, 2)
 
+    def test_app_error_envelope_carries_normalized_and_date_retry_after(self):
+        # The route normalizes a delta-seconds or HTTP-date Retry-After into
+        # numeric seconds (#5787); an HTTP-date reaching `context` from an older
+        # server is still a delay rather than an "invalid delay" hard failure.
+        for delay, expected in ((3.0, 3.0), ("Sun, 09 Sep 2001 01:46:43 GMT", 3.0)):
+            with self.subTest(delay=delay):
+                self.sleep.reset_mock()
+                self.urlopen.reset_mock()
+                self.urlopen.side_effect = [
+                    self.http_error(self.app_error_rate_limit(delay)),
+                    _Response([]),
+                ]
+                self.assertEqual(self.client.fetch_messages("channel"), [])
+                self.sleep.assert_called_once_with(expected)
+                self.assertEqual(self.urlopen.call_count, 2)
+
     def test_app_error_context_without_rate_limit_status_is_not_a_delay(self):
         self.urlopen.side_effect = [
             self.http_error(self.app_error_rate_limit("9", upstream_status=500)),

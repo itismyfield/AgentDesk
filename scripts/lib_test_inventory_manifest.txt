@@ -970,6 +970,9 @@ server::routes::departments::tests::department_not_found_preserves_404_and_messa
 server::routes::departments::tests::ensure_pg_missing_pool_preserves_503_and_message
 server::routes::departments::tests::no_fields_to_update_preserves_400_and_message
 server::routes::departments::tests::reorder_tx_errors_preserve_500_and_prefixed_messages
+server::routes::discord::tests::channel_messages_outcome_keeps_rate_limit_status_for_non_json_body
+server::routes::discord::tests::channel_messages_outcome_rejects_non_json_success_body
+server::routes::discord::tests::channel_messages_response_normalizes_http_date_retry_after
 server::routes::discord::tests::channel_messages_response_passes_through_array_bodies
 server::routes::discord::tests::channel_messages_response_propagates_upstream_rate_limit
 server::routes::discord::tests::channel_messages_response_rejects_non_array_success_body
