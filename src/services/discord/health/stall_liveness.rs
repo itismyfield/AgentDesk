@@ -1713,8 +1713,16 @@ mod tests {
                     "transcript_mtime_recent"
                 );
 
-                // The same real source becomes stale; no decision enum is injected.
-                let stale_now = now + STALL_WATCHDOG_POSITIVE_LIVENESS_SECS as i64 + 1;
+                // Age the real source beyond the inclusive, whole-second budget.
+                file.as_file()
+                    .set_modified(
+                        std::time::SystemTime::now()
+                            - std::time::Duration::from_secs(
+                                STALL_WATCHDOG_POSITIVE_LIVENESS_SECS + 5,
+                            ),
+                    )
+                    .expect("age source transcript beyond the freshness budget");
+                let stale_now = chrono::Utc::now().timestamp();
                 let stale = evaluate_stall_watchdog_liveness(
                     &provider,
                     channel,
@@ -1726,7 +1734,12 @@ mod tests {
                     Some(721),
                 );
                 assert_eq!(stale.action, StallWatchdogLivenessAction::ProceedNoEvidence);
-                assert!(stale.evidence.transcript_mtime_age_secs.is_some());
+                assert!(
+                    stale
+                        .evidence
+                        .transcript_mtime_age_secs
+                        .is_some_and(|age| age > STALL_WATCHDOG_POSITIVE_LIVENESS_SECS)
+                );
 
                 // Unknown source also has no positive evidence; it is not healthy
                 // delivery, a confirmed dead owner, or permission to clear a turn.
