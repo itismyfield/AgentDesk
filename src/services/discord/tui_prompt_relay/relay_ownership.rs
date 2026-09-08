@@ -364,6 +364,33 @@ pub(super) fn external_input_relay_start_offset(
     binding.relay_last_offset()
 }
 
+/// #5780 r4: pair the RESOLVED output with THAT path's own cursor.
+/// [`external_input_relay_output_path`] can re-register the binding onto another
+/// file (Claude re-binds to the freshest transcript), leaving the caller's copy
+/// stale; that cursor on the resolved path stores file B at file A's coordinates,
+/// which `watchers::lifecycle::restore` then resumes from.
+pub(super) fn binding_for_resolved_output(
+    tmux_session_name: &str,
+    binding: Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
+    resolved: Option<&Path>,
+) -> Option<crate::services::tui_prompt_dedupe::TuiRuntimeBinding> {
+    let binding = binding?;
+    let names_resolved = |candidate: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding| {
+        resolved.is_some_and(|resolved| {
+            Path::new(&candidate.output_path) == resolved
+                || Path::new(candidate.relay_output_path()) == resolved
+        })
+    };
+    if names_resolved(&binding) {
+        return Some(binding);
+    }
+    Some(
+        crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name)
+            .filter(names_resolved)
+            .unwrap_or(binding),
+    )
+}
+
 pub(super) fn record_external_turn_lease_for_output(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

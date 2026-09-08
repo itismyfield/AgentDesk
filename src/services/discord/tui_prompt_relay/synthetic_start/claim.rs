@@ -61,6 +61,9 @@ pub(super) async fn claim_tui_direct_synthetic_turn_inner<const DEFERRED: bool>(
         channel_id,
         binding.as_ref(),
     );
+    // #5780 r4: the resolution above may have swapped the runtime binding (Claude),
+    // so re-pair the cursor with the path we resolved before both become durable.
+    let binding = binding_for_resolved_output(tmux_session_name, binding, output_path.as_deref());
     let relay_last_offset = external_input_relay_start_offset(provider, binding.as_ref());
     // #3358 round 2: carry the committed frontier forward, but ONLY for the
     // CURRENT wrapper generation (stale → `None` → no content skip).

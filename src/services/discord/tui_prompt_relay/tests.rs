@@ -4138,6 +4138,37 @@ fn claude_rehydrate_start_offset_uses_current_eof() {
     );
 }
 
+// #5780 r4: Claude's transcript resolver re-registers the runtime binding DURING
+// the claim, after the caller read its pre-resolution copy.
+#[cfg(unix)]
+#[test]
+fn resolved_transcript_rotation_takes_the_new_transcripts_cursor() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let session = "AgentDesk-claude-resolved-rotation-5780";
+    let channel = ChannelId::new(5_780_000_016);
+    let (bound, freshest) = (dir.path().join("a.jsonl"), dir.path().join("b.jsonl"));
+    std::fs::write(&bound, "a".repeat(8192)).expect("bound transcript");
+    std::fs::write(&freshest, "b".repeat(16384)).expect("freshest transcript");
+    use super::claude_idle_runtime::refresh_claude_runtime_binding as rebind;
+    rebind(session, channel, &bound, None);
+    let stale = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
+        .expect("pre-resolution binding");
+    rebind(session, channel, &freshest, None); // what the resolver does next
+    let paired = binding_for_resolved_output(session, Some(stale.clone()), Some(&freshest));
+    crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(session);
+    assert_eq!(
+        (
+            external_input_relay_start_offset(&ProviderKind::Claude, Some(&stale)),
+            external_input_relay_start_offset(&ProviderKind::Claude, paired.as_ref())
+        ),
+        (8192, 16384),
+        "the row must take the RESOLVED transcript's cursor, not the stale copy's"
+    );
+}
+
 // #4549/#4841: `/compact` rewrites the same transcript path to a shorter
 // historical snapshot. Either direct cursor regression or its same-generation
 // durable evidence must fast-forward to the new EOF instead of restarting at
@@ -5175,6 +5206,7 @@ mod native_feeder_birth_regressions {
         WatcherMissing,
         OffsetAdvanced,
         ProgressRetained,
+        DeliveredMarkerOnly,
         SourceRotated,
     }
 
@@ -5309,6 +5341,12 @@ mod native_feeder_birth_regressions {
                 row.response_sent_offset = "already sent;".len();
                 super::super::super::inflight::save_inflight_state(&row).unwrap();
             }
+            // #5780 r4: a confirmed sink POST stamps ONLY this durable marker
+            // (#3976); the mirrored body fields stay pristine.
+            if refresh == RefreshFeeder::DeliveredMarkerOnly {
+                row.session_bound_delivered = true;
+                super::super::super::inflight::save_inflight_state(&row).unwrap();
+            }
             let progress = (
                 row.full_response.clone(),
                 row.response_sent_offset,
@@ -5317,7 +5355,8 @@ mod native_feeder_birth_regressions {
             match refresh {
                 RefreshFeeder::Missing
                 | RefreshFeeder::WatcherMissing
-                | RefreshFeeder::ProgressRetained => {
+                | RefreshFeeder::ProgressRetained
+                | RefreshFeeder::DeliveredMarkerOnly => {
                     shared.tmux_watchers.remove(&channel).unwrap();
                 }
                 // #5780 r3: the wrapper rotated its rollout mid-turn; the row must
@@ -5378,7 +5417,9 @@ mod native_feeder_birth_regressions {
                 refreshed.claimed,
                 !matches!(
                     refresh,
-                    RefreshFeeder::OtherAnchor | RefreshFeeder::ProgressRetained
+                    RefreshFeeder::OtherAnchor
+                        | RefreshFeeder::ProgressRetained
+                        | RefreshFeeder::DeliveredMarkerOnly
                 )
             );
             row = super::super::super::inflight::load_inflight_state(
@@ -5572,6 +5613,16 @@ mod native_feeder_birth_regressions {
             )]),
             vec![(ExternalInputRelayOwner::SessionBoundRelay, true)],
             "a Codex row that already posted output has no ownerless re-arm path, so refresh must leave the durable owner alone instead of reporting a claim it cannot back"
+        );
+    }
+
+    #[test]
+    fn same_anchor_refresh_keeps_the_owner_of_an_already_delivered_row() {
+        let delivered = Some(RefreshFeeder::DeliveredMarkerOnly);
+        assert_eq!(
+            run_birth_cases(&[(16, Some((true, false, false, true)), delivered)]),
+            vec![(ExternalInputRelayOwner::SessionBoundRelay, true)],
+            "a row whose sink already confirmed delivery must keep its owner: demoting it re-keys the delivered turn into rollout recovery and re-posts it"
         );
     }
 

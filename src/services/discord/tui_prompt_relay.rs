@@ -103,7 +103,7 @@ use self::relay_ownership::external_input_relay_owner_for_watchers;
 use self::relay_ownership::resolved_codex_idle_relay_binding;
 use self::relay_ownership::{
     TuiDirectExternalInputLeaseGuard, TuiDirectObservedLeaseEarlyReturnGuard,
-    bridge_adapter_owns_external_turn, claim_should_adopt_relay_owner,
+    binding_for_resolved_output, bridge_adapter_owns_external_turn, claim_should_adopt_relay_owner,
     clear_external_input_bridge_lease_if_current, clear_observed_external_turn_lease_if_current,
     deferred_claim_requires_bridge_tail_relayer, external_input_relay_binding,
     external_input_relay_output_path, external_input_relay_start_offset,

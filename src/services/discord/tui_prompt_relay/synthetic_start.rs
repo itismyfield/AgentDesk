@@ -2183,16 +2183,22 @@ pub(super) fn tui_direct_session_bound_feed_admissible(
 /// tail, and it — like `rebind_reap::ownerless_external_input_inflight_is_stale_at`
 /// — refuses any row that already carries delivery progress, because recovery
 /// re-keys the turn to the prompt line and would re-send what was already posted.
+///
+/// #5780 r4: the durable `session_bound_delivered` marker is delivery evidence too
+/// — a confirmed sink POST stamps only that and can leave the mirrored body fields
+/// pristine, so a delivered turn would otherwise still look re-armable (which
+/// `orphan_relay_reclaim`'s own #3976 conjunct exists to prevent).
 pub(super) fn tui_direct_refresh_demotion_can_rearm(
     provider: &ProviderKind,
     state: &InflightTurnState,
 ) -> bool {
-    provider == &ProviderKind::Claude
-        || (state.current_msg_id == 0
-            && state.response_sent_offset == 0
-            && state.full_response.trim().is_empty()
-            && state.last_watcher_relayed_offset.is_none()
-            && !state.terminal_delivery_committed)
+    !state.session_bound_delivered
+        && (provider == &ProviderKind::Claude
+            || (state.current_msg_id == 0
+                && state.response_sent_offset == 0
+                && state.full_response.trim().is_empty()
+                && state.last_watcher_relayed_offset.is_none()
+                && !state.terminal_delivery_committed))
 }
 
 /// #3876: select first-birth ownership from three caller-supplied signals.
