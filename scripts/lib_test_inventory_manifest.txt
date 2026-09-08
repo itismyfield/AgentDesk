@@ -2197,6 +2197,7 @@ services::cswap::tests::list_cache_miss_is_single_flight
 services::cswap::tests::list_payload_accepts_fractional_usage_age_seconds_4126
 services::cswap::tests::switch_single_flight_times_out_second_switch
 services::cswap::tests::usage_age_seconds_recomputes_at_serve_time
+services::discord::abandon_request_store::probe_contract_tests::drain_http_contract_covers_live_terminal_prose_fences_and_transient_failures
 services::discord::abandon_request_store::tests::abandoned_card_renders_terminal_marker
 services::discord::abandon_request_store::tests::completed_terminal_request_upgrades_abort_for_same_panel
 services::discord::abandon_request_store::tests::defer_only_for_exact_live_anchor
@@ -3676,6 +3677,7 @@ services::discord::placeholder_live_events::tests::live_panel_render_preserves_s
 services::discord::placeholder_live_events::tests::live_status_panel_never_leaks_dangling_fence_when_bloated
 services::discord::placeholder_live_events::tests::monitor_handoff_live_events_stays_under_description_limit_with_long_command
 services::discord::placeholder_live_events::tests::monitor_tool_summaries_redact_command_fields_before_markdown
+services::discord::placeholder_live_events::tests::multiline_activity_marker_stays_on_first_header_and_out_of_answer_footer
 services::discord::placeholder_live_events::tests::newer_panel_cache_invalidation_survives_stale_clear
 services::discord::placeholder_live_events::tests::normalize_summary_stays_single_line_for_panel_cells
 services::discord::placeholder_live_events::tests::panel_cache_invalidation_forces_byte_stable_render_once
@@ -3731,6 +3733,8 @@ services::discord::placeholder_live_events::tests::status_panel_free_renderer_or
 services::discord::placeholder_live_events::tests::status_panel_heartbeat_without_new_events_is_stable
 services::discord::placeholder_live_events::tests::status_panel_keeps_latest_task_tool_entries_under_cap
 services::discord::placeholder_live_events::tests::status_panel_keeps_latest_ten_subagents
+services::discord::placeholder_live_events::tests::status_panel_marker_survives_utf16_truncation_and_costs_four_units
+services::discord::placeholder_live_events::tests::status_panel_marker_uses_snapshot_before_codex_task_projection
 services::discord::placeholder_live_events::tests::status_panel_omits_context_line_when_token_data_is_absent
 services::discord::placeholder_live_events::tests::status_panel_omits_recovery_line_when_count_is_zero_or_missing
 services::discord::placeholder_live_events::tests::status_panel_omits_session_line_when_lifecycle_details_are_absent
@@ -3864,6 +3868,8 @@ services::discord::placeholder_sweeper::is_message_still_placeholder_tests::live
 services::discord::placeholder_sweeper::is_message_still_placeholder_tests::marker_is_authoritative_regardless_of_header_wording
 services::discord::placeholder_sweeper::is_message_still_placeholder_tests::spinner_prefixed_placeholder_is_placeholder
 services::discord::placeholder_sweeper::is_message_still_placeholder_tests::spinner_without_space_is_not_placeholder
+services::discord::placeholder_sweeper::panel_shape::tests::actual_panel_footer_and_answers_are_not_placeholders
+services::discord::placeholder_sweeper::panel_shape::tests::legacy_markerless_prefixes_preserve_compatibility_without_last_tool_prose
 services::discord::placeholder_sweeper::panel_shape::tests::renderer_activity_variants_and_panel_shape_classifier_stay_in_sync
 services::discord::placeholder_sweeper::probe_classification_tests::permanent_statuses_classified_as_gone
 services::discord::placeholder_sweeper::probe_classification_tests::transient_statuses_classified_as_retryable
@@ -4982,6 +4988,7 @@ services::discord::single_message_panel::tests::footer_status_block_empty_panel_
 services::discord::single_message_panel::tests::footer_status_block_keeps_spinner_first
 services::discord::single_message_panel::tests::footer_status_block_repairs_dangling_fence_after_clamp_3394
 services::discord::single_message_panel::tests::footer_status_block_stays_within_discord_limit
+services::discord::single_message_panel::tests::footer_strips_only_exact_panel_header_marker_suffix
 services::discord::single_message_panel::tests::latest_tool_footer_header_is_recognized_after_spinner_merge
 services::discord::single_message_panel::tests::legacy_context_footer_is_stripped_during_format_transition_4846
 services::discord::single_message_panel::tests::migration_does_not_carry_delivered_terminal_marks_to_new_target
@@ -5511,6 +5518,7 @@ services::discord::tmux::tmux_watcher::tests::no_inflight_terminal_response_drop
 services::discord::tmux::tmux_watcher::tests::no_inflight_user_boundary_without_fresh_text_drops_already_delivered_restored_response_seed
 services::discord::tmux::tmux_watcher::tests::no_inflight_user_boundary_without_fresh_text_preserves_body_bearing_seed_for_relay
 services::discord::tmux::tmux_watcher::tests::normal_completion_finalizes_with_both_legacy_flags_false
+services::discord::tmux::tmux_watcher::tests::orphan_reclaim_preserves_actual_panel_footer_answers
 services::discord::tmux::tmux_watcher::tests::orphan_reclaim_real_tail_still_preserves_body_seed_4081
 services::discord::tmux::tmux_watcher::tests::orphan_turn_placeholder_reclaim_decision
 services::discord::tmux::tmux_watcher::tests::persisted_bridge_frozen_prefix_ids_merge_into_watcher_cleanup_list

@@ -507,6 +507,8 @@ src/
 │   │   ├── session.rs
 │   │   └── warm_followup.rs
 │   ├── discord/
+│   │   ├── abandon_request_store/
+│   │   │   └── probe_contract_tests.rs
 │   │   ├── catch_up/
 │   │   │   ├── classification.rs
 │   │   │   ├── classification_order_tests.rs
@@ -712,6 +714,7 @@ src/
 │   │   │   ├── freshness.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── panel_cache_invalidation.rs
+│   │   │   ├── probe_fixtures_tests.rs
 │   │   │   ├── recent_events.rs
 │   │   │   ├── session_banner_claim.rs
 │   │   │   ├── session_panel.rs
