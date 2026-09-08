@@ -189,6 +189,11 @@ fn late_watcher_after_partial_bridge_commit_is_stopped_before_direct_fallback_50
             active.full_response = "prefix suffix".to_string();
             active.response_sent_offset = "prefix ".len();
             crate::services::discord::inflight::save_inflight_state(&active).unwrap();
+            let active = crate::services::discord::inflight::load_inflight_state(
+                &ProviderKind::Claude,
+                channel.get(),
+            )
+            .unwrap();
             dr::write_delivered_frontier(
                 &ProviderKind::Claude,
                 channel.get(),
