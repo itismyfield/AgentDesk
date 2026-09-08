@@ -192,7 +192,8 @@ impl SupervisedWorkerRegistry {
                 self.register_leader_tokio(spec, move || {
                     let rate_limit_pg_pool = rate_limit_pg_pool.clone();
                     async move {
-                        super::super::rate_limit_sync_loop(rate_limit_pg_pool).await;
+                        super::super::rate_limit_sync::rate_limit_sync_loop(rate_limit_pg_pool)
+                            .await;
                     }
                 });
                 Ok(None)
