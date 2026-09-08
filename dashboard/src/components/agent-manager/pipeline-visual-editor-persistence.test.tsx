@@ -145,9 +145,9 @@ function seedCachedSnapshot(rawOverride: unknown) {
   );
 }
 
-function mockApi(rawOverride: unknown) {
+function mockApi(rawOverride: unknown, pipeline: PipelineConfigFull = makePipeline()) {
   vi.spyOn(api, "getEffectivePipeline").mockResolvedValue({
-    pipeline: makePipeline(),
+    pipeline,
     layers: { default: true, repo: true, agent: false },
   });
   vi.spyOn(api, "getRepoPipeline").mockResolvedValue({ repo: REPO, pipeline_config: rawOverride });
@@ -158,7 +158,7 @@ function mockApi(rawOverride: unknown) {
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
-async function mountEditor() {
+async function mountEditor(selectedAgentId: string | null = null) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -169,7 +169,7 @@ async function mountEditor() {
         locale="ko"
         repo={REPO}
         agents={[]}
-        selectedAgentId={null}
+        selectedAgentId={selectedAgentId}
         variant="fsm"
       />,
     );
@@ -188,10 +188,14 @@ async function saveAndReadPayload(): Promise<Record<string, unknown>> {
   return calls[calls.length - 1][1] as Record<string, unknown>;
 }
 
-function persistedDraftExtras(): Record<string, unknown> {
+function persistedDraftEntry(scopeKey: string = SCOPE_KEY): PersistedFsmDraftEntry | null {
   const raw = window.localStorage.getItem(STORAGE_KEYS.fsmDraft) ?? "{}";
   const store = JSON.parse(raw) as { entries?: Record<string, PersistedFsmDraftEntry> };
-  return store.entries?.[SCOPE_KEY]?.overrideExtras ?? {};
+  return store.entries?.[scopeKey] ?? null;
+}
+
+function persistedDraftExtras(): Record<string, unknown> {
+  return persistedDraftEntry()?.overrideExtras ?? {};
 }
 
 beforeEach(() => {
@@ -533,5 +537,152 @@ describe("locally created override extras", () => {
     expect(Object.hasOwn(payload, "retry_budget")).toBe(false);
     expect(Object.hasOwn(restoredExtras, "retry_budget")).toBe(false);
     expect((payload as unknown as PipelineConfigFull).states[0].label).toBe(EDITED_LABEL);
+  });
+});
+
+/**
+ * #5743. Rebinding an FSM edge to an already declared event writes only
+ * `overrideExtras`, so neither signature moves and the persistence effect used to
+ * delete the whole draft scope. Change detection runs against the server
+ * snapshot's extras, so returning to the server value still retires the scope.
+ */
+describe("override-only FSM edge edits", () => {
+  const SERVER_BINDINGS = { "ready->done": { event: "on_dispatch" } };
+
+  /** Both events are declared, so neither rebind touches the pipeline. */
+  function boundPipeline(): PipelineConfigFull {
+    const pipeline = makePipeline();
+    pipeline.events = { on_dispatch: [], on_error: [] };
+    return pipeline;
+  }
+
+  const boundOverride = (b: unknown = SERVER_BINDINGS) => buildOverridePayload(boundPipeline(), { fsm_edge_bindings: b });
+  const mockBoundApi = () => mockApi(boundOverride(), boundPipeline());
+
+  /** Holds the next repo-override GET open so a mutation refresh loses a race. */
+  function gateNextRepoGet(pipelineConfig: unknown) {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.mocked(api.getRepoPipeline).mockImplementationOnce(async () => { await gate; return { repo: REPO, pipeline_config: pipelineConfig }; });
+    return release;
+  }
+
+  const rebind = (event: string) =>
+    act(async () => { view.current?.actions.updateFsmTransitionEvent(0, event); });
+
+  it("keeps a rebind to an already declared event across a remount", async () => {
+    mockBoundApi();
+    await mountEditor();
+    expect(view.current?.ctx.fsmEdgeBindings).toEqual(SERVER_BINDINGS);
+
+    await rebind("on_error");
+    // The edit is override-only: no pipeline or stage signature moved.
+    expect(view.current?.ctx.hasVisibleChanges).toBe(false);
+    expect(view.current?.ctx.pipelineDraft?.events).toEqual({ on_dispatch: [], on_error: [] });
+    expect(persistedDraftExtras().fsm_edge_bindings).toEqual({ "ready->done": { event: "on_error" } });
+
+    await unmountEditor();
+    await mountEditor();
+    expect(view.current?.ctx.fsmEdgeBindings).toEqual({ "ready->done": { event: "on_error" } });
+    expect(persistedDraftExtras().fsm_edge_bindings).toEqual({ "ready->done": { event: "on_error" } });
+  });
+
+  // Out of scope here: `handleSave` still PUTs only when `pipelineChanged`, so an
+  // override-only edit survives a remount but has no way to reach the server yet.
+  it("retires the draft scope once the extras match the server snapshot again", async () => {
+    mockBoundApi();
+    await mountEditor();
+    expect(persistedDraftEntry()).toBeNull();
+
+    await rebind("on_error");
+    expect(persistedDraftEntry()).not.toBeNull();
+
+    await rebind("on_dispatch");
+    expect(view.current?.ctx.fsmEdgeBindings).toEqual(SERVER_BINDINGS);
+    expect(persistedDraftEntry()).toBeNull();
+  });
+
+  // The scope-transition guard. On the render that moves `fsmDraftScopeKey` the
+  // editor still holds the previous scope's draft, extras and `loading=false`,
+  // so without a scope-applied marker the repo edit is written under the agent
+  // scope and a later successful GET restores it there as an agent draft.
+  it("never records a repo-scope edit under the agent scope it switches to", async () => {
+    const agentId = "agent-1";
+    // The scope key carries the selected agent on both levels.
+    const repoScopeKey = buildFsmDraftScopeKey(REPO, "repo", agentId);
+    const agentScopeKey = buildFsmDraftScopeKey(REPO, "agent", agentId);
+    const repoEdit = { "ready->done": { event: "on_error" } };
+    mockBoundApi();
+    const agentPipeline = vi.spyOn(api, "getAgentPipeline")
+      .mockRejectedValue(new Error("transient agent pipeline failure"));
+
+    await mountEditor(agentId);
+    await rebind("on_error");
+    expect(persistedDraftEntry(repoScopeKey)?.overrideExtras.fsm_edge_bindings).toEqual(repoEdit);
+
+    // Agent scope has no snapshot cache, and its GET fails.
+    await act(async () => { view.current?.actions.setLevel("agent"); });
+    await act(async () => { await Promise.resolve(); });
+    expect(view.current?.ctx.error).toBe("transient agent pipeline failure");
+    expect(persistedDraftEntry(agentScopeKey)).toBeNull();
+    expect(persistedDraftEntry(repoScopeKey)?.overrideExtras.fsm_edge_bindings).toEqual(repoEdit);
+
+    // Re-entering the agent scope with a working GET shows the server binding.
+    agentPipeline.mockResolvedValue({
+      agent_id: agentId,
+      pipeline_config: buildOverridePayload(boundPipeline(), { fsm_edge_bindings: SERVER_BINDINGS }),
+    });
+    await refreshInPlace();
+
+    expect(view.current?.ctx.error).toBe(null);
+    expect(view.current?.ctx.fsmEdgeBindings).toEqual(SERVER_BINDINGS);
+    expect(persistedDraftEntry(agentScopeKey)).toBeNull();
+  });
+
+  // The mutation-refresh freshness guard. `refreshAfterMutation` has no effect
+  // cleanup, so a response landing after the editor left its scope used to take
+  // the screen *and* pin `appliedScopeKey` there, blocking that scope's edits.
+  it("discards a mutation refresh that resolves after the editor left its scope", async () => {
+    const agentId = "agent-1";
+    const agentBindings = { "ready->done": { event: "on_error" } };
+    mockBoundApi();
+    vi.spyOn(api, "getAgentPipeline").mockResolvedValue({ agent_id: agentId, pipeline_config: boundOverride(agentBindings) });
+    await mountEditor(agentId);
+    await act(async () => { view.current?.actions.updateState("ready", { label: "Repo edit" }); });
+    // The repo refresh GET is held; `LevelSwitch` stays enabled while saving.
+    const releaseRepoGet = gateNextRepoGet(boundOverride());
+    let savePromise: Promise<void> | undefined;
+    await act(async () => { savePromise = view.current?.actions.handleSave(); await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { view.current?.actions.setLevel("agent"); await Promise.resolve(); });
+    expect(view.current?.ctx.fsmEdgeBindings).toEqual(agentBindings);
+
+    // The repo response neither reaches the agent screen nor claims it, so the
+    // next agent edit is still recorded under the agent scope.
+    await act(async () => { releaseRepoGet(); await savePromise; });
+    expect(view.current?.ctx.fsmEdgeBindings).toEqual(agentBindings);
+    await act(async () => { view.current?.actions.updateState("ready", { label: "Agent edit" }); });
+    expect(persistedDraftEntry(buildFsmDraftScopeKey(REPO, "agent", agentId))?.pipeline.states[0].label).toBe("Agent edit");
+  });
+
+  // Same-scope responses stay interchangeable on purpose: a reset's own refresh
+  // GET is what discards the pre-reset draft, so a reload must not retire it.
+  // Adding a request-generation term back to that guard turns this test red.
+  it("lets the reset refresh discard a draft a same-scope reload restored", async () => {
+    const inherited = boundPipeline();
+    inherited.states[0].label = "Inherited";
+    mockBoundApi();
+    await mountEditor();
+    await act(async () => { view.current?.actions.updateState("ready", { label: EDITED_LABEL }); });
+    expect(persistedDraftEntry()?.pipeline.states[0].label).toBe(EDITED_LABEL);
+    // Hold the reset refresh GET so the reload lands first and restores the draft.
+    vi.mocked(api.getEffectivePipeline).mockResolvedValue({ pipeline: inherited, layers: { default: true, repo: false, agent: false } });
+    vi.mocked(api.getRepoPipeline).mockResolvedValue({ repo: REPO, pipeline_config: null });
+    const releaseResetGet = gateNextRepoGet(null);
+    let resetPromise: Promise<void> | undefined;
+    await act(async () => { resetPromise = view.current?.actions.handleClearOverride(); await Promise.resolve(); await Promise.resolve(); });
+    await refreshInPlace();
+    await act(async () => { releaseResetGet(); await resetPromise; });
+    expect(persistedDraftEntry()).toBeNull();
+    expect(view.current?.ctx.pipelineDraft?.states[0].label).toBe("Inherited");
   });
 });
