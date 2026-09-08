@@ -559,18 +559,74 @@ test("review-automation keeps a create-pr failure retryable when the handoff ale
   assert.equal(state.executions.filter((e) => e.sql.indexOf(MARKER_SQL) >= 0).length, 0, "nor the durable marker");
 });
 
+// #5716 slice B: handoffCreatePr / reuse-refresh / reseed each stamp a fresh dispatch_generation AND
+// reset retry_count to 0, so every generation's first failure is retry_count=1 — only the generation
+// tells them apart. The third call repeats gen-b: deduped, and deliberately left without the durable
+// marker so a colliding key self-heals after the kv TTL instead of leaving the sweep forever.
 test("review-automation alerts again for a new create-pr failure generation", () => {
+  let generation = "gen-a";
   let retryCount = 0;
   const { agentdesk, state } = loadPolicy("policies/review-automation.js", {
     cards: { "card-cp3": { id: "card-cp3", status: "review" } },
+    prTracking: { load: () => ({ card_id: "card-cp3", dispatch_generation: generation }) },
     extraAgentdesk: {
-      reviewAutomation: { recordPrCreateFailure: () => ({ ok: true, retry_count: ++retryCount, escalated: retryCount >= 3 }) }
+      reviewAutomation: { recordPrCreateFailure: () => ({ ok: true, retry_count: ++retryCount, escalated: false }) }
     }
   });
 
   agentdesk.reviewAutomation.markPrCreateFailed("card-cp3", "no_open_pr_found");
+  generation = "gen-b";
+  retryCount = 0;
+  agentdesk.reviewAutomation.markPrCreateFailed("card-cp3", "no_open_pr_found");
+  retryCount = 0;
   agentdesk.reviewAutomation.markPrCreateFailed("card-cp3", "no_open_pr_found");
 
   assert.equal(state.deadlockAlerts.length, 2);
-  assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp3:1", "pr_create_handoff:card-cp3:2"]);
+  assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp3:gen-a", "pr_create_handoff:card-cp3:gen-b"]);
+  assert.equal(state.executions.filter((e) => e.sql.indexOf(MARKER_SQL) >= 0).length, 2, "dedup skip writes no marker");
+});
+
+// #5716 slice B: the completion failure paths must not commit the cause with a separate upsert — a crash
+// between that upsert and the retry_count bump left a recorded failure at retry_count=0, invisible forever.
+test("review-automation commits a create-pr completion failure in one op with no pre-count upsert", () => {
+  const upserts = [];
+  const { policy, state } = loadPolicy("policies/review-automation.js", {
+    cards: { "card-cp4": { id: "card-cp4", status: "review", assigned_agent_id: "agent-cp4" } },
+    prTracking: {
+      load: () => ({ card_id: "card-cp4", repo_id: "o/r", branch: "feat/x", dispatch_generation: "gen-x" }),
+      upsert: (...args) => { upserts.push(args); return {}; },
+      findOpenPrByBranch: () => null
+    },
+    dbQuery: createSqlRouter([
+      { match: "FROM task_dispatches WHERE id = ?", result: [{ id: "d-cp4", kanban_card_id: "card-cp4", dispatch_type: "create-pr", result: null, context: '{"dispatch_generation":"gen-x"}' }] },
+      { match: "SELECT repo_id, github_issue_url", result: [{ repo_id: "o/r", github_issue_url: null }] },
+      { match: "AND dispatch_type IN ('implementation', 'rework')", result: [] },
+      { match: "SELECT status FROM kanban_cards", result: [{ status: "review" }] }
+    ]),
+    extraAgentdesk: { reviewAutomation: { recordPrCreateFailure: () => ({ ok: true, retry_count: 1, escalated: false }) } }
+  });
+
+  policy.onDispatchCompleted({ dispatch_id: "d-cp4" });
+
+  assert.deepEqual(upserts, [], "the cause must be written by recordPrCreateFailure alone");
+  assert.equal(state.deadlockAlerts.length, 1);
+  assert.deepEqual([...state.kv.keys()], ["pr_create_handoff:card-cp4:gen-x"]);
+});
+
+// #5716: notifyDeadlockManager is the durable create-PR handoff. agentdesk.message.queue returns
+// {ok:true,id} or {error:"..."} (src/engine/ops/message_ops.rs), so an enqueue failure must surface as
+// false instead of a claimed delivery. Loads the real 00-escalation.js — the harness stubs the helper out.
+test("00-escalation notifyDeadlockManager reports enqueue failures as undelivered", () => {
+  const source = require("fs").readFileSync(__dirname + "/../00-escalation.js", "utf8");
+  const build = new Function("require", "module", "agentdesk", source + "; return { notifyDeadlockManager };");
+  const withQueueResult = (queueResult) => build(require, {}, {
+    registerPolicy() {}, config: { get: () => "chan-1" }, cards: { get: () => null },
+    log: { warn() {}, info() {}, error() {}, debug() {} },
+    message: { queue: () => queueResult },
+    db: { query: () => [], execute() {} },
+    kv: { get: () => null, set() {}, delete() {} }
+  });
+
+  assert.equal(withQueueResult({ error: "outbox unavailable" }).notifyDeadlockManager("m", "s"), false);
+  assert.equal(withQueueResult({ ok: true, id: 7 }).notifyDeadlockManager("m", "s"), true);
 });

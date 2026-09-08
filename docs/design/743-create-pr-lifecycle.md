@@ -206,11 +206,12 @@ function markPrCreateFailed(cardId, error, stampGen) {
   }
 
   // 4. #5716 slice B: 재시도 소비자가 없으므로 실패 세대마다 운영자 이관.
-  handOffPrCreateFailure(cardId, error, result.retry_count);  // C7
+  //    dedup 키의 세대 성분은 retry_count가 아니라 pr_tracking.dispatch_generation (새 dispatch가 count를 0으로 리셋).
+  handOffPrCreateFailure(cardId, error, result.retry_count, stampGen);  // C7
 }
 ```
 
-Crash safety: 모든 중간 step 실패에서 retry loop가 tracking에서 복구.
+Crash safety: 실패 원인과 retry_count는 recordPrCreateFailure 한 트랜잭션에서 함께 커밋되므로 이후 step에서 죽어도 #5716 스윕(state IN ('create-pr','escalated') AND retry_count > 0, updated_at 30일 이내)이 회수한다.
 
 ## Success 상태 전이표 (kanban_cards.status 기준)
 
