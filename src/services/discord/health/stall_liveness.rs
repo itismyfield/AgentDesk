@@ -547,7 +547,7 @@ pub(super) fn log_stall_watchdog_liveness_deferred(
     );
 }
 
-pub(super) fn log_stall_watchdog_force_cleanup_judgment(
+pub(super) fn log_stall_watchdog_page_judgment(
     provider: &ProviderKind,
     channel_id: ChannelId,
     snapshot: &WatcherStateSnapshot,
@@ -575,7 +575,7 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
         basis.restart_grace_active,
     );
     tracing::warn!(
-        event = "stall_watchdog_force_cleanup_judgment",
+        event = "stall_watchdog_page_judgment",
         reason_code = "1446_stall_watchdog",
         provider = provider.as_str(),
         channel_id = channel_id.get(),
@@ -613,9 +613,9 @@ pub(super) fn log_stall_watchdog_force_cleanup_judgment(
         deferral_count = ?decision.and_then(StallWatchdogLivenessDecision::deferral_count),
         max_deferrals = decision.map(|decision| decision.max_deferrals).unwrap_or(0),
         shadow_verdict,
-        existing_decision = "force_cleanup",
+        existing_decision = "page_suspected_stall",
         shadow_reasons,
-        "  [{ts}] ⚡ STALL-WATCHDOG: shadow_verdict={shadow_verdict} existing_decision=force_cleanup; forced cleanup for desynced channel {}",
+        "  [{ts}] ⚡ STALL-WATCHDOG: shadow_verdict={shadow_verdict} existing_decision=page_suspected_stall; suspected stall, page-only, no cleanup for channel {}",
         channel_id,
     );
 }
@@ -1583,9 +1583,8 @@ mod tests {
     /// absolute backstop — it is no longer the tick count that triggers cleanup.
     /// We first prove that far more than the old 20-tick cap of deferrals all
     /// stay `Defer` while the turn's age is below the backstop, then that a turn
-    /// whose age has crossed `STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS` (a genuine
-    /// forever-spinner, #3582 R1 finite ceiling) force-cleans and logs the
-    /// reason. [acceptance 3]
+    /// whose age has crossed `STALL_WATCHDOG_ABSOLUTE_BACKSTOP_SECS` becomes
+    /// eligible for page-only reporting and logs the reason. [acceptance 3]
     #[test]
     fn liveness_force_clean_after_absolute_backstop_and_logs_reason() {
         let provider = ProviderKind::Codex;
@@ -1645,7 +1644,7 @@ mod tests {
 
         let basis = StallWatchdogJudgmentBasis::from_snapshot(&snap, now, now - 10_000);
         let logs = capture_warns(|| {
-            log_stall_watchdog_force_cleanup_judgment(
+            log_stall_watchdog_page_judgment(
                 &provider,
                 channel,
                 &snap,
