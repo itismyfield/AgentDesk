@@ -109,6 +109,9 @@ export default function PipelineVisualEditor({
     [repo, selectedAgentId],
   );
   const fsmDraftScopeKey = useMemo(() => buildScopeKey(level), [buildScopeKey, level]);
+  // #5743 r5: the scope the loading effect last claimed. That effect cancels its
+  // own stale responses through cleanup; `refreshAfterMutation` has none.
+  const activeScopeKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     persistedFsmDraftStoreRef.current = persistedFsmDraftStore;
@@ -262,6 +265,7 @@ export default function PipelineVisualEditor({
   }, [repo, selectedAgentId, setPersistedPipelineSnapshotStore]);
 
   useEffect(() => {
+    activeScopeKeyRef.current = fsmDraftScopeKey;
     if (!repo) {
       resetEditorState();
       setLoading(false);
@@ -449,8 +453,7 @@ export default function PipelineVisualEditor({
       return;
     }
     // #5743 r2: the scope key can move a whole commit before the loading effect's
-    // reset lands. Writing (or retiring) the target scope from state that belongs
-    // to the previous scope records one scope's edits under the other's key.
+    // reset lands, so state from the previous scope must not write this key.
     if (appliedScopeKey !== fsmDraftScopeKey) {
       return;
     }
@@ -503,10 +506,16 @@ export default function PipelineVisualEditor({
   ]);
 
   async function refreshAfterMutation(nextLevel: EditLevel = level) {
-    const snapshot = await fetchSnapshot(nextLevel);
     const nextScopeKey = buildScopeKey(nextLevel);
+    const snapshot = await fetchSnapshot(nextLevel);
+    // Caching stays correct even when the editor moved on - the snapshot belongs
+    // to `nextScopeKey`. Applying it to another scope's screen does not: it would
+    // pin `appliedScopeKey` there and block that scope's later edits.
     if (nextScopeKey) {
       persistSnapshot(nextScopeKey, nextLevel, snapshot);
+    }
+    if (nextScopeKey !== activeScopeKeyRef.current) {
+      return;
     }
     applySnapshot(snapshot, "fetch", null, nextScopeKey);
   }
