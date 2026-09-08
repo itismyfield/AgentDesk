@@ -937,6 +937,7 @@ server::rate_limit_header_tests::parses_openai_relative_reset_duration
 server::rate_limit_header_tests::parses_rfc3339_reset_timestamp
 server::rate_limit_sync::tests::api_key_429_keeps_pressure_buckets_and_the_backoff_streak
 server::rate_limit_sync::tests::classifies_claude_sync_results_for_backoff
+server::rate_limit_sync::tests::effective_config_comes_from_the_persisted_runtime_overrides
 server::rate_limit_sync::tests::pressure_keeps_the_base_cadence_whatever_the_tick_spacing
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder

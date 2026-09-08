@@ -470,4 +470,32 @@ mod tests {
         assert!(defers(&calm, None, now));
         assert!(backoff.should_attempt(t0 + secs(1800)));
     }
+
+    /// r5 follow-up: the threshold the loop feeds the predicate is the gate's
+    /// EFFECTIVE one — the persisted runtime-config the activation path
+    /// resolves, not the YAML accessor — and the persisted staleness window is
+    /// deliberately not one of the predicate's inputs.
+    #[test]
+    fn effective_config_comes_from_the_persisted_runtime_overrides() {
+        let now = 1_000_000_i64;
+        let persisted = |raw: &str| {
+            let value: serde_json::Value = serde_json::from_str(raw).expect("runtime-config");
+            gate::persisted_runtime_overrides(Some(&value))
+        };
+        let defers = |row: &gate::ProviderPressureSnapshot, danger| {
+            gate::is_deferring_snapshot("claude", Some(row), danger, now)
+        };
+        // Persisting danger 95 makes 97 % pressure; the YAML default of 100
+        // does not, so reading the persisted row is what keeps the floor alive.
+        let (_enabled, danger, stale) =
+            persisted(r#"{"dispatchRateLimitGateDangerPct": 95, "rateLimitStaleSec": 300}"#);
+        assert_eq!((danger, stale), (Some(95), Some(300)));
+        let hot = cached(97, now + 3600, now);
+        assert!(defers(&hot, danger));
+        assert!(!defers(&hot, Some(100)));
+        // The staleness window comes back from the same parser but is not an
+        // input: a row older than 300 s — or than the 600 s default — still has
+        // to be re-observed, so it must not switch the base cadence off.
+        assert!(defers(&cached(100, now + 3600, now - 900), Some(100)));
+    }
 }
