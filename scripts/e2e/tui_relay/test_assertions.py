@@ -29,6 +29,7 @@ from tui_relay import assertions  # noqa: E402
 from tui_relay.test_driver_health import (  # noqa: E402
     _busy_mailbox, _fake_urlopen_for, _health_detail, _idle_mailbox,
     HarnessOutcomeContract, PhasePartialEvidenceContract,  # noqa: F401
+    E36DriverContract,  # noqa: F401
 )
 from tui_relay import normal_intake_evidence as e36  # noqa: E402
 # ci-script-checks.sh runs this module; expose the offline fetch regressions too.
