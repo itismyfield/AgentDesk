@@ -1886,6 +1886,11 @@ pub struct RuntimeSettingsConfig {
     pub context_compact_percent_codex: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_percent_claude: Option<u64>,
+    /// YAML-only absolute window for new Claude TUI launches, independent of model.
+    /// Unset defaults to 700_000; the launch consumer clamps to 100_000..=1_000_000.
+    /// Raw numeric values are preserved here; zero clamps to the minimum, not off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_compact_window_claude: Option<u64>,
     /// Minimum token occupancy at which context compaction may be requested.
     ///
     /// Unset uses the live consumer default (currently 300_000 tokens for
@@ -2058,6 +2063,7 @@ impl RuntimeSettingsConfig {
             && self.context_compact_percent.is_none()
             && self.context_compact_percent_codex.is_none()
             && self.context_compact_percent_claude.is_none()
+            && self.context_compact_window_claude.is_none()
             && self.context_compact_lower_bound_tokens.is_none()
             && self.dispatch_poll_sec.is_none()
             && self.agent_sync_sec.is_none()

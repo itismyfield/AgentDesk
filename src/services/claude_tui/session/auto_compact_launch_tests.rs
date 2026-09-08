@@ -18,7 +18,7 @@ fn launch_config(root: &Path, model: Option<&str>) -> ClaudeTuiLaunchConfig {
     }
 }
 
-fn write_provider_setting(root: &Path, value: Option<u64>) -> PathBuf {
+pub(super) fn write_provider_setting(root: &Path, value: Option<u64>) -> PathBuf {
     let path = root.join("agentdesk.yaml");
     let mut config = serde_json::json!({
         "server": {},
@@ -44,7 +44,7 @@ fn generated_script(root: &Path, name: &str, model: Option<&str>) -> String {
     fs::read_to_string(script_path).unwrap()
 }
 
-fn assert_window(script: &str, expected: u64) {
+pub(super) fn assert_window(script: &str, expected: u64) {
     let unset = format!("unset {WINDOW_ENV}\n");
     let export = format!("export {WINDOW_ENV}={expected}\n");
     let export_prefix = format!("export {WINDOW_ENV}=");
