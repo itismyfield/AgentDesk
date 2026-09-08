@@ -726,4 +726,65 @@ describe("override-only FSM edge edits", () => {
 
     expect(persistedDraftEntry(agentScopeKey)?.pipeline.states[0].label).toBe("Agent edit");
   });
+
+  /**
+   * The generation half of the same guard. Two mutation refreshes in one scope
+   * carry the same scope key, so only the request generation separates the newer
+   * response from the older one. Without it the first request's stale snapshot
+   * lands last and silently reverts the screen to pre-mutation server state.
+   */
+  it("keeps the newest mutation refresh when an earlier one resolves last", async () => {
+    const serverV1 = boundPipeline();
+    serverV1.states[0].label = "Server v1";
+    const serverV2 = boundPipeline();
+    serverV2.states[0].label = "Server v2";
+    const overrideFor = (pipeline: PipelineConfigFull) =>
+      buildOverridePayload(pipeline, { fsm_edge_bindings: SERVER_BINDINGS });
+    const effective = (pipeline: PipelineConfigFull) => ({
+      pipeline,
+      layers: { default: true, repo: true, agent: false },
+    });
+
+    vi.spyOn(api, "getEffectivePipeline").mockResolvedValue(effective(serverV1));
+    vi.spyOn(api, "getRepoPipeline").mockResolvedValue({ repo: REPO, pipeline_config: overrideFor(serverV1) });
+    vi.spyOn(api, "getPipelineStages").mockResolvedValue([]);
+    vi.spyOn(api, "setRepoPipeline").mockResolvedValue({ ok: true });
+
+    await mountEditor();
+    await act(async () => {
+      view.current?.actions.updateState("ready", { label: "Repo edit" });
+    });
+
+    // The save PUT succeeds, but hold its follow-up GET open.
+    let releaseSaveGet = () => {};
+    const saveGetGate = new Promise<void>((resolve) => {
+      releaseSaveGet = resolve;
+    });
+    vi.mocked(api.getRepoPipeline).mockImplementationOnce(async () => {
+      await saveGetGate;
+      return { repo: REPO, pipeline_config: overrideFor(serverV1) };
+    });
+
+    let savePromise: Promise<void> | undefined;
+    await act(async () => {
+      savePromise = view.current?.actions.handleSave();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // A later mutation on the same scope completes while the first still waits.
+    vi.mocked(api.getEffectivePipeline).mockResolvedValue(effective(serverV2));
+    vi.mocked(api.getRepoPipeline).mockResolvedValue({ repo: REPO, pipeline_config: overrideFor(serverV2) });
+    await act(async () => {
+      await view.current?.actions.handleClearOverride();
+    });
+    expect(view.current?.ctx.pipelineDraft?.states[0].label).toBe("Server v2");
+
+    await act(async () => {
+      releaseSaveGet();
+      await savePromise;
+    });
+
+    expect(view.current?.ctx.pipelineDraft?.states[0].label).toBe("Server v2");
+  });
 });
