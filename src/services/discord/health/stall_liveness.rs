@@ -1655,14 +1655,100 @@ mod tests {
                 600,
             );
         });
-        assert!(
-            logs.contains("stall_watchdog_force_cleanup_judgment"),
-            "{logs}"
-        );
+        assert!(logs.contains("stall_watchdog_page_judgment"), "{logs}");
+        assert!(logs.contains("page_suspected_stall"), "{logs}");
+        assert!(logs.contains("page-only, no cleanup"), "{logs}");
+        assert!(!logs.contains("force_cleanup"), "{logs}");
         assert!(
             logs.contains("liveness_absolute_backstop_reached=true"),
             "{logs}"
         );
+    }
+
+    #[test]
+    fn current_provider_source_progress_survives_capture_unknown_5712() {
+        let _root = isolated_runtime_root();
+        for (provider, channel_number) in [
+            (ProviderKind::Claude, 57_120),
+            (ProviderKind::Codex, 57_121),
+        ] {
+            let channel = ChannelId::new(channel_number);
+            for capture_offset in [None, Some(0)] {
+                let tmux = format!("AgentDesk-{}-5712-{capture_offset:?}", provider.as_str());
+                clear_stall_watchdog_liveness_state(&provider, channel, Some(&tmux));
+                let file = tempfile::NamedTempFile::new().expect("isolated source transcript");
+                let now = chrono::Utc::now().timestamp();
+                let mut inflight = inflight_with_output(
+                    channel.get(),
+                    &tmux,
+                    Some(file.path().display().to_string()),
+                );
+                inflight.provider = provider.as_str().to_string();
+                let mut snap = snapshot(channel.get(), &tmux, capture_offset);
+                snap.provider = provider.as_str().to_string();
+                snap.relay_health.provider = provider.as_str().to_string();
+                snap.last_relay_offset = 0;
+                snap.relay_health.last_relay_offset = 0;
+
+                let progressing = evaluate_stall_watchdog_liveness(
+                    &provider,
+                    channel,
+                    &snap,
+                    Some(&inflight),
+                    now,
+                    STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                    STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+                    Some(600),
+                );
+                assert!(
+                    progressing.should_defer(),
+                    "{provider:?} {capture_offset:?}"
+                );
+                assert_eq!(progressing.evidence.pane_offset_advanced_age_secs, None);
+                assert_eq!(progressing.evidence.relay_offset_advanced_age_secs, None);
+                assert_eq!(
+                    progressing
+                        .evidence
+                        .reason_codes_csv(STALL_WATCHDOG_POSITIVE_LIVENESS_SECS),
+                    "transcript_mtime_recent"
+                );
+
+                // The same real source becomes stale; no decision enum is injected.
+                let stale_now = now + STALL_WATCHDOG_POSITIVE_LIVENESS_SECS as i64 + 1;
+                let stale = evaluate_stall_watchdog_liveness(
+                    &provider,
+                    channel,
+                    &snap,
+                    Some(&inflight),
+                    stale_now,
+                    STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                    STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+                    Some(721),
+                );
+                assert_eq!(stale.action, StallWatchdogLivenessAction::ProceedNoEvidence);
+                assert!(stale.evidence.transcript_mtime_age_secs.is_some());
+
+                // Unknown source also has no positive evidence; it is not healthy
+                // delivery, a confirmed dead owner, or permission to clear a turn.
+                inflight.output_path = None;
+                let unknown = evaluate_stall_watchdog_liveness(
+                    &provider,
+                    channel,
+                    &snap,
+                    Some(&inflight),
+                    stale_now,
+                    STALL_WATCHDOG_POSITIVE_LIVENESS_SECS,
+                    STALL_WATCHDOG_MAX_LIVENESS_DEFERRALS,
+                    None,
+                );
+                assert_eq!(
+                    unknown.action,
+                    StallWatchdogLivenessAction::ProceedNoEvidence
+                );
+                assert_eq!(unknown.evidence.transcript_mtime_age_secs, None);
+                clear_stall_watchdog_liveness_state(&provider, channel, Some(&tmux));
+            }
+        }
     }
 
     #[test]
