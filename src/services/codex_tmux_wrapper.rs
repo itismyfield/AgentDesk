@@ -1,5 +1,3 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -12,8 +10,8 @@ use crate::services::task_completion_v1::TaskCompletionV1;
 use crate::services::tmux_common::RotatingJsonlWriter;
 use crate::services::tmux_wrapper::{InputMode, render_for_terminal};
 
-const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
-const TMUX_PROMPT_B64_CHUNK_PREFIX: &str = "__AGENTDESK_B64_CHUNK__:";
+mod input;
+
 const DEFAULT_CODEX_FIRST_EVENT_TIMEOUT_SECS: u64 = 120;
 /// #3557 (B): idle window after the first event. Once Codex has emitted at
 /// least one event, the run loop previously blocked on `recv()` forever, so a
@@ -82,72 +80,11 @@ pub fn run(
 
     let expanded_dir = crate::utils::format::expand_tilde_string(working_dir);
 
-    let (prompt_tx, prompt_rx) = mpsc::channel::<String>();
+    let (prompt_tx, prompt_rx) = mpsc::channel::<input::CodexPrompt>();
 
-    // Terminal input — only in Fifo mode (interactive tmux session)
-    if input_mode == InputMode::Fifo {
-        let prompt_tx = prompt_tx.clone();
-        std::thread::spawn(move || {
-            loop {
-                let reader = open_codex_terminal_input_reader();
-                match read_codex_terminal_input_lines(reader, &prompt_tx) {
-                    TerminalInputLoopOutcome::RetryReader => {
-                        std::thread::sleep(std::time::Duration::from_millis(250));
-                    }
-                    TerminalInputLoopOutcome::Stop => break,
-                }
-            }
-        });
-    }
+    input::spawn_terminal_input_reader(input_mode, &prompt_tx);
 
-    // External input
-    // Fifo mode: reads from named FIFO
-    // Pipe mode: reads from process stdin (parent writes to child stdin pipe)
-    {
-        let prompt_tx = prompt_tx.clone();
-        let input_fifo = input_fifo.to_string();
-        std::thread::spawn(move || {
-            let mut decoder = ExternalPromptDecoder::default();
-            let reader: BufReader<Box<dyn std::io::Read + Send>> = match input_mode {
-                InputMode::Fifo => {
-                    let fifo = match std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .open(&input_fifo)
-                    {
-                        Ok(f) => f,
-                        Err(e) => {
-                            eprintln!("\x1b[90m[input fifo error: {}]\x1b[0m", e);
-                            return;
-                        }
-                    };
-                    BufReader::new(Box::new(fifo))
-                }
-                InputMode::Pipe => BufReader::new(Box::new(std::io::stdin())),
-            };
-
-            for line in reader.lines() {
-                let Ok(line) = line else {
-                    break;
-                };
-                if line.trim().is_empty() {
-                    continue;
-                }
-                eprintln!("\x1b[90m[external message received]\x1b[0m");
-                match decoder.decode_line(&line) {
-                    Ok(Some(prompt)) => {
-                        if !prompt.trim().is_empty() {
-                            let _ = prompt_tx.send(prompt);
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        eprintln!("\x1b[90m[input decode error: {}]\x1b[0m", err);
-                    }
-                }
-            }
-        });
-    }
+    input::spawn_external_input_reader(input_mode, input_fifo, &prompt_tx);
 
     let mut output = match RotatingJsonlWriter::open(output_file) {
         Ok(file) => file,
@@ -196,25 +133,38 @@ pub fn run(
         crate::services::tmux_common::WrapperSentinel::ReadyForInput { provider: "codex" },
     );
 
+    let control_ctx = input::ControlContext {
+        codex_model,
+        reasoning_effort,
+    };
     let mut followup_error: Option<String> = None;
     while let Ok(next_prompt) = prompt_rx.recv() {
-        if let Err(err) = run_turn(
-            &mut output,
-            codex_bin,
-            codex_model,
-            reasoning_effort,
-            developer_instructions,
-            &expanded_dir,
-            next_prompt.trim(),
-            &mut thread_id,
-            fast_mode_enabled,
-            goals_enabled,
-            compact_token_limit,
-            add_dirs,
-        ) {
-            emit_result_error(&mut output, &err);
-            followup_error = Some(err);
-            break;
+        let dispatched = input::dispatch_prompt(next_prompt, control_ctx, |text| {
+            run_turn(
+                &mut output,
+                codex_bin,
+                codex_model,
+                reasoning_effort,
+                developer_instructions,
+                &expanded_dir,
+                text,
+                &mut thread_id,
+                fast_mode_enabled,
+                goals_enabled,
+                compact_token_limit,
+                add_dirs,
+            )
+        });
+        match dispatched {
+            Ok(input::DispatchOutcome::RanTurn) => {}
+            // #5660: handled inside the wrapper — no turn ran, so no
+            // ready_for_input sentinel is due either.
+            Ok(input::DispatchOutcome::HandledLocally { .. }) => continue,
+            Err(err) => {
+                emit_result_error(&mut output, &err);
+                followup_error = Some(err);
+                break;
+            }
         }
         // #2442 (H3) — same as above for follow-up turns.
         crate::services::tmux_common::emit_wrapper_sentinel(
@@ -264,95 +214,6 @@ fn normalize_resume_session_id(resume_session_id: Option<&str>) -> Option<String
         .map(str::to_string)
 }
 
-#[derive(Default)]
-struct ExternalPromptDecoder {
-    chunked: HashMap<String, ChunkedPrompt>,
-}
-
-struct ChunkedPrompt {
-    chunks: Vec<Option<String>>,
-    received: usize,
-}
-
-impl ExternalPromptDecoder {
-    fn decode_line(&mut self, line: &str) -> Result<Option<String>, String> {
-        if let Some(encoded) = line.strip_prefix(TMUX_PROMPT_B64_PREFIX) {
-            return decode_base64_prompt(encoded).map(Some);
-        }
-
-        if let Some(chunk) = line.strip_prefix(TMUX_PROMPT_B64_CHUNK_PREFIX) {
-            return self.decode_chunk(chunk);
-        }
-
-        Ok(Some(line.to_string()))
-    }
-
-    fn decode_chunk(&mut self, line: &str) -> Result<Option<String>, String> {
-        let mut parts = line.splitn(4, ':');
-        let message_id = parts
-            .next()
-            .filter(|value| !value.is_empty())
-            .ok_or("missing chunk message id")?;
-        let index = parts
-            .next()
-            .ok_or("missing chunk index")?
-            .parse::<usize>()
-            .map_err(|_| "invalid chunk index".to_string())?;
-        let total = parts
-            .next()
-            .ok_or("missing chunk total")?
-            .parse::<usize>()
-            .map_err(|_| "invalid chunk total".to_string())?;
-        let chunk = parts.next().ok_or("missing chunk payload")?;
-
-        if total == 0 || total > 10_000 {
-            return Err("invalid chunk total".to_string());
-        }
-        if index >= total {
-            return Err("chunk index out of range".to_string());
-        }
-
-        let entry = self
-            .chunked
-            .entry(message_id.to_string())
-            .or_insert_with(|| ChunkedPrompt {
-                chunks: vec![None; total],
-                received: 0,
-            });
-        if entry.chunks.len() != total {
-            self.chunked.remove(message_id);
-            return Err("chunk total changed for message id".to_string());
-        }
-        if entry.chunks[index].is_some() {
-            self.chunked.remove(message_id);
-            return Err("duplicate chunk index".to_string());
-        }
-
-        entry.chunks[index] = Some(chunk.to_string());
-        entry.received += 1;
-        if entry.received != total {
-            return Ok(None);
-        }
-
-        let entry = self
-            .chunked
-            .remove(message_id)
-            .ok_or("completed chunk state missing")?;
-        let mut encoded = String::new();
-        for chunk in entry.chunks {
-            encoded.push_str(&chunk.ok_or("missing completed chunk")?);
-        }
-        decode_base64_prompt(&encoded).map(Some)
-    }
-}
-
-fn decode_base64_prompt(encoded: &str) -> Result<String, String> {
-    let bytes = BASE64_STANDARD
-        .decode(encoded)
-        .map_err(|e| format!("invalid base64 payload: {}", e))?;
-    String::from_utf8(bytes).map_err(|e| format!("invalid utf-8 payload: {}", e))
-}
-
 fn codex_first_event_timeout() -> std::time::Duration {
     let seconds = std::env::var("AGENTDESK_CODEX_FIRST_EVENT_TIMEOUT_SECS")
         .ok()
@@ -390,48 +251,6 @@ fn cleanup(output_file: &str, input_fifo: &str) {
     let _ = std::fs::remove_file(input_fifo);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TerminalInputLoopOutcome {
-    RetryReader,
-    Stop,
-}
-
-fn open_codex_terminal_input_reader() -> Box<dyn BufRead> {
-    match std::fs::OpenOptions::new().read(true).open("/dev/tty") {
-        Ok(tty) => Box::new(BufReader::new(tty)),
-        Err(err) => {
-            eprintln!("\x1b[90m[terminal input tty open failed: {}]\x1b[0m", err);
-            Box::new(BufReader::new(std::io::stdin()))
-        }
-    }
-}
-
-fn read_codex_terminal_input_lines<R: BufRead>(
-    mut reader: R,
-    prompt_tx: &mpsc::Sender<String>,
-) -> TerminalInputLoopOutcome {
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-            Ok(0) => return TerminalInputLoopOutcome::RetryReader,
-            Ok(_) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                emit_status("[terminal message received]");
-                if prompt_tx.send(trimmed.to_string()).is_err() {
-                    return TerminalInputLoopOutcome::Stop;
-                }
-            }
-            Err(err) => {
-                eprintln!("\x1b[90m[terminal input read error: {}]\x1b[0m", err);
-                return TerminalInputLoopOutcome::RetryReader;
-            }
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn run_turn(
     output: &mut RotatingJsonlWriter,
@@ -449,14 +268,8 @@ fn run_turn(
 ) -> Result<(), String> {
     emit_status("[sending...]");
 
-    let default_reasoning_effort = codex_model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|_| "high");
-    let effective_reasoning_effort = reasoning_effort
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or(default_reasoning_effort);
+    let effective_reasoning_effort =
+        input::effective_reasoning_effort(reasoning_effort, codex_model);
     let add_dir_refs = add_dirs.iter().map(String::as_str).collect::<Vec<_>>();
     let args = build_codex_exec_args(
         &CodexLaunchOptions::new(prompt)
