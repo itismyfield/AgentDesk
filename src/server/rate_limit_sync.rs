@@ -36,19 +36,14 @@ fn classify_claude_sync_result(
     }
 }
 
-/// Resolves the same persisted threshold as activation; SQL failure yields pressure.
-async fn claude_effective_danger_pct(pg_pool: &PgPool) -> Option<u64> {
-    dispatch_gate::effective_danger_pct_pg(pg_pool).await
-}
-
 /// One tick's resolver → pressure → hold decision, shared by the loop and its regression test.
-async fn claude_tick_should_attempt<F: std::future::Future<Output = Option<u64>>>(
+async fn claude_tick_should_attempt(
     backoff: &mut backoff::ClaudeSyncBackoff,
     now: std::time::Instant,
-    resolve: impl FnOnce() -> F,
+    pg_pool: &PgPool,
     pressure: impl FnOnce(Option<u64>) -> bool,
 ) -> bool {
-    let danger = resolve().await;
+    let danger = dispatch_gate::effective_danger_pct_pg(pg_pool).await;
     if pressure(danger) {
         backoff.release_hold();
     }
@@ -79,12 +74,9 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
         // — nothing bounds one iteration, so no longer hold is *provably* short enough to
         // re-observe that pressure before the stale window expires, and base is the pre-PR floor.
         let now_unix = chrono::Utc::now().timestamp();
-        if claude_tick_should_attempt(
-            &mut claude_backoff,
-            now,
-            || claude_effective_danger_pct(pg_pool.as_ref()),
-            |danger| dispatch_gate::is_deferring("claude", danger, now_unix),
-        )
+        if claude_tick_should_attempt(&mut claude_backoff, now, pg_pool.as_ref(), |danger| {
+            dispatch_gate::is_deferring("claude", danger, now_unix)
+        })
         .await
         {
             let claude_result =
@@ -344,8 +336,8 @@ async fn fetch_claude_oauth_usage(token: &str) -> Result<Buckets, anyhow::Error>
 mod tests {
     use super::backoff::{ClaudeSyncBackoff, ClaudeSyncOutcome, ClaudeUsageRateLimited};
     use super::{
-        anthropic_rate_limit_response, classify_claude_sync_result, claude_effective_danger_pct,
-        claude_tick_should_attempt, claude_usage_rate_limited_error,
+        anthropic_rate_limit_response, classify_claude_sync_result, claude_tick_should_attempt,
+        claude_usage_rate_limited_error,
     };
     use crate::services::dispatch_gate as gate;
     use reqwest::{StatusCode, header::HeaderMap};
@@ -522,22 +514,17 @@ mod tests {
             },
             t0,
         );
-        let mut resolved = false;
+        let unusable = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(secs(2))
+            .connect_lazy("postgres://agentdesk:agentdesk@127.0.0.1:1/agentdesk")
+            .expect("a lazy pool never dials on construction");
+        // The real resolver must fail to None, not supply the YAML threshold.
         assert!(
-            claude_tick_should_attempt(
-                &mut backoff,
-                t0 + secs(120),
-                || {
-                    resolved = true;
-                    std::future::ready(danger)
-                },
-                |threshold| defers(&hot, threshold)
-            )
+            claude_tick_should_attempt(&mut backoff, t0 + secs(120), &unusable, |threshold| {
+                assert_eq!(threshold, None, "tick must read the persisted config");
+                defers(&hot, threshold)
+            })
             .await
-        );
-        assert!(
-            resolved,
-            "tick must invoke the persisted resolver, not YAML's 100"
         );
         // The staleness window comes back from the same parser but is not an
         // input: a row older than 300 s — or than the 600 s default — still has
@@ -545,10 +532,7 @@ mod tests {
         assert!(defers(&cached(100, now + 3600, now - 900), Some(100)));
     }
 
-    /// r5 P1-1: the threshold the loop hands the predicate has to come from a pool read, so a
-    /// revert to the YAML accessor is caught. An unusable pool is the cheapest way to tell the
-    /// two apart without a database: the persisted read fails and yields `None` (which the
-    /// predicate treats as pressure), while `danger_pct()` would answer with the YAML value.
+    /// An unreadable runtime-config yields None, which polling treats as pressure.
     #[tokio::test]
     async fn unreadable_runtime_config_resolves_to_no_threshold() {
         let unusable = sqlx::postgres::PgPoolOptions::new()
@@ -558,9 +542,8 @@ mod tests {
         // The YAML accessor always answers, so `None` here can only have come from the persisted
         // read failing — and it is not what `danger_pct()` would have returned, whatever the
         // process's YAML snapshot happens to hold.
-        let resolved = claude_effective_danger_pct(&unusable).await;
+        let resolved = gate::effective_danger_pct_pg(&unusable).await;
         assert_eq!(resolved, None);
-        assert_ne!(resolved, Some(gate::danger_pct()));
         // And `None` is pressure, so the loop keeps the base cadence rather than failing open.
         assert!(gate::is_deferring_snapshot(
             "claude",
