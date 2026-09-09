@@ -949,6 +949,9 @@ src/
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_identity.rs
 │   │   │   └── tests.rs
+│   │   ├── task_supervisor/
+│   │   │   ├── watcher_completion.rs
+│   │   │   └── watcher_completion_tests.rs
 │   │   ├── tmux/
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
 │   │   ├── tmux_output_stream/
