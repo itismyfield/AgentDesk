@@ -204,7 +204,7 @@ use voice_completion::{
 };
 use watcher_handoff::{live_watcher_registered_for_relay, should_delegate_bridge_relay_to_watcher};
 mod context;
-use super::tmux::WatcherClaimIncarnation;
+use super::tmux_watcher_registry::WatcherClaimIncarnation;
 pub(super) use context::TurnBridgeContext;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WatcherHandoffClaimOutcome {
