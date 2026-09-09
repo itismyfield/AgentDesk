@@ -3506,6 +3506,92 @@ mod local_tmux_lifecycle_tests {
         assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux_session_name));
     }
 
+    // ------------------------------------------------------------------
+    // #5708 S1 — a routine's session resolution must be scoped to ITS tmux name.
+    //
+    // `start_claude_tui_session` recovers a resumable resolution from the
+    // runtime binding registered for `tmux_session_name` (:1738). While a DM
+    // routine ran on the user's canonical DM tmux name that lookup found the
+    // USER's live binding, so a `fresh` routine turn either warm-followed-up
+    // into the user's conversation (`resume = true`) or, absent a binding, took
+    // the `else if session_exists` arm and killed the user's pane. Once the
+    // routine carries its own label the two names are different keys: clearing
+    // the routine's binding must yield a fresh start WITHOUT disturbing — or
+    // recovering — the canonical one.
+    //
+    // Scope note: this pins the session-resolution half only. Proving that zero
+    // warm-followup/kill calls reach the producer needs the transport harness in
+    // S3; this test is not a substitute for it.
+    // ------------------------------------------------------------------
+    #[test]
+    fn routine_binding_clear_starts_fresh_without_recovering_the_canonical_dm_binding() {
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        let canonical_transcript = tempfile::NamedTempFile::new().expect("canonical transcript");
+        let routine_transcript = tempfile::NamedTempFile::new().expect("routine transcript");
+        let suffix = uuid::Uuid::new_v4();
+        // The two names the DM channel produces with and without a routine label.
+        let canonical_tmux = format!("AgentDesk-claude-dm-343742347365974026-{suffix}");
+        let routine_tmux = format!("AgentDesk-claude-routine-family-probe---obujang-{suffix}");
+        let canonical_session_id = uuid::Uuid::new_v4().to_string();
+        let routine_session_id = uuid::Uuid::new_v4().to_string();
+        assert_ne!(canonical_tmux, routine_tmux);
+
+        let binding = |path: &std::path::Path, session_id: &str| {
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(session_id.to_string()),
+                last_offset: 0,
+                relay_last_offset: None,
+            }
+        };
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            &canonical_tmux,
+            binding(canonical_transcript.path(), &canonical_session_id),
+        );
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            &routine_tmux,
+            binding(routine_transcript.path(), &routine_session_id),
+        );
+
+        // A live routine pane resumes its OWN conversation, never the user's.
+        let routine =
+            recover_claude_tui_session_resolution_from_runtime_binding(&routine_tmux, None)
+                .expect("routine binding recovers");
+        assert_eq!(routine.session_id, routine_session_id);
+        assert_ne!(
+            routine.session_id, canonical_session_id,
+            "the routine name must never resolve to the user's DM session id"
+        );
+        assert_eq!(routine.transcript_path, routine_transcript.path());
+        assert!(routine.resume);
+
+        // Fresh start: the routine's own binding is cleared first (the start path
+        // does this at headless_turn.rs before spawning a fresh routine turn).
+        assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&routine_tmux));
+
+        assert!(
+            recover_claude_tui_session_resolution_from_runtime_binding(&routine_tmux, None)
+                .is_none(),
+            "with its own binding cleared the routine must start fresh, not adopt the user's"
+        );
+
+        // The canonical DM binding is untouched: the user's next turn still resumes.
+        let canonical =
+            recover_claude_tui_session_resolution_from_runtime_binding(&canonical_tmux, None)
+                .expect("canonical binding survives the routine clear");
+        assert_eq!(canonical.session_id, canonical_session_id);
+        assert_eq!(canonical.transcript_path, canonical_transcript.path());
+        assert!(canonical.resume);
+
+        assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&canonical_tmux));
+    }
+
     #[test]
     fn fresh_tui_start_offset_skips_existing_transcript_for_fresh_launch() {
         use std::io::Write;
