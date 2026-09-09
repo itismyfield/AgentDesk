@@ -56,6 +56,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/claude_tui/hook_output_guard_tests.rs",
         "src/services/claude_tui/hook_server_memento_tests.rs",
         "src/services/claude_tui/session/auto_compact_launch_tests.rs",
+        "src/services/cluster/attachment_transfer/tests.rs",
         "src/services/cluster/intake_worker/dispatch_stamp_tests.rs",
         "src/services/cluster/intake_worker/drain_tests.rs",
         "src/services/cluster/stream_relay/tests/shutdown_tests.rs",

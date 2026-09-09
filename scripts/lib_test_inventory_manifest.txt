@@ -1764,6 +1764,10 @@ services::claude_tui::tui_relay::tests::try_claim_registry_match_token_leaves_st
 services::claude_tui::tui_relay::tests::tui_send_holds_composer_lock_across_paste_and_enter
 services::claude_tui::tui_relay::tests::unrelated_event_does_not_match_stop
 services::claude_tui::tui_relay::tests::wait_request_not_before_defaults_to_none
+services::cluster::attachment_transfer::tests::bundle_rejects_corrupted_bytes_and_unknown_version
+services::cluster::attachment_transfer::tests::bundle_rejects_cross_message_identity
+services::cluster::attachment_transfer::tests::bundle_rejects_partial_entry_set
+services::cluster::attachment_transfer::tests::bundle_roundtrip_preserves_order_and_binary
 services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
 services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed
 services::cluster::intake_preflight::tests::evaluation_does_not_mutate_production_handoff_state_pg
