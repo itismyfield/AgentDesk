@@ -58,28 +58,30 @@ class PromptRoutes(unittest.TestCase):
         self.assertIn('no_applicable_urls', output)
 
     def test_shell_adjacent_strings(self):
-        for expression in (
-            '"http://localhost:1/api/"discord/send',
-            "'http://localhost:1/api/'discord/send",
-            '"http://localhost:1/api/"' + "'discord/send'",
-            '"http://localhost:1/api/"$ROUTE',
-            '"http://localhost:1/api/""$ROUTE"',
-            '"$API"/api/discord/send',
-            '$PREFIX"http://localhost:1/api/send"',
+        # r5: a bare word after the closing quote and any prefix no longer prove a join.
+        for expression, expected in (
+            ('"http://localhost:1/api/"discord/send', 1),
+            ("'http://localhost:1/api/'discord/send", 1),
+            ('"http://localhost:1/api/"' + "'discord/send'", 0),
+            ('"http://localhost:1/api/"$ROUTE', 0),
+            ('"http://localhost:1/api/""$ROUTE"', 0),
+            ('"$API"/api/discord/send', 0),
+            ('$PREFIX"http://localhost:1/api/send"', 1),
         ):
             with self.subTest(expression=expression):
                 rc, output = self.run_check('curl ' + expression)
-                self.assertEqual(rc, 0)
-                self.assertIn('no_applicable_urls', output)
+                self.assertEqual(rc, expected)
+                self.assertIn('unknown_path' if expected else 'no_applicable_urls', output)
         self.assertEqual(self.run_check('curl "http://localhost:1/api/send"')[0], 1)
 
     def test_literal_prose_and_leading_quote_joins(self):
         prose = ['엔드포인트="URL"', 'POST 대상="URL"', '기본값:"URL"', '**"URL"** 로 호출',
                  '["URL"](x)', '| endpoint |"URL"|', '"URL"이 응답한다', 'URL은 "URL"다.',
                  "설정값='URL'", '~~~bash\ncurl "URL"이후\n~~~']
-        joins = ["curl 'https://example.com/?next='\"URL\"", 'curl "https://example.com/?next="\'URL\'',
-                 'curl "$API"\'URL\'', "curl ''\"URL\"", 'curl ""\'URL\'']
-        for template, expected in [(x, 1) for x in prose] + [(x, 0) for x in joins]:
+        leading = ["curl 'https://example.com/?next='\"URL\"", 'curl "https://example.com/?next="\'URL\'',
+                   'curl "$API"\'URL\'', "curl ''\"URL\"", 'curl ""\'URL\'']
+        # r5: the token after a leading quote is itself complete, so these count too.
+        for template, expected in [(x, 1) for x in prose + leading]:
             with self.subTest(template=template):
                 self.assertEqual(self.run_check(template.replace('URL', 'http://localhost:1/api/send'))[0], expected)
 
@@ -88,8 +90,20 @@ class PromptRoutes(unittest.TestCase):
                  'curl 설명: "URL"deprecated', "curl 문서에서 설정값='URL' 로 안내", '**"URL"** curl 로 호출',
                  '~~~sh\ncurl "URL"; echo ok\n~~~', '엔드포인트="URL"', "curl 'URL'.",
                  '~~~bash\n# 스테이징 대상은 "URL".\n~~~', '`ops` 라우트는 "URL".']
-        joins = ['curl "prefix""URL"', 'curl "URL""suffix"', 'curl base:"URL"', 'curl $(base)"URL"']
+        prose += ['curl "prefix""URL"', 'curl base:"URL"', 'curl $(base)"URL"']  # r5: prefixes are literals
+        joins = ['curl "URL""suffix"']
         for template, expected in [(x, 1) for x in prose] + [(x, 0) for x in joins]:
+            with self.subTest(template=template):
+                self.assertEqual(self.run_check(template.replace('URL', 'http://localhost:1/api/send'))[0], expected)
+
+    def test_client_name_prose_and_path_continuation(self):
+        prose = ['curl usage: endpoint="URL"', 'wget documentation: default="URL"',
+                 'http endpoint="URL" is the recommended route.', 'xh docs: target="URL"',
+                 'curl example: "URL"deprecated']
+        joins = ['curl --header "X-Name: 한글" "prefix""URL"/tail', 'curl "URL"/suffix # 한글 설명',
+                 'curl "http://localhost:1/api"$REST']
+        fenced = ['```sh\n' + template + '\n```' for template in prose]
+        for template, expected in [(x, 1) for x in prose + fenced] + [(x, 0) for x in joins]:
             with self.subTest(template=template):
                 self.assertEqual(self.run_check(template.replace('URL', 'http://localhost:1/api/send'))[0], expected)
 

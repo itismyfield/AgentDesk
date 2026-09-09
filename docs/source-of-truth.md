@@ -172,5 +172,5 @@ for in-flight migrations and known-legacy paths lives under
 - [`agent-maintenance/known-legacy.md`](agent-maintenance/known-legacy.md) — intentionally-legacy modules with cleanup-owner issue numbers.
 
 Prompt API path inspection (`scripts/check_prompt_api_routes.py`) reads flat staged `*.prompt.md` files and this checkout’s endpoint inventory; it skips symlinks.
-Only explicit loopback URLs with literal ports in prose or sh/bash/shell fences are checked; comments, blockquotes, other fences and relative paths are excluded.
+Only explicit loopback URLs with literal ports in prose or sh/bash/shell fences are checked; comments, blockquotes, other fences and relative paths are excluded. A complete URL token counts no matter what precedes it; only a path continuing past its own closing quote (`/`, `$`, `{`, a quote, or `+`) reads as a shell join.
 Unknown paths (exit 1) and unavailable inspection (exit 2) warn without blocking deploy; zero candidates means `no_applicable_urls`. This is source path lint, not runtime/method validation; doctor, strict mode and mirror refresh verification remain separate.

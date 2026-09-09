@@ -6,6 +6,12 @@ import re
 from urllib.parse import urlsplit
 
 URL = re.compile(r'''(?<![^\s"'`(<])https?://(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]+/api/[^\s"'`()<>\\]*''')
+JOIN = re.compile(r'''\s*\+|[/${"']''')
+
+def joined(line, match):
+    """True when a path continues past the matched URL token's own closing quote."""
+    rest, quote = line[match.end():], line[match.start() - 1:match.start()]
+    return bool(JOIN.match(rest[1:] if quote in ('"', "'") and rest[:1] == quote else rest))
 
 def inventory(repo):
     root = repo / 'src/server/routes/docs/inventory/endpoints'
@@ -39,12 +45,10 @@ def candidates(source):
                 fence = None
             continue
         if fence is None or fence[2]:
-            # Shell joins are excluded only inside executable fences and on ASCII command lines.
-            shell = bool(fence or (line.isascii() and re.match(r'\s*[$>]?\s*(?:curl|wget|http|xh)\s', line)))
+            # Prose, language and client names never decide a join: a complete URL
+            # token counts unless a path continues past its closing quote.
             matches = (match for match in URL.finditer(line)
-                       if not (shell and (re.search(r'''[A-Za-z0-9_/.:=$})\"']["']$''', line[:match.start()])
-                                          or re.match(r'''["'][A-Za-z0-9_/$\"'-]''', line[match.end():])))
-                       and '$' not in urlsplit(match[0]).path and not re.match(r'''["']?(?:\s*\+|\$)''', line[match.end():]))
+                       if '$' not in urlsplit(match[0]).path and not joined(line, match))
             for path in sorted({urlsplit(match[0]).path for match in matches}):
                 yield number, path
 
