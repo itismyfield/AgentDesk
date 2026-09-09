@@ -63,6 +63,7 @@ pub(super) async fn run_completion_postlude(
     let status_panel_generation = state.status_panel_generation;
     let preserve_inflight_for_cleanup_retry = state.preserve_inflight_for_cleanup_retry;
     let tmux_last_offset = state.tmux_last_offset;
+    let watcher_delivery_pin = state.watcher_delivery_pin;
     let watcher_owner_channel_id = state.watcher_owner_channel_id;
     let bridge_relay_delegated_to_watcher = state.bridge_relay_delegated_to_watcher;
     let is_prompt_too_long = state.is_prompt_too_long;
@@ -237,15 +238,12 @@ pub(super) async fn run_completion_postlude(
             can_chain_locally,
         )
         && let Some(offset) = tmux_last_offset
-        && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
     {
-        if let Ok(mut guard) = watcher.resume_offset.lock() {
-            *guard = Some(offset);
-        }
-        // NOTE: turn_delivered is NOT cleared here — the watcher clears it
-        // when it consumes resume_offset, ensuring the flag stays active
-        // until the watcher actually starts reading from the new offset.
-        watcher.paused.store(false, Ordering::Relaxed);
+        finalize_epilogue::resume_pinned_watcher(
+            &shared_owned.tmux_watchers,
+            watcher_delivery_pin.as_ref(),
+            offset,
+        );
     }
 
     let should_record_final_turn = should_record_final_turn_transcript(
@@ -989,7 +987,7 @@ pub(super) async fn run_completion_postlude(
         provider,
         request_owner_name,
         tmux_last_offset,
-        watcher_owner_channel_id,
+        watcher_delivery_pin,
         completion_r4.permits_channel_effects(),
     )
     .await;
