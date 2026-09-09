@@ -2204,7 +2204,7 @@ async fn apply_queue_exit_feedback(
     // #5035: the edit-or-delete pair is now `teardown_exit_body`, reachable
     // only with a gate-issued token.
     for (card, teardown) in released_cards {
-        queued_card_gate::teardown_exit_body(&http, shared, teardown, card.kind).await;
+        queued_card_gate::teardown_exit_body(&http, shared, teardown, card).await;
     }
 
     queue_marker::drain_queue_exit_markers(shared, &http, channel_id, &queue_exit_events).await;
