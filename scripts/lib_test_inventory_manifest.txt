@@ -5217,10 +5217,16 @@ services::discord::task_notification_delivery::tests::unknown_reference_repair_a
 services::discord::task_notification_delivery::tests::watcher_fallback_turn_key_resumes_sink_primary_key_without_second_row_pg
 services::discord::task_notification_delivery::tests::watcher_primary_key_blocks_late_sink_frame_alias_without_second_row_pg
 services::discord::task_notification_delivery::tests::xml_and_stream_json_share_semantic_key_and_nonce_is_bounded
+services::discord::task_supervisor::tests::completion_is_published_after_registry_cleanup
 services::discord::task_supervisor::tests::panic_payload_summary_handles_common_payloads
 services::discord::task_supervisor::tests::spawn_observed_contains_child_panic
 services::discord::task_supervisor::tests::task_guard_leaves_a_replacement_watcher_entry_in_place
 services::discord::task_supervisor::tests::task_guard_removes_the_registry_entry_it_still_owns
+services::discord::task_supervisor::tests::watcher_wrapper_textually_drops_cleanup_before_completion
+services::discord::task_supervisor::watcher_completion::tests::duplicate_guard_does_not_remove_original_registration
+services::discord::task_supervisor::watcher_completion::tests::old_completion_preserves_other_incarnation
+services::discord::task_supervisor::watcher_completion::tests::panic_and_abort_are_distinct_observations
+services::discord::task_supervisor::watcher_completion::tests::whole_future_two_barriers_precede_completion
 services::discord::terminal_coordinate::tests::absent_provenance_remains_valid_and_does_not_change_c_identity
 services::discord::terminal_coordinate::tests::canonical_c_is_positive_and_hashes_only_c
 services::discord::terminal_coordinate::tests::external_identity_is_id_zero_and_requires_offset_in_identity
