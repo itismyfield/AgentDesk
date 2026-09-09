@@ -594,9 +594,10 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
         "and the mechanism that prevents the rewind is the fence's re-seed",
     );
     assert!(std::sync::Arc::ptr_eq(
-        watcher_delivery_pin
+        &watcher_delivery_pin
             .as_ref()
-            .expect("the real tick writes its detached pin back to caller-owned state"),
+            .expect("the real tick writes its detached pin back to caller-owned state")
+            .turn_delivered,
         &tick_delivery_pin,
     ));
 }

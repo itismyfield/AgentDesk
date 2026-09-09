@@ -44,7 +44,7 @@ struct HandoffObservation {
     claim_outcome: WatcherHandoffClaimOutcome,
     tmux_handed_off: bool,
     watcher_relay_available: bool,
-    watcher_delivery_pin: Option<Arc<AtomicBool>>,
+    watcher_delivery_pin: Option<WatcherClaimIncarnation>,
     watcher_slots: usize,
 }
 
@@ -55,11 +55,13 @@ async fn dispatch_process_handoff_with_pin(
     message: RuntimeHandoffLoopMessage,
     state_dirty: &mut bool,
     done: bool,
-    initial_watcher_delivery_pin: Option<Arc<AtomicBool>>,
+    initial_watcher_delivery_pin: Option<WatcherClaimIncarnation>,
 ) -> HandoffObservation {
     let channel_id = ChannelId::new(state.channel_id);
     let mut terminal_control_ready_observed = false;
-    let mut tmux_last_offset = None;
+    let mut tmux_last_offset = initial_watcher_delivery_pin
+        .as_ref()
+        .map(|_| state.last_offset);
     let mut watcher_owner_channel_id = channel_id;
     let mut standby_relay_owns_output = false;
     let mut watcher_relay_available_for_turn = false;
@@ -268,7 +270,14 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
     let incumbent = live_watcher_handle(tmux_session_name, output_path);
     let incumbent_delivery_pin = Arc::clone(&incumbent.turn_delivered);
     shared.tmux_watchers.insert(incumbent_channel, incumbent);
-    let pre_frame_delivery_pin = Arc::new(AtomicBool::new(false));
+    let pre_frame_handle = live_watcher_handle("pre-frame", "/pre-frame.jsonl");
+    let pre_frame_delivery_pin = Arc::clone(&pre_frame_handle.turn_delivered);
+    let pre_frame_pin =
+        WatcherClaimIncarnation::from_handle(ChannelId::new(channel_id + 200), &pre_frame_handle);
+    let pre_frame_resume = pre_frame_handle.resume_offset.clone();
+    shared
+        .tmux_watchers
+        .insert(ChannelId::new(channel_id + 200), pre_frame_handle);
     let mut state_dirty = false;
     let _fail_second_stamp = guarded_save::fail_guarded_runtime_atomic_stamp_on_call(2);
 
@@ -279,7 +288,7 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
         message.clone(),
         &mut state_dirty,
         false,
-        Some(Arc::clone(&pre_frame_delivery_pin)),
+        Some(pre_frame_pin),
     )
     .await;
 
@@ -293,9 +302,25 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
         .watcher_delivery_pin
         .as_ref()
         .expect("IoError restores the detached pre-frame pin");
-    assert!(Arc::ptr_eq(failed_pin, &pre_frame_delivery_pin));
-    assert!(!Arc::ptr_eq(failed_pin, &incumbent_delivery_pin));
-    assert_eq!(failed.watcher_slots, 1);
+    assert!(Arc::ptr_eq(
+        &failed_pin.turn_delivered,
+        &pre_frame_delivery_pin
+    ));
+    assert!(!Arc::ptr_eq(
+        &failed_pin.turn_delivered,
+        &incumbent_delivery_pin
+    ));
+    assert_eq!(failed.tmux_last_offset, Some(pre_frame.last_offset));
+    assert!(super::super::finalize_epilogue::resume_pinned_watcher(
+        &shared.tmux_watchers,
+        Some(failed_pin),
+        pre_frame.last_offset
+    ));
+    assert_eq!(
+        *pre_frame_resume.lock().unwrap(),
+        Some(pre_frame.last_offset)
+    );
+    assert_eq!(failed.watcher_slots, 2);
     assert!(!state_dirty);
     assert_ne!(
         state.save_generation, pre_frame.save_generation,
@@ -326,8 +351,14 @@ async fn second_watcher_owner_stamp_io_error_retries_from_exact_partial_checkpoi
         .watcher_delivery_pin
         .as_ref()
         .expect("successful retry retains the first adopted pin");
-    assert!(!Arc::ptr_eq(retried_pin, &pre_frame_delivery_pin));
-    assert!(Arc::ptr_eq(retried_pin, &incumbent_delivery_pin));
+    assert!(!Arc::ptr_eq(
+        &retried_pin.turn_delivered,
+        &pre_frame_delivery_pin
+    ));
+    assert!(Arc::ptr_eq(
+        &retried_pin.turn_delivered,
+        &incumbent_delivery_pin
+    ));
     let durable = load_inflight_state(&provider, channel_id).expect("load retried durable row");
     assert_eq!(
         durable.watcher_owner_channel_id,
@@ -436,13 +467,19 @@ async fn runtime_adoption_pins_authoritative_incumbent_not_provisional_marker() 
         .watcher_delivery_pin
         .as_ref()
         .expect("runtime adoption must publish a watcher incarnation pin");
-    assert!(Arc::ptr_eq(pinned, &incumbent_delivery_pin));
-    assert!(!Arc::ptr_eq(pinned, &unrelated_provisional_marker));
+    assert!(Arc::ptr_eq(&pinned.turn_delivered, &incumbent_delivery_pin));
+    assert!(!Arc::ptr_eq(
+        &pinned.turn_delivered,
+        &unrelated_provisional_marker
+    ));
     let registry = shared
         .tmux_watchers
         .get(&owner)
         .expect("incumbent survives reuse");
-    assert!(Arc::ptr_eq(pinned, &registry.turn_delivered));
+    assert!(Arc::ptr_eq(
+        &pinned.turn_delivered,
+        &registry.turn_delivered
+    ));
 }
 
 #[tokio::test]

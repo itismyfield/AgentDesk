@@ -305,7 +305,7 @@ pub(in crate::services::discord::turn_bridge) struct StreamLoopState<'a> {
     pub(in crate::services::discord::turn_bridge) watcher_owns_assistant_relay: &'a mut bool,
     pub(in crate::services::discord::turn_bridge) watcher_relay_available_for_turn: &'a mut bool,
     pub(in crate::services::discord::turn_bridge) watcher_delivery_pin:
-        &'a mut Option<Arc<std::sync::atomic::AtomicBool>>,
+        &'a mut Option<WatcherClaimIncarnation>,
     pub(in crate::services::discord::turn_bridge) watcher_handoff_claim_outcome:
         &'a mut WatcherHandoffClaimOutcome,
     pub(in crate::services::discord::turn_bridge) standby_relay_owns_output: &'a mut bool,
