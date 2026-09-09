@@ -4967,7 +4967,9 @@ services::discord::settings::validation::voice_channel_guard_tests::restart_orph
 services::discord::settings::validation::voice_channel_guard_tests::restart_routing_change_orphans_provider_rebind_but_preserves_reroutable_and_valid
 services::discord::settings::write::yaml_write_back_secret_tests::bot_settings_write_back_keeps_skip_serializing_secrets_on_disk
 services::discord::settings::write::yaml_write_back_secret_tests::bot_settings_write_back_preserves_unowned_document_keys
+services::discord::settings::write::yaml_write_back_secret_tests::invalid_config_is_not_written_back
 services::discord::settings::write::yaml_write_back_secret_tests::scalar_all_unowned_typed_values_are_equal
+services::discord::settings::write::yaml_write_back_secret_tests::scalar_colliding_mcp_keys_keep_distinct_entries
 services::discord::settings::write::yaml_write_back_secret_tests::scalar_database_password_is_preserved
 services::discord::settings::write::yaml_write_back_secret_tests::scalar_numeric_bot_key_patches_existing_entry
 services::discord::settings::write::yaml_write_back_secret_tests::scalar_server_token_is_preserved

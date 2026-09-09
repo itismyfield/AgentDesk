@@ -117,22 +117,34 @@ fn preserve_string_scalars(raw: &mut serde_yaml::Value, typed: &serde_yaml::Valu
             }
         }
         (Value::Mapping(raw), Value::Mapping(typed)) => {
-            *raw = std::mem::take(raw)
-                .into_iter()
-                .map(|(key, mut value)| {
-                    let matched = typed.iter().find(|(candidate, _)| {
-                        **candidate == key
-                            || candidate
-                                .as_str()
-                                .and_then(|s| serde_yaml::from_str::<Value>(s).ok())
-                                .as_ref()
-                                == Some(&key)
+            let original = std::mem::take(raw);
+            let mut available = typed.clone();
+            *raw = original
+                .iter()
+                .map(|(key, value)| {
+                    let mut value = value.clone();
+                    let matched = available.remove_entry(key).or_else(|| {
+                        if key.is_string() {
+                            return None;
+                        }
+                        let candidate = available
+                            .keys()
+                            .find(|candidate| {
+                                !original.contains_key(*candidate)
+                                    && candidate
+                                        .as_str()
+                                        .and_then(|s| serde_yaml::from_str::<Value>(s).ok())
+                                        .as_ref()
+                                        == Some(key)
+                            })
+                            .cloned()?;
+                        available.remove_entry(&candidate)
                     });
                     if let Some((key, typed)) = matched {
-                        preserve_string_scalars(&mut value, typed);
-                        (key.clone(), value)
-                    } else {
+                        preserve_string_scalars(&mut value, &typed);
                         (key, value)
+                    } else {
+                        (key.clone(), value)
                     }
                 })
                 .collect();
@@ -230,6 +242,7 @@ fn persist_bot_auth_to_yaml_checked(
     let original = fs::read_to_string(&path).map_err(|err| config_io_error(&path, err))?;
     let config: crate::config::Config =
         serde_yaml::from_str(&original).map_err(|err| config_io_error(&path, err))?;
+    crate::config::validate_config(&config).map_err(|err| config_io_error(&path, err))?;
 
     let Some(bot_name) = super::resolved_config_bot_name(&config, token) else {
         // Do not mutate YAML for tokens that are not managed by agentdesk.yaml.
@@ -661,6 +674,42 @@ mod yaml_write_back_secret_tests {
     }
 
     #[test]
+    fn scalar_colliding_mcp_keys_keep_distinct_entries() {
+        for entries in [
+            "  '0x7b': {url: 'https://example.invalid/hex'}\n  123: {url: 'https://example.invalid/decimal'}\n",
+            "  123: {url: 'https://example.invalid/decimal'}\n  '0x7b': {url: 'https://example.invalid/hex'}\n",
+        ] {
+            let actual = round_trip(&format!("{FIXTURE}mcp_servers:\n{entries}"));
+            assert_eq!(actual.mcp_servers.len(), 2);
+            assert_eq!(
+                actual.mcp_servers["0x7b"].url,
+                "https://example.invalid/hex"
+            );
+            assert_eq!(
+                actual.mcp_servers["123"].url,
+                "https://example.invalid/decimal"
+            );
+            assert_eq!(
+                actual.discord.bots["main"].auth.allowed_channel_ids,
+                Some(vec![4242])
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_config_is_not_written_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        let original = format!("{FIXTURE}escalation:\n  schedule:\n    timezone: Invalid/Zone\n");
+        fs::write(&path, &original).unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
+        assert!(
+            persist_bot_auth_to_yaml_checked(BOT_TOKEN, &settings_with_new_allowlist()).is_err()
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
     fn scalar_server_token_is_preserved() {
         for token in ["0777", "0x0777"] {
             let actual = round_trip(&FIXTURE.replace("dashboard-secret-token", token));
@@ -703,7 +752,7 @@ mod yaml_write_back_secret_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agentdesk.yaml");
         fs::write(&path, FIXTURE).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
         persist_bot_auth_to_yaml_checked(BOT_TOKEN, &settings_with_new_allowlist()).unwrap();
         assert_eq!(
