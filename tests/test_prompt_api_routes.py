@@ -42,6 +42,9 @@ class PromptRoutes(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertNotIn('SECRET', output)
         self.assertEqual(output.count('unknown_path /api/send'), 1)
+        rc, output = self.run_check('<http://localhost:1/api/send?token=$TOKEN>')
+        self.assertEqual(rc, 1)
+        self.assertNotIn('TOKEN', output)
 
     def test_excluded_examples(self):
         source = '/api/send POST /api/send https://example.com:1/api/send http://localhost:$PORT/api/send\n'

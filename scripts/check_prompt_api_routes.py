@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
-URL = re.compile(r'''(?<![^\s"'`(])https?://(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]+/api/[^\s"'`()<>\\]*''')
+URL = re.compile(r'''(?<![^\s"'`(<])https?://(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]+/api/[^\s"'`()<>\\]*''')
 
 
 def inventory(repo):
@@ -42,7 +42,7 @@ def candidates(source):
             continue
         if fence is None or fence[2]:
             matches = (match for match in URL.finditer(line)
-                       if '$' not in match[0] and not re.match(r'''["']?(?:\s*\+|\$)''', line[match.end():]))
+                       if '$' not in urlsplit(match[0]).path and not re.match(r'''["']?(?:\s*\+|\$)''', line[match.end():]))
             for path in sorted({urlsplit(match[0]).path for match in matches}):
                 yield number, path
 
