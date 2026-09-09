@@ -6380,6 +6380,7 @@ services::discord::turn_bridge::response_delivery::tests::terminal_delivery_afte
 services::discord::turn_bridge::response_delivery::tests::terminal_error_after_rollover_delivers_error_text_not_recovery_notice
 services::discord::turn_bridge::resume_pin_tests::c1_actual_postlude_resume_pin_runtime_proof
 services::discord::turn_bridge::resume_pin_tests::c1_both_late_writers_consume_pin_without_registry_backfill
+services::discord::turn_bridge::resume_pin_tests::c1_bridge_clear_fence_capture_reaches_the_postlude_context
 services::discord::turn_bridge::resume_pin_tests::c1_cancelled_registered_pin_leaves_all_effects_untouched
 services::discord::turn_bridge::resume_pin_tests::c1_missing_and_idle_tail_mismatch_never_resume_latest
 services::discord::turn_bridge::resume_pin_tests::c1_poisoned_resume_lock_does_not_unpause

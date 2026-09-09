@@ -56,6 +56,7 @@ use crate::db::session_observability::{
     BackgroundChildSpawn, close_background_child_pg, insert_background_child_pg,
     mark_session_tool_use_pg,
 };
+use crate::db::session_transcripts::{ChannelClearFence, capture_channel_clear_fence};
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{StatusEvent, TaskNotificationKind};
@@ -216,6 +217,10 @@ pub(super) enum WatcherHandoffClaimOutcome {
 // (#4230 S6) — must live at module scope so both resolve them.
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+/// #5707: the bridge's only clear-fence producer; the postlude proof enters here.
+async fn capture_bridge_clear_fence(shared: &SharedData, channel: ChannelId) -> ChannelClearFence {
+    capture_channel_clear_fence(shared.pg_pool.as_ref(), &channel.get().to_string()).await
+}
 pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
@@ -415,7 +420,8 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut streaming_rollover_frozen_msg_ids: Vec<MessageId> = Vec::new();
         let mut terminal_full_replay_cleanup_msg_ids: Vec<MessageId> = Vec::new();
         let mut tmux_last_offset = bridge.tmux_last_offset;
-        // #3041: recovered bridges and reused watchers share the owner lease.
+        // #3041: seed the authoritative watcher owner channel so recovered
+        // bridges and reused watchers lease the same cell.
         let mut new_session_id = bridge.new_session_id.clone();
         let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
@@ -423,6 +429,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut inflight_state = bridge.inflight_state.clone();
         inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
         let mut last_status_edit = tokio::time::Instant::now();
+        // #3813: first non-empty answer may bypass the status interval once.
         let mut first_answer_relayed = false;
         let status_interval = super::status_update_interval();
         let mut last_session_panel_lifecycle_refresh = tokio::time::Instant::now() - status_interval;
@@ -435,10 +442,10 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut last_status_panel_edit = tokio::time::Instant::now() - status_interval;
         let turn_start = std::time::Instant::now();
         // #5707: observe after own clear; the unbounded prior window can overlap provider work.
-        let clear_fence = crate::db::session_transcripts::capture_channel_clear_fence(
-            shared_owned.pg_pool.as_ref(), &channel_id.get().to_string(),
-        ).await;
+        let clear_fence = capture_bridge_clear_fence(shared_owned.as_ref(), channel_id).await;
+        // #3813: observation-only bridge latency spans share `turn_start`.
         let mut bridge_spans = BridgeLatencySpans::starting_at(turn_start);
+        // #3805: pinned panel epoch; create bumps it and completion proves it.
         let mut status_panel_generation = inflight_state.status_panel_generation;
         inflight_state.long_running_placeholder_active = false;
         let mut resumed_placeholder_clear_applied = false;

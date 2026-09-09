@@ -178,6 +178,21 @@ fn c1_both_late_writers_consume_pin_without_registry_backfill() {
 }
 
 #[test]
+fn c1_bridge_clear_fence_capture_reaches_the_postlude_context() {
+    let entry = include_str!("mod.rs");
+    // One producer only: a second capture at the delivery site would hand the
+    // postlude a fence the bridge never observed before provider work started.
+    assert_eq!(entry.matches("capture_channel_clear_fence(").count(), 1);
+    let capture = entry
+        .find("let clear_fence = capture_bridge_clear_fence(shared_owned.as_ref(), channel_id).await;")
+        .expect("bridge captures its own clear fence");
+    let deliver = entry
+        .find("\n                clear_fence,\n                turn_start,\n")
+        .expect("postlude context receives the captured fence verbatim");
+    assert!(capture < deliver, "capture must precede postlude delivery");
+}
+
+#[test]
 fn c1_actual_postlude_resume_pin_runtime_proof() {
     actual_postlude_runtime_proof(None, "own");
 }
@@ -213,7 +228,7 @@ fn actual_postlude_runtime_proof(response: Option<&str>, case: &str) {
         root.path(),
     );
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-        use crate::db::session_transcripts::{capture_channel_clear_fence, record_channel_clear_boundary};
+        use crate::db::session_transcripts::record_channel_clear_boundary;
         use crate::services::routines::{NewRoutine, RoutineAgentExecutor, RoutineStore};
         let db = if response.is_some() { Some(crate::dispatch::test_support::DispatchPostgresTestDb::create("sa2_postlude", "SA2 actual caller").await) } else { None };
         let pool = if let Some(db) = &db { Some(db.connect_and_migrate_with_max_connections(4).await) } else { None };
@@ -234,8 +249,8 @@ fn actual_postlude_runtime_proof(response: Option<&str>, case: &str) {
             (Some(store), run.run_id)
         } else { (None, String::new()) };
         // `failed_capture`: the bridge observed nothing, so it carries the -1 sentinel.
-        let observable = if case == "failed_capture" { None } else { pool.as_ref() };
-        let clear_fence = capture_channel_clear_fence(observable, &channel).await;
+        let observer = if case == "failed_capture" { super::super::make_shared_data_for_tests_with_storage(None) } else { shared.clone() };
+        let clear_fence = super::capture_bridge_clear_fence(&observer, owner).await;
         if case == "clear" { record_channel_clear_boundary(pool.as_ref(), &channel).await.unwrap(); }
         let h = handle();
         shared.tmux_watchers.insert(owner, copy_handle(&h));
