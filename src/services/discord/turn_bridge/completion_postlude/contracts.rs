@@ -23,6 +23,8 @@ pub(in crate::services::discord::turn_bridge) struct CompletionPostludeContext {
 }
 
 pub(in crate::services::discord::turn_bridge) struct CompletionPostludeState {
+    pub(in crate::services::discord::turn_bridge) watcher_delivery_pin:
+        Option<WatcherClaimIncarnation>,
     pub(in crate::services::discord::turn_bridge) full_response: String,
     pub(in crate::services::discord::turn_bridge) user_text_owned: String,
     pub(in crate::services::discord::turn_bridge) role_binding: Option<RoleBinding>,
