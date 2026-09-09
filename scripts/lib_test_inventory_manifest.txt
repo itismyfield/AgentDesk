@@ -5537,6 +5537,11 @@ services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_gu
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::forward_chunk_surfaces_backpressure_evicted_victim_identity
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::per_turn_fully_mirrored_degrades_when_evicted_victim_matches
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::terminal_event_consumed_offset_excludes_buffered_tail
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::caller_arc_wiring
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::late_a_preserves_successor_b
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::paused_preserves_markers
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::pending_preserves_markers
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::same_a_suppresses_duplicate
 services::discord::tmux::tmux_watcher::terminal_readiness::rewind_attempt_key_tests::reset_rewind_attempts_keys_offset_with_turn_identity_4115
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::bridge_suppressed_turn_discards_pending_buffer_before_direct_input
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::claude_watcher_ready_keeps_busy_when_partial_user_follows_terminator
