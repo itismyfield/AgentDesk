@@ -464,6 +464,11 @@ pub(super) fn spawn_turn_bridge(
         let mut status_panel_dirty = shared_owned.ui.status_panel_v2_enabled;
         let mut last_status_panel_edit = tokio::time::Instant::now() - status_interval;
         let turn_start = std::time::Instant::now();
+        // #5707: protection starts at this observation, after own severance.
+        // The preceding window is unbounded and can overlap provider work.
+        let clear_fence = crate::db::session_transcripts::capture_channel_clear_fence(
+            shared_owned.pg_pool.as_ref(), &channel_id.get().to_string(),
+        ).await;
         // #3813: observation-only bridge latency spans share `turn_start`.
         let mut bridge_spans = BridgeLatencySpans::starting_at(turn_start);
         // #3805: pinned panel epoch; create bumps it and completion proves it.
@@ -910,6 +915,7 @@ pub(super) fn spawn_turn_bridge(
                 is_external_input_tui_direct,
                 context_window_tokens,
                 context_compact_percent,
+                clear_fence,
                 turn_start,
             },
             completion_postlude::CompletionPostludeState {
