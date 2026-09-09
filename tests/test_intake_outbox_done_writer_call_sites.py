@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -367,6 +368,87 @@ class DiscriminationTests(unittest.TestCase):
             f"mark_done_from_delivery_proof: UNLISTED protected import in {PROOF_OWNER}",
             message,
         )
+
+
+class TransportLegacyInventoryTests(unittest.TestCase):
+    """#5485 S2a: read-only shutdown transport + seven legacy writer adapters.
+
+    The `legacy_*` spellings are a convention the compiler cannot enforce, so
+    these enumerated assertions are the entire S2a enforcement surface (design
+    `adapters.ownership_boundary`); field narrowing is S2b's job.
+    """
+
+    WORKER = ROOT / "src/services/cluster/intake_worker.rs"
+    OWNER = ROOT / "src/services/discord/shared_state.rs"
+    BOOTSTRAP = ROOT / "src/services/discord/runtime_bootstrap"
+    RAW_STORE = re.compile(r"(shutting_down|restart_pending)\s*\.store\(")
+    ADAPTER_STORE = re.compile(
+        r"self\.(shutting_down|restart_pending)\.store\((\w+), Ordering::SeqCst\)"
+    )
+    CHECKPOINT = re.compile(
+        r"admission_action\(\s*cancelled,\s*&shared\.restart\.intake_worker_lifecycle,"
+        r"\s*AdmissionCheckpoint::(\w+),"
+    )
+    # "<adapter> <caller basename> <field>=<value>..." in exact store order.
+    ADAPTERS = """
+        legacy_deferred_begin deferred_restart.rs shutting_down=true
+        legacy_deferred_ack deferred_restart.rs restart_pending=true
+        legacy_deferred_rollback deferred_restart.rs shutting_down=false restart_pending=false
+        legacy_promotion_fence gateway_lease_recovery.rs restart_pending=true
+        legacy_promotion_unfence gateway_lease_recovery.rs restart_pending=false
+        legacy_lease_lost gateway_lease.rs shutting_down=true restart_pending=true
+        legacy_sigterm shutdown.rs shutting_down=true restart_pending=true
+    """
+
+    def item(self, text: str, signature: str) -> str:
+        start = text.index(signature)
+        return text[start : text.index("\n}\n", start)]
+
+    def test_transport_legacy_lexical_inventory(self):
+        worker = self.WORKER.read_text(encoding="utf-8")
+        owner = self.OWNER.read_text(encoding="utf-8")
+
+        tick = self.item(worker, "pub(crate) async fn run_intake_worker_tick(")
+        self.assertIn("cancelled: &(dyn Fn() -> bool + Sync),", tick)
+        self.assertEqual(
+            self.CHECKPOINT.findall(tick), ["BeforeClaim", "AfterClaim", "AfterClaim"]
+        )
+        self.assertEqual(tick.count("admission_action("), 3)
+        self.assertEqual(tick.count("release_cancelled_claim(pool, &row, claim_owner)"), 2)
+
+        loop_body = self.item(worker, "pub(crate) async fn run_intake_worker_loop(")
+        self.assertNotIn("cancel: Arc<AtomicBool>", loop_body)
+        self.assertIn("let reader = shared.restart.shutdown_reader();", loop_body)
+        self.assertIn("let cancelled = || reader.load(Ordering::Acquire);", loop_body)
+        self.assertEqual(loop_body.count("if cancelled() {"), 2)
+        self.assertIn("&cancelled,", loop_body)
+
+        escapes = [
+            str(path) for path in sorted((ROOT / "src").rglob("*.rs"))
+            if "restart.shutting_down.clone()" in path.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(escapes, [], "four raw writer-capability escapes stay replaced")
+
+        reader = self.item(owner, "impl ShutdownReader {")
+        self.assertEqual(reader.count("fn "), 1)
+        self.assertIn("fn load(&self, order: Ordering) -> bool {", reader)
+        code = "\n".join(l for l in owner.splitlines() if not l.lstrip().startswith("//"))
+        for forbidden in ("fn store", "fn swap", "impl Deref", "impl AsRef", "impl From<"):
+            self.assertNotIn(forbidden, code, f"ShutdownReader must not gain {forbidden}")
+        self.assertEqual(code.count("ShutdownReader(self.shutting_down.clone())"), 1)
+
+        stores = 0
+        rows = [line.split() for line in self.ADAPTERS.strip().splitlines()]
+        for name, caller_file, *spec in rows:
+            expected = [tuple(pair.split("=")) for pair in spec]
+            body = self.item(owner, f"fn {name}(&self) {{").split("\n    }")[0]
+            self.assertEqual(self.ADAPTER_STORE.findall(body), expected, name)
+            self.assertEqual(owner.count(f"fn {name}(&self)"), 1, name)
+            caller = (self.BOOTSTRAP / caller_file).read_text(encoding="utf-8")
+            self.assertEqual(caller.count(f".{name}();"), 1, name)
+            self.assertEqual(self.RAW_STORE.findall(caller), [], caller_file)
+            stores += len(expected)
+        self.assertEqual((len(rows), stores), (7, 10))
 
 
 if __name__ == "__main__":

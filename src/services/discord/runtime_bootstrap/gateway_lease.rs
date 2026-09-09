@@ -460,14 +460,7 @@ async fn self_fence_gateway(
     shared
         .bot_connected
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    shared
-        .restart
-        .shutting_down
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    shared
-        .restart
-        .restart_pending
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    shared.restart.legacy_lease_lost();
 
     for entry in shared.tmux_watchers.iter() {
         entry
