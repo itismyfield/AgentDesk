@@ -370,13 +370,16 @@ mod tests {
         let mut files = Vec::new();
         collect_rs_files(&source_root, &mut files);
         let spawn = ["spawn_turn_", "bridge("].concat();
+        let pinned = ["spawn_turn_", "bridge_with_pin("].concat();
         let mut callers = Vec::new();
         for path in files {
             let source = std::fs::read_to_string(&path).expect("read Rust source");
             if path.ends_with("channel_episode_scope.rs") {
                 continue;
             }
-            if source.contains(&spawn) && !source.contains("fn spawn_turn_bridge(") {
+            if (source.contains(&spawn) || source.contains(&pinned))
+                && !source.contains("fn spawn_turn_bridge(")
+            {
                 callers.push(
                     path.strip_prefix(&source_root)
                         .expect("source-relative path")
@@ -404,15 +407,22 @@ mod tests {
         assert_eq!(intake.matches(&spawn).count(), 2);
         assert_eq!(headless.matches(&spawn).count(), 1);
         assert_eq!(recovery.matches(&spawn).count(), 1);
-        assert_eq!(tui_direct.matches(&spawn).count(), 2);
+        assert_eq!(tui_direct.matches(&spawn).count(), 0);
+        assert_eq!(tui_direct.matches(&pinned).count(), 2);
         assert!(intake.contains("cancel_token.clone(),\n            request_owner"));
         assert!(headless.contains("cancel_token.clone(),\n        request_owner"));
         assert!(recovery.contains("mailbox_recovery_kickoff(\n            shared,\n            channel_id,\n            cancel_token.clone(),"));
         assert_eq!(
             tui_direct
-                .matches(
-                    "spawn_turn_bridge(shared.clone(), Arc::new(CancelToken::new()), rx, bridge);"
-                )
+                .matches(concat!(
+                    "spawn_turn_bridge_with_pin(\n",
+                    "        shared.clone(),\n",
+                    "        Arc::new(CancelToken::new()),\n",
+                    "        rx,\n",
+                    "        bridge,\n",
+                    "        pin,\n",
+                    "    );"
+                ))
                 .count(),
             2,
             "both TUI-direct entries intentionally omit mailbox registration"
