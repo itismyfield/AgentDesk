@@ -7,6 +7,7 @@ use super::contract::{DoctorProfile, FixSafety, RunContext, SecurityExposure, Se
 use super::{health, mailbox};
 
 mod config_dir_checks;
+mod relay_notifications;
 use crate::cli::dcserver;
 use crate::config;
 use crate::services::operator_connectors::{
@@ -457,7 +458,6 @@ fn provider_connected(snapshot: &HealthSnapshot, provider: &ProviderKind) -> Opt
 
 fn configured_provider_names(cfg: &config::Config, snapshot: &HealthSnapshot) -> BTreeSet<String> {
     let mut configured = BTreeSet::new();
-
     for agent in &cfg.agents {
         if let Some(provider) = ProviderKind::from_str(&agent.provider) {
             configured.insert(provider.as_str().to_string());
@@ -547,7 +547,6 @@ fn check_qwen_settings_files(configured: bool) -> Check {
         ("project settings", qwen_project_settings_path()),
         ("system settings", qwen_system_settings_path()),
     ];
-
     let found: Vec<String> = candidates
         .iter()
         .filter_map(|(label, path)| {
@@ -899,6 +898,7 @@ fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Che
         check_health_db_dashboard(snapshot),
         check_dispatch_outbox(snapshot),
         check_config_audit(snapshot),
+        relay_notifications::check(cfg),
         check_runtime_root(),
         config_dir_checks::check_data_dir(cfg),
         config_dir_checks::check_policies_dir(cfg),
