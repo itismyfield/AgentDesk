@@ -1733,6 +1733,176 @@ mod fresh_routine_tests {
         assert!(scheduled_snapshot_session_label(None).is_none());
     }
 
+    // ------------------------------------------------------------------
+    // #5708 S1 — DM routine label reaches BOTH isolation surfaces.
+    //
+    // A DM `fresh` routine turn used to arrive with `tmux_session_label = None`
+    // (the DM starter hard-coded it), so `tmux_session_name` fell through to the
+    // canonical `dm-<user>` channel name AND `session_key_basis_override`
+    // returned `None`, keying the turn off that same channel. Both surfaces
+    // therefore resolved to the user's live DM session. These tests pin the two
+    // halves of the fix on the real production functions: the ADK session-key
+    // basis (`session_key_basis_override`) and the tmux name the selected basis
+    // produces (`ProviderKind::build_tmux_session_name`).
+    // ------------------------------------------------------------------
+
+    /// The DM routine payload the executor builds (agent_executor.rs `metadata`).
+    fn dm_routine_metadata(execution_strategy: &str) -> serde_json::Value {
+        json!({
+            "agent_id": "obujang",
+            "routine_id": "dc94b692",
+            "routine_run_id": "run-1",
+            "execution_strategy": execution_strategy,
+            "dm_user_id": "343742347365974026",
+            "is_dm": true,
+        })
+    }
+
+    const DM_CHANNEL_NAME: &str = "dm-343742347365974026";
+    const DM_ROUTINE_LABEL: &str = "routine family-profile-probe-obujang - obujang";
+
+    #[test]
+    fn dm_fresh_routine_label_becomes_the_session_key_basis() {
+        let metadata = dm_routine_metadata("fresh");
+
+        assert_eq!(
+            session_key_basis_override(None, Some(&metadata), Some(DM_ROUTINE_LABEL)),
+            Some(DM_ROUTINE_LABEL),
+            "a labelled DM fresh routine must key its ADK session off the label, not the DM channel"
+        );
+        // Legacy DM routines carry no `execution_strategy`; they are fresh too.
+        let legacy = json!({
+            "agent_id": "obujang",
+            "routine_id": "dc94b692",
+            "is_dm": true,
+        });
+        assert_eq!(
+            session_key_basis_override(None, Some(&legacy), Some(DM_ROUTINE_LABEL)),
+            Some(DM_ROUTINE_LABEL)
+        );
+    }
+
+    // S1 no-regression pin: every caller still passes `None` in this slice, so
+    // the DM routine must key off the canonical channel exactly as before.
+    #[test]
+    fn dm_fresh_routine_without_a_label_keeps_the_canonical_channel_key() {
+        assert_eq!(
+            session_key_basis_override(None, Some(&dm_routine_metadata("fresh")), None),
+            None,
+            "no label must leave the DM turn on the channel-derived key (pre-#5708 behavior)"
+        );
+    }
+
+    #[test]
+    fn dm_routine_negative_matrix_never_overrides_the_session_key() {
+        // Persistent DM routines keep continuity on the canonical DM session.
+        assert_eq!(
+            session_key_basis_override(
+                None,
+                Some(&dm_routine_metadata("persistent")),
+                Some(DM_ROUTINE_LABEL)
+            ),
+            None
+        );
+        // Non-routine and malformed DM metadata must never reach the override,
+        // even when a label is somehow supplied.
+        for metadata in [
+            json!({ "is_dm": true, "agent_id": "obujang" }),
+            json!({ "is_dm": true, "routine_id": "" }),
+            json!({ "is_dm": true, "routine_id": "   " }),
+            json!({ "is_dm": true, "routine_id": null }),
+            json!({ "is_dm": true, "routine_id": 7 }),
+        ] {
+            assert_eq!(
+                session_key_basis_override(None, Some(&metadata), Some(DM_ROUTINE_LABEL)),
+                None,
+                "non-routine DM metadata must not claim an isolated session key: {metadata}"
+            );
+        }
+        assert_eq!(
+            session_key_basis_override(None, None, Some(DM_ROUTINE_LABEL)),
+            None
+        );
+        // A scheduled snapshot in a DM keeps its OWN label (#4658 precedence).
+        assert_eq!(
+            session_key_basis_override(
+                Some("scheduled:smsg_dm"),
+                Some(&dm_routine_metadata("fresh")),
+                Some(DM_ROUTINE_LABEL)
+            ),
+            Some("scheduled:smsg_dm")
+        );
+    }
+
+    // The session key is only half the isolation: the physical tmux session is
+    // named from the SAME selected basis. Assert on the real provider namer so a
+    // 44-char truncation cannot silently collapse the routine label back onto
+    // the canonical DM session name.
+    #[test]
+    fn dm_routine_label_yields_a_distinct_tmux_session_name() {
+        for provider in [ProviderKind::Claude, ProviderKind::Codex] {
+            let canonical = provider.build_tmux_session_name(DM_CHANNEL_NAME);
+            let isolated = provider.build_tmux_session_name(DM_ROUTINE_LABEL);
+
+            assert_ne!(
+                canonical, isolated,
+                "{provider:?}: the routine label must not truncate onto the canonical DM tmux name"
+            );
+            assert!(
+                !isolated.is_empty() && isolated != provider.build_tmux_session_name(""),
+                "{provider:?}: the routine label must produce a real tmux name"
+            );
+        }
+    }
+
+    // #3463's routine-name-first ordering is what keeps two routines on ONE
+    // agent apart after truncation. A DM routine inherits that ordering, so pin
+    // it here: same agent, different routine names, distinct tmux sessions even
+    // when the names are long enough to be truncated.
+    #[test]
+    fn two_dm_routines_on_one_agent_do_not_share_a_tmux_session() {
+        let provider = ProviderKind::Claude;
+        let first = provider
+            .build_tmux_session_name("routine family-profile-probe-obujang-morning - obujang");
+        let second = provider
+            .build_tmux_session_name("routine family-profile-probe-obujang-evening - obujang");
+
+        assert_ne!(
+            first, second,
+            "routine-name-first labels must survive the 44-char tmux truncation"
+        );
+    }
+
+    // The two surfaces above are only wired together if the tmux name prefers
+    // the label over the channel name. That ordering lives inline in the giant
+    // start path, so pin it as a source contract next to the behavioral tests
+    // (it proves the selection order, NOT that no kill/warm-followup happens —
+    // that evidence belongs to the S3 transport harness). Needles are assembled
+    // by concatenation so `include_str!` cannot self-match.
+    #[test]
+    fn tmux_name_selection_prefers_the_routine_label_over_the_channel_name() {
+        let src = include_str!("headless_turn.rs");
+        let label_first = format!(
+            "{}{}",
+            "tmux_session_label\n                .as_deref()\n                ",
+            ".or(channel_name.as_deref())"
+        );
+        assert!(
+            src.contains(&label_first),
+            "the tmux session name must be built from the label first, channel name second"
+        );
+        let key_basis_takes_label = format!(
+            "{}{}",
+            "let session_key_basis_override = session_key_basis_override(\n",
+            "        scheduled_snapshot_label.as_deref(),"
+        );
+        assert!(
+            src.contains(&key_basis_takes_label)
+                && src.contains("        tmux_session_label.as_deref(),\n    );"),
+            "the ADK session key basis must be selected from the same tmux label"
+        );
+    }
+
     #[tokio::test]
     async fn fresh_routine_path_records_durable_boundary_before_provider_clear() {
         let events = RefCell::new(Vec::new());
