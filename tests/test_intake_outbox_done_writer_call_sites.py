@@ -385,6 +385,15 @@ class TransportLegacyInventoryTests(unittest.TestCase):
     ADAPTER_STORE = re.compile(
         r"self\.(shutting_down|restart_pending)\.store\((\w+), Ordering::SeqCst\)"
     )
+    RAW_WRITER_CLONE = re.compile(
+        r"restart\.shutting_down\.clone\(\)|Arc::clone\(&[\w.]*restart\.shutting_down\)"
+    )
+    # Every `impl ShutdownReader`/`impl <Trait> for ShutdownReader` item head.
+    READER_IMPL = re.compile(
+        r"^impl(?:<[^>]*>)?\s+(?:(?P<trait>[^\s{]+)\s+for\s+)?ShutdownReader\b[^\n{]*\{", re.M
+    )
+    READER_DECL = re.compile(r"struct ShutdownReader\((?P<field>.*)\);")
+    RAW_HANDLE = re.compile(r"self\.0(?!\.load\()")
     CHECKPOINT = re.compile(
         r"admission_action\(\s*cancelled,\s*&shared\.restart\.intake_worker_lifecycle,"
         r"\s*AdmissionCheckpoint::(\w+),"
@@ -425,17 +434,11 @@ class TransportLegacyInventoryTests(unittest.TestCase):
 
         escapes = [
             str(path) for path in sorted((ROOT / "src").rglob("*.rs"))
-            if "restart.shutting_down.clone()" in path.read_text(encoding="utf-8")
+            if self.RAW_WRITER_CLONE.search(path.read_text(encoding="utf-8"))
         ]
         self.assertEqual(escapes, [], "four raw writer-capability escapes stay replaced")
 
-        reader = self.item(owner, "impl ShutdownReader {")
-        self.assertEqual(reader.count("fn "), 1)
-        self.assertIn("fn load(&self, order: Ordering) -> bool {", reader)
-        code = "\n".join(l for l in owner.splitlines() if not l.lstrip().startswith("//"))
-        for forbidden in ("fn store", "fn swap", "impl Deref", "impl AsRef", "impl From<"):
-            self.assertNotIn(forbidden, code, f"ShutdownReader must not gain {forbidden}")
-        self.assertEqual(code.count("ShutdownReader(self.shutting_down.clone())"), 1)
+        self.assert_reader_surface(owner)
 
         stores = 0
         rows = [line.split() for line in self.ADAPTERS.strip().splitlines()]
@@ -449,6 +452,54 @@ class TransportLegacyInventoryTests(unittest.TestCase):
             self.assertEqual(self.RAW_STORE.findall(caller), [], caller_file)
             stores += len(expected)
         self.assertEqual((len(rows), stores), (7, 10))
+
+    def assert_reader_surface(self, owner: str) -> None:
+        """Audit every `impl ... ShutdownReader`; first-block-only was #5831 P1-1."""
+        code = "\n".join(l for l in owner.splitlines() if not l.lstrip().startswith("//"))
+        decl = self.READER_DECL.search(code)
+        self.assertIsNotNone(decl, "ShutdownReader tuple struct declaration")
+        self.assertNotIn("pub", decl.group("field"), "wrapped handle stays a private field")
+        inherent = []
+        for header in self.READER_IMPL.finditer(code):
+            head = header.group(0)
+            body = code[header.end() : code.index("\n}\n", header.end())]
+            self.assertEqual(self.RAW_HANDLE.findall(body), [], f"raw handle escapes {head}")
+            self.assertNotIn("Arc<", body, f"writable handle re-exposed by {head}")
+            if header.group("trait") is None:
+                inherent.append(body)
+        self.assertEqual(len(inherent), 1, "exactly one inherent impl ShutdownReader")
+        self.assertEqual(inherent[0].count("fn "), 1)
+        self.assertIn("fn load(&self, order: Ordering) -> bool {", inherent[0])
+        for forbidden in ("fn store", "fn swap", "impl Deref", "impl AsRef", "impl From<"):
+            self.assertNotIn(forbidden, code, f"ShutdownReader must not gain {forbidden}")
+        self.assertEqual(code.count("ShutdownReader(self.shutting_down.clone())"), 1)
+
+    def mutate(self, old: str, new: str) -> str:
+        owner = self.OWNER.read_text(encoding="utf-8")
+        self.assertIn(old, owner)
+        return owner.replace(old, new, 1)
+
+    def test_reader_surface_is_red_when_a_second_impl_adds_a_raw_accessor(self):
+        with self.assertRaises(AssertionError):
+            self.assert_reader_surface(
+                self.mutate(
+                    "impl RestartLifecycle {",
+                    "impl ShutdownReader {\n"
+                    "    pub(in crate::services) fn raw_handle(&self) -> Arc<AtomicBool> {\n"
+                    "        self.0.clone()\n"
+                    "    }\n"
+                    "}\n\nimpl RestartLifecycle {",
+                )
+            )
+
+    def test_reader_surface_is_red_when_the_wrapped_handle_field_goes_public(self):
+        with self.assertRaises(AssertionError):
+            self.assert_reader_surface(
+                self.mutate(
+                    "struct ShutdownReader(Arc<",
+                    "struct ShutdownReader(pub(in crate::services) Arc<",
+                )
+            )
 
 
 if __name__ == "__main__":
