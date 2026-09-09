@@ -970,6 +970,8 @@ src/
 │   │   │   │   ├── backstop_tests.rs
 │   │   │   │   └── idle_gate.rs
 │   │   │   ├── streaming_status_tick/
+│   │   │   │   ├── committed_progress_tests.rs
+│   │   │   │   ├── existing_panel_update.rs
 │   │   │   │   └── types.rs
 │   │   │   ├── turn_identity/
 │   │   │   │   └── soft_terminal_authority.rs
