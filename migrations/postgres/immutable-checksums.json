@@ -577,9 +577,19 @@
       "version": 112
     },
     {
+      "path": "migrations/postgres/0113_intake_outbox_terminal_retention_index.sql",
+      "sha256": "c915a4e3557843bd3d541f09d9900ea4a01a78bc2d892e302e51b25b81e31c4c",
+      "version": 113
+    },
+    {
       "path": "migrations/postgres/0114_channel_clear_boundary_markers.sql",
       "sha256": "cece19b1ffa135593ff24ba0edb5e78fd522c2c02552b906f8308c4779329111",
       "version": 114
+    },
+    {
+      "path": "migrations/postgres/0115_intake_outbox_failed_pre_accept_sweep_order_index.sql",
+      "sha256": "94eb65c077b83a6fb22378a1af723c092e6b16e66a34cb77d97db337a557b962",
+      "version": 115
     }
   ],
   "version": 1
