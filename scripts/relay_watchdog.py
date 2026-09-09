@@ -4748,9 +4748,11 @@ def _retire_dead_worktree_authorities(
 
     # Terminating a dead session's loss-state is the LAST point at which anyone
     # can learn those blocks are gone, so termination is gated on the notice
-    # actually going out. The retirement notice shares ONE cooldown key across
-    # every reason, so an idle/read-failure retirement a few seconds earlier
-    # would otherwise swallow this one and close the incident in total silence.
+    # actually going out. The retirement cooldown key is per reason (#5205),
+    # so an idle/read-failure retirement a few seconds earlier can no longer
+    # swallow this notice; only an earlier dead_worktree notice for the same
+    # channel within `realert_secs` still suppresses it, and closing the
+    # incident in silence on that path is exactly what this gate forbids.
     # Nothing below has mutated state yet, so deferring simply retries next tick
     # with the absence window intact.
     dead_notice = _alert_pending_retirement(
@@ -5981,9 +5983,10 @@ def tick_channel(rt: Runtime, ch: ChannelConfig, state: dict[str, Any], now: flo
             #
             # #5190 R3 P2-E: `notice=` reports WHICH of those happened.
             # `undelivered` means the message never left the box; `cooldown`
-            # means it was suppressed by the retirement cooldown key that all
-            # reasons share, so an unrelated idle/read_failure/dead_worktree
-            # notice within `realert_secs` delays this one by up to that long.
+            # means it was suppressed by the per-reason retirement cooldown
+            # key (#5205): only an earlier orphan notice for this channel
+            # within `realert_secs` delays this one; idle/read_failure/
+            # dead_worktree notices no longer do.
             # The old line said `notice=undelivered` for both, which made the
             # log lie about the relay in the cooldown case.
             rt.log(
