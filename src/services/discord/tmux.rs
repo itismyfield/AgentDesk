@@ -2248,7 +2248,7 @@ fn persist_watcher_stream_progress(
     // #3871: the frozen streamed rollover-prefix ids accumulated this invocation,
     // persisted so a later-iteration / post-restart terminal fallback can delete them.
     streaming_rollover_frozen_msg_ids: &[MessageId],
-) {
+) -> super::inflight::WatcherProgressOutcome {
     if full_response.len() < response_sent_offset {
         tracing::debug!(
             provider = %provider.as_str(),
@@ -2258,7 +2258,7 @@ fn persist_watcher_stream_progress(
             full_response_len = full_response.len(),
             "watcher: skipping stream-progress persistence until parsed body catches up"
         );
-        return;
+        return super::inflight::WatcherProgressOutcome::Skipped;
     }
 
     // #3558: pre-emit the in-bounds telemetry against the caller's snapshot for
@@ -2291,7 +2291,7 @@ fn persist_watcher_stream_progress(
     // — the helper preserves whatever the in-lock disk reload carries, so a
     // concurrent owner-gated `refresh_inflight_last_offset_*` advance can no
     // longer be clobbered backward by this previously-unlocked load→save TOCTOU.
-    let _ = super::inflight::persist_watcher_stream_progress_locked(
+    let outcome = super::inflight::persist_watcher_stream_progress_locked(
         provider,
         channel_id.get(),
         require_identity,
@@ -2311,6 +2311,21 @@ fn persist_watcher_stream_progress(
                 .collect(),
         },
     );
+    // #5191: one central diagnostic for a pinned-owner republication the locked
+    // writer rejected as already terminal-committed. It records the rejection,
+    // not that a caller skipped HTTP; the discarded id is a pre-cleanup sample.
+    if outcome == super::inflight::WatcherProgressOutcome::TerminalAlreadyCommitted {
+        tracing::warn!(
+            event = "watcher_stream_progress_terminal_rejected",
+            provider = %provider.as_str(),
+            channel_id = channel_id.get(),
+            tmux_session = %tmux_session_name,
+            user_msg_id = ?require_identity.map(|identity| identity.user_msg_id),
+            discarded_current_msg_id = ?current_msg_id.map(MessageId::get),
+            "watcher: rejected stream-progress republication onto a terminal-committed inflight row"
+        );
+    }
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -44,6 +44,10 @@ pub(in crate::services::discord) enum WatcherProgressOutcome {
     Skipped,
     /// Filesystem or lock acquisition failure.
     IoError,
+    /// #5191: the caller pinned an exact identity and the in-lock reload shows
+    /// that row is already terminal-delivery-committed. Rejected before any
+    /// field mutation, so the committed row stays byte-identical on disk.
+    TerminalAlreadyCommitted,
 }
 
 /// #3558: single-lock read-modify-write for the tmux streaming-progress
@@ -115,6 +119,12 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
         && !identity.matches_state(&state)
     {
         return WatcherProgressOutcome::Skipped;
+    }
+    // #5191: the pinned owner's row is already terminal-delivery-committed, so a
+    // later streaming frame must not rewrite its body/offset/current_msg_id. A
+    // `None` identity keeps its historical behavior (no late-birth denial).
+    if require_identity.is_some() && state.terminal_delivery_completed() {
+        return WatcherProgressOutcome::TerminalAlreadyCommitted;
     }
 
     if let Some(msg_id) = patch.current_msg_id {
