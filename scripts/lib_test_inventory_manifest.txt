@@ -4475,9 +4475,9 @@ services::discord::router::intake_gate::busy_duplicate_notice::tests::keeps_queu
 services::discord::router::intake_gate::busy_duplicate_notice::tests::keeps_recent_resend_duplicate_notice_visible
 services::discord::router::intake_gate::busy_duplicate_notice::tests::silences_already_queued_source_id_duplicate_notice
 services::discord::router::intake_gate::command_recognition_tests::command_outcomes_end_before_restore_and_preserve_upload_conditions
+services::discord::router::intake_gate::gate::tests::boundary_keeps_alert_rejection_and_admits_unmarked_announce_handoff
 services::discord::router::intake_gate::gate::tests::live_human_preservation_requires_determinate_non_utility_identity
 services::discord::router::intake_gate::gate::tests::live_known_automation_is_excluded_even_with_false_bot_flag
-services::discord::router::intake_gate::gate::tests::operational_alert_is_not_admitted_but_announce_handoff_is
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests::live_human_preservation_precedes_stale_dispatch_suppression
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints
 services::discord::router::intake_gate::queue_effects::channel_queued_placeholder_pure_tests::different_author_reuses_existing_channel_card
