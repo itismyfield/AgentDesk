@@ -1952,6 +1952,8 @@ services::cluster::stream_relay::tests::permanent_sink_error_is_not_misclassifie
 services::cluster::stream_relay::tests::queued_frames_keep_their_binding_across_rebinds
 services::cluster::stream_relay::tests::sequence_outcome_tracks_delivery_error_and_drop_sequences
 services::cluster::stream_relay::tests::session_relay_ordered_range_frame_carries_idle_delivery_coordinate
+services::cluster::stream_relay::tests::shutdown_tests::shutdown_preserves_join_failures_and_no_task
+services::cluster::stream_relay::tests::shutdown_tests::shutdown_waits_for_sink_then_joins
 services::cluster::stream_relay::tests::shutdown_unblocks_loop_even_with_outliving_producer_clone
 services::cluster::stream_relay::tests::sub_agent_invocation_does_not_stop_relay
 services::cluster::stream_relay::tests::terminal_frame_carries_consumed_end_and_turn_identity
@@ -2472,6 +2474,7 @@ services::discord::followup_retry_requeue_tests::inflight_retry_restores_earlier
 services::discord::followup_retry_requeue_tests::pre_submit_requeue_of_marked_followup_reconstructs_marked_intervention
 services::discord::followup_retry_requeue_tests::pre_submit_requeue_preserves_context_and_returns_enqueue_outcome
 services::discord::footer_view_reconciler::tests::bridge_watcher_completion_notifications_render_identical_edits
+services::discord::footer_view_reconciler::tests::final_wire_completion_and_refresh_evict_only_after_success_5304
 services::discord::footer_view_reconciler::tests::footer_supersede_is_idempotent
 services::discord::footer_view_reconciler::tests::generation_guard_rejects_stale_two_message_status_completion
 services::discord::footer_view_reconciler::tests::tui_suppress_for_clean_mirror_forgets_target_without_write
@@ -3605,6 +3608,7 @@ services::discord::placeholder_controller::queued_card_gate::tests::t4_merged_dr
 services::discord::placeholder_controller::queued_card_gate::tests::t6_bootstrap_stale_card_is_rekeyed_not_deleted_when_a_live_entry_is_cardless
 services::discord::placeholder_controller::queued_card_gate::tests::t7_gated_sites_hold_no_raw_destructive_call
 services::discord::placeholder_controller::queued_card_gate::tests::t9_t10a_t10b_gated_helpers_wait_for_the_persist_lock
+services::discord::placeholder_live_events::completion_footer::final_wire_tests::no_credit_for_zero_kept_lines_5304
 services::discord::placeholder_live_events::freshness::tests::activity_labels_lead_with_a_spinner_swap_marker
 services::discord::placeholder_live_events::freshness::tests::codex_execution_function_names_map_to_bash
 services::discord::placeholder_live_events::freshness::tests::completed_turn_renders_final_check_label
@@ -5003,6 +5007,7 @@ services::discord::single_message_panel::tests::completion_footer_with_body_clam
 services::discord::single_message_panel::tests::compose_completion_footer_keeps_balanced_body_fence_intact_3394
 services::discord::single_message_panel::tests::compose_completion_footer_repair_scoped_to_body_keeps_footer_marks_3394
 services::discord::single_message_panel::tests::duplicate_same_message_registration_preserves_committed_noop_state_3717
+services::discord::single_message_panel::tests::final_wire_positions_survive_only_complete_lines_5304
 services::discord::single_message_panel::tests::footer_mode_requires_both_flags
 services::discord::single_message_panel::tests::footer_mode_strip_preserves_spinner_prefixed_user_body_without_panel_timestamp
 services::discord::single_message_panel::tests::footer_only_body_strips_to_empty_for_cleanup_callers
@@ -5289,6 +5294,7 @@ services::discord::tmux::placeholder_suppression::placeholder_suppression_tests:
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::task_notification_subagent_kind_exposed_body_preserves
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::task_notification_subagent_kind_unexposed_placeholder_deletes
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::unknown_author_body_preserves_no_edit
+services::discord::tmux::placeholder_suppression::unicode_units_tests::streaming_status_and_tmux_placeholder_suppression_unicode_units
 services::discord::tmux::restored_seed_discard_tests::cross_turn_watcher_reuse_discards_restored_seed_before_terminal_commit
 services::discord::tmux::restored_seed_discard_tests::idle_direct_prompt_discard_still_requires_restored_turn_and_anchor
 services::discord::tmux::restored_seed_discard_tests::idle_direct_prompt_preserves_restored_seed_with_undelivered_body
