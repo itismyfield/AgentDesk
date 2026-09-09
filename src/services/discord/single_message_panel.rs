@@ -106,6 +106,15 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
     body: &str,
     completion_block: Option<&str>,
 ) -> String {
+    compose_completion_footer_text_tracked(body, completion_block, &mut 0)
+}
+
+pub(in crate::services::discord) fn compose_completion_footer_text_tracked(
+    body: &str,
+    completion_block: Option<&str>,
+    surviving_prefix: &mut usize,
+) -> String {
+    *surviving_prefix = 0;
     if let Some(completion_block) = completion_block
         && let Some((completion_without_warning, warning)) =
             super::turn_end_wip_warning::split_merged_turn_end_wip_warning(completion_block)
@@ -132,6 +141,7 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
             completion_without_warning.as_deref(),
             content_limit,
             true,
+            surviving_prefix,
         );
         return if composed.trim().is_empty() {
             warning
@@ -139,18 +149,12 @@ pub(in crate::services::discord) fn compose_completion_footer_text(
             format!("{composed}\n\n{warning}")
         };
     }
-    compose_completion_footer_text_without_warning(body, completion_block)
-}
-
-fn compose_completion_footer_text_without_warning(
-    body: &str,
-    completion_block: Option<&str>,
-) -> String {
     compose_completion_footer_text_without_warning_with_limit(
         body,
         completion_block,
         super::DISCORD_MSG_LIMIT,
         false,
+        surviving_prefix,
     )
 }
 
@@ -159,7 +163,9 @@ fn compose_completion_footer_text_without_warning_with_limit(
     completion_block: Option<&str>,
     message_limit: usize,
     clamp_unadorned_body: bool,
+    surviving_prefix: &mut usize,
 ) -> String {
+    *surviving_prefix = 0;
     let body = body.trim_end();
     let Some(block) = completion_block
         .map(str::trim)
@@ -175,8 +181,10 @@ fn compose_completion_footer_text_without_warning_with_limit(
     };
     let block = completion_footer_subtext(block);
 
+    *surviving_prefix = block.len();
     let max_block_units = message_limit.saturating_sub(6);
     let block = if max_block_units == 0 {
+        *surviving_prefix = 0;
         String::new()
     } else if super::formatting::discord_message_units(&block) <= max_block_units {
         repair_fence_parity(&block)
@@ -185,8 +193,10 @@ fn compose_completion_footer_text_without_warning_with_limit(
         let body_budget =
             max_block_units.saturating_sub(super::formatting::discord_message_units(ellipsis));
         let safe_end = super::formatting::byte_index_at_discord_message_units(&block, body_budget);
+        *surviving_prefix = safe_end;
         repair_fence_parity(&format!("{}{}", &block[..safe_end], ellipsis))
     };
+    *surviving_prefix = (*surviving_prefix).min(block.len());
     if block.is_empty() {
         let safe_end = super::formatting::byte_index_at_discord_message_units(body, message_limit);
         return repair_fence_parity(&body[..safe_end]);
@@ -968,6 +978,92 @@ mod tests {
     use super::super::footer_view_reconciler as footer_registry;
     use crate::services::agent_protocol::StatusEvent;
     use poise::serenity_prelude::{ChannelId, MessageId};
+
+    #[test]
+    fn final_wire_positions_survive_only_complete_lines_5304() {
+        let channel = ChannelId::new(5_304_201);
+        let shared = super::super::make_shared_data_for_tests();
+        let events = &shared.ui.placeholder_live_events;
+        for id in ["first", "second"] {
+            events.push_status_event(
+                channel,
+                StatusEvent::BackgroundTaskStart {
+                    name: "Bash".into(),
+                    summary: "동일한 작업".into(),
+                    tool_use_id: id.into(),
+                },
+            );
+            events.push_status_event(
+                channel,
+                StatusEvent::BackgroundTaskEnd {
+                    tool_use_id: id.into(),
+                    success: true,
+                },
+            );
+        }
+        let rendered = events.render_completion_footer(channel, &ProviderKind::Claude, "x");
+        let block = rendered.block.as_deref().unwrap();
+        assert_eq!(rendered.delivered_terminal_ids.len(), 2);
+        assert_ne!(
+            rendered.delivered_terminal_ids[0],
+            rendered.delivered_terminal_ids[1]
+        );
+        assert_eq!(block.matches("동일한 작업 ✓").count(), 2);
+        let first_end = rendered.terminal_line_ends[0];
+        let mut prefix = 999;
+        let subtext = super::completion_footer_subtext(block);
+        let limit = super::super::formatting::discord_message_units(&subtext[..first_end]) + 7;
+        let wire = super::compose_completion_footer_text_without_warning_with_limit(
+            "body ✓ ✗",
+            Some(block),
+            limit,
+            false,
+            &mut prefix,
+        );
+        assert!(wire.ends_with('…'));
+        assert_eq!(
+            rendered.surviving_terminal_ids(prefix),
+            rendered.delivered_terminal_ids[..1]
+        );
+        super::compose_completion_footer_text_without_warning_with_limit(
+            "body ✓",
+            Some(block),
+            6,
+            false,
+            &mut prefix,
+        );
+        assert!(rendered.surviving_terminal_ids(prefix).is_empty());
+        super::compose_completion_footer_text_tracked("body ✓ ✗", Some(block), &mut prefix);
+        assert_eq!(
+            rendered.surviving_terminal_ids(prefix),
+            rendered.delivered_terminal_ids
+        );
+        let fenced = format!("```dangling\n{block}");
+        super::compose_completion_footer_text_tracked("", Some(&fenced), &mut prefix);
+        assert!(rendered.surviving_terminal_ids(prefix).is_empty());
+        super::compose_completion_footer_text_tracked("body ✓ ✗", None, &mut prefix);
+        assert_eq!(prefix, 0);
+        let mut rendered = events.render_completion_footer(channel, &ProviderKind::Claude, "x");
+        let padding = format!("{}\n", "a".repeat(650));
+        let offset = super::completion_footer_subtext(&padding).len() + 1;
+        for end in &mut rendered.terminal_line_ends {
+            *end += offset;
+        }
+        let block = format!("{padding}{}", rendered.block.as_deref().unwrap());
+        let warning = format!(
+            "{block}\n\n⚠️ **턴을 완료하기 전에 커밋되지 않은 변경사항을 확인하세요.**\n{}",
+            "w".repeat(1600)
+        );
+        let wire =
+            super::compose_completion_footer_text_tracked("본문 ✓", Some(&warning), &mut prefix);
+        assert!(wire.contains("변경사항"));
+        assert!(rendered.surviving_terminal_ids(prefix).is_empty());
+        super::compose_completion_footer_text_tracked("본문 ✓", Some(&block), &mut prefix);
+        assert_eq!(
+            rendered.surviving_terminal_ids(prefix),
+            rendered.delivered_terminal_ids
+        );
+    }
 
     fn panel_portion(status_block: &str) -> &str {
         status_block
@@ -2293,6 +2389,7 @@ mod tests {
         )
         .expect("new target should supersede old target");
         assert_eq!(supersede.message_id, MessageId::new(3_391_204));
+        assert!(supersede.delivered_terminal_ids.is_empty());
         assert!(supersede.text.contains("Bash Finished job ✓"));
         assert!(supersede.text.contains("Bash Running job …"));
 

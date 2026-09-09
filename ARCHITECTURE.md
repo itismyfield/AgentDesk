@@ -480,7 +480,10 @@ src/
 │   │   ├── intake_worker/
 │   │   │   └── dispatch_stamp_tests.rs
 │   │   ├── stream_relay/
+│   │   │   ├── tests/
+│   │   │   │   └── shutdown_tests.rs
 │   │   │   ├── identity.rs
+│   │   │   ├── shutdown.rs
 │   │   │   └── terminal_resolution.rs
 │   │   ├── capability_routing.rs
 │   │   ├── intake_preflight.rs
@@ -851,6 +854,7 @@ src/
 │   │   │   │   ├── headless_turn.rs
 │   │   │   │   ├── intake_turn.rs
 │   │   │   │   ├── latency_spans.rs
+│   │   │   │   ├── pre_admission_control.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
@@ -945,6 +949,9 @@ src/
 │   │   │   ├── store.rs
 │   │   │   ├── terminal_identity.rs
 │   │   │   └── tests.rs
+│   │   ├── task_supervisor/
+│   │   │   ├── watcher_completion.rs
+│   │   │   └── watcher_completion_tests.rs
 │   │   ├── tmux/
 │   │   │   ├── monitor_auto_turn_inflight.rs
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
@@ -954,7 +961,8 @@ src/
 │   │   ├── tmux_placeholder_suppression/
 │   │   │   ├── evidence.rs
 │   │   │   ├── mod.rs
-│   │   │   └── ops.rs
+│   │   │   ├── ops.rs
+│   │   │   └── unicode_units_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── jsonl_rotation/
 │   │   │   │   ├── backstop.rs

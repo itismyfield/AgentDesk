@@ -204,6 +204,7 @@ config_live_reload::tests::load_graceful_uses_live_snapshot_when_file_is_invalid
 config_live_reload::tests::reload_applies_valid_config
 config_live_reload::tests::reload_rejects_invalid_config_and_keeps_current
 config_live_reload::tests::restart_required_changes_detects_discord_token_only_rotation
+config_live_reload::tests::restart_required_changes_detects_server_auth_token_presence_flip
 config_live_reload::tests::restart_required_changes_flags_agent_channel_launch_bindings
 config_live_reload::tests::restart_required_changes_flags_agent_channel_runtime_bindings
 config_live_reload::tests::restart_required_changes_flags_agent_voice_bindings
@@ -1194,6 +1195,9 @@ server::worker_recovery::tests::simultaneous_return_and_shutdown_is_expected_wit
 server::worker_recovery::tests::stable_run_resets_backoff
 server::worker_registry::leader_takeover_tests::policy_tick_thread_captures_the_process_health_registry
 server::worker_registry::leader_takeover_tests::supervisor_respawns_worker_after_lease_takeover
+server::ws::ws_auth_gate_tests::configured_token_accepts_only_the_exact_token
+server::ws::ws_auth_gate_tests::configured_token_rejects_wrong_missing_and_prefix_tokens
+server::ws::ws_auth_gate_tests::unset_or_empty_configured_token_leaves_the_route_open
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::fails_closed_on_column_decode_error
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::fails_closed_on_other_errors
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::metric_thresholds_preserve_retired_authority_policy
@@ -1951,6 +1955,8 @@ services::cluster::stream_relay::tests::permanent_sink_error_is_not_misclassifie
 services::cluster::stream_relay::tests::queued_frames_keep_their_binding_across_rebinds
 services::cluster::stream_relay::tests::sequence_outcome_tracks_delivery_error_and_drop_sequences
 services::cluster::stream_relay::tests::session_relay_ordered_range_frame_carries_idle_delivery_coordinate
+services::cluster::stream_relay::tests::shutdown_tests::shutdown_preserves_join_failures_and_no_task
+services::cluster::stream_relay::tests::shutdown_tests::shutdown_waits_for_sink_then_joins
 services::cluster::stream_relay::tests::shutdown_unblocks_loop_even_with_outliving_producer_clone
 services::cluster::stream_relay::tests::sub_agent_invocation_does_not_stop_relay
 services::cluster::stream_relay::tests::terminal_frame_carries_consumed_end_and_turn_identity
@@ -2471,6 +2477,7 @@ services::discord::followup_retry_requeue_tests::inflight_retry_restores_earlier
 services::discord::followup_retry_requeue_tests::pre_submit_requeue_of_marked_followup_reconstructs_marked_intervention
 services::discord::followup_retry_requeue_tests::pre_submit_requeue_preserves_context_and_returns_enqueue_outcome
 services::discord::footer_view_reconciler::tests::bridge_watcher_completion_notifications_render_identical_edits
+services::discord::footer_view_reconciler::tests::final_wire_completion_and_refresh_evict_only_after_success_5304
 services::discord::footer_view_reconciler::tests::footer_supersede_is_idempotent
 services::discord::footer_view_reconciler::tests::generation_guard_rejects_stale_two_message_status_completion
 services::discord::footer_view_reconciler::tests::tui_suppress_for_clean_mirror_forgets_target_without_write
@@ -3604,6 +3611,7 @@ services::discord::placeholder_controller::queued_card_gate::tests::t4_merged_dr
 services::discord::placeholder_controller::queued_card_gate::tests::t6_bootstrap_stale_card_is_rekeyed_not_deleted_when_a_live_entry_is_cardless
 services::discord::placeholder_controller::queued_card_gate::tests::t7_gated_sites_hold_no_raw_destructive_call
 services::discord::placeholder_controller::queued_card_gate::tests::t9_t10a_t10b_gated_helpers_wait_for_the_persist_lock
+services::discord::placeholder_live_events::completion_footer::final_wire_tests::no_credit_for_zero_kept_lines_5304
 services::discord::placeholder_live_events::freshness::tests::activity_labels_lead_with_a_spinner_swap_marker
 services::discord::placeholder_live_events::freshness::tests::codex_execution_function_names_map_to_bash
 services::discord::placeholder_live_events::freshness::tests::completed_turn_renders_final_check_label
@@ -4470,9 +4478,9 @@ services::discord::router::intake_gate::busy_duplicate_notice::tests::keeps_queu
 services::discord::router::intake_gate::busy_duplicate_notice::tests::keeps_recent_resend_duplicate_notice_visible
 services::discord::router::intake_gate::busy_duplicate_notice::tests::silences_already_queued_source_id_duplicate_notice
 services::discord::router::intake_gate::command_recognition_tests::command_outcomes_end_before_restore_and_preserve_upload_conditions
+services::discord::router::intake_gate::gate::tests::boundary_keeps_alert_rejection_and_admits_unmarked_announce_handoff
 services::discord::router::intake_gate::gate::tests::live_human_preservation_requires_determinate_non_utility_identity
 services::discord::router::intake_gate::gate::tests::live_known_automation_is_excluded_even_with_false_bot_flag
-services::discord::router::intake_gate::gate::tests::operational_alert_is_not_admitted_but_announce_handoff_is
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests::live_human_preservation_precedes_stale_dispatch_suppression
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints
 services::discord::router::intake_gate::queue_effects::channel_queued_placeholder_pure_tests::different_author_reuses_existing_channel_card
@@ -4576,6 +4584,7 @@ services::discord::router::message_handler::intake_turn::recovery_context_take_o
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::intake_real_turn_consumes_recovery_context_once_after_non_dispatch_guards
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::recovery_context_survives_intake_stale_dispatch_abort
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::tui_busy_enqueue_refusal_puts_back_recovery_context_for_next_turn
+services::discord::router::message_handler::intake_turn::runtime_transition::tests::runtime_transition_busy_forwards_owned_uploads_without_taking_session_state
 services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_queue_reaction_tests::busy_pre_submit_enqueue_keeps_the_authoritative_queue_view
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::gated_stale_lookup_feeds_the_turn_abort_branch
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified
@@ -4586,6 +4595,13 @@ services::discord::router::message_handler::latency_spans::tests::full_span_rend
 services::discord::router::message_handler::latency_spans::tests::marks_unlock_segments_in_order
 services::discord::router::message_handler::latency_spans::tests::partial_span_renders_dashes_for_missing_marks
 services::discord::router::message_handler::latency_spans::tests::saturating_u64_clamps_overflow
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::carve_outs_keep_input_out_of_the_control_registry
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::deferred_take_reproduces_the_block_it_replaced
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::every_non_continue_route_is_locally_completable
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::guard_position_and_one_way_upload_ownership_are_pinned
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::intake_turn_keeps_the_gate_above_the_deferred_take
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::resolve_local_controls_clear_pending_turn_view
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::route_branch_table_is_pinned
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_prelaunch_without_raw_seed_keeps_the_wrapper_end_offset
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_raw_seed_requires_exact_live_marker_binding_evidence
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::managed_linked_worktree_skips_provider_reisolation_without_session_state
@@ -4980,6 +4996,17 @@ services::discord::settings::validation::voice_channel_guard_tests::allow_channe
 services::discord::settings::validation::voice_channel_guard_tests::full_guard_passes_voice_slash_command_for_owner_blocks_non_owner
 services::discord::settings::validation::voice_channel_guard_tests::restart_orphan_classification_separates_provider_rebind_from_cross_bot_skip
 services::discord::settings::validation::voice_channel_guard_tests::restart_routing_change_orphans_provider_rebind_but_preserves_reroutable_and_valid
+services::discord::settings::write::yaml_write_back_secret_tests::bot_settings_write_back_keeps_skip_serializing_secrets_on_disk
+services::discord::settings::write::yaml_write_back_secret_tests::bot_settings_write_back_preserves_unowned_document_keys
+services::discord::settings::write::yaml_write_back_secret_tests::invalid_config_is_not_written_back
+services::discord::settings::write::yaml_write_back_secret_tests::scalar_all_unowned_typed_values_are_equal
+services::discord::settings::write::yaml_write_back_secret_tests::scalar_colliding_mcp_keys_keep_distinct_entries
+services::discord::settings::write::yaml_write_back_secret_tests::scalar_database_password_is_preserved
+services::discord::settings::write::yaml_write_back_secret_tests::scalar_numeric_bot_key_patches_existing_entry
+services::discord::settings::write::yaml_write_back_secret_tests::scalar_server_token_is_preserved
+services::discord::settings::write::yaml_write_back_secret_tests::secret_write_back_keeps_owner_only_mode
+services::discord::settings::write::yaml_write_back_secret_tests::typed_gate_blocks_mismatched_snapshot_before_render_returns
+services::discord::settings::write::yaml_write_back_secret_tests::typed_gate_rejects_scalar_corruption
 services::discord::shared_state::restart_lifecycle_tests::check_deferred_restart_fresh_token_decrements_once_without_exit
 services::discord::single_message_panel::tests::carried_entry_notification_updates_latest_target_not_superseded_text
 services::discord::single_message_panel::tests::completion_footer_below_ttl_keeps_animating_registered_target
@@ -5002,6 +5029,7 @@ services::discord::single_message_panel::tests::completion_footer_with_body_clam
 services::discord::single_message_panel::tests::compose_completion_footer_keeps_balanced_body_fence_intact_3394
 services::discord::single_message_panel::tests::compose_completion_footer_repair_scoped_to_body_keeps_footer_marks_3394
 services::discord::single_message_panel::tests::duplicate_same_message_registration_preserves_committed_noop_state_3717
+services::discord::single_message_panel::tests::final_wire_positions_survive_only_complete_lines_5304
 services::discord::single_message_panel::tests::footer_mode_requires_both_flags
 services::discord::single_message_panel::tests::footer_mode_strip_preserves_spinner_prefixed_user_body_without_panel_timestamp
 services::discord::single_message_panel::tests::footer_only_body_strips_to_empty_for_cleanup_callers
@@ -5212,10 +5240,16 @@ services::discord::task_notification_delivery::tests::unknown_reference_repair_a
 services::discord::task_notification_delivery::tests::watcher_fallback_turn_key_resumes_sink_primary_key_without_second_row_pg
 services::discord::task_notification_delivery::tests::watcher_primary_key_blocks_late_sink_frame_alias_without_second_row_pg
 services::discord::task_notification_delivery::tests::xml_and_stream_json_share_semantic_key_and_nonce_is_bounded
+services::discord::task_supervisor::tests::completion_is_published_after_registry_cleanup
 services::discord::task_supervisor::tests::panic_payload_summary_handles_common_payloads
 services::discord::task_supervisor::tests::spawn_observed_contains_child_panic
 services::discord::task_supervisor::tests::task_guard_leaves_a_replacement_watcher_entry_in_place
 services::discord::task_supervisor::tests::task_guard_removes_the_registry_entry_it_still_owns
+services::discord::task_supervisor::tests::watcher_wrapper_textually_drops_cleanup_before_completion
+services::discord::task_supervisor::watcher_completion::tests::duplicate_guard_does_not_remove_original_registration
+services::discord::task_supervisor::watcher_completion::tests::old_completion_preserves_other_incarnation
+services::discord::task_supervisor::watcher_completion::tests::panic_and_abort_are_distinct_observations
+services::discord::task_supervisor::watcher_completion::tests::whole_future_two_barriers_precede_completion
 services::discord::terminal_coordinate::tests::absent_provenance_remains_valid_and_does_not_change_c_identity
 services::discord::terminal_coordinate::tests::canonical_c_is_positive_and_hashes_only_c
 services::discord::terminal_coordinate::tests::external_identity_is_id_zero_and_requires_offset_in_identity
@@ -5288,6 +5322,7 @@ services::discord::tmux::placeholder_suppression::placeholder_suppression_tests:
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::task_notification_subagent_kind_exposed_body_preserves
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::task_notification_subagent_kind_unexposed_placeholder_deletes
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::unknown_author_body_preserves_no_edit
+services::discord::tmux::placeholder_suppression::unicode_units_tests::streaming_status_and_tmux_placeholder_suppression_unicode_units
 services::discord::tmux::restored_seed_discard_tests::cross_turn_watcher_reuse_discards_restored_seed_before_terminal_commit
 services::discord::tmux::restored_seed_discard_tests::idle_direct_prompt_discard_still_requires_restored_turn_and_anchor
 services::discord::tmux::restored_seed_discard_tests::idle_direct_prompt_preserves_restored_seed_with_undelivered_body

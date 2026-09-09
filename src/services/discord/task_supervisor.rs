@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use futures::FutureExt;
 
 use super::SharedData;
+pub(in crate::services::discord) mod watcher_completion;
 
 pub(in crate::services::discord) fn spawn_observed<F>(
     task_name: &'static str,
@@ -39,13 +40,23 @@ pub(in crate::services::discord) fn spawn_observed_tmux_watcher<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    let completion = watcher_completion::Registration::new(cancel.clone());
     spawn_observed(task_name, async move {
-        let _cleanup_guard = TmuxWatcherTaskGuard {
+        let cleanup_guard = TmuxWatcherTaskGuard {
             shared,
             tmux_session_name,
             cancel,
         };
-        future.await;
+        let outcome = AssertUnwindSafe(future).catch_unwind().await;
+        drop(cleanup_guard);
+        let result = match outcome {
+            Ok(()) => watcher_completion::Outcome::Returned,
+            Err(payload) => {
+                tracing::error!(task_name, panic = %panic_payload_summary(payload.as_ref()), "discord background task panicked");
+                watcher_completion::Outcome::Panicked
+            }
+        };
+        completion.finish(result);
     })
 }
 
@@ -101,6 +112,47 @@ mod tests {
                 std::sync::atomic::AtomicI64::new(tmux_watcher_now_ms()),
             ),
         }
+    }
+
+    #[test]
+    fn watcher_wrapper_textually_drops_cleanup_before_completion() {
+        // Lexical tripwire only: bounded to the wrapper, not an execution-order
+        // proof or a Rust parser. Comments/strings are not stripped.
+        let source = include_str!("task_supervisor.rs");
+        let (_, wrapper) = source
+            .split_once("pub(in crate::services::discord) fn spawn_observed_tmux_watcher<F>(")
+            .expect("watcher wrapper exists");
+        let (wrapper, _) = wrapper
+            .split_once("\nstruct TmuxWatcherTaskGuard {")
+            .expect("watcher wrapper has its next symbol boundary");
+        let cleanup = wrapper.find("\n        drop(cleanup_guard);");
+        let completion = wrapper.find("\n        completion.finish(");
+        assert!(
+            matches!((cleanup, completion), (Some(drop_at), Some(finish_at)) if drop_at < finish_at),
+            "wrapper must explicitly drop cleanup_guard before completion.finish"
+        );
+    }
+
+    // This runtime check observes cleanup after ACK, but on current_thread it
+    // cannot distinguish swapped synchronous statements. The tripwire pins them.
+    #[tokio::test]
+    async fn completion_is_published_after_registry_cleanup() {
+        let shared = make_shared_data_for_tests();
+        let tmux = "completion-cleanup-order";
+        let handle = watcher_handle(tmux);
+        let cancel = handle.cancel.clone();
+        shared.tmux_watchers.insert(ChannelId::new(5808), handle);
+        let task = spawn_observed_tmux_watcher(
+            "completion-cleanup",
+            shared.clone(),
+            tmux.into(),
+            cancel.clone(),
+            async {},
+        );
+        let ticket = watcher_completion::observe(&cancel).unwrap();
+        assert_eq!(ticket.wait().await, watcher_completion::Outcome::Returned);
+        assert!(!shared.tmux_watchers.has_live_watcher_handle(tmux));
+        task.await.unwrap();
     }
 
     // #5071 T3-A2 regression lock (no behaviour change): the watcher task guard
