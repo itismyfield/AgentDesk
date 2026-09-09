@@ -46,7 +46,7 @@ pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) should_complete_work_dispatch_after_delivery: bool,
     pub(super) should_fail_dispatch_after_delivery: bool,
     pub(super) bridge_relay_delegated_to_watcher: bool,
-    pub(super) watcher_owner_channel_id: ChannelId,
+    pub(super) watcher_delivery_pin: Option<&'a WatcherClaimIncarnation>,
     pub(super) can_chain_locally: bool,
     pub(super) inflight_generation: u64,
 }
@@ -92,7 +92,7 @@ pub(super) async fn handle_delivery_epilogue(
         ctx.should_complete_work_dispatch_after_delivery;
     let should_fail_dispatch_after_delivery = ctx.should_fail_dispatch_after_delivery;
     let bridge_relay_delegated_to_watcher = ctx.bridge_relay_delegated_to_watcher;
-    let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
+    let watcher_delivery_pin = ctx.watcher_delivery_pin;
     let can_chain_locally = ctx.can_chain_locally;
     let inflight_generation = ctx.inflight_generation;
 
@@ -374,8 +374,7 @@ pub(super) async fn handle_delivery_epilogue(
             .await;
         }
 
-        // Signal the watcher that this turn's response was already delivered.
-        // Prevents the watcher from relaying the same response when it resumes.
+        // Mark this turn delivered so the watcher will not relay it again when it resumes.
         // #3041 P1-2 (codex P1-c): a B2 Skip set
         // `preserve_inflight_for_cleanup_retry = true`, so this gate (encoded in
         // `bridge_epilogue_marks_watcher_delivered`) does NOT mark the watcher
@@ -383,9 +382,11 @@ pub(super) async fn handle_delivery_epilogue(
         if bridge_epilogue_marks_watcher_delivered(
             preserve_inflight_for_cleanup_retry,
             bridge_relay_delegated_to_watcher,
-        ) && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
+        ) && let Some(pin) = watcher_delivery_pin
         {
-            watcher.turn_delivered.store(true, Ordering::Release);
+            pin.adopt_if_current(&shared_owned.tmux_watchers, |pin| {
+                pin.turn_delivered.store(true, Ordering::Release);
+            });
         }
 
         if can_chain_locally

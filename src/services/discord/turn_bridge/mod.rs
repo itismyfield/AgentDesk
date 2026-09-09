@@ -203,46 +203,9 @@ use voice_completion::{
     json_any_true_flag, resolve_voice_turn_link_for_playback, voice_background_completion_target,
 };
 use watcher_handoff::{live_watcher_registered_for_relay, should_delegate_bridge_relay_to_watcher};
-pub(super) struct TurnBridgeContext {
-    pub(super) provider: ProviderKind,
-    pub(super) gateway: Arc<dyn TurnGateway>,
-    pub(super) channel_id: ChannelId,
-    /// `None` for a recovery turn with no anchored Discord user message
-    /// (user_msg_id == 0, e.g. a TUI-direct turn). All Discord-message side
-    /// effects keyed on it (reactions, analytics row, voice link) are skipped.
-    pub(super) user_msg_id: Option<MessageId>,
-    pub(super) user_text_owned: String,
-    pub(super) request_owner_name: String,
-    pub(super) role_binding: Option<RoleBinding>,
-    pub(super) adk_session_key: Option<String>,
-    pub(super) adk_session_name: Option<String>,
-    pub(super) adk_session_info: Option<String>,
-    pub(super) adk_cwd: Option<String>,
-    pub(super) dispatch_id: Option<String>,
-    pub(super) dispatch_kind: Option<String>,
-    pub(super) memory_recall_usage: TokenUsage,
-    pub(super) context_window_tokens: u64,
-    pub(super) context_compact_percent: u64,
-    /// `None` for a recovery turn that never anchored a Discord placeholder
-    /// (current_msg_id == 0, e.g. a TUI-direct turn). The bridge then creates a
-    /// fresh placeholder on first output instead of editing a nonexistent one.
-    pub(super) current_msg_id: Option<MessageId>,
-    pub(super) response_sent_offset: usize,
-    pub(super) full_response: String,
-    pub(super) tmux_last_offset: Option<u64>,
-    pub(super) new_session_id: Option<String>,
-    pub(super) defer_watcher_resume: bool,
-    /// Reuse the persisted V2 status panel only when resuming the same
-    /// in-flight turn. Fresh turns must allocate a new panel near the new
-    /// response instead of editing an old panel buried in scrollback.
-    pub(super) reuse_status_panel_message: bool,
-    pub(super) completion_tx: Option<tokio::sync::oneshot::Sender<()>>,
-    /// `true` ONLY at the two TUI external-input idle callers. Default `false`
-    /// for every other bridge caller; used by footer/chrome decisions that need
-    /// the origin without a `request_owner_name` string compare.
-    pub(super) is_external_input_tui_direct: bool,
-    pub(super) inflight_state: InflightTurnState,
-}
+mod context;
+use super::tmux::WatcherClaimIncarnation;
+pub(super) use context::TurnBridgeContext;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WatcherHandoffClaimOutcome {
     None,
@@ -257,7 +220,16 @@ pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
     rx: mpsc::Receiver<StreamMessage>,
+    bridge: TurnBridgeContext,
+) {
+    spawn_turn_bridge_with_pin(shared_owned, cancel_token, rx, bridge, None);
+}
+pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
+    shared_owned: Arc<SharedData>,
+    cancel_token: Arc<CancelToken>,
+    rx: mpsc::Receiver<StreamMessage>,
     mut bridge: TurnBridgeContext,
+    initial_watcher_delivery_pin: Option<WatcherClaimIncarnation>,
 ) {
     use tracing::Instrument;
     intake_settlement::bind_bridge_turn_snapshot(&shared_owned, &mut bridge);
@@ -363,7 +335,7 @@ pub(super) fn spawn_turn_bridge(
         let mut watcher_owns_assistant_relay =
             matches!(initial_relay_owner_kind, super::inflight::RelayOwnerKind::Watcher);
         let mut watcher_relay_available_for_turn = false;
-        let mut watcher_delivery_pin = None;
+        let mut watcher_delivery_pin = initial_watcher_delivery_pin;
         let mut watcher_handoff_claim_outcome = WatcherHandoffClaimOutcome::None;
         // Durable recovery must honor typed non-bridge owners too. `Unknown`
         // is treated like a live external owner so future relay variants do
@@ -790,6 +762,7 @@ pub(super) fn spawn_turn_bridge(
         let terminal_outcome_delivery_output =
             terminal_outcome_delivery::run_terminal_outcome_delivery(
                 terminal_outcome_delivery::TerminalOutcomeDeliveryContext {
+                    watcher_delivery_pin: watcher_delivery_pin.clone(),
                     channel_id,
                     user_msg_id,
                     current_msg_id,
@@ -913,6 +886,7 @@ pub(super) fn spawn_turn_bridge(
                 turn_start,
             },
             completion_postlude::CompletionPostludeState {
+                watcher_delivery_pin,
                 full_response,
                 user_text_owned,
                 role_binding,
@@ -966,3 +940,6 @@ pub(super) fn spawn_turn_bridge(
         // completion_tx is sent automatically by CompletionGuard on drop
     }.instrument(bridge_span));
 }
+
+#[cfg(all(test, unix))]
+mod resume_pin_tests;

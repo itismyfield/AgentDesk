@@ -214,7 +214,7 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
             should_complete_work_dispatch_after_delivery: false,
             should_fail_dispatch_after_delivery: false,
             bridge_relay_delegated_to_watcher: false,
-            watcher_owner_channel_id: channel_id,
+            watcher_delivery_pin: None,
             can_chain_locally: false,
             inflight_generation: 0,
         },
@@ -599,6 +599,11 @@ impl TerminalDeliveryDriver {
         let channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
         (
             TerminalOutcomeDeliveryContext {
+                watcher_delivery_pin: self
+                    .shared
+                    .tmux_watchers
+                    .get(&channel_id)
+                    .map(|h| WatcherClaimIncarnation::from_handle(channel_id, &h)),
                 channel_id,
                 user_msg_id: Some(MessageId::new(DRIVER_USER_MSG_ID)),
                 current_msg_id: MessageId::new(DRIVER_CURRENT_MSG_ID),
@@ -931,4 +936,61 @@ async fn driver_reaches_the_legacy_long_chunk_arm_with_an_unordered_range_5191()
         output.terminal_delivery_committed,
         "a successful long-chunk send commits the terminal delivery"
     );
+}
+
+#[tokio::test]
+async fn resume_pin_delivery_epilogue_stamps_only_current_incarnation() {
+    for case in ["same", "stale", "missing", "cancelled"] {
+        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+        let (mut ctx, state) = driver.parts();
+        let owner = ctx.watcher_owner_channel_id;
+        let mut replacement_marker = None;
+        if case == "stale" {
+            let old = driver.shared.tmux_watchers.get(&owner).unwrap();
+            let marker = Arc::new(AtomicBool::new(false));
+            let replacement = TmuxWatcherHandle {
+                tmux_session_name: old.tmux_session_name.clone(),
+                output_path: old.output_path.clone(),
+                paused: Arc::new(AtomicBool::new(false)),
+                resume_offset: Arc::new(Mutex::new(None)),
+                cancel: Arc::new(AtomicBool::new(false)),
+                pause_epoch: Arc::new(AtomicU64::new(0)),
+                turn_delivered: marker.clone(),
+                last_heartbeat_ts_ms: Arc::new(AtomicI64::new(0)),
+            };
+            drop(old);
+            driver.shared.tmux_watchers.insert(owner, replacement);
+            replacement_marker = Some(marker);
+        } else if case == "missing" {
+            ctx.watcher_delivery_pin = None;
+        } else if case == "cancelled" {
+            driver
+                .shared
+                .tmux_watchers
+                .get(&owner)
+                .unwrap()
+                .cancel
+                .store(true, Ordering::Release);
+        }
+        let output =
+            tokio::time::timeout(DRIVER_TIMEOUT, run_terminal_outcome_delivery(ctx, state))
+                .await
+                .expect("delivery epilogue must complete");
+        assert!(
+            output.terminal_delivery_committed,
+            "{case}: delivery must commit"
+        );
+        assert_eq!(
+            driver.publish_entries().len(),
+            1,
+            "{case}: real publish required"
+        );
+        if let Some(marker) = replacement_marker {
+            assert!(
+                !marker.load(Ordering::Acquire),
+                "stale epilogue must not stamp replacement B"
+            );
+        }
+        assert_eq!(driver.marker(), case == "same", "{case}: captured A marker");
+    }
 }

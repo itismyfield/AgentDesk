@@ -19,14 +19,14 @@ pub(super) struct BridgeEntryRuntimeState<'a> {
     pub(super) watcher_owner_channel_id: &'a mut ChannelId,
     pub(super) watcher_owns_assistant_relay: &'a mut bool,
     pub(super) watcher_relay_available_for_turn: &'a mut bool,
-    pub(super) watcher_delivery_pin: &'a mut Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(super) watcher_delivery_pin: &'a mut Option<WatcherClaimIncarnation>,
     pub(super) standby_relay_owns_output: &'a mut bool,
     pub(super) status_panel_msg_id: &'a mut Option<MessageId>,
     pub(super) status_panel_generation: &'a mut u64,
 }
 
 struct LiveWatcherRelayObservation {
-    turn_delivered: Arc<std::sync::atomic::AtomicBool>,
+    incarnation: WatcherClaimIncarnation,
 }
 
 fn live_watcher_relay_observation(
@@ -38,7 +38,7 @@ fn live_watcher_relay_observation(
         return None;
     }
     Some(LiveWatcherRelayObservation {
-        turn_delivered: Arc::clone(&watcher.turn_delivered),
+        incarnation: WatcherClaimIncarnation::from_handle(owner_channel_id, &watcher),
     })
 }
 
@@ -152,7 +152,7 @@ pub(super) fn reconcile_runtime_locals_from_inflight_state(
     {
         state
             .watcher_delivery_pin
-            .get_or_insert(watcher.turn_delivered);
+            .get_or_insert(watcher.incarnation);
     }
     *state.status_panel_msg_id = state
         .inflight_state
@@ -763,8 +763,8 @@ mod tests {
             MessageId::new(1),
         );
         let pin = projection.runtime.watcher_delivery_pin.as_ref().unwrap();
-        assert!(Arc::ptr_eq(pin, &incumbent));
-        assert!(!Arc::ptr_eq(pin, &replacement));
+        assert!(Arc::ptr_eq(&pin.turn_delivered, &incumbent));
+        assert!(!Arc::ptr_eq(&pin.turn_delivered, &replacement));
     }
 
     #[test]
