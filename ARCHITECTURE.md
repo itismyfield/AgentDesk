@@ -474,6 +474,8 @@ src/
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
 │   ├── cluster/
+│   │   ├── attachment_transfer/
+│   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
 │   │   │   ├── owner_record.rs
 │   │   │   └── session_owner.rs
@@ -486,6 +488,7 @@ src/
 │   │   │   ├── identity.rs
 │   │   │   ├── shutdown.rs
 │   │   │   └── terminal_resolution.rs
+│   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
