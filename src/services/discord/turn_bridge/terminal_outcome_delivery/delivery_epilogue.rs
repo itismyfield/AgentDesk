@@ -374,8 +374,7 @@ pub(super) async fn handle_delivery_epilogue(
             .await;
         }
 
-        // Signal the watcher that this turn's response was already delivered.
-        // Prevents the watcher from relaying the same response when it resumes.
+        // Mark this turn delivered so the watcher will not relay it again when it resumes.
         // #3041 P1-2 (codex P1-c): a B2 Skip set
         // `preserve_inflight_for_cleanup_retry = true`, so this gate (encoded in
         // `bridge_epilogue_marks_watcher_delivered`) does NOT mark the watcher
