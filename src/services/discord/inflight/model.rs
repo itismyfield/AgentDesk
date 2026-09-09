@@ -300,6 +300,13 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// ADK session key (hostname:session-name) for long-turn diagnostics.
     #[serde(default)]
     pub session_key: Option<String>,
+    /// `ExternalInputRelayLease::turn_id` — the
+    /// `external:<provider>:<channel>:<tmux>:<epoch_ms>` string that names ONE
+    /// external-input execution across the runtime scanner, the observer and the
+    /// TUI-direct adapter. Additive `#[serde(default)]`: legacy rows deserialize
+    /// as `None` and no `INFLIGHT_STATE_VERSION` bump is needed (#2235 convention).
+    #[serde(default)]
+    pub external_turn_id: Option<String>,
     /// Preferred Discord bot key for terminal headless delivery.
     #[serde(default)]
     pub delivery_bot: Option<String>,
@@ -1039,6 +1046,7 @@ impl InflightTurnState {
             any_tool_used: false,
             has_post_tool_text: false,
             session_key: None,
+            external_turn_id: None,
             delivery_bot: None,
             silent_turn: false,
             dispatch_id: None,

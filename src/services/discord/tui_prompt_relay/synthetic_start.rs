@@ -3,6 +3,7 @@ use super::*;
 mod claim;
 mod stale_reclaim;
 pub(super) use claim::claim_tui_direct_synthetic_turn;
+pub(in crate::services::discord) use claim::build_tui_direct_synthetic_inflight_state;
 
 use stale_reclaim::release_reclaimable_stale_synthetic_mailbox_owner_if_current;
 pub(super) use stale_reclaim::{
@@ -2312,46 +2313,6 @@ pub(super) async fn finish_tui_direct_synthetic_turn_if_current(
             shared.clone(),
         )
         .await;
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(in crate::services::discord) fn build_tui_direct_synthetic_inflight_state(
-    provider: ProviderKind,
-    channel_id: ChannelId,
-    user_msg_id: MessageId,
-    current_msg_id: Option<MessageId>,
-    prompt_text: &str,
-    tmux_session_name: &str,
-    output_path: Option<&Path>,
-    start_offset: u64,
-    lease: &ExternalInputRelayLease,
-    relay_owner_kind: RelayOwnerKind,
-) -> InflightTurnState {
-    let mut state = InflightTurnState::new(
-        provider,
-        channel_id.get(),
-        None,
-        TUI_DIRECT_SYNTHETIC_OWNER_USER_ID,
-        user_msg_id.get(),
-        current_msg_id.map(MessageId::get).unwrap_or(0),
-        prompt_text.to_string(),
-        None,
-        Some(tmux_session_name.to_string()),
-        output_path.and_then(|path| path.to_str().map(str::to_string)),
-        None,
-        start_offset,
-    );
-    state.current_msg_len = "...".len();
-    state.session_key = lease.session_key.clone();
-    state.runtime_kind = lease.runtime_kind;
-    state.turn_source = TurnSource::ExternalInput;
-    state.set_relay_owner_kind(relay_owner_kind);
-    // #3099 codex re-review (P2): pin THIS turn's injected `⏳` message id onto
-    // the inflight so the `user_msg_id == 0` completion cleanup can target this
-    // turn's own message instead of whatever later injection has since
-    // overwritten the single shared prompt-anchor slot.
-    state.injected_prompt_message_id = Some(user_msg_id.get());
-    state
 }
 
 // #3982 orphan-at-birth reclaim helpers + their unit tests live in the sibling

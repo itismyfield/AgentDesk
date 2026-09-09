@@ -3162,6 +3162,248 @@ fn synthetic_watcher_inflight_marks_existing_tui_turn_without_prompt_resubmit() 
     assert_eq!(state.input_fifo_path, None);
 }
 
+// ====================================================================
+// #5833 S1 — `lease.turn_id` is the SAME-EXECUTION key. It already agrees
+// across the runtime scanner, the observer and the claim log; S1 only makes
+// it durable. These three tests pin the stamp, the wire compatibility of the
+// new field, and the behaviour-equivalence of the builder's move into
+// `synthetic_start/claim.rs`.
+// ====================================================================
+
+fn s1_lease_5833(turn_id: Option<&str>) -> ExternalInputRelayLease {
+    ExternalInputRelayLease {
+        channel_id: Some(42),
+        turn_id: turn_id.map(str::to_string),
+        session_key: Some("token:AgentDesk-claude-s1".to_string()),
+        relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+        runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+        generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+    }
+}
+
+/// S1T1: both durable rows of ONE external execution carry the lease turn_id.
+#[cfg(unix)]
+#[test]
+fn s5833_s1t1_lease_turn_id_stamped_on_synthetic_and_bridge_rows() {
+    let output_path = PathBuf::from("/tmp/adk-5833-s1.jsonl");
+    let turn_id = "external:claude:42:AgentDesk-claude-s1:1788000000000";
+    let lease = s1_lease_5833(Some(turn_id));
+
+    let synthetic = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Claude,
+        ChannelId::new(42),
+        MessageId::new(101),
+        None,
+        "typed in TUI",
+        "AgentDesk-claude-s1",
+        Some(&output_path),
+        333,
+        &lease,
+        RelayOwnerKind::None,
+    );
+    let bridge = build_tui_direct_bridge_inflight_state(
+        ProviderKind::Claude,
+        ChannelId::new(42),
+        MessageId::new(101),
+        MessageId::new(202),
+        "typed in TUI",
+        "AgentDesk-claude-s1",
+        &output_path,
+        333,
+        &lease,
+    );
+
+    assert_eq!(
+        synthetic.external_turn_id.as_deref(),
+        Some(turn_id),
+        "the synthetic row must persist the lease turn_id verbatim"
+    );
+    assert_eq!(
+        bridge.external_turn_id, synthetic.external_turn_id,
+        "the adapter row must name the SAME execution as the synthetic row"
+    );
+    // The key is turn-scoped, not session-scoped: stamping `session_key` here
+    // would silently make two consecutive turns look like one execution.
+    assert_ne!(
+        synthetic.external_turn_id, lease.session_key,
+        "external_turn_id must not be the (turn-independent) session key"
+    );
+    assert_eq!(synthetic.session_key, lease.session_key);
+
+    // A lease with no turn_id yields None on both rows — never `Some("")`,
+    // which would make two unkeyed rows compare equal.
+    let unassigned = s1_lease_5833(None);
+    let synthetic_none = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Claude,
+        ChannelId::new(42),
+        MessageId::new(101),
+        None,
+        "typed in TUI",
+        "AgentDesk-claude-s1",
+        Some(&output_path),
+        333,
+        &unassigned,
+        RelayOwnerKind::None,
+    );
+    let bridge_none = build_tui_direct_bridge_inflight_state(
+        ProviderKind::Claude,
+        ChannelId::new(42),
+        MessageId::new(101),
+        MessageId::new(202),
+        "typed in TUI",
+        "AgentDesk-claude-s1",
+        &output_path,
+        333,
+        &unassigned,
+    );
+    assert_eq!(synthetic_none.external_turn_id, None);
+    assert_eq!(bridge_none.external_turn_id, None);
+}
+
+/// S1T1 (Fable review addendum): the key the two lease-construction sites mint
+/// — the runtime scanner's `record_external_turn_lease_for_output` and the
+/// observer's `relay_ownership` lease — is derived ONLY from the observation
+/// (provider, channel, tmux session, observed_at), so one observation yields
+/// one string on both sides and a different observation yields a different one.
+#[test]
+fn s5833_s1t1_external_turn_id_is_observation_derived_not_call_site_derived() {
+    let channel_id = ChannelId::new(42);
+    let observed_at = chrono::DateTime::from_timestamp_millis(1_788_000_000_000)
+        .expect("fixed observation timestamp");
+    let runtime_side = super::relay_ownership::external_input_turn_id(
+        ProviderKind::Claude.as_str(),
+        channel_id,
+        "AgentDesk-claude-s1",
+        observed_at,
+    );
+    let observer_side = super::relay_ownership::external_input_turn_id(
+        "claude",
+        channel_id,
+        "AgentDesk-claude-s1",
+        observed_at,
+    );
+    assert_eq!(
+        runtime_side, observer_side,
+        "both lease sites must mint the same key for one observation"
+    );
+    assert_eq!(
+        runtime_side, "external:claude:42:AgentDesk-claude-s1:1788000000000",
+        "the persisted key format is the cross-component contract"
+    );
+    let later = super::relay_ownership::external_input_turn_id(
+        "claude",
+        channel_id,
+        "AgentDesk-claude-s1",
+        observed_at + chrono::Duration::milliseconds(1),
+    );
+    assert_ne!(
+        runtime_side, later,
+        "a distinct observation must not collide with the previous execution"
+    );
+}
+
+/// S1T2: the new field is additive on the wire. A pre-#5833 row (no
+/// `external_turn_id` key) still loads, with `None`, every other field intact;
+/// a stamped row round-trips.
+#[cfg(unix)]
+#[test]
+fn s5833_s1t2_legacy_rows_without_external_turn_id_still_deserialize() {
+    let output_path = PathBuf::from("/tmp/adk-5833-s1.jsonl");
+    let turn_id = "external:claude:42:AgentDesk-claude-s1:1788000000000";
+    let stamped = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Claude,
+        ChannelId::new(42),
+        MessageId::new(101),
+        None,
+        "typed in TUI",
+        "AgentDesk-claude-s1",
+        Some(&output_path),
+        333,
+        &s1_lease_5833(Some(turn_id)),
+        RelayOwnerKind::None,
+    );
+
+    let round_tripped: InflightTurnState =
+        serde_json::from_str(&serde_json::to_string(&stamped).expect("serialize stamped row"))
+            .expect("stamped row round-trips");
+    assert_eq!(round_tripped.external_turn_id.as_deref(), Some(turn_id));
+
+    // Build the legacy shape by DELETING the key, so the fixture cannot drift
+    // away from the real row schema the way a hand-written JSON blob would.
+    let mut legacy: serde_json::Value =
+        serde_json::to_value(&stamped).expect("serialize stamped row");
+    assert!(
+        legacy
+            .as_object_mut()
+            .expect("inflight rows serialize as JSON objects")
+            .remove("external_turn_id")
+            .is_some(),
+        "the field must be present on a stamped row before removal"
+    );
+    let loaded: InflightTurnState =
+        serde_json::from_value(legacy).expect("a pre-#5833 row must still deserialize");
+    assert_eq!(
+        loaded.external_turn_id, None,
+        "a legacy row carries no execution key"
+    );
+    assert_eq!(loaded.session_key, stamped.session_key);
+    assert_eq!(loaded.turn_source, stamped.turn_source);
+    assert_eq!(loaded.user_msg_id, stamped.user_msg_id);
+    assert_eq!(loaded.turn_nonce, stamped.turn_nonce);
+    assert_eq!(loaded.output_path, stamped.output_path);
+    assert_eq!(loaded.version, stamped.version);
+}
+
+/// S1T3: moving the builder from `synthetic_start.rs` into its `claim` child
+/// module changed nothing but the file it lives in. Every field the builder
+/// sets is pinned explicitly (not by `Debug` equality, which would hide a
+/// field the builder stopped setting once a default happened to match).
+#[cfg(unix)]
+#[test]
+fn s5833_s1t3_moved_builder_is_behaviour_identical() {
+    let output_path = PathBuf::from("/tmp/adk-5833-s1.jsonl");
+    let lease = s1_lease_5833(Some("external:claude:42:AgentDesk-claude-s1:1788000000000"));
+    let state = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Claude,
+        ChannelId::new(42),
+        MessageId::new(101),
+        Some(MessageId::new(202)),
+        "typed in TUI",
+        "AgentDesk-claude-s1",
+        Some(&output_path),
+        333,
+        &lease,
+        RelayOwnerKind::Watcher,
+    );
+
+    assert_eq!(state.provider, ProviderKind::Claude.as_str());
+    assert_eq!(state.channel_id, 42);
+    assert_eq!(state.channel_name, None);
+    assert_eq!(
+        state.request_owner_user_id,
+        TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+    );
+    assert_eq!(state.user_msg_id, 101);
+    assert_eq!(state.current_msg_id, 202);
+    assert_eq!(state.current_msg_len, "...".len());
+    assert_eq!(state.user_text, "typed in TUI");
+    assert_eq!(state.session_id, None);
+    assert_eq!(
+        state.tmux_session_name.as_deref(),
+        Some("AgentDesk-claude-s1")
+    );
+    assert_eq!(state.output_path.as_deref(), output_path.to_str());
+    assert_eq!(state.input_fifo_path, None);
+    assert_eq!(state.last_offset, 333);
+    assert_eq!(state.session_key, lease.session_key);
+    assert_eq!(state.runtime_kind, lease.runtime_kind);
+    assert_eq!(state.turn_source, TurnSource::ExternalInput);
+    assert_eq!(state.effective_relay_owner_kind(), RelayOwnerKind::Watcher);
+    assert_eq!(state.injected_prompt_message_id, Some(101));
+    assert_eq!(state.external_turn_id, lease.turn_id);
+}
+
 #[cfg(unix)]
 #[test]
 fn codex_external_input_relay_output_path_uses_rollout_not_wrapper() {
