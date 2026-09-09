@@ -93,6 +93,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/task_notification_delivery/tests.rs",
         "src/services/discord/tmux/task_notification_kind_restart_roundtrip_tests.rs",
         "src/services/discord/tmux_output_stream/provider_output_guard_tests.rs",
+        "src/services/discord/tmux_placeholder_suppression/unicode_units_tests.rs",
         "src/services/discord/tmux_watcher/completion_gate_tests.rs",
         "src/services/discord/tmux_watcher/jsonl_rotation/backstop_tests.rs",
         "src/services/discord/tmux_watcher/panel_decisions_tests.rs",
