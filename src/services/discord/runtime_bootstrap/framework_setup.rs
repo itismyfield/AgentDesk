@@ -53,6 +53,8 @@ pub(super) async fn run_bot_framework_setup(
         provider_for_setup.clone(),
     );
     super::drain_pending_queue_exit_placeholder_clears(&shared_for_migrate).await;
+    // Parking remains enabled even when the periodic retry is disabled.
+    super::spawns::run_bot_spawn_queue_exit_clear_retry(&shared_for_migrate);
     health_registry_for_setup
         .register_http(provider_for_setup.as_str().to_string(), ctx.http.clone())
         .await;
