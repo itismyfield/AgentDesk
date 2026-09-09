@@ -206,10 +206,7 @@ fn runtime_is_idle(shared: &SharedData) -> bool {
 fn unfence_runtimes(runtimes: &[Arc<SharedData>]) {
     for runtime in runtimes {
         runtime.restart.intake_worker_lifecycle.unfence_admission();
-        runtime
-            .restart
-            .restart_pending
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        runtime.restart.legacy_promotion_unfence();
     }
 }
 
@@ -474,10 +471,7 @@ pub(super) async fn attempt_clean_standby_promotion(
         .await;
     for runtime in &runtimes {
         runtime.restart.intake_worker_lifecycle.fence_admission();
-        runtime
-            .restart
-            .restart_pending
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        runtime.restart.legacy_promotion_fence();
     }
     for runtime in &runtimes {
         runtime

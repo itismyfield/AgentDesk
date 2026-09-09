@@ -16,6 +16,7 @@
 //! giant.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use poise::serenity_prelude as serenity;
 use poise::serenity_prelude::{ChannelId, MessageId};
@@ -684,8 +685,89 @@ pub(in crate::services) struct RestartLifecycle {
     pub(in crate::services) shutdown_slot_consumed: std::sync::atomic::AtomicBool,
 }
 
+/// #5485 S2a — read-only transport for the process-global shutdown flag.
+///
+/// Workers that merely *observe* shutdown (the intake poll loop, the voice
+/// sensitivity/progress/rejoin workers) used to be handed a raw
+/// `Arc<AtomicBool>` clone of [`RestartLifecycle::shutting_down`], which is a
+/// full write capability: the handle a poll loop reads with was the same
+/// handle that could flip the flag for the whole process.
+///
+/// `ShutdownReader` is that identical allocation with the write half removed.
+/// [`ShutdownReader::load`] and `Clone` are the entire surface — no `Deref`,
+/// `AsRef`, `From<Arc<_>>`, `store`, `swap`, or inner-handle accessor, and
+/// cloning yields another reader rather than the wrapped `Arc`. Behaviour is
+/// unchanged: readers see the very same allocation the writers store into and
+/// every migrated call site keeps its original memory ordering verbatim.
+#[derive(Clone)]
+pub(in crate::services) struct ShutdownReader(Arc<std::sync::atomic::AtomicBool>);
+
+impl ShutdownReader {
+    /// Read the live shutdown flag. `order` stays the caller's choice so the
+    /// migrated observers keep the orderings they already had.
+    pub(in crate::services) fn load(&self, order: Ordering) -> bool {
+        self.0.load(order)
+    }
+}
+
+impl RestartLifecycle {
+    /// Hand out a read-only view of the process-global shutdown flag. This is
+    /// the ONLY constructor of [`ShutdownReader`]: the wrapped handle is a
+    /// private tuple field of this module, so nothing outside can wrap an
+    /// arbitrary `Arc` into observer capability or unwrap this one into a writer.
+    pub(in crate::services) fn shutdown_reader(&self) -> ShutdownReader {
+        ShutdownReader(self.shutting_down.clone())
+    }
+
+    /// #5485 S2a — deferred-restart poller, admission-fence publish
+    /// (`runtime_bootstrap::deferred_restart::begin_deferred_restart`).
+    pub(in crate::services::discord) fn legacy_deferred_begin(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+    }
+
+    /// #5485 S2a — deferred-restart poller, health-visible acknowledgement
+    /// (`runtime_bootstrap::deferred_restart::prepare_deferred_restart`).
+    pub(in crate::services::discord) fn legacy_deferred_ack(&self) {
+        self.restart_pending.store(true, Ordering::SeqCst);
+    }
+
+    /// #5485 S2a — deferred-restart rollback (`deferred_restart`), clearing in
+    /// the original order: shutdown flag first, acknowledgement second.
+    pub(in crate::services::discord) fn legacy_deferred_rollback(&self) {
+        self.shutting_down.store(false, Ordering::SeqCst);
+        self.restart_pending.store(false, Ordering::SeqCst);
+    }
+
+    /// #5485 S2a — standby promotion fence, applied to every provider runtime
+    /// (`runtime_bootstrap::gateway_lease_recovery`).
+    pub(in crate::services::discord) fn legacy_promotion_fence(&self) {
+        self.restart_pending.store(true, Ordering::SeqCst);
+    }
+
+    /// #5485 S2a — standby promotion unfence
+    /// (`runtime_bootstrap::gateway_lease_recovery::unfence_runtimes`).
+    pub(in crate::services::discord) fn legacy_promotion_unfence(&self) {
+        self.restart_pending.store(false, Ordering::SeqCst);
+    }
+
+    /// #5485 S2a — gateway lease loss self-fence (`gateway_lease`): shut down
+    /// and leave the restart request behind so launchd brings the process back.
+    pub(in crate::services::discord) fn legacy_lease_lost(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        self.restart_pending.store(true, Ordering::SeqCst);
+    }
+
+    /// #5485 S2a — SIGTERM handler (`runtime_bootstrap::shutdown`).
+    pub(in crate::services::discord) fn legacy_sigterm(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        // Block dequeue and put router into drain mode so no new
+        // queue/checkpoint mutations occur during shutdown.
+        self.restart_pending.store(true, Ordering::SeqCst);
+    }
+}
+
 #[cfg(test)]
-mod restart_lifecycle_tests {
+pub(in crate::services::discord) mod restart_lifecycle_tests {
     //! #3038 S3 — post-extraction regression pin for the
     //! `check_deferred_restart` fresh-token branch. This branch needs
     //! `restart_pending == true` while `shutdown_counted == false`, a state
@@ -701,6 +783,79 @@ mod restart_lifecycle_tests {
     use std::sync::atomic::Ordering;
 
     const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
+
+    /// #5485 S2a: stop a test-spawned voice worker through owner state — the
+    /// PCM harness holds a `ShutdownReader`, never a writable `Arc` of its own.
+    pub(in crate::services::discord) fn stop_pcm_worker_for_test(r: &super::RestartLifecycle) {
+        r.shutting_down.store(true, Ordering::Relaxed);
+    }
+
+    /// #5485 S2a A1: `shutdown_reader()` is a view of the live flag, never a
+    /// snapshot, and every clone shares that one allocation.
+    #[tokio::test]
+    async fn shutdown_reader_observes_live_writer_and_clone() {
+        let shared = super::super::make_shared_data_for_tests();
+        let reader = shared.restart.shutdown_reader();
+        let handles = [reader.clone(), reader, shared.restart.shutdown_reader()];
+        let flag = &shared.restart.shutting_down;
+        for expected in [false, true, false, true, false] {
+            flag.store(expected, Ordering::SeqCst);
+            for (index, handle) in handles.iter().enumerate() {
+                let seen = handle.load(Ordering::Acquire);
+                assert_eq!(seen, expected, "handle {index} must observe {expected}");
+            }
+        }
+    }
+
+    /// #5485 S2a A2: each legacy adapter writes exactly the flags its original
+    /// call site wrote, leaves the other one alone, and is idempotent.
+    #[tokio::test]
+    async fn legacy_actor_store_matrix_preserves_unwritten_flags() {
+        // `stores` is "<shutting_down><restart_pending>" for the flags the
+        // original call site wrote: '1' true, '0' false, '-' left untouched.
+        type Row = (&'static str, fn(&super::RestartLifecycle), &'static str);
+        let rows: [Row; 7] = [
+            ("begin", |r| r.legacy_deferred_begin(), "1-"),
+            ("ack", |r| r.legacy_deferred_ack(), "-1"),
+            ("rollback", |r| r.legacy_deferred_rollback(), "00"),
+            ("fence", |r| r.legacy_promotion_fence(), "-1"),
+            ("unfence", |r| r.legacy_promotion_unfence(), "-0"),
+            ("lease_lost", |r| r.legacy_lease_lost(), "11"),
+            ("sigterm", |r| r.legacy_sigterm(), "11"),
+        ];
+        let want = |spec: &str, index: usize, seed: bool| match spec.as_bytes()[index] {
+            b'1' => true,
+            b'0' => false,
+            _ => seed,
+        };
+
+        let shared = super::super::make_shared_data_for_tests();
+        for (name, apply, stores) in rows {
+            for seed in [false, true] {
+                shared.restart.shutting_down.store(seed, Ordering::SeqCst);
+                shared.restart.restart_pending.store(seed, Ordering::SeqCst);
+                let expected = (want(stores, 0, seed), want(stores, 1, seed));
+                for repeat in 0..2 {
+                    apply(&shared.restart);
+                    let shutdown = shared.restart.shutting_down.load(Ordering::SeqCst);
+                    let pending = shared.restart.restart_pending.load(Ordering::SeqCst);
+                    let label = format!("{name} seed={seed} repeat={repeat}");
+                    assert_eq!((shutdown, pending), expected, "{label}");
+                }
+            }
+        }
+
+        // Both stores of a pair land before the adapter returns, so the matrix
+        // cannot see their order. Pin it at the source instead.
+        let source = include_str!("shared_state.rs");
+        for name in "legacy_deferred_rollback legacy_lease_lost legacy_sigterm".split(' ') {
+            let start = source.find(&format!("fn {name}(&self) {{")).expect("fn");
+            let body = &source[start..start + source[start..].find("\n    }\n").expect("end")];
+            let shutdown_at = body.find("self.shutting_down.store").expect("shutdown");
+            let pending_at = body.find("self.restart_pending.store").expect("pending");
+            assert!(shutdown_at < pending_at, "{name} stores shutdown first");
+        }
+    }
 
     struct EnvGuard;
 

@@ -1865,6 +1865,7 @@ services::cluster::intake_worker::tests::intake_request_from_row_rejects_non_num
 services::cluster::intake_worker::tests::intake_request_from_row_rejects_unknown_turn_kind
 services::cluster::intake_worker::tests::intake_request_from_row_restores_preservation_and_fails_safe_for_null
 services::cluster::intake_worker::tests::intake_request_from_row_round_trips_basic_fields
+services::cluster::intake_worker::tests::live_probe_flip_after_claim_releases_before_accept
 services::cluster::intake_worker::tests::marker_between_claim_and_accept_requires_release_without_spawn
 services::cluster::intake_worker::tests::marker_between_loop_check_and_claim_stops_before_claim
 services::cluster::intake_worker::tests::parse_turn_kind_accepts_standard_and_foreground_aliases
@@ -5032,6 +5033,8 @@ services::discord::settings::write::yaml_write_back_secret_tests::secret_write_b
 services::discord::settings::write::yaml_write_back_secret_tests::typed_gate_blocks_mismatched_snapshot_before_render_returns
 services::discord::settings::write::yaml_write_back_secret_tests::typed_gate_rejects_scalar_corruption
 services::discord::shared_state::restart_lifecycle_tests::check_deferred_restart_fresh_token_decrements_once_without_exit
+services::discord::shared_state::restart_lifecycle_tests::legacy_actor_store_matrix_preserves_unwritten_flags
+services::discord::shared_state::restart_lifecycle_tests::shutdown_reader_observes_live_writer_and_clone
 services::discord::single_message_panel::tests::carried_entry_notification_updates_latest_target_not_superseded_text
 services::discord::single_message_panel::tests::completion_footer_below_ttl_keeps_animating_registered_target
 services::discord::single_message_panel::tests::completion_footer_consecutive_edit_failures_evict_registered_target
@@ -5549,6 +5552,16 @@ services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_sing
 services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_single_message_completion_footer_producer_threads_sniffed_background_agent_pending
 services::discord::tmux::tmux_watcher::stall_exit::tests::pinned_exit_preserves_newer_inflight_and_mailbox_on_identity_mismatch
 services::discord::tmux::tmux_watcher::stall_exit::tests::pinned_exit_releases_matching_turn_through_finalizer
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::active_progress_tick_emits_once
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::active_silent_progress_is_durable
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_pinned_identity_suppresses_trailing_body
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_preserves_exact_row
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_tick_emits_no_republication
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_tick_preserves_cleanup_and_panel_parity
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_caller_uses_actual_terminal_outcome
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_short_body_and_ioerror_stay_nonterminal
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::terminal_outcome_logged_at_wrapper
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::terminal_progress_no_false_authority
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_common_edit_and_initial_send_share_guarded_payload
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_watcher_common_frame_selects_one_safe_payload
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_watcher_rollover_never_selects_raw_control_data
@@ -7013,6 +7026,7 @@ services::discord::voice_lifecycle::lifecycle_tests::record_join_success_registe
 services::discord::voice_lifecycle::lifecycle_tests::rejoin_decision_state_transitions
 services::discord::voice_lifecycle::lifecycle_tests::rejoin_inflight_guard_dedupes
 services::discord::voice_lifecycle::lifecycle_tests::should_schedule_rejoin_all_branches
+services::discord::voice_lifecycle::lifecycle_tests::shutdown_reader_backoff_preserves_cancel_precedence
 services::discord::voice_lifecycle::lifecycle_tests::supervisor_spawns_per_guild_so_stuck_guild_does_not_block_others
 services::discord::voice_routing::tests::pairing_store_persists_voice_to_text_mapping
 services::discord::watcher_lifecycle_decision::tests::active_stream_keeps_watcher_running_before_terminal_success
