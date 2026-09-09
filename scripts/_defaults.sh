@@ -661,6 +661,63 @@ _health_json_names_a_provider_runtime() {
   return 1
 }
 
+_health_json_degraded_only_relay_verdict() {
+  # #5736 DEPLOY readiness allowance — NOT a runtime /health change.
+  #
+  # `snapshot::apply_relay_verdict_polarity` now answers the 4987 §5.1 relay
+  # verdict axis on the PUBLIC body too, which is the whole point of #5736: the
+  # summary used to report `healthy` from the same registry `/api/health/detail`
+  # called `degraded`. But `wait_for_http_service_health` polls exactly that
+  # public body (:879) and `health_json_is_ready` has no branch that tolerates a
+  # `relay_verdict_*` reason, so a node whose relay axis is merely UNOBSERVABLE —
+  # `relay_verdict_unknown_<provider>_<channel_id>`, which live nodes carry
+  # continuously — would fail the deploy and rollback gates
+  # (`deploy-release.sh:2868`, `:930`, `deploy.sh:654`) forever.
+  #
+  # The operational decision (#5795 r2): the summary stays HONEST — status is
+  # still `degraded`, the reasons are still published, monitoring still sees the
+  # axis — but the deploy gate does not BLOCK on the relay verdict alone. A relay
+  # verdict says a channel's relay is unobservable or degraded; it does not say
+  # the binary that is serving is bad, and blocking the deploy on it strands the
+  # very fix that would clear it. This mirrors the #4348 rescue's shape: prove
+  # the node is serving, then allow exactly one non-blocking axis.
+  #
+  # STRICTLY ONLY: every element must be a `relay_verdict_` reason. One other
+  # degraded cause anywhere and this returns 1 and the gate blocks, exactly as it
+  # does today. `status` must be `degraded`, never `unhealthy` — the polarity
+  # pass only ever calls `worsen(Degraded)`, so an `unhealthy` body is degraded
+  # by something else and stays blocked.
+  # Only the `server_up`-bearing branch of `health_json_is_ready` calls this:
+  # `public_health_json` projects `server_up` unconditionally (defaulting it to
+  # `db`), so every body that can carry a `relay_verdict_*` reason takes that
+  # branch. Wiring the legacy no-`server_up` branch too would be dead code.
+  local health_json="$1"
+  local reasons_csv
+  [ -n "$health_json" ] || return 1
+
+  if _health_json_has_jq; then
+    printf '%s' "$health_json" | jq -e '
+      .status == "degraded"
+      and (.db == true)
+      and (.server_up == true)
+      and ((.degraded_reasons // []) | length > 0)
+      and all((.degraded_reasons // [])[]; type == "string" and startswith("relay_verdict_"))
+    ' >/dev/null 2>&1
+    return
+  fi
+
+  # jq-less fallback, element-wise across the whole CSV — the same shape (and the
+  # same reason) as `_health_json_gateway_standby_only`. `[^,]+` cannot span the
+  # join, so a reason carrying a literal comma fails to match and the gate
+  # BLOCKS: the safe direction for an ALLOW test.
+  [ "$(_health_json_status "$health_json")" = "degraded" ] || return 1
+  _health_json_field_is_true "$health_json" "db" || return 1
+  _health_json_field_is_true "$health_json" "server_up" || return 1
+  reasons_csv=$(_health_json_reasons "$health_json" || true)
+  [ -n "$reasons_csv" ] || return 1
+  [[ "$reasons_csv" =~ ^relay_verdict_[^,]+(,relay_verdict_[^,]+)*$ ]]
+}
+
 _health_json_unhealthy_only_no_provider_runtimes() {
   # #4348 DEPLOY/RESTART readiness rescue — NOT a runtime /health change.
   # Returns 0 when the node is provably SERVING the new binary (server_up + db +
@@ -831,6 +888,13 @@ health_json_is_ready() {
     if _health_json_has_reconcile_stalled "$health_json"; then
       echo "  ▸ provider reconcile is stalled (reconcile_stalled) — deploy stays blocked"
       return 1
+    fi
+    # #5736: placed AFTER the reconcile_stalled deny so a body carrying both
+    # still blocks, and before the reason-blind `fully_recovered == false`
+    # allowance so the tolerance is logged rather than absorbed silently.
+    if _health_json_degraded_only_relay_verdict "$health_json"; then
+      echo "  ▸ relay verdict axis is the only degraded cause ($(_health_json_reasons "$health_json")) — deploy proceeds; health still reports degraded"
+      return 0
     fi
     if [ "$allow_reconcile_degraded" = "1" ] \
       && _health_json_field_exists "$health_json" "fully_recovered" \

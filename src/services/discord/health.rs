@@ -111,6 +111,7 @@ pub use snapshot::{
 };
 
 /// Per-provider snapshot for the health response.
+#[derive(Clone)]
 pub(super) struct ProviderEntry {
     pub(super) name: String,
     pub(super) shared: Arc<SharedData>,
@@ -463,6 +464,24 @@ impl HealthRegistry {
         }
 
         false
+    }
+
+    /// Owned view of the registered providers, with the mutex RELEASED before
+    /// the caller probes them (#5736).
+    ///
+    /// The health builds walk every mailbox of every provider with file IO and a
+    /// tmux probe per channel. Doing that under `providers` serialized the poll
+    /// against every path that takes the same lock — registration, the recovery
+    /// sweeps, and the runtime resolvers — so one slow probe delayed real
+    /// recovery work rather than just the response. Cloning is an `Arc` bump and
+    /// a `String` per provider; the registry list is a handful of entries.
+    ///
+    /// The cost is that a provider registered or removed mid-build is not
+    /// observed by that build. That was already the contract for
+    /// `active_request_owner_for_channel`, and a health snapshot is a sample,
+    /// not a transaction.
+    pub(super) async fn provider_entries_snapshot(&self) -> Vec<ProviderEntry> {
+        self.providers.lock().await.clone()
     }
 
     pub(super) async fn registered_provider_count(&self) -> usize {

@@ -1048,6 +1048,7 @@ server::routes::health_api::tests::public_auto_queue_cleanup_backlog_is_served_o
 server::routes::health_api::tests::public_auto_queue_cleanup_projection_is_count_only
 server::routes::health_api::tests::public_health_exposes_release_source_read_failure
 server::routes::health_api::tests::public_health_exposes_rollout_flag_source_on_both_assembly_points
+server::routes::health_api::tests::public_health_json_carries_the_relay_verdict_axis_onto_the_summary
 server::routes::health_api::tests::public_health_json_degraded_iff_reasons_nonempty
 server::routes::health_api::tests::public_health_json_degraded_status_reports_not_ok
 server::routes::health_api::tests::public_health_json_keeps_degraded_and_startup_reasons_distinct
@@ -1063,6 +1064,7 @@ server::routes::health_api::tests::registry_purge_decision_gates_on_request_and_
 server::routes::health_api::tests::stale_mailbox_repair_applied_includes_session_only_disconnect
 server::routes::health_api::tests::standalone_relay_authority_observation_publishes_the_whole_triage_block
 server::routes::health_api::tests::standalone_relay_authority_rollout_publishes_the_whole_dormant_block
+server::routes::health_api::tests::summary_and_detail_routes_agree_on_status_and_degraded_reasons
 server::routes::health_api::tests::supported_provider_ids_contain_no_colon
 server::routes::kanban::update_card_validation_tests::update_card_validation_accepts_valid_metadata_json_object
 server::routes::kanban::update_card_validation_tests::update_card_validation_accepts_valid_metadata_json_scalar
@@ -2793,16 +2795,19 @@ services::discord::health::runtime_resolve::direct_meeting_candidate_tests::sing
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::single_live_match_is_selected_without_explicit_match
 services::discord::health::session_enrichment::tests::a_channel_with_no_coordinate_entry_polls_as_absent
 services::discord::health::session_enrichment::tests::a_generation_stamp_moving_under_the_offset_read_witnesses_nothing
+services::discord::health::session_enrichment::tests::an_exhausted_tmux_budget_withholds_a_live_session
 services::discord::health::session_enrichment::tests::health_load_carries_the_live_watcher_transcript_into_the_enrichment
 services::discord::health::session_enrichment::tests::health_load_records_transcript_source_divergence_only_when_the_paths_split
 services::discord::health::session_enrichment::tests::health_reads_the_live_watcher_transcript_off_the_channel_binding
 services::discord::health::session_enrichment::tests::health_reports_no_watcher_transcript_for_a_channel_without_a_binding
+services::discord::health::session_enrichment::tests::health_snapshot_wires_the_tmux_budget_and_probe
 services::discord::health::session_enrichment::tests::inflight_a_alive_watcher_b_dead_mismatch_probes_a
 services::discord::health::session_enrichment::tests::only_exact_dead_or_absent_maps_to_dead
 services::discord::health::session_enrichment::tests::the_health_poll_reports_an_absent_coordinate_as_absent
 services::discord::health::session_enrichment::tests::transcript_discovery_falls_back_to_the_inflight_row_and_then_to_nothing
 services::discord::health::session_enrichment::tests::transcript_discovery_prefers_the_live_watcher_over_the_inflight_row
 services::discord::health::snapshot::tests::a_green_relay_verdict_degrades_the_snapshot_in_neither_mode
+services::discord::health::snapshot::tests::a_health_poll_leaves_a_legacy_inflight_row_byte_identical
 services::discord::health::snapshot::tests::a_non_green_relay_verdict_never_improves_an_unhealthy_snapshot
 services::discord::health::snapshot::tests::bound_selector_absent_when_no_source_and_omitted_from_json
 services::discord::health::snapshot::tests::bound_selector_falls_back_to_runtime_binding
@@ -2822,6 +2827,7 @@ services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::re
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_abstains_when_reachability_ledger_is_absent
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_records_row_vs_registry_identity_divergence
 services::discord::health::snapshot::tests::stale_ownerless_external_input_inflight_is_not_foreground_even_with_cancel_token
+services::discord::health::snapshot::tests::summary_and_detail_agree_on_the_composite_relay_verdict_polarity
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_rejects_same_second_synthetic_successor_4181
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_rejects_successor_episode_4181
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_survives_process_restart_4181
