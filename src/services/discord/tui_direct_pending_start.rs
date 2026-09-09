@@ -36,6 +36,7 @@ use super::SharedData;
 use crate::services::discord::tmux_watcher_registry::{
     TerminalDeliveryFence, WatcherIdentityFence, execution_identity_mode,
 };
+use crate::services::tui_prompt_dedupe::{TuiPromptAnchor, clear_prompt_anchor_for_response};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -733,12 +734,18 @@ async fn run_worker_inner(
                     // i.e. the input was already submitted and usually merges
                     // into the prior owner's turn (a normal outcome, not a
                     // failure). The event key is load-bearing — never change it.
+                    // P2-G: this abandon leaks the shared prompt-anchor slot
+                    // exactly like the exhaustion branch below — the prior
+                    // owner's identity-guarded completion can never clear OUR
+                    // anchor out of it. Release it here (process-local only).
+                    let anchor_slot_released = release_prompt_anchor_slot(&record);
                     tracing::warn!(
                         provider = %record.provider,
                         channel_id = record.channel_id,
                         tmux_session_name = %record.tmux_session_name,
                         anchor_message_id = record.anchor_message_id,
                         backstop_cycles,
+                        anchor_slot_released,
                         waited_ms = worker_start.elapsed().as_millis(),
                         event = "tui_direct_pending_start.backstop_abort_foreign_inflight_live",
                         "tui_direct_pending_start: prior inflight stayed LIVE across the backstop escalation budget; ABORTING the synthetic turn-start claim without overwriting the live prior turn — input already submitted; abort marker recorded, reconcile lands ✅ via prior-owner completion or ⚠ via TTL fallback (#3296)"
@@ -812,12 +819,17 @@ async fn run_worker_inner(
         claim_attempts = claim_attempts.saturating_add(1);
         update_claim_attempt_count(&mut record, claim_attempts);
         if claim_attempts >= PENDING_START_MAX_CLAIM_ATTEMPTS {
+            // #5833 E11: no lifecycle will ever complete for this anchor in
+            // THIS process, so release the shared prompt-anchor slot before the
+            // early return (the durable record still stays for restart retry).
+            let anchor_slot_released = release_prompt_anchor_slot(&record);
             tracing::error!(
                 provider = %record.provider,
                 channel_id = record.channel_id,
                 tmux_session_name = %record.tmux_session_name,
                 anchor_message_id = record.anchor_message_id,
                 claim_attempts,
+                anchor_slot_released,
                 waited_ms = worker_start.elapsed().as_millis(),
                 event = "tui_direct_pending_start.claim_retry_exhausted",
                 "tui_direct_pending_start: claim returned false across the retry budget (another turn owns the mailbox or saves keep failing); abandoning the synthetic ownership claim to avoid an unbounded spin (record retained for restart re-attempt)"
@@ -838,6 +850,28 @@ async fn run_worker_inner(
         tokio::time::sleep(PENDING_START_CLAIM_RETRY_BACKOFF).await;
         // Loop back: re-confirm the prior turn is still finalized, then re-claim.
     }
+}
+
+/// #5833 (E11) + review P2-G: release the process-local `(provider, tmux)`
+/// PROMPT ANCHOR slot when this deferred synthetic start is ABANDONED (terminal
+/// backstop ABORT or claim-retry exhaustion). `record_prompt_anchor` stamps that
+/// single per-pane slot for BOTH the inline and deferred submit paths, but only
+/// a COMPLETED lifecycle ever clears it — so an abandoned start parks its anchor
+/// id there forever and the next response with no pinned anchor of its own
+/// inherits that stale placeholder (E11: a 93s-old abandoned anchor was edited
+/// by a later turn's adapter). Only PROCESS-LOCAL state is released; the durable
+/// record / abort-marker lifecycle is untouched. [`clear_prompt_anchor_for_response`]
+/// is identity-guarded (it removes the slot ONLY while it still equals the anchor
+/// passed here), so a NEWER turn that already overwrote the slot keeps its anchor.
+fn release_prompt_anchor_slot(record: &TuiDirectPendingStart) -> bool {
+    clear_prompt_anchor_for_response(
+        &record.provider,
+        &record.tmux_session_name,
+        TuiPromptAnchor {
+            channel_id: record.channel_id,
+            message_id: record.anchor_message_id,
+        },
+    )
 }
 
 fn record_deferred_claim_marker_if_watcher_owned(record: &TuiDirectPendingStart) {

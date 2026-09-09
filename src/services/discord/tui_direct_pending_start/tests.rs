@@ -2643,6 +2643,369 @@ async fn claim_false_exhausted_still_retains_record() {
     reset_present_for_tests();
 }
 
+// ---------------------------------------------------------------------------
+// #5833 S6 — the shared prompt-anchor slot must be released when a deferred
+// synthetic start is ABANDONED.
+//
+// `record_prompt_anchor` stamps ONE slot per `(provider, tmux)` for both the
+// inline and the deferred submit paths, but only a COMPLETED lifecycle clears
+// it. E11: a deferred start that exhausted its claim retry budget left its
+// anchor id parked there, and 93s later another turn's adapter inherited that
+// stale placeholder id and edited the wrong message. The four tests below pin
+// the release, its identity guard, and the paths that must NOT release.
+// ---------------------------------------------------------------------------
+
+/// Shared rig for the anchor-slot tests: isolates the durable store root AND
+/// the process-global dedupe state. Lock order is env -> dedupe (the order
+/// `tui_prompt_dedupe::TEST_LOCK`'s doc pins globally).
+struct AnchorSlotRig {
+    _env_lock: std::sync::MutexGuard<'static, ()>,
+    _dedupe_lock: std::sync::MutexGuard<'static, ()>,
+    _env: EnvReset,
+    _temp: tempfile::TempDir,
+}
+
+impl AnchorSlotRig {
+    fn new() -> Self {
+        let env_lock = crate::config::shared_test_env_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dedupe_lock = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let env = EnvReset(std::env::var_os("AGENTDESK_ROOT_DIR"));
+        let temp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", temp.path()) };
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+        reset_present_for_tests();
+        Self {
+            _env_lock: env_lock,
+            _dedupe_lock: dedupe_lock,
+            _env: env,
+            _temp: temp,
+        }
+    }
+}
+
+impl Drop for AnchorSlotRig {
+    fn drop(&mut self) {
+        reset_present_for_tests();
+        crate::services::tui_prompt_dedupe::reset_state_for_tests();
+    }
+}
+
+fn anchor_slot(record: &TuiDirectPendingStart) -> Option<TuiPromptAnchor> {
+    crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+        &record.provider,
+        &record.tmux_session_name,
+        record.channel_id,
+    )
+}
+
+fn paused_rt() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("test runtime")
+}
+
+fn claim_always_false() -> ClaimFn {
+    Box::new(|_shared, _record| Box::pin(async move { false }))
+}
+
+/// Drive the whole bounded claim-retry budget to exhaustion.
+async fn drive_claim_retries_to_exhaustion() {
+    for _ in 0..(PENDING_START_MAX_CLAIM_ATTEMPTS + 2) {
+        tokio::time::advance(PENDING_START_CLAIM_RETRY_BACKOFF + PENDING_START_POLL).await;
+        tokio::task::yield_now().await;
+    }
+}
+
+/// S6T1 (#5833 E11): after the claim retry budget is exhausted the worker
+/// abandons the synthetic ownership claim, so the `(provider, tmux)` prompt
+/// anchor slot must no longer hold the abandoned record's `anchor_message_id`
+/// — `prompt_anchor_for_response` resolves `None`. RED pre-#5833: the slot kept
+/// the abandoned anchor forever (only a COMPLETED lifecycle ever cleared it) and
+/// a later turn's adapter inherited the stale placeholder id.
+/// Also pins mutant 3: the durable record is STILL retained for restart retry.
+// Sync test + explicit block_on: the std-mutex test-env guards live only in
+// this sync scope and never span an await, so no await_holding_lock allow is
+// needed (#3034 ratchet stays frozen at its baseline).
+#[test]
+fn claim_retry_exhaustion_releases_the_abandoned_prompt_anchor_slot() {
+    let _guard = worker_test_lock();
+    let _rig = AnchorSlotRig::new();
+
+    let rec = record("claude", 31, 310);
+    crate::services::tui_prompt_dedupe::record_prompt_anchor(
+        &rec.provider,
+        &rec.tmux_session_name,
+        rec.channel_id,
+        rec.anchor_message_id,
+    );
+    assert_eq!(
+        anchor_slot(&rec),
+        Some(TuiPromptAnchor {
+            channel_id: 31,
+            message_id: 310,
+        }),
+        "precondition: the deferred submit stamped the shared slot"
+    );
+    persist(&rec).unwrap();
+
+    let (abort_cleanup, abort_cleanup_calls, _) = recording_abort_cleanup();
+    let for_worker = rec.clone();
+    paused_rt().block_on(async move {
+        let shared = super::super::make_shared_data_for_tests();
+        let handle = tokio::spawn(run_worker(
+            shared,
+            for_worker,
+            finalized_view(),
+            claim_always_false(),
+            abort_cleanup,
+            never_reclaim_orphan(),
+        ));
+        drive_claim_retries_to_exhaustion().await;
+        handle.await.unwrap();
+    });
+
+    assert_eq!(
+        anchor_slot(&rec),
+        None,
+        "RED pre-#5833 (E11): the abandoned deferred start left its anchor id \
+         parked in the shared per-pane slot, so the NEXT response without a \
+         pinned anchor of its own inherited that stale placeholder"
+    );
+    assert!(
+        pending_synthetic_start_present("claude", 31),
+        "the release is PROCESS-LOCAL only — the durable record must still be \
+         retained for the restart re-attempt (RED if the abandon also deletes it)"
+    );
+    assert_eq!(records_for_channel("claude", 31).len(), 1);
+    assert_eq!(
+        abort_cleanup_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "#3282: retry exhaustion still must not run the abort reaction cleanup"
+    );
+}
+
+/// S6T2 (identity guard): if a NEWER turn already overwrote the shared slot
+/// before this deferred start is abandoned, the abandon must LEAVE the newer
+/// anchor in place — `clear_prompt_anchor_for_response` only removes the slot
+/// while it still equals the anchor handed to it. RED if the abandon clears the
+/// slot unconditionally by `(provider, tmux)` key: that would strand the newer
+/// live turn's `⏳` exactly the way E11 stranded the older one.
+// Sync test + explicit block_on: see the note on the sibling test above.
+#[test]
+fn claim_retry_exhaustion_leaves_a_newer_turns_prompt_anchor_in_place() {
+    let _guard = worker_test_lock();
+    let _rig = AnchorSlotRig::new();
+
+    let rec = record("claude", 32, 320);
+    let newer = TuiPromptAnchor {
+        channel_id: rec.channel_id,
+        message_id: 3299,
+    };
+    crate::services::tui_prompt_dedupe::record_prompt_anchor(
+        &rec.provider,
+        &rec.tmux_session_name,
+        rec.channel_id,
+        rec.anchor_message_id,
+    );
+    // A NEWER turn on the same pane overwrites the single shared slot.
+    crate::services::tui_prompt_dedupe::record_prompt_anchor(
+        &rec.provider,
+        &rec.tmux_session_name,
+        newer.channel_id,
+        newer.message_id,
+    );
+    persist(&rec).unwrap();
+
+    let (abort_cleanup, _, _) = recording_abort_cleanup();
+    let for_worker = rec.clone();
+    paused_rt().block_on(async move {
+        let shared = super::super::make_shared_data_for_tests();
+        let handle = tokio::spawn(run_worker(
+            shared,
+            for_worker,
+            finalized_view(),
+            claim_always_false(),
+            abort_cleanup,
+            never_reclaim_orphan(),
+        ));
+        drive_claim_retries_to_exhaustion().await;
+        handle.await.unwrap();
+    });
+
+    assert_eq!(
+        anchor_slot(&rec),
+        Some(newer),
+        "the abandon must clear ONLY its own anchor. RED if it clears the slot \
+         unconditionally by key — the newer live turn would lose its ⏳ owner"
+    );
+}
+
+/// S6T3 (scope): a TRANSIENT claim failure is not an abandon. The worker keeps
+/// retrying, so the slot must still hold this turn's anchor across the retry
+/// backoff, and it must still hold it after the claim finally SUCCEEDS (the
+/// normal `⏳ → ✅` completion owns the anchor there, per #3282). RED if the
+/// clear is added to the transient-retry branch: the still-live turn's own
+/// response would then find no anchor and post a fresh message instead of
+/// resolving its `⏳`.
+// Sync test + explicit block_on: see the note on the sibling tests above.
+#[test]
+fn transient_claim_retry_and_success_keep_the_prompt_anchor_slot() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let _guard = worker_test_lock();
+    let _rig = AnchorSlotRig::new();
+
+    let rec = record("claude", 33, 330);
+    let own = TuiPromptAnchor {
+        channel_id: rec.channel_id,
+        message_id: rec.anchor_message_id,
+    };
+    crate::services::tui_prompt_dedupe::record_prompt_anchor(
+        &rec.provider,
+        &rec.tmux_session_name,
+        rec.channel_id,
+        rec.anchor_message_id,
+    );
+    persist(&rec).unwrap();
+
+    // First two claims fail transiently; the third succeeds.
+    let attempts = Arc::new(AtomicU32::new(0));
+    let attempts_for_fn = attempts.clone();
+    let claim: ClaimFn = Box::new(move |_shared, _record| {
+        let attempts = attempts_for_fn.clone();
+        Box::pin(async move { attempts.fetch_add(1, Ordering::SeqCst) >= 2 })
+    });
+
+    let (abort_cleanup, _, _) = recording_abort_cleanup();
+    let for_worker = rec.clone();
+    let mid_flight_slot = paused_rt().block_on(async move {
+        let shared = super::super::make_shared_data_for_tests();
+        let handle = tokio::spawn(run_worker(
+            shared,
+            for_worker,
+            finalized_view(),
+            claim,
+            abort_cleanup,
+            never_reclaim_orphan(),
+        ));
+        // One transient false + its backoff has elapsed by here.
+        tokio::task::yield_now().await;
+        tokio::time::advance(PENDING_START_CLAIM_RETRY_BACKOFF + PENDING_START_POLL).await;
+        tokio::task::yield_now().await;
+        let mid_flight_slot =
+            crate::services::tui_prompt_dedupe::prompt_anchor_for_response("claude", "tmux-33", 33);
+        for _ in 0..PENDING_START_MAX_CLAIM_ATTEMPTS {
+            tokio::time::advance(PENDING_START_CLAIM_RETRY_BACKOFF + PENDING_START_POLL).await;
+            tokio::task::yield_now().await;
+        }
+        handle.await.unwrap();
+        mid_flight_slot
+    });
+
+    assert_eq!(
+        mid_flight_slot,
+        Some(own),
+        "a transient claim==false is a RETRY, not an abandon — the slot must \
+         keep this turn's anchor. RED if the clear is added to the retry branch"
+    );
+    assert!(
+        attempts.load(Ordering::SeqCst) >= 3,
+        "precondition: the worker retried and the third claim succeeded"
+    );
+    assert_eq!(
+        anchor_slot(&rec),
+        Some(own),
+        "a SUCCESSFUL claim leaves the anchor to the normal ⏳ → ✅ completion \
+         (#3282) — the abandon-only clear must never fire on the success path"
+    );
+    assert!(
+        !pending_synthetic_start_present("claude", 33),
+        "precondition: the successful claim deleted the durable record"
+    );
+}
+
+/// S6T4 (design-review P2-G): the terminal backstop ABORT — a FOREIGN prior
+/// inflight stayed live across the whole escalation budget — is the OTHER
+/// abandon. No claim ever runs for this anchor, and the prior owner's own
+/// identity-guarded completion can never clear OUR anchor out of the shared
+/// slot, so it leaks exactly like the exhaustion branch. The abort must release
+/// it while leaving the #3296 marker/reconcile contract untouched.
+// Sync test + explicit block_on: see the note on the sibling tests above.
+#[test]
+fn backstop_abort_releases_the_abandoned_prompt_anchor_slot() {
+    use std::sync::atomic::Ordering;
+
+    let _guard = worker_test_lock();
+    let _rig = AnchorSlotRig::new();
+
+    let rec = record("claude", 34, 340);
+    crate::services::tui_prompt_dedupe::record_prompt_anchor(
+        &rec.provider,
+        &rec.tmux_session_name,
+        rec.channel_id,
+        rec.anchor_message_id,
+    );
+    persist(&rec).unwrap();
+
+    // A genuinely live FOREIGN prior inflight, forever.
+    let view: ViewFn = Box::new(move |_shared, _record| {
+        Box::pin(async move {
+            Some(PriorTurnObservation {
+                view: PriorTurnView {
+                    inflight_present: true,
+                    inflight_is_own_anchor: false,
+                    mailbox_blocking_turn_present: true,
+                    mailbox_turn_is_own_anchor: false,
+                    runtime_binding_present: true,
+                },
+                foreign_inflight_identity: Some((888, "2026-06-10 12:00:00".to_string())),
+            })
+        })
+    });
+
+    let (abort_cleanup, abort_cleanup_calls, _) = recording_abort_cleanup();
+    let for_worker = rec.clone();
+    paused_rt().block_on(async move {
+        let shared = super::super::make_shared_data_for_tests();
+        let handle = tokio::spawn(run_worker(
+            shared,
+            for_worker,
+            view,
+            claim_succeeds(),
+            abort_cleanup,
+            never_reclaim_orphan(),
+        ));
+        for _ in 0..(PENDING_START_MAX_BACKSTOP_CYCLES + 1) {
+            tokio::time::advance(PENDING_START_BACKSTOP + PENDING_START_POLL * 2).await;
+            tokio::task::yield_now().await;
+        }
+        handle.await.unwrap();
+    });
+
+    assert_eq!(
+        anchor_slot(&rec),
+        None,
+        "P2-G: the terminal backstop ABORT leaked the shared slot the same way \
+         the retry-exhaustion abandon did — RED if the clear is missing here"
+    );
+    assert_eq!(
+        abort_cleanup_calls.load(Ordering::SeqCst),
+        1,
+        "#3296: the durable aborted-anchor marker hook still runs exactly once \
+         (the anchor keeps its ⏳; the watcher drain / TTL sweep reconcile it)"
+    );
+    assert!(
+        !pending_synthetic_start_present("claude", 34),
+        "#3282: the terminal abort still drops the ownership record"
+    );
+}
+
 // Sync test + explicit block_on: the std-mutex test-env guards live only in
 // this sync scope and never span an await, so no await_holding_lock allow is
 // needed (#3034 ratchet stays frozen at its baseline).
