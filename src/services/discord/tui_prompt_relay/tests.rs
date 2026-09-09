@@ -2804,6 +2804,375 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
 // ====================================================================
 
 #[cfg(unix)]
+#[derive(Default)]
+struct S3Gateway {
+    bodies: std::sync::Mutex<Vec<String>>,
+    deleted: std::sync::Mutex<Vec<MessageId>>,
+}
+#[cfg(unix)]
+impl TurnGateway for S3Gateway {
+    fn send_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        content: &'a str,
+    ) -> super::super::gateway::GatewayFuture<'a, Result<MessageId, String>> {
+        Box::pin(async move {
+            self.bodies.lock().unwrap().push(content.to_string());
+            Ok(MessageId::new(880003))
+        })
+    }
+
+    fn send_long_message_with_rollback<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _rollback_anchor_msg_id: MessageId,
+        content: &'a str,
+    ) -> super::super::gateway::GatewayFuture<'a, Result<Vec<MessageId>, String>> {
+        Box::pin(async move {
+            let chunks = super::super::formatting::split_message(content);
+            let count = chunks.len().max(1);
+            Ok((0..count).map(|_| MessageId::new(880003)).collect())
+        })
+    }
+
+    fn edit_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+        content: &'a str,
+    ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.bodies.lock().unwrap().push(content.to_string());
+            Ok(())
+        })
+    }
+
+    fn replace_message_with_outcome<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+        content: &'a str,
+    ) -> super::super::gateway::GatewayFuture<
+        'a,
+        Result<super::super::formatting::ReplaceLongMessageOutcome, String>,
+    > {
+        Box::pin(async move {
+            self.bodies.lock().unwrap().push(content.to_string());
+            Ok(super::super::formatting::ReplaceLongMessageOutcome::EditedOriginal)
+        })
+    }
+
+    fn delete_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+    ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.deleted.lock().unwrap().push(_message_id);
+            Ok(())
+        })
+    }
+
+    fn schedule_retry_with_history<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        _user_message_id: MessageId,
+        user_text: &'a str,
+    ) -> super::super::gateway::GatewayFuture<'a, ()> {
+        Box::pin(async move {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 📦 Headless retry suppressed for channel {}: {}",
+                channel_id,
+                user_text
+            );
+        })
+    }
+
+    fn dispatch_queued_turn<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _intervention: &'a super::super::Intervention,
+        _request_owner_name: &'a str,
+        _has_more_queued_turns: bool,
+        _dispatch_lease: Option<std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>>,
+    ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
+        Box::pin(
+            async move { Err("headless turns do not dispatch queued turns locally".to_string()) },
+        )
+    }
+
+    fn validate_live_routing<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+    ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn requester_mention(&self) -> Option<String> {
+        None
+    }
+
+    fn can_chain_locally(&self) -> bool {
+        false
+    }
+
+    fn bot_owner_provider(&self) -> Option<ProviderKind> {
+        None
+    }
+}
+
+#[cfg(unix)]
+async fn s3_completion_fixture(
+    streamed: bool,
+    signal: Option<bool>,
+    owned: Option<u64>,
+    durable: Option<u64>,
+) {
+    use crate::services::discord::turn_bridge::BridgeCompletionSignal;
+    use crate::services::tui_prompt_dedupe::{prompt_anchor_for_response, record_prompt_anchor};
+    let temp = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = if streamed {
+        ProviderKind::Claude
+    } else {
+        ProviderKind::Codex
+    };
+    let channel = ChannelId::new(880001);
+    let user = MessageId::new(880002);
+    let current = MessageId::new(880003);
+    let tmux = "s3-completion-fixture";
+    let lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
+    let token = Arc::new(CancelToken::new());
+    assert!(
+        super::super::mailbox_try_start_turn(
+            &shared,
+            channel,
+            token.clone(),
+            serenity::UserId::new(TUI_DIRECT_SYNTHETIC_OWNER_USER_ID),
+            MessageId::new(880004)
+        )
+        .await
+    );
+    let path = super::super::inflight::inflight_state_path(
+        &super::super::inflight::inflight_runtime_root().unwrap(),
+        &provider,
+        channel.get(),
+    );
+    let before = durable.map(|id| {
+        let mut row = build_tui_direct_bridge_inflight_state(
+            provider.clone(),
+            channel,
+            MessageId::new(880004),
+            MessageId::new(id),
+            "successor",
+            tmux,
+            &temp.path().join("out.jsonl"),
+            71,
+            &lease,
+        );
+        row.turn_nonce = token.turn_nonce().map(str::to_owned);
+        row.full_response = "후속 턴 바이트".into();
+        super::super::inflight::save_inflight_state(&row).unwrap();
+        std::fs::read(&path).unwrap()
+    });
+    record_prompt_anchor(provider.as_str(), tmux, channel.get(), user.get());
+    let anchor = prompt_anchor_for_response(provider.as_str(), tmux, channel.get());
+    let gateway = Arc::new(S3Gateway::default());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if signal == Some(false) {
+        let (stream_tx, stream_rx) = mpsc::channel();
+        stream_tx
+            .send(StreamMessage::Text {
+                content: "한국어 응답 접두사".into(),
+            })
+            .unwrap();
+        stream_tx
+            .send(StreamMessage::Done {
+                result: "한국어 응답 접두사".into(),
+                session_id: None,
+            })
+            .unwrap();
+        drop(stream_tx);
+        let bridge = TurnBridgeContext {
+            provider: provider.clone(),
+            gateway: gateway.clone(),
+            channel_id: channel,
+            user_msg_id: Some(user),
+            user_text_owned: "prior turn".into(),
+            request_owner_name: "TUI direct".into(),
+            role_binding: None,
+            adk_session_key: lease.session_key.clone(),
+            adk_session_name: Some(tmux.into()),
+            adk_session_info: None,
+            adk_cwd: None,
+            dispatch_id: None,
+            dispatch_kind: None,
+            memory_recall_usage: TokenUsage::default(),
+            context_window_tokens: 0,
+            context_compact_percent: 0,
+            current_msg_id: Some(current),
+            response_sent_offset: 0,
+            full_response: String::new(),
+            tmux_last_offset: Some(0),
+            new_session_id: None,
+            defer_watcher_resume: false,
+            reuse_status_panel_message: false,
+            completion_tx: Some(tx),
+            is_external_input_tui_direct: true,
+            inflight_state: build_tui_direct_bridge_inflight_state(
+                provider.clone(),
+                channel,
+                user,
+                current,
+                "prior turn",
+                tmux,
+                &temp.path().join("out.jsonl"),
+                0,
+                &lease,
+            ),
+        };
+        super::super::turn_bridge::spawn_turn_bridge_with_pin(
+            shared.clone(),
+            Arc::new(CancelToken::new()),
+            stream_rx,
+            bridge,
+            None,
+        );
+    } else if signal == Some(true) {
+        tx.send(BridgeCompletionSignal::Finalized).unwrap();
+    } else {
+        drop(tx);
+    }
+    let completion = tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .expect("bridge completes");
+    if signal == Some(false) {
+        assert_eq!(completion, Ok(BridgeCompletionSignal::EntryAborted));
+    }
+    let result = super::claude_idle_bridge::finish_idle_bridge_completion(
+        Ok(completion),
+        gateway.as_ref(),
+        &provider,
+        channel,
+        user,
+        current,
+        owned.map(MessageId::new),
+        tmux,
+        &lease,
+        anchor,
+        streamed,
+    )
+    .await;
+    assert_eq!(result.is_ok(), signal == Some(true));
+    assert_eq!(
+        tui_idle_tail_stream_should_commit_runtime_binding_offset(result.is_ok()),
+        signal == Some(true)
+    );
+    if signal != Some(true) {
+        assert_eq!(
+            result.unwrap_err(),
+            "TUI-direct bridge entry aborted before authority"
+        );
+        assert_eq!(
+            prompt_anchor_for_response(provider.as_str(), tmux, channel.get()),
+            anchor
+        );
+    }
+    if let Some(before) = before {
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+    assert!(!token.cancelled.load(Ordering::Relaxed));
+    assert_eq!(
+        super::super::mailbox_snapshot(&shared, channel)
+            .await
+            .active_user_message_id,
+        Some(MessageId::new(880004))
+    );
+    assert!(gateway.bodies.lock().unwrap().is_empty());
+    let expected = if signal != Some(true) {
+        owned
+            .filter(|id| Some(*id) != durable && *id != 880004)
+            .map(MessageId::new)
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        vec![]
+    };
+    assert_eq!(*gateway.deleted.lock().unwrap(), expected);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn s3t1_abort_and_recv_error_preserve_foreign_turn_and_anchor() {
+    s3_completion_fixture(true, Some(false), Some(880003), Some(880005)).await;
+    s3_completion_fixture(true, None, Some(880003), Some(880005)).await;
+    let source = include_str!("claude_idle_bridge.rs");
+    let abort = source
+        .split("aborted @")
+        .nth(1)
+        .unwrap()
+        .split("Err(_) => Err(format!(")
+        .next()
+        .unwrap();
+    assert!(!abort.contains("ensure_tui_direct_bridge_delivery_committed"));
+    assert!(!abort.contains("clear_prompt_anchor_for_response"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn s3t2_delivery_failure_never_cancels_successor_or_commits_cursor() {
+    for source in [
+        include_str!("claude_idle_tail.rs"),
+        include_str!("codex_idle_rollout.rs"),
+    ] {
+        let branch = source
+            .split("if delivery_result.is_err() {")
+            .nth(1)
+            .unwrap()
+            .split("\n    }")
+            .next()
+            .unwrap();
+        assert!(!branch.contains("finish_tui_direct_synthetic_turn_if_current"));
+        assert!(source.contains("tui_idle_tail_stream_should_commit_runtime_binding_offset("));
+    }
+    s3_completion_fixture(true, Some(false), Some(880003), Some(880005)).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn s3t3_abort_deletes_only_owned_unreferenced_placeholder() {
+    for owned in [Some(880003), Some(880005), Some(880004), None] {
+        s3_completion_fixture(true, Some(false), owned, Some(880005)).await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn s3t4_finalized_accepts_successor_and_missing_row() {
+    for streamed in [true, false] {
+        for durable in [Some(880005), None] {
+            s3_completion_fixture(streamed, Some(true), Some(880003), durable).await;
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
+    s3_completion_fixture(false, Some(false), Some(880003), Some(880005)).await;
+    s3_completion_fixture(false, None, Some(880003), Some(880005)).await;
+    let source = include_str!("claude_idle_bridge.rs");
+    assert_eq!(
+        source
+            .matches("    finish_idle_bridge_completion(\n        completion,")
+            .count(),
+        2
+    );
+}
+
+#[cfg(unix)]
 fn drain_forwarded_idle_stream(
     prefix: Vec<StreamMessage>,
     rest: Vec<StreamMessage>,
