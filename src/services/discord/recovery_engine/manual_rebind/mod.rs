@@ -598,12 +598,14 @@ async fn rebind_inflight_for_channel_inner(
             rollback_expected_last_offset_for_rebase,
         ) = coordinate_adoption::adopt_coordinates(
             &mut existing,
-            &tmux_session_name,
-            &output_path,
-            &input_fifo_for_state,
-            existing_offset_rebase_to_output,
-            runtime_kind_for_state,
-            &session_id_for_state,
+            coordinate_adoption::AdoptionCoordinates {
+                tmux_session_name: &tmux_session_name,
+                output_path: &output_path,
+                input_fifo_for_state: &input_fifo_for_state,
+                existing_offset_rebase_to_output,
+                runtime_kind_for_state,
+                session_id_for_state: &session_id_for_state,
+            },
             expected_episode,
             &mut locked_episode_from_adoption,
         )

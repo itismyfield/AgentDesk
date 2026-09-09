@@ -1,14 +1,18 @@
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
+/// Normalized runtime coordinates the rebind adopts onto the existing turn.
+pub(super) struct AdoptionCoordinates<'a> {
+    pub(super) tmux_session_name: &'a str,
+    pub(super) output_path: &'a str,
+    pub(super) input_fifo_for_state: &'a Option<String>,
+    pub(super) existing_offset_rebase_to_output: Option<u64>,
+    pub(super) runtime_kind_for_state: Option<RuntimeHandoffKind>,
+    pub(super) session_id_for_state: &'a Option<String>,
+}
+
 pub(super) async fn adopt_coordinates(
     existing: &mut super::inflight::InflightTurnState,
-    tmux_session_name: &str,
-    output_path: &str,
-    input_fifo_for_state: &Option<String>,
-    existing_offset_rebase_to_output: Option<u64>,
-    runtime_kind_for_state: Option<RuntimeHandoffKind>,
-    session_id_for_state: &Option<String>,
+    coordinates: AdoptionCoordinates<'_>,
     expected_episode: Option<&super::inflight::InflightEpisodePin>,
     locked_episode_from_adoption: &mut Option<super::inflight::LockedInflightEpisode>,
 ) -> (
@@ -17,6 +21,14 @@ pub(super) async fn adopt_coordinates(
     Option<u64>,
     Option<u64>,
 ) {
+    let AdoptionCoordinates {
+        tmux_session_name,
+        output_path,
+        input_fifo_for_state,
+        existing_offset_rebase_to_output,
+        runtime_kind_for_state,
+        session_id_for_state,
+    } = coordinates;
     let expected = super::inflight::InflightTurnIdentity::from_state(existing);
     let expected_turn_start_offset = existing.turn_start_offset;
     let expected_last_offset_for_rebase = existing.last_offset;

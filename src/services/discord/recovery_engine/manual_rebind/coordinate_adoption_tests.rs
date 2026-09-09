@@ -62,12 +62,14 @@ fn exercise(successor: bool) {
             let (outcome, rollback_identity, rollback_start, rollback_frontier) =
                 runtime.block_on(coordinate_adoption::adopt_coordinates(
                     &mut adopted,
-                    "normalized-tmux",
-                    "/normalized/events.jsonl",
-                    &Some("/normalized/input".into()),
-                    rebase,
-                    Some(RuntimeHandoffKind::CodexTui),
-                    &Some("normalized-session".into()),
+                    coordinate_adoption::AdoptionCoordinates {
+                        tmux_session_name: "normalized-tmux",
+                        output_path: "/normalized/events.jsonl",
+                        input_fifo_for_state: &Some("/normalized/input".into()),
+                        existing_offset_rebase_to_output: rebase,
+                        runtime_kind_for_state: Some(RuntimeHandoffKind::CodexTui),
+                        session_id_for_state: &Some("normalized-session".into()),
+                    },
                     pinned.then_some(&pin),
                     &mut held,
                 ));
@@ -161,6 +163,22 @@ fn actual_seam_preserves_normal_adoption_and_rollback_coordinates() {
 #[test]
 fn actual_seam_rejects_same_anchor_successor_without_durable_mutation() {
     exercise(true);
+}
+
+#[test]
+fn actual_seam_orders_episode_authority_before_hold_and_return() {
+    let seam = include_str!("coordinate_adoption.rs");
+    assert_eq!(seam.matches("adopt_and_lock_inflight_episode(").count(), 1);
+    let acquire = seam
+        .find("adopt_and_lock_inflight_episode(")
+        .expect("authority");
+    let hold = seam
+        .find("*locked_episode_from_adoption = Some(guard)")
+        .expect("live authority handed to the caller");
+    let ret = seam
+        .rfind("    (\n        save_outcome,")
+        .expect("seam tuple return");
+    assert!(acquire < hold && hold < ret);
 }
 
 #[test]
