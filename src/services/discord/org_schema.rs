@@ -68,6 +68,8 @@ pub(super) struct AgentDef {
     pub auth_profile: Option<String>,
     #[serde(default)]
     pub memory: Option<MemoryConfigOverride>,
+    #[serde(default)]
+    pub recovery: Option<crate::services::agent_recovery::RecoveryConfigWire>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +89,8 @@ pub(super) struct ChannelBinding {
     pub auth_profile: Option<String>,
     #[serde(default)]
     pub memory: Option<MemoryConfigOverride>,
+    #[serde(default)]
+    pub recovery: Option<crate::services::agent_recovery::RecoveryConfigWire>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,8 +130,20 @@ pub(super) struct SummaryRuleDef {
 
 fn load_org_schema() -> Option<OrgSchema> {
     match load_org_schema_for_auth() {
-        Ok(schema) => schema,
+        Ok(Some(schema)) => match install_org_recovery(&schema) {
+            Ok(()) => Some(schema),
+            Err(error) => {
+                tracing::error!(error = %error, "org.yaml recovery policy rejected");
+                crate::services::agent_recovery::clear_catalog();
+                None
+            }
+        },
+        Ok(None) => {
+            crate::services::agent_recovery::clear_catalog();
+            None
+        }
         Err(error) => {
+            crate::services::agent_recovery::clear_catalog();
             tracing::error!("{error}");
             None
         }
@@ -435,6 +451,44 @@ pub(crate) fn api_agent_identity(
         Some(&effective_profile),
     );
     agent_identity::identity_json(&identity)
+}
+
+fn install_org_recovery(
+    schema: &OrgSchema,
+) -> Result<(), crate::services::agent_recovery::PolicyError> {
+    let agents: Vec<crate::services::agent_recovery::OrgAgentInput> = schema
+        .agents
+        .iter()
+        .map(|(id, def)| crate::services::agent_recovery::OrgAgentInput {
+            id: id.clone(),
+            provider: def.provider.clone(),
+            model: def.model.clone(),
+            workspace: def.workspace.clone(),
+            recovery: def.recovery.clone(),
+        })
+        .collect();
+    let channels: Vec<crate::services::agent_recovery::OrgChannelInput> = schema
+        .channels
+        .as_ref()
+        .and_then(|channels| channels.by_id.as_ref())
+        .map(|by_id| {
+            by_id
+                .iter()
+                .map(
+                    |(channel_id, binding)| crate::services::agent_recovery::OrgChannelInput {
+                        channel_id: channel_id.clone(),
+                        agent: binding.agent.clone(),
+                        provider: binding.provider.clone(),
+                        workspace: binding.workspace.clone(),
+                        recovery: binding.recovery.clone(),
+                    },
+                )
+                .collect()
+        })
+        .unwrap_or_default();
+    let catalog = crate::services::agent_recovery::build_recovery_catalog(&agents, &channels)?;
+    crate::services::agent_recovery::install_catalog(catalog);
+    Ok(())
 }
 
 pub(super) fn org_schema_exists() -> bool {

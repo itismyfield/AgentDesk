@@ -560,12 +560,14 @@ pub(super) fn resolve_headless_workspace(
     thread_parent: Option<&(ChannelId, Option<String>)>,
     metadata: Option<&serde_json::Value>,
 ) -> Option<String> {
-    resolve_thread_workspace(channel_id, channel_name_hint, thread_parent).or_else(|| {
-        thread_parent.is_none().then(|| {
-            metadata_parent_channel_id(metadata)
-                .and_then(|parent_id| settings::resolve_workspace(parent_id, None))
-        })?
-    })
+    crate::services::agent_recovery::inherit_workspace(&channel_id.get().to_string())
+        .or_else(|| resolve_thread_workspace(channel_id, channel_name_hint, thread_parent))
+        .or_else(|| {
+            thread_parent.is_none().then(|| {
+                metadata_parent_channel_id(metadata)
+                    .and_then(|parent_id| settings::resolve_workspace(parent_id, None))
+            })?
+        })
 }
 pub(super) fn native_fast_mode_override_for_turn(
     provider: &ProviderKind,
@@ -672,6 +674,16 @@ pub(super) async fn ensure_provider_worktree_isolation(
     channel_name: Option<&str>,
     dispatch_type: Option<&str>,
 ) -> ProviderWorktreeIsolationOutcome {
+    if let Some(workspace) =
+        crate::services::agent_recovery::inherit_workspace(&channel_id.get().to_string())
+    {
+        // Preserve the frozen owner worktree, even if this runtime had another session.
+        *current_path = workspace.clone();
+        if let Some(session) = shared.core.lock().await.sessions.get_mut(&channel_id) {
+            session.current_path = Some(workspace);
+        }
+        return ProviderWorktreeIsolationOutcome::default();
+    }
     let Some(policy) = super::super::super::agentdesk_config::resolve_worktree_isolation_policy(
         channel_id,
         channel_name,

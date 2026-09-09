@@ -595,6 +595,21 @@
       "path": "migrations/postgres/0116_rate_limit_cache_profile_id.sql",
       "sha256": "8e4f72f0055c69b72f346bcfb25d0e06ecf2effa28e783e3008aa370d772990b",
       "version": 116
+    },
+    {
+      "path": "migrations/postgres/0117_agent_recovery_channel_state.sql",
+      "sha256": "305c25cc7b2d51a74b6ee1bafc88f636c6780aed7f3c6c3eac5d39cdbf003e0e",
+      "version": 117
+    },
+    {
+      "path": "migrations/postgres/0118_agent_recovery_fencing_generation.sql",
+      "sha256": "1b176ae9c8978264007b05a19cad9b1077db7f0557cd6d0e2d430c8cda4558b9",
+      "version": 118
+    },
+    {
+      "path": "migrations/postgres/0119_agent_recovery_pending_intents.sql",
+      "sha256": "4f35dfd8d46fe79b41b98f44f78ef819555b19c34f7fe247bfb8332c3a5d7944",
+      "version": 119
     }
   ],
   "version": 1
