@@ -66,6 +66,9 @@ async fn duplicate_guard_does_not_remove_original_registration() {
     let ticket = observe(&cancel).unwrap();
     let duplicate = Registration::new(cancel.clone());
     assert_eq!(*duplicate.sender.borrow(), Outcome::Unknown);
+    drop(duplicate);
+    assert!(observe(&cancel).is_some());
+    let duplicate = Registration::new(cancel.clone());
     let later_ticket = observe(&cancel).unwrap();
     original.finish(Outcome::Returned);
     // The second registration is still live: neither observer may see Returned.

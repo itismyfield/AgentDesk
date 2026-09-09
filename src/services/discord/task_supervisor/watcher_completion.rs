@@ -40,6 +40,9 @@ impl Ticket {
 }
 /// Clone before cancellation. A task that ended before lookup also returns None:
 /// absence is Unknown, never evidence that the watcher joined.
+/// This observes one registration, not all tasks sharing an Arc. After its record
+/// is removed, a third registration may complete while a duplicate still lives.
+/// Retirement consumers must separately establish unique spawn incarnation.
 pub fn observe(cancel: &Arc<AtomicBool>) -> Option<Ticket> {
     let records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
     records.get(&key(cancel)).map(|r| Ticket {
