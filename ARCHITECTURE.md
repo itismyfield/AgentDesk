@@ -25,7 +25,8 @@ src/
 │   │   └── runtime_config.rs
 │   ├── doctor/
 │   │   ├── orchestrator/
-│   │   │   └── config_dir_checks.rs
+│   │   │   ├── config_dir_checks.rs
+│   │   │   └── relay_notifications.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
@@ -753,6 +754,8 @@ src/
 │   │   │   ├── manual_rebind/
 │   │   │   │   ├── adoption.rs
 │   │   │   │   ├── codex_tui_replay.rs
+│   │   │   │   ├── coordinate_adoption.rs
+│   │   │   │   ├── coordinate_adoption_tests.rs
 │   │   │   │   ├── episode_handoff.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── post_adoption_guard_tests.rs
@@ -971,6 +974,8 @@ src/
 │   │   │   │   └── idle_gate.rs
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   └── types.rs
+│   │   │   ├── terminal_commit_epilogue/
+│   │   │   │   └── continuation_marker_tests.rs
 │   │   │   ├── turn_identity/
 │   │   │   │   └── soft_terminal_authority.rs
 │   │   │   ├── commit_decisions.rs

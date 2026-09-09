@@ -137,6 +137,10 @@ cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_deta
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_dispatch_outbox_checks
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_portable_optional_state_checks
 cli::doctor::orchestrator::profile_filter_tests::report_group_round_trip_keeps_portable_groups
+cli::doctor::orchestrator::relay_notifications::tests::declarations_are_unverified_even_when_invalid
+cli::doctor::orchestrator::relay_notifications::tests::rust_whitespace_is_blank
+cli::doctor::orchestrator::relay_notifications::tests::unset_is_warning
+cli::doctor::orchestrator::relay_notifications::tests::wiring_and_read_only_boundary_lexical_tripwire
 cli::doctor::startup::tests::only_the_no_provider_skip_is_replaceable
 cli::doctor::startup::tests::skipped_startup_doctor_writes_current_boot_artifact
 cli::init::launchd_plist_tests::clamp_launchd_nofile_soft_limit_never_exceeds_host_hard_limit
@@ -4101,6 +4105,10 @@ services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::code
 services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::codex_tui_rebind_uses_rollout_resume_offset_with_existing_inflight
 services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::managed_rebind_anchors_first_matching_prompt_after_row_birth
 services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::normalized_rebind_detects_later_rollout_user_prompt
+services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_caller_wires_adoption_before_guarded_handoff
+services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_orders_episode_authority_before_hold_and_return
+services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_preserves_normal_adoption_and_rollback_coordinates
+services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_rejects_same_anchor_successor_without_durable_mutation
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::crossed_codex_turn_forces_watcher_replacement_before_normal_reuse
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::durable_episode_authority_lexically_covers_every_handoff_side_effect
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::episode_pin_rejects_every_handoff_consumed_authority_axis
@@ -5543,6 +5551,11 @@ services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_gu
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::forward_chunk_surfaces_backpressure_evicted_victim_identity
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::per_turn_fully_mirrored_degrades_when_evicted_victim_matches
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::terminal_event_consumed_offset_excludes_buffered_tail
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::caller_arc_wiring
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::late_a_preserves_successor_b
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::paused_preserves_markers
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::pending_preserves_markers
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::same_a_suppresses_duplicate
 services::discord::tmux::tmux_watcher::terminal_readiness::rewind_attempt_key_tests::reset_rewind_attempts_keys_offset_with_turn_identity_4115
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::bridge_suppressed_turn_discards_pending_buffer_before_direct_input
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::claude_watcher_ready_keeps_busy_when_partial_user_follows_terminator

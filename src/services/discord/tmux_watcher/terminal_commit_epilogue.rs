@@ -525,3 +525,7 @@ pub(super) async fn run_terminal_commit_epilogue(
     }
     TerminalCommitEpilogueOutcome::Fallthrough
 }
+
+#[cfg(test)]
+#[path = "terminal_commit_epilogue/continuation_marker_tests.rs"]
+mod continuation_marker_tests;
