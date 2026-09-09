@@ -23,6 +23,7 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
   var backfillMissingSessionAgentIds = helpers.backfillMissingSessionAgentIds;
   var findRecentInflightForSession = helpers.findRecentInflightForSession;
   var inspectInflightProgress = helpers.inspectInflightProgress;
+  var isExternalInputTuiDirectSyntheticTurn = helpers.isExternalInputTuiDirectSyntheticTurn;
   var requestTurnWatchdogExtension = helpers.requestTurnWatchdogExtension;
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
@@ -188,6 +189,16 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
           agentdesk.kv.delete(deadlockKey);
           agentdesk.log.info("[deadlock] Stale working session → idle (no active turn): " + sess.session_key);
           continue;
+        }
+
+        // relay-state-contract.md:43 names only canonical orchestration; deliberately exempt
+        // ALL TUI-direct synthetic owner (user 1) turns by shape, never session-name hardcoding.
+        if (isExternalInputTuiDirectSyntheticTurn(inflightProgress.inflight)) {
+          if (agentdesk.kv.get(deadlockKey) !== '{"count":0,"synthetic_exempt":true}') {
+            agentdesk.log.info("[deadlock] TUI-direct synthetic turn exempt: " + sess.session_key);
+            agentdesk.kv.set(deadlockKey, '{"count":0,"synthetic_exempt":true}');
+          }
+          continue; // One log per stale episode; existing counter cleanup removes the marker.
         }
 
         // Check extension count + last check timestamp
