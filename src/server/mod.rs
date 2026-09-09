@@ -2833,7 +2833,7 @@ where
             }
         } else {
             let error_text = format!("{status}: {err_text}");
-            let action = message_outbox_failure_action(row.retry_count);
+            let action = outbox_actionable_delivery::failure_action(row);
             match action {
                 MessageOutboxFailureAction::Fail { retry_count } => {
                     let failed_update = mark_message_outbox_failed_pg(
