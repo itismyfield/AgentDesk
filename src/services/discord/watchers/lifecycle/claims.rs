@@ -14,10 +14,12 @@ pub(crate) enum WatcherClaimAction {
 // It therefore lives in the cfg-independent `tmux_watcher_registry` module;
 // this re-export keeps the `tmux::WatcherClaimIncarnation` path unchanged.
 pub(in crate::services::discord) use crate::services::discord::tmux_watcher_registry::WatcherClaimIncarnation;
+// `ClaimAdoptionEvictionGuard` is deliberately not re-exported: every caller
+// binds it as `let _guard = evict_claim_before_adoption_for_test(..)` and never
+// names the type, matching the guard-type policy stated in
+// `tmux_watcher_registry.rs`.
 #[cfg(test)]
-pub(in crate::services::discord) use crate::services::discord::tmux_watcher_registry::{
-    ClaimAdoptionEvictionGuard, evict_claim_before_adoption_for_test,
-};
+pub(in crate::services::discord) use crate::services::discord::tmux_watcher_registry::evict_claim_before_adoption_for_test;
 
 #[derive(Debug, Clone)]
 pub(crate) struct WatcherClaimOutcome {
