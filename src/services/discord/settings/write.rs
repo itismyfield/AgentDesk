@@ -28,8 +28,10 @@ fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let temp_path = temp_write_path(path);
-    fs::write(&temp_path, bytes)?;
-    match fs::rename(&temp_path, path) {
+    let result =
+        crate::utils::secret_file::write_secret_file_preserving_parent_mode(&temp_path, bytes)
+            .and_then(|()| fs::rename(&temp_path, path));
+    match result {
         Ok(()) => Ok(()),
         Err(err) => {
             let _ = fs::remove_file(&temp_path);
@@ -54,6 +56,176 @@ fn config_io_error(path: &Path, err: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(format!("{}: {}", path.display(), err))
 }
 
+/// Mutable entry for `key` under `parent`, created as null when absent.
+///
+/// A `parent` that is not a mapping is replaced with an empty one, matching what
+/// the whole-`Config` round-trip this replaced did to a malformed section.
+fn yaml_child<'a>(parent: &'a mut serde_yaml::Value, key: &str) -> &'a mut serde_yaml::Value {
+    if !parent.is_mapping() {
+        *parent = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    let key = serde_yaml::Value::String(key.to_string());
+    let map = parent
+        .as_mapping_mut()
+        .expect("value was just normalized to a mapping");
+    if !map.contains_key(&key) {
+        map.insert(key.clone(), serde_yaml::Value::Null);
+    }
+    map.get_mut(&key).expect("entry exists after the insert")
+}
+
+fn yaml_set(parent: &mut serde_yaml::Value, key: &str, value: serde_yaml::Value) {
+    *yaml_child(parent, key) = value;
+}
+
+fn yaml_remove(parent: &mut serde_yaml::Value, key: &str) {
+    if let Some(map) = parent.as_mapping_mut() {
+        map.remove(&serde_yaml::Value::String(key.to_string()));
+    }
+}
+
+// Local comparison only: include the two secrets deliberately omitted by Serialize.
+// Never log this projection or differences containing its values.
+fn typed_document(config: &crate::config::Config) -> Result<serde_yaml::Value, serde_yaml::Error> {
+    let mut value = serde_yaml::to_value(config)?;
+    yaml_set(
+        yaml_child(&mut value, "server"),
+        "auth_token",
+        serde_yaml::to_value(&config.server.auth_token)?,
+    );
+    let bots = yaml_child(yaml_child(&mut value, "discord"), "bots");
+    for (name, bot) in &config.discord.bots {
+        yaml_set(
+            yaml_child(bots, name),
+            "token",
+            serde_yaml::to_value(&bot.token)?,
+        );
+    }
+    Ok(value)
+}
+
+// Promote existing scalar values/keys using the typed interpretation, without
+// inserting defaults or removing unknown document fields. Unsupported shapes
+// are caught by the typed equivalence gate before any write.
+fn preserve_string_scalars(raw: &mut serde_yaml::Value, typed: &serde_yaml::Value) {
+    use serde_yaml::Value;
+    match (raw, typed) {
+        (raw, Value::String(_)) => *raw = typed.clone(),
+        (Value::Sequence(raw), Value::Sequence(typed)) => {
+            for (raw, typed) in raw.iter_mut().zip(typed) {
+                preserve_string_scalars(raw, typed);
+            }
+        }
+        (Value::Mapping(raw), Value::Mapping(typed)) => {
+            let original = std::mem::take(raw);
+            let mut available = typed.clone();
+            *raw = original
+                .iter()
+                .map(|(key, value)| {
+                    let mut value = value.clone();
+                    let matched = available.remove_entry(key).or_else(|| {
+                        if key.is_string() {
+                            return None;
+                        }
+                        let candidate = available
+                            .keys()
+                            .find(|candidate| {
+                                !original.contains_key(*candidate)
+                                    && candidate
+                                        .as_str()
+                                        .and_then(|s| serde_yaml::from_str::<Value>(s).ok())
+                                        .as_ref()
+                                        == Some(key)
+                            })
+                            .cloned()?;
+                        available.remove_entry(&candidate)
+                    });
+                    if let Some((key, typed)) = matched {
+                        preserve_string_scalars(&mut value, &typed);
+                        (key, value)
+                    } else {
+                        (key.clone(), value)
+                    }
+                })
+                .collect();
+        }
+        _ => {}
+    }
+}
+
+fn check_typed_equivalence(expected: &crate::config::Config, rendered: &str) -> anyhow::Result<()> {
+    let actual: crate::config::Config = serde_yaml::from_str(rendered)?;
+    let expected = typed_document(expected)?;
+    let actual = typed_document(&actual)?;
+    if actual != expected {
+        for (section, value) in expected.as_mapping().expect("Config is a mapping") {
+            if actual.get(section) == Some(value) {
+                continue;
+            }
+            anyhow::bail!(
+                "settings write-back changed typed section {}",
+                section.as_str().unwrap_or("unknown")
+            );
+        }
+        anyhow::bail!("settings write-back changed typed Config sections");
+    }
+    Ok(())
+}
+
+/// Replace the owned bot provider/agent/auth block, preserving other typed values
+/// and unknown fields outside auth. Comments and scalar presentation may change.
+fn patch_bot_settings_yaml(
+    original: &str,
+    mut expected: crate::config::Config,
+    bot_name: &str,
+    owner_id_to_set: Option<u64>,
+    settings: &DiscordBotSettings,
+) -> anyhow::Result<String> {
+    let mut document: serde_yaml::Value = serde_yaml::from_str(original)?;
+    preserve_string_scalars(&mut document, &typed_document(&expected)?);
+
+    let discord = yaml_child(&mut document, "discord");
+    if let Some(owner_id) = owner_id_to_set {
+        yaml_set(discord, "owner_id", serde_yaml::to_value(owner_id)?);
+    }
+
+    let bot = yaml_child(yaml_child(discord, "bots"), bot_name);
+    yaml_set(
+        bot,
+        "provider",
+        serde_yaml::to_value(settings.provider.as_str())?,
+    );
+    match settings.agent.as_deref() {
+        Some(agent) => yaml_set(bot, "agent", serde_yaml::to_value(agent)?),
+        None => yaml_remove(bot, "agent"),
+    }
+
+    let auth = crate::config::DiscordBotAuthConfig {
+        allowed_channel_ids: Some(settings.allowed_channel_ids.clone()),
+        require_mention_channel_ids: Some(settings.require_mention_channel_ids.clone()),
+        allowed_user_ids: Some(settings.allowed_user_ids.clone()),
+        allowed_tools: Some(normalize_allowed_tools(&settings.allowed_tools)),
+        allow_all_users: Some(settings.allow_all_users),
+        allowed_bot_ids: Some(settings.allowed_bot_ids.clone()),
+    };
+    yaml_set(bot, "auth", serde_yaml::to_value(&auth)?);
+
+    if let Some(owner_id) = owner_id_to_set {
+        expected.discord.owner_id = Some(owner_id);
+    }
+    let bot = expected
+        .discord
+        .bots
+        .get_mut(bot_name)
+        .ok_or_else(|| anyhow::anyhow!("configured bot missing"))?;
+    bot.provider = Some(settings.provider.as_str().to_string());
+    bot.agent = settings.agent.clone();
+    bot.auth = auth;
+    let rendered = serde_yaml::to_string(&document)?;
+    check_typed_equivalence(&expected, &rendered)?;
+    Ok(rendered)
+}
+
 fn persist_bot_auth_to_yaml_checked(
     token: &str,
     settings: &DiscordBotSettings,
@@ -61,12 +233,16 @@ fn persist_bot_auth_to_yaml_checked(
     let Some(path) = super::config_path_for_write() else {
         return Ok(());
     };
+    if !path.is_file() {
+        // No file means no configured bot this write-back could own; the old
+        // `Config::default()` branch reached the same early return below.
+        return Ok(());
+    }
 
-    let mut config = if path.is_file() {
-        crate::config::load_from_path(&path).map_err(|err| config_io_error(&path, err))?
-    } else {
-        crate::config::Config::default()
-    };
+    let original = fs::read_to_string(&path).map_err(|err| config_io_error(&path, err))?;
+    let config: crate::config::Config =
+        serde_yaml::from_str(&original).map_err(|err| config_io_error(&path, err))?;
+    crate::config::validate_config(&config).map_err(|err| config_io_error(&path, err))?;
 
     let Some(bot_name) = super::resolved_config_bot_name(&config, token) else {
         // Do not mutate YAML for tokens that are not managed by agentdesk.yaml.
@@ -77,22 +253,13 @@ fn persist_bot_auth_to_yaml_checked(
 
     // Keep the onboarding-configured owner stable; runtime settings should only
     // fill the owner when the YAML is still unset.
-    if config.discord.owner_id.is_none() {
-        config.discord.owner_id = settings.owner_user_id;
-    }
+    let owner_id_to_set = match config.discord.owner_id {
+        Some(_) => None,
+        None => settings.owner_user_id,
+    };
 
-    if let Some(bot) = config.discord.bots.get_mut(&bot_name) {
-        bot.provider = Some(settings.provider.as_str().to_string());
-        bot.agent = settings.agent.clone();
-        bot.auth.allowed_channel_ids = Some(settings.allowed_channel_ids.clone());
-        bot.auth.require_mention_channel_ids = Some(settings.require_mention_channel_ids.clone());
-        bot.auth.allowed_user_ids = Some(settings.allowed_user_ids.clone());
-        bot.auth.allowed_tools = Some(normalize_allowed_tools(&settings.allowed_tools));
-        bot.auth.allow_all_users = Some(settings.allow_all_users);
-        bot.auth.allowed_bot_ids = Some(settings.allowed_bot_ids.clone());
-    }
-
-    let rendered = serde_yaml::to_string(&config).map_err(|err| config_io_error(&path, err))?;
+    let rendered = patch_bot_settings_yaml(&original, config, &bot_name, owner_id_to_set, settings)
+        .map_err(|err| config_io_error(&path, err))?;
     write_bytes_atomically(&path, rendered.as_bytes())
 }
 
@@ -382,5 +549,244 @@ pub(crate) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
                 "failed to persist runtime bot settings; yaml/json changes rolled back: {err}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod yaml_write_back_secret_tests {
+    use super::*;
+
+    /// A settings YAML that carries both `#[serde(skip_serializing)]` secrets in
+    /// the tree: `server.auth_token` (`config.rs:125`) and `discord.bots.*.token`
+    /// (`config.rs:242`).
+    const FIXTURE: &str = concat!(
+        "server:\n",
+        "  host: 0.0.0.0\n",
+        "  port: 8791\n",
+        "  auth_token: dashboard-secret-token\n",
+        "  allow_insecure_nonloopback_bind: true\n",
+        "discord:\n",
+        "  bots:\n",
+        "    main:\n",
+        "      token: discord-bot-secret\n",
+        "      provider: claude\n",
+    );
+
+    const BOT_TOKEN: &str = "discord-bot-secret";
+
+    fn settings_with_new_allowlist() -> DiscordBotSettings {
+        DiscordBotSettings {
+            allowed_channel_ids: vec![4242],
+            ..DiscordBotSettings::default()
+        }
+    }
+
+    /// #5750 — a Discord settings write-back must not delete secrets it never
+    /// read back. The whole-`Config` re-serialization it replaced dropped every
+    /// `skip_serializing` field, which silently disarmed the `/ws` auth gate
+    /// (`src/server/ws.rs:33`) without a restart.
+    #[test]
+    fn bot_settings_write_back_keeps_skip_serializing_secrets_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agentdesk.yaml");
+        fs::write(&path, FIXTURE).expect("write fixture");
+        let _config_env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
+
+        persist_bot_auth_to_yaml_checked(BOT_TOKEN, &settings_with_new_allowlist())
+            .expect("write-back should succeed");
+
+        let reloaded = crate::config::load_from_path(&path).expect("reload written yaml");
+        let bot = reloaded
+            .discord
+            .bots
+            .get("main")
+            .expect("bot entry survives the write-back");
+
+        assert_eq!(
+            bot.auth.allowed_channel_ids,
+            Some(vec![4242]),
+            "the write-back must actually apply the new allowlist"
+        );
+        assert_eq!(
+            reloaded.server.auth_token.as_deref(),
+            Some("dashboard-secret-token"),
+            "#5750: server.auth_token must survive a Discord settings write-back"
+        );
+        assert_eq!(
+            bot.token.as_deref(),
+            Some(BOT_TOKEN),
+            "#5750: discord.bots.*.token must survive a Discord settings write-back"
+        );
+    }
+
+    /// Unmodelled keys survive, though YAML presentation may change.
+    #[test]
+    fn bot_settings_write_back_preserves_unowned_document_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agentdesk.yaml");
+        fs::write(
+            &path,
+            format!("{FIXTURE}unmodelled_section:\n  keep_me: true\n"),
+        )
+        .expect("write fixture");
+        let _config_env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
+
+        persist_bot_auth_to_yaml_checked(BOT_TOKEN, &settings_with_new_allowlist())
+            .expect("write-back should succeed");
+
+        let rendered = fs::read_to_string(&path).expect("read written yaml");
+        assert!(
+            rendered.contains("keep_me"),
+            "unmodelled keys must survive the write-back, got:\n{rendered}"
+        );
+    }
+    fn round_trip(original: &str) -> crate::config::Config {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        fs::write(&path, original).unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
+        persist_bot_auth_to_yaml_checked(BOT_TOKEN, &settings_with_new_allowlist()).unwrap();
+        let rendered = fs::read_to_string(path).unwrap();
+        let raw: serde_yaml::Value = serde_yaml::from_str(&rendered).unwrap();
+        let before: serde_yaml::Value = serde_yaml::from_str(original).unwrap();
+        assert_eq!(
+            raw["discord"]["bots"].as_mapping().unwrap().len(),
+            before["discord"]["bots"].as_mapping().unwrap().len()
+        );
+        serde_yaml::from_str(&rendered).unwrap()
+    }
+
+    #[test]
+    fn scalar_database_password_is_preserved() {
+        let actual = round_trip(&format!("{FIXTURE}database:\n  password: 0x1234\n"));
+        assert_eq!(actual.database.password.as_deref(), Some("0x1234"));
+    }
+
+    #[test]
+    fn scalar_numeric_bot_key_patches_existing_entry() {
+        let actual = round_trip(&FIXTURE.replace("main:", "123:"));
+        assert_eq!(actual.discord.bots.len(), 1);
+        assert_eq!(actual.discord.bots["123"].token.as_deref(), Some(BOT_TOKEN));
+        assert_eq!(
+            actual.discord.bots["123"].auth.allowed_channel_ids,
+            Some(vec![4242])
+        );
+    }
+
+    #[test]
+    fn scalar_colliding_mcp_keys_keep_distinct_entries() {
+        for entries in [
+            "  '0x7b': {url: 'https://example.invalid/hex'}\n  123: {url: 'https://example.invalid/decimal'}\n",
+            "  123: {url: 'https://example.invalid/decimal'}\n  '0x7b': {url: 'https://example.invalid/hex'}\n",
+        ] {
+            let actual = round_trip(&format!("{FIXTURE}mcp_servers:\n{entries}"));
+            assert_eq!(actual.mcp_servers.len(), 2);
+            assert_eq!(
+                actual.mcp_servers["0x7b"].url,
+                "https://example.invalid/hex"
+            );
+            assert_eq!(
+                actual.mcp_servers["123"].url,
+                "https://example.invalid/decimal"
+            );
+            assert_eq!(
+                actual.discord.bots["main"].auth.allowed_channel_ids,
+                Some(vec![4242])
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_config_is_not_written_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        let original = format!("{FIXTURE}escalation:\n  schedule:\n    timezone: Invalid/Zone\n");
+        fs::write(&path, &original).unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
+        assert!(
+            persist_bot_auth_to_yaml_checked(BOT_TOKEN, &settings_with_new_allowlist()).is_err()
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn scalar_server_token_is_preserved() {
+        for token in ["0777", "0x0777"] {
+            let actual = round_trip(&FIXTURE.replace("dashboard-secret-token", token));
+            assert_eq!(actual.server.auth_token.as_deref(), Some(token));
+        }
+    }
+
+    #[test]
+    fn scalar_all_unowned_typed_values_are_equal() {
+        let original = format!("{FIXTURE}database:\n  password: 0x1234\nshared_prompt: 1e3\n");
+        let mut expected: crate::config::Config = serde_yaml::from_str(&original).unwrap();
+        let actual = round_trip(&original);
+        let settings = settings_with_new_allowlist();
+        let bot = expected.discord.bots.get_mut("main").unwrap();
+        bot.provider = Some(settings.provider.as_str().to_string());
+        bot.agent = settings.agent.clone();
+        bot.auth = crate::config::DiscordBotAuthConfig {
+            allowed_channel_ids: Some(settings.allowed_channel_ids),
+            require_mention_channel_ids: Some(settings.require_mention_channel_ids),
+            allowed_user_ids: Some(settings.allowed_user_ids),
+            allowed_tools: Some(normalize_allowed_tools(&settings.allowed_tools)),
+            allow_all_users: Some(settings.allow_all_users),
+            allowed_bot_ids: Some(settings.allowed_bot_ids),
+        };
+        assert_eq!(expected.server.auth_token, actual.server.auth_token);
+        assert_eq!(
+            expected.discord.bots["main"].token,
+            actual.discord.bots["main"].token
+        );
+        assert_eq!(
+            serde_yaml::to_value(expected).unwrap(),
+            serde_yaml::to_value(actual).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_write_back_keeps_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        fs::write(&path, FIXTURE).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
+        persist_bot_auth_to_yaml_checked(BOT_TOKEN, &settings_with_new_allowlist()).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn typed_gate_rejects_scalar_corruption() {
+        let original = format!("{FIXTURE}database:\n  password: 0x1234\n");
+        let expected: crate::config::Config = serde_yaml::from_str(&original).unwrap();
+        let raw: serde_yaml::Value = serde_yaml::from_str(&original).unwrap();
+        let corrupted = serde_yaml::to_string(&raw).unwrap();
+        let error = check_typed_equivalence(&expected, &corrupted)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("database"));
+        assert!(!error.contains("4660") && !error.contains("0x1234"));
+    }
+    #[test]
+    fn typed_gate_blocks_mismatched_snapshot_before_render_returns() {
+        let original = format!("{FIXTURE}database:\n  password: 0x1234\n");
+        let mut expected: crate::config::Config = serde_yaml::from_str(&original).unwrap();
+        expected.server.port += 1;
+        assert!(
+            patch_bot_settings_yaml(
+                &original,
+                expected,
+                "main",
+                None,
+                &settings_with_new_allowlist()
+            )
+            .is_err()
+        );
     }
 }
