@@ -443,8 +443,7 @@ pub(super) fn spawn_turn_bridge(
         let mut streaming_rollover_frozen_msg_ids: Vec<MessageId> = Vec::new();
         let mut terminal_full_replay_cleanup_msg_ids: Vec<MessageId> = Vec::new();
         let mut tmux_last_offset = bridge.tmux_last_offset;
-        // #3041: seed the authoritative watcher owner channel so recovered
-        // bridges and reused watchers lease the same cell.
+        // #3041: recovered bridges and reused watchers share the owner lease.
         let mut new_session_id = bridge.new_session_id.clone();
         let mut new_raw_provider_session_id: Option<String> = None;
         let defer_watcher_resume = bridge.defer_watcher_resume;
@@ -452,7 +451,6 @@ pub(super) fn spawn_turn_bridge(
         let mut inflight_state = bridge.inflight_state.clone();
         inflight_state.set_watcher_owner_channel_id(watcher_owner_channel_id.get());
         let mut last_status_edit = tokio::time::Instant::now();
-        // #3813: first non-empty answer may bypass the status interval once.
         let mut first_answer_relayed = false;
         let status_interval = super::status_update_interval();
         let mut last_session_panel_lifecycle_refresh = tokio::time::Instant::now() - status_interval;
@@ -464,14 +462,11 @@ pub(super) fn spawn_turn_bridge(
         let mut status_panel_dirty = shared_owned.ui.status_panel_v2_enabled;
         let mut last_status_panel_edit = tokio::time::Instant::now() - status_interval;
         let turn_start = std::time::Instant::now();
-        // #5707: protection starts at this observation, after own severance.
-        // The preceding window is unbounded and can overlap provider work.
+        // #5707: observe after own clear; the unbounded prior window can overlap provider work.
         let clear_fence = crate::db::session_transcripts::capture_channel_clear_fence(
             shared_owned.pg_pool.as_ref(), &channel_id.get().to_string(),
         ).await;
-        // #3813: observation-only bridge latency spans share `turn_start`.
         let mut bridge_spans = BridgeLatencySpans::starting_at(turn_start);
-        // #3805: pinned panel epoch; create bumps it and completion proves it.
         let mut status_panel_generation = inflight_state.status_panel_generation;
         inflight_state.long_running_placeholder_active = false;
         let mut resumed_placeholder_clear_applied = false;
