@@ -25,7 +25,8 @@ src/
 │   │   └── runtime_config.rs
 │   ├── doctor/
 │   │   ├── orchestrator/
-│   │   │   └── config_dir_checks.rs
+│   │   │   ├── config_dir_checks.rs
+│   │   │   └── relay_notifications.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs

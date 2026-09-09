@@ -137,6 +137,10 @@ cli::doctor::orchestrator::profile_filter_tests::postgres_checksum_mismatch_deta
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_dispatch_outbox_checks
 cli::doctor::orchestrator::profile_filter_tests::quick_profile_keeps_portable_optional_state_checks
 cli::doctor::orchestrator::profile_filter_tests::report_group_round_trip_keeps_portable_groups
+cli::doctor::orchestrator::relay_notifications::tests::declarations_are_unverified_even_when_invalid
+cli::doctor::orchestrator::relay_notifications::tests::rust_whitespace_is_blank
+cli::doctor::orchestrator::relay_notifications::tests::unset_is_warning
+cli::doctor::orchestrator::relay_notifications::tests::wiring_and_read_only_boundary_lexical_tripwire
 cli::doctor::startup::tests::only_the_no_provider_skip_is_replaceable
 cli::doctor::startup::tests::skipped_startup_doctor_writes_current_boot_artifact
 cli::init::launchd_plist_tests::clamp_launchd_nofile_soft_limit_never_exceeds_host_hard_limit

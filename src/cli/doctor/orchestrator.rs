@@ -7,6 +7,7 @@ use super::contract::{DoctorProfile, FixSafety, RunContext, SecurityExposure, Se
 use super::{health, mailbox};
 
 mod config_dir_checks;
+mod relay_notifications;
 use crate::cli::dcserver;
 use crate::config;
 use crate::services::operator_connectors::{
@@ -899,6 +900,7 @@ fn build_core_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Che
         check_health_db_dashboard(snapshot),
         check_dispatch_outbox(snapshot),
         check_config_audit(snapshot),
+        relay_notifications::check(cfg),
         check_runtime_root(),
         config_dir_checks::check_data_dir(cfg),
         config_dir_checks::check_policies_dir(cfg),
