@@ -9,71 +9,15 @@ pub(crate) enum WatcherClaimAction {
     ReuseExisting,
 }
 
-#[derive(Debug, Clone)]
-pub(in crate::services::discord) struct WatcherClaimIncarnation {
-    owner_channel_id: ChannelId,
-    cancel: Arc<std::sync::atomic::AtomicBool>,
-    pub(in crate::services::discord) paused: Arc<std::sync::atomic::AtomicBool>,
-    pub(in crate::services::discord) resume_offset: Arc<std::sync::Mutex<Option<u64>>>,
-    pub(in crate::services::discord) turn_delivered: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl WatcherClaimIncarnation {
-    pub(in crate::services::discord) fn from_handle(
-        owner_channel_id: ChannelId,
-        handle: &TmuxWatcherHandle,
-    ) -> Self {
-        Self {
-            owner_channel_id,
-            cancel: Arc::clone(&handle.cancel),
-            paused: Arc::clone(&handle.paused),
-            resume_offset: Arc::clone(&handle.resume_offset),
-            turn_delivered: Arc::clone(&handle.turn_delivered),
-        }
-    }
-
-    #[cfg(unix)]
-    pub(in crate::services::discord) fn capture_for_source(
-        watchers: &TmuxWatcherRegistry,
-        tmux_session_name: &str,
-        output_path: &std::path::Path,
-    ) -> Option<Self> {
-        let _guard = lock_tmux_watcher_registry();
-        let owner = watchers.owner_channel_for_tmux_session(tmux_session_name)?;
-        let handle = watchers.get(&owner)?;
-        if handle.tmux_session_name != tmux_session_name
-            || std::path::Path::new(&handle.output_path) != output_path
-            || handle.cancel.load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return None;
-        }
-        Some(Self::from_handle(owner, &handle))
-    }
-
-    #[rustfmt::skip]
-    pub(in crate::services::discord) fn adopt_if_current<T>(
-        &self,
-        watchers: &TmuxWatcherRegistry,
-        adopt: impl FnOnce(&Self) -> T,
-    ) -> Option<T> {
-        let guard = lock_tmux_watcher_registry();
-        #[cfg(test)]
-        if EVICT_CLAIM_BEFORE_ADOPTION.compare_exchange(
-            self.owner_channel_id.get(), 0,
-            std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst,
-        ).is_ok() {
-            let _ = watchers.remove_locked(&guard, &self.owner_channel_id);
-        }
-        let current = watchers.get(&self.owner_channel_id)?;
-        if !Arc::ptr_eq(&current.cancel, &self.cancel)
-            || current.cancel.load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return None;
-        }
-        drop(current);
-        Some(adopt(self))
-    }
-}
+// #5808 C1 / windows build fix: `WatcherClaimIncarnation` pins a registry
+// handle, not a tmux process, and `turn_bridge` threads it on every target.
+// It therefore lives in the cfg-independent `tmux_watcher_registry` module;
+// this re-export keeps the `tmux::WatcherClaimIncarnation` path unchanged.
+pub(in crate::services::discord) use crate::services::discord::tmux_watcher_registry::WatcherClaimIncarnation;
+#[cfg(test)]
+pub(in crate::services::discord) use crate::services::discord::tmux_watcher_registry::{
+    ClaimAdoptionEvictionGuard, evict_claim_before_adoption_for_test,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct WatcherClaimOutcome {
@@ -131,30 +75,6 @@ impl WatcherClaimOutcome {
             WatcherClaimAction::ReuseExisting => "reuse_existing",
         }
     }
-}
-
-#[cfg(test)]
-#[rustfmt::skip]
-static EVICT_CLAIM_BEFORE_ADOPTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-#[cfg(test)]
-pub(in crate::services::discord) struct ClaimAdoptionEvictionGuard(u64);
-
-#[cfg(test)]
-#[rustfmt::skip]
-impl Drop for ClaimAdoptionEvictionGuard {
-    fn drop(&mut self) {
-        let _ = EVICT_CLAIM_BEFORE_ADOPTION.compare_exchange(
-            self.0, 0, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst,
-        );
-    }
-}
-
-#[cfg(test)]
-#[rustfmt::skip]
-pub(in crate::services::discord) fn evict_claim_before_adoption_for_test(owner: ChannelId) -> ClaimAdoptionEvictionGuard {
-    EVICT_CLAIM_BEFORE_ADOPTION.store(owner.get(), std::sync::atomic::Ordering::SeqCst);
-    ClaimAdoptionEvictionGuard(owner.get())
 }
 
 pub(crate) fn find_watcher_by_tmux_session(
