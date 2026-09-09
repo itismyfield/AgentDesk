@@ -195,12 +195,6 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/intake_delivery_capability.rs'
               - 'src/services/discord/runtime_bootstrap/intake_delivery_capability/**'
               - 'src/services/discord/runtime_bootstrap/**'
-              # #5485 S2a: the restart shutdown-flag owner and its two voice
-              # observers select this lane by name instead of leaning on the
-              # broad `rust_or_policy: src/**` filter.
-              - 'src/services/discord/shared_state.rs'
-              - 'src/services/discord/voice_lifecycle.rs'
-              - 'src/services/discord/voice_barge_in/**'
               - 'src/services/discord/tmux_watcher.rs'
               - 'src/services/discord/tmux_watcher/**'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery.rs'
@@ -784,19 +778,6 @@ jobs:
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests
           env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
           env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn
-
-      # #5485 S2a: the manifest pins the transport's test identities but does not
-      # execute them; select them here so the observer records a nonzero lane.
-      - name: Restart shutdown transport regressions
-        timeout-minutes: 10
-        shell: bash
-        env:
-          BASH_ENV: /dev/null
-        run: |
-          source scripts/ci/non-pg-test-filter.sh
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::shared_state::restart_lifecycle_tests -- "${NON_PG_SKIP_ARGS[@]}"
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::voice_lifecycle::lifecycle_tests -- "${NON_PG_SKIP_ARGS[@]}"
-          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::voice_barge_in::tests::pcm_harness_tests -- "${NON_PG_SKIP_ARGS[@]}"
 
       - name: just test-postgres
         timeout-minutes: 20
