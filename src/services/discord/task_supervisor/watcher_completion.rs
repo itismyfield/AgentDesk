@@ -24,7 +24,8 @@ pub struct Ticket {
     receiver: watch::Receiver<Outcome>,
 }
 impl Ticket {
-    /// Observation only: abort/cleanup panic are Unknown, not completed delivery.
+    /// Observation only: abort, cleanup panic or duplicate identity are Unknown.
+    /// Unknown may precede cleanup; it never certifies task or delivery completion.
     pub async fn wait(mut self) -> Outcome {
         loop {
             let result = *self.receiver.borrow_and_update();
@@ -60,7 +61,16 @@ impl Registration {
                 sender: sender.clone(),
             });
         } else {
-            tracing::warn!("duplicate watcher completion registration; new observation is Unknown");
+            // Preserve the record identity, but invalidate every observer of this
+            // ambiguous cancel Arc. finish must not overwrite this sticky Unknown.
+            records
+                .get(&key(&cancel))
+                .unwrap()
+                .sender
+                .send_replace(Outcome::Unknown);
+            tracing::warn!(
+                "duplicate watcher completion registration; all observations are Unknown"
+            );
             sender.send_replace(Outcome::Unknown);
         }
         Self { cancel, sender }
