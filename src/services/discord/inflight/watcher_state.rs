@@ -70,14 +70,32 @@ pub(in crate::services::discord) fn persist_watcher_stream_progress_locked(
     let Some(root) = inflight_runtime_root() else {
         return WatcherProgressOutcome::IoError;
     };
-    persist_watcher_stream_progress_locked_in_root(
+    let discarded_current_msg_id = patch.current_msg_id;
+    let outcome = persist_watcher_stream_progress_locked_in_root(
         &root,
         provider,
         channel_id,
         require_identity,
         require_tmux_session_name,
         patch,
-    )
+    );
+    // #5191: one central diagnostic for a pinned-owner republication this writer
+    // rejected as already terminal-committed. It records the rejection, not that a
+    // caller skipped HTTP; the discarded id is a pre-cleanup sample. It lives here
+    // (not at the `tmux.rs` wrapper) so the only prod caller stays net-zero under
+    // the giant-file no-growth gate while every rejection is still logged once.
+    if outcome == WatcherProgressOutcome::TerminalAlreadyCommitted {
+        tracing::warn!(
+            event = "watcher_stream_progress_terminal_rejected",
+            provider = %provider.as_str(),
+            channel_id,
+            tmux_session = %require_tmux_session_name,
+            user_msg_id = ?require_identity.map(|identity| identity.user_msg_id),
+            ?discarded_current_msg_id,
+            "watcher: rejected stream-progress republication onto a terminal-committed inflight row"
+        );
+    }
+    outcome
 }
 
 /// Root-explicit variant of [`persist_watcher_stream_progress_locked`] for unit
