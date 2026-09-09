@@ -17,6 +17,13 @@ pub(super) enum StreamingStatusTickOutcome {
 mod types;
 pub(super) use types::*;
 
+#[path = "streaming_status_tick/existing_panel_update.rs"]
+mod existing_panel_update;
+
+#[cfg(test)]
+#[path = "streaming_status_tick/committed_progress_tests.rs"]
+mod committed_progress_tests;
+
 pub(super) async fn update_streaming_status_tick(
     ctx: &StreamingStatusTickContext<'_>,
     turn: StreamingStatusTickTurn<'_>,
@@ -136,7 +143,7 @@ pub(super) async fn update_streaming_status_tick(
         // long tool hold must not leave the durable row at its initial empty state.
         // Silent turns suppress rendering, not durable state; the helper validates
         // complete turn identity under the sidecar lock to block stale overwrites.
-        persist_watcher_stream_progress(
+        let progress_outcome = persist_watcher_stream_progress(
             &watcher_provider,
             channel_id,
             &tmux_session_name,
@@ -151,6 +158,11 @@ pub(super) async fn update_streaming_status_tick(
             tool_state.has_post_tool_text,
             &watcher_streaming_rollover_frozen_msg_ids,
         );
+        // #5191: the locked writer rejected this frame because the pinned owner's
+        // row is already terminal-committed. Suppress this tick's preview/status
+        // writes, but only AFTER the pre-existing cleanup paths below have run.
+        let terminal_progress_rejected = progress_outcome
+            == crate::services::discord::inflight::WatcherProgressOutcome::TerminalAlreadyCommitted;
 
         // Headless silent trigger (metadata.silent=true): skip both
         // status-panel and streaming-chunk edits to keep the channel
@@ -166,69 +178,15 @@ pub(super) async fn update_streaming_status_tick(
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }
 
-        if shared.ui.status_panel_v2_enabled
-            && (single_message_panel_footer_mode || status_panel_msg_id.is_some())
-        {
-            // #3055: re-derive this turn's session lifecycle panel
-            // line on the throttled status tick, matching bridge
-            // behavior and avoiding stale per-channel snapshots.
-            refresh_watcher_session_panel_from_lifecycle(
-                &shared,
-                channel_id,
-                turn_identity_for_panel
-                    .as_ref()
-                    .map(|identity| identity.user_msg_id)
-                    .unwrap_or(0),
-                &tmux_session_name,
+        if !terminal_progress_rejected {
+            last_status_panel_text = existing_panel_update::update_existing_panel(
+                ctx,
+                &turn,
+                &turn_identity_for_panel,
+                status_panel_msg_id,
+                last_status_panel_text,
             )
             .await;
-        }
-        if watcher_separate_status_panel_enabled(shared.ui.status_panel_v2_enabled)
-            && let Some(status_msg_id) = status_panel_msg_id
-        {
-            let panel_text = shared.ui.placeholder_live_events.render_status_panel(
-                channel_id,
-                &watcher_provider,
-                status_panel_started_at,
-            );
-            let panel_cache_invalidation_epoch = shared
-                .ui
-                .placeholder_live_events
-                .panel_cache_invalidation_epoch(channel_id, status_msg_id.get());
-            if panel_cache_invalidation_epoch.is_some() || panel_text != last_status_panel_text {
-                rate_limit_wait(&shared, channel_id).await;
-                match crate::services::discord::http::edit_channel_message(
-                    &http,
-                    channel_id,
-                    status_msg_id,
-                    &panel_text,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        last_status_panel_text = panel_text;
-                        if let Some(epoch) = panel_cache_invalidation_epoch {
-                            shared
-                                .ui
-                                .placeholder_live_events
-                                .clear_panel_cache_invalidation_if_epoch(
-                                    channel_id,
-                                    status_msg_id.get(),
-                                    epoch,
-                                );
-                        }
-                    }
-                    Err(error) => {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        tracing::warn!(
-                            "  [{ts}] ⚠ tmux status-panel-v2 edit failed for msg {} in channel {}: {}",
-                            status_msg_id.get(),
-                            channel_id.get(),
-                            error
-                        );
-                    }
-                }
-            }
         }
 
         let has_assistant_response_for_streaming = !full_response.trim().is_empty();
@@ -396,6 +354,13 @@ pub(super) async fn update_streaming_status_tick(
             // single chokepoint at the top of this interval block, before
             // this recent-stop `continue` and the inflight-missing guard
             // can bypass it.
+            commit_streaming_status_tick_state!();
+            return StreamingStatusTickOutcome::ContinueStreamingLoop;
+        }
+        // #5191: the pinned owner's row is terminal-committed. Every pre-existing
+        // cleanup/suppression path above kept its effects; stop before any
+        // further preview or status POST/PATCH for a trailing body.
+        if terminal_progress_rejected {
             commit_streaming_status_tick_state!();
             return StreamingStatusTickOutcome::ContinueStreamingLoop;
         }

@@ -86,8 +86,8 @@ pub(super) fn run_bot_init_voice_workers(
         });
     let voice_receiver =
         crate::voice::VoiceReceiver::from_voice_config_with_hook(voice_config, voice_hook);
-    voice_barge_in.spawn_sensitivity_ttl_reset(shared.restart.shutting_down.clone());
-    voice_barge_in.spawn_progress_worker(shared.clone(), shared.restart.shutting_down.clone());
+    voice_barge_in.spawn_sensitivity_ttl_reset(shared.restart.shutdown_reader());
+    voice_barge_in.spawn_progress_worker(shared.clone(), shared.restart.shutdown_reader());
     voice_receiver
 }
 
@@ -148,7 +148,7 @@ pub(super) async fn run_bot_spawn_voice_auto_join(
             voice_receiver_for_setup.clone(),
             shared_clone.voice_barge_in.clone(),
             provider_for_setup.clone(),
-            shared_clone.restart.shutting_down.clone(),
+            shared_clone.restart.shutdown_reader(),
         );
     }
     if plan.schedule_auto_join {
