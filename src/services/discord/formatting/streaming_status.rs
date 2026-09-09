@@ -28,10 +28,9 @@ pub(super) fn char_count(s: &str) -> usize {
 /// `single_message_panel::{compose_completion_footer_text,
 /// clamp_footer_status_block}`; `placeholder_live_events::status_panel`;
 /// `turn_end_wip_warning`'s bounded merge helpers;
-/// `tui_task_card::truncate_preview_at_boundary`; and
+/// `tui_task_card::truncate_preview_at_boundary`; `tmux_placeholder_suppression`; and
 /// `http::discord_content_or_zwsp`. This is a caller index, not a claim about a
-/// Discord guarantee or a repository-wide invariant: `plan_streaming_rollover`
-/// still budgets its footer with Unicode scalar count, and `markdown_preview`
+/// Discord guarantee or a repository-wide invariant: `markdown_preview`
 /// uses scalar count while collecting candidate lines before its final
 /// unit-based clamp.
 pub(in crate::services::discord) fn discord_message_units(s: &str) -> usize {
@@ -99,10 +98,17 @@ pub(in crate::services::discord) struct StreamingRolloverPlan {
 
 fn build_streaming_placeholder_snapshot(current_portion: &str, status_block: &str) -> String {
     let status_block = clamp_placeholder_status_block(status_block);
-    let footer = format!("\n\n{status_block}");
+    let mut footer = format!("\n\n{status_block}");
+    footer.truncate(byte_index_at_discord_message_units(
+        &footer,
+        DISCORD_MSG_LIMIT,
+    ));
     let body_budget = DISCORD_MSG_LIMIT
-        .saturating_sub(discord_message_units(&footer) + STREAMING_PLACEHOLDER_MARGIN)
-        .max(1);
+        .saturating_sub(discord_message_units(&footer) + STREAMING_PLACEHOLDER_MARGIN);
+    // An exhausted body budget renders only the bounded footer.
+    if body_budget == 0 {
+        return footer;
+    }
     let normalized = normalize_empty_lines(current_portion);
     let body = tail_with_ellipsis_discord_units(&normalized, body_budget);
     format!("{}{}", body, footer)
@@ -119,7 +125,7 @@ pub(in crate::services::discord) fn plan_streaming_rollover(
     let status_block = clamp_placeholder_status_block(status_block);
     let footer = format!("\n\n{status_block}");
     let body_budget = DISCORD_MSG_LIMIT
-        .saturating_sub(footer.chars().count() + STREAMING_PLACEHOLDER_MARGIN)
+        .saturating_sub(discord_message_units(&footer) + STREAMING_PLACEHOLDER_MARGIN)
         .max(1);
     let split_at = streaming_split_boundary(current_portion, body_budget)?;
 
