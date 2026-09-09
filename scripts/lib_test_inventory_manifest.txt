@@ -4584,6 +4584,7 @@ services::discord::router::message_handler::intake_turn::recovery_context_take_o
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::intake_real_turn_consumes_recovery_context_once_after_non_dispatch_guards
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::recovery_context_survives_intake_stale_dispatch_abort
 services::discord::router::message_handler::intake_turn::recovery_context_take_order_tests::tui_busy_enqueue_refusal_puts_back_recovery_context_for_next_turn
+services::discord::router::message_handler::intake_turn::runtime_transition::tests::runtime_transition_busy_forwards_owned_uploads_without_taking_session_state
 services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_queue_reaction_tests::busy_pre_submit_enqueue_keeps_the_authoritative_queue_view
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::gated_stale_lookup_feeds_the_turn_abort_branch
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified
@@ -4594,6 +4595,13 @@ services::discord::router::message_handler::latency_spans::tests::full_span_rend
 services::discord::router::message_handler::latency_spans::tests::marks_unlock_segments_in_order
 services::discord::router::message_handler::latency_spans::tests::partial_span_renders_dashes_for_missing_marks
 services::discord::router::message_handler::latency_spans::tests::saturating_u64_clamps_overflow
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::carve_outs_keep_input_out_of_the_control_registry
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::deferred_take_reproduces_the_block_it_replaced
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::every_non_continue_route_is_locally_completable
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::guard_position_and_one_way_upload_ownership_are_pinned
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::intake_turn_keeps_the_gate_above_the_deferred_take
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::resolve_local_controls_clear_pending_turn_view
+services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::route_branch_table_is_pinned
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_prelaunch_without_raw_seed_keeps_the_wrapper_end_offset
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_raw_seed_requires_exact_live_marker_binding_evidence
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::managed_linked_worktree_skips_provider_reisolation_without_session_state
