@@ -7,7 +7,6 @@ from urllib.parse import urlsplit
 
 URL = re.compile(r'''(?<![^\s"'`(<])https?://(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]+/api/[^\s"'`()<>\\]*''')
 
-
 def inventory(repo):
     root = repo / 'src/server/routes/docs/inventory/endpoints'
     parts = re.findall(r'^mod (part_\d+);$', (root / 'mod.rs').read_text(), re.M)
@@ -25,7 +24,6 @@ def inventory(repo):
     return [re.compile(''.join('.+' if token.startswith('{*') else '[^/]+' if token.startswith('{') else re.escape(token)
                               for token in re.split(r'(\{\*?[^{}]+\})', path))) for path in paths]
 
-
 def candidates(source):
     source = re.sub(r'<!--.*?(?:-->|\Z)', lambda m: '\n' * m[0].count('\n'), source, flags=re.S)
     fence = None
@@ -41,13 +39,14 @@ def candidates(source):
                 fence = None
             continue
         if fence is None or fence[2]:
+            # Only ASCII shell joins are excluded; Korean prose suffixes remain candidates.
+            shell = bool(fence or re.search(r'\bcurl\b|\$[A-Za-z_{]|`', line))
             matches = (match for match in URL.finditer(line)
-                       if not re.search(r'''[^\s("'`<]["']$''', line[:match.start()])
-                       and not re.match(r'''["'][^\s;)<>|&`.,\]]''', line[match.end():])
+                       if not (shell and (re.search(r'''[A-Za-z0-9_/.:=$}\"']["']$''', line[:match.start()])
+                                          or re.match(r'''["'][A-Za-z0-9_/.$\"'-]''', line[match.end():])))
                        and '$' not in urlsplit(match[0]).path and not re.match(r'''["']?(?:\s*\+|\$)''', line[match.end():]))
             for path in sorted({urlsplit(match[0]).path for match in matches}):
                 yield number, path
-
 
 def check(repo, prompts):
     inspected = candidates_count = unknown = skipped = 0

@@ -73,6 +73,15 @@ class PromptRoutes(unittest.TestCase):
                 self.assertIn('no_applicable_urls', output)
         self.assertEqual(self.run_check('curl "http://localhost:1/api/send"')[0], 1)
 
+    def test_literal_prose_and_leading_quote_joins(self):
+        prose = ['엔드포인트="URL"', 'POST 대상="URL"', '기본값:"URL"', '**"URL"** 로 호출',
+                 '["URL"](x)', '| endpoint |"URL"|', '"URL"이 응답한다', 'URL은 "URL"다.',
+                 "설정값='URL'", '~~~bash\ncurl "URL"이후\n~~~']
+        joins = ["curl 'https://example.com/?next='\"URL\"", 'curl "https://example.com/?next="\'URL\'',
+                 'curl "$API"\'URL\'', "curl ''\"URL\"", 'curl ""\'URL\'']
+        for template, expected in [(x, 1) for x in prose] + [(x, 0) for x in joins]:
+            with self.subTest(template=template):
+                self.assertEqual(self.run_check(template.replace('URL', 'http://localhost:1/api/send'))[0], expected)
     def test_fence_closing_contract(self):
         for marker in ('~~~', '```', '````bash'):
             with self.subTest(marker=marker):
