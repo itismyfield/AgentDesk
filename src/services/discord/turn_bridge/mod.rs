@@ -217,9 +217,15 @@ pub(super) enum WatcherHandoffClaimOutcome {
 // (#4230 S6) — must live at module scope so both resolve them.
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-/// #5707: the bridge's only clear-fence producer; the postlude proof enters here.
-async fn capture_bridge_clear_fence(shared: &SharedData, channel: ChannelId) -> ChannelClearFence {
-    capture_channel_clear_fence(shared.pg_pool.as_ref(), &channel.get().to_string()).await
+// The non-Clone receiver is the phase witness: capture consumes it before stream processing.
+async fn capture_bridge_clear_fence(
+    shared: &SharedData,
+    channel: ChannelId,
+    rx: mpsc::Receiver<StreamMessage>,
+) -> (ChannelClearFence, StreamMessageReceiverAdapter) {
+    let fence =
+        capture_channel_clear_fence(shared.pg_pool.as_ref(), &channel.get().to_string()).await;
+    (fence, spawn_stream_message_receiver_adapter(rx))
 }
 pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
@@ -259,7 +265,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         turn_id = %bridge_turn_id,
     );
     super::task_supervisor::spawn_observed("discord_turn_bridge", async move {
-        let mut rx = spawn_stream_message_receiver_adapter(rx);
         let channel_id = bridge.channel_id;
         let provider = bridge.provider.clone();
         let gateway = bridge.gateway.clone();
@@ -442,7 +447,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut last_status_panel_edit = tokio::time::Instant::now() - status_interval;
         let turn_start = std::time::Instant::now();
         // #5707: observe after own clear; the unbounded prior window can overlap provider work.
-        let clear_fence = capture_bridge_clear_fence(shared_owned.as_ref(), channel_id).await;
+        let (clear_fence, mut rx) = capture_bridge_clear_fence(shared_owned.as_ref(), channel_id, rx).await;
         // #3813: observation-only bridge latency spans share `turn_start`.
         let mut bridge_spans = BridgeLatencySpans::starting_at(turn_start);
         // #3805: pinned panel epoch; create bumps it and completion proves it.

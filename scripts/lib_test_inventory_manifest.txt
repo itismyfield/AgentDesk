@@ -6424,7 +6424,6 @@ services::discord::turn_bridge::response_delivery::tests::terminal_delivery_afte
 services::discord::turn_bridge::response_delivery::tests::terminal_error_after_rollover_delivers_error_text_not_recovery_notice
 services::discord::turn_bridge::resume_pin_tests::c1_actual_postlude_resume_pin_runtime_proof
 services::discord::turn_bridge::resume_pin_tests::c1_both_late_writers_consume_pin_without_registry_backfill
-services::discord::turn_bridge::resume_pin_tests::c1_bridge_clear_fence_capture_reaches_the_postlude_context
 services::discord::turn_bridge::resume_pin_tests::c1_cancelled_registered_pin_leaves_all_effects_untouched
 services::discord::turn_bridge::resume_pin_tests::c1_missing_and_idle_tail_mismatch_never_resume_latest
 services::discord::turn_bridge::resume_pin_tests::c1_poisoned_resume_lock_does_not_unpause
@@ -6433,6 +6432,7 @@ services::discord::turn_bridge::resume_pin_tests::c1_synthetic_and_handoff_stale
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_cancelled_pg
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_foreign_or_stale_pg
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_to_executor_pg
+services::discord::turn_bridge::resume_pin_tests::sa2_capture_hands_off_owned_provider_receiver
 services::discord::turn_bridge::retry_state::sentinel_overwrite_clamp_tests::replay_gate_does_not_reset_offset_for_short_sentinel
 services::discord::turn_bridge::retry_state::sentinel_overwrite_clamp_tests::sync_clamps_offset_within_replaced_body
 services::discord::turn_bridge::retry_state::sentinel_overwrite_clamp_tests::sync_normalizes_prior_offset_inside_leading_multibyte_char

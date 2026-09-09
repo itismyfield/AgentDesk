@@ -178,18 +178,19 @@ fn c1_both_late_writers_consume_pin_without_registry_backfill() {
 }
 
 #[test]
-fn c1_bridge_clear_fence_capture_reaches_the_postlude_context() {
-    let entry = include_str!("mod.rs");
-    // One producer only: a second capture at the delivery site would hand the
-    // postlude a fence the bridge never observed before provider work started.
-    assert_eq!(entry.matches("capture_channel_clear_fence(").count(), 1);
-    let capture = entry
-        .find("let clear_fence = capture_bridge_clear_fence(shared_owned.as_ref(), channel_id).await;")
-        .expect("bridge captures its own clear fence");
-    let deliver = entry
-        .find("\n                clear_fence,\n                turn_start,\n")
-        .expect("postlude context receives the captured fence verbatim");
-    assert!(capture < deliver, "capture must precede postlude delivery");
+fn sa2_capture_hands_off_owned_provider_receiver() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None);
+            let (tx, rx) = mpsc::channel();
+            drop(tx);
+            let (_, mut rx) =
+                super::capture_bridge_clear_fence(&shared, ChannelId::new(580899), rx).await;
+            assert!(rx.recv().await.is_none());
+        });
 }
 
 #[test]
@@ -250,7 +251,8 @@ fn actual_postlude_runtime_proof(response: Option<&str>, case: &str) {
         } else { (None, String::new()) };
         // `failed_capture`: the bridge observed nothing, so it carries the -1 sentinel.
         let observer = if case == "failed_capture" { super::super::make_shared_data_for_tests_with_storage(None) } else { shared.clone() };
-        let clear_fence = super::capture_bridge_clear_fence(&observer, owner).await;
+        let (_, rx) = mpsc::channel();
+        let (clear_fence, _rx) = super::capture_bridge_clear_fence(&observer, owner, rx).await;
         if case == "clear" { record_channel_clear_boundary(pool.as_ref(), &channel).await.unwrap(); }
         let h = handle();
         shared.tmux_watchers.insert(owner, copy_handle(&h));

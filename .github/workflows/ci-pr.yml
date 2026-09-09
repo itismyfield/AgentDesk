@@ -202,7 +202,7 @@ jobs:
               - 'src/services/discord/turn_bridge/headless_delivery.rs'
               - 'src/services/discord/turn_bridge/headless_delivery/**'
               - 'src/services/discord/turn_bridge/intake_settlement/**'
-              - 'src/services/discord/turn_bridge/resume_pin_tests.rs'
+              - 'src/services/discord/turn_bridge/**'
               - 'src/services/discord/turn_bridge/voice_completion_tests.rs'
               - 'src/services/scheduled_messages.rs'
               - 'src/services/scheduled_messages/**'
