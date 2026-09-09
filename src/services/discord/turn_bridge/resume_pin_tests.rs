@@ -154,6 +154,9 @@ fn c1_poisoned_resume_lock_does_not_unpause() {
 
 #[test]
 fn c1_both_late_writers_consume_pin_without_registry_backfill() {
+    let entry = include_str!("mod.rs");
+    assert!(entry.contains("CompletionPostludeState {\n                watcher_delivery_pin,"));
+    assert!(entry.contains("TerminalOutcomeDeliveryContext {\n                    watcher_delivery_pin: watcher_delivery_pin.clone(),"));
     let completion = include_str!("completion_postlude.rs");
     let epilogue = include_str!("finalize_epilogue.rs");
     assert_eq!(

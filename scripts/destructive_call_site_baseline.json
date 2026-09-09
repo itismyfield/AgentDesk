@@ -53,6 +53,7 @@
         "src/services/discord/turn_bridge/resume_pin_tests.rs": 1,
         "src/services/discord/turn_bridge/runtime_handoff_loop.rs": 1,
         "src/services/discord/turn_bridge/runtime_handoff_loop/watcher_handoff.rs": 2,
+        "src/services/discord/turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests.rs": 1,
         "src/services/discord/turn_finalizer.rs": 2,
         "src/services/discord/watchers/lifecycle/claims.rs": 3,
         "src/services/discord/watchers/lifecycle/tests.rs": 1

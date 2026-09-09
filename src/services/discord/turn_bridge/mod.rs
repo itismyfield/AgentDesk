@@ -762,6 +762,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let terminal_outcome_delivery_output =
             terminal_outcome_delivery::run_terminal_outcome_delivery(
                 terminal_outcome_delivery::TerminalOutcomeDeliveryContext {
+                    watcher_delivery_pin: watcher_delivery_pin.clone(),
                     channel_id,
                     user_msg_id,
                     current_msg_id,
