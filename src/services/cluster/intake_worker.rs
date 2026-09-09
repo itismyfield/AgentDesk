@@ -198,11 +198,11 @@ enum AdmissionAction {
 }
 
 fn admission_action(
-    cancel: &AtomicBool,
+    cancelled: &(dyn Fn() -> bool + Sync),
     lifecycle: &IntakeWorkerLifecycle,
     checkpoint: AdmissionCheckpoint,
 ) -> AdmissionAction {
-    if !cancel.load(Ordering::Acquire) && !lifecycle.admission_is_fenced() {
+    if !cancelled() && !lifecycle.admission_is_fenced() {
         return AdmissionAction::Proceed;
     }
     match checkpoint {
@@ -263,7 +263,7 @@ pub(crate) async fn run_intake_worker_tick(
     target_instance_id: &str,
     provider: &str,
     claim_owner: &str,
-    cancel: &AtomicBool,
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<TickOutcome, sqlx::Error> {
     let Some(_active_tick) = shared.restart.intake_worker_lifecycle.try_begin_tick() else {
         return Ok(TickOutcome::Cancelled);
@@ -272,7 +272,7 @@ pub(crate) async fn run_intake_worker_tick(
     // The lifecycle gate is the atomic admission boundary. The cancel check is
     // retained as a belt-and-suspenders fence for signal-driven shutdown.
     if admission_action(
-        cancel,
+        cancelled,
         &shared.restart.intake_worker_lifecycle,
         AdmissionCheckpoint::BeforeClaim,
     ) == AdmissionAction::StopBeforeClaim
@@ -288,7 +288,7 @@ pub(crate) async fn run_intake_worker_tick(
     // A marker can land while the claim transaction is in flight. Return only
     // this worker's row to pending and stop before payload work or spawning.
     if admission_action(
-        cancel,
+        cancelled,
         &shared.restart.intake_worker_lifecycle,
         AdmissionCheckpoint::AfterClaim,
     ) == AdmissionAction::ReleaseClaim
@@ -318,7 +318,7 @@ pub(crate) async fn run_intake_worker_tick(
     // pre-accept boundary; after acceptance the lifecycle guard makes marker
     // acknowledgement wait for execute/final DB transition to drain.
     if admission_action(
-        cancel,
+        cancelled,
         &shared.restart.intake_worker_lifecycle,
         AdmissionCheckpoint::AfterClaim,
     ) == AdmissionAction::ReleaseClaim
@@ -409,14 +409,14 @@ async fn release_cancelled_claim(
     Ok(())
 }
 
-/// Run the poll loop forever. Returns when `cancel.load(Acquire)` is true.
+/// Run the poll loop forever. Returns when the shutdown probe reads true.
 /// Each tick claims at most one row; backoff between ticks adapts to
 /// whether the previous tick had work.
 ///
 /// Cancellation semantics (codex Phase 3 review):
 /// - Between ticks (during the adaptive sleep), the loop polls
-///   `cancel` in slices of `max(busy_poll_interval, 50ms)` so a
-///   flag flip unblocks within ~250ms by default.
+///   the shutdown probe in slices of `max(busy_poll_interval, 50ms)`
+///   so a flag flip unblocks within ~250ms by default.
 /// - Before acceptance, the tick rechecks at the claim boundary and returns an
 ///   owned claim to `pending` when cancellation races the claim transaction.
 /// - After `accepted`, cancellation does not interrupt execution. The active
@@ -424,10 +424,12 @@ async fn release_cancelled_claim(
 ///   DB transition to drain. Operators with a stuck turn should use Phase 5's
 ///   force-fail CLI rather than relying on cancel-mid-execute.
 ///
-/// What flips the cancel flag (codex Phase 5 P1 #3): the bootstrap passes
-/// `SharedData.restart.shutting_down`. Both the signal path and the shared
-/// gateway/standby restart-marker poller set it before restart acknowledgement,
-/// fencing new poll ticks while an active tick drains to completion.
+/// What flips the cancel flag (codex Phase 5 P1 #3): the loop reads
+/// `SharedData.restart.shutting_down` through a #5485 S2a `ShutdownReader`,
+/// which is a read-only view of that flag rather than a writable `Arc` clone.
+/// Both the signal path and the shared gateway/standby restart-marker poller
+/// set it before restart acknowledgement, fencing new poll ticks while an
+/// active tick drains to completion.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_intake_worker_loop(
     pool: PgPool,
@@ -438,8 +440,12 @@ pub(crate) async fn run_intake_worker_loop(
     provider: String,
     claim_owner: String,
     config: IntakeWorkerConfig,
-    cancel: Arc<AtomicBool>,
 ) {
+    // Own the reader for the lifetime of the loop; `cancelled` is the single
+    // live probe handed to every checkpoint, so the loop and the tick can never
+    // read different snapshots of the same flag.
+    let reader = shared.restart.shutdown_reader();
+    let cancelled = || reader.load(Ordering::Acquire);
     tracing::info!(
         target_instance_id,
         provider,
@@ -449,7 +455,7 @@ pub(crate) async fn run_intake_worker_loop(
         "[intake_worker] poll loop started"
     );
     loop {
-        if cancel.load(Ordering::Acquire) {
+        if cancelled() {
             tracing::info!(target_instance_id, "[intake_worker] cancelled — exiting");
             return;
         }
@@ -462,7 +468,7 @@ pub(crate) async fn run_intake_worker_loop(
             &target_instance_id,
             &provider,
             &claim_owner,
-            cancel.as_ref(),
+            &cancelled,
         )
         .await;
 
@@ -490,7 +496,7 @@ pub(crate) async fn run_intake_worker_loop(
         let slice = config.busy_poll_interval.max(MIN_SLICE).min(sleep_for);
         let mut remaining = sleep_for;
         while remaining > Duration::ZERO {
-            if cancel.load(Ordering::Acquire) {
+            if cancelled() {
                 return;
             }
             let step = remaining.min(slice).max(MIN_SLICE);
@@ -779,10 +785,10 @@ mod tests {
 
     #[test]
     fn marker_between_claim_and_accept_requires_release_without_spawn() {
-        let cancel = AtomicBool::new(false);
+        let cancelled = || false;
         let lifecycle = IntakeWorkerLifecycle::default();
         assert_eq!(
-            admission_action(&cancel, &lifecycle, AdmissionCheckpoint::BeforeClaim),
+            admission_action(&cancelled, &lifecycle, AdmissionCheckpoint::BeforeClaim),
             AdmissionAction::Proceed
         );
 
@@ -790,7 +796,7 @@ mod tests {
         let mut spawned = false;
         let mut returned_pending = false;
         lifecycle.fence_admission();
-        match admission_action(&cancel, &lifecycle, AdmissionCheckpoint::AfterClaim) {
+        match admission_action(&cancelled, &lifecycle, AdmissionCheckpoint::AfterClaim) {
             AdmissionAction::ReleaseClaim => returned_pending = true,
             AdmissionAction::Proceed => {
                 accepted = true;
@@ -802,6 +808,40 @@ mod tests {
         assert!(returned_pending);
         assert!(!accepted, "a fenced claimed row must not be accepted");
         assert!(!spawned, "a fenced claimed row must not spawn");
+    }
+
+    /// #5485 S2a A3: the probe handed to both checkpoints is LIVE, not a
+    /// snapshot. The same closure must see a flag flip that happens after the
+    /// BeforeClaim decision, so a shutdown racing the claim transaction still
+    /// releases the owned row instead of accepting it.
+    #[test]
+    fn live_probe_flip_after_claim_releases_before_accept() {
+        let flag = AtomicBool::new(false);
+        let cancelled = || flag.load(Ordering::Acquire);
+        let lifecycle = IntakeWorkerLifecycle::default();
+
+        assert_eq!(
+            admission_action(&cancelled, &lifecycle, AdmissionCheckpoint::BeforeClaim),
+            AdmissionAction::Proceed,
+            "an open probe must let the tick reach the claim"
+        );
+
+        flag.store(true, Ordering::Release);
+
+        assert_eq!(
+            admission_action(&cancelled, &lifecycle, AdmissionCheckpoint::AfterClaim),
+            AdmissionAction::ReleaseClaim,
+            "the same closure must observe the post-claim flip and release the row"
+        );
+        assert_eq!(
+            admission_action(&cancelled, &lifecycle, AdmissionCheckpoint::BeforeClaim),
+            AdmissionAction::StopBeforeClaim,
+            "a flipped probe must also stop the next tick before it claims"
+        );
+        assert!(
+            !lifecycle.admission_is_fenced(),
+            "the probe alone decides here — the lifecycle fence stays open"
+        );
     }
 }
 

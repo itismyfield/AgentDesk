@@ -1442,10 +1442,13 @@ async fn voice_turn_done_plays_distinct_done_chime() {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
     let harness = VoicePcmHarness::new(&[]).await;
-    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    harness
-        .runtime
-        .spawn_progress_worker(harness.shared.clone(), shutdown.clone());
+    // #5485 S2a: the worker now takes a read-only `ShutdownReader` over the
+    // harness's own lifecycle flag, so the test no longer owns a writable
+    // `Arc<AtomicBool>` of its own.
+    harness.runtime.spawn_progress_worker(
+        harness.shared.clone(),
+        harness.shared.restart.shutdown_reader(),
+    );
     harness.clear_play_requests();
 
     harness
@@ -1465,7 +1468,12 @@ async fn voice_turn_done_plays_distinct_done_chime() {
         "turn-done must play the distinct done chime"
     );
     assert_no_play_context(&harness, PROCESSING_CHIME_CONTEXT);
-    shutdown.store(true, Ordering::Relaxed);
+    // Both observations above are already awaited, so the semantic stop below
+    // can never race them. Stopping through owner state keeps this call stable
+    // across the S2b writer cutover.
+    crate::services::discord::shared_state::restart_lifecycle_tests::stop_pcm_worker_for_test(
+        &harness.shared.restart,
+    );
 }
 
 // P4: done_chime_path resolves to a non-empty WAV at a file name distinct from
