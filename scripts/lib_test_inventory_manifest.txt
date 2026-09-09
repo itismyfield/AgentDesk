@@ -1764,6 +1764,10 @@ services::claude_tui::tui_relay::tests::try_claim_registry_match_token_leaves_st
 services::claude_tui::tui_relay::tests::tui_send_holds_composer_lock_across_paste_and_enter
 services::claude_tui::tui_relay::tests::unrelated_event_does_not_match_stop
 services::claude_tui::tui_relay::tests::wait_request_not_before_defaults_to_none
+services::cluster::attachment_transfer::tests::bundle_rejects_corrupted_bytes_and_unknown_version
+services::cluster::attachment_transfer::tests::bundle_rejects_cross_message_identity
+services::cluster::attachment_transfer::tests::bundle_rejects_partial_entry_set
+services::cluster::attachment_transfer::tests::bundle_roundtrip_preserves_order_and_binary
 services::cluster::intake_preflight::tests::claude_and_codex_emit_structured_pass_and_fail_evidence
 services::cluster::intake_preflight::tests::each_required_failure_is_independently_fail_closed
 services::cluster::intake_preflight::tests::evaluation_does_not_mutate_production_handoff_state_pg
@@ -1861,6 +1865,7 @@ services::cluster::intake_worker::tests::intake_request_from_row_rejects_non_num
 services::cluster::intake_worker::tests::intake_request_from_row_rejects_unknown_turn_kind
 services::cluster::intake_worker::tests::intake_request_from_row_restores_preservation_and_fails_safe_for_null
 services::cluster::intake_worker::tests::intake_request_from_row_round_trips_basic_fields
+services::cluster::intake_worker::tests::live_probe_flip_after_claim_releases_before_accept
 services::cluster::intake_worker::tests::marker_between_claim_and_accept_requires_release_without_spawn
 services::cluster::intake_worker::tests::marker_between_loop_check_and_claim_stops_before_claim
 services::cluster::intake_worker::tests::parse_turn_kind_accepts_standard_and_foreground_aliases
@@ -5028,6 +5033,8 @@ services::discord::settings::write::yaml_write_back_secret_tests::secret_write_b
 services::discord::settings::write::yaml_write_back_secret_tests::typed_gate_blocks_mismatched_snapshot_before_render_returns
 services::discord::settings::write::yaml_write_back_secret_tests::typed_gate_rejects_scalar_corruption
 services::discord::shared_state::restart_lifecycle_tests::check_deferred_restart_fresh_token_decrements_once_without_exit
+services::discord::shared_state::restart_lifecycle_tests::legacy_actor_store_matrix_preserves_unwritten_flags
+services::discord::shared_state::restart_lifecycle_tests::shutdown_reader_observes_live_writer_and_clone
 services::discord::single_message_panel::tests::carried_entry_notification_updates_latest_target_not_superseded_text
 services::discord::single_message_panel::tests::completion_footer_below_ttl_keeps_animating_registered_target
 services::discord::single_message_panel::tests::completion_footer_consecutive_edit_failures_evict_registered_target
@@ -7015,6 +7022,7 @@ services::discord::voice_lifecycle::lifecycle_tests::record_join_success_registe
 services::discord::voice_lifecycle::lifecycle_tests::rejoin_decision_state_transitions
 services::discord::voice_lifecycle::lifecycle_tests::rejoin_inflight_guard_dedupes
 services::discord::voice_lifecycle::lifecycle_tests::should_schedule_rejoin_all_branches
+services::discord::voice_lifecycle::lifecycle_tests::shutdown_reader_backoff_preserves_cancel_precedence
 services::discord::voice_lifecycle::lifecycle_tests::supervisor_spawns_per_guild_so_stuck_guild_does_not_block_others
 services::discord::voice_routing::tests::pairing_store_persists_voice_to_text_mapping
 services::discord::watcher_lifecycle_decision::tests::active_stream_keeps_watcher_running_before_terminal_success

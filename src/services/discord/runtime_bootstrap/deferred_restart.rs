@@ -88,7 +88,7 @@ impl Drop for DeferredRestartCancellationGuard {
 /// consume that provider's shutdown-barrier slot.
 pub(super) fn begin_deferred_restart(shared: &SharedData) -> Option<DeferredRestartPermit> {
     shared.restart.intake_worker_lifecycle.fence_admission();
-    shared.restart.shutting_down.store(true, Ordering::SeqCst);
+    shared.restart.legacy_deferred_begin();
     shared
         .restart
         .shutdown_counted
@@ -114,7 +114,7 @@ pub(super) async fn prepare_deferred_restart(
     }
     // `restart_pending` is the health-visible acknowledgement consumed by the
     // wrapper. Publish it only after an accepted tick has fully executed.
-    shared.restart.restart_pending.store(true, Ordering::SeqCst);
+    shared.restart.legacy_deferred_ack();
     Some((permit, guard))
 }
 
@@ -211,11 +211,7 @@ fn release_deferred_restart_ownership(shared: &SharedData) {
 
 pub(super) fn rollback_deferred_restart(shared: &SharedData) {
     shared.restart.intake_worker_lifecycle.unfence_admission();
-    shared.restart.shutting_down.store(false, Ordering::SeqCst);
-    shared
-        .restart
-        .restart_pending
-        .store(false, Ordering::SeqCst);
+    shared.restart.legacy_deferred_rollback();
     release_deferred_restart_ownership(shared);
 }
 

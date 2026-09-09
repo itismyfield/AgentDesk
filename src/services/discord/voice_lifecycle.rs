@@ -491,7 +491,7 @@ pub(in crate::services::discord) fn spawn_voice_rejoin_supervisor(
     receiver: crate::voice::VoiceReceiver,
     barge_in: Arc<super::voice_barge_in::VoiceBargeInRuntime>,
     provider: crate::services::provider::ProviderKind,
-    shutting_down: Arc<std::sync::atomic::AtomicBool>,
+    shutting_down: super::shared_state::ShutdownReader,
 ) {
     let provider_key = provider.as_str().to_string();
     let mut rx = register_lifecycle_router(&provider_key);
@@ -525,14 +525,14 @@ fn handle_rejoin_request(
     receiver: &crate::voice::VoiceReceiver,
     barge_in: &Arc<super::voice_barge_in::VoiceBargeInRuntime>,
     provider: &str,
-    shutting_down: &Arc<std::sync::atomic::AtomicBool>,
+    shutting_down: &super::shared_state::ShutdownReader,
     request: ReconnectRequest,
 ) {
     let ctx = ctx.clone();
     let receiver = receiver.clone();
     let barge_in = Arc::clone(barge_in);
     let provider_owned = provider.to_string();
-    let shutting_down = Arc::clone(shutting_down);
+    let shutting_down = shutting_down.clone();
     let _spawned = spawn_rejoin_task(provider, request.guild_id.get(), move |cancel| async move {
         barge_in.voice_disconnected(request.channel_id);
         run_rejoin_loop(
@@ -577,7 +577,7 @@ async fn run_rejoin_loop(
     receiver: &crate::voice::VoiceReceiver,
     barge_in: &Arc<super::voice_barge_in::VoiceBargeInRuntime>,
     provider: &str,
-    shutting_down: &Arc<std::sync::atomic::AtomicBool>,
+    shutting_down: &super::shared_state::ShutdownReader,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
     request: &ReconnectRequest,
 ) {
@@ -785,7 +785,7 @@ enum BackoffOutcome {
 /// backoff. Cancel is checked first so an explicit leave is reported as such.
 async fn sleep_through_backoff(
     duration: Duration,
-    shutting_down: &Arc<std::sync::atomic::AtomicBool>,
+    shutting_down: &super::shared_state::ShutdownReader,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
 ) -> BackoffOutcome {
     use std::sync::atomic::Ordering;
@@ -1136,5 +1136,37 @@ mod lifecycle_tests {
             "a signal after clear must not pre-cancel a later-registered loop"
         );
         clear_rejoin_cancel(provider, guild);
+    }
+
+    /// #5485 S2a A4: the backoff wait now reads shutdown through a read-only
+    /// `ShutdownReader` instead of a writable `Arc<AtomicBool>` clone. Pin the
+    /// full outcome table so the swap cannot quietly reorder the two flags:
+    /// `/vc leave` (SeqCst cancel) is still reported before shutdown (Relaxed),
+    /// and neither flag set still elapses.
+    #[tokio::test]
+    async fn shutdown_reader_backoff_preserves_cancel_precedence() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let shared = super::super::make_shared_data_for_tests();
+        let shutting_down = shared.restart.shutdown_reader();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        for (shutdown, canceled, expected) in [
+            (true, true, BackoffOutcome::Canceled),
+            (false, true, BackoffOutcome::Canceled),
+            (true, false, BackoffOutcome::Shutdown),
+            (false, false, BackoffOutcome::Elapsed),
+        ] {
+            shared
+                .restart
+                .shutting_down
+                .store(shutdown, Ordering::Relaxed);
+            cancel.store(canceled, Ordering::SeqCst);
+            assert_eq!(
+                sleep_through_backoff(Duration::ZERO, &shutting_down, &cancel).await,
+                expected,
+                "backoff table row shutdown={shutdown} cancel={canceled}"
+            );
+        }
     }
 }
