@@ -123,7 +123,7 @@ async fn inline_completed_paths_never_reach_dispatched_pg() {
     );
     assert_path_returns_before_handoff(
         source,
-        "let turn_goal_kind = if !dispatch_reset_provider_state && !dispatch_recreate_tmux {",
+        "let pre_admission_control::PreAdmission::Continue(turn_goal_kind) =",
         "let force_fresh_provider_session =",
         1,
     );
