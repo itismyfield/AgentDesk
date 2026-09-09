@@ -85,6 +85,9 @@ LIB_INVENTORY_STATIC_ONLY_BY_PLATFORM = {
     }),
 }
 LIB_INVENTORY_KNOWN_CARGO_ONLY = frozenset({
+    "services::discord::tmux::monitor_auto_turn_inflight::monitor_auto_turn_inflight_tests::create_new_returns_the_identity_of_the_row_it_wrote",
+    "services::discord::tmux::monitor_auto_turn_inflight::monitor_auto_turn_inflight_tests::persist_failure_returns_none_and_writes_nothing",
+    "services::discord::tmux::monitor_auto_turn_inflight::monitor_auto_turn_inflight_tests::pre_existing_row_returns_none_and_is_left_untouched",
     "services::discord::tmux::restored_turn_injected_anchor_tests::task_notification_kind_restart_invariant_tests::task_notification_kind_restart_roundtrip_4253",
     "services::discord::tmux::tmux_output_stream::tests::provider_output_guard_tests::invariant_4371_raw_claude_jsonl_reaches_last_mile_guard_without_leaking",
     "services::discord::tmux::tmux_watcher::terminal_direct_fallback::tests::committed_cleanup_preserves_tracking_until_delete_commits_4508",

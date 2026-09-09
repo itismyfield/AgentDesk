@@ -7,22 +7,6 @@ export const DANGEROUS_CONFIG_KEY_DETAILS = {
     ko: "PM 판단 게이트",
     en: "PM decision gate",
   },
-  merge_automation_enabled: {
-    ko: "자동 머지",
-    en: "Merge automation",
-  },
-  merge_strategy: {
-    ko: "머지 전략",
-    en: "Merge strategy",
-  },
-  merge_strategy_mode: {
-    ko: "머지 실행 모드",
-    en: "Merge execution mode",
-  },
-  merge_allowed_authors: {
-    ko: "자동 머지 허용 작성자",
-    en: "Merge allowed authors",
-  },
   context_clear_percent: {
     ko: "컨텍스트 초기화 기준",
     en: "Context clear threshold",

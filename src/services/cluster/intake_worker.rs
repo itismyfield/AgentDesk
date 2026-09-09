@@ -156,16 +156,20 @@ impl IntakeWorkerLifecycle {
 
     fn finish_tick(&self) {
         if self.active_ticks.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.drained.notify_one();
+            self.drained.notify_waiters();
         }
     }
 
-    /// Wait for the active tick, if any, to finish. `notify_one` retains a
-    /// permit when the drop races between the atomic load and `notified()`, so
-    /// the single provider poller cannot miss the drained edge.
+    /// Wait for all active ticks. Create `Notified` before checking the count:
+    /// `notify_waiters` reaches futures created before the broadcast, even if
+    /// not polled yet, but retains no permit for futures created afterwards.
     pub(crate) async fn wait_until_drained(&self) {
-        while self.active_ticks.load(Ordering::SeqCst) != 0 {
-            self.drained.notified().await;
+        loop {
+            let notified = self.drained.notified();
+            if self.active_ticks.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            notified.await;
         }
     }
 }
@@ -804,6 +808,10 @@ mod tests {
 #[cfg(test)]
 #[path = "intake_worker/dispatch_stamp_tests.rs"]
 mod dispatch_stamp_tests;
+
+#[cfg(test)]
+#[path = "intake_worker/drain_tests.rs"]
+mod drain_tests;
 
 // PG-backed tick coverage is intentionally NOT in this file:
 // `run_intake_worker_tick` calls `execute_intake_turn_core` →

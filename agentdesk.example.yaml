@@ -437,12 +437,6 @@ prompt_manifest_retention:
   per_layer_max_bytes_adk_provided: 65536
   per_layer_max_bytes_user_derived: 16384
 
-automation:
-  enabled: false
-  strategy: "squash"
-  strategy_mode: "direct-first"
-  allowed_authors: "REPLACE_ME,octocat"
-
 # JS routine worker 설정입니다. 기본값은 enabled=false, dir=./routines, tick=30초이며 PostgreSQL 없이는 실행되지 않습니다.
 # 운영 자동화 루틴을 켤 때 enabled를 true로 바꾸고 additional_dirs로 operator script를 덧붙이세요.
 # routines:
