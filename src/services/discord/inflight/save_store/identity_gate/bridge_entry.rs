@@ -258,16 +258,16 @@ mod tests {
             let mut before = placeholder_state(5752);
             before.full_response = a.0.into();
             before.response_sent_offset = a.1;
-            before.status_message_id = 101;
+            before.status_message_id = Some(101);
             let mut after = before.clone();
             after.full_response = local.0.into();
             after.response_sent_offset = local.1;
             after.current_msg_len = 13;
-            after.status_message_id = statuses.0;
+            after.status_message_id = Some(statuses.0);
             let mut durable = before.clone();
             durable.full_response = disk.0.into();
             durable.response_sent_offset = disk.1;
-            durable.status_message_id = statuses.1;
+            durable.status_message_id = Some(statuses.1);
             save_inflight_state_in_root(root.path(), &durable).unwrap();
             assert_eq!(
                 patch_bridge_entry_state_if_identity_unchanged_in_root(
@@ -285,7 +285,7 @@ mod tests {
                     (state.full_response.as_str(), state.response_sent_offset),
                     expected
                 );
-                assert_eq!(state.status_message_id, statuses.1);
+                assert_eq!(state.status_message_id, Some(statuses.1));
                 assert_eq!(state.current_msg_len, len);
                 assert!(state.long_running_placeholder_active);
             }
