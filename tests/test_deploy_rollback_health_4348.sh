@@ -382,6 +382,70 @@ assert_rc "wait loop accepts no-provider node when opted in (arg7=1)" 0 \
 assert_rc "wait loop rejects no-provider node without opt-in (arg7 omitted)" 1 \
   _wait_with_shim "test.label" 0 1 0 1 1
 
+# ══ #5736 / PR #5795 r2 — the relay-verdict axis on the DEPLOY gate ══════════
+# #5736 made the polarity pass answer on the summary build, so the PUBLIC
+# /api/health body this gate polls now reports `status: degraded` with
+# `relay_verdict_<label>_<provider>_<channel_id>` reasons whenever the 4987 §5.1
+# switch is `composite`. `health_json_is_ready` had no branch tolerating those,
+# so a serving node whose relay axis was merely UNOBSERVABLE failed the deploy
+# and rollback gates. Under test: the summary stays honest and the gate stops
+# blocking on the relay axis ALONE — one other degraded cause and it must block.
+# ── Fixtures — the real PUBLIC /api/health shape after #5736 ─────────────────
+# Measured on the live release node 2026-09-09: `/api/health/detail` carried
+# eight relay_verdict_* reasons under `relay_verdict_source: composite` while the
+# pre-#5736 public body still said healthy.
+RELAY_ONLY_BODY='{"ok":false,"status":"degraded","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["relay_verdict_unknown_claude_1480015244062490774","relay_verdict_degraded_claude_1479671298497183835","relay_verdict_unknown_codex_1479671301387059200"]}'
+RELAY_SINGLE_BODY='{"ok":false,"status":"degraded","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["relay_verdict_unknown_codex_1479671301387059200"]}'
+# Relay reasons PLUS an unrelated degraded cause — must still BLOCK.
+RELAY_PLUS_DISK_BODY='{"ok":false,"status":"degraded","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["relay_verdict_unknown_codex_1479671301387059200","disk_low_free_bytes:123"]}'
+# A non-relay reason ordered FIRST — the element-wise test must not be fooled by
+# position (the defect #5071 S0 r3 fixed twice in this file's sibling helpers).
+DISK_FIRST_BODY='{"ok":false,"status":"degraded","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["disk_low_free_bytes:123","relay_verdict_unknown_codex_1479671301387059200"]}'
+RELAY_PLUS_STALLED_BODY='{"ok":false,"status":"degraded","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["relay_verdict_unknown_codex_1479671301387059200","provider:codex:reconcile_stalled"]}'
+RELAY_DB_DOWN_BODY='{"ok":false,"status":"degraded","version":"x","db":false,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["relay_verdict_unknown_codex_1479671301387059200"]}'
+# unhealthy/db-down/stalled variants: never rescued (the polarity pass only ever
+# worsens to Degraded, so an unhealthy body is unhealthy for something else).
+RELAY_UNHEALTHY_BODY='{"ok":false,"status":"unhealthy","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["relay_verdict_unknown_codex_1479671301387059200"]}'
+NEAR_MISS_BODY='{"ok":false,"status":"degraded","version":"x","db":true,"dashboard":true,"server_up":true,"fully_recovered":true,"cluster_standby":false,"degraded":true,"degraded_reasons":["relay_verdict"]}'
+
+run_relay_verdict_cases() {
+  local mode="$1"
+  echo "== #5736 relay-verdict deploy allowance ($mode) =="
+  # 4th arg = 1 keeps the #4348 no-provider opt-in on, matching deploy-release.sh:2868.
+  assert_rc "[$mode] relay-only degraded body is deploy-ready" 0 \
+    health_json_is_ready "$RELAY_ONLY_BODY" 1 1 1
+  assert_rc "[$mode] single relay reason is deploy-ready" 0 \
+    health_json_is_ready "$RELAY_SINGLE_BODY" 1 1 1
+  assert_rc "[$mode] relay + unrelated degraded cause still blocks" 1 \
+    health_json_is_ready "$RELAY_PLUS_DISK_BODY" 1 1 1
+  assert_rc "[$mode] non-relay reason ordered first still blocks" 1 \
+    health_json_is_ready "$DISK_FIRST_BODY" 1 1 1
+  assert_rc "[$mode] relay + reconcile_stalled still blocks" 1 \
+    health_json_is_ready "$RELAY_PLUS_STALLED_BODY" 1 1 1
+  assert_rc "[$mode] relay reasons on a db-down node still blocks" 1 \
+    health_json_is_ready "$RELAY_DB_DOWN_BODY" 1 1 1
+  assert_rc "[$mode] relay reasons on an unhealthy node still blocks" 1 \
+    health_json_is_ready "$RELAY_UNHEALTHY_BODY" 1 1 1
+
+  echo "== #5736 predicate boundaries ($mode) =="
+  assert_rc "[$mode] predicate accepts a relay-only body" 0 \
+    _health_json_degraded_only_relay_verdict "$RELAY_ONLY_BODY"
+  assert_rc "[$mode] predicate rejects a mixed body" 1 \
+    _health_json_degraded_only_relay_verdict "$RELAY_PLUS_DISK_BODY"
+  assert_rc "[$mode] predicate rejects an empty-reason body" 1 \
+    _health_json_degraded_only_relay_verdict '{"status":"degraded","db":true,"server_up":true,"degraded_reasons":[]}'
+  assert_rc "[$mode] predicate rejects a healthy body" 1 \
+    _health_json_degraded_only_relay_verdict '{"status":"healthy","db":true,"server_up":true,"degraded_reasons":[]}'
+  # `relay_verdict` with no suffix is not a reason the polarity pass can emit.
+  assert_rc "[$mode] predicate rejects a bare relay_verdict token" 1 \
+    _health_json_degraded_only_relay_verdict "$NEAR_MISS_BODY"
+}
+
+run_relay_verdict_cases "jq"
+_health_json_has_jq() { return 1; }
+run_relay_verdict_cases "jq-less"
+unset -f _health_json_has_jq
+
 echo "== Defect 2 — migration sequence parsing =="
 assert_eq "seq of 0079_relay_dead_letter.sql" "79" "$(_migration_seq_from_name '0079_relay_dead_letter.sql')"
 assert_eq "seq of 0080_intake_outbox_provider.sql (octal-safe)" "80" "$(_migration_seq_from_name '0080_intake_outbox_provider.sql')"
