@@ -39,11 +39,11 @@ def candidates(source):
                 fence = None
             continue
         if fence is None or fence[2]:
-            # Only ASCII shell joins are excluded; Korean prose suffixes remain candidates.
-            shell = bool(fence or re.search(r'\bcurl\b|\$[A-Za-z_{]|`', line))
+            # Shell joins are excluded only inside executable fences and on ASCII command lines.
+            shell = bool(fence or (line.isascii() and re.match(r'\s*[$>]?\s*(?:curl|wget|http|xh)\s', line)))
             matches = (match for match in URL.finditer(line)
-                       if not (shell and (re.search(r'''[A-Za-z0-9_/.:=$}\"']["']$''', line[:match.start()])
-                                          or re.match(r'''["'][A-Za-z0-9_/.$\"'-]''', line[match.end():])))
+                       if not (shell and (re.search(r'''[A-Za-z0-9_/.:=$})\"']["']$''', line[:match.start()])
+                                          or re.match(r'''["'][A-Za-z0-9_/$\"'-]''', line[match.end():])))
                        and '$' not in urlsplit(match[0]).path and not re.match(r'''["']?(?:\s*\+|\$)''', line[match.end():]))
             for path in sorted({urlsplit(match[0]).path for match in matches}):
                 yield number, path

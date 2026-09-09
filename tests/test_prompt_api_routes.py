@@ -82,6 +82,17 @@ class PromptRoutes(unittest.TestCase):
         for template, expected in [(x, 1) for x in prose] + [(x, 0) for x in joins]:
             with self.subTest(template=template):
                 self.assertEqual(self.run_check(template.replace('URL', 'http://localhost:1/api/send'))[0], expected)
+
+    def test_shell_context_and_join_boundaries(self):
+        prose = ['curl 사용 시 엔드포인트="URL"', '`POST` 대상="URL"', '토큰은 $TOKEN 이고 기본값:"URL"',
+                 'curl 설명: "URL"deprecated', "curl 문서에서 설정값='URL' 로 안내", '**"URL"** curl 로 호출',
+                 '~~~sh\ncurl "URL"; echo ok\n~~~', '엔드포인트="URL"', "curl 'URL'.",
+                 '~~~bash\n# 스테이징 대상은 "URL".\n~~~', '`ops` 라우트는 "URL".']
+        joins = ['curl "prefix""URL"', 'curl "URL""suffix"', 'curl base:"URL"', 'curl $(base)"URL"']
+        for template, expected in [(x, 1) for x in prose] + [(x, 0) for x in joins]:
+            with self.subTest(template=template):
+                self.assertEqual(self.run_check(template.replace('URL', 'http://localhost:1/api/send'))[0], expected)
+
     def test_fence_closing_contract(self):
         for marker in ('~~~', '```', '````bash'):
             with self.subTest(marker=marker):
