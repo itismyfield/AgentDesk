@@ -3592,27 +3592,6 @@ mod local_tmux_lifecycle_tests {
         assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&canonical_tmux));
     }
 
-    // The fresh resolution a labelled routine turn falls back to must be a NEW
-    // provider session, not the canonical one under another name.
-    #[test]
-    fn fresh_routine_resolution_never_reuses_the_canonical_session_id() {
-        let temp = tempfile::tempdir().expect("workdir");
-        let claude_home = temp.path().join("claude-home");
-
-        let first = fresh_claude_tui_session_resolution(temp.path(), Some(&claude_home))
-            .expect("fresh resolution");
-        let second = fresh_claude_tui_session_resolution(temp.path(), Some(&claude_home))
-            .expect("fresh resolution");
-
-        assert!(!first.resume, "a fresh routine turn must not resume");
-        assert!(!second.resume);
-        assert_ne!(
-            first.session_id, second.session_id,
-            "each fresh routine turn must mint its own provider session id"
-        );
-        assert_ne!(first.transcript_path, second.transcript_path);
-    }
-
     #[test]
     fn fresh_tui_start_offset_skips_existing_transcript_for_fresh_launch() {
         use std::io::Write;

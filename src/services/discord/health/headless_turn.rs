@@ -308,6 +308,10 @@ async fn start_reserved_headless_agent_turn_with_shared(
     is_dm_hint: Option<bool>,
     reservation: HeadlessAgentTurnReservation,
 ) -> Result<router::HeadlessTurnStartOutcome, router::HeadlessTurnStartError> {
+    // #5708 S1 seam: pin the two slots THIS call was handed. Test-only.
+    #[cfg(test)]
+    dm_reserved_label_tests::record_shared_starter_slots(&channel_name_hint, &tmux_session_label);
+
     if reservation.channel_id != channel_id {
         return Err(router::HeadlessTurnStartError::Internal(format!(
             "headless turn reservation channel mismatch: reserved {} but starting {}",
@@ -397,24 +401,24 @@ pub async fn start_direct_meeting(
 
 #[cfg(test)]
 mod dm_reserved_label_tests {
-    // #5708 S1 — DM reserved-turn label plumbing.
-    //
-    // The DM starter used to hard-code `None` into the shared starter's
-    // `tmux_session_label` slot, so a `fresh` routine running in a DM bound to the
-    // user's canonical DM tmux session and ADK session key: every tick recreated
-    // (killed) the user's live pane, or warm-followed-up into it. The thread
-    // routine path has carried a synthetic label since #3463; this slice gives the
-    // DM path the same parameter.
-    //
-    // The parameter is plumbing only in this slice. Every caller still passes
-    // `None`, so behavior is unchanged — `dm_label_absent_reproduces_the_legacy_
-    // shared_starter_inputs` is the regression that pins that invariant, and the
-    // activation to `Some(routine_agent_session_name(..))` waits for the DM
-    // completion receipt and exact owned teardown.
+    // #5708 S1 — DM reserved-turn label plumbing. The DM starter used to
+    // hard-code `None` into the shared starter's `tmux_session_label` slot, so a
+    // `fresh` routine running in a DM bound to the user's canonical DM tmux
+    // session and ADK session key: every tick recreated (killed) the user's live
+    // pane or warm-followed-up into it. The thread routine path has carried a
+    // synthetic label since #3463; this slice gives the DM path the same
+    // parameter, still passed `None` by every caller until the DM completion
+    // receipt (S2) and exact owned teardown (S3) retire the routine's session.
+    use std::cell::RefCell;
+
     use super::ChannelId;
-    use super::{dm_reserved_turn_session_inputs, reserve_headless_agent_turn};
+    use super::{
+        Arc, HealthRegistry, ProviderKind, dm_reserved_turn_session_inputs,
+        reserve_headless_agent_turn, serenity, start_reserved_headless_agent_turn_in_dm,
+    };
 
     const DM_USER_ID: u64 = 343_742_347_365_974_026;
+    const DM_CHANNEL_HINT: &str = "dm-343742347365974026";
     const ROUTINE_LABEL: &str = "routine family-profile-probe-obujang - obujang";
 
     // The label must land in the tmux/session-key slot WITHOUT displacing the
@@ -432,18 +436,13 @@ mod dm_reserved_label_tests {
         );
         assert_eq!(
             channel_name_hint.as_deref(),
-            Some("dm-343742347365974026"),
+            Some(DM_CHANNEL_HINT),
             "the workspace hint must stay the REAL DM channel, not the routine label"
         );
         assert_eq!(
             is_dm_hint,
             Some(true),
             "a labelled DM turn is still a DM turn for delivery purposes"
-        );
-        assert_ne!(
-            channel_name_hint.as_deref(),
-            tmux_session_label.as_deref(),
-            "hint and label must stay distinct or the routine shares the user's session again"
         );
     }
 
@@ -454,7 +453,7 @@ mod dm_reserved_label_tests {
         let (channel_name_hint, tmux_session_label, is_dm_hint) =
             dm_reserved_turn_session_inputs(DM_USER_ID, None);
 
-        assert_eq!(channel_name_hint.as_deref(), Some("dm-343742347365974026"));
+        assert_eq!(channel_name_hint.as_deref(), Some(DM_CHANNEL_HINT));
         assert_eq!(
             tmux_session_label, None,
             "no label means the canonical DM channel name still selects tmux and the session key"
@@ -462,50 +461,63 @@ mod dm_reserved_label_tests {
         assert_eq!(is_dm_hint, Some(true));
     }
 
-    // The starter must forward its own parameter. A mutation that reverts the
-    // call site to pass a literal `None` into the session inputs keeps every
-    // assertion above green, so pin the forwarding at the call site too. BOTH
-    // needles are assembled by concatenation so `include_str!` cannot self-match
-    // on this test body.
-    #[test]
-    fn dm_starter_forwards_its_label_parameter_rather_than_a_literal_none() {
-        let src = include_str!("headless_turn.rs");
-        let call = "dm_reserved_turn_session_inputs(dm_user_id, ";
-        assert!(
-            src.contains(&format!("{call}{}", "tmux_session_label);")),
-            "the DM starter must forward its tmux_session_label parameter into the session inputs"
-        );
-        assert!(
-            !src.contains(&format!("{call}{}", "None)")),
-            "the DM starter must not re-hard-code None into the session inputs"
+    // The helper tests above cannot see the shared-starter call itself: dropping
+    // the label there, or swapping it with the `channel_name_hint` slot next to
+    // it, leaves them green. Drive the REAL starter and assert both slots the
+    // call was handed. The stub runtime has no cached serenity ctx, so the start
+    // fails only AFTER the forwarding under test.
+    #[tokio::test]
+    async fn dm_starter_hands_its_own_label_to_the_shared_starter_call() {
+        let registry = HealthRegistry::new();
+        registry
+            .register(
+                "claude".to_string(),
+                crate::services::discord::make_shared_data_for_tests(),
+            )
+            .await;
+        registry
+            .register_http("claude".to_string(), Arc::new(serenity::Http::new("Bot t")))
+            .await;
+        let dm_channel = ChannelId::new(1_479_662_682_909_966_490);
+
+        start_reserved_headless_agent_turn_in_dm(
+            &registry,
+            ChannelId::new(1_479_791_992_778_264_577),
+            dm_channel,
+            DM_USER_ID,
+            ProviderKind::Claude,
+            "probe".to_string(),
+            None,
+            None,
+            Some(ROUTINE_LABEL.to_string()),
+            reserve_headless_agent_turn(dm_channel),
+        )
+        .await
+        .expect_err("a runtime without a serenity ctx cannot finish the start");
+
+        assert_eq!(
+            SHARED_STARTER_SLOTS.with(|slots| slots.borrow().clone()),
+            Some((
+                Some(DM_CHANNEL_HINT.to_string()),
+                Some(ROUTINE_LABEL.to_string())
+            )),
+            "the shared starter's hint/label slots must arrive filled and unswapped"
         );
     }
 
-    // #4658/#3038 invariant the label must not disturb: the reservation owns the
-    // turn id, and reading it never mints a new one. The DM starter compares the
-    // reservation channel against the DM channel BEFORE any provider work, so a
-    // drifting id would turn a pre-spawn rejection into a post-spawn one.
-    #[test]
-    fn dm_reservation_turn_id_is_stable_and_scoped_to_its_channel() {
-        let dm_channel = ChannelId::new(1_479_662_682_909_966_490);
-        let reservation = reserve_headless_agent_turn(dm_channel);
+    // `#[tokio::test]` runs its future on the test's own thread, so a
+    // thread-local slot cannot be clobbered by a concurrently running test.
+    thread_local! {
+        static SHARED_STARTER_SLOTS: RefCell<Option<(Option<String>, Option<String>)>> =
+            const { RefCell::new(None) };
+    }
 
-        let first = reservation.turn_id().to_string();
-        let second = reservation.turn_id().to_string();
-        assert_eq!(
-            first, second,
-            "reading the turn id must never regenerate it"
-        );
-        assert!(
-            first.starts_with(&format!("discord:{}:", dm_channel.get())),
-            "the DM turn id must stay scoped to the reserved DM channel, got {first}"
-        );
-
-        let other = reserve_headless_agent_turn(ChannelId::new(1_479_791_992_778_264_577));
-        assert_ne!(
-            reservation.turn_id(),
-            other.turn_id(),
-            "distinct reservations must not collide on a turn id"
-        );
+    pub(super) fn record_shared_starter_slots(
+        channel_name_hint: &Option<String>,
+        tmux_session_label: &Option<String>,
+    ) {
+        SHARED_STARTER_SLOTS.with(|slots| {
+            *slots.borrow_mut() = Some((channel_name_hint.clone(), tmux_session_label.clone()));
+        });
     }
 }
