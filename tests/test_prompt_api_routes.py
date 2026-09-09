@@ -57,6 +57,30 @@ class PromptRoutes(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn('no_applicable_urls', output)
 
+    def test_shell_adjacent_strings(self):
+        for expression in (
+            '"http://localhost:1/api/"discord/send',
+            "'http://localhost:1/api/'discord/send",
+            '"http://localhost:1/api/"' + "'discord/send'",
+            '"http://localhost:1/api/"$ROUTE',
+            '"http://localhost:1/api/""$ROUTE"',
+            '"$API"/api/discord/send',
+            '$PREFIX"http://localhost:1/api/send"',
+        ):
+            with self.subTest(expression=expression):
+                rc, output = self.run_check('curl ' + expression)
+                self.assertEqual(rc, 0)
+                self.assertIn('no_applicable_urls', output)
+        self.assertEqual(self.run_check('curl "http://localhost:1/api/send"')[0], 1)
+
+    def test_fence_closing_contract(self):
+        for marker in ('~~~', '```', '````bash'):
+            with self.subTest(marker=marker):
+                rc, output = self.run_check(
+                    '````text\n' + marker + '\nhttp://localhost:1/api/send\n````')
+                self.assertEqual(rc, 0)
+                self.assertIn('no_applicable_urls', output)
+
     def test_executable_fences_and_line_numbers(self):
         for fence in ('sh', 'bash', 'shell'):
             rc, output = self.run_check(f'<!-- hidden\ncomment -->\n~~~{fence}\ncurl http://localhost:1/api/send\n~~~\nhttp://localhost:1/api/send')
@@ -71,9 +95,11 @@ class PromptRoutes(unittest.TestCase):
                 self.assertEqual(self.run_check('http://localhost:1/api/' + path)[0], expected)
 
     def test_unavailable(self):
-        for source in ('', 'ep(dynamic, "/api/send", "", "")', 'ep("GET", r"/api/send", "", "")'):
+        for source in ('ep("GET", "/api/health", "", "")\nep(METHOD_CONST, "/api/discord/send", "", "")', '', 'ep(dynamic, "/api/send", "", "")', 'ep("GET", r"/api/send", "", "")'):
             self.part.write_text(source)
-            self.assertEqual(self.run_check('')[0], 2)
+            rc, output = self.run_check('http://localhost:1/api/discord/send')
+            self.assertEqual(rc, 2)
+            self.assertIn('inspection_unavailable', output)
         self.part.unlink()
         self.assertEqual(self.run_check('')[0], 2)
         (self.parts / 'mod.rs').write_text('')

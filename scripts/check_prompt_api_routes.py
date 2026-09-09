@@ -42,7 +42,9 @@ def candidates(source):
             continue
         if fence is None or fence[2]:
             matches = (match for match in URL.finditer(line)
-                       if '$' not in urlsplit(match[0]).path and not re.match(r'''["']?(?:\s*\+|\$)''', line[match.end():]))
+                       if not re.search(r'''[^\s("'`<]["']$''', line[:match.start()])
+                       and not re.match(r'''["'][^\s;)<>|&`.,\]]''', line[match.end():])
+                       and '$' not in urlsplit(match[0]).path and not re.match(r'''["']?(?:\s*\+|\$)''', line[match.end():]))
             for path in sorted({urlsplit(match[0]).path for match in matches}):
                 yield number, path
 
