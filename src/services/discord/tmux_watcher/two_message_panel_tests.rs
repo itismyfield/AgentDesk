@@ -460,5 +460,33 @@ async fn status_panel_http_adapter_preserves_completion_on_ledger_failure_4891()
 
 #[tokio::test]
 async fn status_panel_watcher_tail_does_not_queue_completed_panel_4891() {
-    exercise_status_panel_ledger_failure_4891(true).await;
+    // The watcher reads a process-cached, default-ON footer flag before HTTP.
+    // A fresh process pins separate-panel mode without changing the sweep's cache.
+    const CHILD: &str = "AGENTDESK_4891_PANEL_FIXTURE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let test_name = format!(
+            "{}::status_panel_watcher_tail_does_not_queue_completed_panel_4891",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test_name, "--nocapture"])
+            .env(CHILD, "1")
+            .env("AGENTDESK_SINGLE_MESSAGE_PANEL", "0")
+            .output()
+            .expect("run isolated watcher fixture");
+        assert!(
+            output.status.success(),
+            "watcher fixture failed: {:?}",
+            output
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+        return;
+    }
+    assert!(!crate::services::discord::single_message_panel_enabled());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        exercise_status_panel_ledger_failure_4891(true),
+    )
+    .await
+    .expect("watcher fixture must finish its HTTP assertions");
 }
