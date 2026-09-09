@@ -1399,6 +1399,7 @@ services::claude::local_tmux_lifecycle_tests::issue_4113_process_demotion_guard_
 services::claude::local_tmux_lifecycle_tests::live_reused_provider_session_is_preserved_when_wrapper_io_is_missing
 services::claude::local_tmux_lifecycle_tests::local_tmux_plan_keeps_cold_start_on_watcher_handoff_path
 services::claude::local_tmux_lifecycle_tests::local_tmux_plan_uses_warm_followup_only_with_live_pane_and_runtime_paths
+services::claude::local_tmux_lifecycle_tests::routine_binding_clear_starts_fresh_without_recovering_the_canonical_dm_binding
 services::claude::simple_launch_env_tests::simple_command_clears_an_inherited_absolute_compact_window
 services::claude::simple_timeout_2387_tests::timeout_drain_prefers_late_result_when_child_pid_snapshot_is_none
 services::claude_command::chokepoint_guard_tests::claude_binaries_are_not_raw_spawned_outside_the_chokepoint
@@ -1865,6 +1866,7 @@ services::cluster::intake_worker::tests::intake_request_from_row_rejects_non_num
 services::cluster::intake_worker::tests::intake_request_from_row_rejects_unknown_turn_kind
 services::cluster::intake_worker::tests::intake_request_from_row_restores_preservation_and_fails_safe_for_null
 services::cluster::intake_worker::tests::intake_request_from_row_round_trips_basic_fields
+services::cluster::intake_worker::tests::live_probe_flip_after_claim_releases_before_accept
 services::cluster::intake_worker::tests::marker_between_claim_and_accept_requires_release_without_spawn
 services::cluster::intake_worker::tests::marker_between_loop_check_and_claim_stops_before_claim
 services::cluster::intake_worker::tests::parse_turn_kind_accepts_standard_and_foreground_aliases
@@ -2600,6 +2602,9 @@ services::discord::hard_ceiling_tests::clamp_leaves_proposal_below_ceiling_untou
 services::discord::hard_ceiling_tests::codex_uses_tighter_ceiling_than_generic
 services::discord::hard_ceiling_tests::initial_deadline_is_capped_at_codex_ceiling
 services::discord::hard_ceiling_tests::initial_deadline_uncapped_when_ceiling_equals_timeout
+services::discord::health::headless_turn::dm_reserved_label_tests::dm_label_absent_reproduces_the_legacy_shared_starter_inputs
+services::discord::health::headless_turn::dm_reserved_label_tests::dm_label_reaches_the_session_slot_without_moving_the_channel_hint
+services::discord::health::headless_turn::dm_reserved_label_tests::dm_starter_hands_its_own_label_to_the_shared_starter_call
 services::discord::health::liveness_authority::tests::bounded_none_transient_then_fail_closed
 services::discord::health::liveness_authority::tests::capture_decrease_preserves_main_two_tick_grace
 services::discord::health::liveness_authority::tests::capture_some_to_none_records_disappearance_and_preserves_main_grace
@@ -4553,6 +4558,10 @@ services::discord::router::message_handler::control::command_boundary_tests::wra
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::goal_fresh_intake_and_headless_paths_record_durable_boundary_before_clear
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_are_classified_precisely
 services::discord::router::message_handler::goal_lifecycle::codex_goal_lifecycle_unit_tests::lifecycle_subcommands_have_consumed_notices
+services::discord::router::message_handler::headless_turn::fresh_routine_tests::dm_fresh_routine_label_becomes_the_session_key_basis
+services::discord::router::message_handler::headless_turn::fresh_routine_tests::dm_fresh_routine_without_a_label_keeps_the_canonical_channel_key
+services::discord::router::message_handler::headless_turn::fresh_routine_tests::dm_routine_label_yields_a_distinct_tmux_session_name
+services::discord::router::message_handler::headless_turn::fresh_routine_tests::dm_routine_negative_matrix_never_overrides_the_session_key
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::explicit_fresh_routine_is_fresh_for_every_channel_path
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::fresh_routine_path_does_not_clear_provider_when_boundary_fails
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::fresh_routine_path_records_durable_boundary_before_provider_clear
@@ -4566,6 +4575,8 @@ services::discord::router::message_handler::headless_turn::fresh_routine_tests::
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::scheduled_snapshot_session_label_reads_metadata_marker
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::scheduled_snapshot_skips_channel_session_key_refresh
 services::discord::router::message_handler::headless_turn::fresh_routine_tests::scheduled_snapshot_turn_stays_out_of_channel_mutating_severance
+services::discord::router::message_handler::headless_turn::fresh_routine_tests::tmux_name_selection_prefers_the_routine_label_over_the_channel_name
+services::discord::router::message_handler::headless_turn::fresh_routine_tests::two_dm_routines_on_one_agent_do_not_share_a_tmux_session
 services::discord::router::message_handler::headless_turn::headless_hard_ceiling_tests::headless_auto_extend_clamped_at_codex_ceiling
 services::discord::router::message_handler::headless_turn::headless_hard_ceiling_tests::headless_initial_deadline_capped_at_codex_ceiling
 services::discord::router::message_handler::headless_turn::headless_hard_ceiling_tests::headless_initial_deadline_uncapped_for_default_claude
@@ -5032,6 +5043,8 @@ services::discord::settings::write::yaml_write_back_secret_tests::secret_write_b
 services::discord::settings::write::yaml_write_back_secret_tests::typed_gate_blocks_mismatched_snapshot_before_render_returns
 services::discord::settings::write::yaml_write_back_secret_tests::typed_gate_rejects_scalar_corruption
 services::discord::shared_state::restart_lifecycle_tests::check_deferred_restart_fresh_token_decrements_once_without_exit
+services::discord::shared_state::restart_lifecycle_tests::legacy_actor_store_matrix_preserves_unwritten_flags
+services::discord::shared_state::restart_lifecycle_tests::shutdown_reader_observes_live_writer_and_clone
 services::discord::single_message_panel::tests::carried_entry_notification_updates_latest_target_not_superseded_text
 services::discord::single_message_panel::tests::completion_footer_below_ttl_keeps_animating_registered_target
 services::discord::single_message_panel::tests::completion_footer_consecutive_edit_failures_evict_registered_target
@@ -5549,6 +5562,16 @@ services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_sing
 services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_single_message_completion_footer_producer_threads_sniffed_background_agent_pending
 services::discord::tmux::tmux_watcher::stall_exit::tests::pinned_exit_preserves_newer_inflight_and_mailbox_on_identity_mismatch
 services::discord::tmux::tmux_watcher::stall_exit::tests::pinned_exit_releases_matching_turn_through_finalizer
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::active_progress_tick_emits_once
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::active_silent_progress_is_durable
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_pinned_identity_suppresses_trailing_body
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_preserves_exact_row
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_tick_emits_no_republication
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_tick_preserves_cleanup_and_panel_parity
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_caller_uses_actual_terminal_outcome
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_short_body_and_ioerror_stay_nonterminal
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::terminal_outcome_logged_at_wrapper
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::terminal_progress_no_false_authority
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_common_edit_and_initial_send_share_guarded_payload
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_watcher_common_frame_selects_one_safe_payload
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_watcher_rollover_never_selects_raw_control_data
@@ -7013,6 +7036,7 @@ services::discord::voice_lifecycle::lifecycle_tests::record_join_success_registe
 services::discord::voice_lifecycle::lifecycle_tests::rejoin_decision_state_transitions
 services::discord::voice_lifecycle::lifecycle_tests::rejoin_inflight_guard_dedupes
 services::discord::voice_lifecycle::lifecycle_tests::should_schedule_rejoin_all_branches
+services::discord::voice_lifecycle::lifecycle_tests::shutdown_reader_backoff_preserves_cancel_precedence
 services::discord::voice_lifecycle::lifecycle_tests::supervisor_spawns_per_guild_so_stuck_guild_does_not_block_others
 services::discord::voice_routing::tests::pairing_store_persists_voice_to_text_mapping
 services::discord::watcher_lifecycle_decision::tests::active_stream_keeps_watcher_running_before_terminal_success

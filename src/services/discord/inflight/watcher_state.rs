@@ -44,6 +44,10 @@ pub(in crate::services::discord) enum WatcherProgressOutcome {
     Skipped,
     /// Filesystem or lock acquisition failure.
     IoError,
+    /// #5191: the caller pinned an exact identity and the in-lock reload shows
+    /// that row is already terminal-delivery-committed. Rejected before any
+    /// field mutation, so the committed row stays byte-identical on disk.
+    TerminalAlreadyCommitted,
 }
 
 /// #3558: single-lock read-modify-write for the tmux streaming-progress
@@ -66,14 +70,32 @@ pub(in crate::services::discord) fn persist_watcher_stream_progress_locked(
     let Some(root) = inflight_runtime_root() else {
         return WatcherProgressOutcome::IoError;
     };
-    persist_watcher_stream_progress_locked_in_root(
+    let discarded_current_msg_id = patch.current_msg_id;
+    let outcome = persist_watcher_stream_progress_locked_in_root(
         &root,
         provider,
         channel_id,
         require_identity,
         require_tmux_session_name,
         patch,
-    )
+    );
+    // #5191: one central diagnostic for a pinned-owner republication this writer
+    // rejected as already terminal-committed. It records the rejection, not that a
+    // caller skipped HTTP; the discarded id is a pre-cleanup sample. It lives here
+    // (not at the `tmux.rs` wrapper) so the only prod caller stays net-zero under
+    // the giant-file no-growth gate while every rejection is still logged once.
+    if outcome == WatcherProgressOutcome::TerminalAlreadyCommitted {
+        tracing::warn!(
+            event = "watcher_stream_progress_terminal_rejected",
+            provider = %provider.as_str(),
+            channel_id,
+            tmux_session = %require_tmux_session_name,
+            user_msg_id = ?require_identity.map(|identity| identity.user_msg_id),
+            ?discarded_current_msg_id,
+            "watcher: rejected stream-progress republication onto a terminal-committed inflight row"
+        );
+    }
+    outcome
 }
 
 /// Root-explicit variant of [`persist_watcher_stream_progress_locked`] for unit
@@ -115,6 +137,12 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
         && !identity.matches_state(&state)
     {
         return WatcherProgressOutcome::Skipped;
+    }
+    // #5191: the pinned owner's row is already terminal-delivery-committed, so a
+    // later streaming frame must not rewrite its body/offset/current_msg_id. A
+    // `None` identity keeps its historical behavior (no late-birth denial).
+    if require_identity.is_some() && state.terminal_delivery_completed() {
+        return WatcherProgressOutcome::TerminalAlreadyCommitted;
     }
 
     if let Some(msg_id) = patch.current_msg_id {

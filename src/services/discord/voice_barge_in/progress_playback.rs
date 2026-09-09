@@ -35,7 +35,7 @@ impl VoiceBargeInRuntime {
     pub(in crate::services::discord) fn spawn_progress_worker(
         self: &Arc<Self>,
         shared: Arc<SharedData>,
-        shutdown_flag: Arc<AtomicBool>,
+        shutdown_flag: crate::services::discord::shared_state::ShutdownReader,
     ) {
         if !self.enabled {
             return;
