@@ -30,6 +30,8 @@ struct StatusPanelFallbackGateway {
     sent_messages: Arc<Mutex<Vec<String>>>,
     edited_message_ids: Arc<Mutex<Vec<MessageId>>>,
     edit_error: Option<String>,
+    edited_bodies: Mutex<Vec<String>>,
+    deleted_ids: Mutex<Vec<MessageId>>,
     send_id: MessageId,
     can_chain_locally: bool,
 }
@@ -49,6 +51,8 @@ impl Default for StatusPanelFallbackGateway {
             sent_messages: Arc::new(Mutex::new(Vec::new())),
             edited_message_ids: Arc::new(Mutex::new(Vec::new())),
             edit_error: None,
+            edited_bodies: Mutex::new(Vec::new()),
+            deleted_ids: Mutex::new(Vec::new()),
             send_id: MessageId::new(1_500_000_000_000_999),
             can_chain_locally: true,
         }
@@ -76,8 +80,9 @@ impl TurnGateway for StatusPanelFallbackGateway {
         &'a self,
         _channel_id: ChannelId,
         message_id: MessageId,
-        _content: &'a str,
+        content: &'a str,
     ) -> TestGatewayFuture<'a, Result<(), String>> {
+        self.edited_bodies.lock().unwrap().push(content.to_string());
         let edited_message_ids = self.edited_message_ids.clone();
         let edit_error = self.edit_error.clone();
         Box::pin(async move {
@@ -90,6 +95,15 @@ impl TurnGateway for StatusPanelFallbackGateway {
                 None => Ok(()),
             }
         })
+    }
+
+    fn delete_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        id: MessageId,
+    ) -> TestGatewayFuture<'a, Result<(), String>> {
+        self.deleted_ids.lock().unwrap().push(id);
+        Box::pin(async { Ok(()) })
     }
 
     fn replace_message_with_outcome<'a>(
@@ -1263,6 +1277,101 @@ async fn status_panel_completion_purges_pending_bind_for_final_panel() {
         )
         .is_empty(),
         "completion success must purge a crash-window pending_bind for the final live panel"
+    );
+}
+
+// #4891: the ledger and the Discord surface are two independent outcomes. A
+// durable-singleton commit failure must NOT be reported as a completion
+// failure: the watcher tail reads that `false` as "recover this panel" and
+// hands it to `status_panel_orphan_store::drain()`, which `delete_message`s it.
+// The 2026-07-24 operator repro lost two live panels this way
+// (`panel_message_id=1530266420234031306` / `…449355210913`).
+//
+// The inflight row here has already moved on to the NEXT turn's panel and no
+// durable singleton was ever written, so `commit_if_owned_or_current` genuinely
+// fails. Completion must still report success, edit the panel into its
+// completion footer, and leave nothing queued for deletion.
+#[tokio::test]
+async fn ledger_commit_failure_does_not_delete_a_completed_panel_4891() {
+    let (_env_lock, _runtime_root) = isolate_agentdesk_runtime_root();
+    let shared = make_two_message_status_panel_shared_for_tests();
+    let gateway = StatusPanelFallbackGateway::default();
+    let provider = ProviderKind::Claude;
+    let channel_id = ChannelId::new(4_891_101);
+    let user_msg_id = 4_891_102;
+    let panel = MessageId::new(1_530_266_420_234_031_306);
+    let next_turn_panel = MessageId::new(1_530_266_449_355_210_913);
+
+    // The NEXT turn already re-bound the on-disk row onto its own panel, and the
+    // durable singleton was never written for either id → the ledger commit for
+    // the completing panel fails ("status panel singleton ownership changed").
+    save_inflight_state(&inflight_row_owned_by(
+        &provider,
+        channel_id.get(),
+        user_msg_id + 500,
+        next_turn_panel.get(),
+    ))
+    .expect("persist the next turn's row");
+    use crate::services::discord::status_panel_orphan_store as orphans;
+    orphans::enqueue_pending_bind(
+        &provider,
+        &shared.token_hash,
+        channel_id.get(),
+        panel.get(),
+        None,
+    );
+
+    let mut last_status_panel_text = String::new();
+    let committed = complete_status_panel_v2(
+        shared.as_ref(),
+        &gateway,
+        channel_id,
+        Some(panel),
+        &provider,
+        1_700_000_000,
+        &mut last_status_panel_text,
+        false,
+        false,
+        "test_4891_ledger_failure_is_not_completion_failure",
+        user_msg_id,
+        true,
+    )
+    .await;
+
+    assert!(gateway.edited_bodies.lock().unwrap()[0].contains("완료"));
+    assert!(gateway.deleted_ids.lock().unwrap().is_empty());
+    let ledger = crate::services::discord::status_panel_singleton_store::load;
+    assert_eq!(
+        ledger(&provider, &shared.token_hash, channel_id.get()),
+        None,
+        "precondition: the durable singleton commit really did fail"
+    );
+    assert!(
+        committed,
+        "a ledger-only failure must not be reported as a completion failure"
+    );
+    let edited = gateway.edited_message_ids.lock().expect("edited ids lock");
+    assert_eq!(
+        edited.as_slice(),
+        &[panel],
+        "the completed panel must stay in the channel as an EDIT, never a re-send"
+    );
+    let sent = gateway.sent_messages.lock().expect("sent messages lock");
+    assert!(
+        sent.is_empty(),
+        "a ledger failure must not mint a replacement panel"
+    );
+    assert!(
+        last_status_panel_text.contains("완료"),
+        "the panel must be left in its completion-footer state"
+    );
+    assert!(
+        orphans::load_pending(&provider, &shared.token_hash).is_empty(),
+        "a completed panel must not be left queued for orphan deletion"
+    );
+    assert!(
+        !orphans::is_queued(&provider, &shared.token_hash, channel_id.get(), panel.get()),
+        "the orphan drain must find nothing to delete for the completed panel"
     );
 }
 
