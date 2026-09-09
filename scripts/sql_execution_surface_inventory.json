@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "0ab074bb56354e4b4c15c5a1a1907d0d5568141e",
+  "measured_at_sha": "c70d6af23018d1b42e60091542b9547e2a62ad30",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1040,11 +1040,29 @@
     {
       "root": "migrations/postgres",
       "kind": "MIGRATION",
+      "path": "migrations/postgres/0113_intake_outbox_terminal_retention_index.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:99cba304725541bfdb937388d5e7c8dcb2f31853d61d97912ea6a414a402100f"
+    },
+    {
+      "root": "migrations/postgres",
+      "kind": "MIGRATION",
       "path": "migrations/postgres/0114_channel_clear_boundary_markers.sql",
       "api": "migration.file",
       "symbol": "file",
       "classification": "STATIC_FILE",
       "fingerprint": "sha256:46d6d2c3872610d972d49ea06ce889d0f7b58331068c03bca62c1911db136938"
+    },
+    {
+      "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0115_intake_outbox_failed_pre_accept_sweep_order_index.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:d389902100a8a7e9d96e3ece7ac17954ca70891e9828dfb0c2094b68333f6b3c"
     },
     {
       "root": "migrations/postgres",
@@ -1062,7 +1080,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:57ac3d704ab4888ecaf6e8e4cc0d48edca4faca59a76b80839a8354cbedefd7b"
+      "fingerprint": "sha256:35aead3803f6a66e02f6d6045ded0bf308a75179c7700a93255f1854d171e500"
     },
     {
       "root": "policies",
@@ -8488,6 +8506,15 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:1ce192589d532a66facd8bdf913663e941a6aa145eda360c54fe4a6a9c05a381"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:1e266b42fbd7380d1c12fc954a3ea6e2ea7fa6945964aa950a40c07634c52db6"
     },
     {
       "root": "src",

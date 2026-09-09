@@ -473,6 +473,7 @@ db::intake_outbox::postgres_tests::force_fail_and_retry_as_new_refuses_pending_a
 db::intake_outbox::postgres_tests::force_fail_and_retry_as_new_terminates_stuck_row_and_inserts_attempt_2
 db::intake_outbox::postgres_tests::full_state_machine_pending_to_done_advances_correctly
 db::intake_outbox::postgres_tests::insert_pending_round_trips_payload_and_returns_id
+db::intake_outbox::postgres_tests::intake_outbox_terminal_retention_index_catalog_pg
 db::intake_outbox::postgres_tests::issue_5057_pr1_capability_loss_rotates_source_then_next_tick_progresses
 db::intake_outbox::postgres_tests::issue_5057_pr1_leader_maintenance_inputs_route_to_current_owner
 db::intake_outbox::postgres_tests::issue_5057_pr1_skips_oldest_unsupported_family_for_capable_family
@@ -498,7 +499,7 @@ db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_marks_
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_empty_when_no_rows_pg
 db::intake_outbox_dispatched_audit::postgres_tests::list_dispatched_audit_returns_only_dispatched_rows_pg
 db::intake_outbox_open_status::tests::intake_open_status_query_sites_do_not_reintroduce_the_legacy_literal
-db::intake_outbox_open_status::tests::intake_open_status_sql_textually_matches_migrations_0105_through_0109
+db::intake_outbox_open_status::tests::intake_open_status_sql_textually_matches_lifecycle_and_concurrent_migrations
 db::intake_outbox_status::tests::all_exactly_matches_declared_variants
 db::intake_outbox_status::tests::all_exactly_matches_migration_status_check
 db::intake_outbox_status::tests::open_classification_matches_shared_sql_list
@@ -5102,6 +5103,8 @@ services::discord::status_panel_orphan_store::tests::pending_bind_exact_owner_re
 services::discord::status_panel_orphan_store::tests::pending_bind_exact_owner_remove_keeps_record_after_reownership
 services::discord::status_panel_orphan_store::tests::pending_bind_exact_owner_remove_restores_missing_protection_after_reownership
 services::discord::status_panel_orphan_store::tests::pending_bind_unclaimed_after_grace_reclassifies_to_stranded_delete_path
+services::discord::status_panel_singleton_store::tests::commit_falls_back_to_durable_singleton_when_inflight_row_moved_on_4891
+services::discord::status_panel_singleton_store::tests::commit_still_fails_closed_for_a_truly_superseded_panel_4891
 services::discord::status_panel_singleton_store::tests::completion_without_inflight_only_recommits_current_singleton_4860
 services::discord::status_panel_singleton_store::tests::durable_binding_survives_reload_and_guarded_clear_4860
 services::discord::status_panel_singleton_store::tests::stale_owner_after_flock_release_cannot_overwrite_new_singleton_4860
@@ -5665,6 +5668,8 @@ services::discord::tmux::tmux_watcher::two_message_panel::tests::creation_gate_o
 services::discord::tmux::tmux_watcher::two_message_panel::tests::reanchor_bind_bumps_epoch_atomically_and_guard_stale_skips_old_epoch
 services::discord::tmux::tmux_watcher::two_message_panel::tests::reanchor_gate_rejects_managed_bridge_owned_turn_even_when_watcher_relays
 services::discord::tmux::tmux_watcher::two_message_panel::tests::reanchor_inflight_reload_gate_requires_rollover_and_flag_on
+services::discord::tmux::tmux_watcher::two_message_panel::tests::status_panel_http_adapter_preserves_completion_on_ledger_failure_4891
+services::discord::tmux::tmux_watcher::two_message_panel::tests::status_panel_watcher_tail_does_not_queue_completed_panel_4891
 services::discord::tmux::tmux_watcher::two_message_panel::tests::watcher_orphan_preregistration_is_flag_gated_and_removed_after_persist
 services::discord::tmux::tmux_watcher::utf8_chunk_decoder::source_epoch_read_tests::same_fd_identity_mode_resample_and_mixed_utf8_policy
 services::discord::tmux::tmux_watcher::utf8_chunk_decoder::tests::utf8_decoder_buffers_split_multibyte_scalar_at_chunk_start
@@ -6378,6 +6383,7 @@ services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::foot
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::foreign_mailbox_owner_cannot_complete_tui_direct_no_footer_arm
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::foreign_mailbox_owner_cannot_complete_two_message_status_panel
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::fresh_turn_discards_stale_status_panel_message_id
+services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::ledger_commit_failure_does_not_delete_a_completed_panel_4891
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::multiple_completion_paths_render_wip_warning_exactly_once
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::resume_turn_discards_synthetic_status_panel_message_id
 services::discord::turn_bridge::status_panel::status_panel_v2_rework_tests::resume_turn_preserves_status_panel_message_id

@@ -17,6 +17,8 @@ const CLAUDE_HOOK_EVENTS: &[&str] = &[
     "Stop",
     "PreToolUse",
     "PostToolUse",
+    "PreCompact",
+    "PostCompact",
     "Notification",
     "SubagentStop",
 ];
@@ -763,6 +765,7 @@ mod tests {
         for event in CLAUDE_HOOK_EVENTS {
             assert!(hooks.contains_key(*event), "missing {event}");
         }
+        assert_eq!(hooks.len(), 9);
         assert_eq!(hooks["PreToolUse"][0]["matcher"], "*");
         assert_eq!(hooks["PostToolUse"][0]["matcher"], "*");
         assert!(hooks["Stop"][0]["matcher"].is_null());
@@ -1002,6 +1005,25 @@ mod tests {
         let raw = std::fs::read_to_string(path).unwrap();
         assert!(raw.contains("claude-hook-relay"));
         assert!(raw.contains("SessionStart"));
+        use crate::services::claude_tui::hook_server::HookEventKind;
+        let settings: Value = serde_json::from_str(&raw).unwrap();
+        for (event, kind) in [
+            ("PreCompact", HookEventKind::PreCompact),
+            ("PostCompact", HookEventKind::PostCompact),
+        ] {
+            let group = &settings["hooks"][event][0];
+            assert!(group.is_object(), "missing compact hook {event}");
+            assert!(group["matcher"].is_null());
+            let command = group["hooks"][0]["command"].as_str().unwrap();
+            assert!(command.contains("claude-hook-relay"));
+            assert!(command.contains("--provider claude"));
+            assert!(command.contains(&format!("--session-id {}", sample_config().session_id)));
+            let args: Vec<_> = command.split_whitespace().collect();
+            let emitted = args[args.iter().position(|arg| *arg == "--event").unwrap() + 1];
+            assert_eq!(emitted, event);
+            assert_eq!(HookEventKind::from_path(emitted), kind);
+            assert_eq!(HookEventKind::from_path(kind.as_str()), kind);
+        }
     }
 
     #[test]
