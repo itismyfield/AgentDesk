@@ -120,19 +120,6 @@ pub(super) async fn take_channel_input_state(
         .unwrap_or_default()
 }
 
-/// Legacy uploads-only primitive retained for its cleared-state regression test.
-#[cfg(test)]
-pub(super) async fn take_channel_input_state_uploads_only(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-) -> Vec<String> {
-    let mut data = shared.core.lock().await;
-    data.sessions
-        .get_mut(&channel_id)
-        .map(|s| std::mem::take(&mut s.pending_uploads))
-        .unwrap_or_default()
-}
-
 /// Reason code and Discord text for a control that produced no provider turn.
 /// `/model` reports and changes nothing, matching the wrapper (#5660); a
 /// command-shaped token outside the registry is refused by its raw spelling.
@@ -415,18 +402,6 @@ pub(super) mod pre_admission_control_tests {
             (vec![], false)
         );
         assert!(shared.core.lock().await.sessions.is_empty());
-    }
-
-    /// (f2) S3-19b: the handoff take must leave `cleared` alone — the queue
-    /// record has no field for it, so the channel is its only home.
-    #[tokio::test]
-    async fn uploads_only_take_leaves_cleared_in_the_session() {
-        let (shared, channel) = fixture(Some(session_with(&["U"], true))).await;
-        let taken = take_channel_input_state_uploads_only(&shared, channel).await;
-        assert_eq!(taken, vec!["U".to_string()]);
-        let data = shared.core.lock().await;
-        assert!(data.sessions[&channel].pending_uploads.is_empty());
-        assert!(data.sessions[&channel].cleared);
     }
 
     #[tokio::test]

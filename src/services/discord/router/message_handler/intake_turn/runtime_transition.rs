@@ -88,29 +88,40 @@ mod tests {
     };
     #[tokio::test]
     #[rustfmt::skip]
-    async fn runtime_transition_takes_uploads_only_inside_the_busy_arm() {
+    async fn runtime_transition_busy_forwards_owned_uploads_without_taking_session_state() {
         let root = tempfile::tempdir().unwrap();
         let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
-        let (shared, channel) = fixture(Some(session_with(&["U1"], false))).await;
-        let (owned, _) = take_channel_input_state(&shared, channel).await;
+        let (shared, channel) = fixture(Some(session_with(&["U1"], true))).await;
+        let (owned, was_cleared) = take_channel_input_state(&shared, channel).await;
+        assert!(was_cleared);
         let mut core = shared.core.lock().await;
-        core.sessions.get_mut(&channel).unwrap().pending_uploads.push("U2".into());
+        assert!(!core.sessions[&channel].cleared, "R1 consumes the original cleared state");
+        // State arriving after R1 belongs to the session, not this handoff.
+        *core.sessions.get_mut(&channel).unwrap() = session_with(&["U2"], true);
         drop(core);
         let _held = shared.session_transition_lock(channel).lock_owned().await;
         let http = Arc::new(serenity::HttpBuilder::new("test-token")
             .proxy("http://127.0.0.1:1").ratelimiter_disabled(true).build());
-        // Run the real busy arm; downstream persistence is not the ownership oracle.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(1),
+        // S3-19b: the held transition must reach the real busy enqueue path.
+        let transition = tokio::time::timeout(std::time::Duration::from_secs(5),
             acquire_after_redirect_or_requeue(
                 (&http, &shared, "test-token", &ProviderKind::Codex), (channel, channel),
                 (TurnKind::Foreground, UserId::new(1), MessageId::new(566_003), "A"),
                 (&None, false, false), (&owned, &None),
                 (false, &None, None, false), (None, false, String::new()),
-            )).await;
+            )).await.expect("busy handoff must finish").expect("busy enqueue must succeed");
+        assert!(transition.is_none(), "held transition must requeue, not acquire");
+        let queued = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+        assert_eq!(queued.intervention_queue.len(), 1);
+        assert_eq!(queued.intervention_queue[0].message_id, MessageId::new(566_003));
+        assert_eq!(queued.intervention_queue[0].pending_uploads, ["U1"]);
         assert_eq!(owned, ["U1"]);
-        assert_eq!(shared.core.lock().await.sessions[&channel].pending_uploads, ["U2"]);
+        let core = shared.core.lock().await;
+        assert_eq!(core.sessions[&channel].pending_uploads, ["U2"]);
+        assert!(core.sessions[&channel].cleared, "busy handoff must preserve cleared");
         let src = include_str!("runtime_transition.rs").split("#[cfg(test)]").next().unwrap();
-        assert!(!src.contains("take_channel_input_state"));
+        assert!(!src.contains("take_channel_input_state"), "handoff must not take session state");
+        assert!(!src.contains("mem::take"), "handoff forwards only already-owned uploads");
         assert!(src.contains("                pending_uploads,"));
     }
 }
