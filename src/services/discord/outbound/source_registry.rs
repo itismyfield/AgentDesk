@@ -1,5 +1,7 @@
 //! Single authorization registry for Discord outbound source labels.
 
+pub(crate) const RETIRED_SEND_SOURCES: &[&str] = &["merge-automation"];
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SendCallerClass {
     LoopbackInternal,
@@ -47,7 +49,6 @@ enum StaticSendSource {
     Pipeline,
     System,
     Timeouts,
-    MergeAutomation,
     LifecycleNotifier,
     RoutineRuntime,
     ScheduledMessage,
@@ -100,7 +101,6 @@ const POLICIES: &[SourcePolicy] = &[
     policy!(Pipeline, "pipeline", LOOPBACK),
     policy!(System, "system", LOOPBACK),
     policy!(Timeouts, "timeouts", LOOPBACK),
-    policy!(MergeAutomation, "merge-automation", LOOPBACK),
     policy!(LifecycleNotifier, "lifecycle_notifier", LOOPBACK),
     policy!(RoutineRuntime, "routine-runtime", LOOPBACK),
     policy!(ScheduledMessage, "scheduled_message", LOOPBACK),
@@ -169,7 +169,6 @@ mod tests {
         "pipeline",
         "system",
         "timeouts",
-        "merge-automation",
         "lifecycle_notifier",
         "routine-runtime",
         "headless_turn",
@@ -193,6 +192,10 @@ mod tests {
 
     #[test]
     fn producer_contract_lists_every_loopback_source() {
+        assert!(
+            validate_send_source_for("merge-automation", SendCallerClass::LoopbackInternal)
+                .is_err()
+        );
         let mut expected = CURRENT_LOOPBACK_LABELS.to_vec();
         expected.extend_from_slice(NEW_LOOPBACK_LABELS);
         for label in expected {

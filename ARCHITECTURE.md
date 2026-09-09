@@ -478,7 +478,8 @@ src/
 │   │   │   ├── owner_record.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
-│   │   │   └── dispatch_stamp_tests.rs
+│   │   │   ├── dispatch_stamp_tests.rs
+│   │   │   └── drain_tests.rs
 │   │   ├── stream_relay/
 │   │   │   ├── tests/
 │   │   │   │   └── shutdown_tests.rs

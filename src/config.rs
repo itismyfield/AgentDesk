@@ -46,8 +46,6 @@ pub struct Config {
     pub placeholder: PlaceholderConfig,
     #[serde(default, skip_serializing_if = "RuntimeSettingsConfig::is_empty")]
     pub runtime: RuntimeSettingsConfig,
-    #[serde(default, skip_serializing_if = "AutomationConfig::is_empty")]
-    pub automation: AutomationConfig,
     #[serde(default, skip_serializing_if = "RoutinesConfig::is_default")]
     pub routines: RoutinesConfig,
     #[serde(default, skip_serializing_if = "EscalationConfig::is_empty")]
@@ -2482,28 +2480,6 @@ mod runtime_hook_registry_config_tests {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct AutomationConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strategy: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strategy_mode: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_authors: Option<String>,
-}
-
-impl AutomationConfig {
-    pub fn is_empty(&self) -> bool {
-        self.enabled.is_none()
-            && self.strategy.is_none()
-            && self.strategy_mode.is_none()
-            && self.allowed_authors.is_none()
-    }
-}
-
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum EscalationMode {
@@ -3333,7 +3309,6 @@ impl Default for Config {
             review: ReviewConfig::default(),
             placeholder: PlaceholderConfig::default(),
             runtime: RuntimeSettingsConfig::default(),
-            automation: AutomationConfig::default(),
             routines: RoutinesConfig::default(),
             escalation: EscalationConfig::default(),
             onboarding: OnboardingConfig::default(),
@@ -3562,6 +3537,23 @@ mod secret_bearing_config_file_tests {
         let error = format!("{:#}", load_from_path(&path).unwrap_err());
 
         assert!(error.contains("schedule.pm_hours must be HH:MM-HH:MM"));
+    }
+
+    #[test]
+    fn load_from_path_ignores_retired_automation_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        save_to_path(&path, &Config::default()).unwrap();
+        let mut legacy_yaml = std::fs::read_to_string(&path).unwrap();
+        legacy_yaml.push_str("\nautomation:\n  enabled: true\n  strategy: squash\n  strategy_mode: direct-first\n  allowed_authors: legacy\n");
+        std::fs::write(&path, legacy_yaml).unwrap();
+        let loaded = load_from_path(&path).unwrap();
+        assert!(
+            serde_yaml::to_value(&loaded)
+                .unwrap()
+                .get("automation")
+                .is_none()
+        );
     }
 
     #[test]
