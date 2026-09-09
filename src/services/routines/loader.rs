@@ -372,6 +372,18 @@ impl RoutineScriptLoader {
                         continue;
                     }
                 };
+                if let Some(script) = existing_scripts
+                    .get(&script_ref)
+                    .filter(|script| script.file == candidate.path && script.source == source)
+                {
+                    self.state
+                        .failed_scripts
+                        .lock()
+                        .unwrap_or_else(recover_poisoned_lock)
+                        .remove(&candidate_key);
+                    selected = Some((script.clone(), false));
+                    break;
+                }
                 let source_version = full_source_version(&source);
                 #[cfg(test)]
                 if let Some(hook) = self
@@ -1228,6 +1240,53 @@ mod tests {
         assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
         assert_eq!(loader.script_refs().unwrap(), vec!["ops/daily/summary.js"]);
         assert!(loader.has_script("ops/daily/summary.js").unwrap());
+        use std::sync::atomic::Ordering::Relaxed;
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 1);
+        let logs = capture_debug_logs(|| {
+            assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+            assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        });
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 1);
+        assert!(!logs.contains("loaded routine script"), "logs={logs}");
+
+        // Equal-length source changes must not be mistaken for unchanged content.
+        let source = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, source.replace("Nested", "수정")).unwrap();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 1);
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 2);
+        assert_eq!(
+            loader
+                .get_script("ops/daily/summary.js")
+                .unwrap()
+                .unwrap()
+                .name,
+            "수정"
+        );
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 2);
+
+        // Restoring the last good bytes clears failure state without evaluation.
+        std::fs::write(&path, "throw new Error('broken');").unwrap();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 3);
+        std::fs::write(&path, source.replace("Nested", "수정")).unwrap();
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 3);
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+
+        *loader.source_reader.lock().unwrap() = Some(Arc::new(|_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "read failure",
+            ))
+        }));
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 3);
+        assert!(!loader.state.failed_scripts.lock().unwrap().is_empty());
+        *loader.source_reader.lock().unwrap() = None;
+        assert_eq!(loader.load_dir(dir.path()).unwrap(), 0);
+        assert!(loader.state.failed_scripts.lock().unwrap().is_empty());
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 3);
     }
 
     #[test]
@@ -1717,6 +1776,45 @@ mod tests {
         let shared = loader.get_script("ops/shared.js").unwrap().unwrap();
         assert_eq!(shared.name, "Operator Shared");
         assert!(shared.file.starts_with(operator.path()));
+        use std::sync::atomic::Ordering::Relaxed;
+        let roots = [bundled.path().to_path_buf(), operator.path().to_path_buf()];
+        assert_eq!(loader.load_dirs(&roots).unwrap(), 0);
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 3);
+
+        // The selected path changes even when both files have identical bytes.
+        let source = std::fs::read_to_string(operator_nested.join("shared.js")).unwrap();
+        std::fs::write(bundled_nested.join("shared.js"), &source).unwrap();
+        std::fs::remove_file(operator_nested.join("shared.js")).unwrap();
+        assert_eq!(loader.load_dirs(&roots).unwrap(), 1);
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 4);
+        assert_eq!(
+            loader.get_script("ops/shared.js").unwrap().unwrap().file,
+            bundled_nested.join("shared.js")
+        );
+        assert_eq!(loader.load_dirs(&roots).unwrap(), 0);
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 4);
+
+        std::fs::write(operator_nested.join("shared.js"), &source).unwrap();
+        assert_eq!(loader.load_dirs(&roots).unwrap(), 1);
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 5);
+        assert_eq!(
+            loader.get_script("ops/shared.js").unwrap().unwrap().file,
+            operator_nested.join("shared.js")
+        );
+        assert_eq!(loader.load_dirs(&roots).unwrap(), 0);
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 5);
+
+        assert_eq!(
+            loader
+                .load_dirs(&[roots[1].clone(), roots[0].clone()])
+                .unwrap(),
+            1
+        );
+        assert_eq!(loader.state.evaluation_attempts.load(Relaxed), 6);
+        assert_eq!(
+            loader.get_script("ops/shared.js").unwrap().unwrap().file,
+            bundled_nested.join("shared.js")
+        );
     }
 
     #[test]

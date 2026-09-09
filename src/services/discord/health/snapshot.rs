@@ -12,15 +12,15 @@ use super::provider_probe::{self, ProviderHealthSnapshot};
 // pre-B6 snapshot: no composed verdict, no polarity from one.
 #[cfg(unix)]
 use super::reachability::composite::{
-    RelayVerdict, RelayVerdictProbe, RelayVerdictReport, observe_relay_verdict,
-    relay_verdict_source,
+    RelayVerdict, RelayVerdictProbe, RelayVerdictReport, apply_relay_verdict_polarity,
+    observe_relay_verdict, relay_verdict_source,
 };
 #[cfg(unix)]
 use super::reachability::ledger::{ledger_file_exists, ledger_path};
 #[cfg(unix)]
 use super::reachability::verdict::ReachabilityVerdict;
 use super::redaction;
-use super::session_enrichment::{self, SessionEnrichment};
+use super::session_enrichment::{self, HealthSnapshotOptions, SessionEnrichment};
 use super::stall_verdict;
 use super::transcript_binding_stall::{self, resolve_bound_selector};
 use super::unpaired_active_token;
@@ -398,8 +398,12 @@ async fn relay_thread_proof_for_channel(
         Some(thread_id) => {
             let thread_channel = ChannelId::new(thread_id);
             let thread_mailbox = discord::mailbox_snapshot(shared, thread_channel).await;
-            let thread_inflight = provider
-                .and_then(|provider| discord::inflight::load_inflight_state(provider, thread_id));
+            // #5736: read-only — see `SessionEnrichment::load`. This probe exists
+            // to answer "does the paired thread show live evidence", never to
+            // rewrite the row it reads.
+            let thread_inflight = provider.and_then(|provider| {
+                discord::inflight::load_inflight_state_read_only(provider, thread_id)
+            });
             thread_mailbox.cancel_token.is_some()
                 || thread_inflight.is_some()
                 || shared.tmux_watchers.contains_key(&thread_channel)
@@ -803,15 +807,8 @@ pub async fn active_request_owner_for_channel(
     channel_id: u64,
 ) -> Option<u64> {
     let channel_id = ChannelId::new(channel_id);
-    let providers: Vec<_> = registry
-        .providers
-        .lock()
-        .await
-        .iter()
-        .map(|entry| entry.shared.clone())
-        .collect();
-    for shared in providers {
-        let snapshots = shared.mailboxes.snapshot_all().await;
+    for entry in registry.provider_entries_snapshot().await {
+        let snapshots = entry.shared.mailboxes.snapshot_all().await;
         if let Some(owner) = snapshots
             .get(&channel_id)
             .and_then(|snapshot| snapshot.active_request_owner)
@@ -824,22 +821,26 @@ pub async fn active_request_owner_for_channel(
 
 /// Build the detailed health check snapshot for authenticated/local diagnostics.
 pub async fn build_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSnapshot {
-    build_health_snapshot_with_options(registry, true).await
+    build_health_snapshot_with_options(registry, HealthSnapshotOptions::new(true)).await
 }
 
-/// Build the public health check snapshot without detail-only mailbox probes.
+/// Build the public health check snapshot without the detail-only payload.
 pub async fn build_public_health_snapshot(registry: &HealthRegistry) -> DiscordHealthSnapshot {
-    build_health_snapshot_with_options(registry, false).await
+    build_health_snapshot_with_options(registry, HealthSnapshotOptions::new(false)).await
 }
 
-async fn build_health_snapshot_with_options(
+pub(super) async fn build_health_snapshot_with_options(
     registry: &HealthRegistry,
-    include_mailbox_details: bool,
+    options: HealthSnapshotOptions,
 ) -> DiscordHealthSnapshot {
+    let HealthSnapshotOptions {
+        include_mailbox_details,
+        mut tmux,
+    } = options;
     let uptime_secs = registry.started_at.elapsed().as_secs();
     let version = env!("CARGO_PKG_VERSION");
 
-    let providers = registry.providers.lock().await;
+    let providers = registry.provider_entries_snapshot().await;
     let mut provider_entries = Vec::new();
     let mut degraded_reasons = Vec::new();
     let mut status = HealthStatus::Healthy;
@@ -850,11 +851,14 @@ async fn build_health_snapshot_with_options(
     let mut recovery_duration = 0.0f64;
     let mut mailbox_entries = Vec::new();
     let mut provider_active_turns = 0usize;
-    // #5071 T4-B6: read the 4987 §5.1 switch once per snapshot, so every entry
-    // in one response answers under the same authority even if the live config
-    // is edited mid-poll.
+    // Read the authority switch once per snapshot. Structural polarity is a
+    // no-op, so the public build skips channel observation entirely (#5736).
     #[cfg(unix)]
     let composite_governs_polarity = relay_verdict_source().governs_health_polarity();
+    #[cfg(unix)]
+    let observe_channels = include_mailbox_details || composite_governs_polarity;
+    #[cfg(not(unix))]
+    let observe_channels = include_mailbox_details;
 
     if providers.is_empty() {
         degraded_reasons.push("no_providers_registered".to_string());
@@ -869,28 +873,131 @@ async fn build_health_snapshot_with_options(
         queue_depth += provider_probe.queue_depth;
         watcher_count += provider_probe.watcher_count;
         recovery_duration = recovery_duration.max(provider_probe.recovery_duration);
-        if include_mailbox_details {
-            let provider_kind = ProviderKind::from_str(&entry.name);
-            for (channel_id, snapshot) in &provider_probe.mailbox_snapshots {
-                let channel = *channel_id;
-                let session =
-                    SessionEnrichment::load(&entry.shared, provider_kind.as_ref(), channel).await;
-                let tmux_present = session.tmux_session_present();
-                let process_present = session.process_present();
-                let desynced = session.desynced(tmux_present, session.watcher_attached);
-                let mailbox_has_cancel_token = snapshot.cancel_token.is_some();
-                let queue_depth = snapshot.intervention_queue.len();
-                let mailbox_active_user_msg_id =
-                    redaction::visible_serenity_message_id(snapshot.active_user_message_id);
-                let relay_thread_proof = relay_thread_proof_for_channel(
-                    &entry.shared,
-                    provider_kind.as_ref(),
-                    channel,
-                    mailbox_has_cancel_token
-                        || session.inflight_state_present
-                        || session.watcher_attached,
-                )
-                .await;
+        let provider_kind = ProviderKind::from_str(&entry.name);
+        let observed_mailboxes = observe_channels
+            .then_some(&provider_probe.mailbox_snapshots)
+            .into_iter()
+            .flatten();
+        for (channel_id, snapshot) in observed_mailboxes {
+            let channel = *channel_id;
+            let session =
+                SessionEnrichment::load(&entry.shared, provider_kind.as_ref(), channel).await;
+            let tmux_present = session.tmux_session_present_within(&mut tmux).await;
+            let desynced = session.desynced(tmux_present, session.watcher_attached);
+            let mailbox_has_cancel_token = snapshot.cancel_token.is_some();
+            let queue_depth = snapshot.intervention_queue.len();
+            let mailbox_active_user_msg_id =
+                redaction::visible_serenity_message_id(snapshot.active_user_message_id);
+            let relay_thread_proof = relay_thread_proof_for_channel(
+                &entry.shared,
+                provider_kind.as_ref(),
+                channel,
+                mailbox_has_cancel_token
+                    || session.inflight_state_present
+                    || session.watcher_attached,
+            )
+            .await;
+            // Resolved before `relay_thread_proof` is folded into the relay
+            // health snapshot below; the coordinate LOOKUP it feeds is
+            // detail-only and stays behind the payload gate (#5736).
+            let counterpart_channel_id = relay_thread_proof.counterpart_channel_id(channel.get());
+            let active_turn = relay_active_turn_from_inflight(
+                mailbox_has_cancel_token,
+                session.inflight.as_ref(),
+            );
+            let unpaired_active_token_reconfirmed = unpaired_active_token::reconfirm(
+                &entry.shared,
+                provider_kind.as_ref(),
+                channel,
+                snapshot,
+                session.inflight_state_present,
+            )
+            .await;
+            let relay_health = build_relay_health_snapshot(RelayHealthBuildInput {
+                provider: entry.name.clone(),
+                channel_id: channel.get(),
+                mailbox_has_cancel_token,
+                mailbox_active_user_msg_id,
+                mailbox_turn_started_at_ms: snapshot
+                    .turn_started_at
+                    .map(|started_at| started_at.timestamp_millis()),
+                unpaired_active_token_reconfirmed,
+                queue_depth,
+                watcher_attached: session.watcher_attached,
+                watcher_attached_stale: session.watcher_attached_stale,
+                watcher_owner_channel_id: session.watcher_owner_channel_id,
+                tmux_session: session.tmux_session.clone(),
+                tmux_alive: session.tmux_session.as_ref().map(|_| tmux_present),
+                bridge_inflight_present: session.inflight_state_present,
+                bridge_current_msg_id: session.inflight_current_msg_id(),
+                watcher_owns_live_relay: session.watcher_owns_live_relay(),
+                last_relay_ts_ms: session.last_relay_ts_ms,
+                last_relay_offset: session.last_relay_offset,
+                last_capture_offset: session.last_capture_offset,
+                unread_bytes: session.unread_bytes,
+                desynced,
+                thread_proof: relay_thread_proof,
+                active_turn,
+                last_outbound_activity_ms: last_outbound_activity_ms(
+                    session.last_relay_ts_ms,
+                    session.inflight.as_ref(),
+                ),
+            });
+            // #5071 T4-B6 (4987 §4.3/§4.4): compose the relay verdict from
+            // the durable T4-B2c ledger, the T4-B3 receipt projection and
+            // the T4-B5 sidecar. Whether it may also change polarity is the
+            // `RelayVerdictSource` switch, read once per poll below. The
+            // row's `output_path` is passed to the divergence comparison
+            // only; nothing here resolves or tails through it.
+            #[cfg(unix)]
+            let relay_verdict = {
+                // The health poll's `tmux_present` witness is intentionally
+                // weaker than the recovery snapshot's has-session probe, and
+                // weaker again once the shared observation budget is spent
+                // (`tmux_session_present_within`). The explicit helper operand
+                // keeps that difference visible instead of silently forking the
+                // remaining inputs.
+                let operands = relay_verdict_probe_operands(
+                    tmux_present,
+                    &relay_health,
+                    unpaired_active_token_reconfirmed,
+                    registry.started_at_unix(),
+                );
+                observe_relay_verdict(RelayVerdictProbe {
+                    provider: provider_kind.as_ref(),
+                    channel_id: channel.get(),
+                    row_output_path: session
+                        .inflight
+                        .as_ref()
+                        .and_then(|state| state.output_path.as_deref()),
+                    registry_output_path: session.watcher_output_path.as_deref(),
+                    pane_idle_confirmed: operands.pane_idle_confirmed,
+                    rowless_active_turn: operands.rowless_active_turn,
+                    placeholder_present: operands.placeholder_present,
+                    now_epoch_ms: operands.now_epoch_ms,
+                    process_started_at_epoch_ms: operands.process_started_at_epoch_ms,
+                })
+            };
+            #[cfg(unix)]
+            apply_relay_verdict_polarity(
+                composite_governs_polarity,
+                &relay_verdict,
+                &entry.name,
+                channel.get(),
+                &mut degraded_reasons,
+                &mut status,
+            );
+            // #5736: this gate is the PAYLOAD boundary, not the judgement one.
+            // The polarity pass above now runs on both builds; while it sat
+            // inside this block the public `/api/health` reported `healthy` from
+            // the same registry `/api/health/detail` called `degraded`.
+            //
+            // Everything the polarity pass does NOT read stays behind the gate,
+            // so raising the judgement did not raise the evidence: the r2 review
+            // found the counterpart-coordinate lookup, the frontier provenance
+            // report and the shadow stall verdict computed on the unauthenticated
+            // path and then discarded.
+            if include_mailbox_details {
                 // #5071 relay-tail S1 (I-4): the counterpart's coordinate is
                 // read here, where the axis is already resolved, and published
                 // beside this channel's own pair as raw evidence. It feeds NO
@@ -898,62 +1005,15 @@ async fn build_health_snapshot_with_options(
                 // row) and the r1 review measured the cost of letting it decide
                 // early. One more lock-free `.get()` on the same in-memory map;
                 // `None` when this channel is not part of a parent/thread pair.
-                let counterpart_coord_observation = relay_thread_proof
-                    .counterpart_channel_id(channel.get())
-                    .map(|counterpart| {
+                let frontier_provenance = FrontierProvenanceReport::of(
+                    session.frontier_provenance,
+                    counterpart_channel_id.map(|counterpart| {
                         session_enrichment::observe_coord_frontier(
                             &entry.shared,
                             ChannelId::new(counterpart),
                         )
-                    });
-                let frontier_provenance = FrontierProvenanceReport::of(
-                    session.frontier_provenance,
-                    counterpart_coord_observation,
+                    }),
                 );
-                let active_turn = relay_active_turn_from_inflight(
-                    mailbox_has_cancel_token,
-                    session.inflight.as_ref(),
-                );
-                let unpaired_active_token_reconfirmed = unpaired_active_token::reconfirm(
-                    &entry.shared,
-                    provider_kind.as_ref(),
-                    channel,
-                    snapshot,
-                    session.inflight_state_present,
-                )
-                .await;
-                let relay_health = build_relay_health_snapshot(RelayHealthBuildInput {
-                    provider: entry.name.clone(),
-                    channel_id: channel.get(),
-                    mailbox_has_cancel_token,
-                    mailbox_active_user_msg_id,
-                    mailbox_turn_started_at_ms: snapshot
-                        .turn_started_at
-                        .map(|started_at| started_at.timestamp_millis()),
-                    unpaired_active_token_reconfirmed,
-                    queue_depth,
-                    watcher_attached: session.watcher_attached,
-                    watcher_attached_stale: session.watcher_attached_stale,
-                    watcher_owner_channel_id: session.watcher_owner_channel_id,
-                    tmux_session: session.tmux_session.clone(),
-                    tmux_alive: session.tmux_session.as_ref().map(|_| tmux_present),
-                    bridge_inflight_present: session.inflight_state_present,
-                    bridge_current_msg_id: session.inflight_current_msg_id(),
-                    watcher_owns_live_relay: session.watcher_owns_live_relay(),
-                    last_relay_ts_ms: session.last_relay_ts_ms,
-                    last_relay_offset: session.last_relay_offset,
-                    last_capture_offset: session.last_capture_offset,
-                    unread_bytes: session.unread_bytes,
-                    desynced,
-                    thread_proof: relay_thread_proof,
-                    active_turn,
-                    last_outbound_activity_ms: last_outbound_activity_ms(
-                        session.last_relay_ts_ms,
-                        session.inflight.as_ref(),
-                    ),
-                });
-                let relay_stall_state = RelayStallClassifier::classify(&relay_health);
-                trace_relay_health_classification(&relay_health, relay_stall_state);
                 let stall_shadow_verdict = stall_verdict::classify_health_snapshot_lossy(
                     provider_kind.as_ref(),
                     channel,
@@ -961,52 +1021,11 @@ async fn build_health_snapshot_with_options(
                     &relay_health,
                     registry.started_at_unix(),
                 );
-                // #5071 T4-B6 (4987 §4.3/§4.4): compose the relay verdict from
-                // the durable T4-B2c ledger, the T4-B3 receipt projection and
-                // the T4-B5 sidecar, and publish it. Whether it may also change
-                // this entry's polarity is the `RelayVerdictSource` switch,
-                // read once per poll below. The row's `output_path` is passed
-                // to the divergence comparison only, matching the descriptive
-                // call above it; nothing here resolves or tails through it.
-                #[cfg(unix)]
-                let relay_verdict = {
-                    // The detail poll's `tmux_present` witness is intentionally
-                    // weaker than the recovery snapshot's has-session probe. The
-                    // explicit helper operand keeps that semantic difference
-                    // visible instead of silently forking the remaining inputs.
-                    let operands = relay_verdict_probe_operands(
-                        tmux_present,
-                        &relay_health,
-                        unpaired_active_token_reconfirmed,
-                        registry.started_at_unix(),
-                    );
-                    observe_relay_verdict(RelayVerdictProbe {
-                        provider: provider_kind.as_ref(),
-                        channel_id: channel.get(),
-                        row_output_path: session
-                            .inflight
-                            .as_ref()
-                            .and_then(|state| state.output_path.as_deref()),
-                        registry_output_path: session.watcher_output_path.as_deref(),
-                        pane_idle_confirmed: operands.pane_idle_confirmed,
-                        rowless_active_turn: operands.rowless_active_turn,
-                        placeholder_present: operands.placeholder_present,
-                        now_epoch_ms: operands.now_epoch_ms,
-                        process_started_at_epoch_ms: operands.process_started_at_epoch_ms,
-                    })
-                };
-                #[cfg(unix)]
-                apply_relay_verdict_polarity(
-                    composite_governs_polarity,
-                    &relay_verdict,
-                    &entry.name,
-                    channel.get(),
-                    &mut degraded_reasons,
-                    &mut status,
-                );
                 #[cfg(unix)]
                 let reachability =
                     RelayVerdictReport::of(&relay_verdict, composite_governs_polarity);
+                let relay_stall_state = RelayStallClassifier::classify(&relay_health);
+                trace_relay_health_classification(&relay_health, relay_stall_state);
                 mailbox_entries.push(MailboxHealthSnapshot {
                     provider: entry.name.clone(),
                     channel_id: channel.get(),
@@ -1022,7 +1041,7 @@ async fn build_health_snapshot_with_options(
                     watcher_attached: session.watcher_attached,
                     inflight_state_present: session.inflight_state_present,
                     tmux_present,
-                    process_present,
+                    process_present: session.process_present(),
                     active_dispatch_present: session.active_dispatch_present(),
                     stall_shadow_verdict,
                     #[cfg(unix)]
@@ -1097,43 +1116,6 @@ async fn build_health_snapshot_with_options(
         #[cfg(unix)]
         axis_b_observation: include_mailbox_details
             .then(crate::services::discord::relay_recovery::axis_b_observation_report),
-    }
-}
-
-/// The only place 4987 §5.1's switch changes a snapshot's polarity (#5071 T4-B6).
-///
-/// The switch is also visible in the response as
-/// `RelayVerdictReport::governs_health_polarity`, published on the mailbox entry
-/// in both modes; what it does NOT do anywhere else is change the aggregate the
-/// caller reads as the process's health. Under `Structural` this returns having
-/// touched neither output — that is what makes the shadow mode a shadow.
-///
-/// One reason per non-green CHANNEL, not per provider: the channel is what an
-/// operator has to look at, and the same response already carries one mailbox
-/// entry per channel. `Degraded`, never `Unhealthy`: 4987 §4.4 asks a
-/// non-`Reachable` relay to set the degraded flag, and taking the process out of
-/// HTTP readiness is authority this switch was not given.
-///
-/// Split out of the per-channel loop so the switch has a seam a test can call.
-/// The polarity is the whole of what T4-B6 granted the composed verdict, and
-/// before this it was reachable only by building a full `HealthRegistry`, which
-/// left both the `composite_governs_polarity` conjunct and the direction of the
-/// `permits_health` test unpinned.
-#[cfg(unix)]
-fn apply_relay_verdict_polarity(
-    composite_governs_polarity: bool,
-    relay_verdict: &RelayVerdict,
-    provider: &str,
-    channel_id: u64,
-    degraded_reasons: &mut Vec<String>,
-    status: &mut HealthStatus,
-) {
-    if composite_governs_polarity && !relay_verdict.permits_health() {
-        degraded_reasons.push(format!(
-            "relay_verdict_{}_{provider}_{channel_id}",
-            relay_verdict.label(),
-        ));
-        *status = status.worsen(HealthStatus::Degraded);
     }
 }
 
@@ -1257,9 +1239,13 @@ mod tests {
     use super::{
         HealthStatus, RelayVerdict, apply_relay_verdict_polarity, relay_verdict_probe_operands,
     };
+    #[cfg(unix)]
+    use crate::config::RelayVerdictSource;
     use crate::services::agent_protocol::RuntimeHandoffKind;
     #[cfg(unix)]
-    use crate::services::discord::health::reachability::composite::compose_relay_verdict;
+    use crate::services::discord::health::reachability::composite::{
+        compose_relay_verdict, set_relay_verdict_source_for_tests,
+    };
     #[cfg(unix)]
     use crate::services::discord::health::reachability::external_verdict::ExternalRelayVerdict;
     #[cfg(unix)]
@@ -1431,6 +1417,203 @@ mod tests {
             assert!(axis_b.contains_key("dropped_records"));
             assert!(axis_b.contains_key("write_failures"));
         }
+    }
+
+    /// #5736: the summary build answers the relay-verdict axis instead of
+    /// skipping it.
+    ///
+    /// `GET /api/health` reported `healthy` with an empty `degraded_reasons` at
+    /// the same instant `GET /api/health/detail` reported `degraded` with two
+    /// `relay_verdict_unknown_*` reasons, because the polarity pass sat inside
+    /// the `include_mailbox_details` block. The summary's `healthy` did not mean
+    /// "nothing is degraded", it meant "this axis was never looked at" — and it
+    /// is the summary that every monitor polls, so the miss was fail-open.
+    ///
+    /// Both halves matter. The verdict polarity must be identical across the two
+    /// builds, and the detail-only payload (mailbox entries, the rollout dial,
+    /// the two observation blocks) must still stay off the public allowlist:
+    /// this raises the judgement, not the evidence behind it.
+    ///
+    /// Driven from a `#[test]` on a current-thread runtime rather than
+    /// `#[tokio::test]`: `lock_test_env()`'s guard pins the process-wide
+    /// `AGENTDESK_ROOT_DIR` for the whole fixture, so it cannot be dropped
+    /// before the two snapshot builds, and holding it across their `.await`s
+    /// inside an `async fn` is exactly what `clippy::await_holding_lock` names.
+    /// Owning the guard OUTSIDE the async block keeps the env pinned without an
+    /// `#[allow]` — the same shape `health_api.rs`'s
+    /// `discord_bot_token_reload_router_reports_success_without_exposing_tokens`
+    /// uses for its env-guarded router test.
+    #[cfg(unix)]
+    #[test]
+    fn summary_and_detail_agree_on_the_composite_relay_verdict_polarity() {
+        fn verdict_reasons(reasons: &[String]) -> Vec<String> {
+            reasons
+                .iter()
+                .filter(|reason| reason.starts_with("relay_verdict_"))
+                .cloned()
+                .collect()
+        }
+
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+        let _source_guard = set_relay_verdict_source_for_tests(RelayVerdictSource::Composite);
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+            let registry = HealthRegistry::new();
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            registry
+                .register(ProviderKind::Codex.as_str().to_string(), shared.clone())
+                .await;
+            // A mailbox with no cancel token is what puts the channel into
+            // `provider_probe`'s snapshots, so the per-channel loop runs for it. No
+            // ledger exists under this runtime root, so the composed verdict cannot
+            // reach `Reachable` and the polarity pass must fire on both builds.
+            let channel = ChannelId::new(NEXT_ABSENT_MAILBOX_CHANNEL.fetch_add(1, Ordering::Relaxed));
+            shared.mailboxes.handle(channel);
+
+            let detail = build_health_snapshot(&registry).await;
+            let public = build_public_health_snapshot(&registry).await;
+
+            let detail_reasons = verdict_reasons(&detail.degraded_reasons);
+            let expected_suffix = format!("_{}_{}", ProviderKind::Codex.as_str(), channel.get());
+            assert!(
+                detail_reasons
+                    .iter()
+                    .any(|reason| reason.ends_with(&expected_suffix)),
+                "fixture must produce a non-green verdict on the detail build: {:?}",
+                detail.degraded_reasons
+            );
+            assert_eq!(
+                verdict_reasons(&public.degraded_reasons),
+                detail_reasons,
+                "the summary build must carry the same relay-verdict reasons as the detail build"
+            );
+            assert_eq!(
+                public.status, detail.status,
+                "the summary build must not report a healthier status than the detail build"
+            );
+
+            assert!(
+                public.mailboxes.is_empty(),
+                "detail-only mailbox entries must stay off the public surface"
+            );
+            let public_json = serde_json::to_value(public).expect("serialize public snapshot");
+            assert!(
+                public_json.get("relay_authority_rollout").is_none()
+                    && public_json.get("relay_authority_observation").is_none()
+                    && public_json.get("axis_b_observation").is_none(),
+                "detail-only observation blocks must stay off the public surface"
+            );
+        });
+    }
+
+    /// #5736 r2: a health poll OBSERVES the in-flight row, it does not rewrite it.
+    ///
+    /// `SessionEnrichment::load` reached `inflight::load_inflight_state`, whose
+    /// finalizer backfill takes a timeout-less file lock and PERSISTS the row it
+    /// read. Hoisting the polarity pass put that write behind an UNAUTHENTICATED
+    /// `GET /api/health`: every poll gave a legacy row a fresh `updated_at`, and
+    /// `inflight::rebind_reap` reads `updated_at` as evidence the row is still
+    /// advancing — so merely looking at a stalled turn made it look alive.
+    ///
+    /// Byte equality covers `updated_at`, the save generation and
+    /// `finalizer_turn_id` at once. Both builds are checked: the detail path is
+    /// a diagnostic too and carried the same write.
+    #[cfg(unix)]
+    #[test]
+    fn a_health_poll_leaves_a_legacy_inflight_row_byte_identical() {
+        let _lock = crate::services::turn_orchestrator::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("temp runtime root");
+        unsafe { std::env::set_var(AGENTDESK_ROOT_DIR_ENV, tmp.path().to_str().unwrap()) };
+        let _env_guard = EnvGuard;
+        let _source_guard = set_relay_verdict_source_for_tests(RelayVerdictSource::Composite);
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let provider = ProviderKind::Codex;
+                let channel =
+                    ChannelId::new(NEXT_ABSENT_MAILBOX_CHANNEL.fetch_add(1, Ordering::Relaxed));
+                let state = crate::services::discord::inflight::InflightTurnState::new(
+                    provider.clone(),
+                    channel.get(),
+                    None,
+                    5_736_000_000_000_001,
+                    5_736_000_000_000_002,
+                    5_736_000_000_000_003,
+                    "#5736 legacy inflight row fixture".to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                );
+                crate::services::discord::inflight::save_inflight_state(&state)
+                    .expect("persist inflight fixture");
+                let root = crate::services::discord::inflight::inflight_runtime_root()
+                    .expect("inflight runtime root");
+                let path = crate::services::discord::inflight::inflight_state_path(
+                    &root,
+                    &provider,
+                    channel.get(),
+                );
+
+                // Clear the finalizer id the writer resolved. That is exactly the
+                // shape `parse_inflight_state_content_with_finalizer_backfill`
+                // reports as needing a rewrite, and `user_msg_id` being non-zero
+                // is what guarantees the resolved id differs from the stored 0.
+                let saved: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&path).expect("read fixture"))
+                        .expect("fixture row is JSON");
+                assert_ne!(
+                    saved["user_msg_id"],
+                    serde_json::json!(0),
+                    "the fixture must resolve a non-zero finalizer id"
+                );
+                assert_ne!(
+                    saved["finalizer_turn_id"],
+                    serde_json::json!(0),
+                    "the writer must have stamped a finalizer id to strip"
+                );
+                let mut legacy_row = saved;
+                legacy_row["finalizer_turn_id"] = serde_json::json!(0);
+                let legacy =
+                    serde_json::to_string_pretty(&legacy_row).expect("serialize legacy row");
+                std::fs::write(&path, &legacy).expect("write legacy row");
+
+                let registry = HealthRegistry::new();
+                let shared = crate::services::discord::make_shared_data_for_tests();
+                registry
+                    .register(provider.as_str().to_string(), shared.clone())
+                    .await;
+                shared.mailboxes.handle(channel);
+
+                let public = build_public_health_snapshot(&registry).await;
+                assert_eq!(
+                    std::fs::read_to_string(&path).expect("re-read row after public poll"),
+                    legacy,
+                    "an unauthenticated health poll must not rewrite the row it observed"
+                );
+                assert!(
+                    public.mailboxes.is_empty(),
+                    "the public build still publishes no mailbox payload"
+                );
+
+                let _detail = build_health_snapshot(&registry).await;
+                assert_eq!(
+                    std::fs::read_to_string(&path).expect("re-read row after detail poll"),
+                    legacy,
+                    "the detail poll is a diagnostic too and must not rewrite the row either"
+                );
+            });
     }
 
     #[cfg(unix)]

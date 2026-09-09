@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "5d59338d07c224dc5e8d389027539dd5baa0961e",
+  "measured_at_sha": "c85834a9c75bd88f29040f0f39f9d833dad99781",
   "comment": "These counts are a growth-blocking baseline, not proof of safety.",
   "categories": {
     "tmux_kill": {

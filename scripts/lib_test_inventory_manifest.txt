@@ -935,6 +935,15 @@ server::policy_tick_schedule_tests::slo_api_friction_aggregation_falls_back_to_f
 server::policy_tick_schedule_tests::slo_api_friction_aggregation_runs_while_leader_epoch_is_pending
 server::rate_limit_header_tests::parses_openai_relative_reset_duration
 server::rate_limit_header_tests::parses_rfc3339_reset_timestamp
+server::rate_limit_sync::backoff::tests::exponential_backoff_doubles_and_caps_at_thirty_minutes
+server::rate_limit_sync::backoff::tests::parses_retry_after_seconds_and_http_date
+server::rate_limit_sync::backoff::tests::retry_after_is_clamped_and_leaves_the_ladder_alone
+server::rate_limit_sync::backoff::tests::success_after_backoff_returns_to_base_interval
+server::rate_limit_sync::tests::api_key_429_keeps_pressure_buckets_and_the_backoff_streak
+server::rate_limit_sync::tests::classifies_claude_sync_results_for_backoff
+server::rate_limit_sync::tests::effective_config_comes_from_the_persisted_runtime_overrides
+server::rate_limit_sync::tests::pressure_keeps_the_base_cadence_whatever_the_tick_spacing
+server::rate_limit_sync::tests::unreadable_runtime_config_resolves_to_no_threshold
 server::resource_locks::resource_locks_pg_tests::resource_lock_allows_only_one_active_holder
 server::resource_locks::resource_locks_pg_tests::resource_lock_reclaims_expired_holder
 server::routes::agents::tmux_relay_adoption_state_tests::absent_and_probe_error_states_are_distinct
@@ -1039,6 +1048,7 @@ server::routes::health_api::tests::public_auto_queue_cleanup_backlog_is_served_o
 server::routes::health_api::tests::public_auto_queue_cleanup_projection_is_count_only
 server::routes::health_api::tests::public_health_exposes_release_source_read_failure
 server::routes::health_api::tests::public_health_exposes_rollout_flag_source_on_both_assembly_points
+server::routes::health_api::tests::public_health_json_carries_the_relay_verdict_axis_onto_the_summary
 server::routes::health_api::tests::public_health_json_degraded_iff_reasons_nonempty
 server::routes::health_api::tests::public_health_json_degraded_status_reports_not_ok
 server::routes::health_api::tests::public_health_json_keeps_degraded_and_startup_reasons_distinct
@@ -1054,6 +1064,7 @@ server::routes::health_api::tests::registry_purge_decision_gates_on_request_and_
 server::routes::health_api::tests::stale_mailbox_repair_applied_includes_session_only_disconnect
 server::routes::health_api::tests::standalone_relay_authority_observation_publishes_the_whole_triage_block
 server::routes::health_api::tests::standalone_relay_authority_rollout_publishes_the_whole_dormant_block
+server::routes::health_api::tests::summary_and_detail_routes_agree_on_status_and_degraded_reasons
 server::routes::health_api::tests::supported_provider_ids_contain_no_colon
 server::routes::kanban::update_card_validation_tests::update_card_validation_accepts_valid_metadata_json_object
 server::routes::kanban::update_card_validation_tests::update_card_validation_accepts_valid_metadata_json_scalar
@@ -1940,6 +1951,8 @@ services::cluster::stream_relay::tests::permanent_sink_error_is_not_misclassifie
 services::cluster::stream_relay::tests::queued_frames_keep_their_binding_across_rebinds
 services::cluster::stream_relay::tests::sequence_outcome_tracks_delivery_error_and_drop_sequences
 services::cluster::stream_relay::tests::session_relay_ordered_range_frame_carries_idle_delivery_coordinate
+services::cluster::stream_relay::tests::shutdown_tests::shutdown_preserves_join_failures_and_no_task
+services::cluster::stream_relay::tests::shutdown_tests::shutdown_waits_for_sink_then_joins
 services::cluster::stream_relay::tests::shutdown_unblocks_loop_even_with_outliving_producer_clone
 services::cluster::stream_relay::tests::sub_agent_invocation_does_not_stop_relay
 services::cluster::stream_relay::tests::terminal_frame_carries_consumed_end_and_turn_identity
@@ -2460,6 +2473,7 @@ services::discord::followup_retry_requeue_tests::inflight_retry_restores_earlier
 services::discord::followup_retry_requeue_tests::pre_submit_requeue_of_marked_followup_reconstructs_marked_intervention
 services::discord::followup_retry_requeue_tests::pre_submit_requeue_preserves_context_and_returns_enqueue_outcome
 services::discord::footer_view_reconciler::tests::bridge_watcher_completion_notifications_render_identical_edits
+services::discord::footer_view_reconciler::tests::final_wire_completion_and_refresh_evict_only_after_success_5304
 services::discord::footer_view_reconciler::tests::footer_supersede_is_idempotent
 services::discord::footer_view_reconciler::tests::generation_guard_rejects_stale_two_message_status_completion
 services::discord::footer_view_reconciler::tests::tui_suppress_for_clean_mirror_forgets_target_without_write
@@ -2784,16 +2798,19 @@ services::discord::health::runtime_resolve::direct_meeting_candidate_tests::sing
 services::discord::health::runtime_resolve::direct_meeting_candidate_tests::single_live_match_is_selected_without_explicit_match
 services::discord::health::session_enrichment::tests::a_channel_with_no_coordinate_entry_polls_as_absent
 services::discord::health::session_enrichment::tests::a_generation_stamp_moving_under_the_offset_read_witnesses_nothing
+services::discord::health::session_enrichment::tests::an_exhausted_tmux_budget_withholds_a_live_session
 services::discord::health::session_enrichment::tests::health_load_carries_the_live_watcher_transcript_into_the_enrichment
 services::discord::health::session_enrichment::tests::health_load_records_transcript_source_divergence_only_when_the_paths_split
 services::discord::health::session_enrichment::tests::health_reads_the_live_watcher_transcript_off_the_channel_binding
 services::discord::health::session_enrichment::tests::health_reports_no_watcher_transcript_for_a_channel_without_a_binding
+services::discord::health::session_enrichment::tests::health_snapshot_wires_the_tmux_budget_and_probe
 services::discord::health::session_enrichment::tests::inflight_a_alive_watcher_b_dead_mismatch_probes_a
 services::discord::health::session_enrichment::tests::only_exact_dead_or_absent_maps_to_dead
 services::discord::health::session_enrichment::tests::the_health_poll_reports_an_absent_coordinate_as_absent
 services::discord::health::session_enrichment::tests::transcript_discovery_falls_back_to_the_inflight_row_and_then_to_nothing
 services::discord::health::session_enrichment::tests::transcript_discovery_prefers_the_live_watcher_over_the_inflight_row
 services::discord::health::snapshot::tests::a_green_relay_verdict_degrades_the_snapshot_in_neither_mode
+services::discord::health::snapshot::tests::a_health_poll_leaves_a_legacy_inflight_row_byte_identical
 services::discord::health::snapshot::tests::a_non_green_relay_verdict_never_improves_an_unhealthy_snapshot
 services::discord::health::snapshot::tests::bound_selector_absent_when_no_source_and_omitted_from_json
 services::discord::health::snapshot::tests::bound_selector_falls_back_to_runtime_binding
@@ -2813,6 +2830,7 @@ services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::re
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_abstains_when_reachability_ledger_is_absent
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_records_row_vs_registry_identity_divergence
 services::discord::health::snapshot::tests::stale_ownerless_external_input_inflight_is_not_foreground_even_with_cancel_token
+services::discord::health::snapshot::tests::summary_and_detail_agree_on_the_composite_relay_verdict_polarity
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_rejects_same_second_synthetic_successor_4181
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_rejects_successor_episode_4181
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_survives_process_restart_4181
@@ -3589,6 +3607,7 @@ services::discord::placeholder_controller::queued_card_gate::tests::t4_merged_dr
 services::discord::placeholder_controller::queued_card_gate::tests::t6_bootstrap_stale_card_is_rekeyed_not_deleted_when_a_live_entry_is_cardless
 services::discord::placeholder_controller::queued_card_gate::tests::t7_gated_sites_hold_no_raw_destructive_call
 services::discord::placeholder_controller::queued_card_gate::tests::t9_t10a_t10b_gated_helpers_wait_for_the_persist_lock
+services::discord::placeholder_live_events::completion_footer::final_wire_tests::no_credit_for_zero_kept_lines_5304
 services::discord::placeholder_live_events::freshness::tests::activity_labels_lead_with_a_spinner_swap_marker
 services::discord::placeholder_live_events::freshness::tests::codex_execution_function_names_map_to_bash
 services::discord::placeholder_live_events::freshness::tests::completed_turn_renders_final_check_label
@@ -4455,9 +4474,9 @@ services::discord::router::intake_gate::busy_duplicate_notice::tests::keeps_queu
 services::discord::router::intake_gate::busy_duplicate_notice::tests::keeps_recent_resend_duplicate_notice_visible
 services::discord::router::intake_gate::busy_duplicate_notice::tests::silences_already_queued_source_id_duplicate_notice
 services::discord::router::intake_gate::command_recognition_tests::command_outcomes_end_before_restore_and_preserve_upload_conditions
+services::discord::router::intake_gate::gate::tests::boundary_keeps_alert_rejection_and_admits_unmarked_announce_handoff
 services::discord::router::intake_gate::gate::tests::live_human_preservation_requires_determinate_non_utility_identity
 services::discord::router::intake_gate::gate::tests::live_known_automation_is_excluded_even_with_false_bot_flag
-services::discord::router::intake_gate::gate::tests::operational_alert_is_not_admitted_but_announce_handoff_is
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests::live_human_preservation_precedes_stale_dispatch_suppression
 services::discord::router::intake_gate::live_intake_preserve_wiring_tests::one_admission_guard_precedes_all_soft_intervention_entrypoints
 services::discord::router::intake_gate::queue_effects::channel_queued_placeholder_pure_tests::different_author_reuses_existing_channel_card
@@ -4987,6 +5006,7 @@ services::discord::single_message_panel::tests::completion_footer_with_body_clam
 services::discord::single_message_panel::tests::compose_completion_footer_keeps_balanced_body_fence_intact_3394
 services::discord::single_message_panel::tests::compose_completion_footer_repair_scoped_to_body_keeps_footer_marks_3394
 services::discord::single_message_panel::tests::duplicate_same_message_registration_preserves_committed_noop_state_3717
+services::discord::single_message_panel::tests::final_wire_positions_survive_only_complete_lines_5304
 services::discord::single_message_panel::tests::footer_mode_requires_both_flags
 services::discord::single_message_panel::tests::footer_mode_strip_preserves_spinner_prefixed_user_body_without_panel_timestamp
 services::discord::single_message_panel::tests::footer_only_body_strips_to_empty_for_cleanup_callers
@@ -5273,6 +5293,7 @@ services::discord::tmux::placeholder_suppression::placeholder_suppression_tests:
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::task_notification_subagent_kind_exposed_body_preserves
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::task_notification_subagent_kind_unexposed_placeholder_deletes
 services::discord::tmux::placeholder_suppression::placeholder_suppression_tests::unknown_author_body_preserves_no_edit
+services::discord::tmux::placeholder_suppression::unicode_units_tests::streaming_status_and_tmux_placeholder_suppression_unicode_units
 services::discord::tmux::restored_seed_discard_tests::cross_turn_watcher_reuse_discards_restored_seed_before_terminal_commit
 services::discord::tmux::restored_seed_discard_tests::idle_direct_prompt_discard_still_requires_restored_turn_and_anchor
 services::discord::tmux::restored_seed_discard_tests::idle_direct_prompt_preserves_restored_seed_with_undelivered_body

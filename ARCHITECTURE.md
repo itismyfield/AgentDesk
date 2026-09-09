@@ -241,6 +241,8 @@ src/
 │   ├── maintenance/
 │   │   ├── mod.rs
 │   │   └── storage_jobs.rs
+│   ├── rate_limit_sync/
+│   │   └── backoff.rs
 │   ├── routes/
 │   │   ├── dispatches/
 │   │   │   ├── crud.rs
@@ -478,7 +480,10 @@ src/
 │   │   ├── intake_worker/
 │   │   │   └── dispatch_stamp_tests.rs
 │   │   ├── stream_relay/
+│   │   │   ├── tests/
+│   │   │   │   └── shutdown_tests.rs
 │   │   │   ├── identity.rs
+│   │   │   ├── shutdown.rs
 │   │   │   └── terminal_resolution.rs
 │   │   ├── capability_routing.rs
 │   │   ├── intake_preflight.rs
@@ -950,7 +955,8 @@ src/
 │   │   ├── tmux_placeholder_suppression/
 │   │   │   ├── evidence.rs
 │   │   │   ├── mod.rs
-│   │   │   └── ops.rs
+│   │   │   ├── ops.rs
+│   │   │   └── unicode_units_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── jsonl_rotation/
 │   │   │   │   ├── backstop.rs
