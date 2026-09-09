@@ -4468,8 +4468,7 @@ def _alert_pending_retirement(
     #5190 R3 P2-E: this used to answer a bare bool, and every caller read the
     False as "nobody could be told". Two very different things produce it. A
     send failure means the notice never left the box. A cooldown hit means the
-    box is fine and something else — possibly an unrelated `idle` or
-    `read_failure` retirement on the SAME shared cooldown key — spoke within
+    box is fine and another retirement of the SAME reason spoke within
     `realert_secs`. Callers gate identically on both (neither is a notice about
     THESE paths), but the log line must not call a cooldown an undelivered
     message: that is a false statement about the relay's health, which is the
@@ -4480,9 +4479,9 @@ def _alert_pending_retirement(
     """
     if not paths:
         return "empty"
-    raw_last_alert = channel_state.get(
-        LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY, 0.0
-    )
+    # The legacy shared timestamp has no reason provenance; leave it inert.
+    alert_key = f"{LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY}:{reason}"
+    raw_last_alert = channel_state.get(alert_key, 0.0)
     last_alert = (
         float(raw_last_alert)
         if _is_finite_nonnegative_number(raw_last_alert)
@@ -4541,7 +4540,7 @@ def _alert_pending_retirement(
             f"reason={reason} count={len(paths)}"
         )
         return "undelivered"
-    channel_state[LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY] = now
+    channel_state[alert_key] = now
     return "sent"
 
 
