@@ -11,9 +11,10 @@ JOIN = re.compile(r'''\s*\+|[/${"']''')
 def joined(line, match):
     """True when a path continues past the matched URL token's own closing quote."""
     rest, quote = line[match.end():], line[match.end():match.end() + 1]
-    # A quote right after the token closes the token's own span whenever that quote is
-    # still open, no matter how many words of the span preceded the URL.
-    if quote in ('"', "'") and line[:match.start()].count(quote) % 2 == 1:
+    # A quote right after the token closes that token's own span when it also opened
+    # the token or is still open by parity; stray apostrophes must not decide this.
+    if quote in ('"', "'") and (line[match.start() - 1:match.start()] == quote
+                                or line[:match.start()].count(quote) % 2 == 1):
         rest = rest[1:]
     return bool(JOIN.match(rest))
 

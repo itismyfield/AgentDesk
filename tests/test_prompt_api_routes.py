@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from scripts.check_prompt_api_routes import check, inventory
+from scripts.check_prompt_api_routes import URL, check, inventory
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -118,6 +118,23 @@ class PromptRoutes(unittest.TestCase):
                 rc, output = self.run_check(template.replace('URL', 'http://localhost:1/api/send'))
                 self.assertEqual(rc, 1)
                 self.assertIn('unknown_path /api/send', output)
+
+    def test_apostrophe_parity_traps_and_shell_joins(self):
+        # r7: an apostrophe or an escaped quote earlier in the line must not flip the
+        # closing-quote verdict and erase a complete literal URL token, while genuine
+        # shell assembly past that quote stays excluded.
+        literals = ["The agent's endpoint is 'URL'.", "Don't call 'URL' directly.",
+                    "Both agents' route is 'URL'.", '```sh\necho "curl \\"URL"\n```',
+                    '"90\'s" \'URL\'']
+        joins = ['curl "http://localhost:1/api/"$SUFFIX', 'curl \'http://localhost:1/api/\'"$X"',
+                 'Don\'t run: curl "http://localhost:1/api/"$SUFFIX']
+        for template, expected in [(x, 1) for x in literals] + [(x, 0) for x in joins]:
+            source = template.replace('URL', 'http://localhost:1/api/send')
+            with self.subTest(template=template):
+                self.assertTrue(URL.search(source), 'vacuous case: no URL token matched')
+                rc, output = self.run_check(source)
+                self.assertEqual(rc, expected)
+                self.assertIn('unknown_path /api/send' if expected else 'no_applicable_urls', output)
 
     def test_fence_closing_contract(self):
         for marker in ('~~~', '```', '````bash'):
