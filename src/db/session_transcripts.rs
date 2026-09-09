@@ -972,7 +972,7 @@ mod clear_fence_pg_tests {
 
     async fn sa2_routine_store(pool: &PgPool) -> RoutineStore {
         sqlx::query(
-            "INSERT INTO routines (id, script_ref, name) VALUES ('routine', 'fixture', 'fixture')",
+            "INSERT INTO routines (id, script_ref, name, in_flight_run_id) VALUES ('routine', 'fixture', 'fixture', 'run')",
         )
         .execute(pool)
         .await
