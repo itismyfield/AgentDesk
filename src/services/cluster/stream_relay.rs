@@ -55,6 +55,8 @@ use tokio::task::JoinHandle;
 use super::session_matcher::MatchedChannel;
 
 mod identity;
+mod shutdown;
+pub use shutdown::ShutdownOutcome;
 mod terminal_resolution;
 pub use identity::*;
 pub use terminal_resolution::{DeliveryOutcome, RelaySinkOutcome};
@@ -749,39 +751,6 @@ impl StreamRelayHandle {
         )
     }
 
-    /// Initiate graceful shutdown. Sets the shutdown flag, fires the
-    /// receiver-side notify so the relay loop exits even when sender clones
-    /// outside this handle (E5 #2412: `RelayProducer` clones cached by the
-    /// production tmux watcher) keep producer clones alive, then closes the
-    /// supervisor-owned queue and awaits task completion.
-    ///
-    /// Without the notify, an idle relay could remain parked in `recv().await`
-    /// while cached producer clones in tmux watchers stayed alive. That wedge
-    /// motivated the explicit receiver-side cancellation.
-    /// Safe to call only once — the handle is consumed.
-    pub async fn shutdown(self) {
-        let StreamRelayHandle {
-            queue,
-            shutdown,
-            shutdown_notify,
-            task,
-            ..
-        } = self;
-        shutdown.store(true, Ordering::Release);
-        // Wake the relay loop's `select!` so it observes the flag and exits.
-        // `notify_one` (not `notify_waiters`) stores a single permit so the
-        // wakeup survives the pre-waiter race: if shutdown lands while the
-        // loop is mid-`deliver_frame` (no `Notified` future armed), the
-        // permit is consumed by the next `notified().await`. The
-        // `shutdown.load()` guard at the top of each loop iteration is the
-        // fail-closed backstop against any residual missed-notify.
-        shutdown_notify.notify_one();
-        queue.close();
-        if let Some(handle) = task {
-            let _ = handle.await;
-        }
-    }
-
     /// Test helper: synchronously check whether the underlying relay task is
     /// still alive (handle not yet shut down).
     #[cfg(test)]
@@ -995,6 +964,7 @@ async fn deliver_frame(
 
 #[cfg(test)]
 mod tests {
+    mod shutdown_tests;
     use super::*;
     use crate::services::cluster::session_matcher::expected_rollout_path_for;
     use crate::services::provider::ProviderKind;

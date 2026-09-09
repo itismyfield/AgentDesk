@@ -1940,6 +1940,8 @@ services::cluster::stream_relay::tests::permanent_sink_error_is_not_misclassifie
 services::cluster::stream_relay::tests::queued_frames_keep_their_binding_across_rebinds
 services::cluster::stream_relay::tests::sequence_outcome_tracks_delivery_error_and_drop_sequences
 services::cluster::stream_relay::tests::session_relay_ordered_range_frame_carries_idle_delivery_coordinate
+services::cluster::stream_relay::tests::shutdown_tests::shutdown_preserves_join_failures_and_no_task
+services::cluster::stream_relay::tests::shutdown_tests::shutdown_waits_for_sink_then_joins
 services::cluster::stream_relay::tests::shutdown_unblocks_loop_even_with_outliving_producer_clone
 services::cluster::stream_relay::tests::sub_agent_invocation_does_not_stop_relay
 services::cluster::stream_relay::tests::terminal_frame_carries_consumed_end_and_turn_identity
