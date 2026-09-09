@@ -13,6 +13,24 @@
 
 use super::*;
 
+pub(super) fn resume_pinned_watcher(
+    watchers: &crate::services::discord::TmuxWatcherRegistry,
+    pin: Option<&WatcherClaimIncarnation>,
+    offset: u64,
+) -> bool {
+    pin.and_then(|pin| {
+        pin.adopt_if_current(watchers, |pin| {
+            let Ok(mut resume) = pin.resume_offset.lock() else {
+                return false;
+            };
+            *resume = Some(offset);
+            pin.paused.store(false, Ordering::Release);
+            true
+        })
+    })
+    .unwrap_or(false)
+}
+
 /// Finalization epilogue: decrement the finalizing-turns counters (symmetric
 /// with the `fetch_add` at turn start) and, if this turn had queued follow-ups,
 /// drain exactly one next turn under the same guards/order as before
@@ -32,7 +50,7 @@ pub(super) async fn finalize_and_drain_queued_turns(
     provider: ProviderKind,
     request_owner_name: String,
     tmux_last_offset: Option<u64>,
-    watcher_owner_channel_id: ChannelId,
+    watcher_delivery_pin: Option<WatcherClaimIncarnation>,
     owns_channel_effects: bool,
 ) {
     // Finalization complete — decrement counters
@@ -189,14 +207,12 @@ pub(super) async fn finalize_and_drain_queued_turns(
             tracing::info!(
                 "  [{ts}] 📦 preserving queued command(s): missing live Discord context — scheduling deferred drain"
             );
-            if owns_channel_effects
-                && let Some(offset) = tmux_last_offset
-                && let Some(watcher) = shared_owned.tmux_watchers.get(&watcher_owner_channel_id)
-            {
-                if let Ok(mut guard) = watcher.resume_offset.lock() {
-                    *guard = Some(offset);
-                }
-                watcher.paused.store(false, Ordering::Relaxed);
+            if owns_channel_effects && let Some(offset) = tmux_last_offset {
+                resume_pinned_watcher(
+                    &shared_owned.tmux_watchers,
+                    watcher_delivery_pin.as_ref(),
+                    offset,
+                );
             }
             super::super::schedule_deferred_idle_queue_kickoff(
                 shared_owned.clone(),
@@ -485,6 +501,10 @@ mod tests {
                     );
                     shared.restart.finalizing_turns.store(1, Ordering::Relaxed);
                     shared.restart.global_finalizing.store(1, Ordering::Relaxed);
+                    let pin = WatcherClaimIncarnation::from_handle(
+                        channel_id,
+                        &shared.tmux_watchers.get(&channel_id).unwrap(),
+                    );
                     finalize_and_drain_queued_turns(
                         shared,
                         true,
@@ -494,7 +514,7 @@ mod tests {
                         ProviderKind::Claude,
                         "requester".to_string(),
                         Some(7_777),
-                        channel_id,
+                        Some(pin),
                         owns_channel_effects,
                     )
                     .await;
@@ -548,7 +568,7 @@ mod tests {
                     provider.clone(),
                     "requester".to_string(),
                     None,
-                    channel_id,
+                    None,
                     true,
                 )
                 .await;
@@ -581,7 +601,7 @@ mod tests {
                     provider,
                     "requester".to_string(),
                     None,
-                    channel_id,
+                    None,
                     true,
                 )
                 .await;
@@ -655,7 +675,7 @@ mod tests {
                     provider,
                     "requester".to_string(),
                     None,
-                    channel_id,
+                    None,
                     true,
                 )
                 .await;
@@ -706,7 +726,7 @@ mod tests {
                     provider,
                     "requester".to_string(),
                     None,
-                    channel_id,
+                    None,
                     true,
                 )
                 .await;
