@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "7ceabb30fc0df2526a9b4e72028dcaac55b3e607",
+  "measured_at_sha": "5455c54e5c6c1c08ee9f2d1c2f39604c7b3bd7fd",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1044,7 +1044,7 @@
       "api": "migration.file",
       "symbol": "file",
       "classification": "STATIC_FILE",
-      "fingerprint": "sha256:c4fa2176359de5f55c02d44085bf8f6158b8ada68f28f0201d3205e43816a53d"
+      "fingerprint": "sha256:99cba304725541bfdb937388d5e7c8dcb2f31853d61d97912ea6a414a402100f"
     },
     {
       "root": "migrations/postgres",
@@ -1062,7 +1062,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:ae98b59a3a535e71ccea5b6d10eeb50fd43465f4aaf5e25026ff5e65c30bb400"
+      "fingerprint": "sha256:125d2ba09a9da572b4eeb18aed11c6ade65c880eff6612e0e05ed6cb3d4da94c"
     },
     {
       "root": "policies",
@@ -8667,6 +8667,15 @@
       "api": "sqlx::query_as",
       "symbol": "query_as",
       "classification": "STATIC",
+      "fingerprint": "sha256:1e266b42fbd7380d1c12fc954a3ea6e2ea7fa6945964aa950a40c07634c52db6"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/db/intake_outbox.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
       "fingerprint": "sha256:4ad73c6031b6d0e137cedf3c76eea94c43cdfc1f9cc215deaaeaf05b56c1d1b7"
     },
     {
@@ -8722,15 +8731,6 @@
       "symbol": "query_as",
       "classification": "STATIC",
       "fingerprint": "sha256:698d787f6b8720ade6510a22a333755d55883c588a263d62c815d406c558a9bd"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/db/intake_outbox.rs",
-      "api": "sqlx::query_as",
-      "symbol": "query_as",
-      "classification": "STATIC",
-      "fingerprint": "sha256:76bd7c353dc139c1e8e2bc496a5559325a0d04db6f049c9852e7bdbdd775bbaa"
     },
     {
       "root": "src",

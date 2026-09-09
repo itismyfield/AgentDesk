@@ -3115,23 +3115,32 @@ mod postgres_tests {
         pg_db.drop().await;
     }
 
-    /// #5320 slice 1: nothing reads migration 0113's terminal-retention index
-    /// yet, so the catalog is the only place its shape can be pinned — both key
-    /// columns (a keyset cursor needs `id` in the key to resume) and the exact
-    /// four-state predicate.
+    /// #5320: no retention reader yet. Migration 0115 offers sweep ordering
+    /// bounded by failed_pre_accept rows. Pin both indexes' ordered keys and
+    /// predicates in the real catalog, without claiming a forced planner choice.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn intake_outbox_terminal_retention_index_catalog_pg() {
         let pg_db = TestPostgresDb::create().await;
         let pool = pg_db.connect_and_migrate().await;
 
-        let (valid, key_atts, first_key, second_key, predicate): (
-            bool,
-            i16,
-            String,
-            String,
-            String,
-        ) = sqlx::query_as(
-            "SELECT i.indisvalid, i.indnkeyatts,
+        for (index, expected_predicate) in [
+            (
+                "idx_intake_outbox_terminal_retention",
+                "(status = ANY (ARRAY['done'::text, 'unknown'::text, 'failed_pre_accept'::text, 'failed_post_accept'::text]))",
+            ),
+            (
+                "idx_intake_outbox_failed_pre_accept_sweep_order",
+                "(status = 'failed_pre_accept'::text)",
+            ),
+        ] {
+            let (valid, key_atts, first_key, second_key, predicate): (
+                bool,
+                i16,
+                String,
+                String,
+                String,
+            ) = sqlx::query_as(
+                "SELECT i.indisvalid, i.indnkeyatts,
                     pg_get_indexdef(i.indexrelid, 1, true),
                     pg_get_indexdef(i.indexrelid, 2, true),
                     pg_get_expr(i.indpred, i.indrelid)
@@ -3140,22 +3149,22 @@ mod postgres_tests {
                JOIN pg_class t ON t.oid = i.indrelid
                JOIN pg_namespace ns ON ns.oid = c.relnamespace
               WHERE ns.nspname = 'public' AND t.relname = 'intake_outbox'
-                AND c.relname = 'idx_intake_outbox_terminal_retention'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("read #5320 terminal-retention index catalog contract"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+                AND c.relname = $1",
+            )
+            .bind(index)
+            .fetch_one(&pool)
+            .await
+            .expect("read #5320 index catalog contract"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
 
-        assert!(valid, "fresh migration must build a valid index");
-        assert_eq!(key_atts, 2, "index must have exactly two key attributes");
-        assert_eq!(first_key, "updated_at", "first key orders by update time");
-        assert_eq!(second_key, "id", "second key breaks updated_at ties");
-        assert_eq!(
-            predicate,
-            "(status = ANY (ARRAY['done'::text, 'unknown'::text, \
-             'failed_pre_accept'::text, 'failed_post_accept'::text]))",
-            "index must retain its exact four-state terminal predicate"
-        );
+            assert!(valid, "fresh migration must build a valid index");
+            assert_eq!(key_atts, 2, "index must have exactly two key attributes");
+            assert_eq!(first_key, "updated_at", "first key orders by update time");
+            assert_eq!(second_key, "id", "second key breaks updated_at ties");
+            assert_eq!(
+                predicate, expected_predicate,
+                "index {index} must retain its exact predicate"
+            );
+        }
 
         pool.close().await;
         pg_db.drop().await;
