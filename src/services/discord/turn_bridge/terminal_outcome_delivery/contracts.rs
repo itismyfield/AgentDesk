@@ -2,6 +2,8 @@ use super::*;
 use crate::services::{agent_protocol::RuntimeHandoffKind, discord::inflight::CodexRange};
 
 pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryContext {
+    pub(in crate::services::discord::turn_bridge) watcher_delivery_pin:
+        Option<WatcherClaimIncarnation>,
     pub(in crate::services::discord::turn_bridge) channel_id: ChannelId,
     pub(in crate::services::discord::turn_bridge) user_msg_id: Option<MessageId>,
     pub(in crate::services::discord::turn_bridge) current_msg_id: MessageId,
