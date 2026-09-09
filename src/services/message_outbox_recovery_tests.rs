@@ -296,6 +296,24 @@ async fn unknown_source_preflight_blocks_all_mutation_pg() {
     assert_eq!(audit_count(&pool).await, 0);
 }
 
+#[tokio::test]
+async fn retired_source_is_terminal_not_unknown_pg() {
+    let Some(pool) = pool("agentdesk_retired_outbox").await else {
+        return;
+    };
+    seed(&pool, 61, "failed", "merge-automation", "c", "n", "s", None).await;
+    for dry_run in [true, false] {
+        let result = redrive_failed_rows(&pool, &[61], "retired-key", "retirement", dry_run)
+            .await
+            .unwrap();
+        assert_eq!(result[0].outcome, "retired_source");
+        assert_eq!(status(&pool, 61).await, "failed");
+    }
+    let row = inspect_failed_rows(&pool, &[61]).await.unwrap();
+    assert_eq!(row[0].error_snippet.as_deref(), Some("retired_source"));
+    assert_eq!(audit_count(&pool).await, 1);
+}
+
 async fn claim_worker(pool: PgPool, id: i64, owner: &'static str) -> Option<String> {
     for _ in 0..100 {
         let claimed = sqlx::query_scalar::<_, String>(
