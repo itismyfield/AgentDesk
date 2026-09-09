@@ -3384,7 +3384,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
     Ok(config)
 }
 
-fn validate_config(config: &Config) -> Result<()> {
+pub(crate) fn validate_config(config: &Config) -> Result<()> {
     config.onboarding.warn_invalid_rules();
     validate_escalation_schedule(&config.escalation.schedule)?;
     validate_scheduled_message_required_mentions(
