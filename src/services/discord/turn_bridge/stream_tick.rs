@@ -101,7 +101,7 @@ pub(super) struct BridgeStreamTickState<'a> {
     pub(super) last_status_panel_text: &'a mut String,
     pub(super) watcher_owns_assistant_relay: &'a mut bool,
     pub(super) watcher_relay_available_for_turn: &'a mut bool,
-    pub(super) watcher_delivery_pin: &'a mut Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(super) watcher_delivery_pin: &'a mut Option<WatcherClaimIncarnation>,
     pub(super) standby_relay_owns_output: &'a mut bool,
     pub(super) watcher_owner_channel_id: &'a mut ChannelId,
     pub(super) full_response: &'a mut String,
