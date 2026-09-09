@@ -11,7 +11,7 @@ use serenity::{ChannelId, MessageId};
 use super::SharedData;
 use super::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
 use super::outbound::delivery_record as dr; // #3089 B2c
-use super::turn_bridge::{TurnBridgeContext, spawn_turn_bridge};
+use super::turn_bridge::TurnBridgeContext;
 use super::turn_view_reconciler::note_tui_anchor_started as started;
 use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
 use crate::services::claude_tui::hook_server::{HookEventKind, subscribe_hook_events};

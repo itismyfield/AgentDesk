@@ -87,10 +87,11 @@ use std::sync::Arc;
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 
-use crate::services::turn_orchestrator::{Intervention, QueueExitKind};
+use crate::services::turn_orchestrator::Intervention;
 
-use super::super::SharedData;
+use super::super::http::{delete_channel_message, edit_channel_message};
 use super::super::runtime_bootstrap::StalePlaceholderDeleter;
+use super::super::{QueueExitVisibleCard, SharedData};
 
 /// Outcome of [`release_or_rekey`] / [`release_or_rekey_locked`].
 pub(in crate::services::discord) enum QueuedCardDisposition {
@@ -229,30 +230,89 @@ pub(in crate::services::discord) async fn teardown_delete(
     shared: &SharedData,
     teardown: QueuedCardTeardown,
 ) -> serenity::Result<()> {
-    let result =
-        super::super::http::delete_channel_message(http, teardown.channel_id, teardown.card).await;
+    let result = delete_channel_message(http, teardown.channel_id, teardown.card).await;
     detach(shared, &teardown);
     result
 }
 
-/// Rewrite the card to its queue-exit body, falling back to delete, then drop
-/// the controller row.
+#[derive(Debug)]
+pub(in crate::services::discord) enum QueueExitTeardownOutcome {
+    Edited,
+    Deleted {
+        edit_error: String,
+    },
+    Parked {
+        edit_error: String,
+        delete_error: String,
+    },
+}
+
+fn is_unknown_message(error: &serenity::Error) -> bool {
+    matches!(error, serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response))
+        if response.status_code.as_u16() == 404 && response.error.code == 10008)
+}
+
+/// Timer-only HTTP seam; the common pending drain re-gates before calling it.
+/// Unlike the boot deleter, an already-gone message counts as cleared.
+pub(in crate::services::discord) struct QueueExitRetryDeleter {
+    pub(in crate::services::discord) http: Arc<serenity::http::Http>,
+}
+
+impl StalePlaceholderDeleter for QueueExitRetryDeleter {
+    fn delete<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        placeholder_msg_id: MessageId,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            match delete_channel_message(&self.http, channel_id, placeholder_msg_id).await {
+                Ok(()) => Ok(()),
+                Err(error) if is_unknown_message(&error) => Ok(()),
+                Err(error) => Err(format!("{error:?}")),
+            }
+        })
+    }
+}
+
+/// Rewrite the exit body or delete; persist double failures for a later re-gated drain.
 pub(in crate::services::discord) async fn teardown_exit_body(
     http: &Arc<serenity::http::Http>,
     shared: &SharedData,
     teardown: QueuedCardTeardown,
-    kind: QueueExitKind,
-) {
-    let body = super::super::queue_exit_card_body(kind);
-    if super::super::http::edit_channel_message(http, teardown.channel_id, teardown.card, body)
-        .await
-        .is_err()
-    {
-        let _ =
-            super::super::http::delete_channel_message(http, teardown.channel_id, teardown.card)
-                .await;
-    }
+    card: QueueExitVisibleCard,
+) -> QueueExitTeardownOutcome {
+    debug_assert_eq!(card.placeholder_msg_id, teardown.card());
+    let (channel, message) = (teardown.channel_id, teardown.card);
+    let body = super::super::queue_exit_card_body(card.kind);
+    let outcome = match edit_channel_message(http, channel, message, body).await {
+        Ok(_) => QueueExitTeardownOutcome::Edited,
+        Err(edit_error) => {
+            let edit_error = format!("{edit_error:?}");
+            let result = delete_channel_message(http, channel, message).await;
+            if let Some(error) = result.err().filter(|error| !is_unknown_message(error)) {
+                let delete_error = format!("{error:?}");
+                tracing::warn!(channel_id = channel.get(), placeholder_msg_id = message.get(),
+                    user_msg_id = card.user_msg_id.get(), %edit_error, %delete_error,
+                    "queue_exit: edit and delete failed; parking for retry");
+                shared
+                    .add_pending_queue_exit_placeholder_clear_one(
+                        channel,
+                        card.user_msg_id,
+                        message,
+                    )
+                    .await;
+                QueueExitTeardownOutcome::Parked {
+                    edit_error,
+                    delete_error,
+                }
+            } else {
+                tracing::debug!(%edit_error, "queue_exit: edit failed; card deleted or already gone");
+                QueueExitTeardownOutcome::Deleted { edit_error }
+            }
+        }
+    };
     detach(shared, &teardown);
+    outcome
 }
 
 /// Delete through the `StalePlaceholderDeleter` seam (bootstrap + deferred

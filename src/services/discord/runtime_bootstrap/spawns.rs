@@ -475,6 +475,51 @@ pub(super) fn run_bot_spawn_dead_tmux_reaper(shared_clone: &Arc<SharedData>) {
     });
 }
 
+fn queue_exit_clear_retry_interval_from(raw: Option<&str>) -> Option<std::time::Duration> {
+    match raw
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(600)
+    {
+        0 => None,
+        seconds => Some(std::time::Duration::from_secs(seconds.max(30))),
+    }
+}
+
+fn queue_exit_clear_retry_interval() -> Option<std::time::Duration> {
+    queue_exit_clear_retry_interval_from(
+        std::env::var("AGENTDESK_QUEUE_EXIT_CLEAR_RETRY_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Fixed-delay retry opportunities, not a per-card deadline: sweeps await each
+/// row serially and missing HTTP skips a sweep. Failures have no TTL or attempt cap.
+pub(super) fn run_bot_spawn_queue_exit_clear_retry(shared: &Arc<SharedData>) {
+    let Some(interval) = queue_exit_clear_retry_interval() else {
+        return;
+    };
+    let shared = shared.clone();
+    task_supervisor::spawn_observed("queue_exit_clear_retry", async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            if shared.pending_queue_exit_placeholder_clears().is_empty() {
+                continue;
+            }
+            let Some(http) = shared.serenity_http_or_token_fallback() else {
+                continue;
+            };
+            super::super::drain_pending_queue_exit_placeholder_clears_with(
+                &shared,
+                &super::super::placeholder_controller::queued_card_gate::QueueExitRetryDeleter {
+                    http,
+                },
+            )
+            .await;
+        }
+    });
+}
+
 #[cfg(test)]
 #[path = "spawns_tests.rs"]
 mod tests;
