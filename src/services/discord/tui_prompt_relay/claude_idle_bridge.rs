@@ -235,7 +235,18 @@ pub(super) async fn relay_tui_idle_response_through_bridge(
         inflight_state,
     };
 
-    spawn_turn_bridge(shared.clone(), Arc::new(CancelToken::new()), rx, bridge);
+    let pin = crate::services::discord::tmux::WatcherClaimIncarnation::capture_for_source(
+        &shared.tmux_watchers,
+        tmux_session_name,
+        output_path,
+    );
+    crate::services::discord::turn_bridge::spawn_turn_bridge_with_pin(
+        shared.clone(),
+        Arc::new(CancelToken::new()),
+        rx,
+        bridge,
+        pin,
+    );
     // #3089 A6b r2 [High]/#3998 S1-f2: feed the bridge
     // `[Text?, OutputOffset, Done]`. `OutputOffset` advances `tmux_last_offset`
     // to `final_offset` so codex external-input's `ordered_range` is true and
@@ -416,8 +427,19 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
         inflight_state,
     };
 
-    // EXACTLY ONE spawn_turn_bridge per external turn.
-    spawn_turn_bridge(shared.clone(), Arc::new(CancelToken::new()), rx, bridge);
+    // EXACTLY ONE spawn_turn_bridge_with_pin per external turn.
+    let pin = crate::services::discord::tmux::WatcherClaimIncarnation::capture_for_source(
+        &shared.tmux_watchers,
+        tmux_session_name,
+        output_path,
+    );
+    crate::services::discord::turn_bridge::spawn_turn_bridge_with_pin(
+        shared.clone(),
+        Arc::new(CancelToken::new()),
+        rx,
+        bridge,
+        pin,
+    );
     let frame_log_context = IdleStreamFrameLogContext {
         provider: provider.as_str().to_string(),
         channel_id: channel_id.get(),

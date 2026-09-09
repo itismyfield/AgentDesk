@@ -11,8 +11,8 @@ use crate::services::discord::{
     queue_exit_drain_queued_placeholders, runtime_bootstrap,
 };
 use crate::services::provider::ProviderKind;
-use crate::services::turn_orchestrator::{InterventionMode, QueueExitEvent};
-use poise::serenity_prelude::UserId;
+use crate::services::turn_orchestrator::{InterventionMode, QueueExitEvent, QueueExitKind};
+use poise::serenity_prelude::{self as serenity, UserId};
 
 fn scoped_root() -> (tempfile::TempDir, crate::config::TestEnvVarGuard) {
     let root = tempfile::tempdir().expect("runtime root");
@@ -564,4 +564,212 @@ fn t7_gated_sites_hold_no_raw_destructive_call() {
         !CONTROLLER_RS.contains(".detach_by_message("),
         "placeholder_controller.rs itself must hold no detach_by_message call site"
     );
+}
+
+// #5141: real HTTP evidence for parking and the timer-only 404 classifier.
+type ExitHttpRequests = Arc<std::sync::Mutex<Vec<(axum::http::Method, String)>>>;
+type ExitHttpFixture = (
+    Arc<serenity::Http>,
+    tokio::task::JoinHandle<()>,
+    ExitHttpRequests,
+);
+
+async fn exit_http_fixture(delete_status: u16, code: u32) -> ExitHttpFixture {
+    use axum::{Router, http::StatusCode, response::IntoResponse, routing::any};
+    let requests: ExitHttpRequests = Arc::default();
+    let recorded = requests.clone();
+    let app = Router::new().fallback(any(
+        move |method: axum::http::Method, uri: axum::http::Uri| {
+            let recorded = recorded.clone();
+            async move {
+                let request = (method.clone(), uri.path().to_owned());
+                recorded.lock().unwrap().push(request);
+                let status = if method == axum::http::Method::PATCH {
+                    403
+                } else {
+                    delete_status
+                };
+                (
+                    StatusCode::from_u16(status).unwrap(),
+                    axum::Json(serde_json::json!({
+                        "code": code, "message": "fixture failure"
+                    })),
+                )
+                    .into_response()
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = Arc::new(
+        serenity::HttpBuilder::new("test-token")
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    (http, server, requests)
+}
+
+fn pending_disk(
+    shared: &SharedData,
+) -> std::collections::HashMap<(ChannelId, MessageId), MessageId> {
+    crate::services::discord::queued_placeholders_store::load_queue_exit_placeholder_clears(
+        &shared.provider,
+        &shared.token_hash,
+    )
+}
+
+#[tokio::test]
+async fn t1_exit_body_failure_table_parks_only_on_double_failure() {
+    let _root = scoped_root();
+    let shared = make_shared_data_for_tests();
+    for (index, status, code) in [(0, 403, 50013), (1, 204, 0), (2, 404, 10008)] {
+        let (channel, user, card) = (chan(100 + index), id(100), id(101));
+        let key = PlaceholderKey {
+            provider: ProviderKind::Claude,
+            channel_id: channel,
+            message_id: card,
+        };
+        shared
+            .ui
+            .placeholder_controller
+            .entries
+            .insert(key.clone(), Arc::new(PlaceholderEntrySlot::default()));
+        let QueuedCardDisposition::Released(teardown) =
+            release_or_rekey(&shared, channel, card, &[user]).await
+        else {
+            panic!("empty queue must release");
+        };
+        let (http, server, requests) = exit_http_fixture(status, code).await;
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            teardown_exit_body(
+                &http,
+                &shared,
+                teardown,
+                QueueExitVisibleCard {
+                    user_msg_id: user,
+                    placeholder_msg_id: card,
+                    kind: QueueExitKind::Cancelled,
+                },
+            ),
+        )
+        .await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        match outcome.expect("bounded HTTP teardown") {
+            QueueExitTeardownOutcome::Parked {
+                edit_error,
+                delete_error,
+            } => {
+                assert_eq!(status, 403);
+                assert!(edit_error.contains("403") && delete_error.contains("403"));
+            }
+            QueueExitTeardownOutcome::Deleted { edit_error } => {
+                assert_ne!(status, 403);
+                assert!(edit_error.contains("403"));
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+        assert!(!shared.ui.placeholder_controller.entries.contains_key(&key));
+        let pending = shared.pending_queue_exit_placeholder_clears();
+        assert_eq!(
+            pending.contains(&(channel, user, card)),
+            status == 403,
+            "parking must match double failure"
+        );
+        assert_eq!(
+            pending_disk(&shared).get(&(channel, user)).copied(),
+            (status == 403).then_some(card)
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0, axum::http::Method::PATCH);
+        assert_eq!(requests[1].0, axum::http::Method::DELETE);
+        for (_, path) in requests.iter() {
+            assert!(
+                path.ends_with(&format!("/channels/{channel}/messages/{card}")),
+                "{path}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn t2_parked_row_is_deleted_by_the_next_pending_drain() {
+    let _root = scoped_root();
+    let shared = make_shared_data_for_tests();
+    let (channel, user, card) = (chan(104), id(104), id(105));
+    shared
+        .add_pending_queue_exit_placeholder_clear_one(channel, user, card)
+        .await;
+    assert_eq!(pending_disk(&shared).get(&(channel, user)), Some(&card));
+    let (http, server, requests) = exit_http_fixture(204, 0).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        crate::services::discord::drain_pending_queue_exit_placeholder_clears_with(
+            &shared,
+            &QueueExitRetryDeleter { http },
+        ),
+    )
+    .await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    assert_eq!(result.unwrap(), (1, 0));
+    assert!(shared.pending_queue_exit_placeholder_clears().is_empty());
+    assert!(pending_disk(&shared).is_empty());
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, axum::http::Method::DELETE);
+    assert!(
+        requests[0]
+            .1
+            .ends_with(&format!("/channels/{channel}/messages/{card}"))
+    );
+}
+
+#[tokio::test]
+async fn t2b_retry_deleter_treats_unknown_message_as_cleared() {
+    for (status, code, gone) in [(404, 10008, true), (403, 50013, false), (404, 10003, false)] {
+        let (http, server, _) = exit_http_fixture(status, code).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            QueueExitRetryDeleter { http }.delete(chan(106), id(106)),
+        )
+        .await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let result = result.expect("bounded HTTP delete");
+        assert_eq!(
+            result.is_ok(),
+            gone,
+            "404/10008 alone means gone: {result:?}"
+        );
+        if !gone {
+            assert!(result.unwrap_err().contains(&status.to_string()));
+        }
+    }
+}
+
+#[test]
+fn t3_exit_body_logs_both_failures() {
+    let source = include_str!("../queued_card_gate.rs");
+    let body = source
+        .split("async fn teardown_exit_body(")
+        .nth(1)
+        .unwrap()
+        .split("async fn teardown_via_deleter(")
+        .next()
+        .unwrap();
+    assert_eq!(body.matches("tracing::warn!").count(), 1);
+    let warning = body
+        .split("tracing::warn!")
+        .nth(1)
+        .unwrap()
+        .split(";")
+        .next()
+        .unwrap();
+    assert!(warning.contains("edit_error") && warning.contains("delete_error"));
+    assert!(!body.contains("let _ ="));
 }

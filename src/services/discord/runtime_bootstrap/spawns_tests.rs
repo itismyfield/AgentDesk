@@ -844,3 +844,49 @@ async fn cancellation_restores_admission_health_and_consumed_barrier_slot() {
         "a new request consumes exactly one restored barrier slot"
     );
 }
+
+#[test]
+fn t4_retry_interval_parse_contract() {
+    for raw in [
+        None,
+        Some(""),
+        Some("abc"),
+        Some("-5"),
+        Some("99999999999999999999"),
+    ] {
+        assert_eq!(
+            queue_exit_clear_retry_interval_from(raw),
+            Some(std::time::Duration::from_secs(600))
+        );
+    }
+    assert_eq!(queue_exit_clear_retry_interval_from(Some("0")), None);
+    for (raw, seconds) in [("1", 30), ("29", 30), ("30", 30), ("31", 31), ("600", 600)] {
+        assert_eq!(
+            queue_exit_clear_retry_interval_from(Some(raw)),
+            Some(std::time::Duration::from_secs(seconds))
+        );
+    }
+}
+
+// Lexical wiring only: this does not prove timer cadence or single-flight behavior.
+#[test]
+fn t5_sweeper_is_spawned_after_the_boot_drain() {
+    let setup = include_str!("framework_setup.rs");
+    let boot = "drain_pending_queue_exit_placeholder_clears(&shared_for_migrate).await;";
+    let spawn = "run_bot_spawn_queue_exit_clear_retry(&shared_for_migrate);";
+    assert_eq!(setup.matches(boot).count(), 1);
+    assert_eq!(setup.matches(spawn).count(), 1);
+    assert!(setup.find(boot).unwrap() < setup.find(spawn).unwrap());
+    let source = include_str!("spawns.rs");
+    let body = source
+        .split("fn run_bot_spawn_queue_exit_clear_retry(")
+        .nth(1)
+        .unwrap();
+    for required in [
+        "drain_pending_queue_exit_placeholder_clears_with(",
+        "QueueExitRetryDeleter",
+        "tokio::time::sleep(interval).await",
+    ] {
+        assert!(body.contains(required), "missing retry wiring: {required}");
+    }
+}

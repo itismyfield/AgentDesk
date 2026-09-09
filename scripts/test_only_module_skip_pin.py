@@ -120,6 +120,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/turn_bridge/chunk_compose_tests.rs",
         "src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs",
         "src/services/discord/turn_bridge/intake_settlement/tests.rs",
+        "src/services/discord/turn_bridge/resume_pin_tests.rs",
         "src/services/discord/turn_bridge/runtime_handoff_loop/tests.rs",
         "src/services/discord/turn_bridge/status_panel_tests.rs",
         "src/services/discord/turn_bridge/stream_loop/expected_identity_tests.rs",
