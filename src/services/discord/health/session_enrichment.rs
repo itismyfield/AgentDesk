@@ -11,6 +11,50 @@ use super::liveness_authority::{CaptureCoordinateObservation, CoordinateStatus};
 
 pub(super) const WATCHER_STATE_DESYNC_STALE_MS: i64 = 30_000;
 
+/// Cumulative probe wait budget; detail-only work does not consume it (#5736).
+/// Separate polls can still differ with probe latency or registry changes.
+const TMUX_OBSERVATION_BUDGET: std::time::Duration = std::time::Duration::from_millis(2_000);
+
+pub(super) struct HealthSnapshotOptions {
+    pub include_mailbox_details: bool,
+    pub tmux: TmuxObservationBudget,
+}
+
+impl HealthSnapshotOptions {
+    pub fn new(include_mailbox_details: bool) -> Self {
+        Self {
+            include_mailbox_details,
+            tmux: TmuxObservationBudget {
+                remaining: TMUX_OBSERVATION_BUDGET,
+                probe: crate::services::platform::tmux::has_session,
+            },
+        }
+    }
+}
+
+pub(super) struct TmuxObservationBudget {
+    remaining: std::time::Duration,
+    probe: fn(&str) -> bool,
+}
+
+pub(super) async fn probe_tmux_session_within(
+    session_name: Option<&str>,
+    budget: &mut TmuxObservationBudget,
+) -> bool {
+    if budget.remaining.is_zero() {
+        return false;
+    }
+    let Some(session_name) = session_name.map(str::to_string) else {
+        return false;
+    };
+    let started = tokio::time::Instant::now();
+    let probe_fn = budget.probe;
+    let probe = tokio::task::spawn_blocking(move || probe_fn(&session_name));
+    let result = tokio::time::timeout(budget.remaining, probe).await;
+    budget.remaining = budget.remaining.saturating_sub(started.elapsed());
+    matches!(result, Ok(Ok(true)))
+}
+
 /// #5071 relay-tail S1 (I-4): one channel's relay coordinate, read once.
 ///
 /// Both the offsets [`SessionEnrichment::load`] already took from this entry
@@ -172,8 +216,17 @@ impl SessionEnrichment {
         channel: ChannelId,
     ) -> Self {
         let watcher_binding = shared.tmux_watchers.channel_binding(&channel);
-        let inflight =
-            provider_kind.and_then(|pk| discord::inflight::load_inflight_state(pk, channel.get()));
+        // #5736: the READ-ONLY loader. `load_inflight_state` runs the finalizer
+        // compatibility backfill, which takes a timeout-less file lock and
+        // PERSISTS the row — refreshing `updated_at` and the save generation that
+        // `inflight::rebind_reap` reads as staleness evidence. Health is a
+        // diagnostic observer on both the authenticated detail path and the
+        // unauthenticated public one; observing a legacy row must not make it
+        // look freshly advanced. The parsed value is identical either way:
+        // `parse_inflight_state_content` still resolves `finalizer_turn_id`
+        // in memory, only the write is dropped.
+        let inflight = provider_kind
+            .and_then(|pk| discord::inflight::load_inflight_state_read_only(pk, channel.get()));
         let inflight_tmux_session = inflight
             .as_ref()
             .and_then(|state| state.tmux_session_name.clone());
@@ -353,10 +406,10 @@ impl SessionEnrichment {
         }
     }
 
-    pub fn tmux_session_present(&self) -> bool {
-        self.tmux_session
-            .as_deref()
-            .is_some_and(crate::services::platform::tmux::has_session)
+    /// Probe off the runtime, charging only probe wait against the build budget.
+    /// Exhaustion withholds the idle witness; an already running probe may finish later.
+    pub async fn tmux_session_present_within(&self, budget: &mut TmuxObservationBudget) -> bool {
+        probe_tmux_session_within(self.tmux_session.as_deref(), budget).await
     }
 
     pub fn process_present(&self) -> bool {
@@ -505,6 +558,78 @@ mod tests {
     fn only_exact_dead_or_absent_maps_to_dead() {
         assert_eq!(liveness_as_alive(PaneLiveness::DeadOrAbsent), Some(false));
         assert_eq!(liveness_as_alive(PaneLiveness::ProbeError), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_exhausted_tmux_budget_withholds_a_live_session() {
+        let mut budget = HealthSnapshotOptions::new(false).tmux;
+        let default_probe = crate::services::platform::tmux::has_session as fn(&str) -> bool;
+        assert!(std::ptr::fn_addr_eq(budget.probe, default_probe));
+        budget.probe = |_| true;
+        // Model detail-only work between probes, outside probe accounting.
+        tokio::time::advance(TMUX_OBSERVATION_BUDGET * 2).await;
+        tokio::time::resume();
+        assert!(probe_tmux_session_within(Some("fake-live"), &mut budget).await);
+        budget.remaining = std::time::Duration::ZERO;
+        budget.probe = |_| panic!("exhausted budget spawned a probe");
+        assert!(!probe_tmux_session_within(Some("fake-live"), &mut budget).await);
+    }
+
+    #[tokio::test]
+    async fn health_snapshot_wires_the_tmux_budget_and_probe() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static DETAILS: AtomicUsize = AtomicUsize::new(0);
+        struct DetailDelay;
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DetailDelay {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().target() == "agentdesk::discord::relay_health" {
+                    let detail = DETAILS.fetch_add(1, Ordering::SeqCst);
+                    if CALLS.load(Ordering::SeqCst) == 1 && detail == 0 {
+                        // This event is emitted inside the builder's detail-only payload branch.
+                        std::thread::sleep(TMUX_OBSERVATION_BUDGET * 2);
+                    }
+                }
+            }
+        }
+        let registry = super::super::HealthRegistry::new();
+        let shared = discord::make_shared_data_for_tests();
+        for id in [5_736_000_000_000_003, 5_736_000_000_000_004] {
+            let channel = ChannelId::new(id);
+            shared.mailboxes.handle(channel);
+            shared
+                .tmux_watchers
+                .insert(channel, watcher_handle(&id.to_string(), NATIVE_TRANSCRIPT));
+        }
+        registry.register("codex".to_string(), shared).await;
+        for available in [true, false] {
+            let mut options = HealthSnapshotOptions::new(true);
+            options.tmux.remaining *= u32::from(available);
+            options.tmux.probe = |_| {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                true
+            };
+            CALLS.store(0, Ordering::SeqCst);
+            DETAILS.store(0, Ordering::SeqCst);
+            let snapshot =
+                super::super::snapshot::build_health_snapshot_with_options(&registry, options)
+                    .with_subscriber(tracing_subscriber::registry().with(DetailDelay))
+                    .await;
+            assert_eq!(CALLS.load(Ordering::SeqCst), 2 * usize::from(available));
+            assert_eq!(DETAILS.load(Ordering::SeqCst), 2);
+            let json = serde_json::to_value(snapshot).unwrap();
+            assert_eq!(json["mailboxes"].as_array().unwrap().len(), 2);
+            for mailbox in json["mailboxes"].as_array().unwrap() {
+                assert_eq!(mailbox["tmux_present"], available);
+                assert_eq!(mailbox["relay_health"]["tmux_alive"], available);
+            }
+        }
     }
 
     const NATIVE_TRANSCRIPT: &str = "/tmp/agentdesk-b0-native.jsonl";
