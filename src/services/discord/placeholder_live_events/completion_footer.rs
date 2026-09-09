@@ -41,6 +41,21 @@ pub(in crate::services::discord) struct CompletionFooterRender {
     /// but reused `tool_use_id`s collapse slots to the same identity; the later
     /// inline clamp can also cut a candidate's mark (#5348).
     pub(in crate::services::discord) delivered_terminal_ids: Vec<TerminalSlotId>,
+    pub(in crate::services::discord) terminal_line_ends: Vec<usize>,
+}
+
+impl CompletionFooterRender {
+    pub(in crate::services::discord) fn surviving_terminal_ids(
+        &self,
+        prefix_bytes: usize,
+    ) -> Vec<TerminalSlotId> {
+        self.delivered_terminal_ids
+            .iter()
+            .zip(&self.terminal_line_ends)
+            .filter(|(_, end)| **end <= prefix_bytes)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
 }
 
 // #3391: render-local candidate surface for the eviction paths below.
@@ -295,6 +310,7 @@ pub(super) fn render_completion_footer(
             .map(|line| line.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
+        let mut waiting_prefix = String::new();
         let (mut clamped, mut kept_count) = clamp_completion_task_section(&section);
         let visible_detailed_background_entry = emitted
             .iter()
@@ -302,7 +318,8 @@ pub(super) fn render_completion_footer(
             .any(|line| line.unfinished_background);
         if snapshot.background_agent_pending && !visible_detailed_background_entry {
             let waiting = format!("Background agents\nWaiting for background agents {indicator}");
-            let combined = format!("{waiting}\n\n{section}");
+            waiting_prefix = format!("{waiting}\n\n");
+            let combined = format!("{waiting_prefix}{section}");
             let clamped_combined = clamp_completion_task_section(&combined).0;
             kept_count = clamped_combined
                 .lines()
@@ -318,11 +335,28 @@ pub(super) fn render_completion_footer(
             .take(kept_count)
             .filter_map(|line| line.terminal_id.clone())
             .collect::<Vec<_>>();
+        // Carry subtext byte positions alongside identities; never recover IDs from text.
+        let mut prefix = sections.join("\n\n");
+        if !prefix.is_empty() {
+            prefix.push_str("\n\n");
+        }
+        prefix.push_str(&waiting_prefix);
+        let mut terminal_line_ends = Vec::new();
+        for line in emitted.iter().take(kept_count) {
+            prefix.push_str(&line.text);
+            if line.terminal_id.is_some() {
+                terminal_line_ends.push(
+                    super::super::single_message_panel::completion_footer_subtext(&prefix).len(),
+                );
+            }
+            prefix.push('\n');
+        }
         sections.push(clamped);
         return CompletionFooterRender {
             block: Some(sections.join("\n\n")),
             has_unfinished_entries,
             delivered_terminal_ids,
+            terminal_line_ends,
         };
     }
 
@@ -341,6 +375,7 @@ pub(super) fn render_completion_footer(
         block: (!sections.is_empty()).then(|| sections.join("\n\n")),
         has_unfinished_entries,
         delivered_terminal_ids: Vec::new(),
+        terminal_line_ends: Vec::new(),
     }
 }
 
@@ -495,3 +530,21 @@ fn clamp_completion_task_section(task_section: &str) -> (String, usize) {
 // whose text happens to end with a ✓/✗ glyph. The completion-footer rendering
 // above legitimately renders terminal slots (#3391/#3086) and never used that
 // compactor.
+
+#[cfg(test)]
+mod final_wire_tests {
+    use super::*;
+
+    #[test]
+    fn no_credit_for_zero_kept_lines_5304() {
+        assert_eq!(clamp_completion_task_section(&"가".repeat(700)).1, 0);
+        let rendered = render_completion_footer(
+            StatusPanelState::default(),
+            &ProviderKind::Claude,
+            "x",
+            None,
+        );
+        assert!(rendered.surviving_terminal_ids(usize::MAX).is_empty());
+        assert!(rendered.terminal_line_ends.is_empty());
+    }
+}

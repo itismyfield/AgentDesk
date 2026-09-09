@@ -189,9 +189,13 @@ async fn prepare_turn_completed_footer(
         .placeholder_live_events
         .render_completion_footer(channel_id, provider, indicator);
     let completion_block = super::turn_end_wip_warning::merge_turn_end_wip_warning(
-        rendered.block.unwrap_or_default(),
+        rendered.block.clone().unwrap_or_default(),
         wip_warning,
     );
+    let merged_prefix =
+        super::turn_end_wip_warning::split_merged_turn_end_wip_warning(&completion_block)
+            .map(|(prefix, _)| smp::completion_footer_subtext(&prefix).len())
+            .unwrap_or(usize::MAX);
     let inflight_started_at = super::inflight::load_inflight_state(provider, channel_id.get())
         .filter(|state| {
             if owner.user_msg_id != 0 {
@@ -230,19 +234,22 @@ async fn prepare_turn_completed_footer(
         completion_block.as_deref(),
         rendered.has_unfinished_entries,
     );
-    let terminal_edit = smp::finalize_streaming_footer_with_completion(
-        terminal_text,
-        provider,
+    let mut surviving_prefix = 0;
+    let text = smp::compose_completion_footer_text_tracked(
+        &smp::completion_footer_base_body(terminal_text, provider),
         completion_block.as_deref(),
-    )
-    .map(|text| CompletionFooterTerminalEdit {
-        message_id: msg_id,
-        owner,
-        text,
-        remove_after_edit: !rendered.has_unfinished_entries,
-        completion_block,
-        delivered_terminal_ids: rendered.delivered_terminal_ids,
-    });
+        &mut surviving_prefix,
+    );
+    let terminal_edit =
+        (!text.trim().is_empty() && text != terminal_text).then(|| CompletionFooterTerminalEdit {
+            message_id: msg_id,
+            owner,
+            text,
+            remove_after_edit: !rendered.has_unfinished_entries,
+            completion_block,
+            delivered_terminal_ids: rendered
+                .surviving_terminal_ids(surviving_prefix.min(merged_prefix)),
+        });
     CompletedFooterPlan {
         supersede_edit,
         terminal_edit,
@@ -507,6 +514,95 @@ mod tests {
             },
         );
         shared
+    }
+
+    #[tokio::test]
+    async fn final_wire_completion_and_refresh_evict_only_after_success_5304() {
+        let channel = ChannelId::new(5_304_101);
+        let shared = super::super::make_shared_data_for_tests();
+        let events = &shared.ui.placeholder_live_events;
+        let finish = |id: &str, summary: &str| {
+            events.push_status_event(
+                channel,
+                StatusEvent::BackgroundTaskStart {
+                    name: "Bash".into(),
+                    summary: summary.into(),
+                    tool_use_id: id.into(),
+                },
+            );
+            events.push_status_event(
+                channel,
+                StatusEvent::BackgroundTaskEnd {
+                    tool_use_id: id.into(),
+                    success: true,
+                },
+            );
+        };
+        finish("5304-done", "정산 작업");
+        events.push_status_event(
+            channel,
+            StatusEvent::BackgroundTaskStart {
+                name: "Bash".into(),
+                summary: "running".into(),
+                tool_use_id: "5304-running".into(),
+            },
+        );
+        let ids = || {
+            events
+                .render_completion_footer(channel, &ProviderKind::Claude, "x")
+                .delivered_terminal_ids
+        };
+        let original = ids();
+        assert_eq!(original.len(), 1);
+        let sink = FooterViewTestSink::default();
+        let owner = CompletionFooterOwner::new(5_304_102, chrono::Utc::now().timestamp());
+        let complete = |text, indicator| {
+            note_turn_completed_footer(
+                FooterViewWriter::test(&shared, &sink),
+                channel,
+                Some(MessageId::new(5_304_103)),
+                owner,
+                &ProviderKind::Claude,
+                text,
+                indicator,
+                false,
+                false,
+                "5304",
+            )
+        };
+        assert!(complete("본문 가짜 ✓ ✗", "```").await);
+        assert_eq!(sink.edits().len(), 1);
+        assert!(!sink.edits()[0].text.contains("정산 작업 ✓"));
+        assert_eq!(ids(), original);
+        // Same slot was not credited by completion; a later refresh fits.
+        let edit = registry::completion_footer_edit_for_registered_target_at(
+            &shared,
+            channel,
+            "y",
+            owner.started_at_unix + 1,
+        )
+        .unwrap();
+        assert_eq!(edit.delivered_terminal_ids, original);
+        registry::completion_footer_record_edit_result_for_edit(&shared, channel, &edit, false);
+        assert_eq!(ids(), original);
+        assert!(
+            note_background_refresh_due(
+                FooterViewWriter::test(&shared, &sink),
+                channel,
+                Some(owner),
+                "y",
+                "5304"
+            )
+            .await
+        );
+        assert_eq!(sink.edits().len(), 2);
+        assert!(sink.edits()[1].text.contains("정산 작업 ✓"));
+        assert!(ids().is_empty());
+        finish("5304-normal", "normal");
+        assert!(complete("본문", "z").await);
+        assert!(sink.edits().last().unwrap().text.contains("normal ✓"));
+        assert!(ids().is_empty());
+        completion_footer_forget_registered_target(channel);
     }
 
     #[tokio::test]
