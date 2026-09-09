@@ -6312,6 +6312,7 @@ services::discord::turn_bridge::response_delivery::tests::long_authoritative_don
 services::discord::turn_bridge::response_delivery::tests::prompt_too_long_guidance_round_trips_folded_provider_detail
 services::discord::turn_bridge::response_delivery::tests::terminal_delivery_after_rollover_includes_authoritative_tail
 services::discord::turn_bridge::response_delivery::tests::terminal_error_after_rollover_delivers_error_text_not_recovery_notice
+services::discord::turn_bridge::resume_pin_tests::c1_actual_postlude_resume_pin_runtime_proof
 services::discord::turn_bridge::resume_pin_tests::c1_both_late_writers_consume_pin_without_registry_backfill
 services::discord::turn_bridge::resume_pin_tests::c1_cancelled_registered_pin_leaves_all_effects_untouched
 services::discord::turn_bridge::resume_pin_tests::c1_missing_and_idle_tail_mismatch_never_resume_latest
