@@ -2828,6 +2828,80 @@ mod tests {
         assert_eq!(public["degraded"], json!(true));
     }
 
+    /// #5736 r2: the relay-verdict axis must survive the SERIALIZATION, not just
+    /// the snapshot build.
+    ///
+    /// `snapshot.rs` proves the two BUILDS agree, but the body an operator and
+    /// every deploy gate read is `public_health_json`'s projection. Nothing
+    /// pinned that hop, so re-dropping `degraded_reasons` there — or teaching
+    /// `sanitize_public_degraded_reasons` to filter the non-`provider:` reasons
+    /// it passes through verbatim — reopens #5736 with the snapshot-level test
+    /// still green. The reasons below are the exact shape the polarity pass
+    /// emits, `{provider}_{channel_id}` suffix included.
+    #[test]
+    fn public_health_json_carries_the_relay_verdict_axis_onto_the_summary() {
+        let detail = json!({
+            "status": "degraded",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": true,
+            "server_up": true,
+            "fully_recovered": true,
+            "degraded_reasons": [
+                "relay_verdict_unknown_codex_1479671301387059200",
+                "relay_verdict_degraded_claude_1479671298497183835",
+            ],
+        });
+        let public = public_health_json(detail.clone());
+        assert_eq!(
+            public["status"], detail["status"],
+            "the summary must report the status the detail build computed"
+        );
+        assert_eq!(
+            public["degraded_reasons"], detail["degraded_reasons"],
+            "the relay-verdict reasons must reach the unauthenticated body intact"
+        );
+        assert_eq!(public["ok"], json!(false));
+        assert_eq!(public["degraded"], json!(true));
+    }
+
+    /// #5736 r2: and the two ROUTES must project the same snapshot.
+    ///
+    /// The URL selects the projection, not the source. This drives both URLs off
+    /// ONE registry through the real router. The relay axis itself is covered by
+    /// `health::snapshot::tests::summary_and_detail_agree_on_the_composite_relay_verdict_polarity`,
+    /// which needs registry internals this module cannot reach.
+    #[test]
+    fn summary_and_detail_routes_agree_on_status_and_degraded_reasons() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let registry = Some(Arc::new(
+            crate::services::discord::health::HealthRegistry::new(),
+        ));
+
+        let public = runtime.block_on(health_body("/health", registry.clone()));
+        let detail = runtime.block_on(health_body("/health/detail", registry));
+
+        assert_eq!(
+            public["status"], detail["status"],
+            "the summary route must not report a healthier status than the detail route"
+        );
+        assert_eq!(
+            public["degraded_reasons"], detail["degraded_reasons"],
+            "the summary route must carry the detail route's degraded reasons"
+        );
+        assert!(
+            !detail["degraded_reasons"]
+                .as_array()
+                .expect("detail degraded_reasons is an array")
+                .is_empty(),
+            "the fixture must produce at least one reason, or the equality above is vacuous"
+        );
+        assert_eq!(public["ok"], json!(public["status"] == json!("healthy")));
+    }
+
     #[test]
     fn public_health_json_preserves_delivery_record_rollout_state() {
         let public = public_health_json(json!({
