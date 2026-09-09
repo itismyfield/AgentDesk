@@ -458,7 +458,6 @@ fn provider_connected(snapshot: &HealthSnapshot, provider: &ProviderKind) -> Opt
 
 fn configured_provider_names(cfg: &config::Config, snapshot: &HealthSnapshot) -> BTreeSet<String> {
     let mut configured = BTreeSet::new();
-
     for agent in &cfg.agents {
         if let Some(provider) = ProviderKind::from_str(&agent.provider) {
             configured.insert(provider.as_str().to_string());
@@ -548,7 +547,6 @@ fn check_qwen_settings_files(configured: bool) -> Check {
         ("project settings", qwen_project_settings_path()),
         ("system settings", qwen_system_settings_path()),
     ];
-
     let found: Vec<String> = candidates
         .iter()
         .filter_map(|(label, path)| {
