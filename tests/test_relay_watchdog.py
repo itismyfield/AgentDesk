@@ -2557,6 +2557,86 @@ class TickRuntimeObservabilityTests(unittest.TestCase):
                     self.assertNotIn(forbidden, body)
                 self.assertEqual(state[PG_STATE_KEY], {}, "no PG verdict recorded")
 
+    def test_recent_dcserver_boot_alert_defers_exactly_one_tick(self):
+        """#4379 shares the 900s cadence: hold one tick, then say so."""
+        rt = self.make_rt(evaluate_pg_health(None, None))
+        rt.dcserver_recent = True
+        state: dict = {RUNTIME_HEALTH_STATE_KEY: {"since": self.NOW - 300}}
+        tick_pg_tunnel(rt, state, self.NOW)
+        obs = state[RUNTIME_HEALTH_STATE_KEY]
+        self.assertEqual(rt.alerts, [], "must not double dcserver's boot alert")
+        self.assertTrue(obs["dedup_deferred"])
+        self.assertNotIn("last_alert", obs, "a deferral must not spend the cooldown")
+        self.assertEqual(state[PG_STATE_KEY], {}, "PG dedup keys stay untouched")
+
+        # The very next tick sends anyway: de-duplication can never be silence.
+        tick_pg_tunnel(rt, state, self.NOW + rt.cfg.poll_secs)
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("관측 불가", rt.alerts[0][0])
+        self.assertIn("1 tick 보류", rt.alerts[0][0])
+        self.assertNotIn("dedup_deferred", obs, "cleared once the alert landed")
+
+        # A re-alert after the cooldown is not a first alert: no second hold.
+        tick_pg_tunnel(rt, state, self.NOW + rt.cfg.poll_secs + rt.cfg.pg_realert_secs)
+        self.assertEqual(len(rt.alerts), 2)
+        self.assertNotIn("1 tick 보류", rt.alerts[1][0])
+
+    def test_recovery_notice_retries_until_it_is_delivered(self):
+        """A dropped close leaves the incident open on the operator's screen."""
+        rt = self.make_rt(evaluate_pg_health(None, None))
+        state: dict = {RUNTIME_HEALTH_STATE_KEY: {"since": self.NOW - 300}}
+        tick_pg_tunnel(rt, state, self.NOW)
+        obs = state[RUNTIME_HEALTH_STATE_KEY]
+        self.assertTrue(obs["alerting"])
+
+        rt.verdict = evaluate_pg_health(True, None)
+        rt.alert_ok = False
+        tick_pg_tunnel(rt, state, self.NOW + 1)
+        self.assertEqual(len(rt.alerts), 2)
+        self.assertIn("관측 재개", rt.alerts[1][0])
+        self.assertTrue(obs["alerting"], "incident stays open until the close lands")
+        self.assertEqual(obs["since"], self.NOW - 300, "duration must not be lost")
+        self.assertEqual(obs["attempts"], 1)
+
+        tick_pg_tunnel(rt, state, self.NOW + 2)
+        self.assertEqual(len(rt.alerts), 2, "the resend rides the 60s backoff")
+        rt.alert_ok = True
+        tick_pg_tunnel(rt, state, self.NOW + 61)
+        self.assertEqual(len(rt.alerts), 3)
+        self.assertIn("관측 재개", rt.alerts[2][0])
+        self.assertNotIn("alerting", obs)
+        self.assertNotIn("since", obs)
+        self.assertEqual(obs["last_alert"], self.NOW, "cooldown still outlives it")
+
+    def test_observable_clears_state_even_inside_a_send_backoff(self):
+        """The resend backoff holds a resend, never a close that is not owed."""
+        rt = self.make_rt(evaluate_pg_health(None, None))
+        rt.alert_ok = False
+        state: dict = {RUNTIME_HEALTH_STATE_KEY: {"since": self.NOW - 300}}
+        tick_pg_tunnel(rt, state, self.NOW)
+        obs = state[RUNTIME_HEALTH_STATE_KEY]
+        self.assertEqual(obs["attempts"], 1, "the outage alert was never delivered")
+
+        rt.verdict = evaluate_pg_health(True, None)
+        tick_pg_tunnel(rt, state, self.NOW + 1)
+        self.assertEqual(len(rt.alerts), 1, "no close is owed for an unsent alert")
+        self.assertNotIn("since", obs, "a stale timer must not survive recovery")
+        self.assertNotIn("attempts", obs)
+
+    def test_corrupt_state_value_does_not_disarm_the_circuit(self):
+        """A non-dict `_runtime_health` must not become permanent silence."""
+        rt = self.make_rt(evaluate_pg_health(None, None))
+        state: dict = {RUNTIME_HEALTH_STATE_KEY: "corrupt"}
+        tick_pg_tunnel(rt, state, self.NOW)
+        self.assertEqual(rt.alerts, [], "the persistence clock restarts here")
+        self.assertEqual(state[RUNTIME_HEALTH_STATE_KEY]["since"], self.NOW)
+        tick_pg_tunnel(rt, state, self.NOW + 300)
+        self.assertEqual(len(rt.alerts), 1)
+        self.assertIn("관측 불가", rt.alerts[0][0])
+        self.assertNotIn(
+            "tick error", "\n".join(rt.log_lines), "not swallowed as a tick error"
+        )
+
 
 class TickChannelTests(unittest.TestCase):
     """Orchestration-level behavior: suppression windows, cooldown, recovery,

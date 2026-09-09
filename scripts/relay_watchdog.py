@@ -84,11 +84,13 @@ PG_STATE_KEY = "_pg_tunnel"
 # #5484: `/api/health/detail` that never yields a usable `db` is PG_UNKNOWN —
 # no evidence about Postgres, deliberately not a PG alert. But a runtime that
 # stopped booting emits exactly that forever, which is how 2026-08-21 went
-# unreported for ~7h. Its own incident, on the PG circuit's thresholds, never a
-# PG verdict; a failed DIRECT send retries on the short backoff below.
+# unreported for ~7h. Its own incident, on the PG circuit's thresholds and its
+# #4379 de-duplication contract, never a PG verdict.
 RUNTIME_HEALTH_STATE_KEY = "_runtime_health"
 RUNTIME_UNOBSERVABLE_RETRY_SECS = 60
 RUNTIME_UNOBSERVABLE_MAX_RETRIES = 5
+# Both circuits defer one tick behind #4379 and then say so, in one wording.
+DCSERVER_DEDUP_NOTE = "\n\n참고: dcserver 부트 PG 알림이 먼저 발화해 이 알림을 1 tick 보류했습니다."
 
 # Independent watcher-coverage states (#4408 phase 1).  Coverage is evaluated
 # in parallel with transcript-vs-Discord gap judgment; these states must never
@@ -3912,9 +3914,9 @@ class Runtime:
 def _sanitized_stamp(value: object, now: float) -> float:
     """Clamp a persisted past-stamp into ``[0, now]``.
 
-    A restart reads these back from disk: a corrupt or clock-skewed FUTURE
-    value must neither manufacture an alert storm (a negative age clears every
-    threshold) nor silence the circuit forever. Clamping is quiet either way.
+    A corrupt or clock-skewed FUTURE value read back from disk must neither
+    manufacture an alert storm (a negative age clears every threshold) nor
+    silence the circuit forever. Clamping is quiet either way.
     """
     if not _is_finite_nonnegative_number(value):
         return now
@@ -3932,16 +3934,36 @@ def tick_runtime_observability(
 
     PG_UNKNOWN means dcserver never returned a usable ``db``: curl failed, the
     body was not JSON, or the field was absent. :func:`tick_pg_tunnel` rightly
-    refuses to read that as a PG failure — but the gap it leaves is a runtime
-    that never boots again and so emits no external signal at all (#5484,
-    2026-08-21). Purely time-based: no transcript or tmux evidence needed, no
-    reclassification of unknown, and nothing is ever restarted.
+    refuses to read that as a PG failure — and a runtime that never boots again
+    leaves a channel too quiet for the transcript-gap circuit to report either
+    (#5484, 2026-08-21). Purely time-based: no transcript or tmux evidence,
+    no reclassification of unknown, and nothing is ever restarted.
     """
     obs: dict[str, Any] = state.setdefault(RUNTIME_HEALTH_STATE_KEY, {})
+    if not isinstance(obs, dict):
+        # Corrupt on-disk state would otherwise raise every tick, and the
+        # caller's except would disarm this circuit behind a log line forever.
+        obs = state[RUNTIME_HEALTH_STATE_KEY] = {}
+    attempts = obs.get("attempts", 0)
+    if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+        attempts = 0
+    # A failed send must NOT spend the 900s re-alert cooldown: one transport
+    # blip would buy the outage a full cooldown of silence. The recovery notice
+    # rides the same bounded backoff, so it cannot be dropped either.
+    resend = attempts and (obs.get("alerting") or verdict.state == PG_UNKNOWN)
+    if resend and now - _sanitized_stamp(obs.get("last_attempt", 0.0), now) < (
+        RUNTIME_UNOBSERVABLE_RETRY_SECS
+        if attempts < RUNTIME_UNOBSERVABLE_MAX_RETRIES
+        else rt.cfg.pg_realert_secs
+    ):
+        rt.log(f"[runtime-health] send retry backoff (attempts={attempts})")
+        return
+
     if verdict.state != PG_UNKNOWN:
-        if obs.pop("alerting", None):
+        if obs.get("alerting"):
             mins = max(1, int((now - _sanitized_stamp(obs.get("since"), now)) // 60))
-            rt.alert(
+            obs["last_attempt"] = now
+            if not rt.alert(
                 ch,
                 "ℹ️ **런타임 health 관측 재개 (relay watchdog)**\n\n"
                 f"`/api/health/detail`이 약 **{mins}분** 만에 다시 "
@@ -3949,11 +3971,15 @@ def tick_runtime_observability(
                 "재개일 뿐이며 릴레이 복구를 의미하지 않습니다 — PG 판정과 릴레이 "
                 "갭은 각자의 회로가 따로 보고합니다.",
                 trigger_turn=False,
-            )
+            ):
+                obs["attempts"] = attempts + 1
+                rt.log(f"[runtime-health] close send failed ({attempts + 1})")
+                return
+            obs.pop("alerting")
             rt.log("[runtime-health] OBSERVABLE — unobservable incident closed")
         # `last_alert` outlives the incident so a flapping endpoint cannot
         # re-alert inside the cooldown; everything incident-local is dropped.
-        for key in ("since", "attempts", "last_attempt"):
+        for key in ("since", "attempts", "last_attempt", "dedup_deferred"):
             obs.pop(key, None)
         return
 
@@ -3965,16 +3991,15 @@ def tick_runtime_observability(
     if now - _sanitized_stamp(obs.get("last_alert", 0.0), now) < rt.cfg.pg_realert_secs:
         rt.log("[runtime-health] db unobservable persists (suppressed, cooldown)")
         return
-    attempts = obs.get("attempts", 0)
-    if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
-        attempts = 0
-    if attempts and now - _sanitized_stamp(obs.get("last_attempt", 0.0), now) < (
-        RUNTIME_UNOBSERVABLE_RETRY_SECS
-        if attempts < RUNTIME_UNOBSERVABLE_MAX_RETRIES
-        else rt.cfg.pg_realert_secs
-    ):
-        rt.log(f"[runtime-health] send retry backoff (attempts={attempts})")
-        return
+    # #4379's dcserver boot alert is PG-independent, rate-limited to the same
+    # 900s, and would run a second stream through a PG-boot crash loop. Ride its
+    # contract (see below): defer only the FIRST alert of an incident by exactly
+    # one tick, then send with the note — de-duplication cannot become silence.
+    if not obs.get("alerting") and not obs.get("dedup_deferred"):
+        if rt.recent_dcserver_pg_alert(now):
+            obs["dedup_deferred"] = True
+            rt.log("[runtime-health] dcserver boot alert recent — defer one tick")
+            return
     delivered = rt.alert(
         ch,
         "\U0001f6a8 **런타임 health 관측 불가 (relay watchdog)**\n\n"
@@ -3982,17 +4007,17 @@ def tick_runtime_observability(
         " 동안 한 번도 읽지 못했습니다(무응답·비정상 JSON·`db` 필드 부재). 이는 "
         "**관측 불가**이며 PG 장애로 단정하지 않습니다. watchdog은 런타임을 "
         "재시작하지 않으므로 런타임 프로세스와 launchd 상태를 직접 확인해 주세요."
-        f"\n\n런타임: {rt.dcserver_snapshot()}",
+        f"\n\n런타임: {rt.dcserver_snapshot()}"
+        + (DCSERVER_DEDUP_NOTE if obs.get("dedup_deferred") else ""),
         trigger_turn=False,
     )
     obs["last_attempt"] = now
     if not delivered:
-        # A failed send must NOT spend the re-alert cooldown: one transport
-        # blip would buy the outage another full cooldown of silence.
         obs["attempts"] = attempts + 1
         rt.log(f"[runtime-health] ALERT send failed (attempt {attempts + 1})")
         return
     obs.update(alerting=True, last_alert=now, attempts=0)
+    obs.pop("dedup_deferred", None)
     rt.log(f"[runtime-health] ALERT unobservable duration={int(unobservable_for)}s")
 
 
@@ -4098,11 +4123,7 @@ def tick_pg_tunnel(rt: Runtime, state: dict[str, Any], now: float) -> None:
             )
             return
 
-    correlation = (
-        "\n\n참고: dcserver 부트 PG 알림이 먼저 발화해 이 알림을 1 tick 보류했습니다."
-        if pgs.get("dcserver_alert_seen")
-        else ""
-    )
+    correlation = DCSERVER_DEDUP_NOTE if pgs.get("dcserver_alert_seen") else ""
     minutes = max(1, int(unhealthy_for // 60))
     rt.alert(
         ch,
