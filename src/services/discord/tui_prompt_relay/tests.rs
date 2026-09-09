@@ -3182,10 +3182,12 @@ fn s1_lease_5833(turn_id: Option<&str>) -> ExternalInputRelayLease {
     }
 }
 
-/// S1T1: both durable rows of ONE external execution carry the lease turn_id.
+/// S1T1: the synthetic row owns persistence; bridge entry cannot restamp its key.
 #[cfg(unix)]
 #[test]
-fn s5833_s1t1_lease_turn_id_stamped_on_synthetic_and_bridge_rows() {
+fn s5833_s1t1_synthetic_owns_durable_key_bridge_entry_is_read_only() {
+    let root = tempfile::tempdir().expect("isolated inflight root");
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
     let output_path = PathBuf::from("/tmp/adk-5833-s1.jsonl");
     let turn_id = "external:claude:42:AgentDesk-claude-s1:1788000000000";
     let lease = s1_lease_5833(Some(turn_id));
@@ -3202,7 +3204,7 @@ fn s5833_s1t1_lease_turn_id_stamped_on_synthetic_and_bridge_rows() {
         &lease,
         RelayOwnerKind::None,
     );
-    let bridge = build_tui_direct_bridge_inflight_state(
+    let mut bridge = build_tui_direct_bridge_inflight_state(
         ProviderKind::Claude,
         ChannelId::new(42),
         MessageId::new(101),
@@ -3219,9 +3221,24 @@ fn s5833_s1t1_lease_turn_id_stamped_on_synthetic_and_bridge_rows() {
         Some(turn_id),
         "the synthetic row must persist the lease turn_id verbatim"
     );
+    use super::super::inflight;
+    inflight::save_inflight_state(&synthetic).expect("save authoritative synthetic row");
+    let before = inflight::load_inflight_state(&ProviderKind::Claude, 42).unwrap();
+    bridge.started_at = before.started_at.clone();
+    bridge.external_turn_id = Some("bridge-must-not-restamp-durable-key".into());
+    assert!(matches!(
+        inflight::patch_bridge_entry_state_if_identity_unchanged(
+            &before,
+            &mut bridge,
+            "s5833_bridge_key_contract",
+        ),
+        inflight::GuardedSaveOutcome::Saved
+    ));
+    let durable = inflight::load_inflight_state(&ProviderKind::Claude, 42).unwrap();
+    assert_eq!(durable.external_turn_id.as_deref(), Some(turn_id));
     assert_eq!(
-        bridge.external_turn_id, synthetic.external_turn_id,
-        "the adapter row must name the SAME execution as the synthetic row"
+        bridge.external_turn_id, durable.external_turn_id,
+        "bridge entry reads back the durable key instead of authoring it"
     );
     // The key is turn-scoped, not session-scoped: stamping `session_key` here
     // would silently make two consecutive turns look like one execution.
@@ -3261,46 +3278,167 @@ fn s5833_s1t1_lease_turn_id_stamped_on_synthetic_and_bridge_rows() {
     assert_eq!(bridge_none.external_turn_id, None);
 }
 
-/// S1T1 (Fable review addendum): the key the two lease-construction sites mint
-/// — the runtime scanner's `record_external_turn_lease_for_output` and the
-/// observer's `relay_ownership` lease — is derived ONLY from the observation
-/// (provider, channel, tmux session, observed_at), so one observation yields
-/// one string on both sides and a different observation yields a different one.
+/// Exercise both production lease constructors, not their shared formatter alone.
 #[test]
 fn s5833_s1t1_external_turn_id_is_observation_derived_not_call_site_derived() {
-    let channel_id = ChannelId::new(42);
-    let observed_at = chrono::DateTime::from_timestamp_millis(1_788_000_000_000)
-        .expect("fixed observation timestamp");
-    let runtime_side = super::relay_ownership::external_input_turn_id(
-        ProviderKind::Claude.as_str(),
-        channel_id,
-        "AgentDesk-claude-s1",
-        observed_at,
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let shared = super::super::make_shared_data_for_tests();
+    let channel = ChannelId::new(5_833_102);
+    let tmux = "AgentDesk-5833-real-lease-sites";
+    let output = root.path().join("transcript.jsonl");
+    let mut prompt = local_control_prompt(tmux, "external prompt", "5833");
+    prompt.observed_at = chrono::DateTime::from_timestamp_millis(1_788_000_000_000).unwrap();
+    let runtime = record_external_turn_lease_for_output(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        tmux,
+        RuntimeHandoffKind::ClaudeTui,
+        &output,
+        prompt.observed_at,
     );
-    let observer_side = super::relay_ownership::external_input_turn_id(
-        "claude",
-        channel_id,
-        "AgentDesk-claude-s1",
-        observed_at,
-    );
+    let observer = record_observed_external_turn_lease(&shared, &prompt, channel);
+    assert_eq!(runtime.turn_id, observer.turn_id);
     assert_eq!(
-        runtime_side, observer_side,
-        "both lease sites must mint the same key for one observation"
+        observer.turn_id.as_deref(),
+        Some("external:claude:5833102:AgentDesk-5833-real-lease-sites:1788000000000")
     );
+    prompt.observed_at += chrono::Duration::milliseconds(1);
+    let later = record_observed_external_turn_lease(&shared, &prompt, channel);
+    assert_ne!(observer.turn_id, later.turn_id);
+    assert!(clear_observed_external_turn_lease_if_current(
+        &prompt, channel, &later
+    ));
+}
+
+/// Real claim admission + existing-row CAS, never the create-only builder.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn s5833_r2_synthetic_refresh_replaces_stale_durable_key() {
+    use super::super::inflight;
+    let root = tempfile::tempdir().expect("isolated inflight root");
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let shared = super::super::make_shared_data_for_tests();
+    let channel = ChannelId::new(5_833_201);
+    let anchor = MessageId::new(5_833_301);
+    let tmux = "AgentDesk-5833-refresh";
+    let mut stale = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Claude,
+        channel,
+        anchor,
+        None,
+        "prompt",
+        tmux,
+        None,
+        0,
+        &s1_lease_5833(Some("stale-turn")),
+        RelayOwnerKind::None,
+    );
+    // Marker proves that refresh preserved the old row rather than recreating it.
+    stale.any_tool_used = true;
+    inflight::save_inflight_state(&stale).unwrap();
+    let lease = s1_lease_5833(Some("current-turn"));
+    let claim = synthetic_start::claim_tui_direct_synthetic_turn(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        tmux,
+        "prompt",
+        anchor,
+        &lease,
+    )
+    .await;
+    assert!(claim.claimed);
+    let durable = inflight::load_inflight_state(&ProviderKind::Claude, channel.get()).unwrap();
+    assert_eq!(durable.external_turn_id, lease.turn_id);
+    assert_eq!(durable.session_key, lease.session_key);
+    assert_eq!(durable.runtime_kind, lease.runtime_kind);
+    assert!(durable.any_tool_used);
+}
+
+/// Exercise the shared repair operation and guarded durable save; pin its exact
+/// poll-loop wiring separately so deleting the production call also goes RED.
+#[cfg(unix)]
+#[test]
+fn s5833_r2_codex_repair_replaces_stale_durable_key() {
+    use super::super::inflight;
+    let root = tempfile::tempdir().expect("isolated repair root");
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let source = include_str!("codex_idle_rollout.rs");
+    let repair = source
+        .split("let mut repaired = inflight;")
+        .nth(1)
+        .unwrap()
+        .split("if !matches!(outcome")
+        .next()
+        .unwrap();
     assert_eq!(
-        runtime_side, "external:claude:42:AgentDesk-claude-s1:1788000000000",
-        "the persisted key format is the cross-component contract"
+        repair
+            .lines()
+            .filter(|line| *line
+                == "                                repaired.restamp_external_turn_lease(&lease);")
+            .count(),
+        1
     );
-    let later = super::relay_ownership::external_input_turn_id(
-        "claude",
-        channel_id,
-        "AgentDesk-claude-s1",
-        observed_at + chrono::Duration::milliseconds(1),
+    assert!(
+        repair
+            .find("repaired.restamp_external_turn_lease(&lease);")
+            .unwrap()
+            < repair
+                .find("save_inflight_state_if_identity_matches_allow_output_restamp")
+                .unwrap()
     );
-    assert_ne!(
-        runtime_side, later,
-        "a distinct observation must not collide with the previous execution"
+    let channel = ChannelId::new(5_833_202);
+    let tmux = "AgentDesk-5833-codex-repair";
+    let output = root.path().join("rollout.jsonl");
+    let shared = super::super::make_shared_data_for_tests();
+    let lease = record_external_turn_lease_for_output(
+        &shared,
+        &ProviderKind::Codex,
+        channel,
+        tmux,
+        RuntimeHandoffKind::CodexTui,
+        &output,
+        chrono::Utc::now(),
     );
+    let mut repaired = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Codex,
+        channel,
+        MessageId::new(5_833_302),
+        None,
+        "prompt",
+        tmux,
+        Some(&output),
+        0,
+        &s1_lease_5833(Some("stale-turn")),
+        RelayOwnerKind::None,
+    );
+    inflight::save_inflight_state(&repaired).unwrap();
+    repaired = inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap();
+    let expected = inflight::InflightTurnIdentity::from_state(&repaired);
+    repaired.restamp_external_turn_lease(&lease);
+    assert!(matches!(
+        inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
+            &repaired,
+            &expected,
+            "codex_idle_rollout_repair",
+        ),
+        inflight::GuardedSaveOutcome::Saved
+    ));
+    let durable = inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap();
+    assert_eq!(durable.external_turn_id, lease.turn_id);
+    assert_eq!(durable.session_key, lease.session_key);
+    assert_eq!(durable.runtime_kind, lease.runtime_kind);
+    assert!(clear_external_input_bridge_lease_if_current(
+        &ProviderKind::Codex,
+        tmux,
+        channel,
+        &lease
+    ));
 }
 
 /// S1T2: the new field is additive on the wire. A pre-#5833 row (no

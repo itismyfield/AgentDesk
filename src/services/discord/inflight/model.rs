@@ -305,6 +305,8 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// external-input execution across the runtime scanner, the observer and the
     /// TUI-direct adapter. Additive `#[serde(default)]`: legacy rows deserialize
     /// as `None` and no `INFLIGHT_STATE_VERSION` bump is needed (#2235 convention).
+    /// S4/S5 must treat `None` (even `None == None`) as unknown execution identity
+    /// and take the conservative path; only matching nonempty `Some` keys prove identity.
     #[serde(default)]
     pub external_turn_id: Option<String>,
     /// Preferred Discord bot key for terminal headless delivery.
@@ -953,6 +955,16 @@ mod turn_source_tests {
 }
 
 impl InflightTurnState {
+    /// Adopt the current external lease as one unit, including legacy/unkeyed rows.
+    pub(in crate::services::discord) fn restamp_external_turn_lease(
+        &mut self,
+        lease: &crate::services::tui_prompt_dedupe::ExternalInputRelayLease,
+    ) {
+        self.session_key = lease.session_key.clone();
+        self.runtime_kind = lease.runtime_kind;
+        self.external_turn_id = lease.turn_id.clone();
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: ProviderKind,

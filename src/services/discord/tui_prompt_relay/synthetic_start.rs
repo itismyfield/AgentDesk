@@ -254,8 +254,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         let mut existing = existing;
         existing.turn_nonce = active_turn_nonce.clone();
         existing.set_relay_owner_kind(relay_owner_kind);
-        existing.session_key = lease.session_key.clone();
-        existing.runtime_kind = lease.runtime_kind;
+        existing.restamp_external_turn_lease(lease);
         existing.output_path = output_path
             .as_deref()
             .and_then(|path| path.to_str().map(str::to_string));
