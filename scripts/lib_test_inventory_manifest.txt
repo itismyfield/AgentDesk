@@ -4101,6 +4101,10 @@ services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::code
 services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::codex_tui_rebind_uses_rollout_resume_offset_with_existing_inflight
 services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::managed_rebind_anchors_first_matching_prompt_after_row_birth
 services::discord::recovery_engine::manual_rebind::codex_tui_replay::tests::normalized_rebind_detects_later_rollout_user_prompt
+services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_caller_wires_adoption_before_guarded_handoff
+services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_orders_episode_authority_before_hold_and_return
+services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_preserves_normal_adoption_and_rollback_coordinates
+services::discord::recovery_engine::manual_rebind::coordinate_adoption_tests::actual_seam_rejects_same_anchor_successor_without_durable_mutation
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::crossed_codex_turn_forces_watcher_replacement_before_normal_reuse
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::durable_episode_authority_lexically_covers_every_handoff_side_effect
 services::discord::recovery_engine::manual_rebind::post_adoption_guard_tests::episode_pin_rejects_every_handoff_consumed_authority_axis
