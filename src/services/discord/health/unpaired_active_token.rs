@@ -129,7 +129,8 @@ pub(super) async fn reconfirm(
 
     let rechecked = discord::mailbox_snapshot(shared, channel).await;
     let rechecked_inflight_present =
-        discord::inflight::load_inflight_state(provider, channel.get()).is_some();
+        // #5736: read-only — a reconfirmation must not persist the row it reads.
+        discord::inflight::load_inflight_state_read_only(provider, channel.get()).is_some();
     recheck_confirms_same_unpaired_turn(
         ActiveTurnIdentity::from(initial),
         initial.cancel_token.is_some(),

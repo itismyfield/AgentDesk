@@ -168,6 +168,12 @@ fn watcher_status_panel_delete_needs_orphan_retry(
 /// footer path never reached the reconcile because footer mode carries no
 /// separate panel id). Extracted here so the P2 guard lands in the sibling and
 /// the 700-capped footer file stays lean.
+///
+/// #4891: `committed == false` here means the DISCORD completion surface was
+/// not committed — that, and only that, may enqueue the panel for the orphan
+/// drain's `delete_message`. A failed durable-singleton (ledger) commit is not a
+/// completion failure: `commit_completed_binding` warns and returns, so a ledger
+/// miss can no longer reach this `else` arm and delete a live panel.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) async fn complete_watcher_status_panel_v2_with_generation_guard(
     http: &serenity::Http,
