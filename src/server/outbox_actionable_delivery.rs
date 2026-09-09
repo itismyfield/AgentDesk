@@ -1,4 +1,13 @@
-//! Retired sources terminate; actionable alerts can fall back from announce to notify.
+//! Delivery policy for actionable operational outbox alerts (#4449).
+//!
+//! The durable row keeps its existing channel target and dedupe identity.  An
+//! announce-bot post is the primary delivery so the configured operations
+//! channel receives the notice through its resident role. Non-turn provenance
+//! keeps the notice out of intervention intake. If that bot cannot deliver,
+//! retry once with the notify bot so the human-visible alert survives an
+//! announce credential/runtime failure. Informational rows never enter this
+//! fallback path.
+
 use sqlx::PgPool;
 
 use super::PendingMessageOutboxRow;

@@ -3540,13 +3540,10 @@ mod secret_bearing_config_file_tests {
     }
 
     #[test]
-    fn save_and_load_harden_secret_bearing_config_file() {
+    fn load_from_path_ignores_retired_automation_section() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agentdesk.yaml");
-        let mut config = Config::default();
-        config.database.password = Some("database-secret".to_string());
-
-        save_to_path(&path, &config).unwrap();
+        save_to_path(&path, &Config::default()).unwrap();
         let mut legacy_yaml = std::fs::read_to_string(&path).unwrap();
         legacy_yaml.push_str("\nautomation:\n  enabled: true\n  strategy: squash\n  strategy_mode: direct-first\n  allowed_authors: legacy\n");
         std::fs::write(&path, legacy_yaml).unwrap();
@@ -3557,6 +3554,16 @@ mod secret_bearing_config_file_tests {
                 .get("automation")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn save_and_load_harden_secret_bearing_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentdesk.yaml");
+        let mut config = Config::default();
+        config.database.password = Some("database-secret".to_string());
+
+        save_to_path(&path, &config).unwrap();
 
         #[cfg(unix)]
         {
