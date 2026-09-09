@@ -479,7 +479,8 @@ src/
 │   │   │   ├── owner_record.rs
 │   │   │   └── session_owner.rs
 │   │   ├── intake_worker/
-│   │   │   └── dispatch_stamp_tests.rs
+│   │   │   ├── dispatch_stamp_tests.rs
+│   │   │   └── drain_tests.rs
 │   │   ├── stream_relay/
 │   │   │   ├── tests/
 │   │   │   │   └── shutdown_tests.rs
@@ -1139,6 +1140,7 @@ src/
 │   │   │   ├── chunk_compose_tests.rs
 │   │   │   ├── completion_guard.rs
 │   │   │   ├── completion_postlude.rs
+│   │   │   ├── context.rs
 │   │   │   ├── context_window.rs
 │   │   │   ├── current_message_anchor.rs
 │   │   │   ├── early_tui_completion.rs
@@ -1155,6 +1157,7 @@ src/
 │   │   │   ├── recall_feedback.rs
 │   │   │   ├── recovery_text.rs
 │   │   │   ├── response_delivery.rs
+│   │   │   ├── resume_pin_tests.rs
 │   │   │   ├── retry_state.rs
 │   │   │   ├── runtime_handoff_loop.rs
 │   │   │   ├── single_message_footer.rs

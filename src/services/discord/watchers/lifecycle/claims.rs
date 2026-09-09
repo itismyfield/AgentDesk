@@ -19,7 +19,10 @@ pub(in crate::services::discord) struct WatcherClaimIncarnation {
 }
 
 impl WatcherClaimIncarnation {
-    fn from_handle(owner_channel_id: ChannelId, handle: &TmuxWatcherHandle) -> Self {
+    pub(in crate::services::discord) fn from_handle(
+        owner_channel_id: ChannelId,
+        handle: &TmuxWatcherHandle,
+    ) -> Self {
         Self {
             owner_channel_id,
             cancel: Arc::clone(&handle.cancel),
@@ -27,6 +30,24 @@ impl WatcherClaimIncarnation {
             resume_offset: Arc::clone(&handle.resume_offset),
             turn_delivered: Arc::clone(&handle.turn_delivered),
         }
+    }
+
+    #[cfg(unix)]
+    pub(in crate::services::discord) fn capture_for_source(
+        watchers: &TmuxWatcherRegistry,
+        tmux_session_name: &str,
+        output_path: &std::path::Path,
+    ) -> Option<Self> {
+        let _guard = lock_tmux_watcher_registry();
+        let owner = watchers.owner_channel_for_tmux_session(tmux_session_name)?;
+        let handle = watchers.get(&owner)?;
+        if handle.tmux_session_name != tmux_session_name
+            || std::path::Path::new(&handle.output_path) != output_path
+            || handle.cancel.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return None;
+        }
+        Some(Self::from_handle(owner, &handle))
     }
 
     #[rustfmt::skip]

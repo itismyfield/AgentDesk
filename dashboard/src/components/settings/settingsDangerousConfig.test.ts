@@ -11,9 +11,9 @@ describe("settingsDangerousConfig", () => {
       getDangerousConfigKeys({
         review_enabled: true,
         githubRepoCacheSec: "300",
-        merge_strategy: "squash",
+        context_clear_percent: "95",
       }),
-    ).toEqual(["review_enabled", "merge_strategy"]);
+    ).toEqual(["review_enabled", "context_clear_percent"]);
   });
 
   it("narrows known dangerous keys", () => {
@@ -22,8 +22,8 @@ describe("settingsDangerousConfig", () => {
   });
 
   it("returns localized labels and falls back to the raw key", () => {
-    expect(getDangerousConfigLabel("merge_automation_enabled", true)).toBe("자동 머지");
-    expect(getDangerousConfigLabel("merge_automation_enabled", false)).toBe("Merge automation");
+    expect(getDangerousConfigLabel("review_enabled", true)).toBe("리뷰 게이트");
+    expect(getDangerousConfigLabel("review_enabled", false)).toBe("Review gate");
     expect(getDangerousConfigLabel("unknown_key", true)).toBe("unknown_key");
   });
 });

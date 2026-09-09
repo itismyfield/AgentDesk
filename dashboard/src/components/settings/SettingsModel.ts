@@ -123,7 +123,6 @@ export const GENERAL_FIELD_KEYS = ["companyName", "ceoName", "language", "theme"
 export const BOOLEAN_CONFIG_KEYS = new Set([
   "review_enabled",
   "pm_decision_gate_enabled",
-  "merge_automation_enabled",
 ]);
 
 export const NUMERIC_CONFIG_KEYS = new Set([
@@ -168,22 +167,6 @@ export const SYSTEM_CONFIG_DESCRIPTIONS: Record<string, { ko: string; en: string
   pm_decision_gate_enabled: {
     ko: "PM 판단 게이트를 거쳐야 다음 단계로 전환됩니다.",
     en: "Requires PM decision gate approval before the next transition.",
-  },
-  merge_automation_enabled: {
-    ko: "허용된 작성자의 PR을 조건 충족 시 자동 머지합니다.",
-    en: "Automatically merges eligible PRs from allowed authors when checks pass.",
-  },
-  merge_strategy: {
-    ko: "자동 머지 시 사용할 GitHub 머지 전략입니다.",
-    en: "GitHub merge strategy used by merge automation.",
-  },
-  merge_strategy_mode: {
-    ko: "터미널 카드에서 direct merge를 먼저 시도할지, 항상 PR을 만들지 결정합니다.",
-    en: "Chooses whether terminal cards try direct merge first or always open a PR.",
-  },
-  merge_allowed_authors: {
-    ko: "자동 머지를 허용할 작성자 목록입니다. 쉼표로 구분합니다.",
-    en: "Comma-separated list of authors allowed for automated merge.",
   },
   requested_timeout_min: {
     ko: "requested 상태에서 오래 머무는 카드를 경고하는 기준입니다.",
