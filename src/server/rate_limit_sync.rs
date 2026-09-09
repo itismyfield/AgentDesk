@@ -41,10 +41,10 @@ async fn claude_tick_should_attempt(
     backoff: &mut backoff::ClaudeSyncBackoff,
     now: std::time::Instant,
     pg_pool: &PgPool,
-    pressure: impl FnOnce(Option<u64>) -> bool,
+    now_unix: i64,
 ) -> bool {
     let danger = dispatch_gate::effective_danger_pct_pg(pg_pool).await;
-    if pressure(danger) {
+    if dispatch_gate::is_deferring("claude", danger, now_unix) {
         backoff.release_hold();
     }
     backoff.should_attempt(now)
@@ -74,11 +74,7 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
         // — nothing bounds one iteration, so no longer hold is *provably* short enough to
         // re-observe that pressure before the stale window expires, and base is the pre-PR floor.
         let now_unix = chrono::Utc::now().timestamp();
-        if claude_tick_should_attempt(&mut claude_backoff, now, pg_pool.as_ref(), |danger| {
-            dispatch_gate::is_deferring("claude", danger, now_unix)
-        })
-        .await
-        {
+        if claude_tick_should_attempt(&mut claude_backoff, now, pg_pool.as_ref(), now_unix).await {
             let claude_result =
                 sync_claude_rate_limit_cache_once_serialized(pg_pool.as_ref()).await;
             let outcome = classify_claude_sync_result(&claude_result);
@@ -518,13 +514,16 @@ mod tests {
             .acquire_timeout(secs(2))
             .connect_lazy("postgres://agentdesk:agentdesk@127.0.0.1:1/agentdesk")
             .expect("a lazy pool never dials on construction");
+        // None defers for every provider; pin the tick's provider wiring separately.
+        let tick_source = include_str!("rate_limit_sync.rs")
+            .split("pub(super) async fn rate_limit_sync_loop")
+            .next()
+            .unwrap();
+        assert!(tick_source.contains("dispatch_gate::is_deferring(\"claude\", danger, now_unix)"));
         // The real resolver must fail to None, not supply the YAML threshold.
         assert!(
-            claude_tick_should_attempt(&mut backoff, t0 + secs(120), &unusable, |threshold| {
-                assert_eq!(threshold, None, "tick must read the persisted config");
-                defers(&hot, threshold)
-            })
-            .await
+            claude_tick_should_attempt(&mut backoff, t0 + secs(120), &unusable, now).await,
+            "tick must observe the persisted-config read failure (None), not a YAML constant"
         );
         // The staleness window comes back from the same parser but is not an
         // input: a row older than 300 s — or than the 600 s default — still has
@@ -539,9 +538,6 @@ mod tests {
             .acquire_timeout(secs(2))
             .connect_lazy("postgres://agentdesk:agentdesk@127.0.0.1:1/agentdesk")
             .expect("a lazy pool never dials on construction");
-        // The YAML accessor always answers, so `None` here can only have come from the persisted
-        // read failing — and it is not what `danger_pct()` would have returned, whatever the
-        // process's YAML snapshot happens to hold.
         let resolved = gate::effective_danger_pct_pg(&unusable).await;
         assert_eq!(resolved, None);
         // And `None` is pressure, so the loop keeps the base cadence rather than failing open.
