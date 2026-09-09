@@ -72,8 +72,18 @@ Use the repository's pinned Rust toolchain and install the cross compiler:
 ```bash
 rustup target add x86_64-pc-windows-gnu
 brew install mingw-w64
-cargo check --target x86_64-pc-windows-gnu --lib
+cargo check --target x86_64-pc-windows-gnu --all-targets
 ```
+
+`--all-targets` is load-bearing, not optional: the required lane
+(`Fast check + non-PG tests (windows-latest)`) runs
+`cargo check --workspace --all-targets`, and most of this repo's code lives in
+`#[cfg(test)]` targets that `--lib` never compiles -- including
+`src/services/discord/tmux_watcher_registry_restore_tests.rs`, which is
+declared `#[cfg(test)] mod` with no unix gate and so is a Windows target only
+under `--all-targets`. Pre-checking with `--lib` can pass while the required
+lane fails. `--workspace` is a no-op here (`Cargo.toml` declares no
+`[workspace]` section), so it is omitted above.
 
 If bindgen cannot locate the target headers, set the target-specific include
 path before retrying (adjust it to the installed MinGW sysroot):

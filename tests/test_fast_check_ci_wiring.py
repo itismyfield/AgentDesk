@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +22,35 @@ CI_RUNNER_HARDENING_SHA256 = (
     "2f6a3d2d6260c546608052819be383115bf979df948e6ca3a16e5a45d2231ca0"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
+CROSS_OS_CONSUMER_SCRIPT = REPO_ROOT / "scripts/cross_os_consumer_paths.py"
+# #5828's own break (turn_bridge/mod.rs) plus the 21 files measured on PR #5834
+# that carry the same shim and were left unselected by the hand-written list.
+# Every one is compiled on Windows and reaches a `#[cfg(unix)]`-gated module, so
+# dropping or mis-cfg-ing its shim reproduces #5828 on main.
+CFG_SHIM_CONSUMERS = (
+    "src/services/discord/turn_bridge/mod.rs",
+    "src/services/discord/health/watcher_respawn.rs",
+    "src/services/discord/outbound/delivery_record.rs",
+    "src/services/discord/recovery_engine/restore_inflight.rs",
+    "src/services/discord/recovery_engine/completion_delivery.rs",
+    "src/services/discord/recovery_engine/unix_journal.rs",
+    "src/services/discord/recovery_engine/manual_rebind/mod.rs",
+    "src/services/discord/recovery_paths/restart.rs",
+    "src/services/discord/router/message_handler.rs",
+    "src/services/discord/router/message_handler/watchdog.rs",
+    "src/services/discord/router/intake_dispatch/tests.rs",
+    "src/services/discord/runtime_bootstrap/recovery_flush.rs",
+    "src/services/discord/runtime_bootstrap/session_gc.rs",
+    "src/services/discord/turn_finalizer.rs",
+    "src/services/discord/turn_finalizer/delivery_lease.rs",
+    "src/services/discord/terminal_ui_obligation.rs",
+    "src/services/discord/destructive_cancel_gate.rs",
+    "src/services/discord/inflight/save_store/create_monotonic_observer.rs",
+    "src/services/discord/placeholder_live_events/tests.rs",
+    "src/services/discord/tui_prompt_relay/tests.rs",
+    "src/services/discord/tui_prompt_relay/relay_ownership.rs",
+    "src/services/discord/tui_prompt_relay/synthetic_start/claim.rs",
+)
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
 MACOS_TRUSTED_WORKFLOW = REPO_ROOT / ".github/workflows/ci-macos-trusted.yml"
@@ -169,6 +199,53 @@ def replace_last(source: str, old: str, new: str) -> str:
     if not separator:
         raise AssertionError(f"missing text for final replacement: {old!r}")
     return head + new + tail
+
+
+def glob_matcher(pattern: str) -> re.Pattern[str]:
+    """Reproduce picomatch `{dot: true}` for the shapes dorny/paths-filter@v3 resolves.
+
+    Cross-checked against picomatch 2.3.2 over every tracked file and every
+    ci-pr.yml filter pattern: identical selection for all 191 non-negated
+    patterns. Negation (`!pat`) is unsupported and asserted absent below; a
+    second matching oracle (pathspec/gitwildmatch) is deliberately not used,
+    because two oracles for one rule means one of them is always wrong.
+    """
+    parts, index = [], 0
+    while index < len(pattern):
+        if pattern[index : index + 3] == "/**":
+            parts.append("/.*" if index + 3 == len(pattern) else "(?:/.*)?")
+            index += 3
+        elif pattern[index : index + 3] == "**/":
+            parts.append("(?:.*/)?")
+            index += 3
+        elif pattern[index : index + 2] == "**":
+            parts.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            parts.append("[^/]*")
+            index += 1
+        elif pattern[index] == "?":
+            parts.append("[^/]")
+            index += 1
+        else:
+            parts.append(re.escape(pattern[index]))
+            index += 1
+    return re.compile("".join(parts) + r"\Z")
+
+
+def selects(patterns: list[str], path: str) -> bool:
+    return any(glob_matcher(pattern).match(path) for pattern in patterns)
+
+
+def derived_cross_os_consumers() -> tuple[str, ...]:
+    completed = subprocess.run(
+        [sys.executable, str(CROSS_OS_CONSUMER_SCRIPT), "--format", "paths"],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=REPO_ROOT,
+    )
+    return tuple(completed.stdout.split())
 
 
 def workflow_paths(root: Path = REPO_ROOT) -> tuple[Path, ...]:
@@ -431,13 +508,46 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 self.assertNotEqual(self.run_hardening_fixture(mutated).returncode, 0)
 
     def test_cfg_gated_relay_consumers_select_windows(self) -> None:
-        paths = paths_filter_definitions(PR_WORKFLOW.read_text())["cross_os_rust"]
-        for owner in (
-            "turn_bridge/**", "watchers/**", "tmux_watcher_registry.rs",
-            "tmux_watcher_registry/**", "tmux*.rs", "tmux_watcher/**", "mod.rs",
-        ):
-            with self.subTest(owner=owner):
-                self.assertEqual(paths.count(f"src/services/discord/{owner}"), 1)
+        """cross_os_rust must select every derived cfg-shim consumer (#5832).
+
+        The predecessor of this test pinned seven literal glob strings, which
+        proved only that someone had typed them. This binds the workflow to the
+        source instead: `scripts/cross_os_consumer_paths.py` recomputes the file
+        class from the module tree, and a consumer that no glob matches fails
+        here rather than on main's required Windows lane.
+        """
+        workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        paths = paths_filter_definitions(workflow)["cross_os_rust"]
+        # The narrow positive list is the design; glob_matcher has no negation.
+        self.assertNotIn("src/services/discord/**", paths)
+        self.assertEqual([pattern for pattern in paths if pattern.startswith("!")], [])
+
+        consumers = derived_cross_os_consumers()
+        self.assertGreater(len(consumers), 100)
+        self.assertEqual([path for path in consumers if not selects(paths, path)], [])
+        for path in CFG_SHIM_CONSUMERS:
+            with self.subTest(consumer=path):
+                self.assertIn(path, consumers)
+                self.assertTrue(selects(paths, path))
+
+        # Every derived selector is load-bearing: commenting one out must leave
+        # a consumer unmatched. This also forbids redundant spellings, because a
+        # subsumed glob would delete cleanly with nothing uncovered.
+        derived = [path for path in paths if path.startswith("src/services/discord/")]
+        self.assertGreater(len(derived), 30)
+        for selector in derived:
+            with self.subTest(selector=selector):
+                survivors = paths_filter_definitions(
+                    replace_last(
+                        workflow,
+                        f"              - '{selector}'",
+                        f"              # - '{selector}'",
+                    )
+                )["cross_os_rust"]
+                self.assertNotIn(selector, survivors)
+                self.assertTrue(
+                    [path for path in consumers if not selects(survivors, path)]
+                )
 
     def test_inflight_lock_primitive_triggers_required_native_windows_lane(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
@@ -450,21 +560,25 @@ class FastCheckCiWiringTests(unittest.TestCase):
         )
 
         cross_os_paths = paths_filter_definitions(workflow)["cross_os_rust"]
+        # #5832 replaced the two literal entries with the derived selector that
+        # covers them; pinning the literals again would freeze a redundant glob.
+        owner_selector = "src/services/discord/inflight/**"
+        self.assertEqual(cross_os_paths.count(owner_selector), 1)
         for owner_path in owner_paths:
-            self.assertEqual(cross_os_paths.count(owner_path), 1)
+            self.assertTrue(selects(cross_os_paths, owner_path))
         self.assertNotIn("src/services/discord/**", cross_os_paths)
 
+        commented = paths_filter_definitions(
+            replace_last(
+                workflow,
+                f"              - '{owner_selector}'",
+                f"              # - '{owner_selector}'",
+            )
+        )["cross_os_rust"]
+        self.assertNotIn(owner_selector, commented)
         for owner_path in owner_paths:
             with self.subTest(missing_owner=owner_path):
-                commented = replace_last(
-                    workflow,
-                    f"              - '{owner_path}'",
-                    f"              # - '{owner_path}'",
-                )
-                self.assertNotIn(
-                    owner_path,
-                    paths_filter_definitions(commented)["cross_os_rust"],
-                )
+                self.assertFalse(selects(commented, owner_path))
         self.assertEqual(
             cross_os["if"],
             "needs.changes.outputs.rust_compile == 'true' && "

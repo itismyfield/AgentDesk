@@ -348,24 +348,59 @@ jobs:
               - 'src/services/cluster/**'
               - 'src/services/codex_tui/**'
               - 'src/services/dispatches/**'
-              # Include cfg-gated tmux owners and their relay consumers (#5832).
-              - 'src/services/discord/turn_bridge/**'
-              - 'src/services/discord/watchers/**'
+              # DERIVED BLOCK (#5832) -- do not hand-edit. cross_os_rust does
+              # not select 'src/services/discord/**' wholesale, so every file in
+              # that subtree that carries a platform cfg shim (or names a
+              # unix-gated module) is selected here instead. #5828 broke the
+              # required Windows lane from exactly one such file, and hand
+              # enumeration is what left its 21 siblings unselected. Regenerate
+              # with `python3 scripts/cross_os_consumer_paths.py --format globs`;
+              # tests/test_fast_check_ci_wiring.py fails when a derived consumer
+              # stops matching. Unix-only trees (tmux.rs and its tmux_watcher/
+              # watchers subtrees) are deliberately absent -- Windows never
+              # compiles them, so they cannot break the lane. This block also
+              # covers the inflight std::fs::File advisory-lock owners and the
+              # restart-v2 per-platform fs backend, listed by hand until now.
+              - 'src/services/discord/commands/**'
+              - 'src/services/discord/delivery_lease_cell.rs'
+              - 'src/services/discord/destructive_cancel_gate.rs'
+              - 'src/services/discord/health.rs'
+              - 'src/services/discord/health/**'
+              - 'src/services/discord/idle_recap.rs'
+              - 'src/services/discord/idle_recap_interaction.rs'
+              - 'src/services/discord/idle_relay_drift.rs'
+              - 'src/services/discord/inflight.rs'
+              - 'src/services/discord/inflight/**'
+              - 'src/services/discord/mod.rs'
+              - 'src/services/discord/model_catalog/**'
+              - 'src/services/discord/outbound/**'
+              - 'src/services/discord/placeholder_live_events/**'
+              - 'src/services/discord/placeholder_sweeper/**'
+              - 'src/services/discord/recovery_engine.rs'
+              - 'src/services/discord/recovery_engine/**'
+              - 'src/services/discord/recovery_paths/**'
+              - 'src/services/discord/relay_health.rs'
+              - 'src/services/discord/relay_recovery.rs'
+              - 'src/services/discord/relay_recovery/**'
+              - 'src/services/discord/relay_recovery_circuit_breaker.rs'
+              - 'src/services/discord/replace_outcome_policy.rs'
+              - 'src/services/discord/restart_mode/**'
+              - 'src/services/discord/router/**'
+              - 'src/services/discord/runtime_bootstrap.rs'
+              - 'src/services/discord/runtime_bootstrap/**'
+              - 'src/services/discord/runtime_store.rs'
+              - 'src/services/discord/settings/**'
+              - 'src/services/discord/terminal_ui_obligation.rs'
               - 'src/services/discord/tmux_watcher_registry.rs'
               - 'src/services/discord/tmux_watcher_registry/**'
-              - 'src/services/discord/tmux*.rs'
-              - 'src/services/discord/tmux_watcher/**'
-              - 'src/services/discord/mod.rs'
-              # The inflight sidecar primitive uses the cross-platform
-              # std::fs::File advisory-lock API. Changes to its owners must
-              # compile all targets in the required native Windows lane.
-              - 'src/services/discord/inflight/store.rs'
-              - 'src/services/discord/inflight/save_store.rs'
-              # The restart-v2 fs backend has per-platform implementations
-              # (unix + unsupported). Changes must compile in the native
-              # Windows lane before merge.
-              - 'src/services/discord/restart_mode/protocol_v2/fs.rs'
-              - 'src/services/discord/restart_mode/protocol_v2/fs/**'
+              - 'src/services/discord/tmux_watcher_registry_restore_tests.rs'
+              - 'src/services/discord/tui_direct_abort_marker/**'
+              - 'src/services/discord/tui_direct_pending_start/**'
+              - 'src/services/discord/tui_prompt_relay.rs'
+              - 'src/services/discord/tui_prompt_relay/**'
+              - 'src/services/discord/turn_bridge/**'
+              - 'src/services/discord/turn_finalizer.rs'
+              - 'src/services/discord/turn_finalizer/**'
               - 'src/services/git/**'
               - 'src/services/maintenance/**'
               - 'src/services/memory/**'
