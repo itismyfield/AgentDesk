@@ -950,7 +950,8 @@ src/
 │   │   ├── tmux_placeholder_suppression/
 │   │   │   ├── evidence.rs
 │   │   │   ├── mod.rs
-│   │   │   └── ops.rs
+│   │   │   ├── ops.rs
+│   │   │   └── unicode_units_tests.rs
 │   │   ├── tmux_watcher/
 │   │   │   ├── jsonl_rotation/
 │   │   │   │   ├── backstop.rs
