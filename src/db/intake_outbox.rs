@@ -3114,4 +3114,59 @@ mod postgres_tests {
         pool.close().await;
         pg_db.drop().await;
     }
+
+    /// #5320: no retention reader yet. Migration 0115 offers sweep ordering
+    /// bounded by failed_pre_accept rows. Pin both indexes' ordered keys and
+    /// predicates in the real catalog, without claiming a forced planner choice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intake_outbox_terminal_retention_index_catalog_pg() {
+        let pg_db = TestPostgresDb::create().await;
+        let pool = pg_db.connect_and_migrate().await;
+
+        for (index, expected_predicate) in [
+            (
+                "idx_intake_outbox_terminal_retention",
+                "(status = ANY (ARRAY['done'::text, 'unknown'::text, 'failed_pre_accept'::text, 'failed_post_accept'::text]))",
+            ),
+            (
+                "idx_intake_outbox_failed_pre_accept_sweep_order",
+                "(status = 'failed_pre_accept'::text)",
+            ),
+        ] {
+            let (valid, key_atts, first_key, second_key, predicate): (
+                bool,
+                i16,
+                String,
+                String,
+                String,
+            ) = sqlx::query_as(
+                "SELECT i.indisvalid, i.indnkeyatts,
+                    pg_get_indexdef(i.indexrelid, 1, true),
+                    pg_get_indexdef(i.indexrelid, 2, true),
+                    pg_get_expr(i.indpred, i.indrelid)
+               FROM pg_index i
+               JOIN pg_class c ON c.oid = i.indexrelid
+               JOIN pg_class t ON t.oid = i.indrelid
+               JOIN pg_namespace ns ON ns.oid = c.relnamespace
+              WHERE ns.nspname = 'public' AND t.relname = 'intake_outbox'
+                AND c.relname = $1",
+            )
+            .bind(index)
+            .fetch_one(&pool)
+            .await
+            .expect("read #5320 index catalog contract"); // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
+
+            assert!(valid, "fresh migration must build a valid index");
+            assert_eq!(key_atts, 2, "index must have exactly two key attributes");
+            assert_eq!(first_key, "updated_at", "first key orders by update time");
+            assert_eq!(second_key, "id", "second key breaks updated_at ties");
+            assert_eq!(
+                predicate, expected_predicate,
+                "index {index} must retain its exact predicate"
+            );
+        }
+
+        pool.close().await;
+        pg_db.drop().await;
+    }
 }
