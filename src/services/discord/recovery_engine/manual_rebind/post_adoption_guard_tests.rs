@@ -159,8 +159,9 @@ fn durable_episode_authority_lexically_covers_every_handoff_side_effect() {
 
     let parent = include_str!("mod.rs");
     let acquire = parent
-        .find("adopt_and_lock_inflight_episode")
+        .find("coordinate_adoption::adopt_coordinates(")
         .expect("atomic adoption authority acquisition");
+    assert!(include_str!("coordinate_adoption.rs").contains("adopt_and_lock_inflight_episode("));
     let commit = parent
         .find("episode_handoff::commit_episode_side_effects")
         .expect("episode side-effect commit");
