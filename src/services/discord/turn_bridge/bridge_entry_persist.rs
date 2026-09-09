@@ -1,5 +1,6 @@
 //! Bridge-entry inflight persistence plus local-state reconciliation (#4259 R4).
 
+use super::context::BridgeCompletionSignal;
 use super::*;
 
 pub(super) struct BridgeEntryRuntimeState<'a> {
@@ -90,10 +91,10 @@ pub(super) fn bridge_entry_lifecycle_can_continue(
 /// Wakes a completion waiter on a pre-authority abort without registering a
 /// finalizer or publishing `InflightSignal::Completed` for a successor turn.
 pub(super) fn signal_bridge_entry_abort_completion(
-    completion_tx: &mut Option<tokio::sync::oneshot::Sender<()>>,
+    completion_tx: &mut Option<tokio::sync::oneshot::Sender<BridgeCompletionSignal>>,
 ) {
     if let Some(tx) = completion_tx.take() {
-        let _ = tx.send(());
+        let _ = tx.send(BridgeCompletionSignal::EntryAborted);
     }
 }
 
@@ -450,7 +451,12 @@ mod tests {
         signal_bridge_entry_abort_completion(&mut completion_tx);
 
         assert!(completion_tx.is_none());
-        assert_eq!(completion_rx.try_recv(), Ok(()));
+        assert_eq!(
+            completion_rx.try_recv(),
+            Ok(BridgeCompletionSignal::EntryAborted)
+        );
+        signal_bridge_entry_abort_completion(&mut completion_tx);
+        assert!(completion_tx.is_none());
         assert!(matches!(
             signal_rx.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
@@ -504,7 +510,10 @@ mod tests {
         assert!(!bridge_entry_lifecycle_can_continue(outcome));
         signal_bridge_entry_abort_completion(&mut completion_tx);
 
-        assert_eq!(completion_rx.try_recv(), Ok(()));
+        assert_eq!(
+            completion_rx.try_recv(),
+            Ok(BridgeCompletionSignal::EntryAborted)
+        );
         assert_eq!(std::fs::read(path).expect("successor survives"), before);
     }
 
@@ -576,6 +585,21 @@ mod tests {
             .expect("post-await durable anchor state refreshes detached locals");
 
         assert!(persist < gate && gate < anchor && anchor < refresh);
+        assert!(
+            helper[anchor..refresh]
+                .contains("signal_bridge_entry_abort_completion(&mut ctx.bridge.completion_tx);")
+                && helper[anchor..refresh].contains("return false;"),
+            "failed anchor materialization must signal EntryAborted and return before guards"
+        );
+        let abort = helper
+            .find("pub(super) fn signal_bridge_entry_abort_completion")
+            .unwrap();
+        let reconcile = helper[abort..]
+            .find("pub(super) fn reconcile_runtime_locals_from_inflight_state")
+            .unwrap()
+            + abort;
+        assert!(!helper[abort..reconcile].contains("register_start"));
+        assert!(!helper[abort..reconcile].contains("InflightSignal::Completed"));
         assert!(
             authority < entry_owner
                 && entry_owner < guards

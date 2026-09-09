@@ -1,5 +1,16 @@
 use super::*;
 
+/// Bridge lifecycle notification, not proof of durable terminal delivery.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::services::discord) enum BridgeCompletionSignal {
+    /// The bridge held durable authority and reached its finalize/relinquish
+    /// path (including guard drop). Delivery evidence still comes from the
+    /// durable row, never from this signal.
+    Finalized,
+    /// Pre-authority abort: no stream frame consumed and no finalizer registered.
+    EntryAborted,
+}
+
 pub(in crate::services::discord) struct TurnBridgeContext {
     pub(in crate::services::discord) provider: ProviderKind,
     pub(in crate::services::discord) gateway: Arc<dyn TurnGateway>,
@@ -33,10 +44,27 @@ pub(in crate::services::discord) struct TurnBridgeContext {
     /// in-flight turn. Fresh turns must allocate a new panel near the new
     /// response instead of editing an old panel buried in scrollback.
     pub(in crate::services::discord) reuse_status_panel_message: bool,
-    pub(in crate::services::discord) completion_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    pub(in crate::services::discord) completion_tx:
+        Option<tokio::sync::oneshot::Sender<BridgeCompletionSignal>>,
     /// `true` ONLY at the two TUI external-input idle callers. Default `false`
     /// for every other bridge caller; used by footer/chrome decisions that need
     /// the origin without a `request_owner_name` string compare.
     pub(in crate::services::discord) is_external_input_tui_direct: bool,
     pub(in crate::services::discord) inflight_state: InflightTurnState,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn intake_completion_waiter_discards_typed_payload_and_only_maps_recv_error() {
+        let source = include_str!("../router/message_handler/intake_turn.rs");
+        let start = source
+            .find("    if let Some(rx) = completion_rx {")
+            .expect("intake completion wait remains present");
+        let waiter = source[start..].split("#[cfg(test)]").next().unwrap();
+        assert_eq!(
+            waiter.trim(),
+            "if let Some(rx) = completion_rx {\n        rx.await\n            .map_err(|_| \"queued turn completion wait failed\".to_string())?;\n    }\n\n    Ok(())\n}"
+        );
+    }
 }
