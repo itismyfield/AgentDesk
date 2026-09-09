@@ -5552,6 +5552,16 @@ services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_sing
 services::discord::tmux::tmux_watcher::single_message_footer_tests::watcher_single_message_completion_footer_producer_threads_sniffed_background_agent_pending
 services::discord::tmux::tmux_watcher::stall_exit::tests::pinned_exit_preserves_newer_inflight_and_mailbox_on_identity_mismatch
 services::discord::tmux::tmux_watcher::stall_exit::tests::pinned_exit_releases_matching_turn_through_finalizer
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::active_progress_tick_emits_once
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::active_silent_progress_is_durable
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_pinned_identity_suppresses_trailing_body
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_preserves_exact_row
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_tick_emits_no_republication
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_tick_preserves_cleanup_and_panel_parity
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_caller_uses_actual_terminal_outcome
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_short_body_and_ioerror_stay_nonterminal
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::terminal_outcome_logged_at_wrapper
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::terminal_progress_no_false_authority
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_common_edit_and_initial_send_share_guarded_payload
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_watcher_common_frame_selects_one_safe_payload
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_watcher_rollover_never_selects_raw_control_data
