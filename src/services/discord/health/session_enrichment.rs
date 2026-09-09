@@ -563,6 +563,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_exhausted_tmux_budget_withholds_a_live_session() {
         let mut budget = HealthSnapshotOptions::new(false).tmux;
+        let default_probe = crate::services::platform::tmux::has_session as fn(&str) -> bool;
+        assert!(std::ptr::fn_addr_eq(budget.probe, default_probe));
         budget.probe = |_| true;
         // Model detail-only work between probes, outside probe accounting.
         tokio::time::advance(TMUX_OBSERVATION_BUDGET * 2).await;
@@ -573,43 +575,60 @@ mod tests {
         assert!(!probe_tmux_session_within(Some("fake-live"), &mut budget).await);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn health_snapshot_wires_the_tmux_budget_and_probe() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
         static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static DETAILS: AtomicUsize = AtomicUsize::new(0);
+        struct DetailDelay;
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DetailDelay {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().target() == "agentdesk::discord::relay_health" {
+                    let detail = DETAILS.fetch_add(1, Ordering::SeqCst);
+                    if CALLS.load(Ordering::SeqCst) == 1 && detail == 0 {
+                        // This event is emitted inside the builder's detail-only payload branch.
+                        std::thread::sleep(TMUX_OBSERVATION_BUDGET * 2);
+                    }
+                }
+            }
+        }
         let registry = super::super::HealthRegistry::new();
         let shared = discord::make_shared_data_for_tests();
-        let channel = ChannelId::new(5_736_000_000_000_003);
-        shared.mailboxes.handle(channel);
-        shared
-            .tmux_watchers
-            .insert(channel, watcher_handle("fake-live", NATIVE_TRANSCRIPT));
+        for id in [5_736_000_000_000_003, 5_736_000_000_000_004] {
+            let channel = ChannelId::new(id);
+            shared.mailboxes.handle(channel);
+            shared
+                .tmux_watchers
+                .insert(channel, watcher_handle(&id.to_string(), NATIVE_TRANSCRIPT));
+        }
         registry.register("codex".to_string(), shared).await;
         for available in [true, false] {
             let mut options = HealthSnapshotOptions::new(true);
-            options.tmux.remaining = if available {
-                TMUX_OBSERVATION_BUDGET
-            } else {
-                std::time::Duration::ZERO
-            };
+            options.tmux.remaining *= u32::from(available);
             options.tmux.probe = |_| {
                 CALLS.fetch_add(1, Ordering::SeqCst);
                 true
             };
             CALLS.store(0, Ordering::SeqCst);
-            if available {
-                tokio::time::advance(TMUX_OBSERVATION_BUDGET * 2).await;
-                tokio::time::resume();
-            }
+            DETAILS.store(0, Ordering::SeqCst);
             let snapshot =
                 super::super::snapshot::build_health_snapshot_with_options(&registry, options)
+                    .with_subscriber(tracing_subscriber::registry().with(DetailDelay))
                     .await;
-            assert_eq!(CALLS.load(Ordering::SeqCst), usize::from(available));
+            assert_eq!(CALLS.load(Ordering::SeqCst), 2 * usize::from(available));
+            assert_eq!(DETAILS.load(Ordering::SeqCst), 2);
             let json = serde_json::to_value(snapshot).unwrap();
-            assert_eq!(json["mailboxes"].as_array().unwrap().len(), 1);
-            let mailbox = &json["mailboxes"][0];
-            assert_eq!(mailbox["tmux_present"], available);
-            assert_eq!(mailbox["relay_health"]["tmux_alive"], available);
+            assert_eq!(json["mailboxes"].as_array().unwrap().len(), 2);
+            for mailbox in json["mailboxes"].as_array().unwrap() {
+                assert_eq!(mailbox["tmux_present"], available);
+                assert_eq!(mailbox["relay_health"]["tmux_alive"], available);
+            }
         }
     }
 
