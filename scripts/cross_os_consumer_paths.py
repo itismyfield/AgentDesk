@@ -17,10 +17,12 @@ to verify. Deterministic (sorted); stdlib only.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from pathlib import Path, PurePosixPath
 
 MOD = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z_]\w*)[ \t]*;")
+INLINE_MOD = re.compile(r"^([ \t]*)(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+([A-Za-z_]\w*)[ \t]*\{")
 PATH_ATTR = re.compile(r"#\[path[ \t]*=[ \t]*\"([^\"]+)\"\]")
 PLATFORM_CFG = re.compile(r"cfg(?:_attr)?!?[ \t]*\([^)]*\b(?:unix|windows|target_os|target_family)\b")
 NON_WINDOWS = re.compile(r"\bunix\b|not[ \t]*\([ \t]*windows")
@@ -46,10 +48,18 @@ def _gate_above(lines: list[str], index: int) -> tuple[bool, str | None]:
     return gated, path_attr.group(1) if path_attr else None
 
 
-def _child(src: Path, name: str, path_attr: str | None) -> Path | None:
-    if path_attr:
-        return src.parent / path_attr
-    base = src.parent if src.stem in {"mod", "lib", "main"} else src.parent / src.stem
+def _child(src: Path, name: str, attr: str | None, chain: tuple[str, ...], owned: bool) -> Path | None:
+    """Resolve one `mod` declaration the way rustc's directory ownership does.
+
+    A file reached through `#[path]` owns its own directory (rustc's `relative:
+    None`), every other non-`mod.rs` file owns `dir/<stem>/`, and each enclosing
+    inline `mod NAME {` block appends a further directory -- including for a
+    nested `#[path]`, which is what hid `voice_barge_in/tests/` (#5834 r3 P1-1).
+    """
+    root = src.parent if owned or src.stem in {"mod", "lib", "main"} else src.parent / src.stem
+    base = root.joinpath(*chain)
+    if attr:
+        return Path(os.path.normpath((base if chain else src.parent) / attr))
     return next((c for c in (base / f"{name}.rs", base / name / "mod.rs") if c.exists()), None)
 
 
@@ -60,21 +70,32 @@ def scan(root: Path) -> tuple[dict[str, bool], set[str]]:
     gated: set[str] = set()
     ungated: set[str] = set()
     seen: set[Path] = set()
+    owned: set[Path] = set()
     while queue:
         src = queue.pop()
         if src in seen:
             continue
         seen.add(src)
         lines = src.read_text(encoding="utf-8", errors="replace").splitlines()
+        stack: list[tuple[str, str]] = []
         for index, line in enumerate(lines):
+            # rustfmt closes an inline block at the opener's own indentation.
+            while stack and line.startswith(f"{stack[-1][0]}}}"):
+                stack.pop()
+            opened = INLINE_MOD.match(line)
+            if opened is not None:
+                stack.append((opened.group(1), opened.group(2)))
             declared = MOD.match(line)
             if declared is None:
                 continue
             gate, path_attr = _gate_above(lines, index)
             (gated if gate else ungated).add(declared.group(1))
-            child = _child(src, declared.group(1), path_attr)
+            chain = tuple(name for _, name in stack)
+            child = _child(src, declared.group(1), path_attr, chain, src in owned)
             if child is None or not child.exists():
                 continue
+            if path_attr:
+                owned.add(child)
             windows[child] = windows.get(child, False) or (windows[src] and not gate)
             queue.append(child)
     return {p.relative_to(root).as_posix(): v for p, v in windows.items()}, gated - ungated
@@ -107,14 +128,27 @@ def globs(compiled: dict[str, bool], scope: str, paths: list[str]) -> list[str]:
     return sorted(selected)
 
 
+def unreachable(root: Path, compiled: dict[str, bool], scope: str) -> list[str]:
+    """Rust files under `scope` the module walk never reached -- the walk's own
+    blind spots, pinned against a justified exception table by #5834 r3."""
+    walked = {rel for rel in compiled if rel.startswith(f"{scope}/")}
+    below = ((p, p.relative_to(root).as_posix()) for p in (root / scope).rglob("*.rs"))
+    return sorted(rel for p, rel in below if p.is_file() and rel not in walked)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--scope", default=DEFAULT_SCOPE)
-    parser.add_argument("--format", choices=("paths", "globs"), default="paths")
+    parser.add_argument(
+        "--format", choices=("paths", "globs", "unreachable"), default="paths"
+    )
     args = parser.parse_args()
     scope = args.scope.rstrip("/")
     compiled, gated = scan(args.root)
+    if args.format == "unreachable":
+        print("\n".join(unreachable(args.root, compiled, scope)))
+        return 0
     found = consumers(args.root, compiled, gated, scope)
     print("\n".join(found if args.format == "paths" else globs(compiled, scope, found)))
     return 0

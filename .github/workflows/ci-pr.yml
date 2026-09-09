@@ -401,6 +401,7 @@ jobs:
               - 'src/services/discord/turn_bridge/**'
               - 'src/services/discord/turn_finalizer.rs'
               - 'src/services/discord/turn_finalizer/**'
+              - 'src/services/discord/voice_barge_in/**'
               - 'src/services/git/**'
               - 'src/services/maintenance/**'
               - 'src/services/memory/**'

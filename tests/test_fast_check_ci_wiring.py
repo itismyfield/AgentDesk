@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -23,7 +23,7 @@ CI_RUNNER_HARDENING_SHA256 = (
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 CROSS_OS_CONSUMER_SCRIPT = REPO_ROOT / "scripts/cross_os_consumer_paths.py"
-# #5828's own break (turn_bridge/mod.rs) plus the 21 files measured on PR #5834
+# #5828's own break (turn_bridge/mod.rs) plus the 22 files measured on PR #5834
 # that carry the same shim and were left unselected by the hand-written list.
 # Every one is compiled on Windows and reaches a `#[cfg(unix)]`-gated module, so
 # dropping or mis-cfg-ing its shim reproduces #5828 on main.
@@ -50,6 +50,26 @@ CFG_SHIM_CONSUMERS = (
     "src/services/discord/tui_prompt_relay/tests.rs",
     "src/services/discord/tui_prompt_relay/relay_ownership.rs",
     "src/services/discord/tui_prompt_relay/synthetic_start/claim.rs",
+    # r3: reached only once the walk resolves a `#[path]` inside an inline
+    # `mod tests {` against the module's directory, per rustc directory
+    # ownership. Windows compiles it and it carries a cfg(unix)/not(unix) pair.
+    "src/services/discord/voice_barge_in/tests/pcm_harness_tests.rs",
+)
+# Files under the derived scope that the module walk cannot reach, each paired
+# with the walked file that `include!`s it. `include!` is text substitution, not
+# a module declaration, so the compiled unit is the including file -- which the
+# walk does reach and the globs do select. An entry that is unreached for any
+# other reason is a #5828-class blind spot the derivation would silently drop,
+# so this table is exhaustive and the test below fails when it grows.
+UNREACHABLE_RUST_FILES = (
+    ("src/services/discord/tmux/monitor_auto_turn_inflight_tests.rs",
+     "src/services/discord/tmux/monitor_auto_turn_inflight.rs"),
+    ("src/services/discord/tmux/task_notification_kind_restart_roundtrip_tests.rs",
+     "src/services/discord/tmux.rs"),
+    ("src/services/discord/tmux_output_stream/provider_output_guard_tests.rs",
+     "src/services/discord/tmux_output_stream.rs"),
+    ("src/services/discord/tmux_watcher/terminal_direct_fallback_tests.rs",
+     "src/services/discord/tmux_watcher/terminal_direct_fallback.rs"),
 )
 MAIN_WORKFLOW = REPO_ROOT / ".github/workflows/ci-main.yml"
 NIGHTLY_WORKFLOW = REPO_ROOT / ".github/workflows/ci-nightly.yml"
@@ -240,6 +260,17 @@ def selects(patterns: list[str], path: str) -> bool:
 def derived_cross_os_consumers() -> tuple[str, ...]:
     completed = subprocess.run(
         [sys.executable, str(CROSS_OS_CONSUMER_SCRIPT), "--format", "paths"],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=REPO_ROOT,
+    )
+    return tuple(completed.stdout.split())
+
+
+def unreachable_rust_files() -> tuple[str, ...]:
+    completed = subprocess.run(
+        [sys.executable, str(CROSS_OS_CONSUMER_SCRIPT), "--format", "unreachable"],
         capture_output=True,
         text=True,
         check=True,
@@ -547,6 +578,28 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 self.assertNotIn(selector, survivors)
                 self.assertTrue(
                     [path for path in consumers if not selects(survivors, path)]
+                )
+
+    def test_module_walk_has_no_unaudited_blind_spots(self) -> None:
+        """A file the walk never reaches cannot be derived (#5834 r3 P1-1).
+
+        `voice_barge_in/tests/pcm_harness_tests.rs` was exactly that: Windows
+        compiles it, it carries the #5828 cfg(unix)/not(unix) pair, no glob
+        matched it -- and the coverage test above still passed, because the walk
+        is its own oracle. Pinning the unreached set turns the next resolver gap
+        into a failure here rather than a green lane that proves nothing.
+        """
+        unreached = unreachable_rust_files()
+        self.assertEqual(unreached, tuple(path for path, _ in UNREACHABLE_RUST_FILES))
+        for path, includer in UNREACHABLE_RUST_FILES:
+            with self.subTest(unreachable=path):
+                # The stated reason, checked rather than asserted in prose.
+                self.assertTrue((REPO_ROOT / path).is_file())
+                self.assertNotIn(includer, unreached)
+                spliced = PurePosixPath(path).relative_to(PurePosixPath(includer).parent)
+                self.assertIn(
+                    f'include!("{spliced}")',
+                    (REPO_ROOT / includer).read_text(encoding="utf-8"),
                 )
 
     def test_inflight_lock_primitive_triggers_required_native_windows_lane(self) -> None:
