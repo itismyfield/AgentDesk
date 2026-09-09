@@ -114,10 +114,27 @@ mod tests {
         }
     }
 
-    // #5071 T3-A2 regression lock (no behaviour change): the watcher task guard
-    // already removes through the registry's current-handle CAS. Pin both arms
-    // so the post-stream-exit sibling that now makes the same call cannot be
-    // "simplified" back into an unconditional or channel-keyed removal here.
+    #[test]
+    fn watcher_wrapper_textually_drops_cleanup_before_completion() {
+        // Lexical tripwire only: bounded to the wrapper, not an execution-order
+        // proof or a Rust parser. Comments/strings are not stripped.
+        let source = include_str!("task_supervisor.rs");
+        let (_, wrapper) = source
+            .split_once("pub(in crate::services::discord) fn spawn_observed_tmux_watcher<F>(")
+            .expect("watcher wrapper exists");
+        let (wrapper, _) = wrapper
+            .split_once("\nstruct TmuxWatcherTaskGuard {")
+            .expect("watcher wrapper has its next symbol boundary");
+        let cleanup = wrapper.find("\n        drop(cleanup_guard);");
+        let completion = wrapper.find("\n        completion.finish(");
+        assert!(
+            matches!((cleanup, completion), (Some(drop_at), Some(finish_at)) if drop_at < finish_at),
+            "wrapper must explicitly drop cleanup_guard before completion.finish"
+        );
+    }
+
+    // This runtime check observes cleanup after ACK, but on current_thread it
+    // cannot distinguish swapped synchronous statements. The tripwire pins them.
     #[tokio::test]
     async fn completion_is_published_after_registry_cleanup() {
         let shared = make_shared_data_for_tests();
@@ -138,6 +155,10 @@ mod tests {
         task.await.unwrap();
     }
 
+    // #5071 T3-A2 regression lock (no behaviour change): the watcher task guard
+    // already removes through the registry's current-handle CAS. Pin both arms
+    // so the post-stream-exit sibling that now makes the same call cannot be
+    // "simplified" back into an unconditional or channel-keyed removal here.
     #[test]
     fn task_guard_removes_the_registry_entry_it_still_owns() {
         let shared = make_shared_data_for_tests();
