@@ -87,7 +87,7 @@ pub(super) fn route(
 /// Sound over-approximation of "this text can finish without a provider turn".
 /// Lemma L: for every `(provider, goals, dispatch_reset, has_preloaded)` whose
 /// [`route`] result is not `Continue(_)`, this predicate is true. It takes no
-/// provider on purpose — `runtime_transition` calls it before the final provider
+/// provider on purpose — R1 calls it before the final provider
 /// is resolved — so it over-includes. Over-inclusion leaves uploads in the
 /// channel; under-inclusion would hand them to a record that drops them.
 pub(super) fn may_complete_locally(user_text: &str) -> bool {
@@ -120,8 +120,8 @@ pub(super) async fn take_channel_input_state(
         .unwrap_or_default()
 }
 
-/// `[R3']`: uploads-only take for the busy-transition handoff. `cleared` has no
-/// `Intervention` field, so the session is the only place a later turn can read.
+/// Legacy uploads-only primitive retained for its cleared-state regression test.
+#[cfg(test)]
 pub(super) async fn take_channel_input_state_uploads_only(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
@@ -253,7 +253,7 @@ pub(super) async fn resolve(
 }
 
 #[cfg(test)]
-mod pre_admission_control_tests {
+pub(super) mod pre_admission_control_tests {
     use super::*;
 
     const NO_RESET: (bool, bool) = (false, false);
@@ -363,7 +363,7 @@ mod pre_admission_control_tests {
         }
     }
 
-    fn session_with(uploads: &[&str], cleared: bool) -> DiscordSession {
+    pub(crate) fn session_with(uploads: &[&str], cleared: bool) -> DiscordSession {
         DiscordSession {
             session_id: None,
             memento_context_loaded: false,
@@ -382,7 +382,7 @@ mod pre_admission_control_tests {
         }
     }
 
-    async fn fixture(session: Option<DiscordSession>) -> (Arc<SharedData>, ChannelId) {
+    pub(crate) async fn fixture(session: Option<DiscordSession>) -> (Arc<SharedData>, ChannelId) {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let channel = ChannelId::new(5_660_003);
         if let Some(session) = session {
@@ -518,32 +518,6 @@ mod pre_admission_control_tests {
         assert_eq!(src.matches(flag).count(), 1);
         assert_eq!(src.matches("mem::take(&mut s.pending_uploads").count(), 0);
         assert_eq!(src.matches("splice(0..0, taken_uploads)").count(), 2);
-    }
-
-    /// (f3) S3-20c'/20d: the conditional handoff take lives inside the busy arm
-    /// only, ahead of the enqueue, and its predicate cannot be dropped.
-    #[test]
-    fn runtime_transition_takes_uploads_only_inside_the_busy_arm() {
-        let src = include_str!("intake_turn/runtime_transition.rs");
-        let take = "take_channel_input_state_uploads_only(";
-        let busy_arm = offset(src, "Err(_) => {");
-        assert!(offset(src, "Ok(transition) => Ok(Some(transition))") < busy_arm);
-        assert!(busy_arm < offset(src, "may_complete_locally("));
-        assert!(offset(src, "may_complete_locally(") < offset(src, take));
-        assert!(offset(src, take) < offset(src, "race_loss::handle_race_loss_enqueue("));
-        assert_eq!(src.matches(take).count(), 1);
-        assert!(
-            src.split(take)
-                .nth(1)
-                .unwrap()
-                .split(')')
-                .next()
-                .unwrap()
-                .split_whitespace()
-                .collect::<String>()
-                .eq("shared,original_channel_id,")
-        );
-        assert_eq!(src.matches("may_complete_locally(").count(), 1);
     }
 
     /// (f3) S3-20e/20f: the guard stays between the lifecycle branch and the

@@ -49,25 +49,8 @@ pub(super) async fn acquire_after_redirect_or_requeue(
                 channel_id = channel_id.get(),
                 "session transition is busy; preserving intake immediately as a durable queued intervention"
             );
-            // #5660 [R3']: with the take deferred, the channel session may still
-            // hold uploads. This branch hands the input to a durable Intervention
-            // that another node can replay, so uploads must travel with it —
-            // but only for input that can actually become a provider turn.
-            // Loading them onto an input that completes locally would drop them
-            // when the replay returns early. `cleared` has no Intervention field
-            // and stays in the session either way.
-            let merged: Vec<String> = if pre_admission_control::may_complete_locally(user_text) {
-                pending_uploads.to_vec()
-            } else {
-                pre_admission_control::take_channel_input_state_uploads_only(
-                    shared,
-                    original_channel_id,
-                )
-                .await
-                .into_iter()
-                .chain(pending_uploads.iter().cloned())
-                .collect()
-            };
+            // Ordinary input already owns its R1 uploads; later arrivals stay
+            // in the session. Locally completable input leaves them there too.
             race_loss::handle_race_loss_enqueue(
                 http,
                 shared,
@@ -82,7 +65,7 @@ pub(super) async fn acquire_after_redirect_or_requeue(
                 reply_context,
                 has_reply_boundary,
                 merge_consecutive,
-                &merged,
+                pending_uploads,
                 voice_announcement,
                 reply_to_user_message,
                 dispatch_id_for_thread,
@@ -93,5 +76,41 @@ pub(super) async fn acquire_after_redirect_or_requeue(
             .await?;
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pre_admission_control::{
+        pre_admission_control_tests::{fixture, session_with},
+        take_channel_input_state,
+    };
+    #[tokio::test]
+    #[rustfmt::skip]
+    async fn runtime_transition_takes_uploads_only_inside_the_busy_arm() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        let (shared, channel) = fixture(Some(session_with(&["U1"], false))).await;
+        let (owned, _) = take_channel_input_state(&shared, channel).await;
+        let mut core = shared.core.lock().await;
+        core.sessions.get_mut(&channel).unwrap().pending_uploads.push("U2".into());
+        drop(core);
+        let _held = shared.session_transition_lock(channel).lock_owned().await;
+        let http = Arc::new(serenity::HttpBuilder::new("test-token")
+            .proxy("http://127.0.0.1:1").ratelimiter_disabled(true).build());
+        // Run the real busy arm; downstream persistence is not the ownership oracle.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1),
+            acquire_after_redirect_or_requeue(
+                (&http, &shared, "test-token", &ProviderKind::Codex), (channel, channel),
+                (TurnKind::Foreground, UserId::new(1), MessageId::new(566_003), "A"),
+                (&None, false, false), (&owned, &None),
+                (false, &None, None, false), (None, false, String::new()),
+            )).await;
+        assert_eq!(owned, ["U1"]);
+        assert_eq!(shared.core.lock().await.sessions[&channel].pending_uploads, ["U2"]);
+        let src = include_str!("runtime_transition.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(!src.contains("take_channel_input_state"));
+        assert!(src.contains("                pending_uploads,"));
     }
 }
