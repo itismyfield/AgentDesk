@@ -65,6 +65,26 @@ cfg-guarded.
 `ci-nightly.yml` has the same Windows boundary today: its Windows lane runs
 default-feature `cargo test --all-targets`.
 
+### Local Windows GNU compile check from macOS
+
+Use the repository's pinned Rust toolchain and install the cross compiler:
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+brew install mingw-w64
+cargo check --target x86_64-pc-windows-gnu --lib
+```
+
+If bindgen cannot locate the target headers, set the target-specific include
+path before retrying (adjust it to the installed MinGW sysroot):
+
+```bash
+export BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_gnu="-I$(brew --prefix mingw-w64)/toolchain-x86_64/x86_64-w64-mingw32/include"
+```
+
+This checks `cfg(windows)` / `not(unix)` compilation, not native Windows
+execution. GNU is not MSVC; the PR's native Windows lane is still required.
+
 ## Strict Clippy Debt
 
 `cargo clippy --workspace --all-targets --all-features -- -D warnings` currently

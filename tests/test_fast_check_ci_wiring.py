@@ -430,6 +430,15 @@ class FastCheckCiWiringTests(unittest.TestCase):
             for mutated in mutations:
                 self.assertNotEqual(self.run_hardening_fixture(mutated).returncode, 0)
 
+    def test_cfg_gated_relay_consumers_select_windows(self) -> None:
+        paths = paths_filter_definitions(PR_WORKFLOW.read_text())["cross_os_rust"]
+        for owner in (
+            "turn_bridge/**", "watchers/**", "tmux_watcher_registry.rs",
+            "tmux_watcher_registry/**", "tmux*.rs", "tmux_watcher/**", "mod.rs",
+        ):
+            with self.subTest(owner=owner):
+                self.assertEqual(paths.count(f"src/services/discord/{owner}"), 1)
+
     def test_inflight_lock_primitive_triggers_required_native_windows_lane(self) -> None:
         workflow = PR_WORKFLOW.read_text(encoding="utf-8")
         jobs = yaml.safe_load(workflow)["jobs"]

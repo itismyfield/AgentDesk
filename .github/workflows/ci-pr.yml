@@ -348,6 +348,14 @@ jobs:
               - 'src/services/cluster/**'
               - 'src/services/codex_tui/**'
               - 'src/services/dispatches/**'
+              # Include cfg-gated tmux owners and their relay consumers (#5832).
+              - 'src/services/discord/turn_bridge/**'
+              - 'src/services/discord/watchers/**'
+              - 'src/services/discord/tmux_watcher_registry.rs'
+              - 'src/services/discord/tmux_watcher_registry/**'
+              - 'src/services/discord/tmux*.rs'
+              - 'src/services/discord/tmux_watcher/**'
+              - 'src/services/discord/mod.rs'
               # The inflight sidecar primitive uses the cross-platform
               # std::fs::File advisory-lock API. Changes to its owners must
               # compile all targets in the required native Windows lane.
