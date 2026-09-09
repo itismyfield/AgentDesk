@@ -2522,8 +2522,7 @@ async fn maybe_recover_completed_stale_leak(
         discord::inflight::persist_leak_recovery_response_offset_if_matches_identity_locked(
             provider,
             channel_id.get(),
-            &discord::inflight::InflightTurnIdentity::from_state(&state),
-            state.current_msg_id,
+            &state,
             end,
         );
     if matches!(
@@ -3187,7 +3186,6 @@ mod stall_watchdog_pure_tests {
         snapshot.full_response = "already relayed plus recovered tail".to_string();
         snapshot.response_sent_offset = 7;
         inflight::save_inflight_state(&snapshot).expect("seed leak snapshot row");
-        let identity = InflightTurnIdentity::from_state(&snapshot);
         let delivered_offset = snapshot.full_response.len();
 
         let mut concurrent = inflight::load_inflight_state(&provider, channel_id.get())
@@ -3200,8 +3198,7 @@ mod stall_watchdog_pure_tests {
         let outcome = inflight::persist_leak_recovery_response_offset_if_matches_identity_locked(
             &provider,
             channel_id.get(),
-            &identity,
-            snapshot.current_msg_id,
+            &snapshot,
             delivered_offset,
         );
 
