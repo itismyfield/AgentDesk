@@ -1,17 +1,9 @@
-//! Delivery policy for actionable operational outbox alerts (#4449).
-//!
-//! The durable row keeps its existing channel target and dedupe identity.  An
-//! announce-bot post is the primary delivery so the configured operations
-//! channel receives the notice through its resident role. Non-turn provenance
-//! keeps the notice out of intervention intake. If that bot cannot deliver,
-//! retry once with the notify bot so the human-visible alert survives an
-//! announce credential/runtime failure. Informational rows never enter this
-//! fallback path.
-
+//! Retired sources terminate; actionable alerts can fall back from announce to notify.
 use sqlx::PgPool;
 
 use super::PendingMessageOutboxRow;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::outbound::source_registry::RETIRED_SEND_SOURCES;
 
 fn should_fallback_to_notify(
     status: &str,
@@ -66,6 +58,9 @@ pub(super) async fn deliver(
     pg_pool: &PgPool,
     row: &PendingMessageOutboxRow,
 ) -> (String, String) {
+    if RETIRED_SEND_SOURCES.contains(&row.source.as_str()) {
+        return ("retired_source".into(), "retired_source".into());
+    }
     let primary_bot = crate::services::message_outbox::delivery_bot_for_target_session(
         &row.target,
         &row.bot,
@@ -97,6 +92,16 @@ pub(super) async fn deliver(
     )
     .await;
     (fallback_status.to_string(), fallback_error)
+}
+
+pub(super) fn failure_action(row: &PendingMessageOutboxRow) -> super::MessageOutboxFailureAction {
+    if RETIRED_SEND_SOURCES.contains(&row.source.as_str()) {
+        super::MessageOutboxFailureAction::Fail {
+            retry_count: row.retry_count,
+        }
+    } else {
+        super::message_outbox_failure_action(row.retry_count)
+    }
 }
 
 #[cfg(test)]

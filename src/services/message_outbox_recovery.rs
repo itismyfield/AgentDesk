@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::services::discord::outbound::source_registry::{
-    SendCallerClass, validate_send_source_for,
+    RETIRED_SEND_SOURCES, SendCallerClass, validate_send_source_for,
 };
 use crate::services::message_outbox_recovery_support::{
     FailedOutboxInspection, OutboxRow, RedriveOutcome, load_rows, outcome, semantic_key,
@@ -60,7 +60,10 @@ pub(crate) async fn redrive_failed_rows(
 ) -> Result<Vec<RedriveOutcome>, RecoveryError> {
     let mut tx = pool.begin().await?;
     let rows = load_rows(&mut *tx, ids, !dry_run).await?;
-    for row in &rows {
+    for row in rows
+        .iter()
+        .filter(|row| !RETIRED_SEND_SOURCES.contains(&row.source.as_str()))
+    {
         validate_send_source_for(&row.source, SendCallerClass::LoopbackInternal).map_err(|_| {
             RecoveryError::SourceNotAllowed {
                 id: row.id,
@@ -96,6 +99,13 @@ pub(crate) async fn redrive_failed_rows(
                 ("already_in_flight", None)
             }
             Some(row) if row.status != "failed" => ("not_failed", None),
+            Some(row) if RETIRED_SEND_SOURCES.contains(&row.source.as_str()) => {
+                if !dry_run {
+                    sqlx::query("UPDATE message_outbox SET error='retired_source',next_attempt_at=NULL,claimed_at=NULL,claim_owner=NULL WHERE id=$1 AND status='failed'").bind(id).execute(&mut *tx).await?;
+                    tracing::warn!(outbox_id = id, "retired_source: refusing outbox redrive");
+                }
+                ("retired_source", None)
+            }
             Some(row) if canonical.get(&semantic_key(row)).copied() != Some(*id) => (
                 "duplicate_failed_identity",
                 canonical.get(&semantic_key(row)).copied(),

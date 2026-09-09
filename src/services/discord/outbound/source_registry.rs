@@ -1,5 +1,7 @@
 //! Single authorization registry for Discord outbound source labels.
 
+pub(crate) const RETIRED_SEND_SOURCES: &[&str] = &["merge-automation"];
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SendCallerClass {
     LoopbackInternal,

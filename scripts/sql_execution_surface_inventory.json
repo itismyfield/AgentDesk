@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "d0ac5f498e2b4d3f3d138e0981bead13a5521369",
+  "measured_at_sha": "0ab074bb56354e4b4c15c5a1a1907d0d5568141e",
   "records": [
     {
       "root": "migrations/postgres",
@@ -28531,6 +28531,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:39dee7935f177bcbf6c8c485e9bc3ff4861b6cd1545b3a569abebe8990af9201"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/message_outbox_recovery.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9a121e9884a570730a4f0d29da47215276a0af36533b00db806a300ee1b9c782"
     },
     {
       "root": "src",

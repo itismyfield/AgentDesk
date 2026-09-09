@@ -1203,6 +1203,35 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn retired_merge_config_keys_stay_unregistered_pg() {
+        let database = TestDatabase::create().await;
+        let pool = database.connect().await;
+        let config = Arc::new(crate::config::Config::default());
+        let service = SettingsService::new(Some(pool.clone()), config.clone());
+        let mut keys = CONFIG_KEYS.iter().map(|(key, ..)| key);
+        assert!(!keys.any(|key| key.starts_with("merge_")));
+        let actions = config_default_seed_actions(&config);
+        for key in [
+            "merge_automation_enabled",
+            "merge_strategy",
+            "merge_strategy_mode",
+            "merge_allowed_authors",
+        ] {
+            upsert_test_kv(&pool, key, "legacy").await;
+            assert!(!actions.iter().any(|action| matches!(action, KvSeedAction::Put { key: k, .. } | KvSeedAction::PutIfAbsent { key: k, .. } if k == key)));
+            let response = service
+                .patch_config_entries(json!({key: "revived"}))
+                .await
+                .unwrap();
+            assert_eq!(response.updated, 0);
+            assert_eq!(response.rejected, vec![key]);
+        }
+        let entries = service.get_config_entries().await.unwrap().entries;
+        assert!(entries.iter().all(|entry| !entry.key.starts_with("merge_")));
+        database.drop().await;
+    }
+
     #[test]
     fn settings_response_dtos_serialize_existing_contract_fields() {
         let response = SettingsConfigEntriesResponse {
