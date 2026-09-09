@@ -12,6 +12,7 @@ use sqlx::PgPool;
 
 use super::PendingMessageOutboxRow;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::outbound::source_registry::RETIRED_SEND_SOURCES;
 
 fn should_fallback_to_notify(
     status: &str,
@@ -66,6 +67,9 @@ pub(super) async fn deliver(
     pg_pool: &PgPool,
     row: &PendingMessageOutboxRow,
 ) -> (String, String) {
+    if RETIRED_SEND_SOURCES.contains(&row.source.as_str()) {
+        return ("retired_source".into(), "retired_source".into());
+    }
     let primary_bot = crate::services::message_outbox::delivery_bot_for_target_session(
         &row.target,
         &row.bot,
@@ -97,6 +101,16 @@ pub(super) async fn deliver(
     )
     .await;
     (fallback_status.to_string(), fallback_error)
+}
+
+pub(super) fn failure_action(row: &PendingMessageOutboxRow) -> super::MessageOutboxFailureAction {
+    if RETIRED_SEND_SOURCES.contains(&row.source.as_str()) {
+        super::MessageOutboxFailureAction::Fail {
+            retry_count: row.retry_count,
+        }
+    } else {
+        super::message_outbox_failure_action(row.retry_count)
+    }
 }
 
 #[cfg(test)]
