@@ -974,6 +974,8 @@ src/
 │   │   │   │   └── idle_gate.rs
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   └── types.rs
+│   │   │   ├── terminal_commit_epilogue/
+│   │   │   │   └── continuation_marker_tests.rs
 │   │   │   ├── turn_identity/
 │   │   │   │   └── soft_terminal_authority.rs
 │   │   │   ├── commit_decisions.rs
