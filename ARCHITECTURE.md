@@ -25,7 +25,8 @@ src/
 │   │   └── runtime_config.rs
 │   ├── doctor/
 │   │   ├── orchestrator/
-│   │   │   └── config_dir_checks.rs
+│   │   │   ├── config_dir_checks.rs
+│   │   │   └── relay_notifications.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
@@ -474,6 +475,8 @@ src/
 │   │   ├── transcript_tail.rs
 │   │   └── tui_relay.rs
 │   ├── cluster/
+│   │   ├── attachment_transfer/
+│   │   │   └── tests.rs
 │   │   ├── intake_router_hook/
 │   │   │   ├── owner_record.rs
 │   │   │   └── session_owner.rs
@@ -486,6 +489,7 @@ src/
 │   │   │   ├── identity.rs
 │   │   │   ├── shutdown.rs
 │   │   │   └── terminal_resolution.rs
+│   │   ├── attachment_transfer.rs
 │   │   ├── capability_routing.rs
 │   │   ├── intake_preflight.rs
 │   │   ├── intake_router_hook.rs
@@ -753,6 +757,8 @@ src/
 │   │   │   ├── manual_rebind/
 │   │   │   │   ├── adoption.rs
 │   │   │   │   ├── codex_tui_replay.rs
+│   │   │   │   ├── coordinate_adoption.rs
+│   │   │   │   ├── coordinate_adoption_tests.rs
 │   │   │   │   ├── episode_handoff.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── post_adoption_guard_tests.rs
@@ -970,7 +976,11 @@ src/
 │   │   │   │   ├── backstop_tests.rs
 │   │   │   │   └── idle_gate.rs
 │   │   │   ├── streaming_status_tick/
+│   │   │   │   ├── committed_progress_tests.rs
+│   │   │   │   ├── existing_panel_update.rs
 │   │   │   │   └── types.rs
+│   │   │   ├── terminal_commit_epilogue/
+│   │   │   │   └── continuation_marker_tests.rs
 │   │   │   ├── turn_identity/
 │   │   │   │   └── soft_terminal_authority.rs
 │   │   │   ├── commit_decisions.rs
