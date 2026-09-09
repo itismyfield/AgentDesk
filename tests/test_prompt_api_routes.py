@@ -107,6 +107,18 @@ class PromptRoutes(unittest.TestCase):
             with self.subTest(template=template):
                 self.assertEqual(self.run_check(template.replace('URL', 'http://localhost:1/api/send'))[0], expected)
 
+    def test_quoted_span_second_token(self):
+        # r6: a trailing quote closes the URL's own span only while that quote is still
+        # open, so a URL that is not the span's first token stays a candidate.
+        for template in ('- ADK API 사용: "POST URL"', '상태 확인은 "curl URL" 로 한다.',
+                         'Run "curl URL" first.', "상태 확인은 'curl URL' 로 한다.",
+                         '```sh\necho "curl URL"\n```',
+                         '"http://localhost:1/api/discord/send 와 URL"'):
+            with self.subTest(template=template):
+                rc, output = self.run_check(template.replace('URL', 'http://localhost:1/api/send'))
+                self.assertEqual(rc, 1)
+                self.assertIn('unknown_path /api/send', output)
+
     def test_fence_closing_contract(self):
         for marker in ('~~~', '```', '````bash'):
             with self.subTest(marker=marker):

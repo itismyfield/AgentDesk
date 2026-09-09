@@ -10,8 +10,12 @@ JOIN = re.compile(r'''\s*\+|[/${"']''')
 
 def joined(line, match):
     """True when a path continues past the matched URL token's own closing quote."""
-    rest, quote = line[match.end():], line[match.start() - 1:match.start()]
-    return bool(JOIN.match(rest[1:] if quote in ('"', "'") and rest[:1] == quote else rest))
+    rest, quote = line[match.end():], line[match.end():match.end() + 1]
+    # A quote right after the token closes the token's own span whenever that quote is
+    # still open, no matter how many words of the span preceded the URL.
+    if quote in ('"', "'") and line[:match.start()].count(quote) % 2 == 1:
+        rest = rest[1:]
+    return bool(JOIN.match(rest))
 
 def inventory(repo):
     root = repo / 'src/server/routes/docs/inventory/endpoints'
