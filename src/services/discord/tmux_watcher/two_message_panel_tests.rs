@@ -309,3 +309,184 @@ fn isolate_agentdesk_runtime_root_for_two_message_tests()
         },
     )
 }
+
+// Real HTTP adapter and watcher tail, with every external operation recorded.
+async fn exercise_status_panel_ledger_failure_4891(watcher_tail: bool) {
+    use crate::services::discord::status_panel_orphan_store as orphans;
+    use axum::{Json, Router, body::Bytes, http::Method, routing::any};
+    let _env = isolate_agentdesk_runtime_root_for_two_message_tests();
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    let ui = &mut Arc::get_mut(&mut shared).unwrap().ui;
+    ui.status_panel_v2_enabled = true;
+    ui.two_message_panel_enabled = true;
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    let app = Router::new().fallback(any(move |method: Method, body: Bytes| {
+        let recorded = recorded.clone();
+        async move {
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            recorded.lock().unwrap().push((method, payload.clone()));
+            Json(serde_json::json!({
+                "id": "4891999", "channel_id": "777", "content": payload["content"],
+                "author": {"id":"1", "username":"test", "discriminator":"0001", "avatar":null},
+                "timestamp":"2026-09-09T00:00:00+00:00", "edited_timestamp":null,
+                "tts":false, "mention_everyone":false, "mentions":[], "mention_roles":[],
+                "attachments":[], "embeds":[], "pinned":false, "type":0
+            }))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = Arc::new(
+        serenity::HttpBuilder::new("test-token")
+            .proxy(format!("http://{}", listener.local_addr().unwrap()))
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(777);
+    let panel = serenity::MessageId::new(4891001);
+    crate::services::discord::inflight::save_inflight_state(&on_disk(Some(4891002), 0)).unwrap();
+    for action in ["edit", "already", "send"] {
+        let target = (action != "send").then_some(panel);
+        let mut text = String::new();
+        if action == "already" {
+            shared.ui.placeholder_live_events.push_status_event(
+                channel,
+                StatusEvent::TurnCompleted {
+                    background: false,
+                    background_agent_pending: false,
+                },
+            );
+            text = shared
+                .ui
+                .placeholder_live_events
+                .render_status_panel(channel, &provider, 1700000000);
+        }
+        if let Some(id) = target {
+            orphans::enqueue_pending_bind(
+                &provider,
+                &shared.token_hash,
+                channel.get(),
+                id.get(),
+                None,
+            );
+        }
+        calls.lock().unwrap().clear();
+        if watcher_tail {
+            complete_watcher_status_panel_v2_with_generation_guard(
+                &http,
+                &shared,
+                channel,
+                &provider,
+                1700000000,
+                target,
+                &mut text,
+                false,
+                false,
+                Some(6000001),
+                true,
+                false,
+            )
+            .await;
+        } else {
+            assert!(
+                crate::services::discord::turn_bridge::complete_status_panel_v2_with_http(
+                    &shared,
+                    &http,
+                    channel,
+                    target,
+                    &provider,
+                    1700000000,
+                    &mut text,
+                    false,
+                    false,
+                    "test_http_4891",
+                    (Some(6000001), None),
+                )
+                .await,
+                "ledger failure must not negate HTTP completion: {action}"
+            );
+        }
+        assert_eq!(
+            crate::services::discord::status_panel_singleton_store::load(
+                &provider,
+                &shared.token_hash,
+                channel.get()
+            ),
+            None,
+            "ledger must really fail"
+        );
+        // Assert the actual tail's enqueue decision before running the destructive consumer.
+        assert!(
+            orphans::load_pending(&provider, &shared.token_hash).is_empty(),
+            "orphan queued: {action}"
+        );
+        assert_eq!(
+            orphans::drain(&http, &shared, &provider, &shared.token_hash).await,
+            0
+        );
+        let effects = calls.lock().unwrap();
+        assert_eq!(
+            effects.iter().filter(|(m, _)| *m == Method::DELETE).count(),
+            0
+        );
+        if action == "already" {
+            assert!(
+                effects.is_empty(),
+                "already committed must not send or edit"
+            );
+        } else {
+            assert_eq!(effects.len(), 1);
+            assert_eq!(
+                effects[0].0,
+                if action == "send" {
+                    Method::POST
+                } else {
+                    Method::PATCH
+                }
+            );
+            assert!(effects[0].1["content"].as_str().unwrap().contains("완료"));
+        }
+        assert!(text.contains("완료"));
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn status_panel_http_adapter_preserves_completion_on_ledger_failure_4891() {
+    exercise_status_panel_ledger_failure_4891(false).await;
+}
+
+#[tokio::test]
+async fn status_panel_watcher_tail_does_not_queue_completed_panel_4891() {
+    // The watcher reads a process-cached, default-ON footer flag before HTTP.
+    // A fresh process pins separate-panel mode without changing the sweep's cache.
+    const CHILD: &str = "AGENTDESK_4891_PANEL_FIXTURE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let test_name = format!(
+            "{}::status_panel_watcher_tail_does_not_queue_completed_panel_4891",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test_name, "--nocapture"])
+            .env(CHILD, "1")
+            .env("AGENTDESK_SINGLE_MESSAGE_PANEL", "0")
+            .output()
+            .expect("run isolated watcher fixture");
+        assert!(
+            output.status.success(),
+            "watcher fixture failed: {:?}",
+            output
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+        return;
+    }
+    assert!(!crate::services::discord::single_message_panel_enabled());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        exercise_status_panel_ledger_failure_4891(true),
+    )
+    .await
+    .expect("watcher fixture must finish its HTTP assertions");
+}
