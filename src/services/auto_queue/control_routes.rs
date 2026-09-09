@@ -89,7 +89,9 @@ pub async fn reset_slot_thread(
 }
 
 /// POST /api/queue/reset
-/// Reset a single agent queue. Requires `agent_id`.
+/// Reset a single auto-queue run. Requires `run_id`; `agent_id`/`repo` only
+/// narrow the target further (#4880). Agent-wide reset is a separate,
+/// confirmation-gated endpoint and is deliberately not reachable from here.
 pub async fn reset(
     State(state): State<AppState>,
     body: Bytes,
@@ -104,26 +106,32 @@ pub async fn reset(
         }
     };
 
-    let agent_id = match body
-        .agent_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(agent_id) => agent_id,
-        None => {
-            return Err(auto_queue_json_error(
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "agent_id is required for reset"})),
-            ));
-        }
-    };
+    let run_id = body.run_id.trim();
+    if run_id.is_empty() {
+        return Err(auto_queue_json_error(
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "run_id is required for reset"})),
+        ));
+    }
+    fn scope(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|value| !value.is_empty())
+    }
+    let agent_id = scope(body.agent_id.as_deref());
+    let repo = scope(body.repo.as_deref());
 
     let Some(pool) = state.pg_pool_ref() else {
         return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
-    match reset_scoped_with_pg(agent_id, pool).await {
+    match reset_run_scoped_with_pg(run_id, agent_id, repo, pool).await {
         Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(error) if error.starts_with(RESET_RUN_NOT_FOUND) => Err(auto_queue_json_error(
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": error})),
+        )),
+        Err(error) if error.starts_with(RESET_RUN_SCOPE_MISMATCH) => Err(auto_queue_json_error(
+            StatusCode::CONFLICT,
+            Json(json!({"error": error})),
+        )),
         Err(error) => Err(auto_queue_json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": error})),
