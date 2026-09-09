@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use futures::FutureExt;
 
 use super::SharedData;
+pub(in crate::services::discord) mod watcher_completion;
 
 pub(in crate::services::discord) fn spawn_observed<F>(
     task_name: &'static str,
@@ -39,13 +40,23 @@ pub(in crate::services::discord) fn spawn_observed_tmux_watcher<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    let completion = watcher_completion::Registration::new(cancel.clone());
     spawn_observed(task_name, async move {
-        let _cleanup_guard = TmuxWatcherTaskGuard {
+        let cleanup_guard = TmuxWatcherTaskGuard {
             shared,
             tmux_session_name,
             cancel,
         };
-        future.await;
+        let outcome = AssertUnwindSafe(future).catch_unwind().await;
+        drop(cleanup_guard);
+        let result = match outcome {
+            Ok(()) => watcher_completion::Outcome::Returned,
+            Err(payload) => {
+                tracing::error!(task_name, panic = %panic_payload_summary(payload.as_ref()), "discord background task panicked");
+                watcher_completion::Outcome::Panicked
+            }
+        };
+        completion.finish(result);
     })
 }
 
@@ -107,6 +118,26 @@ mod tests {
     // already removes through the registry's current-handle CAS. Pin both arms
     // so the post-stream-exit sibling that now makes the same call cannot be
     // "simplified" back into an unconditional or channel-keyed removal here.
+    #[tokio::test]
+    async fn completion_is_published_after_registry_cleanup() {
+        let shared = make_shared_data_for_tests();
+        let tmux = "completion-cleanup-order";
+        let handle = watcher_handle(tmux);
+        let cancel = handle.cancel.clone();
+        shared.tmux_watchers.insert(ChannelId::new(5808), handle);
+        let task = spawn_observed_tmux_watcher(
+            "completion-cleanup",
+            shared.clone(),
+            tmux.into(),
+            cancel.clone(),
+            async {},
+        );
+        let ticket = watcher_completion::observe(&cancel).unwrap();
+        assert_eq!(ticket.wait().await, watcher_completion::Outcome::Returned);
+        assert!(!shared.tmux_watchers.has_live_watcher_handle(tmux));
+        task.await.unwrap();
+    }
+
     #[test]
     fn task_guard_removes_the_registry_entry_it_still_owns() {
         let shared = make_shared_data_for_tests();
