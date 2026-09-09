@@ -5947,6 +5947,7 @@ services::discord::tui_direct_abort_marker::warning_tests::deferred_claim_probe_
 services::discord::tui_direct_pending_start::tests::abandoned_presence_clear_keeps_durable_record
 services::discord::tui_direct_pending_start::tests::abort_pin_prefers_last_view_identity_over_successor_row
 services::discord::tui_direct_pending_start::tests::backstop_abort_promotes_queued_follow_up_without_evicting_inflight
+services::discord::tui_direct_pending_start::tests::backstop_abort_releases_the_abandoned_prompt_anchor_slot
 services::discord::tui_direct_pending_start::tests::backstop_claim_safe_only_when_foreign_inflight_gone
 services::discord::tui_direct_pending_start::tests::backstop_failed_reclaim_falls_back_to_bounded_abort
 services::discord::tui_direct_pending_start::tests::backstop_foreign_inflight_live_aborts_without_claim
@@ -5955,6 +5956,8 @@ services::discord::tui_direct_pending_start::tests::bridge_owned_claim_records_n
 services::discord::tui_direct_pending_start::tests::channel_a_defers_until_prior_clears_while_channel_b_does_not_starve
 services::discord::tui_direct_pending_start::tests::claim_false_exhausted_still_retains_record
 services::discord::tui_direct_pending_start::tests::claim_false_retains_record_and_retries
+services::discord::tui_direct_pending_start::tests::claim_retry_exhaustion_leaves_a_newer_turns_prompt_anchor_in_place
+services::discord::tui_direct_pending_start::tests::claim_retry_exhaustion_releases_the_abandoned_prompt_anchor_slot
 services::discord::tui_direct_pending_start::tests::committed_leaked_foreign_row_clears_then_pending_start_claims
 services::discord::tui_direct_pending_start::tests::durable_restore_roundtrip_loads_fifo_order
 services::discord::tui_direct_pending_start::tests::enforce_mode_stale_foreign_demote_refuses_a_replaced_owner_and_output
@@ -5991,6 +5994,7 @@ services::discord::tui_direct_pending_start::tests::stale_foreign_gate_pass_then
 services::discord::tui_direct_pending_start::tests::stale_foreign_inflight_dead_frontier_is_demoted_via_finalizer_cancel
 services::discord::tui_direct_pending_start::tests::stale_foreign_same_identity_revival_blocks_destructive_cancel
 services::discord::tui_direct_pending_start::tests::successful_watcher_owned_claim_records_own_identity_marker
+services::discord::tui_direct_pending_start::tests::transient_claim_retry_and_success_keep_the_prompt_anchor_slot
 services::discord::tui_prompt_relay::anchor_completion::tests::cross_turn_anchor_cleanup_targets_own_message_and_preserves_later_turn
 services::discord::tui_prompt_relay::anchor_completion::tests::direct_anchor_lifecycle_does_not_complete_preserved_cleanup_retry
 services::discord::tui_prompt_relay::anchor_completion::tests::direct_anchor_lifecycle_requires_visible_terminal_body
