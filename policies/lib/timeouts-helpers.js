@@ -364,7 +364,7 @@ function isSyntheticMissingInflightReattachPlaceholder(inf) {
     inf.has_post_tool_text === false;
 }
 
-// Serialized contract: inflight/model.rs:574; tui_prompt_relay.rs:204 (owner user 1).
+// Serialized contract: inflight/model/turn_kinds.rs:20-42; tui_prompt_relay.rs:204 (owner user 1).
 function isExternalInputTuiDirectSyntheticTurn(inf) {
   return !!inf && inf.turn_source === "external_input" &&
     (inf.request_owner_user_id === 1 || inf.request_owner_user_id === "1") &&

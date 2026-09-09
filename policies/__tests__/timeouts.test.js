@@ -822,6 +822,7 @@ test("S7 active monitor exempts synthetic turns without force-kill or repeated l
         assert.equal(kills().length, 0, "synthetic owner must not force-kill");
         const logCount = state.logs.info.length + state.logs.warn.length;
         assert.equal(state.logs.info.filter((line) => line.includes("synthetic turn exempt")).length, 1);
+        state.kv.set(key, ' { "synthetic_exempt": true, "count": 0 } ');
         // Simulate repeated deadlock windows by aging a counter timestamp if one is written.
         for (let window = 0; window < 5; window++) {
           const value = state.kv.get(key);
@@ -1580,4 +1581,34 @@ test("timeouts idle-kill module excludes thread idle rows from the main batch", 
     assert.match(p.body.reason, /idle \d+(시간|일) 초과/);
     assert.equal(p.body.minimum_idle_minutes, 360);
   });
+});
+
+
+test("S7 ordinary successor clears synthetic marker and starts its own counter", () => {
+  const sessionKey = "provider:AgentDesk-claude-successor";
+  let source = "external_input";
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    inflightList() { return [{
+      session_key: sessionKey, channel_id: "channel-1", provider: "claude",
+      tmux_session_name: "AgentDesk-claude-successor",
+      turn_source: source, request_owner_user_id: 1,
+      started_at: timestampMinutesAgo(100), updated_at: timestampMinutesAgo(40)
+    }]; },
+    timeouts: { deadlockCandidates: [{ session_key: sessionKey, agent_id: "agent-1" }] },
+    exec() { return "0\n"; },
+    httpPost() { return { ok: true, tmux_killed: true }; }
+  });
+  const key = "deadlock_check:" + sessionKey;
+  policy._section_I();
+  assert.equal(JSON.parse(state.kv.get(key)).synthetic_exempt, true);
+  source = "managed";
+  policy._section_I();
+  const counter = JSON.parse(state.kv.get(key));
+  assert.equal(counter.synthetic_exempt, undefined);
+  assert.equal(counter.count, 1);
+  assert.ok(counter.ts > 0);
+  assert.equal(state.httpPosts.filter((post) => post.url.endsWith("/force-kill")).length, 0);
+  policy._section_I();
+  assert.equal(JSON.parse(state.kv.get(key)).count, 1, "ordinary window must not double-count");
 });
