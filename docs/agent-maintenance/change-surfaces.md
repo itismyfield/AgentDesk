@@ -211,6 +211,20 @@ time for diagnostics; neither is a stored approval value.
   no open, append, rotate, truncate, cleanup, configuration, or cutover caller.
 
 
+### `restart_shutdown_transport`
+
+- canonical_modules: `services::discord::shared_state` owns `ShutdownReader`
+  (`load` + `Clone` only; `RestartLifecycle::shutdown_reader` is its one
+  constructor) and the seven `legacy_*` restart-flag writer adapters. Shutdown
+  observers take a reader; the four `runtime_bootstrap` writers call an adapter.
+- invariants: each adapter stores exactly the flags its original call site
+  stored, in the same order and with the same `SeqCst` ordering.
+- non_guarantees: #5485 S2a preserves behaviour and does NOT close #5485.
+  `legacy_*` is convention, not owner enforcement — the raw fields stay
+  `pub(in crate::services)` and ownerless rollback remains until S2b. Its only
+  enforcement is `TransportLegacyInventoryTests` in
+  `tests/test_intake_outbox_done_writer_call_sites.py` (#5485).
+
 ### `writer_gate_ci_wiring`
 
 - canonical_modules: `scripts/check_writer_gate_ci_wiring.py` owns the exact
