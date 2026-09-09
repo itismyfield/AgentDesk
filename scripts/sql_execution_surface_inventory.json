@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "ec3fbd3fbfbaa21ae98bc33a18d76b3993456248",
+  "measured_at_sha": "c0296e70856c54c9012dd88b4ef48652a59671c8",
   "records": [
     {
       "root": "migrations/postgres",
@@ -21213,6 +21213,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:1de6de4be1d9cd772915b9f1f6f9b113991d42747b6da03992e962386f6a880f"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/command.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:21b82d7af62cba099f063a47b5a0ac944454ace936f7a69a38c87e2bc38ffa08"
     },
     {
@@ -21294,6 +21303,15 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
+      "fingerprint": "sha256:60fffad90d32a2e89eab92b0004aae4f9f39efa880d0fa4b01ae6afc036421c2"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/command.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
       "fingerprint": "sha256:6a6b845f4de65dbf09fcb88060402e6def55a3a7b3e2088354c90da5b4926a87"
     },
     {
@@ -21304,15 +21322,6 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:70ae652449176ee08d39c8564816632565e37a3cc8236f6c3b9160e0e23a07e7"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/services/auto_queue/command.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
-      "fingerprint": "sha256:770d4b97720fbfca79d4c5d0b51179fc75f06939daa7503cfbb9b5176021ea4a"
     },
     {
       "root": "src",
@@ -21376,6 +21385,15 @@
       "symbol": "query",
       "classification": "STATIC",
       "fingerprint": "sha256:bc5b6bf9abcc1d667e3fc972766316ed0d197abfbe7765d52a5afc4aa5dec121"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/auto_queue/command.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c0cf2daed34141dfe279d57ea21383b178172d1b0d3249489a8918d760866354"
     },
     {
       "root": "src",

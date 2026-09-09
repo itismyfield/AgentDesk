@@ -88,10 +88,26 @@ pub async fn reset_slot_thread(
     }
 }
 
+/// One trimmed, non-empty scope value, or `None` when the caller omitted it.
+pub(super) fn reset_scope_value(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Status for a reset error: an unreachable run is a caller error, not a 500.
+pub(super) fn reset_error_status(error: &str) -> StatusCode {
+    if error.starts_with(RESET_RUN_NOT_FOUND) {
+        StatusCode::NOT_FOUND
+    } else if error.starts_with(RESET_RUN_SCOPE_MISMATCH) {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
 /// POST /api/queue/reset
 /// Reset a single auto-queue run. Requires `run_id`; `agent_id`/`repo` only
-/// narrow the target further (#4880). Agent-wide reset is a separate,
-/// confirmation-gated endpoint and is deliberately not reachable from here.
+/// narrow the target further (#4880). The one neighbouring reset route is
+/// `POST /api/queue/reset-global`; no agent-wide reset endpoint exists.
 pub async fn reset(
     State(state): State<AppState>,
     body: Bytes,
@@ -106,34 +122,22 @@ pub async fn reset(
         }
     };
 
-    let run_id = body.run_id.trim();
-    if run_id.is_empty() {
+    let Some(run_id) = reset_scope_value(Some(body.run_id.as_str())) else {
         return Err(auto_queue_json_error(
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "run_id is required for reset"})),
         ));
-    }
-    fn scope(value: Option<&str>) -> Option<&str> {
-        value.map(str::trim).filter(|value| !value.is_empty())
-    }
-    let agent_id = scope(body.agent_id.as_deref());
-    let repo = scope(body.repo.as_deref());
+    };
+    let agent_id = reset_scope_value(body.agent_id.as_deref());
+    let repo = reset_scope_value(body.repo.as_deref());
 
     let Some(pool) = state.pg_pool_ref() else {
         return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     match reset_run_scoped_with_pg(run_id, agent_id, repo, pool).await {
         Ok(response) => Ok((StatusCode::OK, Json(response))),
-        Err(error) if error.starts_with(RESET_RUN_NOT_FOUND) => Err(auto_queue_json_error(
-            StatusCode::NOT_FOUND,
-            Json(json!({"error": error})),
-        )),
-        Err(error) if error.starts_with(RESET_RUN_SCOPE_MISMATCH) => Err(auto_queue_json_error(
-            StatusCode::CONFLICT,
-            Json(json!({"error": error})),
-        )),
         Err(error) => Err(auto_queue_json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            reset_error_status(&error),
             Json(json!({"error": error})),
         )),
     }
@@ -917,5 +921,42 @@ mod phase_gate_repair_route_tests {
         caller.verify(Some("agent:real-orchestrator".to_string()));
         assert_eq!(caller.audit_label(), "agent:real-orchestrator");
         assert_eq!(caller.claimed, "agent:attacker-claim");
+    }
+}
+
+// #4880: the reset route's 400/404/409 split has no route-level coverage, so
+// the two decision points it is built from are asserted directly here.
+#[cfg(test)]
+mod reset_route_status_tests {
+    use super::{RESET_RUN_NOT_FOUND, RESET_RUN_SCOPE_MISMATCH, StatusCode};
+    use super::{reset_error_status, reset_scope_value};
+
+    #[test]
+    fn blank_run_id_is_rejected_before_any_database_work() {
+        assert!(reset_scope_value(Some("")).is_none());
+        assert!(reset_scope_value(Some("   ")).is_none());
+        assert!(reset_scope_value(None).is_none());
+        assert_eq!(reset_scope_value(Some("  run-1  ")), Some("run-1"));
+    }
+
+    #[test]
+    fn unknown_run_maps_to_not_found() {
+        let error = format!("{RESET_RUN_NOT_FOUND}: run-absent");
+        assert_eq!(reset_error_status(&error), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn scope_mismatch_maps_to_conflict() {
+        let error = format!("{RESET_RUN_SCOPE_MISMATCH}: run-1");
+        assert_eq!(reset_error_status(&error), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn database_failure_stays_a_server_error() {
+        let error = "delete auto_queue_entries for run run-1: connection reset".to_string();
+        assert_eq!(
+            reset_error_status(&error),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }
