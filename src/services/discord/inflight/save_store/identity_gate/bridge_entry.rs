@@ -134,13 +134,9 @@ fn patch_bridge_entry_state_if_identity_unchanged_in_root_impl(
         &after.current_msg_len,
         &on_disk.current_msg_len,
     ) || field_is_contended(
-        &before.full_response,
-        &after.full_response,
-        &on_disk.full_response,
-    ) || field_is_contended(
-        &before.response_sent_offset,
-        &after.response_sent_offset,
-        &on_disk.response_sent_offset,
+        &(&before.full_response, before.response_sent_offset),
+        &(&after.full_response, after.response_sent_offset),
+        &(&on_disk.full_response, on_disk.response_sent_offset),
     );
     if ui_patch_contended {
         tracing::warn!(
@@ -170,16 +166,12 @@ fn patch_bridge_entry_state_if_identity_unchanged_in_root_impl(
             &after.current_msg_len,
             &mut on_disk.current_msg_len,
         );
-        apply_changed(
-            &before.full_response,
-            &after.full_response,
-            &mut on_disk.full_response,
-        );
-        apply_changed(
-            &before.response_sent_offset,
-            &after.response_sent_offset,
-            &mut on_disk.response_sent_offset,
-        );
+        if (&before.full_response, before.response_sent_offset)
+            != (&after.full_response, after.response_sent_offset)
+        {
+            on_disk.full_response.clone_from(&after.full_response);
+            on_disk.response_sent_offset = after.response_sent_offset;
+        }
     }
 
     if !field_is_contended(
@@ -245,6 +237,63 @@ mod tests {
         state.current_msg_len = 12;
         state.full_response = "partial".to_string();
         state
+    }
+
+    #[test]
+    fn slice_a_pair_contention() {
+        let a = ("abcdef", 3);
+        let b = ("XYZdef", 3);
+        let c = ("abcdef", 5);
+        let d = ("XYZdef", 5);
+        for (local, disk, statuses, expected, len) in [
+            (b, a, (101, 101), b, 13), // A
+            (b, c, (101, 101), c, 12), // B1 cross
+            (c, b, (101, 101), b, 12), // B2 cross
+            (c, a, (102, 103), a, 12), // C status conflict
+            (c, a, (101, 103), c, 13), // D durable-only status
+            (c, c, (101, 101), c, 13), // E converged
+            (a, d, (101, 101), d, 13), // F unchanged local pair
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut before = placeholder_state(5752);
+            before.full_response = a.0.into();
+            before.response_sent_offset = a.1;
+            before.status_message_id = 101;
+            let mut after = before.clone();
+            after.full_response = local.0.into();
+            after.response_sent_offset = local.1;
+            after.current_msg_len = 13;
+            after.status_message_id = statuses.0;
+            let mut durable = before.clone();
+            durable.full_response = disk.0.into();
+            durable.response_sent_offset = disk.1;
+            durable.status_message_id = statuses.1;
+            save_inflight_state_in_root(root.path(), &durable).unwrap();
+            assert_eq!(
+                patch_bridge_entry_state_if_identity_unchanged_in_root(
+                    root.path(),
+                    &before,
+                    &mut after,
+                    "test::pair_contention",
+                ),
+                GuardedSaveOutcome::Saved,
+            );
+            let path = inflight_state_path(root.path(), &ProviderKind::Codex, 5752);
+            let saved = load_inflight_state_unlocked(&path).unwrap();
+            for state in [&after, &saved] {
+                assert_eq!(
+                    (state.full_response.as_str(), state.response_sent_offset),
+                    expected
+                );
+                assert_eq!(state.status_message_id, statuses.1);
+                assert_eq!(state.current_msg_len, len);
+                assert!(state.long_running_placeholder_active);
+            }
+            assert_eq!(
+                serde_json::to_value(&after).unwrap(),
+                serde_json::to_value(&saved).unwrap()
+            );
+        }
     }
 
     #[test]
