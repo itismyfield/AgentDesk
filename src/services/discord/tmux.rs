@@ -52,6 +52,7 @@ use super::{
 // `cfg(unix)`/`cfg(not(unix))` shim pair.
 #[path = "execution_identity.rs"]
 pub(in crate::services::discord) mod execution_identity;
+mod monitor_auto_turn_inflight;
 #[path = "tmux_placeholder_suppression/mod.rs"]
 mod placeholder_suppression;
 #[path = "tmux_reattach_offsets.rs"]
@@ -61,6 +62,7 @@ mod tmux_session_files;
 #[path = "watchers/lifecycle.rs"]
 mod watcher_lifecycle;
 
+use self::monitor_auto_turn_inflight::ensure_monitor_auto_turn_inflight;
 use self::placeholder_suppression::*;
 use self::tmux_reattach_offsets::matching_recent_watcher_reattach_offset;
 pub(in crate::services::discord) use self::tmux_session_files::committed_frontier_for_current_generation;
@@ -1214,72 +1216,6 @@ pub(in crate::services::discord) fn build_monitor_triggered_inflight_state(
     state
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn ensure_monitor_auto_turn_inflight(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    tmux_session_name: &str,
-    output_path: &str,
-    input_fifo_path: &str,
-    session_id: Option<&str>,
-    turn_start_offset: u64,
-    last_offset: u64,
-) {
-    if super::inflight::load_inflight_state(provider, channel_id.get()).is_some() {
-        return;
-    }
-
-    let channel_name = parse_provider_and_channel_from_tmux_name(tmux_session_name)
-        .map(|(_, channel_name)| channel_name);
-    let mut synthetic = super::inflight::InflightTurnState::new(
-        provider.clone(),
-        channel_id.get(),
-        channel_name,
-        0,
-        0,
-        0,
-        "Monitor auto-turn".to_string(),
-        session_id.map(str::to_string),
-        Some(tmux_session_name.to_string()),
-        Some(output_path.to_string()),
-        Some(input_fifo_path.to_string()),
-        last_offset,
-    );
-    synthetic.turn_nonce = super::mailbox_snapshot(shared, channel_id)
-        .await
-        .active_turn_nonce;
-    synthetic.turn_start_offset = Some(turn_start_offset);
-    synthetic = build_monitor_triggered_inflight_state(synthetic);
-    // #2285 audit trail: monitor pattern fired this turn without an
-    // originating Discord message. The session-bound relay does NOT branch
-    // on this — recorded for diagnostics only.
-    // status-panel-v2: make this watcher-owned so the panel-eligibility
-    // predicate (watcher_inflight_is_panel_eligible_for_session) recognises the
-    // synthetic monitor/self-paced-loop turn and the watcher can create/update/
-    // clean up a live status panel for it. The shared external-input predicate
-    // (lease + ⏳ anchor lifecycle, #3164/#3174) stays untouched.
-
-    match super::inflight::save_inflight_state_create_new(&synthetic) {
-        Ok(()) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::info!(
-                "  [{ts}] 👁 Registered synthetic inflight for monitor auto-turn in channel {}",
-                channel_id.get()
-            );
-        }
-        Err(super::inflight::CreateNewInflightError::AlreadyExists) => {}
-        Err(super::inflight::CreateNewInflightError::Internal(error)) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ⚠ Failed to register synthetic monitor inflight for channel {}: {}",
-                channel_id.get(),
-                error
-            );
-        }
-    }
-}
-
 /// Monotonic-CAS advance of the channel's `confirmed_end_offset` watermark to
 /// `committed_end_offset`, pairing the pre-CAS `.generation` mtime on a real
 /// advance and recording the `tmux_confirmed_end_monotonic` invariant. #3041
@@ -1775,7 +1711,7 @@ mod monitor_auto_turn_signal_tests {
             .await
         );
 
-        ensure_monitor_auto_turn_inflight(
+        let _ = ensure_monitor_auto_turn_inflight(
             &shared,
             &provider,
             channel_id,
