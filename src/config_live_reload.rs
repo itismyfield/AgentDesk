@@ -295,13 +295,9 @@ fn routines_restart_fingerprint(routines: &RoutinesConfig) -> RoutinesRestartFin
 /// non-logging fingerprints.
 pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str> {
     let mut changed = Vec::new();
-    // #5750 — `server.auth_token` is `#[serde(skip_serializing)]`, so it is
-    // absent from both sides of the serialized comparison and its arrival or
-    // removal is invisible there. Compare presence only; the secret value never
-    // enters a comparison or a log line.
-    if section_changed(&old.server, &new.server)
-        || old.server.auth_token.is_some() != new.server.auth_token.is_some()
-    {
+    // The HTTP middleware binds the token at boot; rotation also needs restart.
+    // Compare the secret locally, but report only the section name.
+    if section_changed(&old.server, &new.server) || old.server.auth_token != new.server.auth_token {
         changed.push("server");
     }
     if section_changed(&old.database, &new.database) {
@@ -926,7 +922,7 @@ mod tests {
     /// serialized-equality comparison in `section_changed` cannot see it appear
     /// or disappear. A write-back that dropped the token from disk therefore
     /// reloaded as "applied, no restart required" while the `/ws` gate went
-    /// open. Presence is compared; the secret value never is.
+    /// open. Rotation must also flag the boot-bound HTTP middleware.
     #[test]
     fn restart_required_changes_detects_server_auth_token_presence_flip() {
         let mut old = Config::default();
@@ -939,10 +935,7 @@ mod tests {
 
         let mut rotated = old.clone();
         rotated.server.auth_token = Some("rotated-secret-token".to_string());
-        assert!(
-            restart_required_changes(&old, &rotated).is_empty(),
-            "value rotation is not a presence flip and stays out of the comparison"
-        );
+        assert_eq!(restart_required_changes(&old, &rotated), vec!["server"]);
     }
 
     #[test]
