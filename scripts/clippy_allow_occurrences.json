@@ -490,7 +490,12 @@
     {
       "path": "src/services/discord/tmux.rs",
       "lint": "too_many_arguments",
-      "count": 5
+      "count": 4
+    },
+    {
+      "path": "src/services/discord/tmux/monitor_auto_turn_inflight.rs",
+      "lint": "too_many_arguments",
+      "count": 1
     },
     {
       "path": "src/services/discord/tmux_overload_retry.rs",

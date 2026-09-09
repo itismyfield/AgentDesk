@@ -398,7 +398,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
     // await sites from duplicating the nine-argument call verbatim.
     macro_rules! ensure_monitor_auto_turn_inflight_now {
         () => {
-            ensure_monitor_auto_turn_inflight(
+            let _ = ensure_monitor_auto_turn_inflight(
                 &shared,
                 &watcher_provider,
                 channel_id,
@@ -409,7 +409,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                 data_start_offset,
                 current_offset,
             )
-            .await
+            .await;
         };
     }
     // #1009: 1-shot tracker for the monitor-auto-turn preamble hint so the

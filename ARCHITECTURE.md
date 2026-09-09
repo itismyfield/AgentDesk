@@ -953,6 +953,8 @@ src/
 │   │   │   ├── watcher_completion.rs
 │   │   │   └── watcher_completion_tests.rs
 │   │   ├── tmux/
+│   │   │   ├── monitor_auto_turn_inflight.rs
+│   │   │   ├── monitor_auto_turn_inflight_tests.rs
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
 │   │   ├── tmux_output_stream/
 │   │   │   └── provider_output_guard_tests.rs
