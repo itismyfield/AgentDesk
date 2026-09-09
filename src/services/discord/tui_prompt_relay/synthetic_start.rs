@@ -2,8 +2,8 @@ use super::*;
 
 mod claim;
 mod stale_reclaim;
-pub(super) use claim::claim_tui_direct_synthetic_turn;
 pub(in crate::services::discord) use claim::build_tui_direct_synthetic_inflight_state;
+pub(super) use claim::claim_tui_direct_synthetic_turn;
 
 use stale_reclaim::release_reclaimable_stale_synthetic_mailbox_owner_if_current;
 pub(super) use stale_reclaim::{
