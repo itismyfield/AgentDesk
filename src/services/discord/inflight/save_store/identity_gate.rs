@@ -536,8 +536,7 @@ pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
 pub(in crate::services::discord) fn persist_leak_recovery_response_offset_if_matches_identity_locked(
     provider: &ProviderKind,
     channel_id: u64,
-    expected: &InflightTurnIdentity,
-    expected_current_msg_id: u64,
+    delivered: &InflightTurnState,
     delivered_offset: usize,
 ) -> GuardedSaveOutcome {
     let Some(root) = inflight_runtime_root() else {
@@ -547,8 +546,7 @@ pub(in crate::services::discord) fn persist_leak_recovery_response_offset_if_mat
         &root,
         provider,
         channel_id,
-        expected,
-        expected_current_msg_id,
+        delivered,
         delivered_offset,
     )
 }
@@ -557,8 +555,7 @@ pub(in crate::services::discord::inflight) fn persist_leak_recovery_response_off
     root: &Path,
     provider: &ProviderKind,
     channel_id: u64,
-    expected: &InflightTurnIdentity,
-    expected_current_msg_id: u64,
+    delivered: &InflightTurnState,
     delivered_offset: usize,
 ) -> GuardedSaveOutcome {
     let path = inflight_state_path(root, provider, channel_id);
@@ -573,14 +570,19 @@ pub(in crate::services::discord::inflight) fn persist_leak_recovery_response_off
     let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
         return GuardedSaveOutcome::Missing;
     };
-    if !expected.matches_state(&on_disk) || on_disk.current_msg_id != expected_current_msg_id {
+    let expected = InflightTurnIdentity::from_state(delivered);
+    if !expected.matches_state(&on_disk) || on_disk.current_msg_id != delivered.current_msg_id {
         return GuardedSaveOutcome::IdentityMismatch;
     }
     if on_disk.response_sent_offset >= delivered_offset {
         return GuardedSaveOutcome::IdentityMismatch;
     }
-    if delivered_offset > on_disk.full_response.len()
-        || !on_disk.full_response.is_char_boundary(delivered_offset)
+    if transfer_end(
+        &delivered.full_response,
+        delivered_offset,
+        &on_disk.full_response,
+    )
+    .is_none()
     {
         return GuardedSaveOutcome::IdentityMismatch;
     }
@@ -919,6 +921,56 @@ pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slice_a_leak_prefix_adoption() {
+        use GuardedSaveOutcome as G;
+        for (source, target, end, offset, msg_delta, turn_delta, outcome, saved_end) in [
+            ("abcdef", "abcTAIL", 3, 1, 0, 0, G::Saved, 3),
+            ("abcdef", "XYZdef", 3, 1, 0, 0, G::IdentityMismatch, 1),
+            ("abcdef", "abcTAIL", 3, 1, 1, 0, G::IdentityMismatch, 1),
+            ("abcdef", "abcTAIL", 3, 1, 0, 1, G::IdentityMismatch, 1),
+            ("abcdef", "abcTAIL", 3, 3, 0, 0, G::IdentityMismatch, 3),
+            ("abcdef", "abcTAIL", 3, 4, 0, 0, G::IdentityMismatch, 4),
+            ("한글", "한글", 1, 0, 0, 0, G::IdentityMismatch, 0),
+            ("ab", "abcdef", 3, 1, 0, 0, G::IdentityMismatch, 1),
+            ("abcdef", "ab", 3, 1, 0, 0, G::IdentityMismatch, 1),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut delivered = drain_restart_seed(5752, "prefix-transfer");
+            delivered.full_response = source.into();
+            delivered.current_msg_id = 901;
+            let mut durable = delivered.clone();
+            durable.full_response = target.into();
+            durable.response_sent_offset = offset;
+            durable.current_msg_id += msg_delta;
+            durable.user_msg_id += turn_delta;
+            durable.last_watcher_relayed_offset = Some(2048);
+            durable.last_watcher_relayed_generation_mtime_ns = Some(9999);
+            save_inflight_state_in_root(root.path(), &durable).unwrap();
+            let path = inflight_state_path(root.path(), &ProviderKind::Codex, 5752);
+            let raw = fs::read(&path).unwrap();
+            assert_eq!(
+                persist_leak_recovery_response_offset_if_matches_identity_locked_in_root(
+                    root.path(),
+                    &ProviderKind::Codex,
+                    5752,
+                    &delivered,
+                    end,
+                ),
+                outcome,
+            );
+            let updated = fs::read(&path).unwrap();
+            if outcome != G::Saved {
+                assert_eq!(updated, raw);
+            }
+            let saved: InflightTurnState = serde_json::from_slice(&updated).unwrap();
+            assert_eq!(saved.response_sent_offset, saved_end);
+            assert_eq!(saved.full_response, target);
+            assert_eq!(saved.last_watcher_relayed_offset, Some(2048));
+            assert_eq!(saved.last_watcher_relayed_generation_mtime_ns, Some(9999));
+        }
+    }
 
     fn drain_restart_seed(channel_id: u64, tmux_session_name: &str) -> InflightTurnState {
         InflightTurnState::new(
