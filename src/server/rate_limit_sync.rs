@@ -42,12 +42,12 @@ async fn claude_tick_should_attempt(
     now: std::time::Instant,
     pg_pool: &PgPool,
     now_unix: i64,
-) -> bool {
+) -> (bool, Option<u64>) {
     let danger = dispatch_gate::effective_danger_pct_pg(pg_pool).await;
     if dispatch_gate::is_deferring("claude", danger, now_unix) {
         backoff.release_hold();
     }
-    backoff.should_attempt(now)
+    (backoff.should_attempt(now), danger)
 }
 
 pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
@@ -74,7 +74,10 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
         // — nothing bounds one iteration, so no longer hold is *provably* short enough to
         // re-observe that pressure before the stale window expires, and base is the pre-PR floor.
         let now_unix = chrono::Utc::now().timestamp();
-        if claude_tick_should_attempt(&mut claude_backoff, now, pg_pool.as_ref(), now_unix).await {
+        if claude_tick_should_attempt(&mut claude_backoff, now, pg_pool.as_ref(), now_unix)
+            .await
+            .0
+        {
             let claude_result =
                 sync_claude_rate_limit_cache_once_serialized(pg_pool.as_ref()).await;
             let outcome = classify_claude_sync_result(&claude_result);
@@ -480,7 +483,7 @@ mod tests {
         assert!(backoff.should_attempt(t0 + secs(1800)));
     }
 
-    /// r5 follow-up: the threshold the loop feeds the predicate is the gate's
+    /// r5 follow-up: the threshold the tick feeds the predicate is the gate's
     /// EFFECTIVE one — the persisted runtime-config the activation path
     /// resolves, not the YAML accessor — and the persisted staleness window is
     /// deliberately not one of the predicate's inputs.
@@ -520,10 +523,25 @@ mod tests {
             .next()
             .unwrap();
         assert!(tick_source.contains("dispatch_gate::is_deferring(\"claude\", danger, now_unix)"));
+        let (_, loop_source) = include_str!("rate_limit_sync.rs")
+            .split_once("pub(super) async fn rate_limit_sync_loop")
+            .unwrap();
+        let (loop_source, _) = loop_source
+            .split_once("async fn sync_claude_rate_limit_cache_once_serialized")
+            .unwrap();
+        assert!(loop_source.contains(
+            "claude_tick_should_attempt(&mut claude_backoff, now, pg_pool.as_ref(), now_unix)"
+        ));
         // The real resolver must fail to None, not supply the YAML threshold.
+        let (attempt, resolved_danger) =
+            claude_tick_should_attempt(&mut backoff, t0 + secs(120), &unusable, now).await;
+        assert_eq!(
+            resolved_danger, None,
+            "tick must use the persisted threshold"
+        );
         assert!(
-            claude_tick_should_attempt(&mut backoff, t0 + secs(120), &unusable, now).await,
-            "tick must observe the persisted-config read failure (None), not a YAML constant"
+            attempt,
+            "unreadable persisted config must release the polling hold"
         );
         // The staleness window comes back from the same parser but is not an
         // input: a row older than 300 s — or than the 600 s default — still has
