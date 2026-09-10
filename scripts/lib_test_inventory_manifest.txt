@@ -5615,7 +5615,9 @@ services::discord::tmux::tmux_watcher::supervisor_relay::tests::forward_chunk_su
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::per_turn_fully_mirrored_degrades_when_evicted_victim_matches
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::terminal_event_consumed_offset_excludes_buffered_tail
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::caller_arc_wiring
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::current_zero_id_row_can_complete
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::late_a_preserves_successor_b
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::newer_zero_id_row_survives_old_terminal
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::paused_preserves_markers
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::pending_preserves_markers
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::same_a_suppresses_duplicate
