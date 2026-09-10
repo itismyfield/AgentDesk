@@ -623,7 +623,7 @@
       "count": 3
     },
     {
-      "path": "src/services/discord/tui_prompt_relay/synthetic_start.rs",
+      "path": "src/services/discord/tui_prompt_relay/synthetic_start/claim.rs",
       "lint": "too_many_arguments",
       "count": 1
     },
