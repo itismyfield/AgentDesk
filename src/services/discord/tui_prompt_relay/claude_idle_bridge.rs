@@ -264,13 +264,9 @@ pub(super) async fn relay_tui_idle_response_through_bridge(
         completion,
         gateway.as_ref(),
         &provider,
-        channel_id,
-        user_msg_id,
-        current_msg_id,
+        (channel_id, user_msg_id, current_msg_id),
         Some(current_msg_id),
-        tmux_session_name,
-        lease,
-        anchor,
+        (tmux_session_name, lease, anchor),
         false,
     )
     .await
@@ -461,13 +457,9 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
         completion,
         gateway.as_ref(),
         &provider,
-        channel_id,
-        user_msg_id,
-        current_msg_id,
+        (channel_id, user_msg_id, current_msg_id),
         Some(current_msg_id),
-        tmux_session_name,
-        lease,
-        anchor,
+        (tmux_session_name, lease, anchor),
         true,
     )
     .await
@@ -475,7 +467,6 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
 
 // Shared by both adapters; only Finalized may acknowledge delivery or clear the anchor.
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn finish_idle_bridge_completion(
     completion: Result<
         Result<BridgeCompletionSignal, tokio::sync::oneshot::error::RecvError>,
@@ -483,15 +474,17 @@ pub(super) async fn finish_idle_bridge_completion(
     >,
     gateway: &dyn super::super::gateway::TurnGateway,
     provider: &ProviderKind,
-    channel_id: ChannelId,
-    user_msg_id: MessageId,
-    current_msg_id: MessageId,
+    message_ids: (ChannelId, MessageId, MessageId),
     bridge_created_placeholder: Option<MessageId>,
-    tmux_session_name: &str,
-    lease: &ExternalInputRelayLease,
-    anchor: Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor>,
+    turn_context: (
+        &str,
+        &ExternalInputRelayLease,
+        Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor>,
+    ),
     streamed: bool,
 ) -> Result<(), String> {
+    let (channel_id, user_msg_id, current_msg_id) = message_ids;
+    let (tmux_session_name, lease, anchor) = turn_context;
     match completion {
         Ok(Ok(BridgeCompletionSignal::Finalized)) => {
             ensure_tui_direct_bridge_delivery_committed(

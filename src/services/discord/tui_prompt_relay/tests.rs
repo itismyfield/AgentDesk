@@ -3066,13 +3066,9 @@ async fn s3_completion_fixture(
         Ok(completion),
         gateway.as_ref(),
         &provider,
-        channel,
-        user,
-        current,
+        (channel, user, current),
         owned.map(MessageId::new),
-        tmux,
-        &lease,
-        anchor,
+        (tmux, &lease, anchor),
         streamed,
     )
     .await;
