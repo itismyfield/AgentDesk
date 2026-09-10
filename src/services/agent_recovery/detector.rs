@@ -71,10 +71,24 @@ pub fn trigger_from_error_message(message: &str) -> Option<DetectorSignal> {
         }
         return Some(DetectorSignal::StreamIdleTimeout);
     }
-    if lower.contains("429")
-        || lower.contains("rate limit")
-        || lower.contains("quota")
-        || lower.contains("resource_exhausted")
+    if lower
+        .split(|c: char| !c.is_ascii_digit())
+        .any(|part| part == "429")
+        || [
+            "rate limit",
+            "rate_limit",
+            "rate-limit",
+            "quota exceeded",
+            "quota exhausted",
+            "exceeded your current quota",
+            "insufficient_quota",
+            "resource_exhausted",
+            "usage limit",
+            "you've hit your limit",
+            "quota has been exceeded",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
     {
         return Some(DetectorSignal::TurnRateLimit);
     }
@@ -96,5 +110,40 @@ pub fn mailbox_kind_from_name(name: &str) -> MailboxStallKind {
         "orphan_pending_token" => MailboxStallKind::OrphanPendingToken,
         "unpaired_active_token" => MailboxStallKind::UnpairedActiveToken,
         _ => MailboxStallKind::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn classify_provider_limits_without_generic_quota_false_positives() {
+        for error in [
+            "HTTP 429 Too Many Requests",
+            "rate_limit_error",
+            "RESOURCE_EXHAUSTED",
+            "You exceeded your current quota",
+            "You've hit your limit",
+            "usage limit reached",
+        ] {
+            assert_eq!(
+                trigger_from_error_message(error),
+                Some(DetectorSignal::TurnRateLimit),
+                "{error}"
+            );
+        }
+        for error in [
+            "HTTP 401 invalid API key",
+            "permission denied",
+            "could not load quota settings",
+            "request id 14290 failed",
+            "context window exceeded",
+        ] {
+            assert_eq!(trigger_from_error_message(error), None, "{error}");
+        }
+        assert_eq!(
+            trigger_from_error_message("AGY produced no output for 180 seconds"),
+            Some(DetectorSignal::StreamIdleTimeout)
+        );
     }
 }

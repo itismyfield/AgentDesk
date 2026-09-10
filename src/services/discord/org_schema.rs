@@ -271,6 +271,7 @@ fn spawn_auth_overlay_for_context(
     let channel_profile = channel_id.and_then(|id| {
         schema.as_ref().and_then(|schema| {
             resolve_channel_binding(schema, ChannelId::new(id), None)
+                .filter(|(binding, _)| agent_id.is_none_or(|agent| agent == binding.agent))
                 .and_then(|(binding, _)| binding.auth_profile.clone())
         })
     });
@@ -282,13 +283,25 @@ fn spawn_auth_overlay_for_context(
                 .and_then(|agent| agent.auth_profile.clone())
         })
     });
-    let profile = configured_auth_profile(channel_profile.as_deref(), agent_profile.as_deref())
-        .map(str::to_string)
-        .or_else(|| {
-            schema
-                .as_ref()
-                .map(|schema| provider_primary_profile(schema, Some(provider.as_str())))
-        });
+    let pinned_profile = channel_id
+        .map(|id| {
+            crate::services::agent_recovery::pinned_auth_profile(
+                &id.to_string(),
+                &provider,
+                agent_id,
+            )
+        })
+        .transpose()?
+        .flatten();
+    let profile = pinned_profile.or_else(|| {
+        configured_auth_profile(channel_profile.as_deref(), agent_profile.as_deref())
+            .map(str::to_string)
+            .or_else(|| {
+                schema
+                    .as_ref()
+                    .map(|schema| provider_primary_profile(schema, Some(provider.as_str())))
+            })
+    });
     let overlay = resolve(provider.clone(), profile.as_deref(), None, &catalog)
         .map_err(|error| error.to_string())?;
     if let Some(binding) = channel_id.and_then(|id| resolve_role_binding(ChannelId::new(id), None))
@@ -464,6 +477,9 @@ fn install_org_recovery(
             provider: def.provider.clone(),
             model: def.model.clone(),
             workspace: def.workspace.clone(),
+            auth_profile: configured_auth_profile(None, def.auth_profile.as_deref())
+                .map(str::to_string)
+                .unwrap_or_else(|| provider_primary_profile(schema, def.provider.as_deref())),
             recovery: def.recovery.clone(),
         })
         .collect();
@@ -480,6 +496,7 @@ fn install_org_recovery(
                         agent: binding.agent.clone(),
                         provider: binding.provider.clone(),
                         workspace: binding.workspace.clone(),
+                        auth_profile: binding.auth_profile.clone(),
                         recovery: binding.recovery.clone(),
                     },
                 )

@@ -23,6 +23,7 @@ mod expected_identity;
 #[path = "stream_loop/expected_identity_tests.rs"]
 mod expected_identity_tests;
 mod message_conversion;
+mod provider_recovery;
 mod tool_arms;
 pub(super) mod types;
 pub(super) use exit_reconcile::StreamLoopOutcome;
@@ -37,6 +38,8 @@ pub(super) async fn run_stream_loop(
     ctx: StreamLoopContext,
     state: StreamLoopState<'_>,
 ) -> StreamLoopOutput {
+    let recovery_lease = ctx.capture_recovery_lease();
+    let context_compact_lower_bound_tokens = ctx.compact_lower_bound_tokens().await;
     let (shared_owned, gateway) = (ctx.shared_owned, ctx.gateway);
     let (channel_id, provider) = (ctx.channel_id, ctx.provider);
     let (cancel_token, user_text_owned) = (ctx.cancel_token, ctx.user_text_owned);
@@ -49,7 +52,6 @@ pub(super) async fn run_stream_loop(
     let (footer_owner, status_panel_started_at) = (ctx.footer_owner, ctx.status_panel_started_at);
     let (status_interval, context_window_tokens) = (ctx.status_interval, ctx.context_window_tokens);
     let context_compact_percent = ctx.context_compact_percent;
-    let context_compact_lower_bound_tokens = compact_lower_bound(shared_owned.api_port).await;
 
     let rx = &mut *state.rx;
     let mut full_response = std::mem::take(state.full_response);
@@ -326,6 +328,7 @@ pub(super) async fn run_stream_loop(
                                     gateway: &gateway,
                                     channel_id,
                                     provider: &provider,
+                                    recovery_lease: recovery_lease.as_ref(),
                                     expected_identity: &stream_tick_expected_identity,
                                     voice_progress_playback_channel_id,
                                     watcher_owns_assistant_relay,

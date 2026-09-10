@@ -44,6 +44,8 @@ fn allows(
         .as_ref()
         != Some(provider)
         || agent.is_some_and(|agent| agent != state.active_writer_agent_id)
+        // Provider identity alone cannot distinguish two accounts.
+        || (agent.is_none() && state.context.as_ref().is_some_and(|context| context.owner_provider == context.fallback_provider))
     {
         return false;
     }
@@ -166,6 +168,42 @@ mod tests {
             &runtime.states[CHANNEL],
             &ProviderKind::Grok,
             None,
+            None
+        ));
+    }
+
+    #[test]
+    fn same_provider_fallback_never_admits_owner_or_unscoped_turns() {
+        let mut runtime = enabled_runtime();
+        runtime.observe(ObserveInput {
+            channel_id: CHANNEL.into(),
+            primary_turn_id: "turn".into(),
+            signal: DetectorSignal::TurnRateLimit,
+        });
+        let state = runtime.states.get_mut(CHANNEL).unwrap();
+        state.context.as_mut().unwrap().owner_provider = "codex".into();
+        let lease = RecoveryLease::from_state(state);
+        assert!(!allows(state, &ProviderKind::Codex, None, Some(&lease)));
+        assert!(!allows(
+            state,
+            &ProviderKind::Codex,
+            Some("claude"),
+            Some(&lease)
+        ));
+        assert!(allows(
+            state,
+            &ProviderKind::Codex,
+            Some("monitoring"),
+            Some(&lease)
+        ));
+        runtime.acknowledge_start(&lease).unwrap();
+        let state = &runtime.states[CHANNEL];
+        assert!(!allows(state, &ProviderKind::Codex, None, None));
+        assert!(!allows(state, &ProviderKind::Codex, Some("claude"), None));
+        assert!(allows(
+            state,
+            &ProviderKind::Codex,
+            Some("monitoring"),
             None
         ));
     }

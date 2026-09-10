@@ -38,6 +38,7 @@ fn agent(
         provider: Some(provider.to_string()),
         model: Some("grok-4.6".to_string()),
         workspace: workspace.map(ToOwned::to_owned),
+        auth_profile: "default".into(),
         recovery,
     }
 }
@@ -48,6 +49,7 @@ fn channel(owner: &str, recovery: Option<RecoveryConfigWire>) -> OrgChannelInput
         agent: owner.to_string(),
         provider: None,
         workspace: None,
+        auth_profile: None,
         recovery,
     }
 }
@@ -146,7 +148,7 @@ fn acknowledge(runtime: &mut RecoveryRuntime) {
 }
 
 #[test]
-fn recovery_catalog_rejects_fallback_on_the_owner_provider() {
+fn recovery_catalog_rejects_same_provider_with_the_same_account() {
     let error = build_recovery_catalog(
         &[
             agent(
@@ -159,7 +161,7 @@ fn recovery_catalog_rejects_fallback_on_the_owner_provider() {
         ],
         &[channel("claude", Some(enabled_recovery("backup")))],
     )
-    .expect_err("provider-level dispatch cannot fence two same-provider agents");
+    .expect_err("a different agent name is not a different account");
     assert!(matches!(
         error,
         super::policy::PolicyError::SameProviderFallback { .. }
@@ -176,6 +178,38 @@ fn compact(progress: &str) -> CheckpointPayload {
         "continue from Next",
         "please keep going",
     )
+}
+
+#[test]
+fn same_provider_fallback_requires_distinct_effective_profiles_and_account_isolation() {
+    let yaml = r#"
+provider_auth_primary_profiles:
+  codex: primary-account
+agents:
+  owner:
+    provider: codex
+    recovery: {enabled: true, fallback_agent_id: backup}
+  backup:
+    provider: codex
+    auth_profile: backup-account
+channels:
+  by_id:
+    "123": {agent: owner, auth_profile: channel-account}
+"#;
+    let catalog = load_org_recovery_catalog_from_yaml(yaml).unwrap();
+    assert_eq!(catalog.agents["owner"].auth_profile, "primary-account");
+    assert_eq!(
+        catalog.channels["123"].owner_auth_profile,
+        "channel-account"
+    );
+    assert!(
+        load_org_recovery_catalog_from_yaml(&yaml.replace("channel-account", "backup-account"))
+            .is_err()
+    );
+    assert!(load_org_recovery_catalog_from_yaml(&yaml.replace("codex", "agy")).is_err());
+    assert!(
+        load_org_recovery_catalog_from_yaml(&yaml.replace("channel-account", "default")).is_ok()
+    );
 }
 
 #[test]
