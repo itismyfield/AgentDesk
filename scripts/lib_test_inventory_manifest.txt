@@ -8359,6 +8359,7 @@ services::tui_turn_state::tests::codex_s1_agent_reasoning_tail_is_busy
 services::tui_turn_state::tests::codex_s1_complete_token_preserves_idle
 services::tui_turn_state::tests::codex_s1_item_completed_token_is_busy
 services::tui_turn_state::tests::codex_s1_new_task_after_settings_is_busy
+services::tui_turn_state::tests::codex_s1_retained_invalid_utf8_is_not_repaired
 services::tui_turn_state::tests::codex_s1_settings_only_is_unknown
 services::tui_turn_state::tests::codex_s1_task_complete_settings_preserves_drain_not_finalize
 services::tui_turn_state::tests::codex_s1_torn_tail_is_unknown
@@ -8366,6 +8367,7 @@ services::tui_turn_state::tests::codex_s1_truncated_empty_window_cannot_prove_id
 services::tui_turn_state::tests::codex_s1_truncated_housekeeping_cannot_prove_not_busy
 services::tui_turn_state::tests::codex_s1_turn_completed_settings_preserves_finalize
 services::tui_turn_state::tests::codex_s1_unknown_tail_is_busy
+services::tui_turn_state::tests::codex_s1_utf8_tail_boundary_preserves_evidence
 services::tui_turn_state::tests::codex_task_complete_and_session_markers_are_not_turn_end
 services::tui_turn_state::tests::codex_task_complete_marks_idle
 services::tui_turn_state::tests::codex_turn_completed_is_turn_end

@@ -393,17 +393,21 @@ fn read_recent_jsonl_window(
     if start > 0 {
         file.seek(SeekFrom::Start(start))?;
     }
-    let mut buf = String::new();
-    file.read_to_string(&mut buf)?;
-    let mut lines = buf.lines().map(ToString::to_string).collect::<Vec<_>>();
-    // When the window does not begin at byte 0 the first "line" is almost
-    // certainly a fragment of an envelope that started before the window, so
-    // we drop it. That dropped fragment also means the window does not cover
-    // the whole file.
-    let dropped_partial_head = start > 0 && !buf.starts_with('\n') && !lines.is_empty();
-    if dropped_partial_head {
-        lines.remove(0);
-    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    // Discard the partial first line before decoding: seek may split UTF-8.
+    // Retained lines must still be valid UTF-8; never repair them lossily.
+    let retained = if start > 0 && !buf.starts_with(b"\n") {
+        &buf[buf
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(buf.len(), |i| i + 1)..]
+    } else {
+        &buf[..]
+    };
+    let text = std::str::from_utf8(retained)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let lines = text.lines().map(ToString::to_string).collect();
     Ok(JsonlTailWindow {
         lines,
         window_covers_file: start == 0,
@@ -703,6 +707,72 @@ mod tests {
             jsonl_turn_end_terminator_idle(&ProviderKind::Codex, file.path()),
         );
         assert_eq!(actual, (observer, drain, finalize, finalize), "{events:?}");
+    }
+
+    #[test]
+    fn codex_s1_utf8_tail_boundary_preserves_evidence() {
+        for text in ["가".repeat(30_000), "a".repeat(90_000)] {
+            for shift in 0..3 {
+                let huge = serde_json::json!({"type":"compacted", "text":text}).to_string();
+                let tail = format!(
+                    "{}{}",
+                    r#"{"type":"event_msg","payload":{"type":"thread_settings_applied"}}"#,
+                    " ".repeat(shift)
+                );
+                let file = write_jsonl(&[&huge, &tail]);
+                assert_eq!(
+                    observe_codex_jsonl_turn_state(file.path()),
+                    TuiTurnState::Streaming,
+                    "shift={shift}"
+                );
+                let complete = write_jsonl(&[&huge, r#"{"type":"turn.completed"}"#, &tail]);
+                assert_eq!(
+                    observe_codex_jsonl_turn_state(complete.path()),
+                    TuiTurnState::Idle
+                );
+                assert!(jsonl_strict_terminator_idle(
+                    &ProviderKind::Codex,
+                    complete.path()
+                ));
+                assert!(jsonl_completion_scan_idle(
+                    &ProviderKind::Codex,
+                    complete.path()
+                ));
+                let claude = write_jsonl(&[&huge, r#"{"type":"result"}"#, &" ".repeat(shift)]);
+                assert_eq!(
+                    observe_claude_jsonl_turn_state(claude.path()),
+                    TuiTurnState::Idle
+                );
+                assert!(jsonl_completion_scan_idle(
+                    &ProviderKind::Claude,
+                    claude.path()
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn codex_s1_retained_invalid_utf8_is_not_repaired() {
+        for bytes in [
+            b"{\"type\":\"turn.completed\"}\n\xff".as_slice(),
+            b"{\"type\":\"event_msg\",\"payload\":\"\xea\xb0".as_slice(),
+        ] {
+            let file = write_jsonl(&[]);
+            std::fs::write(file.path(), bytes).unwrap();
+            assert!(read_recent_jsonl_window(file.path(), TURN_STATE_TAIL_BYTES).is_err());
+            assert_eq!(
+                observe_codex_jsonl_turn_state(file.path()),
+                TuiTurnState::Unknown
+            );
+            assert!(!jsonl_strict_terminator_idle(
+                &ProviderKind::Codex,
+                file.path()
+            ));
+            assert!(!jsonl_completion_scan_idle(
+                &ProviderKind::Codex,
+                file.path()
+            ));
+        }
     }
 
     #[test]
