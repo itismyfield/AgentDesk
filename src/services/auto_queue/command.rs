@@ -15,33 +15,79 @@ pub(super) async fn cancel_selected_runs_with_pg(
     .await
 }
 
-pub(super) async fn reset_scoped_with_pg(
-    agent_id: &str,
+/// Error prefixes the reset route maps to 404/409 instead of a 500.
+pub(super) const RESET_RUN_NOT_FOUND: &str = "auto-queue run not found";
+pub(super) const RESET_RUN_SCOPE_MISMATCH: &str =
+    "auto-queue run does not belong to the requested agent/repo scope";
+
+/// A narrowing scope refuses only when the run contradicts it: the dashboard
+/// always sends `agentId`, so a NULL `agent_id`/`repo` must not 409 (#4880).
+fn scope_conflicts(requested: Option<&str>, stored: Option<&str>) -> bool {
+    matches!((requested, stored), (Some(requested), Some(stored)) if requested != stored)
+}
+
+/// Reset exactly one auto-queue run (#4880). `agent_id`/`repo` only narrow the
+/// target — the run must not contradict them — and every write is pinned to
+/// `run_id`, so resetting run X never touches a sibling run of the same agent
+/// and never leaves an entry of run X behind.
+pub(super) async fn reset_run_scoped_with_pg(
+    run_id: &str,
+    agent_id: Option<&str>,
+    repo: Option<&str>,
     pool: &sqlx::PgPool,
 ) -> Result<serde_json::Value, String> {
-    let deleted_entries = sqlx::query("DELETE FROM auto_queue_entries WHERE agent_id = $1")
-        .bind(agent_id)
-        .execute(pool)
+    let mut tx = pool
+        .begin()
         .await
-        .map_err(|error| format!("delete auto_queue_entries for agent {agent_id}: {error}"))?
+        .map_err(|error| format!("begin reset for auto_queue_run {run_id}: {error}"))?;
+    // `aq_run:<run_id>` before any row read or write, as the token protocol in
+    // `db::auto_queue::runs` requires: otherwise the ownership SELECT and the
+    // entry DELETE straddle a window another participant can attach through.
+    let lock_targets = [run_id.to_string()];
+    crate::db::auto_queue::acquire_run_advisory_xact_locks_on_pg_tx(&mut tx, &lock_targets).await?;
+    let owner = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT agent_id, repo FROM auto_queue_runs WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("resolve auto_queue_run {run_id}: {error}"))?;
+    let Some((run_agent_id, run_repo)) = owner else {
+        return Err(format!("{RESET_RUN_NOT_FOUND}: {run_id}"));
+    };
+    if scope_conflicts(agent_id, run_agent_id.as_deref())
+        || scope_conflicts(repo, run_repo.as_deref())
+    {
+        return Err(format!("{RESET_RUN_SCOPE_MISMATCH}: {run_id}"));
+    }
+    // Pinned to `run_id` alone: `auto_queue_entries.agent_id` is the assigned
+    // card owner, not the run owner, so narrowing it strands the rest pending.
+    let deleted_entries = sqlx::query("DELETE FROM auto_queue_entries WHERE run_id = $1")
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("delete auto_queue_entries for run {run_id}: {error}"))?
         .rows_affected() as usize;
     let completed_runs = sqlx::query(
         "UPDATE auto_queue_runs
              SET status = 'completed',
                  completed_at = NOW()
-             WHERE status IN ('generated', 'pending', 'active', 'paused')
-               AND agent_id = $1",
+             WHERE id = $1
+               AND status IN ('generated', 'pending', 'active', 'paused')",
     )
-    .bind(agent_id)
-    .execute(pool)
+    .bind(run_id)
+    .execute(&mut *tx)
     .await
-    .map_err(|error| format!("complete auto_queue_runs for agent {agent_id}: {error}"))?
+    .map_err(|error| format!("complete auto_queue_run {run_id}: {error}"))?
     .rows_affected() as usize;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit reset for auto_queue_run {run_id}: {error}"))?;
     Ok(json!({
         "ok": true,
+        "run_id": run_id,
         "deleted_entries": deleted_entries,
         "completed_runs": completed_runs,
-        "protected_active_runs": 0usize,
     }))
 }
 
@@ -566,6 +612,238 @@ mod tests {
             .expect("reopen completes without deadlock");
 
         drop(holder);
+        pool.close().await;
+        db.drop().await;
+    }
+}
+
+// #4880: proving that resetting one run leaves a sibling run of the same agent
+// intact needs a live PostgreSQL server, so the module name carries the `pg_`
+// marker the PG test lane selects on.
+#[cfg(test)]
+mod reset_run_scope_pg_tests {
+    use super::*;
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use sqlx::PgPool;
+
+    const AGENT_ID: &str = "agent-reset-scope";
+
+    /// Seed one active run holding one entry owned by the run's own agent.
+    /// `agent_id`/`repo` are nullable so the legacy NULL-scoped run that #4880
+    /// P1-2 must keep resettable can be seeded through the same helper.
+    async fn seed_run(pool: &PgPool, run_id: &str, agent_id: Option<&str>, repo: Option<&str>) {
+        let card_id = format!("card-{run_id}");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id)
+             VALUES ($1, 'Reset Scope Card', 'todo', $2)",
+        )
+        .bind(&card_id)
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .expect("seed reset-scope card");
+        sqlx::query(
+            "INSERT INTO auto_queue_runs (id, agent_id, repo, status)
+             VALUES ($1, $2, $3, 'active')",
+        )
+        .bind(run_id)
+        .bind(agent_id)
+        .bind(repo)
+        .execute(pool)
+        .await
+        .expect("seed reset-scope run");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status)
+             VALUES ($1, $2, $3, $4, 'pending')",
+        )
+        .bind(format!("entry-{run_id}"))
+        .bind(run_id)
+        .bind(&card_id)
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .expect("seed reset-scope entry");
+    }
+
+    /// Add one more entry to `run_id` whose `agent_id` is the card owner rather
+    /// than the run owner, the shape `route_generate`/`dispatch_command` write.
+    async fn seed_foreign_entry(pool: &PgPool, run_id: &str, entry_id: &str, entry_agent: &str) {
+        let card_id = format!("card-{entry_id}");
+        sqlx::query(
+            "INSERT INTO kanban_cards (id, title, status) VALUES ($1, 'Foreign Card', 'todo')",
+        )
+        .bind(&card_id)
+        .execute(pool)
+        .await
+        .expect("seed foreign card");
+        sqlx::query(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status)
+             VALUES ($1, $2, $3, $4, 'pending')",
+        )
+        .bind(entry_id)
+        .bind(run_id)
+        .bind(&card_id)
+        .bind(entry_agent)
+        .execute(pool)
+        .await
+        .expect("seed foreign entry");
+    }
+
+    async fn seed_agent(pool: &PgPool) {
+        sqlx::query(
+            "INSERT INTO agents (id, name, provider, discord_channel_id)
+             VALUES ($1, 'Reset Scope Agent', 'claude', '4880')",
+        )
+        .bind(AGENT_ID)
+        .execute(pool)
+        .await
+        .expect("seed reset-scope agent");
+    }
+
+    async fn entry_count(pool: &PgPool, run_id: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)::BIGINT FROM auto_queue_entries WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("count reset-scope entries")
+    }
+
+    async fn run_status(pool: &PgPool, run_id: &str) -> String {
+        sqlx::query_scalar::<_, String>("SELECT status FROM auto_queue_runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("read reset-scope run status")
+    }
+
+    #[tokio::test]
+    async fn reset_of_one_run_leaves_sibling_run_of_same_agent_intact_pg() {
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-reset-x", Some(AGENT_ID), Some("owner/repo-a")).await;
+        seed_run(&pool, "run-reset-y", Some(AGENT_ID), Some("owner/repo-b")).await;
+        // Same agent *and* same repo: the pair the scope narrowing cannot tell
+        // apart, so only the `run_id` pin keeps this run out of the blast area.
+        seed_run(&pool, "run-reset-z", Some(AGENT_ID), Some("owner/repo-a")).await;
+
+        // Ownership mismatch must be refused before anything is deleted.
+        let mismatch =
+            reset_run_scoped_with_pg("run-reset-x", Some(AGENT_ID), Some("owner/repo-b"), &pool)
+                .await
+                .expect_err("run X does not belong to repo-b");
+        assert!(
+            mismatch.starts_with(RESET_RUN_SCOPE_MISMATCH),
+            "expected a scope-mismatch refusal, got: {mismatch}"
+        );
+        assert_eq!(entry_count(&pool, "run-reset-x").await, 1);
+
+        let response =
+            reset_run_scoped_with_pg("run-reset-x", Some(AGENT_ID), Some("owner/repo-a"), &pool)
+                .await
+                .expect("run-scoped reset succeeds");
+        assert_eq!(response["run_id"], json!("run-reset-x"));
+        assert_eq!(response["deleted_entries"], json!(1));
+        assert_eq!(response["completed_runs"], json!(1));
+
+        assert_eq!(entry_count(&pool, "run-reset-x").await, 0);
+        assert_eq!(run_status(&pool, "run-reset-x").await, "completed");
+        assert_eq!(
+            entry_count(&pool, "run-reset-y").await,
+            1,
+            "sibling run of the same agent must keep its entries"
+        );
+        assert_eq!(
+            run_status(&pool, "run-reset-y").await,
+            "active",
+            "sibling run of the same agent must stay open"
+        );
+        assert_eq!(
+            entry_count(&pool, "run-reset-z").await,
+            1,
+            "sibling run sharing agent and repo must keep its entries"
+        );
+        assert_eq!(
+            run_status(&pool, "run-reset-z").await,
+            "active",
+            "sibling run sharing agent and repo must stay open"
+        );
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// #4880 P1-1: `auto_queue_entries.agent_id` is the assigned card owner, not
+    /// the run owner, so narrowing the delete by the caller's scope completed
+    /// the run while stranding its other entries (deleted 1, left 1 pending).
+    #[tokio::test]
+    async fn reset_deletes_run_entries_owned_by_other_agents_pg() {
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-reset-x", Some(AGENT_ID), Some("owner/repo-a")).await;
+        seed_foreign_entry(&pool, "run-reset-x", "entry-unassigned", "").await;
+        seed_foreign_entry(&pool, "run-reset-x", "entry-card-owner", "agent-card-owner").await;
+
+        let response =
+            reset_run_scoped_with_pg("run-reset-x", Some(AGENT_ID), Some("owner/repo-a"), &pool)
+                .await
+                .expect("run-scoped reset succeeds");
+        assert_eq!(
+            response["deleted_entries"],
+            json!(3),
+            "every entry of the reset run must be deleted and reported"
+        );
+        assert_eq!(
+            entry_count(&pool, "run-reset-x").await,
+            0,
+            "a completed run must not keep pending entries"
+        );
+        assert_eq!(run_status(&pool, "run-reset-x").await, "completed");
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    /// #4880 P1-2: the dashboard always sends `agentId`, so a run stored with a
+    /// NULL `agent_id`/`repo` was permanently unresettable (409 every time).
+    #[tokio::test]
+    async fn reset_of_null_scoped_run_accepts_a_narrowing_body_pg() {
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        seed_agent(&pool).await;
+        seed_run(&pool, "run-reset-null", None, None).await;
+
+        let response = reset_run_scoped_with_pg(
+            "run-reset-null",
+            Some(AGENT_ID),
+            Some("owner/repo-a"),
+            &pool,
+        )
+        .await
+        .expect("a NULL-scoped run must accept a narrowing reset body");
+        assert_eq!(response["deleted_entries"], json!(1));
+        assert_eq!(response["completed_runs"], json!(1));
+        assert_eq!(run_status(&pool, "run-reset-null").await, "completed");
+
+        pool.close().await;
+        db.drop().await;
+    }
+
+    #[tokio::test]
+    async fn reset_of_missing_run_reports_not_found_pg() {
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let missing = reset_run_scoped_with_pg("run-absent", None, None, &pool)
+            .await
+            .expect_err("an unknown run id must not report a successful reset");
+        assert!(
+            missing.starts_with(RESET_RUN_NOT_FOUND),
+            "expected a not-found refusal, got: {missing}"
+        );
+
         pool.close().await;
         db.drop().await;
     }

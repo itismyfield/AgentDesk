@@ -5027,7 +5027,7 @@ class TickChannelTests(unittest.TestCase):
         )
         self.assertFalse(any("릴레이 갭 해소" in body for body, _ in rt.alerts))
 
-    def test_invariant_4435_retirement_alerts_share_realert_cooldown(self):
+    def test_invariant_4435_same_reason_retirement_alerts_share_realert_cooldown(self):
         current = self.proj_dir / "retirement-current.jsonl"
         current.write_text(
             json.dumps(
@@ -5088,6 +5088,128 @@ class TickChannelTests(unittest.TestCase):
         self.assertEqual(
             len([body for body, _ in rt.alerts if "평가 권한 만료" in body]), 2
         )
+
+    def _5205_assert_retirement_notice_log(self, reason: str, event: str) -> None:
+        for notice in ("sent", "cooldown", "undelivered"):
+            with self.subTest(reason=reason, notice=notice):
+                rt = self.make_rt(read_fail_alert_after=3)
+                chs: dict = {}
+                if notice == "cooldown":
+                    self.assertEqual(
+                        relay_watchdog._alert_pending_retirement(
+                            rt, TICK_CHANNEL, chs, ["/prior.jsonl"],
+                            self.now - 1, reason=reason,
+                        ),
+                        "sent",
+                    )
+                rt.alert_succeeds = notice != "undelivered"
+                rt.alerts.clear()
+                rt.log_lines.clear()
+                paths = []
+                for index in range(2):
+                    path = self.proj_dir / f"retire-{index}.jsonl"
+                    path.write_bytes(b"{}\n" if reason == "idle" else b"\xff\n")
+                    os.utime(path, (self.now, self.now))
+                    paths.append(str(path))
+                chs.update({
+                    "transcript_sizes": {path: Path(path).stat().st_size for path in paths},
+                    "transcript_seen_at": {path: self.now for path in paths},
+                    "transcript_known_at": {path: self.now for path in paths},
+                    "pending_transcripts": paths[:],
+                    "pending_transcript_since": {
+                        path: self.now - rt.cfg.idle_quiet_secs - 1
+                        if reason == "idle" else self.now
+                        for path in paths
+                    },
+                    "pending_transcript_failures": {path: 2 for path in paths},
+                })
+                tick_channel(rt, TICK_CHANNEL, {"999": chs}, self.now)
+                for path in paths:
+                    self.assertIn(path, chs[relay_watchdog.RETIRED_TRANSCRIPTS_KEY])
+                    self.assertNotIn(path, chs[relay_watchdog.PENDING_TRANSCRIPTS_KEY])
+                    self.assertNotIn(
+                        path, chs.get(relay_watchdog.PENDING_TRANSCRIPT_FAILURES_KEY, {})
+                    )
+                self.assertEqual(len(rt.alerts), 0 if notice == "cooldown" else 1)
+                unannounced = [line for line in rt.log_lines if "-unannounced " in line]
+                self.assertEqual(
+                    unannounced,
+                    [] if notice == "sent" else [
+                        f"[999] transcript-pending-{event}-unannounced "
+                        f"notice={notice} count=2"
+                    ],
+                    rt.log_lines,
+                )
+
+    def test_5205_expired_unannounced_log_reports_actual_notice(self):
+        self._5205_assert_retirement_notice_log("idle", "expired")
+
+    def test_5205_escalated_unannounced_log_reports_actual_notice(self):
+        self._5205_assert_retirement_notice_log("read_failure", "escalated")
+
+    def test_5205_retirement_cooldown_is_independent_for_every_reason_pair(self):
+        reasons = (
+            "idle", "read_failure",
+            relay_watchdog.ORPHAN_STRANDED_RETIREMENT_REASON,
+            relay_watchdog.DEAD_WORKTREE_RETIREMENT_REASON,
+        )
+        for first in reasons:
+            for second in reasons:
+                with self.subTest(first=first, second=second):
+                    rt = self.make_rt()
+                    chs: dict = {}
+                    self.assertEqual(
+                        relay_watchdog._alert_pending_retirement(
+                            rt, TICK_CHANNEL, chs, ["/first.jsonl"],
+                            self.now, reason=first,
+                        ),
+                        "sent",
+                    )
+                    self.assertEqual(
+                        relay_watchdog._alert_pending_retirement(
+                            rt, TICK_CHANNEL, chs, ["/second.jsonl"],
+                            self.now + 1, reason=second,
+                        ),
+                        "cooldown" if first == second else "sent",
+                    )
+                    self.assertEqual(len(rt.alerts), 1 if first == second else 2)
+
+    def test_5205_reason_cooldown_persists_and_failed_notice_can_retry(self):
+        rt = self.make_rt()
+        base_key = relay_watchdog.LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY
+        # The legacy shared key has no reason provenance and cannot suppress
+        # any reason after upgrade. It stays inert until normal state cleanup.
+        chs = {base_key: self.now}
+        reason = relay_watchdog.ORPHAN_STRANDED_RETIREMENT_REASON
+        key = f"{base_key}:{reason}"
+
+        def alert(at: float, paths=None) -> str:
+            return relay_watchdog._alert_pending_retirement(
+                rt, TICK_CHANNEL, chs,
+                ["/orphan.jsonl"] if paths is None else paths, at, reason=reason,
+            )
+
+        self.assertEqual(alert(self.now, []), "empty")
+        self.assertNotIn(key, chs)
+        rt.alert_succeeds = False
+        self.assertEqual(alert(self.now), "undelivered")
+        self.assertNotIn(key, chs)
+        rt.alert_succeeds = True
+        self.assertEqual(alert(self.now), "sent")
+        state_file = self.root / "cooldown-state.json"
+        relay_watchdog.save_state(state_file, {"999": chs})
+        chs = relay_watchdog.load_state(state_file)["999"]
+        self.assertEqual(chs[key], self.now)
+        boundary = self.now + rt.cfg.realert_secs
+        self.assertEqual(alert(boundary - 1), "cooldown")
+        self.assertEqual(chs[key], self.now)
+        rt.alert_succeeds = False
+        self.assertEqual(alert(boundary), "undelivered")
+        self.assertEqual(chs[key], self.now)
+        rt.alert_succeeds = True
+        self.assertEqual(alert(boundary), "sent")
+        self.assertEqual(chs[key], boundary)
+        self.assertEqual(chs[base_key], self.now)
 
     def test_invariant_4435_unrelated_pending_retirement_preserves_live_gap(self):
         rt = self.gap_rt()
@@ -6284,9 +6406,8 @@ class TickChannelTests(unittest.TestCase):
     ):
         """#5190 R3 P2-E: "nothing went out" has two causes, not one.
 
-        The retirement notice shares ONE cooldown key across every reason, so
-        an unrelated idle/read_failure/dead_worktree notice within
-        `realert_secs` suppresses this one. The old code answered a bare bool
+        A prior retirement notice of the same reason within `realert_secs`
+        suppresses this one. The old code answered a bare bool
         and the caller logged `notice=undelivered` for both — a false statement
         about the relay written into the record every time the real cause was a
         cooldown.
@@ -6307,7 +6428,7 @@ class TickChannelTests(unittest.TestCase):
             ),
             "sent",
         )
-        # A DIFFERENT reason, moments later, on the shared key.
+        # The same reason, moments later, must still be rate-limited.
         self.assertEqual(
             relay_watchdog._alert_pending_retirement(
                 rt,
@@ -6315,7 +6436,7 @@ class TickChannelTests(unittest.TestCase):
                 chs,
                 ["/b.jsonl"],
                 now + 60,
-                reason=relay_watchdog.ORPHAN_STRANDED_RETIREMENT_REASON,
+                reason="idle",
             ),
             "cooldown",
         )
@@ -6357,8 +6478,9 @@ class TickChannelTests(unittest.TestCase):
             discovered_at + relay_watchdog.ORPHAN_STRANDED_CONFIRM_SECS
         )
         self._5190_live_delivery(rt, live, retire_at, "live block three")
-        # An unrelated retirement notice went out moments ago on the shared key.
-        chs[relay_watchdog.LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY] = (
+        # Another orphan notice just consumed this reason's cooldown.
+        reason = relay_watchdog.ORPHAN_STRANDED_RETIREMENT_REASON
+        chs[f"{relay_watchdog.LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY}:{reason}"] = (
             retire_at - 10
         )
         tick_channel(rt, TICK_CHANNEL, state, retire_at)
@@ -9418,9 +9540,8 @@ class DeadWorktreeRetirementTests(unittest.TestCase):
     def test_termination_defers_while_the_notice_is_swallowed_by_cooldown(self):
         """P1-B: loss-state never terminates in silence.
 
-        `_alert_pending_retirement` shares ONE cooldown key across every reason,
-        so an idle/read-failure retirement seconds earlier would otherwise
-        swallow the dead-session notice while the incident closed anyway.
+        A previous dead-worktree retirement within the same reason's cooldown
+        must not swallow this notice while the incident closes anyway.
         """
         self.write_stale_transcript(4.9 * 86400)
         rt = self.make_rt()
@@ -9428,8 +9549,9 @@ class DeadWorktreeRetirementTests(unittest.TestCase):
         chs = state["999"]
         self.tick(rt, state, self.now)
         retire_at = self.now + relay_watchdog.DEAD_WORKTREE_CONFIRM_SECS + 1
-        # An unrelated retirement 10s ago burned the shared cooldown.
-        chs[relay_watchdog.LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY] = (
+        # Another dead-worktree retirement 10s ago burned this reason's cooldown.
+        reason = relay_watchdog.DEAD_WORKTREE_RETIREMENT_REASON
+        chs[f"{relay_watchdog.LAST_PENDING_TRANSCRIPT_RETIREMENT_ALERT_KEY}:{reason}"] = (
             retire_at - 10
         )
         self.tick(rt, state, retire_at)

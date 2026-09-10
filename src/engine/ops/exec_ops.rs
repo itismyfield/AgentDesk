@@ -259,6 +259,7 @@ pub(super) fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
                                     "any_tool_used": data.get("any_tool_used").cloned().unwrap_or_else(|| serde_json::json!(false)),
                                     "has_post_tool_text": data.get("has_post_tool_text").cloned().unwrap_or_else(|| serde_json::json!(false)),
                                     "rebind_origin": data.get("rebind_origin").cloned().unwrap_or_else(|| serde_json::json!(false)),
+                                    "turn_source": data.get("turn_source").cloned().unwrap_or(serde_json::Value::Null),
                                     "session_key": data.get("session_key").and_then(|v| v.as_str()).unwrap_or(""),
                                     "dispatch_id": data.get("dispatch_id").and_then(|v| v.as_str()).unwrap_or(""),
                                 }));
@@ -489,6 +490,7 @@ mod inflight_list_tests {
                 "any_tool_used": false,
                 "has_post_tool_text": false,
                 "rebind_origin": true,
+                "turn_source": "external_input",
                 "session_key": "claude:AgentDesk-claude-project-agentdesk",
                 "dispatch_id": "dispatch-1"
             }))
@@ -528,6 +530,7 @@ mod inflight_list_tests {
             assert_eq!(parsed["any_tool_used"], false);
             assert_eq!(parsed["has_post_tool_text"], false);
             assert_eq!(parsed["rebind_origin"], true);
+            assert_eq!(parsed["turn_source"], "external_input");
             assert_eq!(
                 parsed["session_key"],
                 "claude:AgentDesk-claude-project-agentdesk"
