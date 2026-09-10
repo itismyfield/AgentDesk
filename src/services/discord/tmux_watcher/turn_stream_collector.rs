@@ -212,7 +212,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
     }
 
     let initial_buffer_was_empty = all_data.is_empty();
-    let decoded_data = utf8_decoder.decode(&data, data_start_offset);
+    let decoded_data = utf8_decoder.decode_source(&data, data_start_offset, source_authority);
     let initial_source_authority =
         authority_for_decoded_text(source_authority, decoded_data.mixed_read_provenance);
     if initial_buffer_was_empty {
@@ -675,7 +675,11 @@ pub(super) async fn collect_turn_stream_until_terminal(
                     );
                     ready_for_input_tracker.record_output();
                     let chunk_start_offset = current_offset.saturating_sub(chunk.len() as u64);
-                    let decoded_chunk = utf8_decoder.decode(&chunk, chunk_start_offset);
+                    let decoded_chunk = utf8_decoder.decode_source(
+                        &chunk,
+                        chunk_start_offset,
+                        chunk_source_authority,
+                    );
                     let chunk_source_authority = authority_for_decoded_text(
                         chunk_source_authority,
                         decoded_chunk.mixed_read_provenance,

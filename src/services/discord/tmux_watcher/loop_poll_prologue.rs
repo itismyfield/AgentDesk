@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct WatcherSourceAuthority {
+    pub(super) source_file: crate::services::cluster::stream_relay::SourceFileIdentity,
     pub(super) generation_mtime_ns: i64,
     pub(super) reset_incarnation: u64,
     pub(super) source_stamp: Option<crate::services::cluster::stream_relay::SourceStamp>,
@@ -673,6 +674,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         data_start_offset,
         epoch_snapshot,
         source_authority: WatcherSourceAuthority {
+            source_file: source_file_identity,
             generation_mtime_ns: source_generation_mtime_ns,
             reset_incarnation: source_frontier_token.reset_incarnation,
             source_stamp,
