@@ -1085,7 +1085,8 @@ src/
 │   │   ├── turn_bridge/
 │   │   │   ├── completion_guard/
 │   │   │   │   ├── completion_context.rs
-│   │   │   │   └── completion_postgres.rs
+│   │   │   │   ├── completion_postgres.rs
+│   │   │   │   └── span_tests.rs
 │   │   │   ├── completion_postlude/
 │   │   │   │   ├── channel_episode_scope.rs
 │   │   │   │   ├── channel_writeback.rs
