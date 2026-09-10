@@ -83,11 +83,39 @@
       "derivation": "Re-measured with the declared command plus -- --list on the #5071 relay-tail S4 branch over origin/main 0d6e810f9: 50 named tests were selected, up from the 43 pinned on 0ae1c5b77. This is the existing recovery planner/apply contract module around plan_relay_recovery, and it is also where the S4-m5 mutation target post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel lives, so this floor is what keeps that target selectable."
     },
     {
+      "name": "t5-s4-missing-row-cohort-lifecycle",
+      "boundary": "T5",
+      "status": "active",
+      "module": "services::discord::turn_bridge::stream_tick::guarded_persist::tests",
+      "command": [
+        "cargo",
+        "test",
+        "--lib",
+        "services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_inside_the_cohort_and_still_ends_lifecycle_outside_it"
+      ],
+      "minimum": 1,
+      "derivation": "Measured on origin/main b4ee089369f12cb052993560b77e375226680342: the declared named selector plus -- --list selects one test; execution with -- --test-threads=1 passes one test (no ignored tests or DB soft-skip). Existing S4 witness only, not full T5 teardown or S7a coverage."
+    },
+    {
+      "name": "t5-s4-same-authority-watcher-epoch",
+      "boundary": "T5",
+      "status": "active",
+      "module": "services::discord::turn_bridge::stream_tick::guarded_persist::tests",
+      "command": [
+        "cargo",
+        "test",
+        "--lib",
+        "services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority"
+      ],
+      "minimum": 1,
+      "derivation": "Measured on origin/main b4ee089369f12cb052993560b77e375226680342: the declared named selector plus -- --list selects one test; execution with -- --test-threads=1 passes one test (no ignored tests or DB soft-skip). Existing S4 witness only, not full T5 teardown or S7a coverage."
+    },
+    {
       "name": "t5-structural-signal-authority-teardown",
       "boundary": "T5",
       "status": "gap",
       "module": "services::discord::inflight",
-      "reason": "No T5 contract target exists yet: structural signals and inflight still participate in recovery/lifecycle authority, so authority teardown has not been implemented or tested."
+      "reason": "The two active T5 S4 witnesses cover Missing-row cohort suppression and same-authority watcher epoch advance only. Full structural-signal authority teardown remains incomplete: inflight and structural signals still participate in recovery/lifecycle authority, and S7a rowless terminal-body/frontier/receipt authority is not implemented by these targets."
     },
     {
       "name": "relay-e2e-local-model-queue-wake",

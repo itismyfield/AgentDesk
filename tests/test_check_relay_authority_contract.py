@@ -100,10 +100,31 @@ class ManifestContract(unittest.TestCase):
         self.assertEqual([lane.name for lane in lanes], [
             "t1-sink-terminal-handoff",
             "t4-single-actor-recovery-decision",
+            "t5-s4-missing-row-cohort-lifecycle",
+            "t5-s4-same-authority-watcher-epoch",
             "relay-e2e-local-model-queue-wake",
         ])
         self.assertEqual({gap["boundary"] for gap in gaps}, {"T2", "T3", "T5"})
         self.assertTrue(all(lane.minimum > 0 for lane in lanes))
+
+    def test_omitting_either_checked_in_s4_invocation_is_rejected(self) -> None:
+        lanes, _ = contract.load_active_lanes(
+            REPO_ROOT / "scripts" / "relay_authority_contract_targets.json",
+            REPO_ROOT,
+        )
+        s4_lanes = [lane for lane in lanes if lane.name.startswith("t5-s4-")]
+        self.assertEqual(len(s4_lanes), 2)
+        workflow = (REPO_ROOT / contract.PR_WORKFLOW).read_text(encoding="utf-8")
+        for lane in s4_lanes:
+            with self.subTest(lane=lane.name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                path = root / contract.PR_WORKFLOW
+                path.parent.mkdir(parents=True)
+                command = contract.expected_workflow_command(lane)
+                self.assertEqual(workflow.count(command), 1)
+                path.write_text(workflow.replace(command, ""), encoding="utf-8")
+                with self.assertRaisesRegex(contract.ManifestError, "must exactly match"):
+                    contract.validate_workflow_contract(root, lanes, True)
 
     def test_condition3_false_rejects_existing_mutation_script(self) -> None:
         temporary, path = manifest_path([active_lane()])
