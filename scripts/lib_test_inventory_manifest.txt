@@ -4554,6 +4554,8 @@ services::discord::router::intake_gate::queue_effects::merged_placeholder_reuse_
 services::discord::router::intake_gate::queue_effects::merged_placeholder_reuse_pure_tests::own_id_card_is_never_reused
 services::discord::router::intake_gate::queue_effects::merged_placeholder_reuse_pure_tests::second_merged_followup_reuses_rekeyed_card
 services::discord::router::intake_gate::queue_effects::pending_reaction_failure_adapter_tests::production_adapter_emits_exactly_one_queue_fallback
+services::discord::router::intake_gate::queue_effects::rekey_window_tests::actor_advances_under_persist_lock_and_consumers_redecide
+services::discord::router::intake_gate::queue_effects::rekey_window_tests::reuse_caller_keeps_lock_snapshot_seam_order
 services::discord::router::intake_gate::queue_effects::schedule_post_enqueue_idle_drain_tests::schedules_when_enqueued_and_slot_idle
 services::discord::router::intake_gate::queue_effects::schedule_post_enqueue_idle_drain_tests::skips_when_enqueue_was_refused
 services::discord::router::intake_gate::queue_effects::schedule_post_enqueue_idle_drain_tests::skips_when_real_turn_holds_slot
@@ -4829,6 +4831,9 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_spawns_exactly_once_per_process
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_task_can_restart_after_task_death
+services::discord::runtime_bootstrap::queued_placeholders::tests::recovery_consumer_routes_uninstalled_candidates_to_cleanup
+services::discord::runtime_bootstrap::queued_placeholders::tests::restore_rows_and_cleanup_preserve_current_owners
+services::discord::runtime_bootstrap::queued_placeholders::tests::restore_waits_for_channel_lock_and_keeps_other_channel
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::check_deferred_restart_is_noop_without_restart_pending
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::deferred_restart_poller_consumes_marker_token_and_decrements_exactly_once
 services::discord::runtime_bootstrap::session_gc::thread_session_gc_tests::thread_gc_reap_candidate_requires_thread_owner_marker_and_existing_tmux
