@@ -224,7 +224,7 @@ async fn capture_bridge_clear_fence(
     rx: mpsc::Receiver<StreamMessage>,
     fence: &tokio::sync::OnceCell<ChannelClearFence>,
 ) -> StreamMessageReceiverAdapter {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     let channel = resume_pin_tests::capture_channel(channel);
     crate::db::session_transcripts::observe_channel_clear_fence_once(
         fence,
@@ -456,7 +456,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         // #5707: observe after own clear; the unbounded prior window can overlap provider work.
         let clear_fence = tokio::sync::OnceCell::new();
         let mut rx = capture_bridge_clear_fence(shared_owned.as_ref(), channel_id, rx, &clear_fence).await;
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         resume_pin_tests::after_bridge_capture(channel_id).await;
         // #3813: observation-only bridge latency spans share `turn_start`.
         let mut bridge_spans = BridgeLatencySpans::starting_at(turn_start);
