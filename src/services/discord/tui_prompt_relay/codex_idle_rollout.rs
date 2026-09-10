@@ -115,8 +115,7 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                                     rollout_path.to_str().map(ToString::to_string);
                                 repaired.last_offset = line_end_offset;
                                 repaired.turn_start_offset = Some(line_end_offset);
-                                repaired.session_key = lease.session_key.clone();
-                                repaired.runtime_kind = lease.runtime_kind;
+                                repaired.restamp_external_turn_lease(&lease);
                                 repaired.set_relay_owner_kind(RelayOwnerKind::None);
                                 let outcome = inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
                                     &repaired,

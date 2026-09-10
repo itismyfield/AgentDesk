@@ -6207,6 +6207,12 @@ services::discord::tui_prompt_relay::tests::s3t2_delivery_failure_never_cancels_
 services::discord::tui_prompt_relay::tests::s3t3_abort_deletes_only_owned_unreferenced_placeholder
 services::discord::tui_prompt_relay::tests::s3t4_finalized_accepts_successor_and_missing_row
 services::discord::tui_prompt_relay::tests::s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion
+services::discord::tui_prompt_relay::tests::s5833_r2_codex_repair_replaces_stale_durable_key
+services::discord::tui_prompt_relay::tests::s5833_r2_synthetic_refresh_replaces_stale_durable_key
+services::discord::tui_prompt_relay::tests::s5833_s1t1_external_turn_id_is_observation_derived_not_call_site_derived
+services::discord::tui_prompt_relay::tests::s5833_s1t1_synthetic_owns_durable_key_bridge_entry_is_read_only
+services::discord::tui_prompt_relay::tests::s5833_s1t2_legacy_rows_without_external_turn_id_still_deserialize
+services::discord::tui_prompt_relay::tests::s5833_s1t3_moved_builder_is_behaviour_identical
 services::discord::tui_prompt_relay::tests::slash_command_control_kind_distinguishes_distinct_unknown_commands
 services::discord::tui_prompt_relay::tests::slash_command_control_kind_is_stable_across_double_post_halves
 services::discord::tui_prompt_relay::tests::slash_command_control_note_loop_and_generic_stdout_show_body
