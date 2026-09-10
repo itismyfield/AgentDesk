@@ -3858,6 +3858,10 @@ const DC1_CASES: &[&str] = &[
     "read-error",
     "closed",
     "chunk",
+    "echo",
+    "shrink",
+    "short-consume",
+    "short-send",
 ];
 
 #[test]
@@ -3897,9 +3901,13 @@ static DC1_TICKS: std::sync::OnceLock<Mutex<Vec<Dc1Snapshot>>> = std::sync::Once
 enum Dc1OpenAction {
     Replace,
     Remove,
-    Truncate,
+    Shorten(u64),
 }
 static DC1_OPEN: Mutex<Option<(String, usize, Dc1OpenAction)>> = Mutex::new(None);
+
+fn dc1_open(path: &std::path::Path, skip: usize, action: Dc1OpenAction) {
+    *DC1_OPEN.lock().unwrap() = Some((path.to_str().unwrap().into(), skip, action));
+}
 
 pub(super) fn dc1_before_open(path: &str) {
     let mut hook = DC1_OPEN.lock().unwrap();
@@ -3909,7 +3917,10 @@ pub(super) fn dc1_before_open(path: &str) {
             match action {
                 Dc1OpenAction::Replace => std::fs::rename(format!("{target}.replacement"), target),
                 Dc1OpenAction::Remove => std::fs::rename(&*target, format!("{target}.saved")),
-                Dc1OpenAction::Truncate => std::fs::write(target, b""),
+                Dc1OpenAction::Shorten(len) => std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(target)
+                    .and_then(|file| file.set_len(*len)),
             }
             .unwrap();
             *hook = None;
@@ -3928,11 +3939,11 @@ pub(super) fn dc1_observe_tick(
             cursors
                 .iter()
                 .map(|(name, c)| {
-                    let kind = match pending.get(name).map(|p| p.1) {
+                    let kind = match pending.get(name).copied() {
                         None => 0,
                         Some(Deferred) => 1,
                         Some(SentUnconfirmed) => 2,
-                        Some(RetainedForRetry) => 3,
+                        Some(RetainedForRetry(_)) => 3,
                     };
                     (name.clone(), (c.offset, kind))
                 })
@@ -4028,6 +4039,9 @@ impl Dc1Fixture {
         }
     }
     async fn frame(&mut self, from: u64, payload: &str) {
+        self.frame_bytes(from, payload.as_bytes()).await;
+    }
+    async fn frame_bytes(&mut self, from: u64, payload: &[u8]) {
         for _ in 0..100 {
             tokio::task::yield_now().await;
         }
@@ -4036,7 +4050,7 @@ impl Dc1Fixture {
             .try_recv()
             .expect("actual scanner must enqueue an uncovered suffix");
         assert_eq!(frame.relay_range, Some((from, from + payload.len() as u64)));
-        assert_eq!(frame.payload, payload);
+        assert_eq!(frame.payload, String::from_utf8_lossy(payload).as_ref());
     }
     async fn restart(&mut self) {
         self.shutdown.store(true, Ordering::Release);
@@ -4114,11 +4128,19 @@ async fn dc1_isolated_scanner_child() {
             );
         }
         "provenance" => {
-            std::fs::write(&path, payload).unwrap();
+            let payload = format!("{{\"type\":\"user\"}}\n{payload}");
+            std::fs::write(&path, &payload).unwrap();
             assert_eq!(dc1_tick().await[&name], (0, 3));
+            assert!(
+                f.rx.try_recv().is_err(),
+                "deferred body has never been delivered"
+            );
+            f.present(false);
+            assert_eq!(dc1_tick().await[&name], (0, 3));
+            f.present(true);
             f.producer(true);
             assert_eq!(dc1_tick().await[&name], (0, 2));
-            f.frame(0, payload).await;
+            f.frame(0, &payload).await;
             let expanded = format!("{payload}{{\"type\":\"user\"}}\n");
             std::fs::write(&path, &expanded).unwrap();
             assert_eq!(
@@ -4131,13 +4153,16 @@ async fn dc1_isolated_scanner_child() {
             assert_eq!(
                 dc1_tick().await[&name],
                 (0, 3),
-                "producer failure defaults S to retry-only"
+                "producer failure retains S visibility in retry state"
             );
             assert_eq!(
                 dc1_tick().await[&name],
-                (expanded.len() as u64, 0),
-                "retry-only does not inherit true gate"
+                (0, 3),
+                "authorised retry cannot consume an undelivered range"
             );
+            f.producer(true);
+            dc1_tick().await;
+            f.frame(0, &expanded).await;
         }
         "generation" => {
             std::fs::write(&path, payload).unwrap();
@@ -4166,11 +4191,11 @@ async fn dc1_isolated_scanner_child() {
             // Intentional user-event consumption followed by truncation must reset to zero.
             f.producer(false);
             dc1_tick().await;
+            std::fs::remove_file(marker).unwrap();
             std::fs::write(&path, "{\"type\":\"user\"}\n").unwrap();
             assert!(dc1_tick().await[&name].0 > 0);
             std::fs::write(&path, b"x").unwrap();
             assert_eq!(dc1_tick().await[&name].0, 1);
-            std::fs::remove_file(marker).unwrap();
         }
         "durable" => {
             let marker = crate::services::tmux_common::session_temp_path(&name, "generation");
@@ -4196,8 +4221,14 @@ async fn dc1_isolated_scanner_child() {
             f.present(true);
             dc1_tick().await;
             f.frame(4, payload).await;
-            for action in [Dc1OpenAction::Remove, Dc1OpenAction::Truncate] {
-                *DC1_OPEN.lock().unwrap() = Some((path.to_str().unwrap().into(), 1, action));
+            let raw = [b"old\n".as_slice(), payload.as_bytes(), b"\xff\xfetail"].concat();
+            std::fs::write(&path, &raw).unwrap();
+            dc1_open(&path, 1, Dc1OpenAction::Shorten(raw.len() as u64 - 4));
+            dc1_tick().await;
+            f.frame_bytes(4, &raw[4..raw.len() - 4]).await;
+            std::fs::write(&path, format!("old\n{payload}")).unwrap();
+            for action in [Dc1OpenAction::Remove, Dc1OpenAction::Shorten(0)] {
+                dc1_open(&path, 1, action);
                 assert_eq!(
                     dc1_tick().await[&name],
                     (0, 3),
@@ -4217,8 +4248,7 @@ async fn dc1_isolated_scanner_child() {
                 format!("old\n{payload}"),
             )
             .unwrap();
-            *DC1_OPEN.lock().unwrap() =
-                Some((path.to_str().unwrap().into(), 1, Dc1OpenAction::Replace));
+            dc1_open(&path, 1, Dc1OpenAction::Replace);
             assert_eq!(dc1_tick().await[&name], (0, 3));
             assert!(
                 f.rx.try_recv().is_err(),
@@ -4281,7 +4311,7 @@ async fn dc1_isolated_scanner_child() {
             );
             assert!(
                 !absent.contains_key("dc1-extra-00"),
-                "name resolves equal-time ties"
+                "oldest additional source is evicted"
             );
             assert!(
                 absent["dc1-extra-64"] == (0, 0) && absent["dc1-extra-63"] == (0, 1),
@@ -4294,8 +4324,7 @@ async fn dc1_isolated_scanner_child() {
             assert_eq!(dc1_tick().await[&name], (0, 2));
             f.frame(0, payload).await;
             if case == "read-error" {
-                *DC1_OPEN.lock().unwrap() =
-                    Some((path.to_str().unwrap().into(), 0, Dc1OpenAction::Remove));
+                dc1_open(&path, 0, Dc1OpenAction::Remove);
             } else {
                 let replacement = crate::services::cluster::stream_relay::spawn_stream_relay(
                     f.binding.clone(),
@@ -4321,9 +4350,12 @@ async fn dc1_isolated_scanner_child() {
             std::fs::write(&path, &expanded).unwrap();
             assert_eq!(
                 dc1_tick().await[&name],
-                (expanded.len() as u64, 0),
-                "R loses visibility gate"
+                (0, if case == "closed" { 3 } else { 2 }),
+                "retry keeps prior visibility gate"
             );
+            if case == "read-error" {
+                f.frame(0, &expanded).await;
+            }
         }
         "chunk" => {
             let cap = IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK as usize;
@@ -4345,12 +4377,57 @@ async fn dc1_isolated_scanner_child() {
                 "truncation reads from zero, not EOF"
             );
         }
+        "echo" => {
+            std::fs::write(&path, payload).unwrap();
+            assert_eq!(dc1_tick().await[&name], (0, 3));
+            let echo = format!("{{\"type\":\"user\"}}\n{payload}");
+            std::fs::write(&path, &echo).unwrap();
+            f.producer(true);
+            assert_eq!(dc1_tick().await[&name], (echo.len() as u64, 0));
+            assert!(
+                f.rx.try_recv().is_err(),
+                "unqualified retry must suppress user echo"
+            );
+        }
+        "shrink" | "short-consume" => {
+            std::fs::write(
+                &path,
+                format!("{payload}{}", " ".repeat(1000 - payload.len())),
+            )
+            .unwrap();
+            assert_eq!(dc1_tick().await[&name], (0, 3));
+            let prefix = format!("{{\"type\":\"user\"}}\n{}", " ".repeat(384));
+            std::fs::write(&path, format!("{prefix}{}", " ".repeat(600))).unwrap();
+            if case == "shrink" {
+                std::fs::write(&path, &prefix).unwrap();
+            } else {
+                dc1_open(&path, 0, Dc1OpenAction::Shorten(400));
+            }
+            assert_eq!(
+                dc1_tick().await[&name],
+                (400, 0),
+                "consume only bytes actually read"
+            );
+            let suffix = payload.repeat(10);
+            assert!(prefix.len() + suffix.len() > 1000);
+            std::fs::write(&path, format!("{prefix}{suffix}")).unwrap();
+            f.producer(true);
+            dc1_tick().await;
+            f.frame(400, &suffix).await;
+        }
+        "short-send" => {
+            let raw = [payload.as_bytes(), b"\xff\xfetail"].concat();
+            std::fs::write(&path, &raw).unwrap();
+            dc1_open(&path, 0, Dc1OpenAction::Shorten(raw.len() as u64 - 4));
+            f.producer(true);
+            dc1_tick().await;
+            f.frame_bytes(0, &raw[..raw.len() - 4]).await;
+        }
         "replacement" => {
             std::fs::write(&path, payload).unwrap();
             let replacement = "{\"type\":\"user\"}\n";
             std::fs::write(format!("{}.replacement", path.display()), replacement).unwrap();
-            *DC1_OPEN.lock().unwrap() =
-                Some((path.to_str().unwrap().into(), 0, Dc1OpenAction::Replace));
+            dc1_open(&path, 0, Dc1OpenAction::Replace);
             f.producer(true);
             assert_eq!(
                 dc1_tick().await[&name],

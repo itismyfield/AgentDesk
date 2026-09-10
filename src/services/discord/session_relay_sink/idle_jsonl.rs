@@ -240,15 +240,13 @@ pub(super) struct IdleCursor {
     pub restore_pending: bool,
 }
 
+// Retry state preserves eligibility; byte limits belong to the current opened range.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum IdlePendingKind {
+pub(super) enum IdlePending {
     Deferred,
     SentUnconfirmed,
-    RetainedForRetry,
+    RetainedForRetry(bool),
 }
-
-// End watermark and the legacy visibility gate provenance travel together.
-pub(super) type IdlePending = (u64, IdlePendingKind);
 
 pub(super) fn prune_idle_jsonl_session_state(
     seen_sessions: &HashSet<String>,
@@ -364,7 +362,7 @@ pub(super) struct OpenedJsonlRange {
     pub payload: Vec<u8>,
     pub file_identity: crate::services::cluster::stream_relay::SourceFileIdentity,
     start: u64,
-    end: u64,
+    pub end: u64,
 }
 
 impl OpenedJsonlRange {
@@ -402,6 +400,7 @@ fn read_jsonl_range_from_file(
     let mut payload = Vec::new();
     file.take(end.saturating_sub(start))
         .read_to_end(&mut payload)?;
+    let end = start + payload.len() as u64;
     Ok(OpenedJsonlRange {
         payload,
         file_identity,

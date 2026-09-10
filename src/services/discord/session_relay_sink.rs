@@ -41,7 +41,7 @@ mod relay_format;
 mod task_notification_context;
 mod terminal_handoff;
 mod turn_parser;
-use self::idle_jsonl::IdlePendingKind::{Deferred, RetainedForRetry, SentUnconfirmed};
+use self::idle_jsonl::IdlePending::{Deferred, RetainedForRetry, SentUnconfirmed};
 use self::idle_jsonl::{
     IdleCursor, IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdlePending, IdleRelayRangeAction,
     idle_jsonl_apply_active_inflight_gate,
@@ -1295,9 +1295,6 @@ async fn run_idle_jsonl_relay_loop(
                 Some(len),
             )
             .max(durable);
-            let pending_end = pending_ends
-                .get(&session_name)
-                .map_or(len, |p| p.0.max(len));
 
             macro_rules! consume_idle_offset {
                 ($to:expr, $rearm:expr) => {
@@ -1338,17 +1335,17 @@ async fn run_idle_jsonl_relay_loop(
                         decision,
                         idle_jsonl::IdleJsonlInflightGateDecision::DeferUntilCommitted
                     ) {
-                        pending_ends.insert(session_name.clone(), (pending_end, Deferred));
+                        pending_ends.insert(session_name.clone(), Deferred);
                         if matches!(
                             idle_jsonl_suppressed_range_action(
                                 committed,
                                 *offset,
-                                pending_end,
+                                len,
                                 IdleJsonlSuppression::DeferUntilCommitted,
                             ),
                             IdleRelayRangeAction::AdvanceCommitted
                         ) {
-                            consume_idle_offset!(pending_end, IdleJsonlSessionInitRearm::Keep);
+                            consume_idle_offset!(len, IdleJsonlSessionInitRearm::Keep);
                         }
                     }
                     continue;
@@ -1362,15 +1359,15 @@ async fn run_idle_jsonl_relay_loop(
             let in_new_session_grace =
                 first_seen.elapsed() < IDLE_JSONL_RELAY_RECENT_INFLIGHT_GRACE;
             if in_recent_inflight_grace || in_new_session_grace {
-                pending_ends.insert(session_name.clone(), (pending_end, Deferred));
+                pending_ends.insert(session_name.clone(), Deferred);
                 match idle_jsonl_suppressed_range_action(
                     committed,
                     *offset,
-                    pending_end,
+                    len,
                     IdleJsonlSuppression::DeferUntilCommitted,
                 ) {
                     IdleRelayRangeAction::AdvanceCommitted => {
-                        consume_idle_offset!(pending_end, IdleJsonlSessionInitRearm::Keep);
+                        consume_idle_offset!(len, IdleJsonlSessionInitRearm::Keep);
                     }
                     IdleRelayRangeAction::HoldPending => {}
                     _ => unreachable!("deferred suppression returns only hold/advance"),
@@ -1385,17 +1382,17 @@ async fn run_idle_jsonl_relay_loop(
             let start = *offset;
             let was_deferred = matches!(
                 pending_ends.get(&session_name),
-                Some((_, Deferred | SentUnconfirmed))
+                Some(Deferred | SentUnconfirmed | RetainedForRetry(true))
             );
-            pending_ends.insert(session_name.clone(), (pending_end, RetainedForRetry));
-            let end = pending_end.min(start.saturating_add(IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK));
+            pending_ends.insert(session_name.clone(), RetainedForRetry(was_deferred));
+            let end = len.min(start.saturating_add(IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK));
             let Ok(opened_range) = read_jsonl_range(&relay_source.path, start, end) else {
                 continue;
             };
             if opened_range.file_identity != expected_file {
                 continue;
             }
-            let payload = &opened_range.payload;
+            let (payload, end) = (&opened_range.payload, opened_range.end);
             if payload.is_empty() {
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                 continue;
@@ -1436,6 +1433,7 @@ async fn run_idle_jsonl_relay_loop(
                     if suffix.file_identity != expected_file || suffix.payload.is_empty() {
                         continue;
                     }
+                    let end = suffix.end;
                     let source_stamp = source_marker.and_then(|marker| {
                         source_epoch_observer::source_stamp(
                             &session_name,
@@ -1450,11 +1448,11 @@ async fn run_idle_jsonl_relay_loop(
                         current_generation_signature,
                         source_stamp,
                     ) {
-                        pending_ends.insert(session_name.clone(), (end, SentUnconfirmed));
+                        pending_ends.insert(session_name.clone(), SentUnconfirmed);
                     }
                 }
                 IdleRelayRangeAction::HoldPending => {
-                    pending_ends.insert(session_name.clone(), (end, Deferred));
+                    pending_ends.insert(session_name.clone(), Deferred);
                 }
             }
         }
