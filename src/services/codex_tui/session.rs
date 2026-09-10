@@ -1,3 +1,5 @@
+mod source_observation;
+
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -158,6 +160,7 @@ pub(crate) fn install_codex_tui_runtime_binding(
             );
             return;
         }
+        source_observation::observe(&rollout_path, session_id.as_deref());
         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding_under_source_authority(
             authority, binding,
         );
@@ -610,6 +613,164 @@ mod tests {
                 rollout_start_offset: None,
             })
         );
+        source_observation_matrix(dir.path());
+    }
+
+    fn source_observation_matrix(root: &Path) {
+        use crate::services::agent_protocol::RuntimeHandoffKind;
+        use crate::services::tui_prompt_dedupe::{
+            TuiRuntimeBinding, runtime_binding_for_tmux_session,
+        };
+        use std::io::Write;
+        #[derive(Clone)]
+        struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Logs {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.0.take() {
+                        Some(home) => std::env::set_var("CODEX_HOME", home),
+                        None => std::env::remove_var("CODEX_HOME"),
+                    }
+                }
+            }
+        }
+        let hooks = std::env::var_os("AGENTDESK_CODEX_DIRECT_TUI_HOOKS");
+        unsafe {
+            std::env::remove_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS");
+        }
+        let hooks_off = !crate::services::codex::codex_direct_tui_hook_overrides_enabled();
+        unsafe {
+            if let Some(value) = hooks {
+                std::env::set_var("AGENTDESK_CODEX_DIRECT_TUI_HOOKS", value);
+            }
+        }
+        assert!(hooks_off, "direct hooks remain opt-in");
+        let _home = RestoreHome(std::env::var_os("CODEX_HOME"));
+        unsafe {
+            std::env::set_var("CODEX_HOME", root.join("custom-home"));
+        }
+        let sessions = root.join("custom-home/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = sessions.join(format!("rollout-{id}.jsonl"));
+        let other = uuid::Uuid::new_v4().to_string();
+        let logs = Logs(Default::default());
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        for (metadata_id, source, parent, expected) in [
+            (
+                other.as_str(),
+                serde_json::json!("cli"),
+                Value::Null,
+                "rejected",
+            ),
+            (
+                id.as_str(),
+                serde_json::json!({"subagent":{"thread_spawn":{"parent_thread_id":other,"depth":1}}}),
+                Value::Null,
+                "child",
+            ),
+            (
+                id.as_str(),
+                serde_json::json!("cli"),
+                serde_json::json!(other),
+                "child",
+            ),
+            (
+                id.as_str(),
+                serde_json::json!("cli"),
+                Value::Null,
+                "matched",
+            ),
+            (
+                id.as_str(),
+                serde_json::json!({"unknown":true}),
+                Value::Null,
+                "pending",
+            ),
+        ] {
+            let meta = serde_json::json!({"type":"session_meta","payload":{
+                "id":metadata_id,"source":source,"parent_thread_id":parent}});
+            std::fs::write(&path, format!("{meta}\n")).unwrap();
+            assert_eq!(source_observation::observe(&path, Some(&id)), expected);
+            let before = std::fs::read(&path).unwrap();
+            logs.0.lock().unwrap().clear();
+            let binding = TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::CodexTui,
+                output_path: path.display().to_string(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some(id.clone()),
+                last_offset: 42,
+                relay_last_offset: None,
+            };
+            install_codex_tui_runtime_binding("AgentDesk-d1d1-observer", Some(42), binding);
+            let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+            assert!(text.contains(&format!("verdict=\"{expected}\"")), "{text}");
+            assert!(
+                text.contains("launch_verified=false") && text.contains("source_metadata_only")
+            );
+            let installed = runtime_binding_for_tmux_session("AgentDesk-d1d1-observer").unwrap();
+            assert_eq!(installed.output_path, path.display().to_string());
+            assert_eq!(installed.session_id.as_deref(), Some(id.as_str()));
+            assert_eq!(installed.last_offset, 42);
+            let marker = read_codex_tui_rollout_marker("AgentDesk-d1d1-observer").unwrap();
+            assert_eq!(marker.rollout_path, path);
+            assert_eq!(marker.rollout_start_offset, Some(42));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        for content in [
+            "".to_string(),
+            "{partial".to_string(),
+            "x".repeat(65536),
+            "{}\n".repeat(16),
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"source\":\"cli\"}}}}"
+            ),
+        ] {
+            std::fs::write(&path, content).unwrap();
+            assert_eq!(source_observation::observe(&path, Some(&id)), "pending");
+        }
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"source\":\"cli\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(source_observation::observe(&path, None), "pending");
+        assert_eq!(
+            source_observation::observe(&path, Some("not-uuid")),
+            "pending"
+        );
+        assert_eq!(
+            source_observation::observe(&sessions.join("absent"), Some(&id)),
+            "pending"
+        );
+        let outside = root.join("outside.jsonl");
+        std::fs::copy(&path, &outside).unwrap();
+        assert_eq!(source_observation::observe(&outside, Some(&id)), "pending");
+        // Open-handle identity and metadata must survive a pathname replacement.
+        let opened = std::fs::File::open(&path).unwrap();
+        std::fs::rename(&path, sessions.join("old.jsonl")).unwrap();
+        std::fs::write(&path, "{}\n").unwrap();
+        assert_eq!(source_observation::compare(opened, Some(&id)), "matched");
     }
 
     #[test]
