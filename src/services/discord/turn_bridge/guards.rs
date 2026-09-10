@@ -1,3 +1,4 @@
+use super::context::BridgeCompletionSignal;
 use super::inflight::RelayOwnerKind;
 use super::*;
 
@@ -11,7 +12,7 @@ use super::*;
 // — if no subscriber is registered, `send` returns Err and we
 // ignore it.
 pub(super) struct CompletionGuard {
-    tx: Option<tokio::sync::oneshot::Sender<()>>,
+    tx: Option<tokio::sync::oneshot::Sender<BridgeCompletionSignal>>,
     broadcaster: tokio::sync::broadcast::Sender<super::super::inflight::InflightSignal>,
     turn_finalizer: Arc<super::super::turn_finalizer::TurnFinalizer>,
     shared: Arc<SharedData>,
@@ -41,7 +42,7 @@ impl CompletionGuard {
     /// would stop the relay that just became authoritative for the same turn.
     pub(super) fn relinquish_bridge_authority(&mut self) {
         if let Some(tx) = self.tx.take() {
-            let _ = tx.send(());
+            let _ = tx.send(BridgeCompletionSignal::Finalized);
         }
         self.publish_completed_on_drop = false;
     }
@@ -71,7 +72,7 @@ impl CompletionGuard {
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
         if let Some(tx) = self.tx.take() {
-            let _ = tx.send(());
+            let _ = tx.send(BridgeCompletionSignal::Finalized);
         }
         if self.publish_completed_on_drop {
             let _ = self
@@ -172,6 +173,52 @@ pub(super) fn make_bridge_guards(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_guard_drop_signals_finalized_and_publishes_completed() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let mut signals = shared.inflight_signals.subscribe();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let mut guard =
+            CompletionGuard::for_completion_test(shared.clone(), ChannelId::new(58_330_201), 201);
+        guard.tx = Some(tx);
+
+        drop(guard);
+
+        assert_eq!(rx.try_recv(), Ok(BridgeCompletionSignal::Finalized));
+        assert!(matches!(
+            signals.try_recv(),
+            Ok(super::super::super::inflight::InflightSignal::Completed {
+                channel_id: 58_330_201,
+                turn_id: 201,
+            })
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_guard_relinquish_signals_finalized_without_completed() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let mut signals = shared.inflight_signals.subscribe();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let mut guard =
+            CompletionGuard::for_completion_test(shared.clone(), ChannelId::new(58_330_202), 202);
+        guard.tx = Some(tx);
+
+        guard.relinquish_bridge_authority();
+
+        assert!(guard.tx.is_none());
+        assert_eq!(rx.try_recv(), Ok(BridgeCompletionSignal::Finalized));
+        assert!(matches!(
+            signals.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        guard.relinquish_bridge_authority();
+        drop(guard);
+        assert!(matches!(
+            signals.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
 
     #[test]
     fn merged_id_zero_state_drives_guard_key_owner_and_cleanup_identity() {

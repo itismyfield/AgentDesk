@@ -23,6 +23,7 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
   var backfillMissingSessionAgentIds = helpers.backfillMissingSessionAgentIds;
   var findRecentInflightForSession = helpers.findRecentInflightForSession;
   var inspectInflightProgress = helpers.inspectInflightProgress;
+  var isExternalInputTuiDirectSyntheticTurn = helpers.isExternalInputTuiDirectSyntheticTurn;
   var requestTurnWatchdogExtension = helpers.requestTurnWatchdogExtension;
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
@@ -190,6 +191,18 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
           continue;
         }
 
+        // relay-state-contract.md:43 names only canonical orchestration; deliberately exempt
+        // ALL TUI-direct synthetic owner (user 1) turns by shape, never session-name hardcoding.
+        if (isExternalInputTuiDirectSyntheticTurn(inflightProgress.inflight)) {
+          var exemption = null;
+          try { exemption = JSON.parse(agentdesk.kv.get(deadlockKey)); } catch(e) {}
+          if (!exemption || exemption.synthetic_exempt !== true || exemption.count !== 0) {
+            agentdesk.log.info("[deadlock] TUI-direct synthetic turn exempt: " + sess.session_key);
+            agentdesk.kv.set(deadlockKey, '{"count":0,"synthetic_exempt":true}');
+          }
+          continue; // One log per stale episode; existing counter cleanup removes the marker.
+        }
+
         // Check extension count + last check timestamp
         var extValue = agentdesk.kv.get(deadlockKey);
         var extensions = 0;
@@ -197,8 +210,9 @@ module.exports = function attachActiveMonitor(timeouts, helpers) {
         if (extValue) {
           try {
             var parsed = JSON.parse(extValue);
-            extensions = parsed.count || 0;
-            lastCheckAt = parsed.ts || 0;
+            if (parsed.synthetic_exempt === true) agentdesk.kv.delete(deadlockKey);
+            extensions = parsed.synthetic_exempt === true ? 0 : (parsed.count || 0);
+            lastCheckAt = parsed.synthetic_exempt === true ? 0 : (parsed.ts || 0);
           } catch(e) {
             // 기존 형식(숫자만) 마이그레이션
             extensions = parseInt(extValue) || 0;
