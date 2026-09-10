@@ -6,7 +6,7 @@
 > 과도기를 넘겨 살아남지 않으므로, T6 진입 시 이 파일이 존재한다는 가정이
 > 성립해야 한다.
 >
-> Last refreshed: 2026-09-04 (against exact main 310f08096439470f7674371c206c7669385ceb78; S4, S5, S6a, and S6b landed inventory resynced; T5 rollout and live acceptance remain pending).
+> Last refreshed: 2026-09-10 (against exact main d2dd9cbd4a0753410c6126765472823bc71ebd2f; landed source reconciled through PR #5851 and #5848; no claim of full T5 or live acceptance).
 
 정본 계약: `design-t5-r3.md` §12-2. **T5의 각 구현 슬라이스는, 레거시 경로를 대체할 때마다 그 자리에서
 대체된 경로를 이 파일에 기록하고 코드에 deprecated 마킹을 남긴다.** 목적 이중:
@@ -15,6 +15,35 @@
 
 기록 형식: 슬라이스별 1절. 대체가 없으면 **"대체한 레거시 경로 없음(순수 추가)"** 를 명시 기록한다
 (빈 절은 "아직 안 썼다"와 구별되지 않으므로 금지).
+
+---
+
+## 현재 판정과 T6 진입 경계 (2026-09-10)
+
+- **운영 dwell을 별도 대기 단계로 두지 않는다.** 전환 뒤 바로 T6의 철거 작업으로 이어 간다.
+  다만 즉시 T6 착수는 모든 후보의 무조건 삭제 승인이나 T5 전체 완료 선언이 아니다.
+- 아래 S1–S6b는 당시 슬라이스의 대체 범위를 기록한 이력이다. “이 슬라이스에서 미구현”은
+  최신 main 전체의 미구현 판정이 아니다. 후속 착지의 실제 범위는 아래 별도 대응표로 읽는다.
+- 100% 집행·rollback 종료처럼 각 후보가 요구하는 권위 전제는 유지한다. 기존 절의
+  live acceptance는 해당 경로의 배달·안전성 수용 증거를 뜻하며 추가 체류 시간을 요구하지 않는다.
+  이 문서 갱신은 라이브 설정·배포·fleet 상태를 측정하지 않았으므로 그 전제를 충족했다고 쓰지 않는다.
+- source에서 제거가 확인된 구 경로를 다시 철거 후보로 세지 않는다. 남은 호환 코드와
+  영구 authority guard를 구분하고, 후보별 선행 증거가 없는 항목만 보류한다.
+
+### 후속 착지 대응표 — 관측·완료 신호·receipt (T5 전체 대체 아님)
+
+표의 source 경로는 `src/services/` 기준이다.
+
+| 착지 | 확인한 source / 바뀐 범위 | T6 처분·남은 경계 |
+|---|---|---|
+| #5810 `ff2f2001c6` → #5851 `f325319527` (#5808) | `cluster/stream_relay/shutdown.rs`의 `shutdown_with_result`가 `Joined`/`NoTask`/`JoinError`를 보존한다. `cluster/watcher_supervisor.rs`의 `observe_relay_shutdown`은 기존 네 shutdown 지점(boot, registry change, lagged reconcile, final drain)에서 결과를 관측한다. | 결과를 버리는 호환 `shutdown` 래퍼는 잔여 호출자·공개 API 호환 확인 뒤에만 좁은 후보다. queue close·admission 차단·join 대기는 보존한다. `Joined`는 배달 ACK나 detached 작업 완료 증명이 아니다. observer 착지는 owner/admission 전환이 아니다. |
+| #5841 `5bd3415321` → #5844 `eaa88ed654` (#5833 S2/S3) | `discord/turn_bridge/context.rs`의 `BridgeCompletionSignal`이 `Finalized`와 `EntryAborted`를 구분한다. `tui_prompt_relay/claude_idle_bridge.rs`의 공통 완료 처리는 abort/수신 오류를 실패로 반환하고, Claude/Codex tail의 delivery-failure broad Cancel은 이미 제거됐다. | 제거된 Cancel은 재철거 대상이 아니다. typed abort 분기와 후임 durable 참조 placeholder 보존은 안전 경계다. `Finalized` 자체는 내구 배달 증명이 아니며 S3의 episode-bound witness 후속 전체를 완료시킨 것으로 세지 않는다. |
+| #5848 `d2dd9cbd4a` (#5845 D1a2) | `claude_tui/hook_server/relay_receipts.rs`의 `RelayReceiptLedger::begin`은 신규 managed 요청의 freshness를 삽입 전에 검사한다. 같은 pin의 InFlight는 유효 기간 중 425, 만료 후 410을 반환하며 Fresh로 재발급하지 않는다. pin 충돌 409와 terminal 응답 재사용은 유지된다. | freshness·pin 충돌·중복 인가 차단은 영구 보존한다. Legacy 요청, 기존 2시간 pruning, terminal 캐시는 존치하며 이 착지가 cardinality cap·tombstone·quarantine 또는 source/reader/owner 전환을 구현한 것은 아니다. |
+
+#5851의 production-loop 이벤트 테스트는 registry change와 final drain을 행사한다.
+lagged 지점은 lexical 검사이고 boot 초기 teardown 목록은 비어 있으므로 네 지점 모두의
+runtime 배달 검증으로 확대하지 않는다. #5833 S4/S5 및 #5845 D1e1은 위 착지 범위 밖이며,
+이 표는 PARK 항목을 완료로 승격하지 않는다. T5의 S4/S5와 #5833의 동명 S4/S5는 다른 슬라이스다.
 
 ---
 
@@ -422,7 +451,7 @@ segmentation 은 48h 미만 다이얼 이탈에서 두 window 를 병합했고(r
 ## S4 — 스트림 중 내구 행 소실 억제 집행 · a5e8c64d65 / PR #5489
 
 **S4는 선택된 rollout 채널에서 내구 행 소실만으로 스트림 수명을 끝내던 레거시 경로를
-대체했다. T5 rollout과 live acceptance는 아직 대기 중이다.**
+대체했다. 이 코드 착지만으로 운영 rollout·live acceptance 완료를 판정하지 않는다.**
 
 - **대체된 경로:** 스트림 중 보호 저장이 내구 행 소실을 확인하면, 선택된 채널에서는 현재
   Discord 가시 변경만 억제하고 정상 종료 처리까지 수명을 이어 간다. 한 틱의 모든 가시 변경과
