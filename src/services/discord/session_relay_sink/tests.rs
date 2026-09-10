@@ -4465,8 +4465,8 @@ async fn dc1_isolated_scanner_child() {
             assert!(f.rx.try_recv().is_err(), "replacement must not enqueue");
             assert_eq!(
                 dc1_tick().await[&name],
-                (replacement.len() as u64, 1),
-                "new source starts at EOF"
+                (replacement.len() as u64, 0),
+                "new source starts at EOF without qualification"
             );
         }
         _ => unreachable!(),
