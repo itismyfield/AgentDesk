@@ -65,6 +65,29 @@ use super::super::super::DiscordSession;
 use super::super::memory_lifecycle::TurnEndMemoryPlan;
 use crate::ui::ai_screen::{HistoryItem, HistoryType};
 
+/// Re-admission authorizes only the isolated attempt's own transcript;
+/// it grants no channel effects and the postlude also rejects cancelled turns.
+pub(super) async fn resolve_completion_scope(
+    shared: &std::sync::Arc<super::super::super::SharedData>,
+    channel_id: poise::serenity_prelude::ChannelId,
+    provider: &crate::services::provider::ProviderKind,
+    turn_key: Option<&str>,
+    turn_id: &str,
+) -> (bool, bool) {
+    let canonical =
+        super::super::super::adk_session::build_adk_session_key(shared, channel_id, provider, None)
+            .await;
+    let isolated = turn_key.is_some_and(|key| canonical.as_deref() != Some(key));
+    let routine = isolated
+        && crate::db::session_transcripts::routine_attempt_owns_turn_pg(
+            shared.pg_pool.as_ref(),
+            turn_id,
+            &channel_id.get().to_string(),
+        )
+        .await;
+    (isolated, routine)
+}
+
 /// Outcome of the end-of-turn channel-session writeback.
 pub(in crate::services::discord::turn_bridge) struct ChannelTurnWriteback {
     /// Provider `session_id` to persist to the DB under the turn's own
@@ -89,6 +112,7 @@ pub(in crate::services::discord::turn_bridge) struct ChannelTurnWriteback {
 pub(in crate::services::discord::turn_bridge) fn apply_channel_turn_writeback(
     session: &mut DiscordSession,
     channel_effects_suppressed: bool,
+    routine_attempt_owns_turn: bool,
     plan: &TurnEndMemoryPlan,
     user_text: &str,
     full_response: &str,
@@ -100,7 +124,7 @@ pub(in crate::services::discord::turn_bridge) fn apply_channel_turn_writeback(
     if channel_effects_suppressed {
         return ChannelTurnWriteback {
             session_id_to_persist: None,
-            persist_transcript: false,
+            persist_transcript: routine_attempt_owns_turn && plan.persist_transcript,
         };
     }
 
@@ -212,6 +236,32 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn sa2_suppressed_transcript_requires_attempt_and_plan() {
+        for routine in [false, true] {
+            for persist in [false, true] {
+                let mut session = seeded_channel_session();
+                let before = session.clone();
+                let mut plan = persist_plan();
+                plan.persist_transcript = persist;
+                plan.clear_provider_session = true;
+                let outcome = apply_channel_turn_writeback(
+                    &mut session,
+                    true,
+                    routine,
+                    &plan,
+                    "격리",
+                    "NO_REPLY",
+                    Some("foreign"),
+                );
+                assert_eq!(outcome.persist_transcript, routine && persist);
+                assert_eq!(outcome.session_id_to_persist, None);
+                assert_eq!(history_snapshot(&session), history_snapshot(&before));
+                assert_eq!(session.session_id, before.session_id);
+            }
+        }
+    }
+
     /// Mutation proof: a scheduled-snapshot turn (isolated session key) must
     /// leave the channel's live in-memory session byte-for-byte unchanged.
     /// Deleting the isolation guard in `apply_channel_turn_writeback` makes this
@@ -225,6 +275,7 @@ mod tests {
         let outcome = apply_channel_turn_writeback(
             &mut session,
             true, // isolated scheduled-snapshot turn
+            false,
             &persist_plan(),
             "snapshot-turn-user",
             "snapshot-turn-assistant",
@@ -299,6 +350,7 @@ mod tests {
         let outcome = apply_channel_turn_writeback(
             &mut session,
             false, // normal live turn
+            false,
             &persist_plan(),
             "live-u2",
             "live-a2",

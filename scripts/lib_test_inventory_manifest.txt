@@ -6365,6 +6365,7 @@ services::discord::turn_bridge::completion_postlude::channel_episode_scope::test
 services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::tui_direct_synthetic_release_is_idle_but_an_active_successor_is_foreign
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::foreign_completion_cannot_select_provider_session_clear
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::normal_turn_writes_back_into_channel_session
+services::discord::turn_bridge::completion_postlude::channel_writeback::tests::sa2_suppressed_transcript_requires_attempt_and_plan
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_does_not_stash_feedback_reminder
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_leaves_channel_session_untouched
 services::discord::turn_bridge::context::tests::intake_completion_waiter_discards_typed_payload_and_only_maps_recv_error
@@ -6468,6 +6469,10 @@ services::discord::turn_bridge::resume_pin_tests::c1_missing_and_idle_tail_misma
 services::discord::turn_bridge::resume_pin_tests::c1_poisoned_resume_lock_does_not_unpause
 services::discord::turn_bridge::resume_pin_tests::c1_same_synthetic_and_handoff_pin_resume_without_clearing_marker
 services::discord::turn_bridge::resume_pin_tests::c1_synthetic_and_handoff_stale_pins_leave_replacement_untouched
+services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_cancelled_pg
+services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_foreign_or_stale_pg
+services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_to_executor_pg
+services::discord::turn_bridge::resume_pin_tests::sa2_capture_hands_off_owned_provider_receiver
 services::discord::turn_bridge::retry_state::sentinel_overwrite_clamp_tests::replay_gate_does_not_reset_offset_for_short_sentinel
 services::discord::turn_bridge::retry_state::sentinel_overwrite_clamp_tests::sync_clamps_offset_within_replaced_body
 services::discord::turn_bridge::retry_state::sentinel_overwrite_clamp_tests::sync_normalizes_prior_offset_inside_leading_multibyte_char
