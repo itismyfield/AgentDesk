@@ -1771,8 +1771,12 @@ _acquire_release_deploy_lock "$@"
 # high-CPU scan excludes this deploy's own process group. Skipped in the
 # detached-helper dry run (DEPLOY_TEST_MODE=1), which never builds.
 if [ "$DEPLOY_TEST_MODE" != "1" ]; then
-    if ! _preflight_resource_contention; then
-        exit 1
+    # Only source builds below enter the canonical build_token.py queue (#5818).
+    # External artifacts do not acquire that token and keep the original guard.
+    if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
+        _preflight_resource_contention canonical-build-token || exit 1
+    else
+        _preflight_resource_contention || exit 1
     fi
 fi
 

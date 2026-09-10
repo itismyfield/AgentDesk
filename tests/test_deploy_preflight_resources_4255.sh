@@ -126,6 +126,25 @@ reset_clean_stubs() {
 reset_clean_stubs
 
 # ── Pure helpers ─────────────────────────────────────────────────────────────
+echo "== #5818 canonical-token caller keeps independent host gates =="
+PGREP_MATCH="cargo rustc"
+assert_rc "canonical source build defers Cargo to token" 0 _preflight_resource_contention canonical-build-token
+assert_rc "non-token caller still refuses Cargo" 1 _preflight_resource_contention
+assert_rc "unknown serialization does not bypass guard" 1 _preflight_resource_contention unknown
+STUB_LOADAVG=99
+assert_rc "canonical source build still refuses host load" 1 _preflight_resource_contention canonical-build-token
+assert_out_contains "host refusal is distinct from token wait" "host resource contention" _preflight_resource_contention canonical-build-token
+unset STUB_LOADAVG
+STUB_PRESSURE=4
+assert_rc "canonical source build still refuses memory pressure" 1 _preflight_resource_contention canonical-build-token
+unset STUB_PRESSURE
+STUB_HIGHCPU="$(printf '99999\t99.0\t04:00:00\t03:59:00\trustc')"
+assert_rc "canonical source build still refuses sustained CPU" 1 _preflight_resource_contention canonical-build-token
+unset STUB_HIGHCPU
+PGREP_MATCH="UnrealBuildTool"
+assert_rc "canonical source build still refuses non-token builder" 1 _preflight_resource_contention canonical-build-token
+reset_clean_stubs
+
 echo "== Pure numeric helpers =="
 assert_rc "_preflight_num_gt 25 > 21 → true"            0 _preflight_num_gt "25" "21"
 assert_rc "_preflight_num_gt 3.70 > 21 → false"         1 _preflight_num_gt "3.70" "21"

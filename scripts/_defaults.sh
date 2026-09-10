@@ -2268,6 +2268,9 @@ _preflight_resource_contention() {
   # AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=1 proceeds anyway (findings are
   # still printed, downgraded to warnings), consistent with the
   # AGENTDESK_DEPLOY_FORCE_ROLLBACK force-through style.
+  # Only a caller whose build unconditionally enters build_token.py may opt in.
+  # Other callers (including external-artifact deploys) retain builder rejection.
+  local build_serialization="${1:-}"
   local force="${AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT:-0}"
   local max_load="${AGENTDESK_DEPLOY_MAX_LOADAVG:-}"
   local max_pressure="${AGENTDESK_DEPLOY_MAX_MEM_PRESSURE_LEVEL:-4}"
@@ -2295,9 +2298,12 @@ _preflight_resource_contention() {
   ncpu="$(_preflight_cpu_count)"
 
   # (1) Concurrent build tools — EXACT-name match only (never `pgrep -f`). These
-  # are the known deploy-killers (07-05 concurrent UE build) and stay a HARD
-  # refuse on their own — a builder is unambiguous, machine-wide contention.
+  # remain hard refusals except Cargo on the canonical serialized build path.
+  # Actual load, memory pressure and sustained CPU contention stay independent.
   for name in cargo rustc UnrealEditor UnrealEditor-Cmd UnrealBuildTool ShaderCompileWorker; do
+    case "$build_serialization:$name" in
+      canonical-build-token:cargo|canonical-build-token:rustc) continue ;;
+    esac
     pids="$(_preflight_builder_pids "$name" || true)"
     if [ -n "$pids" ]; then
       findings+=("concurrent build tool '${name}' running (pid ${pids}) — would oversubscribe CPU/RAM against the release build")
@@ -2381,7 +2387,7 @@ EOF
     return 0
   fi
 
-  echo "🛑 [gate] Refusing release build — resource contention detected (#4255):" >&2
+  echo "🛑 [gate] Refusing release build — host resource contention detected (#4255):" >&2
   for f in "${findings[@]}"; do
     echo "    - $f" >&2
   done

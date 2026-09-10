@@ -250,6 +250,76 @@ class WiringTests(unittest.TestCase):
         self.assertIn("tests.test_build_token_serialization_5663", checks)
 
 
+class DeployPreflightTokenTests(unittest.TestCase):
+    def test_source_build_queues_but_artifact_and_host_pressure_refuse(self) -> None:
+        # Execute the actual preflight/build branches, never the full deployment.
+        deploy = (SCRIPTS / "deploy-release.sh").read_text()
+        preflight = deploy.split('if [ "$DEPLOY_TEST_MODE" != "1" ]; then', 1)[1]
+        preflight = 'if [ "$DEPLOY_TEST_MODE" != "1" ]; then' + preflight.split("# #743:", 1)[0]
+        build = deploy.split('if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then')[-1]
+        build = 'if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then' + build.split("# Rebuild dashboard", 1)[0]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            token, marker = root / "token", root / "built"
+            driver = root / "driver.py"
+            driver.write_text(_SEAL + """
+assert sys.argv[2] == "scripts/build_token.py"
+assert sys.argv[3] == "--"
+assert sys.argv[4:6] == ["cargo", "build"]
+# Replace Cargo alone: the production CLI still acquires the isolated token.
+raise SystemExit(bt.main([sys.argv[2], "--", sys.executable, "-c",
+                         "from pathlib import Path; Path(" + repr(sys.argv[-1]) + ").touch()"] ))
+""")
+            script = root / "scenario.sh"
+            script.write_text("""set -eu
+. "$1/_defaults.sh"
+DEPLOY_TEST_MODE=0
+REPO="$1/.."
+SOURCE_BINARY="$4"
+DEPLOY_BUILD_PROFILE="$5"
+_preflight_builder_pids() { case "$1" in cargo|rustc) echo 55555;; esac; }
+_preflight_cpu_count() { echo 8; }
+_preflight_loadavg_1min() { echo "${TEST_LOAD:-1}"; }
+_preflight_mem_pressure_level() { echo "${TEST_PRESSURE:-1}"; }
+_preflight_high_cpu_processes() { :; }
+_preflight_deploy_target_pids() { :; }
+DRIVER="$2"; TOKEN="$3"; MARKER="$4"
+python3() { command "$TEST_PYTHON" "$DRIVER" "$TOKEN" "$@" "$MARKER"; }
+""" + preflight + build)
+            env = dict(os.environ, TEST_PYTHON=sys.executable,
+                       ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS="2")
+            for key in list(env):
+                if key.startswith("AGENTDESK_DEPLOY_") or key == bt.LEASE_ENV:
+                    env.pop(key)
+            command = ["bash", str(script), str(SCRIPTS), str(driver), str(token), str(marker)]
+            for profile in ("release", "dev"):
+                with self.subTest(profile=profile), token.open("a+") as holder:
+                    fcntl.flock(holder, fcntl.LOCK_EX)
+                    with subprocess.Popen(command + [profile], env=env, stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, text=True) as child:
+                        try:
+                            notice = child.stderr.readline()
+                            self.assertIn("build token: waiting for", notice)
+                            self.assertFalse(marker.exists(), "build started before token release")
+                            self.assertIsNone(child.poll(), "busy token must queue, not reject")
+                        finally:
+                            fcntl.flock(holder, fcntl.LOCK_UN)
+                        out, err = child.communicate(timeout=10)
+                        self.assertEqual(child.returncode, 0, out + err)
+                        self.assertTrue(marker.exists())
+                        marker.unlink()
+            for extra, reason in (({"TEST_LOAD": "99"}, "load average"),
+                                  ({"TEST_PRESSURE": "4"}, "memory pressure"),
+                                  ({"AGENTDESK_DEPLOY_BINARY": "artifact"}, "concurrent build tool")):
+                with self.subTest(extra=extra):
+                    result = subprocess.run(command + ["release"], env=dict(env, **extra),
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn(reason, result.stderr)
+                    self.assertNotIn("build token: waiting", result.stderr)
+                    self.assertFalse(marker.exists())
+
+
 class WaitTimeoutTests(TokenTestCase):
     def test_unusable_overrides_fall_back_to_the_default(self) -> None:
         for raw in ("", "nope", "0", "-5", "nan", "inf"):
