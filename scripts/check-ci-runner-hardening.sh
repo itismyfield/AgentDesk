@@ -909,6 +909,8 @@ targets = {
     # hardening registry so order-independent job keys cannot disable it silently.
     # #5321 re-pins after making the independent backstop verify both the
     # result helper and the gate before executing that verified gate.
+    # #5464 A12 re-pins after adding two existing S4 named witnesses;
+    # no commands or enforcement checks are removed or relaxed.
     "job_sha256" => "bea72bed3d9f683bb9a53cdaedd15a092ed50d9221c3edd7dd1c5f4187859fac",
     "job_timeout_minutes" => 50,
     "cargo_steps" => {
