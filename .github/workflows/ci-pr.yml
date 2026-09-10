@@ -1525,7 +1525,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=2f6a3d2d6260c546608052819be383115bf979df948e6ca3a16e5a45d2231ca0
+          expected=a326da6e45343e8c0f3e842b58886593dde6d8af5571ebcb8d3a3691742433f1
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1601,6 +1601,8 @@ jobs:
         run: |
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::session_relay_sink -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_inside_the_cohort_and_still_ends_lifecycle_outside_it -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
 
       - name: Require relay-authority mutations to be killed
@@ -1632,7 +1634,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=2f6a3d2d6260c546608052819be383115bf979df948e6ca3a16e5a45d2231ca0
+          expected=a326da6e45343e8c0f3e842b58886593dde6d8af5571ebcb8d3a3691742433f1
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
