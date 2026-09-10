@@ -619,9 +619,22 @@ mod tests {
     fn source_observation_matrix(root: &Path) {
         use crate::services::agent_protocol::RuntimeHandoffKind;
         use crate::services::tui_prompt_dedupe::{
-            TuiRuntimeBinding, runtime_binding_for_tmux_session,
+            TEST_LOCK, TuiRuntimeBinding, clear_tmux_runtime_binding,
+            runtime_binding_for_tmux_session,
         };
         use std::io::Write;
+        // The caller already holds the env lock: preserve env -> dedupe order.
+        let _dedupe = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        struct ClearBinding;
+        impl Drop for ClearBinding {
+            fn drop(&mut self) {
+                clear_tmux_runtime_binding("AgentDesk-d1d1-observer");
+            }
+        }
+        // Drop before _dedupe, including on assertion unwind; do not reset peers.
+        let cleanup = ClearBinding;
         #[derive(Clone)]
         struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
         impl Write for Logs {
@@ -735,6 +748,8 @@ mod tests {
             assert_eq!(marker.rollout_start_offset, Some(42));
             assert_eq!(std::fs::read(&path).unwrap(), before);
         }
+        drop(cleanup);
+        assert!(runtime_binding_for_tmux_session("AgentDesk-d1d1-observer").is_none());
         for content in [
             "".to_string(),
             "{partial".to_string(),
