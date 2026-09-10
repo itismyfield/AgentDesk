@@ -232,11 +232,6 @@ pub struct DiscordHealthSnapshot {
     /// which reads the JSONL event log instead (design §5.3).
     #[serde(skip_serializing_if = "Option::is_none")]
     relay_authority_observation: Option<RelayAuthorityObservationReport>,
-    /// #5464 T5 S5: detail-only axis-B triage. The public health response is an
-    /// allowlist, so absence is serialized as no key rather than JSON `null`.
-    #[cfg(unix)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    axis_b_observation: Option<crate::services::discord::relay_recovery::AxisBObservationReport>,
 }
 
 impl DiscordHealthSnapshot {
@@ -1113,9 +1108,6 @@ pub(super) async fn build_health_snapshot_with_options(
         relay_authority_rollout: include_mailbox_details.then(cohort::rollout_report),
         relay_authority_observation: include_mailbox_details
             .then(authority_observation::observation_report),
-        #[cfg(unix)]
-        axis_b_observation: include_mailbox_details
-            .then(crate::services::discord::relay_recovery::axis_b_observation_report),
     }
 }
 
@@ -1408,15 +1400,10 @@ mod tests {
             Some(0),
             "AC2-R's monotone-relaxing alarm counter must be zero in this process"
         );
-        #[cfg(unix)]
-        {
-            let axis_b = detail
-                .get("axis_b_observation")
-                .and_then(serde_json::Value::as_object)
-                .expect("detail health publishes the independent axis-B producer block");
-            assert!(axis_b.contains_key("dropped_records"));
-            assert!(axis_b.contains_key("write_failures"));
-        }
+        assert!(
+            detail.get("axis_b_observation").is_none(),
+            "the retired comparison block must be absent from detail health"
+        );
     }
 
     /// #5736: the summary build answers the relay-verdict axis instead of
