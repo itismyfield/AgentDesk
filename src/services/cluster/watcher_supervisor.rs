@@ -292,6 +292,28 @@ pub(crate) async fn run_watcher_supervisor_loop_with_registry(
     .await;
 }
 
+async fn observe_relay_shutdown(
+    shutdown: impl std::future::Future<
+        Output = Result<super::stream_relay::ShutdownOutcome, tokio::task::JoinError>,
+    >,
+    site: &'static str,
+) -> &'static str {
+    use super::stream_relay::ShutdownOutcome;
+    let outcome = match shutdown.await {
+        Ok(ShutdownOutcome::Joined) => "joined",
+        Ok(ShutdownOutcome::NoTask) => "no_task",
+        Err(error) if error.is_panic() => "join_error_panic",
+        Err(error) if error.is_cancelled() => "join_error_cancelled",
+        Err(_) => "join_error",
+    };
+    tracing::info!(
+        site,
+        outcome,
+        "watcher-supervisor relay shutdown observed; not a delivery acknowledgement"
+    );
+    outcome
+}
+
 /// Full-control variant. The E5 (#2412) end-to-end test uses this to inject
 /// a fresh `RelayProducerRegistry` so the supervisor's producer-registry
 /// publish path is exercised without leaking handles into the global
@@ -309,7 +331,7 @@ pub async fn run_watcher_supervisor_loop_with_registry_and_producers(
     // Boot reconcile: pick up anything already in the registry.
     let initial_teardowns = full_reconcile(&mut active, &registry, &sink, &producers);
     for handle in initial_teardowns {
-        handle.shutdown().await;
+        let _ = observe_relay_shutdown(handle.shutdown_with_result(), "boot_reconcile").await;
     }
 
     tracing::info!(
@@ -330,7 +352,9 @@ pub async fn run_watcher_supervisor_loop_with_registry_and_producers(
             Ok(change) => {
                 let to_shutdown = apply_change(&mut active, &change, &sink, &producers);
                 if let Some(handle) = to_shutdown {
-                    handle.shutdown().await;
+                    let _ =
+                        observe_relay_shutdown(handle.shutdown_with_result(), "registry_change")
+                            .await;
                 }
             }
             Err(RecvError::Lagged(skipped)) => {
@@ -340,7 +364,9 @@ pub async fn run_watcher_supervisor_loop_with_registry_and_producers(
                 );
                 let teardowns = full_reconcile(&mut active, &registry, &sink, &producers);
                 for handle in teardowns {
-                    handle.shutdown().await;
+                    let _ =
+                        observe_relay_shutdown(handle.shutdown_with_result(), "lagged_reconcile")
+                            .await;
                 }
             }
             Err(RecvError::Closed) => {
@@ -367,7 +393,7 @@ pub async fn run_watcher_supervisor_loop_with_registry_and_producers(
     );
     for (session, handle) in active.drain() {
         producers.deregister(&session);
-        handle.shutdown().await;
+        let _ = observe_relay_shutdown(handle.shutdown_with_result(), "final_drain").await;
     }
 }
 
@@ -841,5 +867,280 @@ mod tests {
             "idle supervisor must exit without a registry event unblocking recv()"
         );
         assert_eq!(producers.len(), 0);
+    }
+
+    #[derive(Clone, Default)]
+    struct ShutdownCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for ShutdownCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ShutdownCapture {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self {
+            self.clone()
+        }
+    }
+    impl ShutdownCapture {
+        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + 'static {
+            use tracing_subscriber::prelude::*;
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .without_time()
+                        .with_ansi(false)
+                        .with_writer(self.clone()),
+                )
+                .with(tracing_subscriber::filter::dynamic_filter_fn(
+                    |metadata, _| *metadata.level() <= tracing::Level::INFO,
+                ))
+        }
+        fn events(&self) -> Vec<(String, String)> {
+            let text = String::from_utf8(self.0.lock().unwrap().clone()).unwrap();
+            text.lines().filter(|line| line.contains("watcher-supervisor relay shutdown observed; not a delivery acknowledgement"))
+                .map(|line| {
+                    let field = |key: &str| line.split_whitespace()
+                        .find_map(|part| part.strip_prefix(key))
+                        .expect("structured shutdown field").trim_matches('"').to_owned();
+                    (field("site="), field("outcome="))
+                }).collect()
+        }
+    }
+    struct AbortSupervisor(tokio::task::AbortHandle);
+    impl Drop for AbortSupervisor {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    // Lexical tripwire only: boot teardown is empty; lagged is not exercised by R1.
+    fn shutdown_site_pattern(site: &str) -> regex::Regex {
+        regex::Regex::new(&format!(r#"let\s+_\s*=\s*observe_relay_shutdown\s*\(\s*handle\s*\.\s*shutdown_with_result\s*\(\s*\)\s*,\s*"{}"\s*,?\s*\)\s*\.\s*await\s*;"#, regex::escape(site))).unwrap()
+    }
+    #[test]
+    fn shutdown_observation_sites_are_branch_scoped() {
+        let source = include_str!("watcher_supervisor.rs");
+        let boundary = "#[cfg(test)]\nmod tests {";
+        assert_eq!(source.matches(boundary).count(), 1);
+        let production = source.split_once(boundary).unwrap().0;
+        let body = production
+            .split_once("pub async fn run_watcher_supervisor_loop_with_registry_and_producers(")
+            .unwrap()
+            .1;
+        let anchors = [
+            "for handle in initial_teardowns {",
+            "if let Some(handle) = to_shutdown {",
+            "for handle in teardowns {",
+            "for (session, handle) in active.drain() {",
+        ];
+        let sites = [
+            "boot_reconcile",
+            "registry_change",
+            "lagged_reconcile",
+            "final_drain",
+        ];
+        let positions: Vec<_> = anchors
+            .iter()
+            .map(|a| {
+                assert_eq!(body.matches(a).count(), 1);
+                body.find(a).unwrap()
+            })
+            .collect();
+        assert!(positions.windows(2).all(|p| p[0] < p[1]));
+        for (i, site) in sites.iter().enumerate() {
+            let interval = &body[positions[i]..positions.get(i + 1).copied().unwrap_or(body.len())];
+            let pattern = shutdown_site_pattern(site);
+            assert_eq!(pattern.find_iter(interval).count(), 1, "{site}");
+            assert_eq!(interval.matches("observe_relay_shutdown").count(), 1);
+            if i == 3 {
+                assert!(
+                    interval.find("producers.deregister(&session);").unwrap()
+                        < pattern.find(interval).unwrap().start()
+                );
+            }
+        }
+        for call in [
+            r#"let _ = observe_relay_shutdown(handle.shutdown_with_result(), "registry_change").await;"#,
+            "let _ =\n observe_relay_shutdown(\n handle.shutdown_with_result(),\n \"registry_change\",\n )\n .await;",
+        ] {
+            assert!(shutdown_site_pattern("registry_change").is_match(call));
+            assert!(!shutdown_site_pattern("final_drain").is_match(call));
+        }
+        assert!(!shutdown_site_pattern("registry_change").is_match(r#"let _ = tokio::time::timeout(Duration::from_secs(1), observe_relay_shutdown(handle.shutdown_with_result(), "registry_change")).await;"#));
+    }
+
+    #[test]
+    fn shutdown_observation_logs_classification_fields() {
+        let source = include_str!("watcher_supervisor.rs");
+        let helper = source
+            .split_once("async fn observe_relay_shutdown(")
+            .unwrap()
+            .1
+            .split_once("/// Full-control variant.")
+            .unwrap()
+            .0;
+        assert_eq!(helper.matches("tracing::info!").count(), 1);
+        let pattern = regex::Regex::new(r#"tracing::info!\s*\(\s*site\s*,\s*outcome\s*,\s*"watcher-supervisor relay shutdown observed; not a delivery acknowledgement"\s*,?\s*\)"#).unwrap();
+        assert!(pattern.is_match(helper));
+    }
+
+    async fn shutdown_join_error(panic: bool) -> tokio::task::JoinError {
+        let task = tokio::spawn(async move {
+            if panic {
+                panic!("shutdown subtype fixture");
+            }
+            std::future::pending::<()>().await;
+        });
+        if !panic {
+            task.abort();
+        }
+        let error = task.await.unwrap_err();
+        assert_eq!(error.is_panic(), panic);
+        assert_eq!(error.is_cancelled(), !panic);
+        error
+    }
+    #[tokio::test]
+    async fn shutdown_observation_classifies_join_results() {
+        use super::super::stream_relay::ShutdownOutcome;
+        for (result, label) in [
+            (Ok(ShutdownOutcome::Joined), "joined"),
+            (Ok(ShutdownOutcome::NoTask), "no_task"),
+            (Err(shutdown_join_error(true).await), "join_error_panic"),
+            (
+                Err(shutdown_join_error(false).await),
+                "join_error_cancelled",
+            ),
+        ] {
+            assert_eq!(
+                observe_relay_shutdown(std::future::ready(result), "helper").await,
+                label
+            );
+        }
+    }
+    #[tokio::test]
+    async fn shutdown_observation_waits_before_reporting() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let future = observe_relay_shutdown(
+            async {
+                rx.await.unwrap();
+                Ok(super::super::stream_relay::ShutdownOutcome::Joined)
+            },
+            "pending",
+        );
+        tokio::pin!(future);
+        assert!(futures::poll!(&mut future).is_pending());
+        tx.send(()).unwrap();
+        assert_eq!(future.await, "joined");
+    }
+    #[tokio::test]
+    async fn shutdown_observation_accepts_actual_relay_shutdown() {
+        let handle = spawn_stream_relay(
+            matched("observe-real", ProviderKind::Claude),
+            Arc::new(CountingSink::default()),
+        );
+        let producer = handle.producer();
+        assert_eq!(
+            observe_relay_shutdown(handle.shutdown_with_result(), "real").await,
+            "joined"
+        );
+        assert!(!producer.is_alive());
+        assert!(!producer.try_send_frame("종료 뒤 입력".into()));
+    }
+    #[tokio::test]
+    async fn shutdown_observation_production_loop_emits_change_and_drain() {
+        // Isolate process-wide tracing callsite state from parallel libtest users.
+        const CHILD: &str = "ADK_SHUTDOWN_OBSERVATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["services::cluster::watcher_supervisor::tests::shutdown_observation_production_loop_emits_change_and_drain", "--exact", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "R1 isolated loop failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+            return;
+        }
+        use tracing::instrument::WithSubscriber;
+        let registry = Arc::new(SessionRegistry::new());
+        let producers = Arc::new(RelayProducerRegistry::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let a = matched("observe-change", ProviderKind::Claude);
+        let b = matched("observe-drain", ProviderKind::Codex);
+        // Boot full_reconcile runs; only its initial_teardowns iteration is empty.
+        registry.upsert(a.clone(), Some("mac-mini"));
+        registry.upsert(b.clone(), Some("mac-mini"));
+        let capture = ShutdownCapture::default();
+        let task = tokio::spawn(
+            run_watcher_supervisor_loop_with_registry_and_producers(
+                SupervisorConfig::for_test(),
+                Arc::new(CountingSink::default()),
+                shutdown.clone(),
+                registry.clone(),
+                producers.clone(),
+            )
+            .with_subscriber(capture.subscriber()),
+        );
+        let _cleanup = AbortSupervisor(task.abort_handle());
+        wait_for(|| producers.len() == 2, "boot producers").await;
+        let survivor = producers.get_producer(&b.expected_session_name).unwrap();
+        registry.remove(&a.expected_session_name);
+        let observed = tokio::time::timeout(Duration::from_secs(2), async {
+            while capture.events().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            observed.is_ok(),
+            "registry_change observation missing: {:?}",
+            String::from_utf8(capture.0.lock().unwrap().clone()).unwrap()
+        );
+        assert_eq!(
+            capture.events(),
+            vec![("registry_change".into(), "joined".into())]
+        );
+        assert!(survivor.is_alive());
+        shutdown.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("supervisor exits")
+            .expect("supervisor joins");
+        assert_eq!(
+            capture.events(),
+            vec![
+                ("registry_change".into(), "joined".into()),
+                ("final_drain".into(), "joined".into())
+            ]
+        );
+        assert_eq!(producers.len(), 0);
+        assert!(!survivor.is_alive());
+        assert!(!survivor.try_send_frame("종료 뒤 입력".into()));
+    }
+    #[tokio::test]
+    async fn shutdown_observation_emits_exact_error_subtypes() {
+        use tracing::instrument::WithSubscriber;
+        let capture = ShutdownCapture::default();
+        for (panic, site) in [(true, "panic"), (false, "cancel")] {
+            let error = shutdown_join_error(panic).await;
+            observe_relay_shutdown(std::future::ready(Err(error)), site)
+                .with_subscriber(capture.subscriber())
+                .await;
+        }
+        assert_eq!(
+            capture.events(),
+            vec![
+                ("panic".into(), "join_error_panic".into()),
+                ("cancel".into(), "join_error_cancelled".into())
+            ]
+        );
     }
 }
