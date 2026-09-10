@@ -720,6 +720,26 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
             "lib inventory final selection matches 0 test IDs in "
             f"{LIB_INVENTORY_MANIFEST_REL}"
         )))
+    # Non-lib selection uses the same static test-ID subset as the lib scanner;
+    # cfg expansion, include! and macro-generated tests remain outside it.
+    nonlib_ids: set[str] | None = None
+    if spec.filters and not spec.target_inconclusive and not findings \
+            and spec.selection is TargetSelection.EXPLICIT \
+            and "lib" not in selected_targets:
+        nonlib_ids = set()
+        try:
+            roots = discover_targets(repo_root)
+            for target in selected_targets:
+                root = (repo_root / "tests" / f"{target.partition(':')[2]}.rs"
+                        if target.startswith("test:") else roots.get(target))
+                if root is None or not root.is_file():
+                    raise ValueError(f"missing source for {target}")
+                inventory = collect_static_tests(root, repo_root)
+                if inventory.module_errors:
+                    raise ValueError(f"{target}: {inventory.module_errors}")
+                nonlib_ids.update(inventory.tests)
+        except (OSError, UnicodeError, ValueError) as error:
+            return [("inventory-error", str(error))]
     for filt in (() if spec.target_inconclusive else spec.filters):
         lead = filt.split("::", 1)[0]
         if not lead or lead in selected:
@@ -739,14 +759,12 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
             findings.append(("unknown-module", (
                 f"module-path filter `{filt}`: leading segment `{lead}` is "
                 f"not a module in any known target")))
-    if spec.filters and not spec.target_inconclusive \
-            and not selected and not findings \
-            and spec.selection is TargetSelection.EXPLICIT:
-        # Decisive signal: the selected target declares no modules at all, so
-        # ANY filter (typo'd, ::-less, whatever) selects 0 tests there.
-        findings.append(("empty-target", (
-            f"selected target(s) {'/'.join(selected_targets)} declare no modules; "
-            f"every libtest filter runs 0 tests there and cargo still exits 0")))
+    if nonlib_ids is not None and not findings \
+            and not _lib_selection(spec, frozenset(nonlib_ids)):
+        kind = "zero-match" if nonlib_ids else "empty-target"
+        findings.append((kind, (
+            f"selected target(s) {'/'.join(selected_targets)} final selection "
+            "matches 0 statically discovered test IDs")))
     return findings
 
 
