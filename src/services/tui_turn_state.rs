@@ -622,7 +622,9 @@ fn codex_event_msg_turn_state(json: &Value) -> Option<TuiTurnState> {
     let payload = json.get("payload")?;
     match payload.get("type").and_then(Value::as_str)? {
         "task_complete" => Some(TuiTurnState::Idle),
-        "token_count" | "agent_reasoning" => Some(TuiTurnState::Streaming),
+        // Housekeeping carries no turn boundary; keep scanning for lifecycle evidence.
+        "token_count" | "thread_settings_applied" => None,
+        "task_started" | "item_completed" | "agent_reasoning" => Some(TuiTurnState::Streaming),
         _ => Some(TuiTurnState::Streaming),
     }
 }
@@ -665,6 +667,130 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), lines.join("\n")).unwrap();
         file
+    }
+
+    // Exercise the real file readers together: drain readiness is deliberately
+    // weaker than finalize authority (native task_complete is not turn.completed).
+    fn assert_codex_s1_tail(events: &[&str], observer: TuiTurnState, drain: bool, finalize: bool) {
+        let lines: Vec<String> = events
+            .iter()
+            .map(|event| match *event {
+                "turn.completed" => r#"{"type":"turn.completed"}"#.to_owned(),
+                "torn" => r#"{"type":"event_msg","payload":{"type":"task_started""#.to_owned(),
+                _ => {
+                    serde_json::json!({"type": "event_msg", "payload": {"type": event}}).to_string()
+                }
+            })
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let file = write_jsonl(&refs);
+        // Collect every consumer before asserting, so a failed observer cannot
+        // mask the independent drain/finalize actual values in a regression.
+        let actual = (
+            observe_codex_jsonl_turn_state(file.path()),
+            jsonl_strict_terminator_idle(&ProviderKind::Codex, file.path()),
+            jsonl_completion_scan_idle(&ProviderKind::Codex, file.path()),
+            jsonl_turn_end_terminator_idle(&ProviderKind::Codex, file.path()),
+        );
+        assert_eq!(actual, (observer, drain, finalize, finalize), "{events:?}");
+    }
+
+    #[test]
+    fn codex_s1_task_complete_settings_preserves_drain_not_finalize() {
+        assert_codex_s1_tail(
+            &["task_complete", "thread_settings_applied"],
+            TuiTurnState::Idle,
+            true,
+            false,
+        );
+    }
+
+    #[test]
+    fn codex_s1_turn_completed_settings_preserves_finalize() {
+        assert_codex_s1_tail(
+            &["turn.completed", "thread_settings_applied"],
+            TuiTurnState::Idle,
+            true,
+            true,
+        );
+    }
+
+    #[test]
+    fn codex_s1_new_task_after_settings_is_busy() {
+        for complete in ["task_complete", "turn.completed"] {
+            assert_codex_s1_tail(
+                &[complete, "thread_settings_applied", "task_started"],
+                TuiTurnState::Streaming,
+                false,
+                false,
+            );
+        }
+    }
+
+    #[test]
+    fn codex_s1_complete_token_preserves_idle() {
+        assert_codex_s1_tail(
+            &["task_complete", "token_count"],
+            TuiTurnState::Idle,
+            true,
+            false,
+        );
+        assert_codex_s1_tail(
+            &["turn.completed", "token_count"],
+            TuiTurnState::Idle,
+            true,
+            true,
+        );
+    }
+
+    #[test]
+    fn codex_s1_item_completed_token_is_busy() {
+        assert_codex_s1_tail(
+            &["turn.completed", "item_completed", "token_count"],
+            TuiTurnState::Streaming,
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn codex_s1_agent_reasoning_tail_is_busy() {
+        assert_codex_s1_tail(
+            &["turn.completed", "agent_reasoning"],
+            TuiTurnState::Streaming,
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn codex_s1_unknown_tail_is_busy() {
+        assert_codex_s1_tail(
+            &["turn.completed", "future_event"],
+            TuiTurnState::Streaming,
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn codex_s1_settings_only_is_unknown() {
+        assert_codex_s1_tail(
+            &["thread_settings_applied"],
+            TuiTurnState::Unknown,
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn codex_s1_torn_tail_is_unknown() {
+        assert_codex_s1_tail(
+            &["turn.completed", "torn"],
+            TuiTurnState::Unknown,
+            false,
+            false,
+        );
     }
 
     #[cfg(unix)]
