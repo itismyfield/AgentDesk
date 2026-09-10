@@ -19,6 +19,8 @@ pub(in crate::services::discord::turn_bridge) struct CompletionPostludeContext {
     pub(in crate::services::discord::turn_bridge) is_external_input_tui_direct: bool,
     pub(in crate::services::discord::turn_bridge) context_window_tokens: u64,
     pub(in crate::services::discord::turn_bridge) context_compact_percent: u64,
+    pub(in crate::services::discord::turn_bridge) clear_fence:
+        crate::db::session_transcripts::ChannelClearFence,
     pub(in crate::services::discord::turn_bridge) turn_start: std::time::Instant,
 }
 
