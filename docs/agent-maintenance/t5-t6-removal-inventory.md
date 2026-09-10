@@ -45,6 +45,21 @@ lagged 지점은 lexical 검사이고 boot 초기 teardown 목록은 비어 있�
 runtime 배달 검증으로 확대하지 않는다. #5833 S4/S5 및 #5845 D1e1은 위 착지 범위 밖이며,
 이 표는 PARK 항목을 완료로 승격하지 않는다. T5의 S4/S5와 #5833의 동명 S4/S5는 다른 슬라이스다.
 
+### R2a — 자동 복구의 중복 axis-B 관측 제거
+
+- `automatic_stale_sweep_warrants`, `auto_apply_relay_recovery_for_shared_at`,
+  `watchdog_axis_b_warrants`, `stale_turn_axis_b_warrants`의
+  `observe_axis_b_candidate` 호출과 관측만을 위한 shared 조회를 제거한다.
+  세 production 파일의 합계는 41줄 감소하며, destructive warrant의 bind·판정·반환값
+  소비와 actor/durable-frontier 안전 경계는 보존한다.
+- 수동 복구·health report·cohort 설정 및 `observe_axis_b_candidate` 자체는 남는다.
+  R2 전체 철거나 T5 전환 완료로 세지 않는다.
+- 기존 `axis_b_tests` 8개와 `destructive_warrant::tests` 5개는 PR의
+  `Library sweep (selection-set gated)`가 `cargo test --lib`로 선택한다.
+  해당 ID는 non-PG 제외 문자열에 걸리지 않으며 lib-test manifest에 이미 존재한다.
+  관측 재삽입·warrant 결과 우회 변이는 기존 wiring assertion을 실패시키는 범위의
+  증거이며, 모든 runtime 분기의 동등성 증거로 확대하지 않는다.
+
 ---
 
 ## S1 — cohort infra (배포 no-op) · 브랜치 `feat/5464-t5-s1-cohort`
