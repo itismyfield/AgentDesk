@@ -292,34 +292,7 @@ pub(in crate::services::discord) fn completion_footer_has_registered_target(
         .contains_key(&channel_id.get())
 }
 
-pub(in crate::services::discord) fn completion_footer_edit_for_registered_target(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    indicator: &str,
-) -> Option<CompletionFooterEdit> {
-    completion_footer_edit_for_registered_target_at(
-        shared,
-        channel_id,
-        indicator,
-        chrono::Utc::now().timestamp(),
-    )
-}
-
-pub(in crate::services::discord) fn completion_footer_edit_for_registered_target_for_owner(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    owner: CompletionFooterOwner,
-    indicator: &str,
-) -> Option<CompletionFooterEdit> {
-    completion_footer_edit_for_registered_target_at_for_owner(
-        shared,
-        channel_id,
-        Some(owner),
-        indicator,
-        chrono::Utc::now().timestamp(),
-    )
-}
-
+#[cfg(test)]
 pub(in crate::services::discord) fn completion_footer_edit_for_registered_target_at(
     shared: &SharedData,
     channel_id: ChannelId,
