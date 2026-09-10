@@ -1118,11 +1118,10 @@ class RawWriterAllowlistTests(unittest.TestCase):
                 ],
                 # The LegacyTmuxWrapper branch here gates
                 # `observe_legacy_wrapper_direct_prompt_from_pane`, a pane-prompt
-                # OBSERVATION with no delivery in it. The two delivery-work calls
-                # sit on the post-terminal suppressed-range path, which every
+                # OBSERVATION with no delivery in it. The delivery-work call
+                # sits on the post-terminal suppressed-range path, which every
                 # runtime kind reaches.
                 "src/services/discord/tmux_watcher/loop_poll_prologue.rs": [
-                    "advance_watcher_confirmed_end",
                     "settle_without_transport",
                 ],
             },
