@@ -786,6 +786,66 @@ fn pick_channel_queued_placeholder(
     fallback
 }
 
+// The mailbox actor can advance while this persist guard is held; the snapshot
+// is not an atomic queue/map transaction. Later consumers re-evaluate ownership.
+fn rekey_channel_card_locked(
+    shared: &SharedData,
+    channel_id: serenity::ChannelId,
+    user_msg_id: serenity::MessageId,
+    snapshot: &crate::services::discord::ChannelMailboxSnapshot,
+    guard: &tokio::sync::OwnedMutexGuard<()>,
+) -> Option<(serenity::MessageId, serenity::MessageId)> {
+    debug_assert!(std::sync::Arc::ptr_eq(
+        tokio::sync::OwnedMutexGuard::mutex(guard),
+        &shared.queued_placeholders_persist_lock(channel_id),
+    ));
+    // Only reuse while this message is genuinely still queued behind an active
+    // turn. If it already started, the dispatch hand-off owns its card; if it is
+    // no longer queued, there is nothing to represent.
+    let still_queued = snapshot.intervention_queue.iter().any(|intervention| {
+        intervention.message_id == user_msg_id
+            || intervention.source_message_ids.contains(&user_msg_id)
+    });
+    if snapshot.active_user_message_id == Some(user_msg_id) || !still_queued {
+        return None;
+    }
+
+    // Find ANY existing queued card on this channel that does not already belong
+    // to `user_msg_id`. Prefer the card owned by a message still present in the
+    // queue (the live waiting head); fall back to another channel-scoped card.
+    // This chooses one card; it does not establish a universal one-card invariant.
+    let queued_ids: std::collections::HashSet<serenity::MessageId> = snapshot
+        .intervention_queue
+        .iter()
+        .flat_map(|intervention| {
+            std::iter::once(intervention.message_id)
+                .chain(intervention.source_message_ids.iter().copied())
+        })
+        .collect();
+
+    let channel_cards: Vec<(serenity::MessageId, serenity::MessageId)> = shared
+        .queued
+        .queued_placeholders
+        .iter()
+        .filter_map(|entry| {
+            let (ch, owner) = *entry.key();
+            (ch == channel_id).then_some((owner, *entry.value()))
+        })
+        .collect();
+
+    let Some((prior_owner, placeholder_msg_id)) =
+        pick_channel_queued_placeholder(&channel_cards, user_msg_id, &queued_ids)
+    else {
+        return None;
+    };
+
+    // Move this mapping so hand-off / queue-exit consumers can find the card.
+    shared.remove_queued_placeholder_locked(channel_id, prior_owner);
+    shared.insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
+
+    Some((prior_owner, placeholder_msg_id))
+}
+
 /// #3082 part A — generalize "AT MOST ONE queued card per channel/active turn".
 ///
 /// `reuse_merged_queued_placeholder` only collapses *merge-eligible*
@@ -819,54 +879,13 @@ async fn reuse_any_queued_placeholder_for_channel(
     let persist_guard = persist_lock.lock_owned().await;
 
     let snapshot = mailbox_snapshot(&data.shared, channel_id).await;
-    // Only reuse while this message is genuinely still queued behind an active
-    // turn. If it already started, the dispatch hand-off owns its card; if it is
-    // no longer queued, there is nothing to represent.
-    let still_queued = snapshot.intervention_queue.iter().any(|intervention| {
-        intervention.message_id == user_msg_id
-            || intervention.source_message_ids.contains(&user_msg_id)
-    });
-    if snapshot.active_user_message_id == Some(user_msg_id) || !still_queued {
-        return None;
-    }
-
-    // Find ANY existing queued card on this channel that does not already belong
-    // to `user_msg_id`. Prefer the card owned by a message still present in the
-    // queue (the live waiting head) so we re-key the canonical card; fall back to
-    // any other channel-scoped card otherwise. Either way the invariant is "one
-    // visible card", so reusing whichever exists is correct.
-    let queued_ids: std::collections::HashSet<serenity::MessageId> = snapshot
-        .intervention_queue
-        .iter()
-        .flat_map(|intervention| {
-            std::iter::once(intervention.message_id)
-                .chain(intervention.source_message_ids.iter().copied())
-        })
-        .collect();
-
-    let channel_cards: Vec<(serenity::MessageId, serenity::MessageId)> = data
-        .shared
-        .queued
-        .queued_placeholders
-        .iter()
-        .filter_map(|entry| {
-            let (ch, owner) = *entry.key();
-            (ch == channel_id).then_some((owner, *entry.value()))
-        })
-        .collect();
-
-    let Some((prior_owner, placeholder_msg_id)) =
-        pick_channel_queued_placeholder(&channel_cards, user_msg_id, &queued_ids)
-    else {
-        return None;
-    };
-
-    // Re-key the single card onto this message id so the dispatch hand-off /
-    // queue-exit drain track exactly one card per active turn.
-    data.shared
-        .remove_queued_placeholder_locked(channel_id, prior_owner);
-    data.shared
-        .insert_queued_placeholder_locked(channel_id, user_msg_id, placeholder_msg_id);
+    let (prior_owner, placeholder_msg_id) = rekey_channel_card_locked(
+        &data.shared,
+        channel_id,
+        user_msg_id,
+        &snapshot,
+        &persist_guard,
+    )?;
 
     let gateway = crate::services::discord::gateway::DiscordGateway::new(
         ctx.http.clone(),
@@ -1341,5 +1360,164 @@ mod channel_queued_placeholder_pure_tests {
         // After re-key, the card is owned by m2; m3 coalesces onto it.
         let picked_3 = pick_channel_queued_placeholder(&[(m2, card)], m3, &ids(&[m1, m2, m3]));
         assert_eq!(picked_3, Some((m2, card)), "m3 coalesces onto the one card");
+    }
+}
+
+#[cfg(test)]
+mod rekey_window_tests {
+    use super::*;
+    use crate::services::discord::{
+        make_shared_data_for_tests,
+        placeholder_controller::queued_card_gate::{self, QueuedCardDisposition},
+        queue_dispatch, queue_exit_drain_queued_placeholders, queued_placeholders_store,
+    };
+    use crate::services::turn_orchestrator::{
+        Intervention, InterventionMode, QueueExitEvent, QueueExitKind,
+    };
+    use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+    fn queued(head: MessageId, sources: &[MessageId]) -> Intervention {
+        Intervention {
+            author_id: UserId::new(7),
+            author_is_bot: false,
+            message_id: head,
+            queued_generation: 1,
+            source_message_ids: sources.to_vec(),
+            source_message_queued_generations: Vec::new(),
+            source_text_segments: Vec::new(),
+            text: format!("queued {}", head.get()),
+            mode: InterventionMode::Soft,
+            created_at: std::time::Instant::now(),
+            reply_context: None,
+            has_reply_boundary: false,
+            merge_consecutive: false,
+            pending_uploads: Vec::new(),
+            voice_announcement: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn actor_advances_under_persist_lock_and_consumers_redecide() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+        let shared = make_shared_data_for_tests();
+        let (prior, arrival, waiter, card) = (
+            MessageId::new(1),
+            MessageId::new(2),
+            MessageId::new(3),
+            MessageId::new(90),
+        );
+        for case in 0..5 {
+            let c = ChannelId::new(514140 + case);
+            let ctx = queue_dispatch::persistence_context(&shared, &shared.provider, c);
+            let ids = if case == 2 || case == 3 {
+                vec![prior, arrival, waiter]
+            } else {
+                vec![prior, arrival]
+            };
+            for id in ids {
+                assert!(
+                    shared
+                        .mailbox(c)
+                        .enqueue(queued(id, &[id]), ctx.clone())
+                        .await
+                        .enqueued
+                );
+            }
+            let guard = shared
+                .queued_placeholders_persist_lock(c)
+                .lock_owned()
+                .await;
+            shared.insert_queued_placeholder_locked(c, prior, card);
+            let stale = mailbox_snapshot(&shared, c).await;
+            // The real actor advances even though map writers are excluded.
+            assert_eq!(
+                shared
+                    .mailbox(c)
+                    .take_next_soft(ctx.clone())
+                    .await
+                    .intervention
+                    .unwrap()
+                    .message_id,
+                prior
+            );
+            if case > 0 {
+                assert!(
+                    shared
+                        .mailbox(c)
+                        .abandon_pending_dispatch(prior, ctx.clone())
+                        .await
+                );
+                assert_eq!(
+                    shared
+                        .mailbox(c)
+                        .take_next_soft(ctx.clone())
+                        .await
+                        .intervention
+                        .unwrap()
+                        .message_id,
+                    arrival
+                );
+            }
+            assert_eq!(
+                rekey_channel_card_locked(&shared, c, arrival, &stale, &guard),
+                Some((prior, card))
+            );
+            assert_eq!(shared.remove_queued_placeholder_locked(c, prior), None);
+            drop(guard);
+            if case == 0 {
+                assert_eq!(
+                    shared
+                        .queued
+                        .queued_placeholders
+                        .get(&(c, arrival))
+                        .map(|v| *v),
+                    Some(card)
+                );
+            } else if case == 1 || case == 2 {
+                assert_eq!(
+                    shared.remove_queued_placeholder(c, arrival).await,
+                    Some(card)
+                );
+                let outcome =
+                    queued_card_gate::release_or_rekey(&shared, c, card, &[arrival]).await;
+                if case == 1 {
+                    assert!(matches!(outcome, QueuedCardDisposition::Released(_)));
+                } else {
+                    assert!(
+                        matches!(outcome, QueuedCardDisposition::Preserved { owner } if owner == waiter)
+                    );
+                }
+            } else {
+                let event = QueueExitEvent {
+                    intervention: queued(arrival, &[arrival]),
+                    kind: QueueExitKind::Overflow,
+                };
+                let tokens = queue_exit_drain_queued_placeholders(&shared, c, &[&event]).await;
+                assert_eq!(tokens.len(), if case == 3 { 0 } else { 1 });
+            }
+            let disk = queued_placeholders_store::load_queued_placeholders(
+                &shared.provider,
+                &shared.token_hash,
+            );
+            let map: std::collections::HashMap<_, _> = shared
+                .queued
+                .queued_placeholders
+                .iter()
+                .map(|e| (*e.key(), *e.value()))
+                .collect();
+            assert_eq!(disk, map);
+        }
+    }
+    #[test]
+    fn reuse_caller_keeps_lock_snapshot_seam_order() {
+        // Lexical auxiliary; PATCH/rollback remains production-source reviewed.
+        let source = include_str!("queue_effects.rs");
+        let source = &source[source
+            .find("async fn reuse_any_queued_placeholder_for_channel(")
+            .unwrap()..];
+        let lock = source.find("lock_owned().await").unwrap();
+        let snapshot = source.find("mailbox_snapshot(").unwrap();
+        let seam = source.find("rekey_channel_card_locked(").unwrap();
+        assert!(lock < snapshot && snapshot < seam);
     }
 }
