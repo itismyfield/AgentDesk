@@ -154,11 +154,22 @@ impl RelayReceiptLedger {
                 | RelayReceiptEntry::Failed { response, .. } => {
                     RelayReceiptBegin::Respond(response.clone())
                 }
-                RelayReceiptEntry::InFlight { .. } => RelayReceiptBegin::Respond(error_response(
-                    StatusCode::TOO_EARLY,
-                    "relay request is already in flight",
-                )),
+                RelayReceiptEntry::InFlight { .. } => RelayReceiptBegin::Respond(
+                    validate_freshness(headers, now).err().unwrap_or_else(|| {
+                        error_response(StatusCode::TOO_EARLY, "relay request is already in flight")
+                    }),
+                ),
             };
+        }
+
+        if !freshness_headers_present(headers) {
+            return RelayReceiptBegin::Respond(error_response(
+                StatusCode::BAD_REQUEST,
+                "managed relay requests require published-at and deadline headers",
+            ));
+        }
+        if let Err(response) = validate_freshness(headers, now) {
+            return RelayReceiptBegin::Respond(response);
         }
 
         entries.insert(
@@ -169,20 +180,7 @@ impl RelayReceiptLedger {
             },
         );
         let ticket = RelayReceiptTicket { request_id, pin };
-        match validate_freshness(headers, now) {
-            Ok(()) => RelayReceiptBegin::Fresh(ticket),
-            Err(response) => {
-                entries.insert(
-                    ticket.request_id.clone(),
-                    RelayReceiptEntry::Failed {
-                        pin: ticket.pin.clone(),
-                        response: response.clone(),
-                        updated_at: now,
-                    },
-                );
-                RelayReceiptBegin::Respond(response)
-            }
-        }
+        RelayReceiptBegin::Fresh(ticket)
     }
 
     pub(crate) fn finish_accepted(
@@ -308,6 +306,15 @@ mod tests {
             RELAY_REQUEST_ID_HEADER,
             HeaderValue::from_str(&request_id).unwrap(),
         );
+        let now = Utc::now();
+        headers.insert(RELAY_PUBLISHED_AT_HEADER, now.to_rfc3339().parse().unwrap());
+        headers.insert(
+            RELAY_DEADLINE_HEADER,
+            (now + chrono::Duration::minutes(30))
+                .to_rfc3339()
+                .parse()
+                .unwrap(),
+        );
         let first_pin = RelayReceiptPin::new(
             "Claude",
             "Stop",
@@ -342,5 +349,137 @@ mod tests {
             }
             other => panic!("expected pin conflict, got {other:?}"),
         }
+    }
+
+    fn managed_headers(now: DateTime<Utc>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            RELAY_REQUEST_ID_HEADER,
+            uuid::Uuid::new_v4().to_string().parse().unwrap(),
+        );
+        headers.insert(RELAY_PUBLISHED_AT_HEADER, now.to_rfc3339().parse().unwrap());
+        headers.insert(
+            RELAY_DEADLINE_HEADER,
+            (now + chrono::Duration::minutes(30))
+                .to_rfc3339()
+                .parse()
+                .unwrap(),
+        );
+        headers
+    }
+
+    fn begin_status(
+        ledger: &RelayReceiptLedger,
+        headers: &HeaderMap,
+        now: DateTime<Utc>,
+    ) -> StatusCode {
+        let pin = RelayReceiptPin::new("Claude", "Stop", Some("session"), &json!({}), headers);
+        match ledger.begin(headers, pin, now) {
+            RelayReceiptBegin::Respond(response) => response.status,
+            other => panic!("expected response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn managed_inflight_deadline_never_reissues_fresh() {
+        let ledger = RelayReceiptLedger::default();
+        let now = Utc::now();
+        let headers = managed_headers(now);
+        let pin = RelayReceiptPin::new("Claude", "Stop", Some("session"), &json!({}), &headers);
+        let mut executions = 0;
+        for (time, expected) in [
+            (now, None),
+            (now, Some(StatusCode::TOO_EARLY)),
+            (now + chrono::Duration::minutes(30), Some(StatusCode::GONE)),
+        ] {
+            match ledger.begin(&headers, pin.clone(), time) {
+                RelayReceiptBegin::Fresh(_) => {
+                    executions += 1;
+                    assert_eq!(expected, None);
+                }
+                RelayReceiptBegin::Respond(response) => assert_eq!(Some(response.status), expected),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(executions, 1);
+        let mut changed = headers.clone();
+        changed.insert(
+            RELAY_DEADLINE_HEADER,
+            (now + chrono::Duration::minutes(40))
+                .to_rfc3339()
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            begin_status(&ledger, &changed, now + chrono::Duration::minutes(30)),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn managed_missing_freshness_never_inserts_and_legacy_survives() {
+        let ledger = RelayReceiptLedger::default();
+        let now = Utc::now();
+        for removed in [
+            vec![RELAY_PUBLISHED_AT_HEADER, RELAY_DEADLINE_HEADER],
+            vec![RELAY_PUBLISHED_AT_HEADER],
+            vec![RELAY_DEADLINE_HEADER],
+        ] {
+            let mut headers = managed_headers(now);
+            for key in removed {
+                headers.remove(key);
+            }
+            assert_eq!(
+                begin_status(&ledger, &headers, now),
+                StatusCode::BAD_REQUEST
+            );
+            assert!(ledger.entries.lock().unwrap().is_empty());
+        }
+        let headers = HeaderMap::new();
+        let pin = RelayReceiptPin::new("Claude", "Stop", None, &json!({}), &headers);
+        assert!(matches!(
+            ledger.begin(&headers, pin, now),
+            RelayReceiptBegin::Legacy
+        ));
+    }
+
+    #[test]
+    fn managed_prune_stale_pin_and_terminal_population_preserve_contract() {
+        let ledger = RelayReceiptLedger::default();
+        let now = Utc::now();
+        let headers = managed_headers(now);
+        let pin = RelayReceiptPin::new("Claude", "Stop", Some("session"), &json!({}), &headers);
+        assert!(matches!(
+            ledger.begin(&headers, pin, now),
+            RelayReceiptBegin::Fresh(_)
+        ));
+        assert_eq!(
+            begin_status(&ledger, &headers, now + chrono::Duration::hours(3)),
+            StatusCode::GONE
+        );
+        assert!(ledger.entries.lock().unwrap().is_empty());
+        for n in 0..5000 {
+            let headers = managed_headers(now);
+            let pin = RelayReceiptPin::new("Claude", "Stop", Some("session"), &json!({}), &headers);
+            let ticket = match ledger.begin(&headers, pin, now) {
+                RelayReceiptBegin::Fresh(ticket) => ticket,
+                other => panic!("terminal population blocked admission {n}: {other:?}"),
+            };
+            let status = if n % 2 == 0 {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            if n % 2 == 0 {
+                ledger.finish_accepted(ticket, status, json!({"n": n}));
+            } else {
+                ledger.finish_failed(ticket, status, json!({"n": n}));
+            }
+            assert_eq!(
+                begin_status(&ledger, &headers, now + chrono::Duration::minutes(31)),
+                status
+            );
+        }
+        assert_eq!(ledger.entries.lock().unwrap().len(), 5000);
     }
 }
