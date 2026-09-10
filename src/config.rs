@@ -1722,7 +1722,7 @@ fn is_legacy_publication_permit_mode(mode: &PublicationPermitMode) -> bool {
 /// No mode gives the reachability tier a destructive capability: 4987 §7.1 /
 /// I15 keeps turn cancel, tmux/process kill, registry removal, and mailbox
 /// force-clean out of every reachability-derived path in both modes. See
-/// `services::discord::relay_recovery::plan_relay_recovery_under_reachability`.
+/// `services::discord::relay_recovery::destructive_warrant_bind`.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayVerdictSource {
