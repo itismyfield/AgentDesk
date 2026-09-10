@@ -2593,9 +2593,10 @@ async fn probe_redrive_reattach_records_the_actual_relay_recovery_observation() 
         response.decision.auto_heal.eligible,
         "the actual redrive fixture must reach reattach eligibility"
     );
-    assert!(
-        count(&after) >= count(&before) + 1,
-        "ProbeAutoHeal ReattachWatcher must record its automatic axis-B site"
+    assert_eq!(
+        count(&after),
+        count(&before),
+        "ProbeAutoHeal ReattachWatcher must not record a retired automatic axis-B site"
     );
     assert!(!token.cancelled.load(Ordering::Relaxed));
 
