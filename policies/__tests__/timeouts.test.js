@@ -55,6 +55,24 @@ test("timeouts helper module identifies synthetic missing-inflight reattach plac
   );
 });
 
+test("S7T1 helper recognizes external-input TUI-direct synthetic owners", () => {
+  const { module } = loadPolicy("policies/timeouts.js");
+  for (const owner of [1, "1"]) {
+    assert.equal(module.helpers.isExternalInputTuiDirectSyntheticTurn({
+      turn_source: "external_input", request_owner_user_id: owner
+    }), true);
+  }
+});
+
+test("S7T2 helper rejects rebind, ordinary, other-owner and missing inflights", () => {
+  const { module } = loadPolicy("policies/timeouts.js");
+  const synthetic = { turn_source: "external_input", request_owner_user_id: 1 };
+  for (const inf of [null, { ...synthetic, rebind_origin: true },
+    { ...synthetic, turn_source: "managed" }, { ...synthetic, request_owner_user_id: 2 }]) {
+    assert.equal(module.helpers.isExternalInputTuiDirectSyntheticTurn(inf), false);
+  }
+});
+
 test("timeouts helper module ignores synthetic reattach placeholders for inflight progress", () => {
   const { module } = loadPolicy("policies/timeouts.js", {
     inflights: [
@@ -770,6 +788,58 @@ test("timeouts active monitor module treats synthetic reattach placeholders as a
   assert.deepEqual(toPlain(state.timeoutMarkSessionIdleCalls), [
     { sessionKey, options: { clear_active_dispatch_id: false } }
   ]);
+});
+
+test("S7 active monitor exempts synthetic turns without force-kill or repeated logs", () => {
+  const sessionKey = "provider:AgentDesk-claude-unrelated-session";
+  for (const mode of ["turn-cap", "extensions", "watchdog"]) {
+    for (const owner of [1, "1", 2]) {
+      const { policy, state } = loadPolicy("policies/timeouts.js", {
+        config: { server_port: 8791 },
+        inflights: [{
+          session_key: sessionKey, channel_id: "channel-1", provider: "claude",
+          tmux_session_name: "AgentDesk-claude-unrelated-session",
+          turn_source: "external_input", request_owner_user_id: owner,
+          started_at: timestampMinutesAgo(mode === "turn-cap" ? 190 : 100),
+          updated_at: timestampMinutesAgo(mode === "extensions" ? 40 : 1)
+        }],
+        timeouts: { deadlockCandidates: [{ session_key: sessionKey, agent_id: "agent-1" }] },
+        exec() { return "0\n"; },
+        httpPost() { return { ok: true, tmux_killed: true }; }
+      });
+      const key = "deadlock_check:" + sessionKey;
+      state.kv.set(key, JSON.stringify({ count: 3, ts: Date.now() - 31 * 60000 }));
+      policy._section_I();
+      const kills = () => state.httpPosts.filter((post) => post.url.endsWith("/force-kill"));
+      if (mode === "watchdog") {
+        assert.equal(kills().length, 0);
+        assert.equal(state.httpPosts.length, 1);
+        assert.match(state.httpPosts[0].url, /extend-timeout$/);
+        assert.equal(state.kv.has(key), false);
+      } else if (owner === 2) {
+        assert.equal(kills().length, 1, "ordinary owner must still force-kill");
+      } else {
+        assert.equal(kills().length, 0, "synthetic owner must not force-kill");
+        const logCount = state.logs.info.length + state.logs.warn.length;
+        assert.equal(state.logs.info.filter((line) => line.includes("synthetic turn exempt")).length, 1);
+        state.kv.set(key, ' { "synthetic_exempt": true, "count": 0 } ');
+        // Simulate repeated deadlock windows by aging a counter timestamp if one is written.
+        for (let window = 0; window < 5; window++) {
+          const value = state.kv.get(key);
+          if (value && value.startsWith("{") && JSON.parse(value).ts) {
+            state.kv.set(key, JSON.stringify({ ...JSON.parse(value), ts: Date.now() - 31 * 60000 }));
+          }
+          policy._section_I();
+        }
+        assert.equal(kills().length, 0, "later windows must not force-kill");
+        assert.equal(state.logs.info.length + state.logs.warn.length, logCount, "no repeated logs");
+        assert.equal(state.httpPosts.length, 0);
+        assert.equal(state.timeoutMarkSessionIdleCalls.length, 0);
+        assert.equal(state.timeoutTerminationRecords.length, 0);
+        assert.equal(state.deadlockAlerts.length, 0);
+      }
+    }
+  }
 });
 
 test("timeouts active monitor opt-in review hang recovery retries stale review dispatches", () => {
@@ -1511,4 +1581,34 @@ test("timeouts idle-kill module excludes thread idle rows from the main batch", 
     assert.match(p.body.reason, /idle \d+(시간|일) 초과/);
     assert.equal(p.body.minimum_idle_minutes, 360);
   });
+});
+
+
+test("S7 ordinary successor clears synthetic marker and starts its own counter", () => {
+  const sessionKey = "provider:AgentDesk-claude-successor";
+  let source = "external_input";
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    inflightList() { return [{
+      session_key: sessionKey, channel_id: "channel-1", provider: "claude",
+      tmux_session_name: "AgentDesk-claude-successor",
+      turn_source: source, request_owner_user_id: 1,
+      started_at: timestampMinutesAgo(100), updated_at: timestampMinutesAgo(40)
+    }]; },
+    timeouts: { deadlockCandidates: [{ session_key: sessionKey, agent_id: "agent-1" }] },
+    exec() { return "0\n"; },
+    httpPost() { return { ok: true, tmux_killed: true }; }
+  });
+  const key = "deadlock_check:" + sessionKey;
+  policy._section_I();
+  assert.equal(JSON.parse(state.kv.get(key)).synthetic_exempt, true);
+  source = "managed";
+  policy._section_I();
+  const counter = JSON.parse(state.kv.get(key));
+  assert.equal(counter.synthetic_exempt, undefined);
+  assert.equal(counter.count, 1);
+  assert.ok(counter.ts > 0);
+  assert.equal(state.httpPosts.filter((post) => post.url.endsWith("/force-kill")).length, 0);
+  policy._section_I();
+  assert.equal(JSON.parse(state.kv.get(key)).count, 1, "ordinary window must not double-count");
 });

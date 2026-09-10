@@ -6349,6 +6349,7 @@ services::discord::turn_bridge::completion_postlude::channel_writeback::tests::f
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::normal_turn_writes_back_into_channel_session
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_does_not_stash_feedback_reminder
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_leaves_channel_session_untouched
+services::discord::turn_bridge::context::tests::intake_completion_waiter_discards_typed_payload_and_only_maps_recv_error
 services::discord::turn_bridge::context_window::tests::done_keeps_equal_streaming_response_when_no_tools_used
 services::discord::turn_bridge::context_window::tests::done_uses_terminal_result_when_streamed_response_is_prefix_missing_tail
 services::discord::turn_bridge::context_window::tests::done_uses_terminal_result_when_streamed_response_is_tail_only
@@ -6366,6 +6367,8 @@ services::discord::turn_bridge::followup_requeue::tests::pre_submit_retry_adds_q
 services::discord::turn_bridge::followup_requeue::tests::pre_submit_retry_reaction_failure_emits_exactly_one_referenced_fallback
 services::discord::turn_bridge::followup_requeue::tests::retry_cap_preserves_entry_and_stops_auto_kickoff_4888
 services::discord::turn_bridge::followup_requeue::tests::uncapped_retry_arms_only_after_terminal_projection_settles_4888
+services::discord::turn_bridge::guards::tests::completion_guard_drop_signals_finalized_and_publishes_completed
+services::discord::turn_bridge::guards::tests::completion_guard_relinquish_signals_finalized_without_completed
 services::discord::turn_bridge::guards::tests::merged_id_zero_state_drives_guard_key_owner_and_cleanup_identity
 services::discord::turn_bridge::headless_delivery::durable_outbox::tests::durable_rollout_defaults_off_and_requires_an_explicit_true_value
 services::discord::turn_bridge::headless_delivery::durable_outbox::tests::exact_identity_key_changes_on_each_required_axis
