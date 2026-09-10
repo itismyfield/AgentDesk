@@ -19,6 +19,17 @@ use serde_adapters::{
 };
 pub(in crate::services::discord) use turn_kinds::{RelayOwnerKind, TurnSource};
 
+/// Transfer a numeric end only when both UTF-8 prefixes are identical.
+pub(in crate::services::discord) fn transfer_end(
+    source_body: &str,
+    end: usize,
+    target_body: &str,
+) -> Option<usize> {
+    let source = source_body.get(..end)?;
+    let target = target_body.get(..end)?;
+    (source == target).then_some(end)
+}
+
 /// Build an optional `serenity::MessageId` from a possibly-zero raw persisted id.
 ///
 /// A zero message id is a legitimate sentinel for an unanchored TUI-direct or
@@ -50,8 +61,24 @@ pub(in crate::services::discord) use opt_message_id as optional_message_id;
 
 #[cfg(test)]
 mod discord_id_tests {
-    use super::{opt_channel_id, opt_message_id};
+    use super::{opt_channel_id, opt_message_id, transfer_end};
     use poise::serenity_prelude::{ChannelId, MessageId};
+
+    #[test]
+    fn slice_a_transfer_end_boundaries() {
+        for (source, end, target, expected) in [
+            ("abcdef", 3, "abcdef", Some(3)),
+            ("abcdef", 3, "abcTAIL", Some(3)),
+            ("abcdef", 3, "XYZdef", None),
+            ("ab", 3, "abcdef", None),
+            ("abcdef", 3, "ab", None),
+            ("한글 끝", 3, "한글 새끝", Some(3)),
+            ("한글", 1, "한글", None),
+            ("abc", 0, "XYZ", Some(0)),
+        ] {
+            assert_eq!(transfer_end(source, end, target), expected);
+        }
+    }
 
     #[test]
     fn optional_id_helpers_return_none_for_zero_without_panicking() {
