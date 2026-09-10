@@ -4970,6 +4970,8 @@ services::discord::session_relay_sink::task_notification_context::tests::transie
 services::discord::session_relay_sink::tests::a0_characterization_tests::a0_session_bound_predicate_boundary_is_strictly_greater_than_2000
 services::discord::session_relay_sink::tests::controller_skips_empty_body_so_cutover_gate_keeps_it_legacy
 services::discord::session_relay_sink::tests::cutover_short_replace_production_path_advance_is_fresh_identity_gated
+services::discord::session_relay_sink::tests::dc1_actual_scanner_contract
+services::discord::session_relay_sink::tests::dc1_isolated_scanner_child
 services::discord::session_relay_sink::tests::deliver_response_err_path_releases_external_input_lease_via_guard
 services::discord::session_relay_sink::tests::discord_and_tui_direct_have_explicit_terminal_owner_models
 services::discord::session_relay_sink::tests::fenceless_frame_with_complete_result_carries_no_commit_fence
