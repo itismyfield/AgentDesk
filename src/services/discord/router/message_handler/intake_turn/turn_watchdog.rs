@@ -1,4 +1,4 @@
-use super::*;
+use super::{take_watchdog_deadline_override as take_override, *};
 
 /// #3837 decomposition: the per-turn watchdog spawn lifted verbatim from
 /// `handle_text_message`. Behavior-preserving — computes the initial/ceiling
@@ -66,16 +66,12 @@ pub(super) fn spawn_text_turn_watchdog(
                 .cancelled
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                crate::services::discord::clear_watchdog_deadline_override(watchdog_channel_id_num)
-                    .await;
+                let _ = take_override(watchdog_channel_id_num, &watchdog_token).await;
                 return;
             }
 
             // Check for API-based deadline extension
-            if let Some(extension) =
-                crate::services::discord::take_watchdog_deadline_override(watchdog_channel_id_num)
-                    .await
-            {
+            if let Some(extension) = take_override(watchdog_channel_id_num, &watchdog_token).await {
                 let effective_deadline =
                     apply_watchdog_deadline_extension(&watchdog_token, extension);
                 last_deadlock_prealert_deadline_ms = None;
@@ -138,23 +134,13 @@ pub(super) fn spawn_text_turn_watchdog(
                                     );
                                 }
                                 if new_dl > current_dl {
-                                    watchdog_token
-                                        .watchdog_deadline_ms
-                                        .store(new_dl, std::sync::atomic::Ordering::Relaxed);
-                                    watchdog_token.watchdog_max_deadline_ms.store(
-                                        std::cmp::max(
-                                            watchdog_token
-                                                .watchdog_max_deadline_ms
-                                                .load(std::sync::atomic::Ordering::Relaxed),
-                                            new_dl,
-                                        ),
-                                        std::sync::atomic::Ordering::Relaxed,
-                                    );
+                                    let new_dl =
+                                        watchdog_token.raise_watchdog_deadlines(new_dl, new_dl);
                                     last_deadlock_prealert_deadline_ms = None;
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     let remaining_min = (new_dl - now_ms_check) / 1000 / 60;
                                     tracing::info!(
-                                        "  [{ts}] ⏰ WATCHDOG: auto-extended for channel {} (inflight active) — {remaining_min}m remaining",
+                                        "  [{ts}] ⏰ WATCHDOG: auto-extend checked for channel {} (inflight active) — effective {remaining_min}m remaining",
                                         channel_id
                                     );
                                 }
@@ -178,10 +164,7 @@ pub(super) fn spawn_text_turn_watchdog(
                         .await
                         .is_some_and(|current| std::sync::Arc::ptr_eq(&watchdog_token, &current));
                 if !is_current_token {
-                    crate::services::discord::clear_watchdog_deadline_override(
-                        watchdog_channel_id_num,
-                    )
-                    .await;
+                    let _ = take_override(watchdog_channel_id_num, &watchdog_token).await;
                     return;
                 }
                 let current_max_deadline = watchdog_token
@@ -202,10 +185,7 @@ pub(super) fn spawn_text_turn_watchdog(
                 }
             }
 
-            if let Some(extension) =
-                crate::services::discord::take_watchdog_deadline_override(watchdog_channel_id_num)
-                    .await
-            {
+            if let Some(extension) = take_override(watchdog_channel_id_num, &watchdog_token).await {
                 apply_watchdog_deadline_extension(&watchdog_token, extension);
                 last_deadlock_prealert_deadline_ms = None;
             }

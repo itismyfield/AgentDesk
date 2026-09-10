@@ -38,8 +38,8 @@ use dispatch_reservation::{
     record_valve_cleared_pending_dispatch, set_pending_user_dispatch,
 };
 use episode_identity::{
-    TurnNonceGuard, persist_queue_or_restore, reset_watchdog_extension_state,
-    turn_nonce_guard_matches,
+    TurnNonceGuard, matching_cancel_token, persist_queue_or_restore,
+    reset_watchdog_extension_state, take_watchdog_override_if_current, turn_nonce_guard_matches,
 };
 use front_requeue::requeue_intervention_front;
 pub(crate) use overflow::SoftInterventionProbe;
@@ -1364,14 +1364,6 @@ impl ChannelMailboxHandle {
         .await
     }
 
-    pub(crate) async fn take_timeout_override(&self) -> Option<WatchdogDeadlineExtension> {
-        self.request(
-            |reply| ChannelMailboxMsg::TakeTimeoutOverride { reply },
-            None,
-        )
-        .await
-    }
-
     pub(crate) async fn clear_timeout_override(&self) {
         let _ = self
             .request(
@@ -1866,6 +1858,7 @@ enum ChannelMailboxMsg {
         reply: oneshot::Sender<Result<WatchdogDeadlineExtension, WatchdogDeadlineExtensionError>>,
     },
     TakeTimeoutOverride {
+        expected_token: Arc<CancelToken>,
         reply: oneshot::Sender<Option<WatchdogDeadlineExtension>>,
     },
     ClearTimeoutOverride {
@@ -2115,12 +2108,11 @@ fn extend_active_watchdog_deadline(
         std::cmp::max(current_deadline, now_ms) + applied_extend_secs as i64 * 1000;
     let max_deadline_ms = std::cmp::max(current_max_deadline, new_deadline_ms);
 
-    cancel_token
-        .watchdog_deadline_ms
-        .store(new_deadline_ms, Ordering::Relaxed);
-    cancel_token
+    let new_deadline_ms = cancel_token.raise_watchdog_deadlines(new_deadline_ms, max_deadline_ms);
+    let max_deadline_ms = cancel_token
         .watchdog_max_deadline_ms
-        .store(max_deadline_ms, Ordering::Relaxed);
+        .load(Ordering::Relaxed)
+        .max(new_deadline_ms);
 
     state.watchdog_extension_count = state.watchdog_extension_count.saturating_add(1);
     state.watchdog_extension_total_secs = state
@@ -2290,10 +2282,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     expected_token,
                     reply,
                 } => {
-                    let token = state
-                        .cancel_token
-                        .clone()
-                        .filter(|token| Arc::ptr_eq(token, &expected_token));
+                    let token = matching_cancel_token(&state, &expected_token);
                     let already_stopping = token.as_ref().is_some_and(|token| {
                         token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
                     });
@@ -2317,10 +2306,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     // #2374 — atomic reason-then-flip with the
                     // `if_current` guard preserved. See the unguarded
                     // variant above for the broader rationale.
-                    let token = state
-                        .cancel_token
-                        .clone()
-                        .filter(|token| Arc::ptr_eq(token, &expected_token));
+                    let token = matching_cancel_token(&state, &expected_token);
                     let already_stopping = token.as_ref().is_some_and(|token| {
                         token.cancelled.load(std::sync::atomic::Ordering::Relaxed)
                     });
@@ -3280,8 +3266,14 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 } => {
                     let _ = reply.send(extend_active_watchdog_deadline(&mut state, extend_by_secs));
                 }
-                ChannelMailboxMsg::TakeTimeoutOverride { reply } => {
-                    let _ = reply.send(state.watchdog_deadline_override.take());
+                ChannelMailboxMsg::TakeTimeoutOverride {
+                    expected_token,
+                    reply,
+                } => {
+                    let _ = reply.send(take_watchdog_override_if_current(
+                        &mut state,
+                        &expected_token,
+                    ));
                 }
                 ChannelMailboxMsg::ClearTimeoutOverride { reply } => {
                     state.watchdog_deadline_override = None;

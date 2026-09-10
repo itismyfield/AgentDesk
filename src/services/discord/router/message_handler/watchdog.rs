@@ -1,4 +1,4 @@
-use super::*;
+use super::{take_watchdog_deadline_override as take_override, *};
 
 pub(super) const WATCHDOG_DEADLOCK_PREALERT_MS: i64 = 5 * 60 * 1000;
 pub(super) const WATCHDOG_DEADLOCK_PREALERT_BOT: &str =
@@ -60,25 +60,15 @@ pub(super) fn should_send_watchdog_deadlock_prealert(
 }
 
 pub(super) fn initialize_watchdog_deadlines(token: &CancelToken, initial: i64) {
-    use std::sync::atomic::Ordering::Relaxed;
     token.mark_async_managed();
-    token.watchdog_max_deadline_ms.fetch_max(initial, Relaxed);
-    token.watchdog_deadline_ms.fetch_max(initial, Relaxed);
+    token.raise_watchdog_deadlines(initial, initial);
 }
 
 pub(super) fn apply_watchdog_deadline_extension(
     watchdog_token: &CancelToken,
     extension: crate::services::turn_orchestrator::WatchdogDeadlineExtension,
 ) -> i64 {
-    watchdog_token.watchdog_max_deadline_ms.store(
-        extension.max_deadline_ms,
-        std::sync::atomic::Ordering::Relaxed,
-    );
-    watchdog_token.watchdog_deadline_ms.store(
-        extension.new_deadline_ms,
-        std::sync::atomic::Ordering::Relaxed,
-    );
-    extension.new_deadline_ms
+    watchdog_token.raise_watchdog_deadlines(extension.new_deadline_ms, extension.max_deadline_ms)
 }
 
 pub(super) fn build_watchdog_deadlock_prealert_message(
@@ -261,13 +251,10 @@ pub(super) fn spawn_headless_turn_watchdog(
                 .cancelled
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                super::super::super::clear_watchdog_deadline_override(watchdog_channel_id_num)
-                    .await;
+                let _ = take_override(watchdog_channel_id_num, &watchdog_token).await;
                 return;
             }
-            if let Some(extension) =
-                super::super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await
-            {
+            if let Some(extension) = take_override(watchdog_channel_id_num, &watchdog_token).await {
                 apply_watchdog_deadline_extension(&watchdog_token, extension);
                 last_deadlock_prealert_deadline_ms = None;
             }
@@ -306,18 +293,7 @@ pub(super) fn spawn_headless_turn_watchdog(
                             );
                         }
                         if new_dl > current_dl {
-                            watchdog_token
-                                .watchdog_deadline_ms
-                                .store(new_dl, std::sync::atomic::Ordering::Relaxed);
-                            watchdog_token.watchdog_max_deadline_ms.store(
-                                std::cmp::max(
-                                    watchdog_token
-                                        .watchdog_max_deadline_ms
-                                        .load(std::sync::atomic::Ordering::Relaxed),
-                                    new_dl,
-                                ),
-                                std::sync::atomic::Ordering::Relaxed,
-                            );
+                            watchdog_token.raise_watchdog_deadlines(new_dl, new_dl);
                             last_deadlock_prealert_deadline_ms = None;
                         }
                     }
@@ -338,8 +314,7 @@ pub(super) fn spawn_headless_turn_watchdog(
                         .await
                         .is_some_and(|current| Arc::ptr_eq(&watchdog_token, &current));
                 if !is_current_token {
-                    super::super::super::clear_watchdog_deadline_override(watchdog_channel_id_num)
-                        .await;
+                    let _ = take_override(watchdog_channel_id_num, &watchdog_token).await;
                     return;
                 }
                 let current_max_deadline = watchdog_token
@@ -359,9 +334,7 @@ pub(super) fn spawn_headless_turn_watchdog(
                     last_deadlock_prealert_deadline_ms = Some(current_deadline);
                 }
             }
-            if let Some(extension) =
-                super::super::super::take_watchdog_deadline_override(watchdog_channel_id_num).await
-            {
+            if let Some(extension) = take_override(watchdog_channel_id_num, &watchdog_token).await {
                 apply_watchdog_deadline_extension(&watchdog_token, extension);
                 last_deadlock_prealert_deadline_ms = None;
             }
@@ -535,7 +508,7 @@ pub(super) async fn reconcile_watchdog_timeout(
         WATCHDOG_TIMEOUT_CANCEL_SOURCE,
     )
     .await;
-    super::super::super::clear_watchdog_deadline_override(channel_id.get()).await;
+    let _ = take_override(channel_id.get(), watchdog_token).await;
 
     let Some(token) = result.token else {
         return WatchdogTimeoutCancelDisposition::StaleToken;
@@ -1058,7 +1031,12 @@ pub(super) mod timeout_notice_tests {
         if init_order == 2 {
             initialize_watchdog_deadlines(&successor, 1_000);
         }
-        assert!(handle.take_timeout_override().await.is_none());
+        assert!(
+            handle
+                .take_timeout_override(successor.clone())
+                .await
+                .is_none()
+        );
         assert!(successor.watchdog_deadline_ms.load(Relaxed) >= accepted.new_deadline_ms);
         assert!(successor.watchdog_max_deadline_ms.load(Relaxed) >= accepted.max_deadline_ms);
     }
@@ -1150,6 +1128,98 @@ pub(super) mod timeout_notice_tests {
                 "test",
             );
         });
+    }
+
+    #[tokio::test]
+    async fn watchdog_monotonic_replay_preserves_newer_actor_extension() {
+        use crate::services::turn_orchestrator::ChannelMailboxRegistry;
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(serenity::ChannelId::new(9_000_000_505_602_001));
+        let token = Arc::new(CancelToken::new());
+        assert!(
+            handle
+                .try_start_turn(
+                    token.clone(),
+                    serenity::UserId::new(52),
+                    serenity::MessageId::new(52)
+                )
+                .await
+        );
+        let first = handle.extend_timeout(86_400).await.unwrap();
+        let replay = handle.take_timeout_override(token.clone()).await.unwrap();
+        assert_eq!(replay, first);
+        assert_eq!(
+            apply_watchdog_deadline_extension(&token, replay),
+            first.new_deadline_ms
+        );
+        let latest = handle.extend_timeout(86_400).await.unwrap();
+        assert!(latest.new_deadline_ms > replay.new_deadline_ms);
+        let effective = apply_watchdog_deadline_extension(&token, replay);
+        assert_eq!(
+            token.watchdog_deadline_ms.load(Relaxed),
+            latest.new_deadline_ms
+        );
+        assert_eq!(
+            token.watchdog_max_deadline_ms.load(Relaxed),
+            latest.max_deadline_ms
+        );
+        assert_eq!(effective, latest.new_deadline_ms);
+        assert_eq!(
+            handle.take_timeout_override(token.clone()).await.unwrap(),
+            latest
+        );
+        let initial = latest.max_deadline_ms.checked_add(60_000).unwrap();
+        initialize_watchdog_deadlines(&token, initial);
+        let effective = apply_watchdog_deadline_extension(&token, latest);
+        assert_eq!(token.watchdog_deadline_ms.load(Relaxed), initial);
+        assert_eq!(token.watchdog_max_deadline_ms.load(Relaxed), initial);
+        assert_eq!(effective, initial);
+    }
+
+    #[test]
+    fn watchdog_monotonic_all_existing_writer_paths_use_token_rmw() {
+        let body = |source: &str, marker: &str| {
+            source
+                .split(marker)
+                .nth(1)
+                .unwrap()
+                .split("\n}\n")
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .collect::<String>()
+        };
+        let watchdog = include_str!("watchdog.rs");
+        for (source, marker) in [
+            (watchdog, "fn initialize_watchdog_deadlines("),
+            (watchdog, "fn apply_watchdog_deadline_extension("),
+            (watchdog, "fn spawn_headless_turn_watchdog("),
+            (
+                include_str!("intake_turn/turn_watchdog.rs"),
+                "fn spawn_text_turn_watchdog(",
+            ),
+            (
+                include_str!("../../../turn_orchestrator.rs"),
+                "fn extend_active_watchdog_deadline(",
+            ),
+        ] {
+            let source = body(source, marker);
+            assert_eq!(
+                source.matches(".raise_watchdog_deadlines(").count(),
+                1,
+                "{marker}"
+            );
+            for field in ["watchdog_deadline_ms", "watchdog_max_deadline_ms"] {
+                assert!(
+                    !source.contains(&format!(".{field}.store(")),
+                    "{marker}: {field}"
+                );
+                assert!(
+                    !source.contains(&format!(".{field}.fetch_max(")),
+                    "{marker}: {field}"
+                );
+            }
+        }
     }
 
     fn headless_inflight(
