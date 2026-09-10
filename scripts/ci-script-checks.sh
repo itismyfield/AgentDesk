@@ -332,6 +332,7 @@ banner "Test-target integrity gate (#5003/#5008)"
 # here. The unittest run below is the gate's own mutation proof.
 "$PYTHON" scripts/check_test_target_integrity.py --enforce
 "$PYTHON" -m unittest tests.test_check_test_target_integrity
+"$PYTHON" -m unittest tests.test_target_empty_identity
 AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scripts/check_test_target_integrity.py --verify-lib-inventory
 
 banner "PostgreSQL test-lane membership gate (#4979, enforced)"
