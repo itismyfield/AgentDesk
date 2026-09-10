@@ -152,8 +152,8 @@ pub(in crate::services::discord) async fn delete_stale_queued_placeholder_cards_
     let mut preserved = 0usize;
     for (channel_id, user_msg_id, placeholder_msg_id) in stale_cards {
         let (channel_id, placeholder_msg_id) = (*channel_id, *placeholder_msg_id);
-        // The stale owner is by definition absent from `live_queue_ids`, so the
-        // partial departing hint cannot even reach the candidate list.
+        // Candidates include late/conflicting restores whose owners may still queue.
+        // The departing hint deprioritizes an owner; it does not exclude one.
         let teardown = match queued_card_gate::release_or_rekey(
             shared,
             channel_id,
@@ -213,3 +213,60 @@ pub(in crate::services::discord) async fn collect_live_queue_message_ids(
     }
     by_channel
 }
+
+/// Install disk candidates without overwriting newer map ownership. The actor
+/// remains independent of the persist lock; cleanup always goes through A8.
+pub(in crate::services::discord) async fn install_restored_queued_placeholders(
+    shared: &SharedData,
+    live: Vec<((ChannelId, MessageId), MessageId)>,
+    channels_with_stale: &std::collections::HashSet<ChannelId>,
+) -> Vec<(ChannelId, MessageId, MessageId)> {
+    let mut by_channel = std::collections::HashMap::<_, Vec<_>>::new();
+    for ((channel, owner), card) in live {
+        by_channel.entry(channel).or_default().push((owner, card));
+    }
+    for channel in channels_with_stale {
+        by_channel.entry(*channel).or_default();
+    }
+    let mut uninstalled = Vec::new();
+    for (channel, rows) in by_channel {
+        let lock = shared.queued_placeholders_persist_lock(channel);
+        let _guard = lock.lock_owned().await;
+        let snapshot = mailbox_snapshot(shared, channel).await;
+        let queued = queued_message_ids(&snapshot);
+        for (owner, card) in rows {
+            let current = shared
+                .queued
+                .queued_placeholders
+                .get(&(channel, owner))
+                .map(|v| *v);
+            if !queued.contains(&owner.get()) {
+                uninstalled.push((channel, owner, card));
+            } else if let Some(current) = current {
+                if current != card {
+                    uninstalled.push((channel, owner, card));
+                }
+            } else if shared
+                .queued
+                .queued_placeholders
+                .iter()
+                .any(|entry| entry.key().0 == channel && *entry.value() == card)
+            {
+                uninstalled.push((channel, owner, card));
+            } else {
+                shared.insert_queued_placeholder_locked(channel, owner, card);
+            }
+        }
+        // Also prune stale-only/conflict-only snapshots. Save remains best-effort.
+        queued_placeholders_store::persist_channel_from_map(
+            &shared.queued.queued_placeholders,
+            &shared.provider,
+            &shared.token_hash,
+            channel,
+        );
+    }
+    uninstalled
+}
+
+#[cfg(test)]
+mod tests;
