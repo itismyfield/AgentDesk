@@ -656,7 +656,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
 
             match read_more {
                 Ok(Ok(Ok((chunk, off, file_identity)))) if !chunk.is_empty() => {
-                    let chunk_source_authority = source_authority_for_read(
+                    let authority = source_authority_for_read(
                         source_authority,
                         &tmux_session_name,
                         crate::services::discord::delivery_lease_cell::source_epoch_observer::marker_if_enabled(
@@ -674,21 +674,14 @@ pub(super) async fn collect_turn_stream_until_terminal(
                         &mut last_activity_heartbeat_at,
                     );
                     ready_for_input_tracker.record_output();
-                    let chunk_start_offset = current_offset.saturating_sub(chunk.len() as u64);
-                    let decoded_chunk = utf8_decoder.decode_source(
-                        &chunk,
-                        chunk_start_offset,
-                        chunk_source_authority,
-                    );
-                    let chunk_source_authority = authority_for_decoded_text(
-                        chunk_source_authority,
-                        decoded_chunk.mixed_read_provenance,
-                    );
+                    let chunk_start = current_offset.saturating_sub(chunk.len() as u64);
+                    let decoded_chunk = utf8_decoder.decode_source(&chunk, chunk_start, authority);
+                    let authority =
+                        authority_for_decoded_text(authority, decoded_chunk.mixed_read_provenance);
                     // Defer forwarding until parsing attaches the terminal fence.
                     let chunk_buffer_was_empty = all_data.is_empty();
                     if chunk_buffer_was_empty {
-                        all_data_start_offset =
-                            decoded_chunk.start_offset.unwrap_or(chunk_start_offset);
+                        all_data_start_offset = decoded_chunk.start_offset.unwrap_or(chunk_start);
                     }
                     if decoded_chunk.text.is_empty() && all_data.is_empty() {
                         continue;
@@ -743,7 +736,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             &producer_registry,
                             &mut cached_relay_producer,
                             fence,
-                            chunk_source_authority,
+                            authority,
                         ),
                         None => forward_chunk_to_supervisor_relay_for_turn(
                             &tmux_session_name,
@@ -751,7 +744,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             &producer_registry,
                             &mut cached_relay_producer,
                             turn_identity_for_panel.as_ref(),
-                            chunk_source_authority,
+                            authority,
                         ),
                     };
                     apply_streaming_supervisor_relay_forward(
