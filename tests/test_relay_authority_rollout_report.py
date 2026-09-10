@@ -185,6 +185,72 @@ class RolloutReportTest(unittest.TestCase):
                 self.assertIn(report.main(argv + ["--root", str(root)]), (0, 1))
             return summary
 
+    @staticmethod
+    def axis_b_record() -> dict:
+        # AxisBRecord + flattened AxisBStamp from relay_recovery.rs.
+        return {"schema": "relay_authority.axis_b.v1", "ts": BASE.isoformat(),
+                "host": "fixture", "api_port": 8790, "process_generation": 7,
+                "runtime_ptr": "0x1", "cohort_fingerprint": FINGERPRINT,
+                "provider": "codex", "channel_id": 4259300,
+                "site": "operator_relay_recovery", "structural_action": "reattach_watcher",
+                "structural_eligible": True, "ledger_action": "observe_only",
+                "ledger_eligible": False, "diff": "ledger_milder", "cleanup_delay_ms": 12}
+
+    def test_valid_axis_b_does_not_change_axis_a_promotion(self):
+        events = turns(210, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))
+        baseline = self.run_report(events)
+        mixed = self.run_report(events + [self.axis_b_record()] * 1000)
+        self.assertTrue(mixed["promotion_ready"])
+        self.assertEqual(mixed["criteria"], baseline["criteria"])
+        for key in ("lines", "unusable", "cohabiting_usable_lines"):
+            self.assertEqual(mixed["line_integrity"][key], baseline["line_integrity"][key])
+        self.assertEqual(mixed["line_integrity_all_files"]["lines"], 630)
+        self.assertEqual(mixed["line_integrity_all_files"]["axis_b_lines"], 1000)
+
+    def test_axis_b_cannot_supply_coverage_or_dilute_corruption(self):
+        noise = [self.axis_b_record()] * 1000
+        alone = self.run_report(noise)
+        self.assertFalse(alone["promotion_ready"])
+        self.assertEqual(alone["criteria"]["turn_samples"]["value"], 0)
+        self.assertEqual(alone["criteria"]["window_days"]["value"], 0)
+        sparse = turns(210, days=7, sites=("bridge_entry",))
+        self.assertEqual(self.run_report(sparse)["criteria"],
+                         self.run_report(sparse + noise)["criteria"])
+        events = turns(210, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))
+        for day in ("2026-08-01", "undated"):
+            with self.subTest(day=day):
+                junk = ['{"schema":"unknown"}', 'null', '[]', '{broken'] * 3
+                baseline = self.run_report(events, extra_lines=junk, extra_day=day)
+                mixed = self.run_report(events + noise, extra_lines=junk, extra_day=day)
+                if day == "2026-08-01":
+                    self.assertFalse(mixed["criteria"]["line_integrity"]["met"])
+                else:
+                    self.assertEqual(mixed["line_integrity"]["out_of_scope_unusable_lines"], 12)
+                self.assertEqual(mixed["line_integrity_all_files"]["unusable"], 12)
+                self.assertEqual(mixed["criteria"], baseline["criteria"])
+                self.assertEqual(mixed["line_integrity_all_files"]["lines"], 642)
+
+    def test_incomplete_or_malformed_axis_b_is_still_unusable(self):
+        valid = self.axis_b_record()
+        invalid = [dict(valid, **{key: value}) for key, value in (
+            ("ts", "not-a-date"), ("api_port", True), ("process_generation", -1),
+            ("channel_id", 2**64), ("cleanup_delay_ms", "12"),
+            ("structural_eligible", 1), ("ledger_eligible", None),
+            ("site", "unknown"), ("structural_action", []), ("ledger_action", "unknown"),
+            ("structural_action", "unknown"),
+            ("diff", "unknown"), ("unknown_reason", None))]
+        invalid += [{key: value for key, value in valid.items() if key != missing}
+                    for missing in valid]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "undated.jsonl"
+            path.write_text("\n".join(map(json.dumps, invalid)), encoding="utf-8")
+            loaded, warnings, by_file = report.load_events(Path(root))
+            self.assertEqual(loaded, [])
+            self.assertEqual(len(warnings), len(invalid))
+            self.assertEqual(by_file[path.name]["schema_mismatch"], len(invalid))
+            self.assertEqual(by_file[path.name]["axis_b_lines"], 0)
+
+
     def test_a_complete_window_is_promotion_ready(self):
         summary = self.run_report(
             turns(210, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))
