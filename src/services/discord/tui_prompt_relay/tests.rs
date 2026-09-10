@@ -2922,21 +2922,13 @@ impl TurnGateway for S3Gateway {
     }
 }
 
-// SAFETY (await_holding_lock): test-only current-thread fixtures retain this
-// mutex across awaits to exclude global dedupe resets. The environment lock
-// is acquired first, matching the other fixtures; no awaited task takes either.
-#[allow(clippy::await_holding_lock)]
 #[cfg(unix)]
-async fn s3_completion_fixture(
+fn s3_completion_fixture(
     streamed: bool,
     signal: Option<bool>,
     owned: Option<u64>,
     durable: Option<u64>,
 ) {
-    use crate::services::discord::turn_bridge::{
-        BridgeCompletionSignal, spawn_turn_bridge_with_pin as spawn_fixture_bridge,
-    };
-    use crate::services::tui_prompt_dedupe::{prompt_anchor_for_response, record_prompt_anchor};
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
     // Match the established environment -> dedupe order; retain across awaits
@@ -2944,6 +2936,27 @@ async fn s3_completion_fixture(
     let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(s3_completion_fixture_body(
+            streamed, signal, owned, durable, &temp,
+        ));
+}
+
+#[cfg(unix)]
+async fn s3_completion_fixture_body(
+    streamed: bool,
+    signal: Option<bool>,
+    owned: Option<u64>,
+    durable: Option<u64>,
+    temp: &tempfile::TempDir,
+) {
+    use crate::services::discord::turn_bridge::{
+        BridgeCompletionSignal, spawn_turn_bridge_with_pin as spawn_fixture_bridge,
+    };
+    use crate::services::tui_prompt_dedupe::{prompt_anchor_for_response, record_prompt_anchor};
     let shared = super::super::make_shared_data_for_tests();
     let provider = if streamed {
         ProviderKind::Claude
@@ -3111,10 +3124,10 @@ async fn s3_completion_fixture(
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn s3t1_abort_and_recv_error_preserve_foreign_turn_and_anchor() {
-    s3_completion_fixture(true, Some(false), Some(880003), Some(880005)).await;
-    s3_completion_fixture(true, None, Some(880003), Some(880005)).await;
+#[test]
+fn s3t1_abort_and_recv_error_preserve_foreign_turn_and_anchor() {
+    s3_completion_fixture(true, Some(false), Some(880003), Some(880005));
+    s3_completion_fixture(true, None, Some(880003), Some(880005));
     let source = include_str!("claude_idle_bridge.rs");
     let abort = source
         .split("aborted @")
@@ -3128,8 +3141,8 @@ async fn s3t1_abort_and_recv_error_preserve_foreign_turn_and_anchor() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn s3t2_delivery_failure_never_cancels_successor_or_commits_cursor() {
+#[test]
+fn s3t2_delivery_failure_never_cancels_successor_or_commits_cursor() {
     for source in [
         include_str!("claude_idle_tail.rs"),
         include_str!("codex_idle_rollout.rs"),
@@ -3144,32 +3157,32 @@ async fn s3t2_delivery_failure_never_cancels_successor_or_commits_cursor() {
         assert!(!branch.contains("finish_tui_direct_synthetic_turn_if_current"));
         assert!(source.contains("tui_idle_tail_stream_should_commit_runtime_binding_offset("));
     }
-    s3_completion_fixture(true, Some(false), Some(880003), Some(880005)).await;
+    s3_completion_fixture(true, Some(false), Some(880003), Some(880005));
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn s3t3_abort_deletes_only_owned_unreferenced_placeholder() {
+#[test]
+fn s3t3_abort_deletes_only_owned_unreferenced_placeholder() {
     for owned in [Some(880003), Some(880005), Some(880004), None] {
-        s3_completion_fixture(true, Some(false), owned, Some(880005)).await;
+        s3_completion_fixture(true, Some(false), owned, Some(880005));
     }
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn s3t4_finalized_accepts_successor_and_missing_row() {
+#[test]
+fn s3t4_finalized_accepts_successor_and_missing_row() {
     for streamed in [true, false] {
         for durable in [Some(880005), None] {
-            s3_completion_fixture(streamed, Some(true), Some(880003), durable).await;
+            s3_completion_fixture(streamed, Some(true), Some(880003), durable);
         }
     }
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
-    s3_completion_fixture(false, Some(false), Some(880003), Some(880005)).await;
-    s3_completion_fixture(false, None, Some(880003), Some(880005)).await;
+#[test]
+fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
+    s3_completion_fixture(false, Some(false), Some(880003), Some(880005));
+    s3_completion_fixture(false, None, Some(880003), Some(880005));
     let source = include_str!("claude_idle_bridge.rs");
     assert_eq!(
         source
