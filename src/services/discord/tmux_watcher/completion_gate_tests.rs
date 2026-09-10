@@ -1754,9 +1754,20 @@ fn post_terminal_suppression_watermark_stops_before_co_read_followup_turn() {
 
 #[test]
 fn suppression_arms_are_wired_to_consumed_end_helper() {
-    assert_suppression_arm_uses_confirmed_end_helper(
-        "src/services/discord/tmux.rs:post_terminal_no_inflight_suppressed_output",
-    );
+    let source = include_str!("loop_poll_prologue.rs");
+    let arm = source
+        .split_once("    if post_terminal_no_inflight_should_suppress {")
+        .unwrap()
+        .1
+        .split_once("    maybe_refresh_watcher_activity_heartbeat(")
+        .unwrap()
+        .0;
+    assert!(arm.contains("suppressed_terminal_confirmed_end(current_offset, all_data)"));
+    assert!(arm.contains("range: (data_start_offset, confirmed_end)"));
+    assert!(arm.contains(
+        "if first_observation_of_range {\n            journal_watcher::settle_without_transport("
+    ));
+    assert!(!arm.contains("advance_watcher_confirmed_end("));
     assert_suppression_arm_uses_confirmed_end_helper(
         "src/services/discord/tmux.rs:silent_turn_suppressed_terminal_output",
     );
