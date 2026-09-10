@@ -178,7 +178,58 @@ fn c1_both_late_writers_consume_pin_without_registry_backfill() {
 }
 
 #[test]
+fn sa2_capture_hands_off_owned_provider_receiver() {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let shared = super::super::make_shared_data_for_tests_with_storage(None);
+            let (tx, rx) = mpsc::channel();
+            drop(tx);
+            let fence = tokio::sync::OnceCell::new();
+            let mut rx =
+                super::capture_bridge_clear_fence(&shared, ChannelId::new(580899), rx, &fence)
+                    .await;
+            assert!(rx.recv().await.is_none());
+        });
+}
+
+#[test]
 fn c1_actual_postlude_resume_pin_runtime_proof() {
+    actual_postlude_runtime_proof(None, "own");
+}
+
+#[test]
+fn sa2_actual_postlude_to_executor_pg() {
+    for response in ["오늘 브리핑입니다", "NO_REPLY"] {
+        actual_postlude_runtime_proof(Some(response), "own");
+    }
+}
+
+#[test]
+fn sa2_actual_postlude_rejects_cancelled_pg() {
+    for case in ["cancelled", "token_cancelled"] {
+        actual_postlude_runtime_proof(Some("NO_REPLY"), case);
+    }
+}
+
+#[test]
+fn sa2_actual_postlude_rejects_foreign_or_stale_pg() {
+    for case in [
+        "clear",
+        "failed_capture",
+        "foreign_attempt",
+        "replacement",
+        "bridge_own",
+        "bridge_clear",
+        "bridge_channel",
+    ] {
+        actual_postlude_runtime_proof(Some("NO_REPLY"), case);
+    }
+}
+
+fn actual_postlude_runtime_proof(response: Option<&str>, case: &str) {
     let _lock = crate::config::shared_test_env_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -188,8 +239,32 @@ fn c1_actual_postlude_resume_pin_runtime_proof() {
         root.path(),
     );
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-        let shared = super::super::make_shared_data_for_tests();
+        use crate::db::session_transcripts::record_channel_clear_boundary;
+        use crate::services::routines::{NewRoutine, RoutineAgentExecutor, RoutineStore};
+        let db = if response.is_some() { Some(crate::dispatch::test_support::DispatchPostgresTestDb::create("sa2_postlude", "SA2 actual caller").await) } else { None };
+        let pool = if let Some(db) = &db { Some(db.connect_and_migrate_with_max_connections(4).await) } else { None };
+        let shared = super::super::make_shared_data_for_tests_with_storage(pool.clone());
         let owner = ChannelId::new(580899);
+        let channel = owner.get().to_string();
+        let turn_id = format!("discord:{channel}:9001");
+        let (store, run_id) = if let Some(pool) = &pool {
+            let store = RoutineStore::new_with_timezone_and_checkpoint_limit(Arc::new(pool.clone()), "UTC", 1024);
+            let routine = store.attach_routine(NewRoutine { agent_id: None, fallback_agent_id: None, max_retries: None, script_ref: "fixture".into(), name: "fixture".into(), status: None, execution_strategy: "fresh".into(), schedule: None, next_due_at: None, checkpoint: None, discord_thread_id: None, timeout_secs: None }).await.unwrap();
+            let run = store.claim_run_now(&routine.id).await.unwrap().unwrap();
+            let thread = if case == "foreign_attempt" { "sibling" } else { &channel };
+            // `replacement`: the in-flight run already moved on to a later turn id.
+            let started = if case == "replacement" { format!("{turn_id}:replacement") } else { turn_id.clone() };
+            assert!(store.mark_agent_turn_started(&run.run_id, &started, Some(serde_json::json!({"channel_id": channel, "discord_thread_id": thread})), "fixture", "fresh").await.unwrap());
+            record_channel_clear_boundary(Some(pool), &channel).await.unwrap();
+            super::super::session_runtime::rebind_channel_session(&shared, &ProviderKind::Codex, owner, root.path().to_str().unwrap(), "live-session").await;
+            (Some(store), run.run_id)
+        } else { (None, String::new()) };
+        // `failed_capture`: the bridge observed nothing, so it carries the -1 sentinel.
+        let observer = if case == "failed_capture" { super::super::make_shared_data_for_tests_with_storage(None) } else { shared.clone() };
+        let (_, rx) = mpsc::channel();
+        let clear_fence = tokio::sync::OnceCell::new();
+        let _rx = super::capture_bridge_clear_fence(&observer, owner, rx, &clear_fence).await;
+        if case == "clear" { record_channel_clear_boundary(pool.as_ref(), &channel).await.unwrap(); }
         let h = handle();
         shared.tmux_watchers.insert(owner, copy_handle(&h));
         let pin = capture(&shared, "/C1-source.jsonl").unwrap();
@@ -222,9 +297,51 @@ reuse_status_panel_message: false,
 completion_tx: None,
 is_external_input_tui_direct: false,
 inflight_state: durable.clone(), };
+        if case.starts_with("bridge_") {
+
+            bridge.user_msg_id = Some(MessageId::new(9001));
+            bridge.user_text_owned = "브리핑".into();
+            bridge.adk_session_key = Some("isolated-routine-attempt".into());
+            bridge.inflight_state.user_msg_id = 9001;
+            bridge.inflight_state.session_key = Some("isolated-routine-attempt".into());
+            super::super::inflight::save_inflight_state(&bridge.inflight_state).unwrap();
+            let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+            bridge.completion_tx = Some(completed_tx);
+            shared.tmux_watchers.remove(&owner);
+            let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+            let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+            *BRIDGE_CAPTURE_PROBE.lock().unwrap() = Some((owner, captured_tx, resume_rx));
+            *WRONG_CAPTURE_CHANNEL.lock().unwrap() = (case == "bridge_channel").then_some(owner);
+            let (tx, rx) = mpsc::channel();
+            let start_bridge = super::spawn_turn_bridge;
+            start_bridge(shared.clone(), Arc::new(CancelToken::new()), rx, bridge);
+            tokio::time::timeout(std::time::Duration::from_secs(10), captured_rx).await.unwrap().unwrap();
+            if case == "bridge_clear" { record_channel_clear_boundary(pool.as_ref(), &channel).await.unwrap(); }
+            resume_tx.send(()).unwrap();
+            tx.send(StreamMessage::Done { result: "NO_REPLY".into(), session_id: Some("routine-provider-session".into()) }).unwrap();
+            drop(tx);
+            // Stand in for the delivery worker, not for bridge/postlude execution.
+            let worker = async {
+                loop {
+                    sqlx::query("UPDATE message_outbox SET status='sent', sent_at=NOW() WHERE status='pending'")
+                        .execute(pool.as_ref().unwrap()).await.unwrap();
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            };
+            tokio::select! {
+                result = tokio::time::timeout(std::time::Duration::from_secs(10), completed_rx) => { result.unwrap().unwrap(); },
+                _ = worker => unreachable!(),
+            }
+            let pairs = crate::db::session_transcripts::fetch_recent_channel_pairs(pool.as_ref().unwrap(), &channel, 10).await.unwrap();
+            assert_eq!(pairs.len(), usize::from(case == "bridge_own"), "actual bridge case={case}");
+            drop((shared, store));
+            pool.as_ref().unwrap().close().await;
+            db.unwrap().drop().await;
+            return;
+        }
         let (completion_guard, mut inflight_guard) = super::guards::make_bridge_guards(&mut bridge, &durable, &shared, &ProviderKind::Codex);
         inflight_guard.defuse();
-        let ctx = super::completion_postlude::CompletionPostludeContext { shared_owned: shared.clone(),
+        let mut ctx = super::completion_postlude::CompletionPostludeContext { shared_owned: shared.clone(),
 gateway: gateway.clone(),
 channel_id: owner,
 provider: ProviderKind::Codex,
@@ -241,8 +358,9 @@ single_message_panel_footer_mode: false,
 is_external_input_tui_direct: false,
 context_window_tokens: 0,
 context_compact_percent: 0,
+clear_fence: clear_fence.into_inner().expect("bridge captured fence"),
 turn_start: std::time::Instant::now(), };
-        let state = super::completion_postlude::CompletionPostludeState { watcher_delivery_pin: Some(pin),
+        let mut state = super::completion_postlude::CompletionPostludeState { watcher_delivery_pin: Some(pin),
 full_response: String::new(),
 user_text_owned: String::new(),
 role_binding: None,
@@ -290,6 +408,33 @@ bridge_skip_holder_owns_inflight: false,
 completion_guard: completion_guard,
 inflight_guard: inflight_guard,
 inflight_state: durable.clone(), };
+        if let Some(response) = response {
+            ctx.turn_id = turn_id;
+            ctx.user_msg_id = Some(MessageId::new(9001)); // Predates the routine's own clear.
+            state.adk_session_key = Some("isolated-routine-attempt".into());
+            state.new_session_id = Some("routine-provider-session".into());
+            state.full_response = response.into();
+            state.user_text_owned = "브리핑".into();
+            (state.terminal_delivery_committed, state.preserve_inflight_for_cleanup_retry, state.cancelled) = (true, false, case == "cancelled");
+            if case == "token_cancelled" { ctx.cancel_token.cancelled.store(true, Ordering::Release); }
+            // A foreign mailbox/watcher must retain its live channel state even on success.
+            assert!(_mailbox.try_start_turn(Arc::new(CancelToken::new()), UserId::new(2), MessageId::new(3)).await);
+            tokio::time::timeout(std::time::Duration::from_secs(10), super::completion_postlude::run_completion_postlude(ctx, state)).await.unwrap();
+            let session = shared.core.lock().await.sessions.get(&owner).unwrap().clone();
+            assert_eq!((session.session_id.as_deref(), session.history.len()), (Some("live-session"), 0));
+            unchanged(&h);
+            assert_eq!(_mailbox.snapshot().await.active_user_message_id, Some(MessageId::new(3)));
+            let pool = pool.as_ref().unwrap();
+            let pairs = crate::db::session_transcripts::fetch_recent_channel_pairs(pool, &channel, 10).await.unwrap();
+            assert_eq!(pairs.iter().map(|pair| &*pair.assistant_message).collect::<Vec<_>>(), if case == "own" { vec![response] } else { vec![] }, "case={case}");
+            let outcomes = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 1800).poll_agent_runs(store.as_ref().unwrap(), 10, false).await.unwrap();
+            assert_eq!(outcomes.len(), usize::from(case == "own"), "case={case}");
+            if case == "own" { assert_eq!((&*outcomes[0].run_id, &*outcomes[0].status), (&*run_id, "succeeded")); }
+            drop((shared, store));
+            pool.close().await;
+            db.unwrap().drop().await;
+            return;
+        }
         let future = super::completion_postlude::run_completion_postlude(ctx, state);
         tokio::pin!(future);
         // Poll the real caller through its resume effect; stop before unrelated downstream work.
@@ -302,4 +447,38 @@ inflight_state: durable.clone(), };
         assert!(!h.paused.load(Ordering::Acquire));
         assert!(h.turn_delivered.load(Ordering::Acquire));
     });
+}
+
+// Per-channel rendezvous: only the real bridge capture site calls this hook.
+static BRIDGE_CAPTURE_PROBE: std::sync::Mutex<
+    Option<(
+        ChannelId,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+> = std::sync::Mutex::new(None);
+pub(super) async fn after_bridge_capture(channel: ChannelId) {
+    let probe = {
+        let mut slot = BRIDGE_CAPTURE_PROBE.lock().unwrap();
+        if slot.as_ref().is_some_and(|p| p.0 == channel) {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, captured, resume)) = probe {
+        let _ = captured.send(());
+        resume.await.unwrap();
+    }
+}
+
+static WRONG_CAPTURE_CHANNEL: std::sync::Mutex<Option<ChannelId>> = std::sync::Mutex::new(None);
+pub(super) fn capture_channel(channel: ChannelId) -> ChannelId {
+    let mut wrong = WRONG_CAPTURE_CHANNEL.lock().unwrap();
+    if *wrong == Some(channel) {
+        *wrong = None;
+        ChannelId::new(channel.get() + 1)
+    } else {
+        channel
+    }
 }
