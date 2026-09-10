@@ -298,6 +298,7 @@ pub(crate) fn observe_claude_jsonl_turn_state(path: &Path) -> TuiTurnState {
         claude_envelope_turn_state,
         claude_partial_turn_state,
         MalformedJsonlLinePolicy::FallbackToPrevious,
+        false,
     )
 }
 
@@ -307,6 +308,7 @@ pub(crate) fn observe_codex_jsonl_turn_state(path: &Path) -> TuiTurnState {
         codex_envelope_turn_state,
         |_| None,
         MalformedJsonlLinePolicy::ReturnUnknown,
+        true,
     )
 }
 
@@ -321,14 +323,22 @@ fn observe_jsonl_turn_state(
     classify: fn(&Value) -> Option<TuiTurnState>,
     classify_partial: fn(&str) -> Option<TuiTurnState>,
     malformed_policy: MalformedJsonlLinePolicy,
+    conservative_truncated: bool,
 ) -> TuiTurnState {
-    let Ok(lines) = read_recent_jsonl_lines(path) else {
+    let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
         return TuiTurnState::Unknown;
     };
-    if lines.is_empty() {
-        return TuiTurnState::Idle;
+    // Codex housekeeping may hide lifecycle evidence behind a large compaction.
+    // Missing evidence in a truncated window must not authorize submission.
+    let truncated = conservative_truncated && !window.window_covers_file;
+    if window.lines.is_empty() {
+        return if truncated {
+            TuiTurnState::Streaming
+        } else {
+            TuiTurnState::Idle
+        };
     }
-    for line in lines.iter().rev() {
+    for line in window.lines.iter().rev() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -349,11 +359,11 @@ fn observe_jsonl_turn_state(
             return state;
         }
     }
-    TuiTurnState::Unknown
-}
-
-fn read_recent_jsonl_lines(path: &Path) -> Result<Vec<String>, std::io::Error> {
-    Ok(read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES)?.lines)
+    if truncated {
+        TuiTurnState::Streaming
+    } else {
+        TuiTurnState::Unknown
+    }
 }
 
 /// Result of a bounded tail read: the parsed lines plus whether the window
@@ -693,6 +703,39 @@ mod tests {
             jsonl_turn_end_terminator_idle(&ProviderKind::Codex, file.path()),
         );
         assert_eq!(actual, (observer, drain, finalize, finalize), "{events:?}");
+    }
+
+    #[test]
+    fn codex_s1_truncated_housekeeping_cannot_prove_not_busy() {
+        let compacted =
+            serde_json::json!({"type": "compacted", "text": "x".repeat(570_000)}).to_string();
+        for boundary in ["task_started", "task_complete"] {
+            for tail in ["thread_settings_applied", "token_count"] {
+                let first =
+                    serde_json::json!({"type":"event_msg","payload":{"type":boundary}}).to_string();
+                let last =
+                    serde_json::json!({"type":"event_msg","payload":{"type":tail}}).to_string();
+                let file = write_jsonl(&[&first, &compacted, &last]);
+                assert_eq!(observe_codex_jsonl_turn_state(file.path()), TuiTurnState::Streaming,
+                    "truncated {boundary}/{tail} lacks lifecycle evidence, not proof of a live turn");
+            }
+        }
+    }
+
+    #[test]
+    fn codex_s1_truncated_empty_window_cannot_prove_idle() {
+        let compacted =
+            serde_json::json!({"type": "compacted", "text": "x".repeat(570_000)}).to_string();
+        let file = write_jsonl(&[&compacted]);
+        assert_eq!(
+            observe_codex_jsonl_turn_state(file.path()),
+            TuiTurnState::Streaming
+        );
+        // Claude's historical empty-window and malformed policies are unchanged.
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Idle
+        );
     }
 
     #[test]
