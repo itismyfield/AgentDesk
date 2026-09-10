@@ -2922,6 +2922,10 @@ impl TurnGateway for S3Gateway {
     }
 }
 
+// SAFETY (await_holding_lock): test-only current-thread fixtures retain this
+// mutex across awaits to exclude global dedupe resets. The environment lock
+// is acquired first, matching the other fixtures; no awaited task takes either.
+#[allow(clippy::await_holding_lock)]
 #[cfg(unix)]
 async fn s3_completion_fixture(
     streamed: bool,
@@ -2935,6 +2939,11 @@ async fn s3_completion_fixture(
     use crate::services::tui_prompt_dedupe::{prompt_anchor_for_response, record_prompt_anchor};
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+    // Match the established environment -> dedupe order; retain across awaits
+    // so dedupe-only tests cannot reset this fixture's shared anchor.
+    let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let shared = super::super::make_shared_data_for_tests();
     let provider = if streamed {
         ProviderKind::Claude
