@@ -3862,6 +3862,10 @@ const DC1_CASES: &[&str] = &[
     "shrink",
     "short-consume",
     "short-send",
+    "empty-read",
+    "empty-eof",
+    "empty-grace",
+    "empty-inflight",
 ];
 
 #[test]
@@ -4091,13 +4095,37 @@ async fn dc1_isolated_scanner_child() {
     )
     .await;
     let name = f.binding.expected_session_name.clone();
-    if case == "provenance" {
+    assert_eq!(dc1_tick().await[&name].1, 0, "empty starts unqualified");
+    if case == "provenance" || case.starts_with("empty-") {
         std::fs::write(&path, payload).unwrap();
         assert_eq!(dc1_tick().await[&name], (0, 1), "grace creates Deferred");
+        if matches!(case.as_str(), "empty-grace" | "empty-inflight") {
+            if case == "empty-inflight" {
+                let mut inflight = inflight_for(&name, RelayOwnerKind::Watcher, false);
+                inflight.channel_id = 58080001;
+                super::super::inflight::save_inflight_state(&inflight).unwrap();
+            }
+            std::fs::write(&path, b"").unwrap();
+            assert_eq!(dc1_tick().await[&name], (0, 1), "empty suppression keeps D");
+            super::super::inflight::clear_inflight_state(&ProviderKind::Claude, 58080001);
+        }
     }
     // Production grace is the monotonic OS clock. Tokio advance alone cannot expire it.
     std::thread::sleep(Duration::from_millis(10_100));
     match case.as_str() {
+        case if case.starts_with("empty-") => {
+            if case == "empty-read" {
+                dc1_open(&path, 0, Dc1OpenAction::Shorten(0));
+            } else if case == "empty-eof" {
+                std::fs::write(&path, b"").unwrap();
+            }
+            dc1_tick().await;
+            let payload = format!("{{\"type\":\"user\"}}\n{payload}");
+            std::fs::write(&path, &payload).unwrap();
+            f.producer(true);
+            dc1_tick().await;
+            f.frame(0, &payload).await;
+        }
         "first-seed" => {
             f.present(false);
             assert_eq!(dc1_tick().await[&name], (4, 0));

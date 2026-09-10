@@ -1244,11 +1244,11 @@ async fn run_idle_jsonl_relay_loop(
             let cursor = offsets.entry(session_name.clone()).or_insert(IdleCursor {
                 offset: len,
                 source,
-                restore_pending: true,
+                first_restore: true,
             });
             if len < cursor.offset {
                 cursor.offset = 0;
-                cursor.restore_pending = false;
+                cursor.first_restore = false;
                 pending_ends.remove(&session_name);
                 session_init_seen.remove(&session_name);
             }
@@ -1282,8 +1282,7 @@ async fn run_idle_jsonl_relay_loop(
                 &session_name,
                 Some(len),
             );
-            let first_restore = std::mem::take(&mut cursor.restore_pending);
-            if first_restore && (1..=cursor.offset).contains(&durable) {
+            if std::mem::take(&mut cursor.first_restore) && (1..=cursor.offset).contains(&durable) {
                 cursor.offset = durable;
             }
             let offset = &mut cursor.offset;
@@ -1333,7 +1332,7 @@ async fn run_idle_jsonl_relay_loop(
                     );
                     if matches!(
                         decision,
-                        idle_jsonl::IdleJsonlInflightGateDecision::DeferUntilCommitted
+                        idle_jsonl::IdleJsonlInflightGateDecision::DeferUntilCommitted if len > *offset
                     ) {
                         pending_ends.insert(session_name.clone(), Deferred);
                         if matches!(
@@ -1358,7 +1357,7 @@ async fn run_idle_jsonl_relay_loop(
                 .is_some_and(|seen_at| seen_at.elapsed() < IDLE_JSONL_RELAY_RECENT_INFLIGHT_GRACE);
             let in_new_session_grace =
                 first_seen.elapsed() < IDLE_JSONL_RELAY_RECENT_INFLIGHT_GRACE;
-            if in_recent_inflight_grace || in_new_session_grace {
+            if (in_recent_inflight_grace || in_new_session_grace) && len > *offset {
                 pending_ends.insert(session_name.clone(), Deferred);
                 match idle_jsonl_suppressed_range_action(
                     committed,
@@ -1375,7 +1374,6 @@ async fn run_idle_jsonl_relay_loop(
                 continue;
             }
             if len <= *offset {
-                pending_ends.remove(&session_name);
                 continue;
             }
 
@@ -1394,7 +1392,6 @@ async fn run_idle_jsonl_relay_loop(
             }
             let (payload, end) = (&opened_range.payload, opened_range.end);
             if payload.is_empty() {
-                consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                 continue;
             }
             if idle_jsonl_payload_contains_schedule_wakeup_setup(payload) {

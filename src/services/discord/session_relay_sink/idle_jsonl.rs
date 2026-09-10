@@ -237,15 +237,14 @@ pub(super) async fn idle_jsonl_prepare_dedup_shared(
 pub(super) struct IdleCursor {
     pub offset: u64,
     pub source: (ProviderKind, u64, String, SourceFileIdentity),
-    pub restore_pending: bool,
+    pub first_restore: bool,
 }
 
-// Retry state preserves eligibility; byte limits belong to the current opened range.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum IdlePending {
     Deferred,
     SentUnconfirmed,
-    RetainedForRetry(bool),
+    RetainedForRetry(bool), // Previous visibility eligibility.
 }
 
 pub(super) fn prune_idle_jsonl_session_state(
