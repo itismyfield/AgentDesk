@@ -9,6 +9,7 @@ use serenity::model::id::ChannelId;
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::cluster::session_matcher::MatchedChannel;
+use crate::services::cluster::stream_relay::SourceFileIdentity;
 use crate::services::discord::SharedData;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::inflight::InflightTurnState;
@@ -232,15 +233,38 @@ pub(super) async fn idle_jsonl_prepare_dedup_shared(
     shared_for_dedup
 }
 
+// Process-local retry window only; eviction and restart retain legacy EOF limits.
+pub(super) struct IdleCursor {
+    pub offset: u64,
+    pub source: (ProviderKind, u64, String, SourceFileIdentity),
+    pub first_restore: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum IdlePending {
+    Deferred,
+    SentUnconfirmed,
+    RetainedForRetry(bool), // Previous visibility eligibility.
+}
+
 pub(super) fn prune_idle_jsonl_session_state(
     seen_sessions: &HashSet<String>,
-    offsets: &mut HashMap<String, u64>,
+    offsets: &mut HashMap<String, IdleCursor>,
     first_seen_at: &mut HashMap<String, Instant>,
     last_inflight_seen_at: &mut HashMap<String, Instant>,
     session_init_seen: &mut HashSet<String>,
     session_generation_signatures: &mut HashMap<String, i64>,
-    pending_ends: &mut HashMap<String, u64>,
+    pending_ends: &mut HashMap<String, IdlePending>,
 ) {
+    let mut absent: Vec<_> = offsets
+        .keys()
+        .filter(|s| !seen_sessions.contains(*s))
+        .cloned()
+        .collect();
+    absent.sort_by_key(|s| (first_seen_at.get(s).copied(), s.clone()));
+    let mut retained = seen_sessions.clone();
+    retained.extend(absent.into_iter().rev().take(64));
+    let seen_sessions = &retained;
     offsets.retain(|session, _| seen_sessions.contains(session));
     first_seen_at.retain(|session, _| seen_sessions.contains(session));
     last_inflight_seen_at.retain(|session, _| seen_sessions.contains(session));
@@ -337,7 +361,7 @@ pub(super) struct OpenedJsonlRange {
     pub payload: Vec<u8>,
     pub file_identity: crate::services::cluster::stream_relay::SourceFileIdentity,
     start: u64,
-    end: u64,
+    pub end: u64,
 }
 
 impl OpenedJsonlRange {
@@ -359,6 +383,8 @@ pub(super) fn read_jsonl_range(
     start: u64,
     end: u64,
 ) -> std::io::Result<OpenedJsonlRange> {
+    #[cfg(test)]
+    super::tests::dc1_before_open(path);
     read_jsonl_range_from_file(File::open(path)?, start, end)
 }
 
@@ -373,6 +399,7 @@ fn read_jsonl_range_from_file(
     let mut payload = Vec::new();
     file.take(end.saturating_sub(start))
         .read_to_end(&mut payload)?;
+    let end = start + payload.len() as u64;
     Ok(OpenedJsonlRange {
         payload,
         file_identity,
