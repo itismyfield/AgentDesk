@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "d001b520bf7cd9417c425b36708e85f3c67c5dbc",
+  "measured_at_sha": "f17dd98fa107ab543784d2011cb11541a3f10ff7",
   "records": [
     {
       "root": "migrations/postgres",
@@ -26470,6 +26470,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:e9d324e3bd7df163177fbc7edeac674391519c99d88e8aabe47577fa57a5c567"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/discord/turn_bridge/resume_pin_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:2c58fc1362c983f58fe6755ae85c27a131c98f31a10b4907f5ba3cbb5ca77111"
     },
     {
       "root": "src",

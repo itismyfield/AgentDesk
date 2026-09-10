@@ -187,8 +187,10 @@ fn sa2_capture_hands_off_owned_provider_receiver() {
             let shared = super::super::make_shared_data_for_tests_with_storage(None);
             let (tx, rx) = mpsc::channel();
             drop(tx);
-            let (_, mut rx) =
-                super::capture_bridge_clear_fence(&shared, ChannelId::new(580899), rx).await;
+            let fence = tokio::sync::OnceCell::new();
+            let mut rx =
+                super::capture_bridge_clear_fence(&shared, ChannelId::new(580899), rx, &fence)
+                    .await;
             assert!(rx.recv().await.is_none());
         });
 }
@@ -214,7 +216,15 @@ fn sa2_actual_postlude_rejects_cancelled_pg() {
 
 #[test]
 fn sa2_actual_postlude_rejects_foreign_or_stale_pg() {
-    for case in ["clear", "failed_capture", "foreign_attempt", "replacement"] {
+    for case in [
+        "clear",
+        "failed_capture",
+        "foreign_attempt",
+        "replacement",
+        "bridge_own",
+        "bridge_clear",
+        "bridge_channel",
+    ] {
         actual_postlude_runtime_proof(Some("NO_REPLY"), case);
     }
 }
@@ -252,7 +262,8 @@ fn actual_postlude_runtime_proof(response: Option<&str>, case: &str) {
         // `failed_capture`: the bridge observed nothing, so it carries the -1 sentinel.
         let observer = if case == "failed_capture" { super::super::make_shared_data_for_tests_with_storage(None) } else { shared.clone() };
         let (_, rx) = mpsc::channel();
-        let (clear_fence, _rx) = super::capture_bridge_clear_fence(&observer, owner, rx).await;
+        let clear_fence = tokio::sync::OnceCell::new();
+        let _rx = super::capture_bridge_clear_fence(&observer, owner, rx, &clear_fence).await;
         if case == "clear" { record_channel_clear_boundary(pool.as_ref(), &channel).await.unwrap(); }
         let h = handle();
         shared.tmux_watchers.insert(owner, copy_handle(&h));
@@ -286,6 +297,48 @@ reuse_status_panel_message: false,
 completion_tx: None,
 is_external_input_tui_direct: false,
 inflight_state: durable.clone(), };
+        if case.starts_with("bridge_") {
+
+            bridge.user_msg_id = Some(MessageId::new(9001));
+            bridge.user_text_owned = "브리핑".into();
+            bridge.adk_session_key = Some("isolated-routine-attempt".into());
+            bridge.inflight_state.user_msg_id = 9001;
+            bridge.inflight_state.session_key = Some("isolated-routine-attempt".into());
+            super::super::inflight::save_inflight_state(&bridge.inflight_state).unwrap();
+            let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+            bridge.completion_tx = Some(completed_tx);
+            shared.tmux_watchers.remove(&owner);
+            let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+            let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+            *BRIDGE_CAPTURE_PROBE.lock().unwrap() = Some((owner, captured_tx, resume_rx));
+            *WRONG_CAPTURE_CHANNEL.lock().unwrap() = (case == "bridge_channel").then_some(owner);
+            let (tx, rx) = mpsc::channel();
+            let start_bridge = super::spawn_turn_bridge;
+            start_bridge(shared.clone(), Arc::new(CancelToken::new()), rx, bridge);
+            tokio::time::timeout(std::time::Duration::from_secs(10), captured_rx).await.unwrap().unwrap();
+            if case == "bridge_clear" { record_channel_clear_boundary(pool.as_ref(), &channel).await.unwrap(); }
+            resume_tx.send(()).unwrap();
+            tx.send(StreamMessage::Done { result: "NO_REPLY".into(), session_id: Some("routine-provider-session".into()) }).unwrap();
+            drop(tx);
+            // Stand in for the delivery worker, not for bridge/postlude execution.
+            let worker = async {
+                loop {
+                    sqlx::query("UPDATE message_outbox SET status='sent', sent_at=NOW() WHERE status='pending'")
+                        .execute(pool.as_ref().unwrap()).await.unwrap();
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            };
+            tokio::select! {
+                result = tokio::time::timeout(std::time::Duration::from_secs(10), completed_rx) => { result.unwrap().unwrap(); },
+                _ = worker => unreachable!(),
+            }
+            let pairs = crate::db::session_transcripts::fetch_recent_channel_pairs(pool.as_ref().unwrap(), &channel, 10).await.unwrap();
+            assert_eq!(pairs.len(), usize::from(case == "bridge_own"), "actual bridge case={case}");
+            drop((shared, store));
+            pool.as_ref().unwrap().close().await;
+            db.unwrap().drop().await;
+            return;
+        }
         let (completion_guard, mut inflight_guard) = super::guards::make_bridge_guards(&mut bridge, &durable, &shared, &ProviderKind::Codex);
         inflight_guard.defuse();
         let mut ctx = super::completion_postlude::CompletionPostludeContext { shared_owned: shared.clone(),
@@ -305,7 +358,7 @@ single_message_panel_footer_mode: false,
 is_external_input_tui_direct: false,
 context_window_tokens: 0,
 context_compact_percent: 0,
-clear_fence,
+clear_fence: clear_fence.into_inner().expect("bridge captured fence"),
 turn_start: std::time::Instant::now(), };
         let mut state = super::completion_postlude::CompletionPostludeState { watcher_delivery_pin: Some(pin),
 full_response: String::new(),
@@ -394,4 +447,38 @@ inflight_state: durable.clone(), };
         assert!(!h.paused.load(Ordering::Acquire));
         assert!(h.turn_delivered.load(Ordering::Acquire));
     });
+}
+
+// Per-channel rendezvous: only the real bridge capture site calls this hook.
+static BRIDGE_CAPTURE_PROBE: std::sync::Mutex<
+    Option<(
+        ChannelId,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+> = std::sync::Mutex::new(None);
+pub(super) async fn after_bridge_capture(channel: ChannelId) {
+    let probe = {
+        let mut slot = BRIDGE_CAPTURE_PROBE.lock().unwrap();
+        if slot.as_ref().is_some_and(|p| p.0 == channel) {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, captured, resume)) = probe {
+        let _ = captured.send(());
+        resume.await.unwrap();
+    }
+}
+
+static WRONG_CAPTURE_CHANNEL: std::sync::Mutex<Option<ChannelId>> = std::sync::Mutex::new(None);
+pub(super) fn capture_channel(channel: ChannelId) -> ChannelId {
+    let mut wrong = WRONG_CAPTURE_CHANNEL.lock().unwrap();
+    if *wrong == Some(channel) {
+        *wrong = None;
+        ChannelId::new(channel.get() + 1)
+    } else {
+        channel
+    }
 }
