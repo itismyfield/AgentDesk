@@ -265,16 +265,19 @@ class DeployPreflightTokenTests(unittest.TestCase):
             driver.write_text(_SEAL + """
 assert sys.argv[2] == "scripts/build_token.py"
 assert sys.argv[3] == "--"
-assert sys.argv[4:6] == ["cargo", "build"]
-# Replace Cargo alone: the production CLI still acquires the isolated token.
-raise SystemExit(bt.main([sys.argv[2], "--", sys.executable, "-c",
-                         "from pathlib import Path; Path(" + repr(sys.argv[-1]) + ").touch()"] ))
+assert sys.argv[4:6] == ["bash", "-c"]
+command = sys.argv[4:-1]
+idx = command.index("cargo")
+assert command[idx:idx + 2] == ["cargo", "build"]
+command[idx:] = [sys.executable, "-c", "from pathlib import Path; Path(" + repr(sys.argv[-1]) + ").touch()"]
+raise SystemExit(bt.main([sys.argv[2], "--"] + command))
 """)
             script = root / "scenario.sh"
             script.write_text("""set -eu
 . "$1/_defaults.sh"
 DEPLOY_TEST_MODE=0
 REPO="$1/.."
+SCRIPT_DIR="$6"
 SOURCE_BINARY="$4"
 DEPLOY_BUILD_PROFILE="$5"
 _preflight_builder_pids() { case "$1" in cargo|rustc) echo 55555;; esac; }
@@ -286,6 +289,22 @@ _preflight_deploy_target_pids() { :; }
 DRIVER="$2"; TOKEN="$3"; MARKER="$4"
 python3() { command "$TEST_PYTHON" "$DRIVER" "$TOKEN" "$@" "$MARKER"; }
 """ + preflight + build)
+            # Real default guard and real high-CPU classifier, only OS data mocked.
+            defaults = root / "_defaults.sh"
+            defaults.write_text((SCRIPTS / "_defaults.sh").read_text() + """
+_preflight_cpu_count() { echo 8; }
+_preflight_loadavg_1min() { echo "${AFTER_LOAD:-1}"; }
+_preflight_mem_pressure_level() { echo "${AFTER_PRESSURE:-1}"; }
+_preflight_deploy_target_pids() { :; }
+pgrep() { [ -n "${AFTER_BUILDER:-}" ] && [ "$2" = "$AFTER_BUILDER" ] && echo 55555; return 0; }
+ps() {
+ case "$1" in
+  -o) echo 123;;
+  *) printf '111 123 99 01:00:00 00:59:00 python\\n222 123 99 01:00:00 00:59:00 bash\\n'
+     [ -z "${AFTER_HOT:-}" ] || printf '333 456 99 01:00:00 00:59:00 rustc\\n';;
+ esac
+}
+""")
             env = dict(os.environ, TEST_PYTHON=sys.executable,
                        ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS="2")
             for key in list(env):
@@ -295,7 +314,7 @@ python3() { command "$TEST_PYTHON" "$DRIVER" "$TOKEN" "$@" "$MARKER"; }
             for profile in ("release", "dev"):
                 with self.subTest(profile=profile), token.open("a+") as holder:
                     fcntl.flock(holder, fcntl.LOCK_EX)
-                    with subprocess.Popen(command + [profile], env=env, stdout=subprocess.PIPE,
+                    with subprocess.Popen(command + [profile, str(root)], env=env, stdout=subprocess.PIPE,
                                           stderr=subprocess.PIPE, text=True) as child:
                         try:
                             notice = child.stderr.readline()
@@ -310,9 +329,15 @@ python3() { command "$TEST_PYTHON" "$DRIVER" "$TOKEN" "$@" "$MARKER"; }
                         marker.unlink()
             for extra, reason in (({"TEST_LOAD": "99"}, "load average"),
                                   ({"TEST_PRESSURE": "4"}, "memory pressure"),
-                                  ({"AGENTDESK_DEPLOY_BINARY": "artifact"}, "concurrent build tool")):
+                                  ({"AGENTDESK_DEPLOY_BINARY": "artifact"}, "concurrent build tool"),
+                                  ({"AFTER_BUILDER": "cargo"}, "concurrent build tool"),
+                                  ({"AFTER_BUILDER": "rustc"}, "concurrent build tool"),
+                                  ({"AFTER_HOT": "1"}, "SUSTAINED runaway"),
+                                  ({"AFTER_BUILDER": "UnrealEditor"}, "concurrent build tool"),
+                                  ({"AFTER_LOAD": "99"}, "load average"),
+                                  ({"AFTER_PRESSURE": "4"}, "memory pressure")):
                 with self.subTest(extra=extra):
-                    result = subprocess.run(command + ["release"], env=dict(env, **extra),
+                    result = subprocess.run(command + ["release", str(root)], env=dict(env, **extra),
                                             capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                     self.assertIn(reason, result.stderr)

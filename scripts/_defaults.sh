@@ -2268,7 +2268,7 @@ _preflight_resource_contention() {
   # AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT=1 proceeds anyway (findings are
   # still printed, downgraded to warnings), consistent with the
   # AGENTDESK_DEPLOY_FORCE_ROLLBACK force-through style.
-  # Only a caller whose build unconditionally enters build_token.py may opt in.
+  # Queue entry only: the caller rechecks without exemption inside build_token.py.
   # Other callers (including external-artifact deploys) retain builder rejection.
   local build_serialization="${1:-}"
   local force="${AGENTDESK_DEPLOY_FORCE_RESOURCE_PREFLIGHT:-0}"

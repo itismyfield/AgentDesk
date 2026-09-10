@@ -141,8 +141,9 @@ unset STUB_PRESSURE
 STUB_HIGHCPU="$(printf '99999\t99.0\t04:00:00\t03:59:00\trustc')"
 assert_rc "canonical source build still refuses sustained CPU" 1 _preflight_resource_contention canonical-build-token
 unset STUB_HIGHCPU
-PGREP_MATCH="UnrealBuildTool"
-assert_rc "canonical source build still refuses non-token builder" 1 _preflight_resource_contention canonical-build-token
+for PGREP_MATCH in UnrealBuildTool UnrealEditor UnrealEditor-Cmd ShaderCompileWorker; do
+  assert_rc "canonical source build still refuses $PGREP_MATCH" 1 _preflight_resource_contention canonical-build-token
+done
 reset_clean_stubs
 
 echo "== Pure numeric helpers =="

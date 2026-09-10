@@ -1854,12 +1854,15 @@ fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
     if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
         echo "▸ Building release binary..."
-        # Serialized behind the build token (#5663).
-        (cd "$REPO" && python3 scripts/build_token.py -- cargo build --release --bin agentdesk)
+        # Recheck under the token: unwrapped/residual builders are still unsafe (#5818).
+        (cd "$REPO" && python3 scripts/build_token.py -- bash -c \
+            '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"' \
+            bash "$SCRIPT_DIR/_defaults.sh" cargo build --release --bin agentdesk)
     else
         echo "▸ Building ${DEPLOY_BUILD_PROFILE} binary (opt-in fast deploy profile)..."
-        (cd "$REPO" && python3 scripts/build_token.py -- \
-            cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk)
+        (cd "$REPO" && python3 scripts/build_token.py -- bash -c \
+            '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"' \
+            bash "$SCRIPT_DIR/_defaults.sh" cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk)
     fi
     # Cargo tracks embedded migration inputs via build.rs. The freshness gate
     # below is mtime-based, and a successful current-HEAD cargo build can still
