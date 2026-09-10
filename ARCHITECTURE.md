@@ -513,6 +513,8 @@ src/
 │   ├── codex_tui/
 │   │   ├── rollout_tail/
 │   │   │   └── parser.rs
+│   │   ├── session/
+│   │   │   └── source_observation.rs
 │   │   ├── input.rs
 │   │   ├── mod.rs
 │   │   ├── rollout_index.rs
