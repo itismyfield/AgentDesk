@@ -909,7 +909,9 @@ targets = {
     # hardening registry so order-independent job keys cannot disable it silently.
     # #5321 re-pins after making the independent backstop verify both the
     # result helper and the gate before executing that verified gate.
-    "job_sha256" => "5d3c101473dff0bea9df5b12979081a91f082bf955e28009ea6afe85cea9ae7f",
+    # #5464 A12 re-pins after adding two existing S4 named witnesses;
+    # no commands or enforcement checks are removed or relaxed.
+    "job_sha256" => "bea72bed3d9f683bb9a53cdaedd15a092ed50d9221c3edd7dd1c5f4187859fac",
     "job_timeout_minutes" => 50,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
@@ -920,6 +922,8 @@ targets = {
         "commands" => [
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::session_relay_sink -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_inside_the_cohort_and_still_ends_lifecycle_outside_it -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1",
         ],
         "timeout_minutes" => 30,
