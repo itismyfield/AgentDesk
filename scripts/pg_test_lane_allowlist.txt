@@ -2,3 +2,4 @@
 # Format: test:<fully-qualified-test> # reason and tracking issue
 #     or: file:<repository-relative-path> # reason and tracking issue
 # Every active entry requires an inline reason. Prefer fixing the classifier.
+test:services::discord::turn_bridge::resume_pin_tests::c1_actual_postlude_resume_pin_runtime_proof # #5707: passes response=None; shared fixture never creates or connects PostgreSQL on this branch.
