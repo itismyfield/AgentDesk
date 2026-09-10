@@ -42,8 +42,8 @@ mod tests {
     /// both lists against direct calls in `src/**/*.rs`, including the real
     /// fixture in `db::postgres`; that file is not merely a helper definition.
     /// `engine::ops::config_ops` delegates base selection through the listed
-    /// `dispatch::test_support` and is an explicit exception below, not covered
-    /// by these per-source token assertions. Target-parser and tunnel contract
+    /// `dispatch::test_support` and is an explicit exception to direct base-call checks only.
+    /// Its source still participates in the address/environment token checks. Target-parser and tunnel contract
     /// tests have no direct constructor calls and need no inventory exception.
     const PG_FIXTURE_SOURCES: &[(&str, &str)] = &[
         (
@@ -128,6 +128,17 @@ mod tests {
         ("voice::turn_link", include_str!("../voice/turn_link.rs")),
     ];
 
+    const DELEGATED_FIXTURE_SOURCE: (&str, &str) = (
+        "engine::ops::config_ops",
+        include_str!("../engine/ops/config_ops.rs"),
+    );
+
+    fn address_checked_sources() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+        PG_FIXTURE_SOURCES
+            .iter()
+            .chain(std::iter::once(&DELEGATED_FIXTURE_SOURCE))
+    }
+
     /// Assembled at runtime so this file does not itself contain the literal it
     /// forbids; a plain grep for the address stays a reliable audit.
     fn forbidden_address() -> String {
@@ -196,7 +207,7 @@ mod tests {
     #[test]
     fn fixture_sources_never_hardcode_a_database_server_address() {
         let needle = forbidden_address();
-        for (module, source) in PG_FIXTURE_SOURCES {
+        for (module, source) in address_checked_sources() {
             assert!(
                 !source.contains(&needle),
                 "{module} hardcodes {needle}; fixture addresses must come from the lane (#5510)"
@@ -272,7 +283,7 @@ mod tests {
         // Assemble the name so the lane classifier does not mark this audit
         // as database-dependent from a seed identifier in its own source.
         let constructor = ["create", "test", "database"].join("_");
-        let delegated = fixture_code_tokens(include_str!("../engine/ops/config_ops.rs"));
+        let delegated = fixture_code_tokens(DELEGATED_FIXTURE_SOURCE.1);
         for helper in ["postgres_base_database_url", "postgres_admin_database_url"] {
             let qualified = [
                 "crate",
@@ -298,7 +309,7 @@ mod tests {
             .iter()
             .chain(PG_FIXTURE_SOURCES)
             .map(|(module, _)| module.to_string())
-            .chain(std::iter::once("engine::ops::config_ops".to_string()))
+            .chain(std::iter::once(DELEGATED_FIXTURE_SOURCE.0.to_string()))
             .collect();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut pending = vec![root.clone()];
@@ -312,19 +323,30 @@ mod tests {
                     pending.push(path);
                 } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
                     let source = std::fs::read_to_string(&path).expect("read fixture source");
-                    if has_named_fixture_call(&source, &constructor) {
-                        let relative = path.strip_prefix(&root).expect("source below root");
-                        let mut module = relative.with_extension("");
-                        if module.file_name().is_some_and(|name| name == "mod") {
-                            module.pop();
+                    // Inventory labels encode physical paths (with mod.rs collapsed),
+                    // not Rust's module graph: #[path] can give a file another name.
+                    let relative = path.strip_prefix(&root).expect("source below root");
+                    let mut module = relative.with_extension("");
+                    if module.file_name().is_some_and(|name| name == "mod") {
+                        module.pop();
+                    }
+                    let module = module
+                        .iter()
+                        .map(|part| part.to_str().expect("UTF-8 module"))
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    for (label, included) in FIXTURE_SOURCES.iter().chain(address_checked_sources())
+                    {
+                        if *label == module {
+                            assert!(
+                                *included == source,
+                                "{label} include_str source differs from physical file {} (#5756)",
+                                relative.display()
+                            );
                         }
-                        actual.insert(
-                            module
-                                .iter()
-                                .map(|part| part.to_str().expect("UTF-8 module"))
-                                .collect::<Vec<_>>()
-                                .join("::"),
-                        );
+                    }
+                    if has_named_fixture_call(&source, &constructor) {
+                        actual.insert(module);
                     }
                 }
             }
@@ -388,7 +410,7 @@ mod tests {
                  the canonical authority must not read process host/port defaults (#5229)"
             );
         }
-        for (module, source) in PG_FIXTURE_SOURCES {
+        for (module, source) in address_checked_sources() {
             for variable in ["PGHOST", "PGPORT"] {
                 assert!(
                     !source.contains(variable),

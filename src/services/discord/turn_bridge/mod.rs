@@ -56,6 +56,7 @@ use crate::db::session_observability::{
     BackgroundChildSpawn, close_background_child_pg, insert_background_child_pg,
     mark_session_tool_use_pg,
 };
+use crate::db::session_transcripts::ChannelClearFence;
 use crate::db::session_transcripts::{SessionTranscriptEvent, SessionTranscriptEventKind};
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{StatusEvent, TaskNotificationKind};
@@ -216,6 +217,23 @@ pub(super) enum WatcherHandoffClaimOutcome {
 // (#4230 S6) — must live at module scope so both resolve them.
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+// The non-Clone receiver is the phase witness: capture consumes it before stream processing.
+async fn capture_bridge_clear_fence(
+    shared: &SharedData,
+    channel: ChannelId,
+    rx: mpsc::Receiver<StreamMessage>,
+    fence: &tokio::sync::OnceCell<ChannelClearFence>,
+) -> StreamMessageReceiverAdapter {
+    #[cfg(all(test, unix))]
+    let channel = resume_pin_tests::capture_channel(channel);
+    crate::db::session_transcripts::observe_channel_clear_fence_once(
+        fence,
+        shared.pg_pool.as_ref(),
+        &channel.get().to_string(),
+    )
+    .await;
+    spawn_stream_message_receiver_adapter(rx)
+}
 pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
@@ -254,7 +272,6 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         turn_id = %bridge_turn_id,
     );
     super::task_supervisor::spawn_observed("discord_turn_bridge", async move {
-        let mut rx = spawn_stream_message_receiver_adapter(rx);
         let channel_id = bridge.channel_id;
         let provider = bridge.provider.clone();
         let gateway = bridge.gateway.clone();
@@ -436,6 +453,11 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut status_panel_dirty = shared_owned.ui.status_panel_v2_enabled;
         let mut last_status_panel_edit = tokio::time::Instant::now() - status_interval;
         let turn_start = std::time::Instant::now();
+        // #5707: observe after own clear; the unbounded prior window can overlap provider work.
+        let clear_fence = tokio::sync::OnceCell::new();
+        let mut rx = capture_bridge_clear_fence(shared_owned.as_ref(), channel_id, rx, &clear_fence).await;
+        #[cfg(all(test, unix))]
+        resume_pin_tests::after_bridge_capture(channel_id).await;
         // #3813: observation-only bridge latency spans share `turn_start`.
         let mut bridge_spans = BridgeLatencySpans::starting_at(turn_start);
         // #3805: pinned panel epoch; create bumps it and completion proves it.
@@ -883,6 +905,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 is_external_input_tui_direct,
                 context_window_tokens,
                 context_compact_percent,
+                clear_fence: clear_fence.into_inner().expect("bridge captured fence"),
                 turn_start,
             },
             completion_postlude::CompletionPostludeState {
