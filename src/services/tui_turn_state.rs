@@ -328,9 +328,9 @@ fn observe_jsonl_turn_state(
     let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
         return TuiTurnState::Unknown;
     };
-    // Codex housekeeping may hide lifecycle evidence behind a large compaction.
-    // Missing evidence in a truncated window must not authorize submission.
+    // Nonempty, evidence-free truncated tails are conservative only for Codex.
     let truncated = conservative_truncated && !window.window_covers_file;
+    // Empty truncated windows cannot prove idle for either provider.
     if window.lines.is_empty() {
         return if !window.window_covers_file {
             TuiTurnState::Streaming
