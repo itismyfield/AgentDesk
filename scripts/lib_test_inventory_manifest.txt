@@ -4653,6 +4653,7 @@ services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_que
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::gated_stale_lookup_feeds_the_turn_abort_branch
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::turn_start_guard_is_gated_on_preserve_on_cancel
+services::discord::router::message_handler::intake_turn::turn_watchdog::deadline_initialization_tests::text_spawn_preserves_accepted_deadline_and_provider_baseline
 services::discord::router::message_handler::latency_spans::tests::empty_span_renders_all_dashes
 services::discord::router::message_handler::latency_spans::tests::fresh_span_has_only_accept_anchor
 services::discord::router::message_handler::latency_spans::tests::full_span_renders_every_segment
@@ -4741,8 +4742,14 @@ services::discord::router::message_handler::watchdog::cold_start_retry_tests::de
 services::discord::router::message_handler::watchdog::cold_start_retry_tests::headless_retry_after_precheck_preserves_handoff_incarnation
 services::discord::router::message_handler::watchdog::cold_start_retry_tests::message_retry_after_precheck_preserves_handoff_incarnation
 services::discord::router::message_handler::watchdog::relay_state_contract_refs::contract_symbols_exist
+services::discord::router::message_handler::watchdog::timeout_notice_tests::accepted_deadline_survives_init_then_stale_clear
+services::discord::router::message_handler::watchdog::timeout_notice_tests::accepted_deadline_survives_stale_clear_then_init
+services::discord::router::message_handler::watchdog::timeout_notice_tests::headless_spawn_preserves_accepted_deadline_and_provider_baseline
 services::discord::router::message_handler::watchdog::timeout_notice_tests::headless_watchdog_timeout_notice_visibility_requires_visible_surface
+services::discord::router::message_handler::watchdog::timeout_notice_tests::post_init_extension_survives_stale_clear_control
+services::discord::router::message_handler::watchdog::timeout_notice_tests::text_watchdog_uses_shared_initializer
 services::discord::router::message_handler::watchdog::timeout_notice_tests::watchdog_alert_messages_carry_non_turn_provenance
+services::discord::router::message_handler::watchdog::timeout_notice_tests::watchdog_initializer_preserves_explicit_deadlines
 services::discord::router::message_handler::watchdog::timeout_notice_tests::watchdog_timeout_notice_message_matches_foreground_copy
 services::discord::router::queue_status_presentation::tests::queued_user_messages_never_render_status_cards
 services::discord::router::response_format::tests::absent_voluntary_feedback_reminder_leaves_reply_context_unchanged
