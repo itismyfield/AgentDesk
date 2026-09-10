@@ -332,7 +332,7 @@ fn observe_jsonl_turn_state(
     // Missing evidence in a truncated window must not authorize submission.
     let truncated = conservative_truncated && !window.window_covers_file;
     if window.lines.is_empty() {
-        return if truncated {
+        return if !window.window_covers_file {
             TuiTurnState::Streaming
         } else {
             TuiTurnState::Idle
@@ -710,6 +710,54 @@ mod tests {
     }
 
     #[test]
+    fn claude_s1_oversized_active_line_is_busy_at_consumed_eof() {
+        for kind in ["assistant", "user"] {
+            for text in ["가".repeat(30_000), "a".repeat(90_000)] {
+                for shift in 0..3 {
+                    let line = format!(
+                        "{}{}",
+                        serde_json::json!({"type":kind,
+                        "message":{"role":kind,"content":[{"type":"text","text":text}]}}),
+                        " ".repeat(shift)
+                    );
+                    let file = write_jsonl(&[&line]);
+                    let eof = std::fs::metadata(file.path()).unwrap().len();
+                    assert_eq!(
+                        (
+                            observe_claude_jsonl_turn_state(file.path()),
+                            jsonl_ready_for_input(
+                                &ProviderKind::Claude,
+                                None,
+                                file.path(),
+                                Some(eof)
+                            )
+                        ),
+                        (TuiTurnState::Streaming, Some(TuiReadyState::Busy)),
+                        "{kind}/{shift}"
+                    );
+                    assert!(!jsonl_strict_terminator_idle(
+                        &ProviderKind::Claude,
+                        file.path()
+                    ));
+                    assert!(!jsonl_completion_scan_idle(
+                        &ProviderKind::Claude,
+                        file.path()
+                    ));
+                }
+            }
+        }
+        let empty = write_jsonl(&[]);
+        assert_eq!(
+            observe_claude_jsonl_turn_state(empty.path()),
+            TuiTurnState::Idle
+        );
+        assert_eq!(
+            jsonl_ready_for_input(&ProviderKind::Claude, None, empty.path(), Some(0)),
+            Some(TuiReadyState::Unknown)
+        );
+    }
+
+    #[test]
     fn codex_s1_utf8_tail_boundary_preserves_evidence() {
         for text in ["가".repeat(30_000), "a".repeat(90_000)] {
             for shift in 0..3 {
@@ -801,10 +849,10 @@ mod tests {
             observe_codex_jsonl_turn_state(file.path()),
             TuiTurnState::Streaming
         );
-        // Claude's historical empty-window and malformed policies are unchanged.
+        // An empty truncated window cannot prove either provider idle.
         assert_eq!(
             observe_claude_jsonl_turn_state(file.path()),
-            TuiTurnState::Idle
+            TuiTurnState::Streaming
         );
     }
 

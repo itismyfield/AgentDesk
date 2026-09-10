@@ -8341,6 +8341,7 @@ services::tui_turn_state::tests::claude_permission_mode_partial_line_classified_
 services::tui_turn_state::tests::claude_permission_mode_trailing_does_not_fall_back_to_previous_result
 services::tui_turn_state::tests::claude_real_terminators_are_turn_end
 services::tui_turn_state::tests::claude_result_marks_idle_even_when_pane_scrape_would_be_ambiguous
+services::tui_turn_state::tests::claude_s1_oversized_active_line_is_busy_at_consumed_eof
 services::tui_turn_state::tests::claude_system_stop_hook_summary_marks_idle
 services::tui_turn_state::tests::claude_system_turn_duration_marks_idle
 services::tui_turn_state::tests::claude_trailing_bare_user_after_assistant_remains_user_submitted
