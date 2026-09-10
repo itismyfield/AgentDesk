@@ -2804,6 +2804,395 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
 // ====================================================================
 
 #[cfg(unix)]
+#[derive(Default)]
+struct S3Gateway {
+    bodies: std::sync::Mutex<Vec<String>>,
+    deleted: std::sync::Mutex<Vec<MessageId>>,
+}
+#[cfg(unix)]
+impl TurnGateway for S3Gateway {
+    fn send_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        content: &'a str,
+    ) -> super::super::gateway::GatewayFuture<'a, Result<MessageId, String>> {
+        Box::pin(async move {
+            self.bodies.lock().unwrap().push(content.to_string());
+            Ok(MessageId::new(880003))
+        })
+    }
+
+    fn send_long_message_with_rollback<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _rollback_anchor_msg_id: MessageId,
+        content: &'a str,
+    ) -> super::super::gateway::GatewayFuture<'a, Result<Vec<MessageId>, String>> {
+        Box::pin(async move {
+            let chunks = super::super::formatting::split_message(content);
+            let count = chunks.len().max(1);
+            Ok((0..count).map(|_| MessageId::new(880003)).collect())
+        })
+    }
+
+    fn edit_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+        content: &'a str,
+    ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.bodies.lock().unwrap().push(content.to_string());
+            Ok(())
+        })
+    }
+
+    fn replace_message_with_outcome<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+        content: &'a str,
+    ) -> super::super::gateway::GatewayFuture<
+        'a,
+        Result<super::super::formatting::ReplaceLongMessageOutcome, String>,
+    > {
+        Box::pin(async move {
+            self.bodies.lock().unwrap().push(content.to_string());
+            Ok(super::super::formatting::ReplaceLongMessageOutcome::EditedOriginal)
+        })
+    }
+
+    fn delete_message<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _message_id: MessageId,
+    ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            self.deleted.lock().unwrap().push(_message_id);
+            Ok(())
+        })
+    }
+
+    fn schedule_retry_with_history<'a>(
+        &'a self,
+        channel_id: ChannelId,
+        _user_message_id: MessageId,
+        user_text: &'a str,
+    ) -> super::super::gateway::GatewayFuture<'a, ()> {
+        Box::pin(async move {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            tracing::info!(
+                "  [{ts}] 📦 Headless retry suppressed for channel {}: {}",
+                channel_id,
+                user_text
+            );
+        })
+    }
+
+    fn dispatch_queued_turn<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+        _intervention: &'a super::super::Intervention,
+        _request_owner_name: &'a str,
+        _has_more_queued_turns: bool,
+        _dispatch_lease: Option<std::sync::Arc<crate::services::turn_orchestrator::DispatchLease>>,
+    ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
+        Box::pin(
+            async move { Err("headless turns do not dispatch queued turns locally".to_string()) },
+        )
+    }
+
+    fn validate_live_routing<'a>(
+        &'a self,
+        _channel_id: ChannelId,
+    ) -> super::super::gateway::GatewayFuture<'a, Result<(), String>> {
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn requester_mention(&self) -> Option<String> {
+        None
+    }
+
+    fn can_chain_locally(&self) -> bool {
+        false
+    }
+
+    fn bot_owner_provider(&self) -> Option<ProviderKind> {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn s3_completion_fixture(
+    streamed: bool,
+    signal: Option<bool>,
+    owned: Option<u64>,
+    durable: Option<u64>,
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+    // Match the established environment -> dedupe order; retain across awaits
+    // so dedupe-only tests cannot reset this fixture's shared anchor.
+    let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(s3_completion_fixture_body(
+            streamed, signal, owned, durable, &temp,
+        ));
+}
+
+#[cfg(unix)]
+async fn s3_completion_fixture_body(
+    streamed: bool,
+    signal: Option<bool>,
+    owned: Option<u64>,
+    durable: Option<u64>,
+    temp: &tempfile::TempDir,
+) {
+    use crate::services::discord::turn_bridge::{
+        BridgeCompletionSignal, spawn_turn_bridge_with_pin as spawn_fixture_bridge,
+    };
+    use crate::services::tui_prompt_dedupe::{prompt_anchor_for_response, record_prompt_anchor};
+    let shared = super::super::make_shared_data_for_tests();
+    let provider = if streamed {
+        ProviderKind::Claude
+    } else {
+        ProviderKind::Codex
+    };
+    let channel = ChannelId::new(880001);
+    let user = MessageId::new(880002);
+    let current = MessageId::new(880003);
+    let tmux = "s3-completion-fixture";
+    let lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
+    let token = Arc::new(CancelToken::new());
+    assert!(
+        super::super::mailbox_try_start_turn(
+            &shared,
+            channel,
+            token.clone(),
+            serenity::UserId::new(TUI_DIRECT_SYNTHETIC_OWNER_USER_ID),
+            MessageId::new(880004)
+        )
+        .await
+    );
+    let path = super::super::inflight::inflight_state_path(
+        &super::super::inflight::inflight_runtime_root().unwrap(),
+        &provider,
+        channel.get(),
+    );
+    let before = durable.map(|id| {
+        let mut row = build_tui_direct_bridge_inflight_state(
+            provider.clone(),
+            channel,
+            MessageId::new(880004),
+            MessageId::new(id),
+            "successor",
+            tmux,
+            &temp.path().join("out.jsonl"),
+            71,
+            &lease,
+        );
+        row.turn_nonce = token.turn_nonce().map(str::to_owned);
+        row.full_response = "후속 턴 바이트".into();
+        super::super::inflight::save_inflight_state(&row).unwrap();
+        std::fs::read(&path).unwrap()
+    });
+    record_prompt_anchor(provider.as_str(), tmux, channel.get(), user.get());
+    let anchor = prompt_anchor_for_response(provider.as_str(), tmux, channel.get());
+    let gateway = Arc::new(S3Gateway::default());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if signal == Some(false) {
+        let (stream_tx, stream_rx) = mpsc::channel();
+        stream_tx
+            .send(StreamMessage::Text {
+                content: "한국어 응답 접두사".into(),
+            })
+            .unwrap();
+        stream_tx
+            .send(StreamMessage::Done {
+                result: "한국어 응답 접두사".into(),
+                session_id: None,
+            })
+            .unwrap();
+        drop(stream_tx);
+        let bridge = TurnBridgeContext {
+            provider: provider.clone(),
+            gateway: gateway.clone(),
+            channel_id: channel,
+            user_msg_id: Some(user),
+            user_text_owned: "prior turn".into(),
+            request_owner_name: "TUI direct".into(),
+            role_binding: None,
+            adk_session_key: lease.session_key.clone(),
+            adk_session_name: Some(tmux.into()),
+            adk_session_info: None,
+            adk_cwd: None,
+            dispatch_id: None,
+            dispatch_kind: None,
+            memory_recall_usage: TokenUsage::default(),
+            context_window_tokens: 0,
+            context_compact_percent: 0,
+            current_msg_id: Some(current),
+            response_sent_offset: 0,
+            full_response: String::new(),
+            tmux_last_offset: Some(0),
+            new_session_id: None,
+            defer_watcher_resume: false,
+            reuse_status_panel_message: false,
+            completion_tx: Some(tx),
+            is_external_input_tui_direct: true,
+            inflight_state: build_tui_direct_bridge_inflight_state(
+                provider.clone(),
+                channel,
+                user,
+                current,
+                "prior turn",
+                tmux,
+                &temp.path().join("out.jsonl"),
+                0,
+                &lease,
+            ),
+        };
+        spawn_fixture_bridge(
+            shared.clone(),
+            Arc::new(CancelToken::new()),
+            stream_rx,
+            bridge,
+            None,
+        );
+    } else if signal == Some(true) {
+        tx.send(BridgeCompletionSignal::Finalized).unwrap();
+    } else {
+        drop(tx);
+    }
+    let completion = tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .expect("bridge completes");
+    if signal == Some(false) {
+        assert_eq!(completion, Ok(BridgeCompletionSignal::EntryAborted));
+    }
+    let result = super::claude_idle_bridge::finish_idle_bridge_completion(
+        Ok(completion),
+        gateway.as_ref(),
+        &provider,
+        (channel, user, current),
+        owned.map(MessageId::new),
+        (tmux, &lease, anchor),
+        streamed,
+    )
+    .await;
+    assert_eq!(result.is_ok(), signal == Some(true));
+    assert_eq!(
+        tui_idle_tail_stream_should_commit_runtime_binding_offset(result.is_ok()),
+        signal == Some(true)
+    );
+    if signal != Some(true) {
+        assert_eq!(
+            result.unwrap_err(),
+            "TUI-direct bridge entry aborted before authority"
+        );
+        assert_eq!(
+            prompt_anchor_for_response(provider.as_str(), tmux, channel.get()),
+            anchor
+        );
+    }
+    if let Some(before) = before {
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+    assert!(!token.cancelled.load(Ordering::Relaxed));
+    assert_eq!(
+        super::super::mailbox_snapshot(&shared, channel)
+            .await
+            .active_user_message_id,
+        Some(MessageId::new(880004))
+    );
+    assert!(gateway.bodies.lock().unwrap().is_empty());
+    let expected = if signal != Some(true) {
+        owned
+            .filter(|id| Some(*id) != durable && *id != 880004)
+            .map(MessageId::new)
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        vec![]
+    };
+    assert_eq!(*gateway.deleted.lock().unwrap(), expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn s3t1_abort_and_recv_error_preserve_foreign_turn_and_anchor() {
+    s3_completion_fixture(true, Some(false), Some(880003), Some(880005));
+    s3_completion_fixture(true, None, Some(880003), Some(880005));
+    let source = include_str!("claude_idle_bridge.rs");
+    let abort = source
+        .split("aborted @")
+        .nth(1)
+        .unwrap()
+        .split("Err(_) => Err(format!(")
+        .next()
+        .unwrap();
+    assert!(!abort.contains("ensure_tui_direct_bridge_delivery_committed"));
+    assert!(!abort.contains("clear_prompt_anchor_for_response"));
+}
+
+#[cfg(unix)]
+#[test]
+fn s3t2_delivery_failure_never_cancels_successor_or_commits_cursor() {
+    for source in [
+        include_str!("claude_idle_tail.rs"),
+        include_str!("codex_idle_rollout.rs"),
+    ] {
+        let branch = source
+            .split("if delivery_result.is_err() {")
+            .nth(1)
+            .unwrap()
+            .split("\n    }")
+            .next()
+            .unwrap();
+        assert!(!branch.contains("finish_tui_direct_synthetic_turn_if_current"));
+        assert!(source.contains("tui_idle_tail_stream_should_commit_runtime_binding_offset("));
+    }
+    s3_completion_fixture(true, Some(false), Some(880003), Some(880005));
+}
+
+#[cfg(unix)]
+#[test]
+fn s3t3_abort_deletes_only_owned_unreferenced_placeholder() {
+    for owned in [Some(880003), Some(880005), Some(880004), None] {
+        s3_completion_fixture(true, Some(false), owned, Some(880005));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn s3t4_finalized_accepts_successor_and_missing_row() {
+    for streamed in [true, false] {
+        for durable in [Some(880005), None] {
+            s3_completion_fixture(streamed, Some(true), Some(880003), durable);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
+    s3_completion_fixture(false, Some(false), Some(880003), Some(880005));
+    s3_completion_fixture(false, None, Some(880003), Some(880005));
+    let source = include_str!("claude_idle_bridge.rs");
+    assert_eq!(
+        source
+            .matches("    finish_idle_bridge_completion(\n        completion,")
+            .count(),
+        2
+    );
+}
+
+#[cfg(unix)]
 fn drain_forwarded_idle_stream(
     prefix: Vec<StreamMessage>,
     rest: Vec<StreamMessage>,
@@ -3160,6 +3549,386 @@ fn synthetic_watcher_inflight_marks_existing_tui_turn_without_prompt_resubmit() 
     assert_eq!(state.user_text, "typed in TUI");
     assert_eq!(state.output_path.as_deref(), output_path.to_str());
     assert_eq!(state.input_fifo_path, None);
+}
+
+// ====================================================================
+// #5833 S1 — `lease.turn_id` is the SAME-EXECUTION key. It already agrees
+// across the runtime scanner, the observer and the claim log; S1 only makes
+// it durable. These three tests pin the stamp, the wire compatibility of the
+// new field, and the behaviour-equivalence of the builder's move into
+// `synthetic_start/claim.rs`.
+// ====================================================================
+
+fn s1_lease_5833(turn_id: Option<&str>) -> ExternalInputRelayLease {
+    ExternalInputRelayLease {
+        channel_id: Some(42),
+        turn_id: turn_id.map(str::to_string),
+        session_key: Some("token:AgentDesk-claude-s1".to_string()),
+        relay_owner: ExternalInputRelayOwner::BridgeAdapter,
+        runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+        generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+    }
+}
+
+/// S1T1: the synthetic row owns persistence; bridge entry cannot restamp its key.
+#[cfg(unix)]
+#[test]
+fn s5833_s1t1_synthetic_owns_durable_key_bridge_entry_is_read_only() {
+    let root = tempfile::tempdir().expect("isolated inflight root");
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let output_path = PathBuf::from("/tmp/adk-5833-s1.jsonl");
+    let turn_id = "external:claude:42:AgentDesk-claude-s1:1788000000000";
+    let lease = s1_lease_5833(Some(turn_id));
+
+    let synthetic = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Claude,
+        ChannelId::new(42),
+        MessageId::new(101),
+        None,
+        "typed in TUI",
+        "AgentDesk-claude-s1",
+        Some(&output_path),
+        333,
+        &lease,
+        RelayOwnerKind::None,
+    );
+    let mut bridge = build_tui_direct_bridge_inflight_state(
+        ProviderKind::Claude,
+        ChannelId::new(42),
+        MessageId::new(101),
+        MessageId::new(202),
+        "typed in TUI",
+        "AgentDesk-claude-s1",
+        &output_path,
+        333,
+        &lease,
+    );
+
+    assert_eq!(
+        synthetic.external_turn_id.as_deref(),
+        Some(turn_id),
+        "the synthetic row must persist the lease turn_id verbatim"
+    );
+    use super::super::inflight;
+    inflight::save_inflight_state(&synthetic).expect("save authoritative synthetic row");
+    let before = inflight::load_inflight_state(&ProviderKind::Claude, 42).unwrap();
+    bridge.started_at = before.started_at.clone();
+    bridge.external_turn_id = Some("bridge-must-not-restamp-durable-key".into());
+    assert!(matches!(
+        inflight::patch_bridge_entry_state_if_identity_unchanged(
+            &before,
+            &mut bridge,
+            "s5833_bridge_key_contract",
+        ),
+        inflight::GuardedSaveOutcome::Saved
+    ));
+    let durable = inflight::load_inflight_state(&ProviderKind::Claude, 42).unwrap();
+    assert_eq!(durable.external_turn_id.as_deref(), Some(turn_id));
+    assert_eq!(
+        bridge.external_turn_id, durable.external_turn_id,
+        "bridge entry reads back the durable key instead of authoring it"
+    );
+    // The key is turn-scoped, not session-scoped: stamping `session_key` here
+    // would silently make two consecutive turns look like one execution.
+    assert_ne!(
+        synthetic.external_turn_id, lease.session_key,
+        "external_turn_id must not be the (turn-independent) session key"
+    );
+    assert_eq!(synthetic.session_key, lease.session_key);
+
+    // A lease with no turn_id yields None on both rows — never `Some("")`,
+    // which would make two unkeyed rows compare equal.
+    let unassigned = s1_lease_5833(None);
+    let synthetic_none = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Claude,
+        ChannelId::new(42),
+        MessageId::new(101),
+        None,
+        "typed in TUI",
+        "AgentDesk-claude-s1",
+        Some(&output_path),
+        333,
+        &unassigned,
+        RelayOwnerKind::None,
+    );
+    let bridge_none = build_tui_direct_bridge_inflight_state(
+        ProviderKind::Claude,
+        ChannelId::new(42),
+        MessageId::new(101),
+        MessageId::new(202),
+        "typed in TUI",
+        "AgentDesk-claude-s1",
+        &output_path,
+        333,
+        &unassigned,
+    );
+    assert_eq!(synthetic_none.external_turn_id, None);
+    assert_eq!(bridge_none.external_turn_id, None);
+}
+
+/// Exercise both production lease constructors, not their shared formatter alone.
+#[test]
+fn s5833_s1t1_external_turn_id_is_observation_derived_not_call_site_derived() {
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let shared = super::super::make_shared_data_for_tests();
+    let channel = ChannelId::new(5_833_102);
+    let tmux = "AgentDesk-5833-real-lease-sites";
+    let output = root.path().join("transcript.jsonl");
+    let mut prompt = local_control_prompt(tmux, "external prompt", "5833");
+    prompt.observed_at = chrono::DateTime::from_timestamp_millis(1_788_000_000_000).unwrap();
+    let runtime = record_external_turn_lease_for_output(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        tmux,
+        RuntimeHandoffKind::ClaudeTui,
+        &output,
+        prompt.observed_at,
+    );
+    let observer = record_observed_external_turn_lease(&shared, &prompt, channel);
+    assert_eq!(runtime.turn_id, observer.turn_id);
+    assert_eq!(
+        observer.turn_id.as_deref(),
+        Some("external:claude:5833102:AgentDesk-5833-real-lease-sites:1788000000000")
+    );
+    prompt.observed_at += chrono::Duration::milliseconds(1);
+    let later = record_observed_external_turn_lease(&shared, &prompt, channel);
+    assert_ne!(observer.turn_id, later.turn_id);
+    assert!(clear_observed_external_turn_lease_if_current(
+        &prompt, channel, &later
+    ));
+}
+
+/// Real claim admission + existing-row CAS, never the create-only builder.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn s5833_r2_synthetic_refresh_replaces_stale_durable_key() {
+    use super::super::inflight;
+    let root = tempfile::tempdir().expect("isolated inflight root");
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let shared = super::super::make_shared_data_for_tests();
+    let channel = ChannelId::new(5_833_201);
+    let anchor = MessageId::new(5_833_301);
+    let tmux = "AgentDesk-5833-refresh";
+    let mut stale = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Claude,
+        channel,
+        anchor,
+        None,
+        "prompt",
+        tmux,
+        None,
+        0,
+        &s1_lease_5833(Some("stale-turn")),
+        RelayOwnerKind::None,
+    );
+    // Marker proves that refresh preserved the old row rather than recreating it.
+    stale.any_tool_used = true;
+    inflight::save_inflight_state(&stale).unwrap();
+    let lease = s1_lease_5833(Some("current-turn"));
+    let claim = synthetic_start::claim_tui_direct_synthetic_turn(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        tmux,
+        "prompt",
+        anchor,
+        &lease,
+    )
+    .await;
+    assert!(claim.claimed);
+    let durable = inflight::load_inflight_state(&ProviderKind::Claude, channel.get()).unwrap();
+    assert_eq!(durable.external_turn_id, lease.turn_id);
+    assert_eq!(durable.session_key, lease.session_key);
+    assert_eq!(durable.runtime_kind, lease.runtime_kind);
+    assert!(durable.any_tool_used);
+}
+
+/// Exercise the shared repair operation and guarded durable save; pin its exact
+/// poll-loop wiring separately so deleting the production call also goes RED.
+#[cfg(unix)]
+#[test]
+fn s5833_r2_codex_repair_replaces_stale_durable_key() {
+    use super::super::inflight;
+    let root = tempfile::tempdir().expect("isolated repair root");
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let source = include_str!("codex_idle_rollout.rs");
+    let repair = source
+        .split("let mut repaired = inflight;")
+        .nth(1)
+        .unwrap()
+        .split("if !matches!(outcome")
+        .next()
+        .unwrap();
+    assert_eq!(
+        repair
+            .lines()
+            .filter(|line| *line
+                == "                                repaired.restamp_external_turn_lease(&lease);")
+            .count(),
+        1
+    );
+    assert!(
+        repair
+            .find("repaired.restamp_external_turn_lease(&lease);")
+            .unwrap()
+            < repair
+                .find("save_inflight_state_if_identity_matches_allow_output_restamp")
+                .unwrap()
+    );
+    let channel = ChannelId::new(5_833_202);
+    let tmux = "AgentDesk-5833-codex-repair";
+    let output = root.path().join("rollout.jsonl");
+    let shared = super::super::make_shared_data_for_tests();
+    let lease = record_external_turn_lease_for_output(
+        &shared,
+        &ProviderKind::Codex,
+        channel,
+        tmux,
+        RuntimeHandoffKind::CodexTui,
+        &output,
+        chrono::Utc::now(),
+    );
+    let mut repaired = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Codex,
+        channel,
+        MessageId::new(5_833_302),
+        None,
+        "prompt",
+        tmux,
+        Some(&output),
+        0,
+        &s1_lease_5833(Some("stale-turn")),
+        RelayOwnerKind::None,
+    );
+    inflight::save_inflight_state(&repaired).unwrap();
+    repaired = inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap();
+    let expected = inflight::InflightTurnIdentity::from_state(&repaired);
+    repaired.restamp_external_turn_lease(&lease);
+    assert!(matches!(
+        inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
+            &repaired,
+            &expected,
+            "codex_idle_rollout_repair",
+        ),
+        inflight::GuardedSaveOutcome::Saved
+    ));
+    let durable = inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap();
+    assert_eq!(durable.external_turn_id, lease.turn_id);
+    assert_eq!(durable.session_key, lease.session_key);
+    assert_eq!(durable.runtime_kind, lease.runtime_kind);
+    assert!(clear_external_input_bridge_lease_if_current(
+        &ProviderKind::Codex,
+        tmux,
+        channel,
+        &lease
+    ));
+}
+
+/// S1T2: the new field is additive on the wire. A pre-#5833 row (no
+/// `external_turn_id` key) still loads, with `None`, every other field intact;
+/// a stamped row round-trips.
+#[cfg(unix)]
+#[test]
+fn s5833_s1t2_legacy_rows_without_external_turn_id_still_deserialize() {
+    let output_path = PathBuf::from("/tmp/adk-5833-s1.jsonl");
+    let turn_id = "external:claude:42:AgentDesk-claude-s1:1788000000000";
+    let stamped = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Claude,
+        ChannelId::new(42),
+        MessageId::new(101),
+        None,
+        "typed in TUI",
+        "AgentDesk-claude-s1",
+        Some(&output_path),
+        333,
+        &s1_lease_5833(Some(turn_id)),
+        RelayOwnerKind::None,
+    );
+
+    let round_tripped: InflightTurnState =
+        serde_json::from_str(&serde_json::to_string(&stamped).expect("serialize stamped row"))
+            .expect("stamped row round-trips");
+    assert_eq!(round_tripped.external_turn_id.as_deref(), Some(turn_id));
+
+    // Build the legacy shape by DELETING the key, so the fixture cannot drift
+    // away from the real row schema the way a hand-written JSON blob would.
+    let mut legacy: serde_json::Value =
+        serde_json::to_value(&stamped).expect("serialize stamped row");
+    assert!(
+        legacy
+            .as_object_mut()
+            .expect("inflight rows serialize as JSON objects")
+            .remove("external_turn_id")
+            .is_some(),
+        "the field must be present on a stamped row before removal"
+    );
+    let loaded: InflightTurnState =
+        serde_json::from_value(legacy).expect("a pre-#5833 row must still deserialize");
+    assert_eq!(
+        loaded.external_turn_id, None,
+        "a legacy row carries no execution key"
+    );
+    assert_eq!(loaded.session_key, stamped.session_key);
+    assert_eq!(loaded.turn_source, stamped.turn_source);
+    assert_eq!(loaded.user_msg_id, stamped.user_msg_id);
+    assert_eq!(loaded.turn_nonce, stamped.turn_nonce);
+    assert_eq!(loaded.output_path, stamped.output_path);
+    assert_eq!(loaded.version, stamped.version);
+}
+
+/// S1T3: moving the builder from `synthetic_start.rs` into its `claim` child
+/// module changed nothing but the file it lives in. Every field the builder
+/// sets is pinned explicitly (not by `Debug` equality, which would hide a
+/// field the builder stopped setting once a default happened to match).
+#[cfg(unix)]
+#[test]
+fn s5833_s1t3_moved_builder_is_behaviour_identical() {
+    let output_path = PathBuf::from("/tmp/adk-5833-s1.jsonl");
+    let lease = s1_lease_5833(Some("external:claude:42:AgentDesk-claude-s1:1788000000000"));
+    let state = build_tui_direct_synthetic_inflight_state(
+        ProviderKind::Claude,
+        ChannelId::new(42),
+        MessageId::new(101),
+        Some(MessageId::new(202)),
+        "typed in TUI",
+        "AgentDesk-claude-s1",
+        Some(&output_path),
+        333,
+        &lease,
+        RelayOwnerKind::Watcher,
+    );
+
+    assert_eq!(state.provider, ProviderKind::Claude.as_str());
+    assert_eq!(state.channel_id, 42);
+    assert_eq!(state.channel_name, None);
+    assert_eq!(
+        state.request_owner_user_id,
+        TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
+    );
+    assert_eq!(state.user_msg_id, 101);
+    assert_eq!(state.current_msg_id, 202);
+    assert_eq!(state.current_msg_len, "...".len());
+    assert_eq!(state.user_text, "typed in TUI");
+    assert_eq!(state.session_id, None);
+    assert_eq!(
+        state.tmux_session_name.as_deref(),
+        Some("AgentDesk-claude-s1")
+    );
+    assert_eq!(state.output_path.as_deref(), output_path.to_str());
+    assert_eq!(state.input_fifo_path, None);
+    assert_eq!(state.last_offset, 333);
+    assert_eq!(state.session_key, lease.session_key);
+    assert_eq!(state.runtime_kind, lease.runtime_kind);
+    assert_eq!(state.turn_source, TurnSource::ExternalInput);
+    assert_eq!(state.effective_relay_owner_kind(), RelayOwnerKind::Watcher);
+    assert_eq!(state.injected_prompt_message_id, Some(101));
+    assert_eq!(state.external_turn_id, lease.turn_id);
 }
 
 #[cfg(unix)]
