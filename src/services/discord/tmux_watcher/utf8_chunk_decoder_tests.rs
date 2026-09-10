@@ -129,7 +129,9 @@ fn same_opened_source_keeps_split_utf8_provenance_across_decoder_calls() {
         let replacement = dir.path().join("replacement.jsonl");
         std::fs::write(&replacement, original).unwrap();
         std::fs::rename(&replacement, &path).unwrap();
-        let (_, _, new_identity) = read_watcher_source_chunk(path.to_str().unwrap(), 0).unwrap();
+        let (_, _, new_identity) = read_watcher_source_chunk(path.to_str().unwrap(), 0)
+            .unwrap()
+            .into_parts();
         assert_ne!(identity, new_identity);
         let next = source_authority_for_read(source, "decoder-local-proof", None, new_identity);
         assert_eq!(

@@ -311,7 +311,7 @@ pub(super) async fn poll_watcher_output_or_continue(
     drop(source_frontier_mutation);
 
     let (data, new_offset, source_file_identity) = match read_result {
-        Ok(Ok(Ok((data, off, identity)))) => (data, off, identity),
+        Ok(Ok(Ok(batch))) => batch.into_parts(),
         _ => {
             match tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),

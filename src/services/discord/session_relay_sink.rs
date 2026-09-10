@@ -1215,13 +1215,13 @@ pub(crate) async fn run_session_bound_discord_relay_supervisor(
     };
 
     SESSION_BOUND_DISCORD_DELIVERY_ENABLED.store(true, Ordering::Release);
-    let idle_health_registry = health_registry.clone();
-    let sink: Arc<dyn RelaySink> = Arc::new(SessionBoundDiscordRelaySink::new(health_registry));
+    let sink = Arc::new(SessionBoundDiscordRelaySink::new(health_registry));
+    let idle_sink = sink.clone();
     let idle_shutdown = shutdown.clone();
     super::task_supervisor::spawn_observed(
         "session_bound_idle_jsonl_relay",
         async move {
-            run_idle_jsonl_relay_loop(idle_shutdown, idle_health_registry).await;
+            run_idle_jsonl_relay_loop(idle_shutdown, idle_sink).await;
         }
         .instrument(tracing::info_span!("session_bound_idle_jsonl_relay")),
     );
@@ -1231,7 +1231,7 @@ pub(crate) async fn run_session_bound_discord_relay_supervisor(
 
 async fn run_idle_jsonl_relay_loop(
     shutdown: Arc<AtomicBool>,
-    health_registry: Arc<HealthRegistry>,
+    sink: Arc<SessionBoundDiscordRelaySink>,
 ) {
     let registry = crate::services::cluster::session_registry::global_session_registry();
     let producers =
@@ -1279,7 +1279,7 @@ async fn run_idle_jsonl_relay_loop(
             }
             let channel = ChannelId::new(channel_id);
             let shared_for_dedup = idle_jsonl_prepare_dedup_shared(
-                &health_registry,
+                &sink.health_registry,
                 &matched,
                 channel,
                 &session_name,
@@ -1320,7 +1320,7 @@ async fn run_idle_jsonl_relay_loop(
                 super::inflight::load_inflight_state(&matched.provider, channel_id)
             {
                 if orphan_reclaim::reclaim_orphaned_session_bound_relay_if_dead(
-                    &health_registry,
+                    &sink.health_registry,
                     &producers,
                     &matched.provider,
                     channel_id,

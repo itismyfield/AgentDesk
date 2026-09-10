@@ -4,7 +4,35 @@
 use crate::services::cluster::stream_relay::{SourceFileIdentity, SourceWitness};
 use std::io::{Read, Seek, SeekFrom};
 
-type SourceChunk = Result<(Vec<u8>, u64, SourceFileIdentity), String>;
+type SourceChunk = Result<WatcherReadBatch, String>;
+
+pub(super) struct WatcherReadBatch {
+    file: std::fs::File,
+    bytes: Vec<u8>,
+    end: u64,
+    origin: SourceFileIdentity,
+}
+
+impl WatcherReadBatch {
+    fn read(mut self) -> SourceChunk {
+        self.origin = SourceFileIdentity::from_open_file(&self.file);
+        self.file
+            .seek(SeekFrom::Start(self.end))
+            .map_err(|error| format!("seek: {error}"))?;
+        self.bytes = vec![0_u8; 16_384];
+        let read = self
+            .file
+            .read(&mut self.bytes)
+            .map_err(|error| format!("read: {error}"))?;
+        self.bytes.truncate(read);
+        self.end += read as u64;
+        Ok(self)
+    }
+
+    pub(super) fn into_parts(self) -> (Vec<u8>, u64, SourceFileIdentity) {
+        (self.bytes, self.end, self.origin)
+    }
+}
 
 pub(super) fn read_watcher_source_chunk(path: &str, offset: u64) -> SourceChunk {
     read_watcher_source_chunk_from_file(
@@ -13,16 +41,14 @@ pub(super) fn read_watcher_source_chunk(path: &str, offset: u64) -> SourceChunk 
     )
 }
 
-fn read_watcher_source_chunk_from_file(mut file: std::fs::File, offset: u64) -> SourceChunk {
-    let identity = SourceFileIdentity::from_open_file(&file);
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|error| format!("seek: {error}"))?;
-    let mut bytes = vec![0_u8; 16_384];
-    let read = file
-        .read(&mut bytes)
-        .map_err(|error| format!("read: {error}"))?;
-    bytes.truncate(read);
-    Ok((bytes, offset + read as u64, identity))
+fn read_watcher_source_chunk_from_file(file: std::fs::File, offset: u64) -> SourceChunk {
+    WatcherReadBatch {
+        file,
+        bytes: Vec::new(),
+        end: offset,
+        origin: SourceFileIdentity::Unavailable,
+    }
+    .read()
 }
 
 pub(super) fn authority_for_decoded_text(
@@ -65,8 +91,8 @@ mod source_epoch_read_tests {
         let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("source.jsonl"); let replacement = dir.path().join("replacement.jsonl");
         std::fs::write(&path, b"old-bytes").unwrap(); let old_file = std::fs::File::open(&path).unwrap();
         std::fs::write(&replacement, b"new-bytes").unwrap(); std::fs::rename(&replacement, &path).unwrap();
-        let (old_bytes, _, old_id) = read_watcher_source_chunk_from_file(old_file, 0).unwrap();
-        let (new_bytes, _, new_id) = read_watcher_source_chunk(path.to_str().unwrap(), 0).unwrap();
+        let (old_bytes, _, old_id) = read_watcher_source_chunk_from_file(old_file, 0).unwrap().into_parts();
+        let (new_bytes, _, new_id) = read_watcher_source_chunk(path.to_str().unwrap(), 0).unwrap().into_parts();
         assert_eq!((old_bytes.as_slice(), new_bytes.as_slice()), (b"old-bytes".as_slice(), b"new-bytes".as_slice())); assert_ne!(old_id, new_id);
         let first = source_authority_for_read(base, &session, Some(witness), old_id); let known = first.source_stamp;
         let legacy = source_authority_for_read(first, &session, None, new_id); assert_eq!((legacy.source_stamp, legacy.generation_mtime_ns, legacy.reset_incarnation), (None, 77, 9));

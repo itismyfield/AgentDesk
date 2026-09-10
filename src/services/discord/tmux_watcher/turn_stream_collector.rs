@@ -654,7 +654,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
             )
             .await;
 
-            match read_more {
+            match read_more.map(|r| r.map(|r| r.map(|batch| batch.into_parts()))) {
                 Ok(Ok(Ok((chunk, off, file_identity)))) if !chunk.is_empty() => {
                     let authority = source_authority_for_read(
                         source_authority,
