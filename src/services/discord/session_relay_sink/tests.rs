@@ -4170,6 +4170,23 @@ async fn dc1_isolated_scanner_child() {
             f.present(true);
             dc1_tick().await;
             f.frame(4, payload).await;
+            // A fresh scanner can only resume from the existing durable positive frontier.
+            f.shutdown.store(true, Ordering::Release);
+            tokio::time::advance(Duration::from_millis(500)).await;
+            (&mut f.task).await.unwrap();
+            f.shutdown = Arc::new(AtomicBool::new(false));
+            f.task = tokio::spawn(run_idle_jsonl_relay_loop(
+                f.shutdown.clone(),
+                f.health.clone(),
+            ));
+            assert_eq!(
+                dc1_tick().await[&name].0,
+                4,
+                "restart resumes verified durable frontier, not EOF"
+            );
+            std::thread::sleep(Duration::from_millis(10_100));
+            dc1_tick().await;
+            f.frame(4, payload).await;
             // Reopen suffix must agree with the metadata identity too.
             std::fs::write(
                 format!("{}.replacement", path.display()),

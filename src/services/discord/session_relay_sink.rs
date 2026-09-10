@@ -1323,11 +1323,9 @@ async fn run_idle_jsonl_relay_loop(
                 &session_name,
                 Some(len),
             );
-            if cursor.restore_pending {
-                if durable > 0 && durable <= cursor.offset {
-                    cursor.offset = durable;
-                }
-                cursor.restore_pending = false;
+            let first_restore = std::mem::take(&mut cursor.restore_pending);
+            if first_restore && (1..=cursor.offset).contains(&durable) {
+                cursor.offset = durable;
             }
             let offset = &mut cursor.offset;
             let committed = dr::effective_committed_offset(
