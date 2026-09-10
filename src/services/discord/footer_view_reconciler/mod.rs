@@ -386,20 +386,13 @@ pub(in crate::services::discord) async fn note_background_refresh_due(
     indicator: &str,
     source: &'static str,
 ) -> bool {
-    let edit = if let Some(owner) = owner {
-        registry::completion_footer_edit_for_registered_target_for_owner(
-            writer.shared(),
-            channel_id,
-            owner,
-            indicator,
-        )
-    } else {
-        registry::completion_footer_edit_for_registered_target(
-            writer.shared(),
-            channel_id,
-            indicator,
-        )
-    };
+    let edit = registry::completion_footer_edit_for_registered_target_at_for_owner(
+        writer.shared(),
+        channel_id,
+        owner,
+        indicator,
+        chrono::Utc::now().timestamp(),
+    );
     let Some(edit) = edit else {
         return false;
     };

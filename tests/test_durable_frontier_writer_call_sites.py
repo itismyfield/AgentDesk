@@ -46,7 +46,8 @@ INTAKE_SPEC.loader.exec_module(intake_guard)
 # `append_completed_turn`), one funnel call replaced them
 # (`record_recovery_terminal_delivery`), and the funnel body gained its third
 # private caller.
-TOTAL_CALL_SITES = 48
+# #5755 removes the unproven loop_poll_prologue shared-frontier advance.
+TOTAL_CALL_SITES = 47
 PINNED_SYMBOLS = 29
 ZERO_PINNED = {
     "write_confirmed_delivery",

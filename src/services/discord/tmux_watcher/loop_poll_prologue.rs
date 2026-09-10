@@ -617,17 +617,8 @@ pub(super) async fn poll_watcher_output_or_continue(
         let generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
         last_relayed_offset = Some(current_offset);
         last_observed_generation_mtime_ns = Some(generation_mtime_ns);
-        advance_watcher_confirmed_end(
-            shared,
-            watcher_provider,
-            channel_id,
-            tmux_session_name,
-            confirmed_end,
-            "src/services/discord/tmux.rs:post_terminal_no_inflight_suppressed_output",
-        );
-        // #5071 T1 S3b: O+S once per distinct suppressed range. The advance itself
-        // is a monotonic CAS that no-ops on re-entry; the observation is gated so
-        // the journal no-ops the same way.
+        // Suppression consumes the local range, not shared delivery authority.
+        // O+S remains once per distinct suppressed range.
         if first_observation_of_range {
             journal_watcher::settle_without_transport(
                 shared,
@@ -681,3 +672,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         },
     }
 }
+
+#[cfg(test)]
+#[path = "loop_poll_prologue/post_terminal_disposal_tests.rs"]
+mod post_terminal_disposal_tests;
