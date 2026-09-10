@@ -162,6 +162,7 @@ services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests
 services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests
 services::auto_queue::route::activate_command::tests::depth_gate_activate_pg_tests
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests
+services::auto_queue::route::command::reset_run_scope_pg_tests
 services::auto_queue::route::command::tests
 services::auto_queue::route::fsm::tests
 services::auto_queue::route::phase_gate::tests
@@ -628,6 +629,10 @@ services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests:
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests::implementation_latest_dispatch_is_attachable_pg
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests::scope_assessment_completion_does_not_finalize_pending_entry_pg
 services::auto_queue::route::activate_command::tests::side_path_hijack_pg_tests::scope_assessment_latest_dispatch_is_not_attachable_pg
+services::auto_queue::route::command::reset_run_scope_pg_tests::reset_deletes_run_entries_owned_by_other_agents_pg
+services::auto_queue::route::command::reset_run_scope_pg_tests::reset_of_missing_run_reports_not_found_pg
+services::auto_queue::route::command::reset_run_scope_pg_tests::reset_of_null_scoped_run_accepts_a_narrowing_body_pg
+services::auto_queue::route::command::reset_run_scope_pg_tests::reset_of_one_run_leaves_sibling_run_of_same_agent_intact_pg
 services::auto_queue::route::command::tests::reopen_and_force_pause_share_multi_run_advisory_order_pg
 services::auto_queue::route::fsm::tests::recovery_reattach_path_rechecks_cancelled_run_pg
 services::auto_queue::route::fsm::tests::restore_attach_existing_path_rechecks_cancelled_run_pg
