@@ -27,6 +27,13 @@ Their fresh reads are independent, non-atomic samples: a prefix may survive a
 crash and different sites may describe different mailbox episodes, so the rows
 must not be interpreted as one completion snapshot.
 
+Complete axis-B v1 wire records also leave axis-A events and integrity
+denominators. ``axis_b_lines`` counts those exclusions per file, in the target
+file aggregate, and across all files; it is diagnostic, never a promotion input.
+Unknown schemas and incomplete axis-B records remain unusable. Existing scope
+limits are unchanged: corruption in a file with no target axis-A record,
+including an undated file, is displayed but not judged by the scoped criterion.
+
 Promotion criteria (design §5.3, S2's share of the table). All of them are
 evaluated over ONE segment — the newest contiguous run of samples at a single
 cohort fingerprint — never over the whole input, so samples from two different
@@ -602,7 +609,8 @@ def scoped_integrity(target: dict | None, by_file: dict[str, dict]) -> dict:
     # Usable lines in those files belonging to some other segment. Excluded from
     # the denominator; reported so the exclusion is auditable rather than silent.
     scoped["cohabiting_usable_lines"] = (
-        scoped["lines"] - scoped["unusable"] - scoped[COMPLETION_LINES] - scoped["axis_b_lines"] - records
+        scoped["lines"] - scoped["unusable"] - scoped[COMPLETION_LINES]
+        - scoped["axis_b_lines"] - records
     )
     # The symmetric display for the fail-open residual: unusable lines in files
     # this target has no usable record in, which leave BOTH sides of the ratio.

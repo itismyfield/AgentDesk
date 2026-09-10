@@ -237,6 +237,7 @@ class RolloutReportTest(unittest.TestCase):
             ("channel_id", 2**64), ("cleanup_delay_ms", "12"),
             ("structural_eligible", 1), ("ledger_eligible", None),
             ("site", "unknown"), ("structural_action", []), ("ledger_action", "unknown"),
+            ("structural_action", "unknown"),
             ("diff", "unknown"), ("unknown_reason", None))]
         invalid += [{key: value for key, value in valid.items() if key != missing}
                     for missing in valid]
