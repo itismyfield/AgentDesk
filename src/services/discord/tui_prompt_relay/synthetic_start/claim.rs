@@ -181,6 +181,7 @@ pub(in crate::services::discord) fn build_tui_direct_synthetic_inflight_state(
     );
     state.current_msg_len = "...".len();
     state.session_key = lease.session_key.clone();
+    state.external_turn_id = lease.turn_id.clone();
     state.runtime_kind = lease.runtime_kind;
     state.turn_source = TurnSource::ExternalInput;
     state.set_relay_owner_kind(relay_owner_kind);
