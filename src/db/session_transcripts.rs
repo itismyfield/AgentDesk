@@ -326,9 +326,13 @@ struct PreparedSessionTranscript {
     duration_ms: Option<i64>,
 }
 
-/// Fixed first observation; -1 permanently represents failed observation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ChannelClearFence(i64);
+/// Fixed first observation bound to its exact channel; -1 permanently means failure.
+/// A fence captured for one channel must never authorize another channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChannelClearFence {
+    channel_id: String,
+    generation: i64,
+}
 
 async fn channel_clear_fence_tx<'a>(
     pool: &'a PgPool,
@@ -342,7 +346,13 @@ async fn channel_clear_fence_tx<'a>(
     .bind(channel_id)
     .fetch_optional(&mut *tx)
     .await?;
-    Ok((tx, ChannelClearFence(generation.unwrap_or(0))))
+    Ok((
+        tx,
+        ChannelClearFence {
+            channel_id: channel_id.to_owned(),
+            generation: generation.unwrap_or(0),
+        },
+    ))
 }
 
 pub(crate) async fn capture_channel_clear_fence(
@@ -356,16 +366,21 @@ pub(crate) async fn capture_channel_clear_fence(
             }
         }
     }
-    ChannelClearFence(-1)
+    ChannelClearFence {
+        channel_id: channel_id.to_owned(),
+        generation: -1,
+    }
 }
 
+/// DM / thread-creation fallback may have no thread, but exact channel ownership
+/// is always required; accepting NULL does not authorize a different channel.
 pub(crate) async fn routine_attempt_owns_turn_pg(
     pool: Option<&PgPool>,
     turn_id: &str,
     channel_id: &str,
 ) -> bool {
     let Some(pool) = pool else { return false };
-    sqlx::query("SELECT 1 FROM routine_runs WHERE turn_id = $1 AND result_json->>'channel_id' = $2 AND result_json->>'discord_thread_id' = $2 LIMIT 2")
+    sqlx::query("SELECT 1 FROM routine_runs WHERE turn_id = $1 AND result_json->>'channel_id' = $2 AND (result_json->>'discord_thread_id' = $2 OR result_json->>'discord_thread_id' IS NULL) LIMIT 2")
         .bind(turn_id)
         .bind(channel_id)
         .fetch_all(pool)
@@ -397,12 +412,30 @@ pub(crate) async fn persist_turn_db_with_clear_fence(
     // Required proof never falls back to the legacy timestamp/fail-open path.
     if let Some(captured) = fence {
         let Some(channel_id) = prepared.channel_id.as_deref() else {
+            tracing::warn!(channel_id = %captured.channel_id, reason = "missing_channel", "transcript fence rejected");
             return Ok(false);
         };
-        let Ok((mut tx, observed)) = channel_clear_fence_tx(pool, channel_id).await else {
+        if captured.channel_id != channel_id {
+            tracing::warn!(
+                channel_id,
+                reason = "channel_mismatch",
+                "transcript fence rejected"
+            );
             return Ok(false);
+        }
+        let (mut tx, observed) = match channel_clear_fence_tx(pool, channel_id).await {
+            Ok(observation) => observation,
+            Err(error) => {
+                tracing::warn!(channel_id, reason = "observation_failed", error = %error, "transcript fence rejected");
+                return Ok(false);
+            }
         };
-        if captured != observed {
+        if captured.generation != observed.generation {
+            tracing::warn!(
+                channel_id,
+                reason = "generation_mismatch",
+                "transcript fence rejected"
+            );
             return Ok(false);
         }
         persist_turn_pg_on(&mut *tx, &prepared).await?;
@@ -981,7 +1014,7 @@ mod clear_fence_pg_tests {
         RoutineStore::new_with_timezone_and_checkpoint_limit(Arc::new(pool.clone()), "UTC", 1024)
     }
 
-    async fn sa2_mark(store: &RoutineStore, run: &str, channel: &str, thread: &str) {
+    async fn sa2_mark(store: &RoutineStore, run: &str, channel: &str, thread: Option<&str>) {
         let proof = serde_json::json!({"channel_id": channel, "discord_thread_id": thread});
         assert!(
             store
@@ -997,7 +1030,7 @@ mod clear_fence_pg_tests {
             let (db, pool) = create_pool().await;
             let store = sa2_routine_store(&pool).await;
             let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 1800);
-            sa2_mark(&store, "run", "200", "200").await;
+            sa2_mark(&store, "run", "200", Some("200")).await;
             record_channel_clear_boundary(Some(&pool), "200")
                 .await
                 .expect("own clear");
@@ -1005,7 +1038,7 @@ mod clear_fence_pg_tests {
             let mut item = entry("discord:200:9001", "200", 0); // Synthetic snowflake predates own clear.
             item.assistant_message = response;
             assert!(
-                persist_turn_db_with_clear_fence(Some(&pool), item, Some(fence))
+                persist_turn_db_with_clear_fence(Some(&pool), item, Some(fence.clone()))
                     .await
                     .expect("own insert")
             );
@@ -1038,7 +1071,45 @@ mod clear_fence_pg_tests {
     #[tokio::test]
     async fn sa2_failed_observation_survives_recovery_pg() {
         let (db, pool) = create_pool().await;
+        #[derive(Clone)]
+        struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("log lock").extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = LogWriter(logs.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
         let captured = capture_channel_clear_fence(Some(&pool), "200").await;
+        assert!(
+            !persist_turn_db_with_clear_fence(
+                Some(&pool),
+                entry("cross", "201", 0),
+                Some(captured.clone())
+            )
+            .await
+            .expect("cross channel")
+        );
+        assert!(channel_pairs(&pool, "201").await.is_empty());
+        let mut missing = entry("missing", "200", 0);
+        missing.channel_id = None;
+        missing.session_key = None;
+        assert!(
+            !persist_turn_db_with_clear_fence(Some(&pool), missing, Some(captured.clone()))
+                .await
+                .expect("missing channel")
+        );
         sqlx::query("ALTER TABLE channel_session_clear_boundaries RENAME TO hidden_boundary")
             .execute(&pool)
             .await
@@ -1072,6 +1143,25 @@ mod clear_fence_pg_tests {
             .expect("permanent sentinel")
         );
         assert_eq!(channel_pairs(&pool, "200").await.len(), 1);
+        let output = String::from_utf8(logs.lock().expect("logs").clone()).expect("utf8");
+        for reason in [
+            "missing_channel",
+            "channel_mismatch",
+            "observation_failed",
+            "generation_mismatch",
+        ] {
+            let line = output
+                .lines()
+                .find(|line| line.contains(reason))
+                .expect(reason);
+            assert!(
+                line.contains("WARN") && line.contains("channel_id="),
+                "{line}"
+            );
+            if reason == "observation_failed" {
+                assert!(line.contains("error="), "{line}");
+            }
+        }
         pool.close().await;
         db.drop().await;
     }
@@ -1081,9 +1171,11 @@ mod clear_fence_pg_tests {
         let (db, pool) = create_pool().await;
         let store = sa2_routine_store(&pool).await;
         for (channel, thread, expected) in [
-            ("200", "200", true),
-            ("parent", "200", false),
-            ("200", "sibling", false),
+            ("200", Some("200"), true),
+            ("200", None, true),
+            ("parent", None, false),
+            ("parent", Some("200"), false),
+            ("200", Some("sibling"), false),
         ] {
             sa2_mark(&store, "run", channel, thread).await;
             assert_eq!(
@@ -1094,7 +1186,7 @@ mod clear_fence_pg_tests {
         assert!(!routine_attempt_owns_turn_pg(Some(&pool), "foreign", "200").await);
         assert!(!routine_attempt_owns_turn_pg(None, "discord:200:9001", "200").await);
         for run in ["run", "duplicate"] {
-            sa2_mark(&store, run, "200", "200").await;
+            sa2_mark(&store, run, "200", Some("200")).await;
         }
         assert!(!routine_attempt_owns_turn_pg(Some(&pool), "discord:200:9001", "200").await);
         sqlx::query("ALTER TABLE routine_runs RENAME TO hidden_runs")
