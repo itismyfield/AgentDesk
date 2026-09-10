@@ -740,8 +740,6 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
                 nonlib_ids.update(inventory.tests)
         except (OSError, UnicodeError, ValueError) as error:
             return [("inventory-error", str(error))]
-        if _lib_selection(spec, frozenset(nonlib_ids)):
-            return findings
     for filt in (() if spec.target_inconclusive else spec.filters):
         lead = filt.split("::", 1)[0]
         if not lead or lead in selected:
@@ -761,7 +759,8 @@ def validate_command(spec: CommandSpec, inventories: dict[str, dict[str, str]],
             findings.append(("unknown-module", (
                 f"module-path filter `{filt}`: leading segment `{lead}` is "
                 f"not a module in any known target")))
-    if nonlib_ids is not None and not findings:
+    if nonlib_ids is not None and not findings \
+            and not _lib_selection(spec, frozenset(nonlib_ids)):
         kind = "zero-match" if nonlib_ids else "empty-target"
         findings.append((kind, (
             f"selected target(s) {'/'.join(selected_targets)} final selection "

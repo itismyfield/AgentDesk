@@ -79,6 +79,20 @@ class TargetEmptyIdentity(unittest.TestCase):
             self.assertEqual([k for k, _ in self.validate(
                 'cargo test --test smoke my_real_case')], ['inventory-error'])
 
+    def test_mixed_filters_preserve_per_filter_diagnostics(self):
+        self.source.write_text('#[test] fn my_real_case() {}', encoding='utf-8')
+        (self.root / 'src/lib.rs').write_text('mod libmod {}', encoding='utf-8')
+        for bad, kind in (('libmod::t', 'target-mismatch'),
+                          ('ghost::case', 'unknown-module')):
+            for args in (f'my_real_case -- {bad}', f'{bad} -- my_real_case'):
+                with self.subTest(args=args):
+                    self.assertEqual([k for k, _ in self.validate(
+                        'cargo test --bin alias ' + args)], [kind])
+        self.assertEqual(self.validate(
+            'cargo test --bin alias my_real_case -- ghostcase'), [])
+        self.assertEqual(self.validate(
+            'cargo test --bin alias my_real_case -- --skip ghostcase'), [])
+
     def test_multiple_targets_use_identity_union(self):
         self.assertEqual(self.validate(
             'cargo test --bin alias --test smoke my_real_case'), [])
