@@ -307,7 +307,6 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
         "src/services/discord/session_relay_sink/delivery_commit.rs": 1,
         "src/services/discord/tmux.rs": 1,
         "src/services/discord/tmux_watcher.rs": 1,
-        "src/services/discord/tmux_watcher/loop_poll_prologue.rs": 1,
         "src/services/discord/tmux_watcher/no_result_exits.rs": 1,
         "src/services/discord/tmux_watcher/terminal_preflight.rs": 2,
         "src/services/discord/turn_finalizer/delivery_lease.rs": 1,
