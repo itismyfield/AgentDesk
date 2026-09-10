@@ -302,7 +302,7 @@ pub(crate) fn watchdog_axis_b_warrants(
 /// helper only preserves or lowers `structural_candidate_apply`.
 #[cfg(unix)]
 pub(crate) fn watchdog_axis_b_warrants(
-    shared: &SharedData,
+    _shared: &SharedData,
     provider: &ProviderKind,
     snapshot: &WatcherStateSnapshot,
     site: AxisBSite,
@@ -317,15 +317,6 @@ pub(crate) fn watchdog_axis_b_warrants(
         return true;
     };
     let structural_candidate_apply = relay_recovery::structural_candidate_apply(true);
-    relay_recovery::observe_axis_b_candidate(
-        shared,
-        provider,
-        snapshot,
-        site,
-        action,
-        structural_candidate_apply,
-        chrono::Utc::now().timestamp_millis(),
-    );
     let destructive_warrant_bind = relay_recovery::destructive_warrant_bind(
         structural_candidate_apply,
         action,

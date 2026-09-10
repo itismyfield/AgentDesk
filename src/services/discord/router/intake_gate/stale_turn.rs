@@ -61,7 +61,7 @@ fn stale_turn_axis_b_warrants(
 
 #[cfg(unix)]
 fn stale_turn_axis_b_warrants(
-    shared: &std::sync::Arc<SharedData>,
+    _shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     proof: &StaleActiveTurnProof,
 ) -> bool {
@@ -73,15 +73,6 @@ fn stale_turn_axis_b_warrants(
         ));
     let action =
         crate::services::discord::relay_recovery::RelayRecoveryActionKind::ClearStaleThreadProof;
-    crate::services::discord::relay_recovery::observe_axis_b_candidate(
-        shared,
-        provider,
-        &proof.snapshot,
-        crate::services::discord::relay_recovery::AxisBSite::StaleTurnIntake,
-        action,
-        structural_candidate_apply,
-        chrono::Utc::now().timestamp_millis(),
-    );
     let destructive_warrant_bind =
         crate::services::discord::relay_recovery::destructive_warrant_bind(
             structural_candidate_apply,

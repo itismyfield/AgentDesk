@@ -639,7 +639,7 @@ pub(crate) async fn automatic_stale_sweep_warrants(
     registry: Option<&HealthRegistry>,
     session_key: &str,
     provider_name: &str,
-    site: AxisBSite,
+    _site: AxisBSite,
 ) -> bool {
     let structural_candidate_apply = destructive_warrant::structural_candidate_apply(true);
     let Some(registry) = registry else {
@@ -666,20 +666,6 @@ pub(crate) async fn automatic_stale_sweep_warrants(
     else {
         return structural_candidate_apply;
     };
-    if let Some(shared) = registry
-        .shared_for_provider_on_channel(&provider, ChannelId::new(channel_id))
-        .await
-    {
-        observe_axis_b_candidate(
-            &shared,
-            &provider,
-            &snapshot,
-            site,
-            RelayRecoveryActionKind::ClearStaleThreadProof,
-            structural_candidate_apply,
-            chrono::Utc::now().timestamp_millis(),
-        );
-    }
     let destructive_warrant_bind = destructive_warrant::destructive_warrant_bind(
         structural_candidate_apply,
         RelayRecoveryActionKind::ClearStaleThreadProof,
@@ -789,16 +775,7 @@ async fn auto_apply_relay_recovery_for_shared_at(
     trace_relay_recovery_decision(&decision, true);
     #[cfg(unix)]
     if decision.action.is_destructive() {
-        if let Some(site) = axis_b_site_for_apply(source, decision.action) {
-            observe_axis_b_candidate(
-                &shared,
-                provider,
-                &snapshot,
-                site,
-                decision.action,
-                decision.auto_heal.eligible,
-                chrono::Utc::now().timestamp_millis(),
-            );
+        if let Some(_site) = axis_b_site_for_apply(source, decision.action) {
             let structural_candidate_apply =
                 destructive_warrant::structural_candidate_apply(decision.auto_heal.eligible);
             let destructive_warrant_bind = destructive_warrant::destructive_warrant_bind(
@@ -1167,6 +1144,68 @@ mod axis_b_tests {
 
     #[test]
     fn automatic_warrant_wiring_is_pinned_at_the_four_direct_consumers() {
+        // These lexical wiring checks complement, not replace, the warrant behavior tests.
+        let recovery = include_str!("relay_recovery.rs")
+            .split("#[cfg(all(test, unix))]")
+            .next()
+            .unwrap();
+        let body = |source: &str, symbol: &str| -> String {
+            source
+                .rsplit_once(&format!("fn {symbol}("))
+                .expect("production function exists")
+                .1
+                .split_once("\n}")
+                .expect("function end")
+                .0
+                .to_owned()
+        };
+        for (source, symbol) in [
+            (recovery, "automatic_stale_sweep_warrants"),
+            (recovery, "auto_apply_relay_recovery_for_shared_at"),
+            (
+                include_str!("health/recovery/watchdog_decisions.rs"),
+                "watchdog_axis_b_warrants",
+            ),
+            (
+                include_str!("router/intake_gate/stale_turn.rs"),
+                "stale_turn_axis_b_warrants",
+            ),
+        ] {
+            let owner = body(source, symbol);
+            assert_eq!(
+                owner.matches("observe_axis_b_candidate(").count(),
+                0,
+                "automatic observation retired: {symbol}"
+            );
+            assert_eq!(
+                owner.matches("destructive_warrant_bind(").count(),
+                1,
+                "automatic warrant retained: {symbol}"
+            );
+            assert!(
+                owner.contains("destructive_warrant_bind.eligible"),
+                "automatic warrant result consumed: {symbol}"
+            );
+        }
+        assert_eq!(
+            body(recovery, "run_relay_recovery")
+                .matches("observe_axis_b_candidate(")
+                .count(),
+            1,
+            "manual observation retained"
+        );
+        let apply = body(recovery, "auto_apply_relay_recovery_for_shared_at");
+        let mapped = apply
+            .split_once("if let Some(_site) = axis_b_site_for_apply(source, decision.action) {")
+            .expect("mapped automatic guard retained")
+            .1
+            .split_once("} else if source != RelayRecoveryApplySource::Manual {")
+            .expect("unmapped automatic deny retained")
+            .0;
+        assert!(mapped.contains("destructive_warrant::destructive_warrant_bind("));
+        assert!(
+            mapped.contains("decision.auto_heal.eligible = destructive_warrant_bind.eligible;")
+        );
         for (source, needle) in [
             (
                 include_str!("health/recovery.rs"),
