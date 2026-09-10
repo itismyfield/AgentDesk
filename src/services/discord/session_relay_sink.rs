@@ -7,6 +7,7 @@
 //! treats terminal delivery as delegated instead of sending directly.
 
 use std::collections::{HashMap, HashSet};
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ use super::replace_outcome_policy::edit_fail_fallback_disposition;
 #[cfg(test)]
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::{
-    RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame,
+    RelaySink, RelaySinkError, RelaySinkOutcome, SourceFileIdentity, StreamFrame,
 };
 use crate::services::cluster::watcher_supervisor::{SupervisorConfig, run_watcher_supervisor_loop};
 use crate::services::provider::ProviderKind;
@@ -49,8 +50,9 @@ mod relay_format;
 mod task_notification_context;
 mod terminal_handoff;
 mod turn_parser;
+use self::idle_jsonl::IdlePendingKind::{Deferred, RetainedForRetry, SentUnconfirmed};
 use self::idle_jsonl::{
-    IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdleRelayRangeAction,
+    IdleCursor, IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdlePending, IdleRelayRangeAction,
     idle_jsonl_apply_active_inflight_gate,
     idle_jsonl_clear_session_init_on_generation_signature_change, idle_jsonl_consume_offset,
     idle_jsonl_current_eof, idle_jsonl_payload_contains_init_event,
@@ -1236,8 +1238,8 @@ async fn run_idle_jsonl_relay_loop(
     let registry = crate::services::cluster::session_registry::global_session_registry();
     let producers =
         crate::services::cluster::relay_producer_registry::global_relay_producer_registry();
-    let mut offsets: HashMap<String, u64> = HashMap::new();
-    let mut pending_ends: HashMap<String, u64> = HashMap::new();
+    let mut offsets: HashMap<String, IdleCursor> = HashMap::new();
+    let mut pending_ends: HashMap<String, IdlePending> = HashMap::new();
     let mut first_seen_at: HashMap<String, Instant> = HashMap::new();
     let mut last_inflight_seen_at: HashMap<String, Instant> = HashMap::new();
     let mut session_init_seen: HashSet<String> = HashSet::new();
@@ -1250,7 +1252,7 @@ async fn run_idle_jsonl_relay_loop(
             let session_name = matched.expected_session_name.clone();
             let relay_source = idle_jsonl_relay_source_for_matched(&matched);
             seen_sessions.insert(session_name.clone());
-            let first_seen = *first_seen_at
+            let mut first_seen = *first_seen_at
                 .entry(session_name.clone())
                 .or_insert_with(Instant::now);
             let Ok(channel_id) = matched.channel_id.parse::<u64>() else {
@@ -1260,9 +1262,34 @@ async fn run_idle_jsonl_relay_loop(
                 continue;
             };
             let len = metadata.len();
-            let offset = offsets.entry(session_name.clone()).or_insert(len);
-            if len < *offset {
-                *offset = 0;
+            let expected_file = SourceFileIdentity::Unix {
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            };
+            let source = (
+                matched.provider.clone(),
+                channel_id,
+                relay_source.path.clone(),
+                expected_file,
+            );
+            if offsets
+                .get(&session_name)
+                .is_some_and(|cursor| cursor.source != source)
+            {
+                offsets.remove(&session_name);
+                first_seen = Instant::now();
+                first_seen_at.insert(session_name.clone(), first_seen);
+                pending_ends.remove(&session_name);
+                session_init_seen.remove(&session_name);
+            }
+            let cursor = offsets.entry(session_name.clone()).or_insert(IdleCursor {
+                offset: len,
+                source,
+                restore_pending: true,
+            });
+            if len < cursor.offset {
+                cursor.offset = 0;
+                cursor.restore_pending = false;
                 pending_ends.remove(&session_name);
                 session_init_seen.remove(&session_name);
             }
@@ -1290,6 +1317,19 @@ async fn run_idle_jsonl_relay_loop(
             let Some(shared) = shared_for_dedup else {
                 continue;
             };
+            let durable = dr::delivered_frontier_end_current_generation(
+                &matched.provider,
+                channel,
+                &session_name,
+                Some(len),
+            );
+            if cursor.restore_pending {
+                if durable > 0 && durable <= cursor.offset {
+                    cursor.offset = durable;
+                }
+                cursor.restore_pending = false;
+            }
+            let offset = &mut cursor.offset;
             let committed = dr::effective_committed_offset(
                 &shared,
                 &matched.provider,
@@ -1297,15 +1337,14 @@ async fn run_idle_jsonl_relay_loop(
                 &session_name,
                 Some(len),
             )
-            .max(dr::delivered_frontier_end_current_generation(
-                &matched.provider,
-                channel,
-                &session_name,
-                Some(len),
-            ));
+            .max(durable);
+            let pending_end = pending_ends
+                .get(&session_name)
+                .map_or(len, |p| p.0.max(len));
 
             macro_rules! consume_idle_offset {
                 ($to:expr, $rearm:expr) => {
+                    pending_ends.remove(&session_name);
                     idle_jsonl_consume_offset(
                         &mut session_init_seen,
                         &session_name,
@@ -1342,18 +1381,17 @@ async fn run_idle_jsonl_relay_loop(
                         decision,
                         idle_jsonl::IdleJsonlInflightGateDecision::DeferUntilCommitted
                     ) {
-                        let pending_end = pending_ends.entry(session_name.clone()).or_insert(len);
-                        *pending_end = (*pending_end).max(len);
+                        pending_ends.insert(session_name.clone(), (pending_end, Deferred));
                         if matches!(
                             idle_jsonl_suppressed_range_action(
                                 committed,
                                 *offset,
-                                *pending_end,
+                                pending_end,
                                 IdleJsonlSuppression::DeferUntilCommitted,
                             ),
                             IdleRelayRangeAction::AdvanceCommitted
                         ) {
-                            consume_idle_offset!(*pending_end, IdleJsonlSessionInitRearm::Keep);
+                            consume_idle_offset!(pending_end, IdleJsonlSessionInitRearm::Keep);
                             pending_ends.remove(&session_name);
                         }
                     }
@@ -1368,16 +1406,15 @@ async fn run_idle_jsonl_relay_loop(
             let in_new_session_grace =
                 first_seen.elapsed() < IDLE_JSONL_RELAY_RECENT_INFLIGHT_GRACE;
             if in_recent_inflight_grace || in_new_session_grace {
-                let pending_end = pending_ends.entry(session_name.clone()).or_insert(len);
-                *pending_end = (*pending_end).max(len);
+                pending_ends.insert(session_name.clone(), (pending_end, Deferred));
                 match idle_jsonl_suppressed_range_action(
                     committed,
                     *offset,
-                    *pending_end,
+                    pending_end,
                     IdleJsonlSuppression::DeferUntilCommitted,
                 ) {
                     IdleRelayRangeAction::AdvanceCommitted => {
-                        consume_idle_offset!(*pending_end, IdleJsonlSessionInitRearm::Keep);
+                        consume_idle_offset!(pending_end, IdleJsonlSessionInitRearm::Keep);
                         pending_ends.remove(&session_name);
                     }
                     IdleRelayRangeAction::HoldPending => {}
@@ -1391,12 +1428,18 @@ async fn run_idle_jsonl_relay_loop(
             }
 
             let start = *offset;
-            let was_deferred = pending_ends.contains_key(&session_name);
-            let pending_end = pending_ends.remove(&session_name).unwrap_or(len).max(len);
+            let was_deferred = matches!(
+                pending_ends.get(&session_name),
+                Some((_, Deferred | SentUnconfirmed))
+            );
+            pending_ends.insert(session_name.clone(), (pending_end, RetainedForRetry));
             let end = pending_end.min(start.saturating_add(IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK));
             let Ok(opened_range) = read_jsonl_range(&relay_source.path, start, end) else {
                 continue;
             };
+            if opened_range.file_identity != expected_file {
+                continue;
+            }
             let payload = &opened_range.payload;
             if payload.is_empty() {
                 consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
@@ -1435,7 +1478,7 @@ async fn run_idle_jsonl_relay_loop(
                     let Ok(suffix) = opened_range.suffix(&relay_source.path, from) else {
                         continue;
                     };
-                    if suffix.payload.is_empty() {
+                    if suffix.file_identity != expected_file || suffix.payload.is_empty() {
                         continue;
                     }
                     let source_stamp = source_marker.and_then(|marker| {
@@ -1452,11 +1495,11 @@ async fn run_idle_jsonl_relay_loop(
                         current_generation_signature,
                         source_stamp,
                     ) {
-                        pending_ends.insert(session_name.clone(), end);
+                        pending_ends.insert(session_name.clone(), (end, SentUnconfirmed));
                     }
                 }
                 IdleRelayRangeAction::HoldPending => {
-                    pending_ends.insert(session_name.clone(), end);
+                    pending_ends.insert(session_name.clone(), (end, Deferred));
                 }
             }
         }
@@ -1470,6 +1513,8 @@ async fn run_idle_jsonl_relay_loop(
             &mut session_generation_signatures,
             &mut pending_ends,
         );
+        #[cfg(test)]
+        tests::dc1_observe_tick(&offsets, &pending_ends);
         tokio::time::sleep(IDLE_JSONL_RELAY_POLL_INTERVAL).await;
     }
 }

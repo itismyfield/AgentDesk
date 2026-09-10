@@ -3844,3 +3844,393 @@ mod a0_characterization_tests {
         assert!(!should_send("short"));
     }
 }
+
+#[test]
+fn dc1_actual_scanner_contract() {
+    for case in [
+        "first-seed",
+        "retry-zero",
+        "provenance",
+        "generation",
+        "durable",
+        "capacity",
+        "replacement",
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "services::discord::session_relay_sink::tests::dc1_isolated_scanner_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("ADK_DC1_CHILD", case)
+            .output()
+            .expect("DC1 child must execute");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "DC1 {case} failed: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            stdout
+                .matches(&format!("ADK_DC1_EXECUTED:{case}:PASS"))
+                .count(),
+            1,
+            "{stdout}"
+        );
+        assert!(stdout.contains("1 passed; 0 failed; 0 ignored"), "{stdout}");
+    }
+}
+
+type Dc1Snapshot = std::collections::BTreeMap<String, (u64, u8)>;
+static DC1_TICKS: std::sync::OnceLock<Mutex<Vec<Dc1Snapshot>>> = std::sync::OnceLock::new();
+static DC1_OPEN: Mutex<Option<(String, usize)>> = Mutex::new(None);
+
+pub(super) fn dc1_before_open(path: &str) {
+    let mut hook = DC1_OPEN.lock().unwrap();
+    if let Some((target, remaining)) = hook.as_mut().filter(|(target, _)| target == path) {
+        if *remaining == 0 {
+            std::fs::rename(format!("{target}.replacement"), target).unwrap();
+            *hook = None;
+        } else {
+            *remaining -= 1;
+        }
+    }
+}
+
+pub(super) fn dc1_observe_tick(
+    cursors: &HashMap<String, IdleCursor>,
+    pending: &HashMap<String, IdlePending>,
+) {
+    if let Some(ticks) = DC1_TICKS.get() {
+        ticks.lock().unwrap().push(
+            cursors
+                .iter()
+                .map(|(name, c)| {
+                    let kind = match pending.get(name).map(|p| p.1) {
+                        None => 0,
+                        Some(Deferred) => 1,
+                        Some(SentUnconfirmed) => 2,
+                        Some(RetainedForRetry) => 3,
+                    };
+                    (name.clone(), (c.offset, kind))
+                })
+                .collect(),
+        );
+    }
+}
+
+async fn dc1_tick() -> Dc1Snapshot {
+    let ticks = DC1_TICKS.get().unwrap();
+    let before = ticks.lock().unwrap().len();
+    tokio::time::advance(Duration::from_millis(500)).await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+        let samples = ticks.lock().unwrap();
+        if samples.len() > before {
+            return samples.last().unwrap().clone();
+        }
+    }
+    panic!("actual scanner tick did not finish");
+}
+
+struct Dc1Fixture {
+    binding: MatchedChannel,
+    health: Arc<HealthRegistry>,
+    shutdown: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<StreamFrame>,
+    relay: crate::services::cluster::stream_relay::StreamRelayHandle,
+}
+
+impl Dc1Fixture {
+    async fn start(path: &std::path::Path, initial: &[u8], shared: bool) -> Self {
+        let mut binding = matched("58080001");
+        binding.expected_session_name = format!("dc1-{}", std::process::id());
+        binding.expected_rollout_path = path.to_str().unwrap().to_owned();
+        std::fs::write(path, initial).unwrap();
+        let health = Arc::new(HealthRegistry::new());
+        if shared {
+            health
+                .register_standby("claude".into(), super::super::make_shared_data_for_tests())
+                .await;
+        }
+        struct Capture(tokio::sync::mpsc::UnboundedSender<StreamFrame>);
+        #[async_trait::async_trait]
+        impl RelaySink for Capture {
+            async fn deliver(
+                &self,
+                frame: &StreamFrame,
+            ) -> Result<RelaySinkOutcome, RelaySinkError> {
+                self.0.send(frame.clone()).unwrap();
+                Ok(RelaySinkOutcome::FrameAccepted)
+            }
+        }
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let relay = crate::services::cluster::stream_relay::spawn_stream_relay(
+            binding.clone(),
+            Arc::new(Capture(tx)),
+        );
+        DC1_TICKS.get_or_init(|| Mutex::new(Vec::new()));
+        let registry = crate::services::cluster::session_registry::global_session_registry();
+        registry.upsert(binding.clone(), None);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn(run_idle_jsonl_relay_loop(shutdown.clone(), health.clone()));
+        let result = Self {
+            binding,
+            health,
+            shutdown,
+            task,
+            rx,
+            relay,
+        };
+        dc1_tick().await;
+        result
+    }
+    fn producer(&self, enabled: bool) {
+        let p = crate::services::cluster::relay_producer_registry::global_relay_producer_registry();
+        if enabled {
+            p.register(
+                self.binding.expected_session_name.clone(),
+                self.relay.producer(),
+            );
+        } else {
+            p.deregister(&self.binding.expected_session_name);
+        }
+    }
+    fn present(&self, enabled: bool) {
+        let r = crate::services::cluster::session_registry::global_session_registry();
+        if enabled {
+            r.upsert(self.binding.clone(), None);
+        } else {
+            r.remove(&self.binding.expected_session_name);
+        }
+    }
+    async fn frame(&mut self, from: u64, payload: &str) {
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        let frame = self
+            .rx
+            .try_recv()
+            .expect("actual scanner must enqueue an uncovered suffix");
+        assert_eq!(frame.relay_range, Some((from, from + payload.len() as u64)));
+        assert_eq!(frame.payload, payload);
+    }
+    async fn stop(self) {
+        self.shutdown.store(true, Ordering::Release);
+        tokio::time::advance(Duration::from_millis(500)).await;
+        self.present(false);
+        self.producer(false);
+        self.task.await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "DC1 isolated child; required parent executes"]
+async fn dc1_isolated_scanner_child() {
+    let case = std::env::var("ADK_DC1_CHILD").expect("required DC1 parent environment");
+    assert!(
+        [
+            "first-seed",
+            "retry-zero",
+            "provenance",
+            "generation",
+            "durable",
+            "capacity",
+            "replacement"
+        ]
+        .contains(&case.as_str())
+    );
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        dir.path(),
+    );
+    let path = dir.path().join("source.jsonl");
+    let payload = "{\"type\":\"system\",\"subtype\":\"init\"}\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"보존할 응답\"}]}}\n";
+    let mut f = Dc1Fixture::start(
+        &path,
+        if case == "first-seed" { b"old\n" } else { b"" },
+        case != "first-seed" && case != "capacity",
+    )
+    .await;
+    let name = f.binding.expected_session_name.clone();
+    // Production grace is the monotonic OS clock. Tokio advance alone cannot expire it.
+    std::thread::sleep(Duration::from_millis(10_100));
+    match case.as_str() {
+        "first-seed" => {
+            f.present(false);
+            assert_eq!(dc1_tick().await[&name], (4, 0));
+            std::fs::write(&path, format!("old\n{payload}")).unwrap();
+            f.health
+                .register_standby("claude".into(), super::super::make_shared_data_for_tests())
+                .await;
+            f.producer(true);
+            f.present(true);
+            dc1_tick().await;
+            f.frame(4, payload).await;
+        }
+        "retry-zero" => {
+            std::fs::write(&path, payload).unwrap();
+            assert_eq!(dc1_tick().await[&name], (0, 3));
+            f.present(false);
+            assert_eq!(dc1_tick().await[&name], (0, 3));
+            f.present(true);
+            f.producer(true);
+            dc1_tick().await;
+            f.frame(0, payload).await;
+            f.producer(false);
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(
+                dc1_tick().await[&name].0,
+                0,
+                "metadata failure keeps known cursor"
+            );
+        }
+        "provenance" => {
+            std::fs::write(&path, payload).unwrap();
+            assert_eq!(dc1_tick().await[&name], (0, 3));
+            f.producer(true);
+            assert_eq!(dc1_tick().await[&name], (0, 2));
+            f.frame(0, payload).await;
+            let expanded = format!("{payload}{{\"type\":\"user\"}}\n");
+            std::fs::write(&path, &expanded).unwrap();
+            assert_eq!(
+                dc1_tick().await[&name],
+                (0, 2),
+                "accepted range remains a true visibility gate"
+            );
+            f.frame(0, &expanded).await;
+            f.producer(false);
+            assert_eq!(
+                dc1_tick().await[&name],
+                (0, 3),
+                "producer failure defaults S to retry-only"
+            );
+            assert_eq!(
+                dc1_tick().await[&name],
+                (expanded.len() as u64, 0),
+                "retry-only does not inherit true gate"
+            );
+        }
+        "generation" => {
+            std::fs::write(&path, payload).unwrap();
+            assert_eq!(dc1_tick().await[&name].0, 0);
+            let marker = crate::services::tmux_common::session_temp_path(&name, "generation");
+            std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+            for present in [true, false, true] {
+                if present {
+                    std::fs::write(&marker, "generation").unwrap();
+                } else {
+                    std::fs::remove_file(&marker).unwrap();
+                }
+                assert_eq!(
+                    dc1_tick().await[&name],
+                    (0, 3),
+                    "generation-only change preserves source cursor"
+                );
+            }
+            f.producer(true);
+            dc1_tick().await;
+            f.frame(0, payload).await;
+            // Intentional user-event consumption followed by truncation must reset to zero.
+            f.producer(false);
+            dc1_tick().await;
+            std::fs::write(&path, "{\"type\":\"user\"}\n").unwrap();
+            assert!(dc1_tick().await[&name].0 > 0);
+            std::fs::write(&path, b"x").unwrap();
+            assert_eq!(dc1_tick().await[&name].0, 1);
+            std::fs::remove_file(marker).unwrap();
+        }
+        "durable" => {
+            let marker = crate::services::tmux_common::session_temp_path(&name, "generation");
+            std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+            std::fs::write(&marker, "generation").unwrap();
+            let generation = dr::current_generation_mtime_ns(&name);
+            std::fs::write(&path, format!("old\n{payload}")).unwrap();
+            assert!(
+                dr::commit_ordered_jsonl_range(
+                    &ProviderKind::Claude,
+                    ChannelId::new(58080001),
+                    &name,
+                    (0, 4),
+                    generation
+                )
+                .unwrap()
+            );
+            f.producer(true);
+            dc1_tick().await;
+            f.frame(4, payload).await;
+            f.present(false);
+            dc1_tick().await;
+            f.present(true);
+            dc1_tick().await;
+            f.frame(4, payload).await;
+            // Reopen suffix must agree with the metadata identity too.
+            std::fs::write(
+                format!("{}.replacement", path.display()),
+                format!("old\n{payload}"),
+            )
+            .unwrap();
+            *DC1_OPEN.lock().unwrap() = Some((path.to_str().unwrap().into(), 1));
+            assert_eq!(dc1_tick().await[&name].0, 0);
+            assert!(
+                f.rx.try_recv().is_err(),
+                "suffix replacement cannot enqueue"
+            );
+            std::fs::remove_file(marker).unwrap();
+        }
+        "capacity" => {
+            let r = crate::services::cluster::session_registry::global_session_registry();
+            let mut names = vec![name.clone()];
+            for i in 0..65 {
+                let mut b = f.binding.clone();
+                b.expected_session_name = format!("dc1-extra-{i:02}");
+                names.push(b.expected_session_name.clone());
+                r.upsert(b, None);
+            }
+            assert_eq!(dc1_tick().await.len(), 66, "seen population is not capped");
+            for n in &names {
+                r.remove(n);
+            }
+            let absent = dc1_tick().await;
+            assert_eq!(absent.len(), 64);
+            assert!(
+                !absent.contains_key(&name),
+                "oldest source is evicted first"
+            );
+            assert!(
+                !absent.contains_key("dc1-extra-00"),
+                "name resolves equal-time ties"
+            );
+            assert!(
+                absent.values().all(|v| *v == (0, 0)),
+                "pending-free cursor shares same window"
+            );
+        }
+        "replacement" => {
+            std::fs::write(&path, payload).unwrap();
+            std::fs::write(format!("{}.replacement", path.display()), payload).unwrap();
+            *DC1_OPEN.lock().unwrap() = Some((path.to_str().unwrap().into(), 0));
+            f.producer(true);
+            assert_eq!(
+                dc1_tick().await[&name],
+                (0, 3),
+                "metadata/open replacement cannot consume old source"
+            );
+            assert!(f.rx.try_recv().is_err(), "replacement must not enqueue");
+            assert_eq!(
+                dc1_tick().await[&name].0,
+                payload.len() as u64,
+                "new source starts at EOF"
+            );
+        }
+        _ => unreachable!(),
+    }
+    f.stop().await;
+    println!("ADK_DC1_EXECUTED:{case}:PASS");
+}
