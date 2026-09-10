@@ -6365,6 +6365,7 @@ services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::terminal_failure_reconciles_phase_gate_and_releases_semaphore_pg
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::terminal_fallback_finalizes_run_once_pg
 services::discord::turn_bridge::completion_guard::completion_postgres::runtime_completion_policy_tests::runtime_auto_queue_terminal_sync_matches_dispatch_completion_policy
+services::discord::turn_bridge::completion_guard::span_tests::concurrent_completions_keep_dispatch_spans_poll_scoped
 services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_covers_work_dispatch_types_including_plan
 services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_excludes_side_paths_and_review_family
 services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_requires_live_status

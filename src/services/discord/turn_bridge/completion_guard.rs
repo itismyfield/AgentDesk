@@ -1,5 +1,6 @@
 use super::super::*;
 use crate::utils::format::safe_suffix;
+use tracing::Instrument as _;
 
 mod completion_context;
 mod completion_postgres;
@@ -470,8 +471,6 @@ async fn fail_dispatch_with_policy(
     error_code: Option<&str>,
     reset_auto_queue_entries: bool,
 ) {
-    use tracing::Instrument as _;
-
     let Some(dispatch_id) = dispatch_id else {
         return;
     };
@@ -565,7 +564,17 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         None,
         None,
     );
-    let _turn_guard = turn_span.enter();
+    complete_work_dispatch_turn(shared, dispatch_id, adk_cwd, turn_output)
+        .instrument(turn_span)
+        .await;
+}
+
+async fn complete_work_dispatch_turn(
+    shared: &Arc<super::super::SharedData>,
+    dispatch_id: &str,
+    adk_cwd: Option<&str>,
+    turn_output: Option<&str>,
+) {
     let Some(snapshot) = fetch_dispatch_snapshot(shared.api_port, dispatch_id).await else {
         fail_dispatch_with_retry(
             shared.api_port,
@@ -584,8 +593,18 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         snapshot.kanban_card_id.as_deref(),
         None,
     );
-    let _snapshot_guard = snapshot_span.enter();
+    complete_work_dispatch_snapshot(shared, dispatch_id, adk_cwd, turn_output, &snapshot)
+        .instrument(snapshot_span)
+        .await;
+}
 
+async fn complete_work_dispatch_snapshot(
+    shared: &Arc<super::super::SharedData>,
+    dispatch_id: &str,
+    adk_cwd: Option<&str>,
+    turn_output: Option<&str>,
+    snapshot: &DispatchSnapshot,
+) {
     let explicit_work_outcome = turn_output.and_then(extract_explicit_work_outcome);
     let tracked_changes = tracked_change_summary(adk_cwd);
 
@@ -863,6 +882,9 @@ pub(super) async fn complete_work_dispatch_on_turn_end(
         }
     }
 }
+
+#[cfg(test)]
+mod span_tests;
 
 #[cfg(test)]
 mod tests {
