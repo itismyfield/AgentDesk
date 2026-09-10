@@ -32,7 +32,7 @@ class TargetEmptyIdentity(unittest.TestCase):
     def test_required_script_invokes_dedicated_suite(self):
         script = Path(__file__).resolve().parents[1] / 'scripts/ci-script-checks.sh'
         commands = [shlex.split(line) for line in script.read_text().splitlines()
-                    if line.startswith('"$PYTHON" -m unittest tests.test_check_test_target_integrity')]
+                    if line.startswith('"$PYTHON" -m unittest tests.test_target_empty_identity')]
         self.assertTrue(any('tests.test_target_empty_identity' in argv[3:]
                             for argv in commands))
 
