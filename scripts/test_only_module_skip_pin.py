@@ -102,6 +102,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tmux_placeholder_suppression/unicode_units_tests.rs",
         "src/services/discord/tmux_watcher/completion_gate_tests.rs",
         "src/services/discord/tmux_watcher/jsonl_rotation/backstop_tests.rs",
+        "src/services/discord/tmux_watcher/loop_poll_prologue/post_terminal_disposal_tests.rs",
         "src/services/discord/tmux_watcher/panel_decisions_tests.rs",
         "src/services/discord/tmux_watcher/session_bound_ack_tests.rs",
         "src/services/discord/tmux_watcher/single_message_footer_tests.rs",
