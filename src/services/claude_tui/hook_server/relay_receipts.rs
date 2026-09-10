@@ -180,20 +180,7 @@ impl RelayReceiptLedger {
             },
         );
         let ticket = RelayReceiptTicket { request_id, pin };
-        match validate_freshness(headers, now) {
-            Ok(()) => RelayReceiptBegin::Fresh(ticket),
-            Err(response) => {
-                entries.insert(
-                    ticket.request_id.clone(),
-                    RelayReceiptEntry::Failed {
-                        pin: ticket.pin.clone(),
-                        response: response.clone(),
-                        updated_at: now,
-                    },
-                );
-                RelayReceiptBegin::Respond(response)
-            }
-        }
+        RelayReceiptBegin::Fresh(ticket)
     }
 
     pub(crate) fn finish_accepted(
