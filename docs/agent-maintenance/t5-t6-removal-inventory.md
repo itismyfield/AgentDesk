@@ -77,8 +77,8 @@ runtime 배달 검증으로 확대하지 않는다. #5833 S4/S5 및 #5845 D1e1�
   다음 요청의 새 시각에서 허용될 수 있다. 정확히 같은 허가 시점을 보장하지 않는다.
 - 기존 bounded-retry 테스트에 planner+reserve의 같은 시각을 넣어 expiry/backoff
   직전 거절·경계 허용을 검증한다. 전체 수동 apply 동등성 증거로 확대하지 않는다.
-- 로컬 스택의 source 범위이며, 공개 PR은 R2a 착지 뒤 fresh main에 R2b delta만 적용한다.
-  실제 compile·기존 테스트·독립 리뷰·CI와 T5/T6 전체 완료는 별도 게이트다.
+- 이번 PR은 R2a·R2b 철거와 관련 fixture 수리를 함께 포함하며, 위 동작 변화는 배포 후 효과다.
+  실제 compile·기존 테스트·독립 리뷰·CI·배포 검증과 T5/T6 전체 완료는 별도 게이트다.
 
 ---
 
