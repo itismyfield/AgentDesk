@@ -198,10 +198,46 @@ def event_time(event: dict) -> datetime | None:
     return None
 
 
+def is_complete_axis_b(event: dict) -> bool:
+    """Recognize AxisBRecord's v1 wire shape, not its recovery correctness.
+
+    Only complete typed records are excluded. Unknown schemas and incomplete
+    axis-B objects still take the ordinary schema-mismatch path.
+    """
+    if event.get("schema") != "relay_authority.axis_b.v1":
+        return False
+    strings = ("ts", "host", "runtime_ptr", "cohort_fingerprint", "provider",
+               "site", "structural_action", "ledger_action", "diff")
+    if any(not isinstance(event.get(key), str) for key in strings):
+        return False
+    try:
+        datetime.fromisoformat(event["ts"])
+    except ValueError:
+        return False
+    bounds = {"api_port": 2**16, "process_generation": 2**64,
+              "channel_id": 2**64, "cleanup_delay_ms": 2**63}
+    if any(type(event.get(key)) is not int or not 0 <= event[key] < bound
+           for key, bound in bounds.items()):
+        return False
+    if any(type(event.get(key)) is not bool
+           for key in ("structural_eligible", "ledger_eligible")):
+        return False
+    actions = ("observe_only", "clear_stale_thread_proof", "clear_orphan_pending_token",
+               "reattach_watcher", "drain_pending_queue", "report_relay_unreachable")
+    sites = ("operator_relay_recovery", "probe_auto_heal_reattach", "watchdog_stale_idle",
+             "watchdog_explicit_background", "stale_turn_intake", "relay_dead_reattach",
+             "probe_auto_heal", "policy_tick_stale_sweep", "boot_reconcile_sweep")
+    return (event["site"] in sites
+            and event["structural_action"] in actions and event["ledger_action"] in actions
+            and event["diff"] in ("agree", "ledger_milder", "ledger_stricter")
+            and ("unknown_reason" not in event or isinstance(event["unknown_reason"], str)))
+
+
 def empty_integrity() -> dict:
     return {name: 0 for name in INTEGRITY_COUNTERS} | {
         "unusable": 0,
         COMPLETION_LINES: 0,
+        "axis_b_lines": 0,
     }
 
 
@@ -210,7 +246,7 @@ def merge_integrity(tallies) -> dict:
 
     total = empty_integrity()
     for tally in tallies:
-        for name in (*INTEGRITY_COUNTERS, COMPLETION_LINES):
+        for name in (*INTEGRITY_COUNTERS, COMPLETION_LINES, "axis_b_lines"):
             total[name] += tally[name]
     total["unusable"] = total["unparseable"] + total["schema_mismatch"] + total["undatable"]
     return total
@@ -218,7 +254,7 @@ def merge_integrity(tallies) -> dict:
 
 def all_file_integrity(by_file: dict[str, dict]) -> dict:
     total = merge_integrity(by_file.values())
-    total["lines"] -= total.pop(COMPLETION_LINES)
+    total["lines"] -= total.pop(COMPLETION_LINES) + total["axis_b_lines"]
     return total
 
 
@@ -267,6 +303,9 @@ def load_events(directory: Path) -> tuple[list[dict], list[str], dict[str, dict]
                     f"{path.name}:{lineno}: line is a JSON "
                     f"{type(event).__name__}, not an object, skipped"
                 )
+                continue
+            if is_complete_axis_b(event):
+                integrity["axis_b_lines"] += 1
                 continue
             schema = event.get("schema")
             if schema != SCHEMA:
@@ -563,7 +602,7 @@ def scoped_integrity(target: dict | None, by_file: dict[str, dict]) -> dict:
     # Usable lines in those files belonging to some other segment. Excluded from
     # the denominator; reported so the exclusion is auditable rather than silent.
     scoped["cohabiting_usable_lines"] = (
-        scoped["lines"] - scoped["unusable"] - scoped[COMPLETION_LINES] - records
+        scoped["lines"] - scoped["unusable"] - scoped[COMPLETION_LINES] - scoped["axis_b_lines"] - records
     )
     # The symmetric display for the fail-open residual: unusable lines in files
     # this target has no usable record in, which leave BOTH sides of the ratio.
