@@ -59,6 +59,13 @@ pub(super) fn should_send_watchdog_deadlock_prealert(
         && last_notified_deadline_ms != Some(deadline_ms)
 }
 
+pub(super) fn initialize_watchdog_deadlines(token: &CancelToken, initial: i64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    token.mark_async_managed();
+    token.watchdog_max_deadline_ms.fetch_max(initial, Relaxed);
+    token.watchdog_deadline_ms.fetch_max(initial, Relaxed);
+}
+
 pub(super) fn apply_watchdog_deadline_extension(
     watchdog_token: &CancelToken,
     extension: crate::services::turn_orchestrator::WatchdogDeadlineExtension,
@@ -231,7 +238,6 @@ pub(super) fn spawn_headless_turn_watchdog(
         super::super::super::turn_hard_ceiling_deadline_ms(turn_started_ms, provider);
     let proposed_initial_dl = now_ms + timeout.as_millis() as i64;
     let deadline_ms = std::cmp::min(proposed_initial_dl, ceiling_deadline_ms);
-    let max_deadline_ms = deadline_ms;
     if proposed_initial_dl > ceiling_deadline_ms {
         let ts = chrono::Local::now().format("%H:%M:%S");
         let ceiling_min = (ceiling_deadline_ms - now_ms) / 1000 / 60;
@@ -241,13 +247,7 @@ pub(super) fn spawn_headless_turn_watchdog(
             provider_label
         );
     }
-    watchdog_token.mark_async_managed();
-    watchdog_token
-        .watchdog_deadline_ms
-        .store(deadline_ms, std::sync::atomic::Ordering::Relaxed);
-    watchdog_token
-        .watchdog_max_deadline_ms
-        .store(max_deadline_ms, std::sync::atomic::Ordering::Relaxed);
+    initialize_watchdog_deadlines(&watchdog_token, deadline_ms);
 
     let watchdog_channel_id_num = channel_id.get();
     let watchdog_provider = provider.clone();
@@ -1020,8 +1020,137 @@ mod relay_state_contract_refs {
 }
 
 #[cfg(test)]
-mod timeout_notice_tests {
+pub(super) mod timeout_notice_tests {
     use super::*;
+    use std::sync::atomic::Ordering::Relaxed;
+
+    // #5056: isolated actor commands, not the global clear/take wrappers.
+    // This preserves a completed acceptance before init, not all concurrent writers.
+    async fn assert_accepted_deadline_survives_clear(init_order: u64) {
+        use crate::services::turn_orchestrator::ChannelMailboxRegistry;
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(serenity::ChannelId::new(9_000_000_000_505_600 + init_order));
+        let predecessor = Arc::new(CancelToken::new());
+        let owner = serenity::UserId::new(5056);
+        assert!(
+            handle
+                .try_start_turn(predecessor.clone(), owner, serenity::MessageId::new(1))
+                .await
+        );
+        predecessor.cancelled.store(true, Relaxed);
+        let finished = handle.finish_cancelled_turn().await;
+        assert!(Arc::ptr_eq(&finished.removed_token.unwrap(), &predecessor));
+        let successor = Arc::new(CancelToken::new());
+        assert!(
+            handle
+                .try_start_turn(successor.clone(), owner, serenity::MessageId::new(2))
+                .await
+        );
+        if init_order == 0 {
+            initialize_watchdog_deadlines(&successor, 1_000);
+        }
+        let accepted = handle.extend_timeout(86_400).await.unwrap();
+        assert!(accepted.new_deadline_ms > 1_000);
+        if init_order == 1 {
+            initialize_watchdog_deadlines(&successor, 1_000);
+        }
+        handle.clear_timeout_override().await;
+        if init_order == 2 {
+            initialize_watchdog_deadlines(&successor, 1_000);
+        }
+        assert!(handle.take_timeout_override().await.is_none());
+        assert!(successor.watchdog_deadline_ms.load(Relaxed) >= accepted.new_deadline_ms);
+        assert!(successor.watchdog_max_deadline_ms.load(Relaxed) >= accepted.max_deadline_ms);
+    }
+
+    #[tokio::test]
+    async fn accepted_deadline_survives_init_then_stale_clear() {
+        assert_accepted_deadline_survives_clear(1).await;
+    }
+
+    #[tokio::test]
+    async fn accepted_deadline_survives_stale_clear_then_init() {
+        assert_accepted_deadline_survives_clear(2).await;
+    }
+
+    #[tokio::test]
+    async fn post_init_extension_survives_stale_clear_control() {
+        assert_accepted_deadline_survives_clear(0).await;
+    }
+
+    #[test]
+    fn watchdog_initializer_preserves_explicit_deadlines() {
+        let token = CancelToken::new();
+        for (accepted, initial, expected) in
+            [(0, 1000, 1000), (1000, 500, 1000), (2000, 1000, 2000)]
+        {
+            token.watchdog_deadline_ms.store(accepted, Relaxed);
+            token.watchdog_max_deadline_ms.store(accepted, Relaxed);
+            initialize_watchdog_deadlines(&token, initial);
+            assert_eq!(token.watchdog_deadline_ms.load(Relaxed), expected);
+            assert_eq!(token.watchdog_max_deadline_ms.load(Relaxed), expected);
+            assert!(token.async_managed.load(Relaxed));
+        }
+    }
+
+    #[test]
+    fn text_watchdog_uses_shared_initializer() {
+        let source = include_str!("intake_turn/turn_watchdog.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            production.contains("initialize_watchdog_deadlines(&watchdog_token, deadline_ms);")
+        );
+    }
+
+    pub(in crate::services::discord::router::message_handler) fn assert_spawn_deadlines(
+        spawn: impl Fn(&Arc<CancelToken>, &ProviderKind),
+    ) {
+        use crate::services::discord::{turn_hard_ceiling_deadline_ms, turn_watchdog_timeout};
+        for provider in [ProviderKind::Claude, ProviderKind::Codex] {
+            let timeout_ms = turn_watchdog_timeout().as_millis() as i64;
+            let initial =
+                |t: i64| (t + timeout_ms).min(turn_hard_ceiling_deadline_ms(t, &provider));
+            let accepted = initial(chrono::Utc::now().timestamp_millis())
+                .checked_add(60_000)
+                .unwrap();
+            for prior in [0, accepted] {
+                let token = Arc::new(CancelToken::new());
+                token.watchdog_deadline_ms.store(prior, Relaxed);
+                token.watchdog_max_deadline_ms.store(prior, Relaxed);
+                let before = chrono::Utc::now().timestamp_millis();
+                spawn(&token, &provider);
+                let after = chrono::Utc::now().timestamp_millis();
+                assert!(
+                    after >= before,
+                    "wall clock moved backwards: {before} -> {after}"
+                );
+                let bounds = initial(before).max(prior)..=initial(after).max(prior);
+                let deadline = token.watchdog_deadline_ms.load(Relaxed);
+                assert!(
+                    bounds.contains(&deadline),
+                    "{provider:?} timeout={timeout_ms} prior={prior} deadline={deadline} bounds={bounds:?}"
+                );
+                assert_eq!(token.watchdog_max_deadline_ms.load(Relaxed), deadline);
+                assert!(token.async_managed.load(Relaxed));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn headless_spawn_preserves_accepted_deadline_and_provider_baseline() {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let http = Arc::new(serenity::http::Http::new("unused"));
+        assert_spawn_deadlines(|token, provider| {
+            spawn_headless_turn_watchdog(
+                token,
+                &shared,
+                &http,
+                serenity::ChannelId::new(50561),
+                provider,
+                "test",
+            );
+        });
+    }
 
     fn headless_inflight(
         current_msg_id: u64,
