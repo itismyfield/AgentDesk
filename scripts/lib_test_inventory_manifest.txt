@@ -2002,6 +2002,13 @@ services::cluster::watcher_supervisor::tests::apply_change_updated_respawns_rela
 services::cluster::watcher_supervisor::tests::boot_reconcile_spawns_relays_for_existing_entries
 services::cluster::watcher_supervisor::tests::full_reconcile_rebinds_active_relay_when_update_was_lagged
 services::cluster::watcher_supervisor::tests::idle_supervisor_observes_shutdown_without_registry_event
+services::cluster::watcher_supervisor::tests::shutdown_observation_accepts_actual_relay_shutdown
+services::cluster::watcher_supervisor::tests::shutdown_observation_classifies_join_results
+services::cluster::watcher_supervisor::tests::shutdown_observation_emits_exact_error_subtypes
+services::cluster::watcher_supervisor::tests::shutdown_observation_logs_classification_fields
+services::cluster::watcher_supervisor::tests::shutdown_observation_production_loop_emits_change_and_drain
+services::cluster::watcher_supervisor::tests::shutdown_observation_sites_are_branch_scoped
+services::cluster::watcher_supervisor::tests::shutdown_observation_waits_before_reporting
 services::cluster::watcher_supervisor::tests::supervisor_publishes_producer_for_each_spawn
 services::cluster::watcher_supervisor::tests::supervisor_teardown_completes_with_outliving_producer_clone
 services::codex::codex_fifo_followup_transport_tests::reused_fifo_wrapper_buffer_keeps_protocol_line_terminated
