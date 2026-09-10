@@ -1173,7 +1173,7 @@ mod axis_b_tests {
         ] {
             let owner = body(source, symbol);
             assert_eq!(
-                owner.matches("observe_axis_b_candidate(").count(),
+                owner.matches("observe_axis_b_candidate").count(),
                 0,
                 "automatic observation retired: {symbol}"
             );

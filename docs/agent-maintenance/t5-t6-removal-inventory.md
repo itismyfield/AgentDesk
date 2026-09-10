@@ -54,6 +54,7 @@ runtime 배달 검증으로 확대하지 않는다. #5833 S4/S5 및 #5845 D1e1�
   소비와 actor/durable-frontier 안전 경계는 보존한다.
 - 수동 복구·health report·cohort 설정 및 `observe_axis_b_candidate` 자체는 남는다.
   R2 전체 철거나 T5 전환 완료로 세지 않는다.
+  자동 관측 종료 뒤 새 관측은 수동 복구만 남으므로, 자동 키 부재를 divergence 0으로 해석하면 안 된다.
 - 기존 `axis_b_tests` 8개와 `destructive_warrant::tests` 5개는 PR의
   `Library sweep (selection-set gated)`가 `cargo test --lib`로 선택한다.
   해당 ID는 non-PG 제외 문자열에 걸리지 않으며 lib-test manifest에 이미 존재한다.
