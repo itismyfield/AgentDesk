@@ -167,12 +167,34 @@ fn publish_atomic_file(path: &Path, bytes: &[u8], label: &str) -> Result<(), Str
         .and_then(|name| name.to_str())
         .unwrap_or("relay");
     let temp_path = parent.join(format!(".{filename}.tmp.{}", uuid::Uuid::new_v4().simple()));
-    std::fs::write(&temp_path, bytes)
-        .map_err(|err| format!("write {label} temp {}: {err}", temp_path.display()))?;
-    std::fs::rename(&temp_path, path).map_err(|err| {
+    use std::io::Write;
+    let result = (|| {
+        let mut temp = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|err| format!("create {label} temp: {err}"))?;
+        temp.write_all(bytes)
+            .map_err(|err| format!("write {label} temp: {err}"))?;
+        sync_atomic_file(&temp, label, "temp")?;
+        std::fs::rename(&temp_path, path)
+            .map_err(|err| format!("publish {label} {}: {err}", path.display()))?;
+        let directory =
+            std::fs::File::open(parent).map_err(|err| format!("open {label} parent: {err}"))?;
+        sync_atomic_file(&directory, label, "parent")
+    })();
+    if result.is_err() {
+        // After rename only the temporary name may be cleaned up, never the destination.
         let _ = std::fs::remove_file(&temp_path);
-        format!("publish {label} {}: {err}", path.display())
-    })
+    }
+    result
+}
+
+fn sync_atomic_file(file: &std::fs::File, label: &str, stage: &str) -> Result<(), String> {
+    #[cfg(test)]
+    tests::atomic_sync_fault(label, stage)?;
+    file.sync_all()
+        .map_err(|err| format!("sync {label} {stage}: {err}"))
 }
 
 fn queue_request_paths(queue_dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -936,6 +958,123 @@ mod tests {
 
     use super::*;
 
+    thread_local! {
+        static SYNC_FAULT: std::cell::RefCell<Option<(&'static str, &'static str)>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn atomic_sync_fault(label: &str, stage: &str) -> Result<(), String> {
+        SYNC_FAULT.with(|fault| {
+            if fault
+                .borrow()
+                .is_some_and(|wanted| wanted == (label, stage))
+            {
+                Err(format!("injected sync {label} {stage}"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn with_sync_fault<T>(label: &'static str, stage: &'static str, run: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SYNC_FAULT.with(|fault| *fault.borrow_mut() = None);
+            }
+        }
+        SYNC_FAULT.with(|fault| *fault.borrow_mut() = Some((label, stage)));
+        let _reset = Reset;
+        run()
+    }
+
+    fn atomic_publication_preserves_all_five_consumers_on_sync_failure() {
+        // Fault injection proves error handling; this source oracle separately pins the syscall.
+        let source = include_str!("ordered_queue.rs");
+        let sync = source
+            .split("fn sync_atomic_file(")
+            .nth(1)
+            .unwrap()
+            .split("fn queue_request_paths(")
+            .next()
+            .unwrap();
+        assert!(
+            sync.contains("file.sync_all()"),
+            "atomic publication must invoke fsync"
+        );
+        for label in [
+            "hook relay quarantine evidence",
+            "hook relay queue sequence",
+            "hook relay completed high-water",
+            "ordered hook relay request",
+            "ordered hook relay response",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("destination");
+            std::fs::write(&path, b"old").unwrap();
+            for (stage, expected) in [("temp", b"old"), ("parent", b"new")] {
+                let result =
+                    with_sync_fault(label, stage, || publish_atomic_file(&path, b"new", label));
+                assert!(
+                    result.unwrap_err().contains("injected sync"),
+                    "{label} {stage}"
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), expected, "{label} {stage}");
+                assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+            }
+        }
+    }
+
+    fn atomic_queue_evidence_and_high_water_survive_publication_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = dir.path();
+        let _worker = lock_relay_queue_file(&queue.join("worker.lock"), false)
+            .unwrap()
+            .unwrap();
+        assert!(
+            lock_relay_queue_file(&queue.join("worker.lock"), true)
+                .unwrap()
+                .is_none()
+        );
+        let original = queue.join("00000000000000000041-request.request.json");
+        std::fs::write(&original, b"corrupt").unwrap();
+        let result = with_sync_fault("hook relay quarantine evidence", "parent", || {
+            quarantine_path(queue, &original, "bad json")
+        });
+        assert!(result.unwrap_err().contains("injected sync"));
+        let evidence_path = std::fs::read_dir(queue.join("quarantine"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().ends_with(".evidence.json"))
+            .unwrap();
+        let evidence: Value =
+            serde_json::from_slice(&std::fs::read(evidence_path).unwrap()).unwrap();
+        assert_eq!(evidence["original_path"], original.to_str().unwrap());
+        assert_eq!(
+            std::fs::read(evidence["quarantined_path"].as_str().unwrap()).unwrap(),
+            b"corrupt"
+        );
+        assert!(!original.exists());
+        let result = with_sync_fault("hook relay queue sequence", "parent", || {
+            next_relay_queue_sequence(queue)
+        });
+        assert!(result.unwrap_err().contains("injected sync"));
+        assert_eq!(
+            read_high_water(&queue.join("next-sequence")).unwrap(),
+            Some(42)
+        );
+        assert_eq!(next_relay_queue_sequence(queue).unwrap(), 43);
+        let result = with_sync_fault("hook relay completed high-water", "parent", || {
+            record_completed_high_water(queue, 50)
+        });
+        assert!(result.unwrap_err().contains("injected sync"));
+        record_completed_high_water(queue, 49).unwrap();
+        assert_eq!(
+            read_high_water(&queue.join("completed-high-water")).unwrap(),
+            Some(50)
+        );
+        assert_eq!(next_relay_queue_sequence(queue).unwrap(), 51);
+    }
+
     const LOCK_HOLDER_PATH_ENV: &str = "AGENTDESK_RELAY_TEST_LOCK_HOLDER_PATH";
     const LOCK_HOLDER_READY_ENV: &str = "AGENTDESK_RELAY_TEST_LOCK_HOLDER_READY";
     const LOCK_HOLDER_RELEASE_ENV: &str = "AGENTDESK_RELAY_TEST_LOCK_HOLDER_RELEASE";
@@ -1279,6 +1418,8 @@ mod tests {
 
     #[test]
     fn corrupt_counter_recovers_without_reusing_completed_high_water() {
+        atomic_publication_preserves_all_five_consumers_on_sync_failure();
+        atomic_queue_evidence_and_high_water_survive_publication_error();
         let temp_dir = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(temp_dir.path());
         let (endpoint, requests, receiver) = spawn_test_receiver(1);
@@ -1901,6 +2042,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn worker_crash_after_actual_stop_acceptance_replays_cached_receipt_once() {
+        check_worker_acceptance_replay(false).await;
+        check_worker_acceptance_replay(true).await;
+    }
+
+    async fn check_worker_acceptance_replay(sync_failure: bool) {
         let temp_dir = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(temp_dir.path());
         let session_id = "worker-crash-after-stop-acceptance";
@@ -1938,15 +2084,30 @@ mod tests {
             release_rx,
         ));
 
-        let (queue_dir, response_path) = enqueue_ordered_hook_relay_request(
-            &endpoint,
-            "claude",
-            "Stop",
-            session_id,
-            json!({}),
-            Some(Duration::from_secs(10)),
-        )
-        .unwrap();
+        let enqueue = || {
+            enqueue_ordered_hook_relay_request(
+                &endpoint,
+                "claude",
+                "Stop",
+                session_id,
+                json!({}),
+                Some(Duration::from_secs(10)),
+            )
+        };
+        let (queue_dir, response_path) = if sync_failure {
+            assert!(
+                with_sync_fault("ordered hook relay request", "parent", enqueue)
+                    .unwrap_err()
+                    .contains("injected sync")
+            );
+            let queue = relay_queue_dir("claude", session_id).unwrap();
+            let ingress = queue_ingress_paths(&queue).unwrap().remove(0);
+            let request: OrderedHookRelayRequest =
+                serde_json::from_slice(&std::fs::read(ingress).unwrap()).unwrap();
+            (queue, Some(request.response.unwrap().path))
+        } else {
+            enqueue().unwrap()
+        };
         let ingress_path = queue_ingress_paths(&queue_dir).unwrap().remove(0);
         let queued: Value = serde_json::from_slice(&std::fs::read(&ingress_path).unwrap()).unwrap();
         let request_id = queued
@@ -1955,23 +2116,37 @@ mod tests {
             .expect("ordered request must persist a stable receiver idempotency key")
             .to_string();
 
-        let mut first_worker = spawn_worker_process(&queue_dir);
+        let mut first_worker = (!sync_failure).then(|| spawn_worker_process(&queue_dir));
+        let failed_worker = sync_failure.then(|| {
+            let queue_dir = queue_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                with_sync_fault("ordered hook relay response", "parent", || {
+                    run_ordered_hook_relay_worker(OrderedHookRelayWorkerRequest { queue_dir })
+                })
+            })
+        });
         let (first_path, first_body) =
             tokio::time::timeout(Duration::from_secs(3), accepted_rx.recv())
                 .await
                 .expect("first receiver acceptance timeout")
                 .expect("first receiver acceptance");
         assert_eq!(first_path, request_id);
-        first_worker
-            .kill()
-            .expect("kill worker after receiver acceptance");
-        first_worker.wait().expect("reap killed worker");
+        if let Some(worker) = first_worker.as_mut() {
+            worker
+                .kill()
+                .expect("kill worker after receiver acceptance");
+            worker.wait().expect("reap killed worker");
+        }
+        let _ = release_tx.send(());
+        if let Some(worker) = failed_worker {
+            assert!(worker.await.unwrap().unwrap_err().contains("injected sync"));
+            assert!(response_path.as_ref().unwrap().exists());
+        }
         let request_path = queue_request_paths(&queue_dir).unwrap().remove(0);
         assert!(
             request_path.exists(),
             "crash point must precede request removal"
         );
-        let _ = release_tx.send(());
         let mut recovery_worker = spawn_worker_process(&queue_dir);
         let (second_path, second_body) =
             tokio::time::timeout(Duration::from_secs(3), accepted_rx.recv())

@@ -6202,6 +6202,17 @@ services::discord::tui_prompt_relay::tests::owner_channel_chokepoint_triggers_dr
 services::discord::tui_prompt_relay::tests::registry_is_authoritative_for_owner_channel_resolution
 services::discord::tui_prompt_relay::tests::registry_miss_but_dedupe_hit_drops_and_does_not_use_mirror
 services::discord::tui_prompt_relay::tests::relay_prompt_decision_skips_model_two_half_transcript
+services::discord::tui_prompt_relay::tests::s3t1_abort_and_recv_error_preserve_foreign_turn_and_anchor
+services::discord::tui_prompt_relay::tests::s3t2_delivery_failure_never_cancels_successor_or_commits_cursor
+services::discord::tui_prompt_relay::tests::s3t3_abort_deletes_only_owned_unreferenced_placeholder
+services::discord::tui_prompt_relay::tests::s3t4_finalized_accepts_successor_and_missing_row
+services::discord::tui_prompt_relay::tests::s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion
+services::discord::tui_prompt_relay::tests::s5833_r2_codex_repair_replaces_stale_durable_key
+services::discord::tui_prompt_relay::tests::s5833_r2_synthetic_refresh_replaces_stale_durable_key
+services::discord::tui_prompt_relay::tests::s5833_s1t1_external_turn_id_is_observation_derived_not_call_site_derived
+services::discord::tui_prompt_relay::tests::s5833_s1t1_synthetic_owns_durable_key_bridge_entry_is_read_only
+services::discord::tui_prompt_relay::tests::s5833_s1t2_legacy_rows_without_external_turn_id_still_deserialize
+services::discord::tui_prompt_relay::tests::s5833_s1t3_moved_builder_is_behaviour_identical
 services::discord::tui_prompt_relay::tests::slash_command_control_kind_distinguishes_distinct_unknown_commands
 services::discord::tui_prompt_relay::tests::slash_command_control_kind_is_stable_across_double_post_halves
 services::discord::tui_prompt_relay::tests::slash_command_control_note_loop_and_generic_stdout_show_body
