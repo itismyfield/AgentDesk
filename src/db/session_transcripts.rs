@@ -355,10 +355,18 @@ async fn channel_clear_fence_tx<'a>(
     ))
 }
 
-pub(crate) async fn capture_channel_clear_fence(
+/// First observation is immutable, including a failed observation.
+/// The caller owns the slot; later captures cannot replace its channel or generation.
+pub(crate) async fn observe_channel_clear_fence_once(
+    slot: &tokio::sync::OnceCell<ChannelClearFence>,
     pool: Option<&PgPool>,
     channel_id: &str,
-) -> ChannelClearFence {
+) {
+    slot.get_or_init(|| capture_channel_clear_fence(pool, channel_id))
+        .await;
+}
+
+async fn capture_channel_clear_fence(pool: Option<&PgPool>, channel_id: &str) -> ChannelClearFence {
     if let Some(pool) = pool {
         if let Ok((tx, fence)) = channel_clear_fence_tx(pool, channel_id).await {
             if tx.commit().await.is_ok() {
