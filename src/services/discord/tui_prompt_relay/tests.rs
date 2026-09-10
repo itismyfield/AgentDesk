@@ -2929,7 +2929,9 @@ async fn s3_completion_fixture(
     owned: Option<u64>,
     durable: Option<u64>,
 ) {
-    use crate::services::discord::turn_bridge::BridgeCompletionSignal;
+    use crate::services::discord::turn_bridge::{
+        BridgeCompletionSignal, spawn_turn_bridge_with_pin as spawn_fixture_bridge,
+    };
     use crate::services::tui_prompt_dedupe::{prompt_anchor_for_response, record_prompt_anchor};
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
@@ -3033,7 +3035,7 @@ async fn s3_completion_fixture(
                 &lease,
             ),
         };
-        super::super::turn_bridge::spawn_turn_bridge_with_pin(
+        spawn_fixture_bridge(
             shared.clone(),
             Arc::new(CancelToken::new()),
             stream_rx,
