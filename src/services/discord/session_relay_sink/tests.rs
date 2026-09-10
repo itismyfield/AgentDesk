@@ -4170,6 +4170,18 @@ async fn dc1_isolated_scanner_child() {
             f.present(true);
             dc1_tick().await;
             f.frame(4, payload).await;
+            // Reopen suffix must agree with the metadata identity too.
+            std::fs::write(
+                format!("{}.replacement", path.display()),
+                format!("old\n{payload}"),
+            )
+            .unwrap();
+            *DC1_OPEN.lock().unwrap() = Some((path.to_str().unwrap().into(), 1));
+            assert_eq!(dc1_tick().await[&name].0, 0);
+            assert!(
+                f.rx.try_recv().is_err(),
+                "suffix replacement cannot enqueue"
+            );
             // A fresh scanner can only resume from the existing durable positive frontier.
             f.shutdown.store(true, Ordering::Release);
             tokio::time::advance(Duration::from_millis(500)).await;
@@ -4187,18 +4199,6 @@ async fn dc1_isolated_scanner_child() {
             std::thread::sleep(Duration::from_millis(10_100));
             dc1_tick().await;
             f.frame(4, payload).await;
-            // Reopen suffix must agree with the metadata identity too.
-            std::fs::write(
-                format!("{}.replacement", path.display()),
-                format!("old\n{payload}"),
-            )
-            .unwrap();
-            *DC1_OPEN.lock().unwrap() = Some((path.to_str().unwrap().into(), 1));
-            assert_eq!(dc1_tick().await[&name].0, 0);
-            assert!(
-                f.rx.try_recv().is_err(),
-                "suffix replacement cannot enqueue"
-            );
             std::fs::remove_file(marker).unwrap();
         }
         "capacity" => {
