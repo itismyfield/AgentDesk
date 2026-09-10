@@ -1,7 +1,6 @@
 use super::super::{inflight, task_supervisor};
 use super::claude_idle_bridge::compose_tui_idle_response;
 use super::*;
-
 #[cfg(unix)]
 fn advance_codex_tui_runtime_binding_and_marker_offset(
     tmux_session_name: &str,
@@ -501,15 +500,7 @@ async fn run_codex_idle_response_tail(
     )
     .await;
     if delivery_result.is_err() {
-        finish_tui_direct_synthetic_turn_if_current(
-            &shared,
-            &ProviderKind::Codex,
-            channel_id,
-            &tmux_session_name,
-            lease.session_key.as_deref(),
-            "codex_tui_direct_delivery_failed",
-        )
-        .await;
+        tracing::warn!(error = ?delivery_result, "Codex TUI-direct delivery failed; preserving successor and cursor");
     }
     match offset_rx.await {
         Ok(Ok(final_offset))

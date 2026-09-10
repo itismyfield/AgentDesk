@@ -1,3 +1,4 @@
+use super::super::turn_bridge::BridgeCompletionSignal;
 use super::*;
 
 #[cfg(unix)]
@@ -202,13 +203,14 @@ pub(super) async fn relay_tui_idle_response_through_bridge(
         start_offset,
         lease,
     );
+    let gateway = Arc::new(TuiDirectBridgeGateway {
+        http,
+        shared: shared.clone(),
+        provider: provider.clone(),
+    });
     let bridge = TurnBridgeContext {
         provider: provider.clone(),
-        gateway: Arc::new(TuiDirectBridgeGateway {
-            http,
-            shared: shared.clone(),
-            provider: provider.clone(),
-        }),
+        gateway: gateway.clone(),
         channel_id,
         user_msg_id: Some(user_msg_id),
         user_text_owned: prompt_text.to_string(),
@@ -257,44 +259,17 @@ pub(super) async fn relay_tui_idle_response_through_bridge(
     }
     drop(tx);
 
-    match tokio::time::timeout(Duration::from_secs(180), completion_rx).await {
-        Ok(_) => {
-            ensure_tui_direct_bridge_delivery_committed(
-                &provider,
-                channel_id,
-                user_msg_id,
-                current_msg_id,
-                tmux_session_name,
-                lease,
-                anchor.map(|anchor| anchor.message_id),
-                false,
-            )?;
-            if let Some(anchor) = anchor {
-                crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
-                    provider.as_str(),
-                    tmux_session_name,
-                    anchor,
-                );
-            }
-            tracing::info!(
-                channel_id = channel_id.get(),
-                tmux_session_name = %tmux_session_name,
-                provider = %provider.as_str(),
-                turn_id = lease.turn_id.as_deref().unwrap_or(""),
-                session_key = lease.session_key.as_deref().unwrap_or(""),
-                relay_owner = lease.relay_owner.as_str(),
-                runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
-                current_msg_id = current_msg_id.get(),
-                prompt_anchor_message_id = anchor.map(|anchor| anchor.message_id),
-                "TUI-direct bridge adapter completed response relay"
-            );
-            Ok(())
-        }
-        Err(_) => Err(format!(
-            "TUI-direct bridge adapter timed out waiting for completion for provider {}",
-            provider.as_str()
-        )),
-    }
+    let completion = tokio::time::timeout(Duration::from_secs(180), completion_rx).await;
+    finish_idle_bridge_completion(
+        completion,
+        gateway.as_ref(),
+        &provider,
+        (channel_id, user_msg_id, current_msg_id),
+        Some(current_msg_id),
+        (tmux_session_name, lease, anchor),
+        false,
+    )
+    .await
 }
 
 /// #3256: STREAM-THROUGH variant of `relay_tui_idle_response_through_bridge`
@@ -394,13 +369,14 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
         start_offset,
         lease,
     );
+    let gateway = Arc::new(TuiDirectBridgeGateway {
+        http,
+        shared: shared.clone(),
+        provider: provider.clone(),
+    });
     let bridge = TurnBridgeContext {
         provider: provider.clone(),
-        gateway: Arc::new(TuiDirectBridgeGateway {
-            http,
-            shared: shared.clone(),
-            provider: provider.clone(),
-        }),
+        gateway: gateway.clone(),
         channel_id,
         user_msg_id: Some(user_msg_id),
         user_text_owned: prompt_text.to_string(),
@@ -477,17 +453,49 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
     // which should land within seconds of the terminal frame being forwarded.
     let completion = tokio::time::timeout(Duration::from_secs(180), completion_rx).await;
 
+    finish_idle_bridge_completion(
+        completion,
+        gateway.as_ref(),
+        &provider,
+        (channel_id, user_msg_id, current_msg_id),
+        Some(current_msg_id),
+        (tmux_session_name, lease, anchor),
+        true,
+    )
+    .await
+}
+
+// Shared by both adapters; only Finalized may acknowledge delivery or clear the anchor.
+#[cfg(unix)]
+pub(super) async fn finish_idle_bridge_completion(
+    completion: Result<
+        Result<BridgeCompletionSignal, tokio::sync::oneshot::error::RecvError>,
+        tokio::time::error::Elapsed,
+    >,
+    gateway: &dyn super::super::gateway::TurnGateway,
+    provider: &ProviderKind,
+    message_ids: (ChannelId, MessageId, MessageId),
+    bridge_created_placeholder: Option<MessageId>,
+    turn_context: (
+        &str,
+        &ExternalInputRelayLease,
+        Option<crate::services::tui_prompt_dedupe::TuiPromptAnchor>,
+    ),
+    streamed: bool,
+) -> Result<(), String> {
+    let (channel_id, user_msg_id, current_msg_id) = message_ids;
+    let (tmux_session_name, lease, anchor) = turn_context;
     match completion {
-        Ok(_) => {
+        Ok(Ok(BridgeCompletionSignal::Finalized)) => {
             ensure_tui_direct_bridge_delivery_committed(
-                &provider,
+                provider,
                 channel_id,
                 user_msg_id,
                 current_msg_id,
                 tmux_session_name,
                 lease,
                 anchor.map(|anchor| anchor.message_id),
-                true,
+                streamed,
             )?;
             if let Some(anchor) = anchor {
                 crate::services::tui_prompt_dedupe::clear_prompt_anchor_for_response(
@@ -506,9 +514,29 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
                 runtime_kind = lease.runtime_kind.map(RuntimeHandoffKind::as_str).unwrap_or("unknown"),
                 current_msg_id = current_msg_id.get(),
                 prompt_anchor_message_id = anchor.map(|anchor| anchor.message_id),
-                "TUI-direct bridge adapter completed streamed response relay"
+                "{}", if streamed { "TUI-direct bridge adapter completed streamed response relay" }
+                else { "TUI-direct bridge adapter completed response relay" }
             );
             Ok(())
+        }
+        aborted @ (Ok(Ok(BridgeCompletionSignal::EntryAborted)) | Ok(Err(_))) => {
+            let durable =
+                super::super::inflight::load_inflight_state_read_only(provider, channel_id.get());
+            if let Some(placeholder) = bridge_created_placeholder.filter(|id| {
+                !durable.as_ref().is_some_and(|row| {
+                    row.current_msg_id == id.get()
+                        || row.user_msg_id == id.get()
+                        || row.status_message_id == Some(id.get())
+                })
+            }) {
+                if let Err(error) = gateway.delete_message(channel_id, placeholder).await {
+                    tracing::warn!(%error, "failed to delete aborted bridge placeholder");
+                }
+            }
+            tracing::warn!(turn_id = lease.turn_id.as_deref().unwrap_or(""),
+                durable_user_msg_id = durable.as_ref().map(|row| row.user_msg_id),
+                reason = ?aborted, "TUI-direct bridge entry aborted before authority");
+            Err("TUI-direct bridge entry aborted before authority".to_string())
         }
         Err(_) => Err(format!(
             "TUI-direct bridge adapter timed out waiting for completion for provider {}",
