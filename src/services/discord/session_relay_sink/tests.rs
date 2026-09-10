@@ -1,4 +1,6 @@
+use super::super::placeholder_controller::PlaceholderLifecycle;
 use super::*;
+use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::session_matcher::{MatchedChannel, expected_rollout_path_for};
 use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
 use crate::services::tui_prompt_dedupe::{ExternalInputRelayLease, ExternalInputRelayOwner};
@@ -3845,17 +3847,22 @@ mod a0_characterization_tests {
     }
 }
 
+const DC1_CASES: &[&str] = &[
+    "first-seed",
+    "retry-zero",
+    "provenance",
+    "generation",
+    "durable",
+    "capacity",
+    "replacement",
+    "read-error",
+    "closed",
+    "chunk",
+];
+
 #[test]
 fn dc1_actual_scanner_contract() {
-    for case in [
-        "first-seed",
-        "retry-zero",
-        "provenance",
-        "generation",
-        "durable",
-        "capacity",
-        "replacement",
-    ] {
+    for case in DC1_CASES {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -3886,13 +3893,25 @@ fn dc1_actual_scanner_contract() {
 
 type Dc1Snapshot = std::collections::BTreeMap<String, (u64, u8)>;
 static DC1_TICKS: std::sync::OnceLock<Mutex<Vec<Dc1Snapshot>>> = std::sync::OnceLock::new();
-static DC1_OPEN: Mutex<Option<(String, usize)>> = Mutex::new(None);
+#[derive(Clone, Copy)]
+enum Dc1OpenAction {
+    Replace,
+    Remove,
+    Truncate,
+}
+static DC1_OPEN: Mutex<Option<(String, usize, Dc1OpenAction)>> = Mutex::new(None);
 
 pub(super) fn dc1_before_open(path: &str) {
     let mut hook = DC1_OPEN.lock().unwrap();
-    if let Some((target, remaining)) = hook.as_mut().filter(|(target, _)| target == path) {
+    if let Some((target, remaining, action)) = hook.as_mut().filter(|(target, _, _)| target == path)
+    {
         if *remaining == 0 {
-            std::fs::rename(format!("{target}.replacement"), target).unwrap();
+            match action {
+                Dc1OpenAction::Replace => std::fs::rename(format!("{target}.replacement"), target),
+                Dc1OpenAction::Remove => std::fs::rename(&*target, format!("{target}.saved")),
+                Dc1OpenAction::Truncate => std::fs::write(target, b""),
+            }
+            .unwrap();
             *hook = None;
         } else {
             *remaining -= 1;
@@ -4019,6 +4038,16 @@ impl Dc1Fixture {
         assert_eq!(frame.relay_range, Some((from, from + payload.len() as u64)));
         assert_eq!(frame.payload, payload);
     }
+    async fn restart(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        tokio::time::advance(Duration::from_millis(500)).await;
+        (&mut self.task).await.unwrap();
+        self.shutdown = Arc::new(AtomicBool::new(false));
+        self.task = tokio::spawn(run_idle_jsonl_relay_loop(
+            self.shutdown.clone(),
+            self.health.clone(),
+        ));
+    }
     async fn stop(self) {
         self.shutdown.store(true, Ordering::Release);
         tokio::time::advance(Duration::from_millis(500)).await;
@@ -4032,18 +4061,7 @@ impl Dc1Fixture {
 #[ignore = "DC1 isolated child; required parent executes"]
 async fn dc1_isolated_scanner_child() {
     let case = std::env::var("ADK_DC1_CHILD").expect("required DC1 parent environment");
-    assert!(
-        [
-            "first-seed",
-            "retry-zero",
-            "provenance",
-            "generation",
-            "durable",
-            "capacity",
-            "replacement"
-        ]
-        .contains(&case.as_str())
-    );
+    assert!(DC1_CASES.contains(&case.as_str()));
     let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let dir = tempfile::tempdir().unwrap();
     let _env = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -4059,6 +4077,10 @@ async fn dc1_isolated_scanner_child() {
     )
     .await;
     let name = f.binding.expected_session_name.clone();
+    if case == "provenance" {
+        std::fs::write(&path, payload).unwrap();
+        assert_eq!(dc1_tick().await[&name], (0, 1), "grace creates Deferred");
+    }
     // Production grace is the monotonic OS clock. Tokio advance alone cannot expire it.
     std::thread::sleep(Duration::from_millis(10_100));
     match case.as_str() {
@@ -4122,9 +4144,13 @@ async fn dc1_isolated_scanner_child() {
             assert_eq!(dc1_tick().await[&name].0, 0);
             let marker = crate::services::tmux_common::session_temp_path(&name, "generation");
             std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
-            for present in [true, false, true] {
+            for (i, present) in [true, false, true, true].into_iter().enumerate() {
                 if present {
                     std::fs::write(&marker, "generation").unwrap();
+                    std::fs::File::open(&marker)
+                        .unwrap()
+                        .set_modified(std::time::SystemTime::now() + Duration::from_secs(i as u64))
+                        .unwrap();
                 } else {
                     std::fs::remove_file(&marker).unwrap();
                 }
@@ -4170,27 +4196,36 @@ async fn dc1_isolated_scanner_child() {
             f.present(true);
             dc1_tick().await;
             f.frame(4, payload).await;
+            for action in [Dc1OpenAction::Remove, Dc1OpenAction::Truncate] {
+                *DC1_OPEN.lock().unwrap() = Some((path.to_str().unwrap().into(), 1, action));
+                assert_eq!(
+                    dc1_tick().await[&name],
+                    (0, 3),
+                    "suffix failure retains cursor"
+                );
+                assert!(f.rx.try_recv().is_err(), "failed suffix cannot enqueue");
+                if matches!(action, Dc1OpenAction::Remove) {
+                    std::fs::rename(format!("{}.saved", path.display()), &path).unwrap();
+                }
+                std::fs::write(&path, format!("old\n{payload}")).unwrap();
+                dc1_tick().await;
+                f.frame(4, payload).await;
+            }
             // Reopen suffix must agree with the metadata identity too.
             std::fs::write(
                 format!("{}.replacement", path.display()),
                 format!("old\n{payload}"),
             )
             .unwrap();
-            *DC1_OPEN.lock().unwrap() = Some((path.to_str().unwrap().into(), 1));
-            assert_eq!(dc1_tick().await[&name].0, 0);
+            *DC1_OPEN.lock().unwrap() =
+                Some((path.to_str().unwrap().into(), 1, Dc1OpenAction::Replace));
+            assert_eq!(dc1_tick().await[&name], (0, 3));
             assert!(
                 f.rx.try_recv().is_err(),
                 "suffix replacement cannot enqueue"
             );
             // A fresh scanner can only resume from the existing durable positive frontier.
-            f.shutdown.store(true, Ordering::Release);
-            tokio::time::advance(Duration::from_millis(500)).await;
-            (&mut f.task).await.unwrap();
-            f.shutdown = Arc::new(AtomicBool::new(false));
-            f.task = tokio::spawn(run_idle_jsonl_relay_loop(
-                f.shutdown.clone(),
-                f.health.clone(),
-            ));
+            f.restart().await;
             assert_eq!(
                 dc1_tick().await[&name].0,
                 4,
@@ -4199,6 +4234,17 @@ async fn dc1_isolated_scanner_child() {
             std::thread::sleep(Duration::from_millis(10_100));
             dc1_tick().await;
             f.frame(4, payload).await;
+            std::fs::File::open(&marker)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() + Duration::from_secs(60))
+                .unwrap();
+            assert_ne!(dr::current_generation_mtime_ns(&name), generation);
+            f.restart().await;
+            assert_eq!(
+                dc1_tick().await[&name].0,
+                4 + payload.len() as u64,
+                "stale-generation receipt cannot restore cursor"
+            );
             std::fs::remove_file(marker).unwrap();
         }
         "capacity" => {
@@ -4207,10 +4253,23 @@ async fn dc1_isolated_scanner_child() {
             for i in 0..65 {
                 let mut b = f.binding.clone();
                 b.expected_session_name = format!("dc1-extra-{i:02}");
+                if i == 64 {
+                    b.expected_rollout_path =
+                        dir.path().join("pending-free.jsonl").display().to_string();
+                    std::fs::write(&b.expected_rollout_path, b"").unwrap();
+                }
                 names.push(b.expected_session_name.clone());
                 r.upsert(b, None);
             }
             assert_eq!(dc1_tick().await.len(), 66, "seen population is not capped");
+            f.health
+                .register_standby("claude".into(), super::super::make_shared_data_for_tests())
+                .await;
+            std::fs::write(&path, payload).unwrap();
+            let mixed = dc1_tick().await;
+            assert_eq!(mixed[&name], (0, 3));
+            assert_eq!(mixed["dc1-extra-63"], (0, 1));
+            assert_eq!(mixed["dc1-extra-64"], (0, 0));
             for n in &names {
                 r.remove(n);
             }
@@ -4225,14 +4284,73 @@ async fn dc1_isolated_scanner_child() {
                 "name resolves equal-time ties"
             );
             assert!(
-                absent.values().all(|v| *v == (0, 0)),
+                absent["dc1-extra-64"] == (0, 0) && absent["dc1-extra-63"] == (0, 1),
                 "pending-free cursor shares same window"
+            );
+        }
+        "read-error" | "closed" => {
+            std::fs::write(&path, payload).unwrap();
+            f.producer(true);
+            assert_eq!(dc1_tick().await[&name], (0, 2));
+            f.frame(0, payload).await;
+            if case == "read-error" {
+                *DC1_OPEN.lock().unwrap() =
+                    Some((path.to_str().unwrap().into(), 0, Dc1OpenAction::Remove));
+            } else {
+                let replacement = crate::services::cluster::stream_relay::spawn_stream_relay(
+                    f.binding.clone(),
+                    Arc::new(crate::services::cluster::stream_relay::DiscardSink),
+                );
+                std::mem::replace(&mut f.relay, replacement)
+                    .shutdown()
+                    .await;
+            }
+            assert_eq!(
+                dc1_tick().await[&name],
+                (0, 3),
+                "failed read/send turns S into R"
+            );
+            assert!(f.rx.try_recv().is_err());
+            f.present(false);
+            assert_eq!(dc1_tick().await[&name], (0, 3));
+            if case == "read-error" {
+                std::fs::rename(format!("{}.saved", path.display()), &path).unwrap();
+            }
+            f.present(true);
+            let expanded = format!("{payload}{{\"type\":\"user\"}}\n");
+            std::fs::write(&path, &expanded).unwrap();
+            assert_eq!(
+                dc1_tick().await[&name],
+                (expanded.len() as u64, 0),
+                "R loses visibility gate"
+            );
+        }
+        "chunk" => {
+            let cap = IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK as usize;
+            let prefix = format!("{{\"type\":\"user\"}}\n{}", " ".repeat(cap - 16));
+            assert_eq!(prefix.len(), cap);
+            std::fs::write(&path, format!("{prefix}{payload}")).unwrap();
+            assert_eq!(dc1_tick().await[&name], (cap as u64, 0));
+            f.present(false);
+            assert_eq!(dc1_tick().await[&name], (cap as u64, 0));
+            f.present(true);
+            f.producer(true);
+            dc1_tick().await;
+            f.frame(cap as u64, payload).await;
+            f.producer(false);
+            std::fs::write(&path, payload).unwrap();
+            assert_eq!(
+                dc1_tick().await[&name],
+                (0, 3),
+                "truncation reads from zero, not EOF"
             );
         }
         "replacement" => {
             std::fs::write(&path, payload).unwrap();
-            std::fs::write(format!("{}.replacement", path.display()), payload).unwrap();
-            *DC1_OPEN.lock().unwrap() = Some((path.to_str().unwrap().into(), 0));
+            let replacement = "{\"type\":\"user\"}\n";
+            std::fs::write(format!("{}.replacement", path.display()), replacement).unwrap();
+            *DC1_OPEN.lock().unwrap() =
+                Some((path.to_str().unwrap().into(), 0, Dc1OpenAction::Replace));
             f.producer(true);
             assert_eq!(
                 dc1_tick().await[&name],
@@ -4241,8 +4359,8 @@ async fn dc1_isolated_scanner_child() {
             );
             assert!(f.rx.try_recv().is_err(), "replacement must not enqueue");
             assert_eq!(
-                dc1_tick().await[&name].0,
-                payload.len() as u64,
+                dc1_tick().await[&name],
+                (replacement.len() as u64, 1),
                 "new source starts at EOF"
             );
         }
@@ -4250,4 +4368,45 @@ async fn dc1_isolated_scanner_child() {
     }
     f.stop().await;
     println!("ADK_DC1_EXECUTED:{case}:PASS");
+}
+
+pub(in crate::services::discord) mod sink_fixtures {
+    pub(in crate::services::discord) const PURE_SUBAGENT_ZERO_DELIVERY_PAYLOAD: &str = concat!(
+        "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"sub-1\",\"task_type\":\"local_agent\"}\n",
+        "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"sub-1\",\"status\":\"completed\",\"summary\":\"Subagent finished\"}\n",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
+    );
+
+    pub(in crate::services::discord) struct SinkLeaseTestProbe {
+        pub(in crate::services::discord::session_relay_sink) acquired: tokio::sync::Notify,
+        pub(in crate::services::discord::session_relay_sink) release: tokio::sync::Notify,
+    }
+}
+
+impl SessionBoundExternalInputLeaseGuard {
+    /// Test-only convenience: read the current lease for this target and arm with
+    /// it (the production path threads in the route's single read instead).
+    fn arm_if_present(
+        provider: &ProviderKind,
+        channel_id: u64,
+        tmux_session_name: &str,
+    ) -> Option<Self> {
+        let observed = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+            provider.as_str(),
+            tmux_session_name,
+            channel_id,
+        );
+        Self::arm_with_observed_lease(provider, channel_id, tmux_session_name, observed.as_ref())
+    }
+}
+
+impl SessionBoundDiscordRelaySink {
+    fn with_lease_test_probe(
+        health_registry: Arc<HealthRegistry>,
+        lease_test_probe: Arc<SinkLeaseTestProbe>,
+    ) -> Self {
+        let mut sink = Self::new(health_registry);
+        sink.lease_test_probe = Some(lease_test_probe);
+        sink
+    }
 }

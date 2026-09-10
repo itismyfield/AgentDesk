@@ -7,37 +7,28 @@
 //! treats terminal delivery as delegated instead of sending directly.
 
 use std::collections::{HashMap, HashSet};
-use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serenity::model::id::{ChannelId, MessageId};
 
+#[cfg(test)]
+pub(in crate::services::discord) use self::tests::sink_fixtures::*;
 use super::delivery_lease_cell::source_epoch_observer;
 use super::formatting::{self, ReplaceLongMessageOutcome};
 use super::health::HealthRegistry;
 use super::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
 use super::outbound::delivery_record as dr;
 use super::outbound::turn_output_controller as toc;
-#[cfg(test)]
-use super::placeholder_controller::PlaceholderLifecycle;
 use super::replace_outcome_policy::edit_fail_fallback_disposition;
-#[cfg(test)]
-use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::{
-    RelaySink, RelaySinkError, RelaySinkOutcome, SourceFileIdentity, StreamFrame,
+    RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame,
 };
 use crate::services::cluster::watcher_supervisor::{SupervisorConfig, run_watcher_supervisor_loop};
 use crate::services::provider::ProviderKind;
 use tracing::Instrument;
 
-#[cfg(test)]
-pub(in crate::services::discord) const PURE_SUBAGENT_ZERO_DELIVERY_PAYLOAD: &str = concat!(
-    "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"sub-1\",\"task_type\":\"local_agent\"}\n",
-    "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"sub-1\",\"status\":\"completed\",\"summary\":\"Subagent finished\"}\n",
-    "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
-);
 mod delivery_commit;
 mod delivery_frontier;
 mod delivery_outcome_classify;
@@ -258,22 +249,6 @@ impl SessionBoundExternalInputLeaseGuard {
             channel_id,
             generation: lease.generation,
         })
-    }
-
-    /// Test-only convenience: read the current lease for this target and arm with
-    /// it (the production path threads in the route's single read instead).
-    #[cfg(test)]
-    fn arm_if_present(
-        provider: &ProviderKind,
-        channel_id: u64,
-        tmux_session_name: &str,
-    ) -> Option<Self> {
-        let observed = crate::services::tui_prompt_dedupe::external_input_relay_lease(
-            provider.as_str(),
-            tmux_session_name,
-            channel_id,
-        );
-        Self::arm_with_observed_lease(provider, channel_id, tmux_session_name, observed.as_ref())
     }
 }
 
@@ -503,12 +478,6 @@ fn inflight_turn_id(state: &InflightTurnState) -> Option<String> {
     (state.user_msg_id != 0).then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id))
 }
 
-#[cfg(test)]
-struct SinkLeaseTestProbe {
-    acquired: tokio::sync::Notify,
-    release: tokio::sync::Notify,
-}
-
 pub(in crate::services::discord) struct SessionBoundDiscordRelaySink {
     health_registry: Arc<HealthRegistry>,
     frames_total: AtomicU64,
@@ -548,16 +517,6 @@ impl SessionBoundDiscordRelaySink {
             #[cfg(test)]
             test_force_legacy_replace: false,
         }
-    }
-
-    #[cfg(test)]
-    fn with_lease_test_probe(
-        health_registry: Arc<HealthRegistry>,
-        lease_test_probe: Arc<SinkLeaseTestProbe>,
-    ) -> Self {
-        let mut sink = Self::new(health_registry);
-        sink.lease_test_probe = Some(lease_test_probe);
-        sink
     }
 
     fn ingest_frame(&self, frame: &StreamFrame) -> Vec<SessionRelayDelivery> {
@@ -1262,9 +1221,9 @@ async fn run_idle_jsonl_relay_loop(
                 continue;
             };
             let len = metadata.len();
-            let expected_file = SourceFileIdentity::Unix {
-                dev: metadata.dev(),
-                ino: metadata.ino(),
+            let expected_file = crate::services::cluster::stream_relay::SourceFileIdentity::Unix {
+                dev: std::os::unix::fs::MetadataExt::dev(&metadata),
+                ino: std::os::unix::fs::MetadataExt::ino(&metadata),
             };
             let source = (
                 matched.provider.clone(),
@@ -1390,7 +1349,6 @@ async fn run_idle_jsonl_relay_loop(
                             IdleRelayRangeAction::AdvanceCommitted
                         ) {
                             consume_idle_offset!(pending_end, IdleJsonlSessionInitRearm::Keep);
-                            pending_ends.remove(&session_name);
                         }
                     }
                     continue;
@@ -1413,7 +1371,6 @@ async fn run_idle_jsonl_relay_loop(
                 ) {
                     IdleRelayRangeAction::AdvanceCommitted => {
                         consume_idle_offset!(pending_end, IdleJsonlSessionInitRearm::Keep);
-                        pending_ends.remove(&session_name);
                     }
                     IdleRelayRangeAction::HoldPending => {}
                     _ => unreachable!("deferred suppression returns only hold/advance"),
