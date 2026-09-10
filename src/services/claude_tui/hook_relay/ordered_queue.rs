@@ -987,8 +987,20 @@ mod tests {
         run()
     }
 
-    #[test]
     fn atomic_publication_preserves_all_five_consumers_on_sync_failure() {
+        // Fault injection proves error handling; this source oracle separately pins the syscall.
+        let source = include_str!("ordered_queue.rs");
+        let sync = source
+            .split("fn sync_atomic_file(")
+            .nth(1)
+            .unwrap()
+            .split("fn queue_request_paths(")
+            .next()
+            .unwrap();
+        assert!(
+            sync.contains("file.sync_all()"),
+            "atomic publication must invoke fsync"
+        );
         for label in [
             "hook relay quarantine evidence",
             "hook relay queue sequence",
@@ -1012,7 +1024,6 @@ mod tests {
         }
     }
 
-    #[test]
     fn atomic_queue_evidence_and_high_water_survive_publication_error() {
         let dir = tempfile::tempdir().unwrap();
         let queue = dir.path();
@@ -1407,6 +1418,8 @@ mod tests {
 
     #[test]
     fn corrupt_counter_recovers_without_reusing_completed_high_water() {
+        atomic_publication_preserves_all_five_consumers_on_sync_failure();
+        atomic_queue_evidence_and_high_water_survive_publication_error();
         let temp_dir = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(temp_dir.path());
         let (endpoint, requests, receiver) = spawn_test_receiver(1);
