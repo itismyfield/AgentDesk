@@ -88,6 +88,40 @@ pub(super) fn bridge_entry_lifecycle_can_continue(
     matches!(outcome, GuardedSaveOutcome::Saved)
 }
 
+/// Whether this channel may take the AC2-R rowless entry continuation.
+/// Delegates to the stream side's read rather than repeating it: S4 and S7a
+/// enforce under ONE dial, and two readers of `relay_authority_mode` +
+/// `relay_authority_cohort_percent` could drift into admitting a channel to one
+/// slice and not the other, shredding the AC3 cohort fingerprint.
+pub(super) fn bridge_entry_rowless_cohort_admits(channel_id: u64) -> bool {
+    super::stream_tick::guarded_persist::stream_loop_suppression_cohort_admits(channel_id)
+}
+
+/// #5464 T5 S7a entry gate. Outside the cohort this IS
+/// [`bridge_entry_lifecycle_can_continue`] — retained because deleting it is a
+/// T6 action whose rollback closure `t5-t6-removal-inventory.md` declares UNMET.
+/// Inside it, `entry_gate_new` plus ONE precondition: `ContinueRowless` needs an
+/// anchor that ALREADY exists, because with none
+/// `ensure_bridge_current_message_anchor` sends a placeholder, cannot bind it to
+/// a row that does not exist, and deletes it — today's silence plus a flicker.
+pub(super) fn bridge_entry_disposition_continues(
+    outcome: crate::services::discord::inflight::GuardedSaveOutcome,
+    cohort_admits: bool,
+    anchor_present: bool,
+) -> bool {
+    use crate::services::discord::relay_recovery::authority_observation::{
+        LifecycleVerdict, entry_gate_new,
+    };
+
+    if !cohort_admits {
+        return bridge_entry_lifecycle_can_continue(outcome);
+    }
+    match entry_gate_new(outcome) {
+        LifecycleVerdict::ContinueRowless => anchor_present,
+        verdict => !verdict.ends_lifecycle(),
+    }
+}
+
 /// Wakes a completion waiter on a pre-authority abort without registering a
 /// finalizer or publishing `InflightSignal::Completed` for a successor turn.
 pub(super) fn signal_bridge_entry_abort_completion(
@@ -271,12 +305,16 @@ pub(super) async fn establish_bridge_entry_authority(
         &ctx.bridge.inflight_state,
         outcome,
     );
-    if !bridge_entry_lifecycle_can_continue(outcome) {
+    let anchor_was_absent = durable_current_msg_id_from_detached(*runtime.current_msg_id) == 0;
+    if !bridge_entry_disposition_continues(
+        outcome,
+        bridge_entry_rowless_cohort_admits(ctx.bridge.inflight_state.channel_id),
+        !anchor_was_absent,
+    ) {
         signal_bridge_entry_abort_completion(&mut ctx.bridge.completion_tx);
         return false;
     }
 
-    let anchor_was_absent = durable_current_msg_id_from_detached(*runtime.current_msg_id) == 0;
     let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(
         runtime.inflight_state,
     );
@@ -340,7 +378,7 @@ mod tests {
     #[test]
     fn recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate() {
         use crate::services::discord::relay_recovery::authority_observation::{
-            entry_gate_new, entry_gate_old,
+            LifecycleVerdict, entry_gate_new, entry_gate_old,
         };
 
         for outcome in [
@@ -352,13 +390,247 @@ mod tests {
             assert_eq!(
                 entry_gate_old(outcome).ends_lifecycle(),
                 !bridge_entry_lifecycle_can_continue(outcome),
-                "{outcome:?}: recorded old entry verdict disagrees with the shipped gate"
+                "{outcome:?}: recorded old verdict disagrees with the retained gate"
+            );
+            assert_eq!(
+                bridge_entry_disposition_continues(outcome, false, true),
+                bridge_entry_lifecycle_can_continue(outcome),
+                "{outcome:?}: outside the cohort the gate must be the shipped mapping"
+            );
+            assert_eq!(
+                bridge_entry_disposition_continues(outcome, true, true),
+                !entry_gate_new(outcome).ends_lifecycle(),
+                "{outcome:?}: in the cohort, onto an anchor, the gate must be entry_gate_new"
+            );
+            assert_eq!(
+                bridge_entry_disposition_continues(outcome, true, false),
+                !entry_gate_new(outcome).ends_lifecycle()
+                    && entry_gate_new(outcome) != LifecycleVerdict::ContinueRowless,
+                "{outcome:?}: with no anchor the rowless arm is the only one withheld"
             );
         }
+        // #5464 T5 S7a: the shipped predicate is now the OUT-OF-COHORT path, so
+        // AC1 is stated per cohort state instead of in one framing.
         assert!(
             !bridge_entry_lifecycle_can_continue(GuardedSaveOutcome::Missing)
                 && !entry_gate_new(GuardedSaveOutcome::Missing).ends_lifecycle(),
-            "AC1: the shipped gate ends the turn on a missing row and the new one must not"
+            "AC1: the retained gate ends the turn on a missing row and AC2-R must not"
+        );
+        assert_eq!(
+            (
+                bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, false, true),
+                bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, true, false),
+                bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, true, true),
+            ),
+            (false, false, true),
+            "AC1: a rowless turn continues only inside the cohort and only onto an anchor \
+             that already exists"
+        );
+    }
+
+    /// What the COMPILED-IN default dial does — NOT what the deployed host does.
+    /// `config_live_reload::install` never runs in a lib test, so `current()` is
+    /// `None` and the wrapper falls back to `Legacy/0`; that fallback, and only
+    /// it, is what the sweep below observes. The release host ships
+    /// `relay_authority_mode: enforce` / `relay_authority_cohort_percent: 100`,
+    /// under which this same wrapper admits EVERY channel — see
+    /// `the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none`,
+    /// which installs those positions and observes it. This is the reversibility
+    /// statement for an UN-ENROLLED node; it is not evidence that the cutover is
+    /// dormant in production and must not be cited as such.
+    #[test]
+    fn an_uninstalled_live_config_leaves_the_entry_rowless_cohort_empty() {
+        use crate::config::RelayAuthorityMode;
+
+        let defaults = crate::config::RuntimeSettingsConfig::default();
+        assert_eq!(defaults.relay_authority_mode, RelayAuthorityMode::Legacy);
+        assert_eq!(defaults.relay_authority_cohort_percent, 0);
+        assert!(
+            !RelayAuthorityMode::Observe.governs_destructive_authority(),
+            "the observing mode must not be able to enforce"
+        );
+
+        for channel_id in (0..2_000u64).map(|index| 1_534_511_598_012_600_371 + index * 7) {
+            let admits = bridge_entry_rowless_cohort_admits(channel_id);
+            assert!(
+                !admits,
+                "channel {channel_id} was admitted by the shipped dial"
+            );
+            assert!(
+                !bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, admits, true),
+                "channel {channel_id}: a rowless turn must still end outside the cohort"
+            );
+        }
+    }
+
+    /// Re-runs this binary for ONE test with the dial moved: `install` writes a
+    /// process-global `OnceLock` with no uninstall, so moving the dial in-process
+    /// would leak `Enforce/100` into every other test here (the sweep above and
+    /// `cohort::tests::rollout_report_without_a_live_config_...` both read it).
+    /// Same shape, same reason, as `provider::channel_rules::tests::run_child`.
+    fn run_dial_child(name: &str, marker: &str) {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", name, "--nocapture"])
+            .env(marker, "1")
+            .output()
+            .expect("spawn isolated dial child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success()
+                && stdout.lines().any(|line| line
+                    .starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")),
+            "{name}: {}\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// #5464 T5 S7a's production posture, OBSERVED at the dial the release host
+    /// runs rather than asserted from a compiled-in constant: at `enforce`/`100`
+    /// the entry gate's own cohort wrapper admits every channel, so on merge this
+    /// cutover governs 100% of entry traffic. At `observe`/`100` it admits none —
+    /// `governs_destructive_authority` carrying the veto, not the width.
+    ///
+    /// Both halves call `bridge_entry_rowless_cohort_admits` itself, so a folded
+    /// wrapper body fails here whichever constant it folds to: `false` silently
+    /// reverts the cutover in production, `true` (or a
+    /// `governs_destructive_authority` that stops vetoing) cuts every `Observe`
+    /// host over at once.
+    #[test]
+    fn the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none() {
+        const CHILD: &str = "ADK_ENTRY_ROWLESS_DIAL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_dial_child(
+                "services::discord::turn_bridge::bridge_entry_persist::tests::the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none",
+                CHILD,
+            );
+            return;
+        }
+        use crate::config::RelayAuthorityMode;
+
+        let ids = || (0..512u64).map(|index| 1_534_511_598_012_600_371 + index * 7);
+        let dial = |mode| {
+            let mut config = crate::config::Config::default();
+            config.runtime.relay_authority_mode = mode;
+            config.runtime.relay_authority_cohort_percent = 100;
+            crate::config_live_reload::install(config);
+        };
+
+        dial(RelayAuthorityMode::Enforce);
+        for channel_id in ids() {
+            let admits = bridge_entry_rowless_cohort_admits(channel_id);
+            assert!(
+                admits,
+                "channel {channel_id} is OUTSIDE the cohort at the deployed enforce/100 dial; \
+                 the S7a entry cutover would govern nothing in production"
+            );
+            assert!(
+                bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, admits, true),
+                "channel {channel_id}: at enforce/100 a rowless turn onto a live anchor continues"
+            );
+        }
+
+        dial(RelayAuthorityMode::Observe);
+        for channel_id in ids() {
+            assert!(
+                !bridge_entry_rowless_cohort_admits(channel_id),
+                "channel {channel_id} was admitted at observe/100; only Enforce may govern, and \
+                 Observe must stay behaviour-identical to Legacy for every non-recorder"
+            );
+        }
+    }
+
+    fn rowless_entry_state(channel_id: u64) -> InflightTurnState {
+        InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("entry-rowless".to_string()),
+            343_742_347_365_974_026,
+            77_701,
+            0,
+            "prompt".to_string(),
+            Some("session".to_string()),
+            Some(format!("AgentDesk-entry-rowless-{channel_id}")),
+            None,
+            None,
+            4_100,
+        )
+    }
+
+    /// #5464 T5 S7a / #5307 B1: the zero-anchor half of the rowless population.
+    /// `ensure_bridge_current_message_anchor` SENDS a real Discord placeholder
+    /// and binds it against a durable row; with no row the bind fails and the
+    /// message it just sent is deleted again. A rowless continuation leaning on
+    /// that call to fail would buy today's silence PLUS a visible flicker, so
+    /// the gate refuses it first. The tail is the positive control.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder() {
+        use super::super::stream_tick::provider_output_guard_tests::CapturingGateway;
+
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let channel_id = ChannelId::new(4_259_701);
+        let mut state = rowless_entry_state(channel_id.get());
+        let identity = crate::services::discord::inflight::InflightTurnIdentity::from_state(&state);
+        let mut detached = detached_current_msg_id_from_durable(state.current_msg_id);
+        let anchor_present = durable_current_msg_id_from_detached(detached) != 0;
+        assert!(!anchor_present, "this turn has no anchor to continue onto");
+        let mut created = None;
+        let gateway = CapturingGateway::default();
+        let mut anchor = async || {
+            ensure_bridge_current_message_anchor(
+                &gateway,
+                &ProviderKind::Codex,
+                "entry-rowless-token",
+                channel_id,
+                &identity,
+                &mut detached,
+                &mut created,
+                &mut state,
+                "processing",
+            )
+            .await
+        };
+
+        if bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, true, anchor_present) {
+            let _ = anchor().await;
+        }
+        assert!(
+            gateway.sends.lock().expect("sends lock").is_empty()
+                && gateway.deletes.lock().expect("deletes lock").is_empty(),
+            "a rowless turn with no anchor must perform no send-then-delete round trip"
+        );
+        assert!(!anchor().await, "positive control: bind cannot succeed");
+        assert_eq!(gateway.sends.lock().expect("sends lock").len(), 1);
+        assert_eq!(gateway.deletes.lock().expect("deletes lock").len(), 1);
+    }
+
+    /// #5464 T5 S7a: the `Missing` arm must keep NOT reconciling. A rowless turn
+    /// carries pre-persist detached locals by design and there is no row to
+    /// reconcile from, so hoisting the call out of `Saved` would overwrite the
+    /// turn's live progress with a snapshot nothing wrote.
+    #[test]
+    fn a_rowless_entry_patch_keeps_its_pre_persist_detached_locals() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let owner = ChannelId::new(4_259_702);
+        let mut durable = rowless_entry_state(owner.get());
+        durable.full_response = "durable row bytes".to_string();
+        let before = durable.clone();
+        let mut harness = ReconcileHarness::new(&mut durable, owner);
+        *harness.runtime.full_response = "pre-persist detached bytes".to_string();
+        let mut cleared = false;
+        let runtime = &mut harness.runtime;
+
+        let outcome = persist_bridge_entry_inflight_state(&before, &shared, runtime, &mut cleared);
+
+        assert_eq!(outcome, GuardedSaveOutcome::Missing);
+        assert_eq!(
+            harness.runtime.full_response.as_str(),
+            "pre-persist detached bytes",
+            "a rowless turn keeps its pre-persist detached locals; reconciling from a row \
+             that does not exist erases the turn's live progress"
         );
     }
 
@@ -572,7 +844,7 @@ mod tests {
             .map(|offset| establish + offset)
             .expect("authority helper persists first");
         let gate = helper[persist..]
-            .find("if !bridge_entry_lifecycle_can_continue")
+            .find("if !bridge_entry_disposition_continues(")
             .map(|offset| persist + offset)
             .expect("authority helper gates persistence");
         let anchor = helper[gate..]
@@ -613,6 +885,12 @@ mod tests {
             helper[gate..anchor].contains("signal_bridge_entry_abort_completion")
                 && helper[gate..anchor].contains("return false;"),
             "failed persistence must signal only the waiter and abort"
+        );
+        assert!(
+            helper[gate..anchor].contains("bridge_entry_rowless_cohort_admits(")
+                && helper[gate..anchor].contains("!anchor_was_absent,"),
+            "the entry gate must take BOTH the cohort read and the anchor precondition at the \
+             call site; a literal at either one pins this site to one side of the rollout"
         );
         assert!(
             !caller[spawn..authority].contains("make_bridge_guards("),
