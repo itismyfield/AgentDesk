@@ -109,6 +109,8 @@ pub use snapshot::{
     DiscordHealthSnapshot, HealthStatus, WatcherStateSnapshot, active_request_owner_for_channel,
     build_health_snapshot, build_public_health_snapshot,
 };
+#[cfg(unix)]
+pub(in crate::services::discord) use snapshot::watcher_state_snapshot_for_warrant;
 
 /// Per-provider snapshot for the health response.
 #[derive(Clone)]

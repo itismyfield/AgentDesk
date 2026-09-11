@@ -4279,6 +4279,10 @@ mod stale_sweep_witness_support {
     /// is removed, and the shared environment lock E is released last.
     pub(crate) struct StaleSweepWarrantFixture {
         registry: HealthRegistry,
+        shared: Arc<crate::services::discord::SharedData>,
+        channel_id: u64,
+        tmux_session_name: String,
+        transcript_path: std::path::PathBuf,
         session_key: String,
         ledger_path: std::path::PathBuf,
         _env_guard: crate::config::TestEnvVarGuard,
@@ -4357,6 +4361,10 @@ mod stale_sweep_witness_support {
 
             let fixture = Self {
                 registry,
+                shared,
+                channel_id,
+                tmux_session_name: tmux_session_name.clone(),
+                transcript_path: transcript_path.clone(),
                 session_key: format!("host:{tmux_session_name}"),
                 ledger_path: path,
                 _env_guard: env_guard,
@@ -4381,12 +4389,55 @@ mod stale_sweep_witness_support {
             write_ledger_at(&self.ledger_path, &ledger)
         }
 
+        /// Push the fixture's outstanding obligation far enough into the past
+        /// that it predates ANY process anchor a consumer might compare it to.
+        ///
+        /// The constructor's 700s age is enough for a consumer that anchors on
+        /// the freshly built `HealthRegistry` it is handed. A consumer that
+        /// anchors on PROCESS start instead reads `first_observed < anchor` as
+        /// the restart-boundary transport trace, and a test binary that has
+        /// already been running longer than 700s silently loses that trace —
+        /// `TransportUnknown` quietly degrades to `Unreachable`, which for a
+        /// ROWLESS candidate abstains instead of vetoing. Pinning the
+        /// obligation to a fixed ancient epoch makes the transport trace
+        /// independent of when in a suite the consuming test runs.
+        pub(crate) fn predate_any_process_anchor(&self) -> Result<(), String> {
+            let mut ledger = read_ledger_at(&self.ledger_path)
+                .ok_or_else(|| "fixture ledger unreadable".to_string())?;
+            for obligation in &mut ledger.obligations {
+                obligation.first_observed_at_epoch_ms = 1_000_000;
+            }
+            write_ledger_at(&self.ledger_path, &ledger)
+        }
+
         pub(crate) fn registry(&self) -> &HealthRegistry {
             &self.registry
         }
 
         pub(crate) fn session_key(&self) -> &str {
             &self.session_key
+        }
+
+        /// The runtime the fixture's reachability ledger is keyed to. A consumer
+        /// that runs inside a watcher rather than a registry sweep needs THIS
+        /// runtime, otherwise its snapshot would be composed for a channel the
+        /// ledger says nothing about.
+        pub(crate) fn shared(&self) -> &Arc<crate::services::discord::SharedData> {
+            &self.shared
+        }
+
+        pub(crate) fn channel_id(&self) -> u64 {
+            self.channel_id
+        }
+
+        pub(crate) fn tmux_session_name(&self) -> &str {
+            &self.tmux_session_name
+        }
+
+        /// The transcript the fixture's watcher handle is bound to, which is the
+        /// same file `transcript_liveness` stats.
+        pub(crate) fn transcript_path(&self) -> &std::path::Path {
+            &self.transcript_path
         }
     }
 }

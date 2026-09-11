@@ -802,6 +802,42 @@ async fn watcher_state_snapshot_for_shared(
     })
 }
 
+/// Wall-clock Unix seconds first observed by this process, used as the axis-B
+/// restart-boundary anchor when no [`HealthRegistry`] is in scope.
+///
+/// The watcher poll loop owns no registry — `SharedData` holds none — so an
+/// automatic destructive consumer running inside it cannot borrow
+/// `HealthRegistry::started_at_unix`. This anchor is first-touch, not true
+/// process start, and the skew only ever makes `transport_evidence` MISS a
+/// restart boundary, because that comparison is `first_observed < anchor`. A
+/// missed boundary is a weaker veto, never a manufactured one.
+#[cfg(unix)]
+static WARRANT_PROCESS_ANCHOR_UNIX: std::sync::LazyLock<i64> =
+    std::sync::LazyLock::new(|| chrono::Utc::now().timestamp());
+
+/// Compose the watcher-state snapshot an automatic destructive consumer needs
+/// when it already holds the owning runtime but no [`HealthRegistry`].
+///
+/// This is the same composer the three registry entry points call, so the
+/// reachability operand a warrant reads here is the one the health surface
+/// publishes; only the process anchor differs. `None` means the channel has no
+/// watcher state to judge at all, which the S6a warrant reads as an absent
+/// operand and abstains on rather than treating as approval.
+#[cfg(unix)]
+pub(in crate::services::discord) async fn watcher_state_snapshot_for_warrant(
+    provider: &ProviderKind,
+    shared: std::sync::Arc<SharedData>,
+    channel: ChannelId,
+) -> Option<WatcherStateSnapshot> {
+    watcher_state_snapshot_for_shared(
+        provider.as_str(),
+        shared,
+        channel,
+        *WARRANT_PROCESS_ANCHOR_UNIX,
+    )
+    .await
+}
+
 pub async fn active_request_owner_for_channel(
     registry: &HealthRegistry,
     channel_id: u64,

@@ -92,6 +92,130 @@ pub(crate) fn should_suppress_post_terminal_output_without_inflight(
         && !pending_synthetic_start_present
 }
 
+/// Non-unix builds have no reachability evidence source, so every warrant
+/// operand is absent: the warrant abstains and the structural disposal
+/// predicate alone decides. Absence of evidence never manufactures a veto, and
+/// never promotes a candidate the structural predicate already refused.
+#[cfg(not(unix))]
+pub(crate) async fn post_terminal_disposal_warrants(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    structural_eligible: bool,
+) -> bool {
+    let _ = (shared, provider, channel_id);
+    structural_eligible
+}
+
+/// #5464 T5 C2(c): bind the post-terminal disposal candidate to the S6a axis-B
+/// warrant — the same veto-only gate the eight automatic destructive consumers
+/// already carry.
+///
+/// [`should_suppress_post_terminal_output_without_inflight`] is a STRUCTURAL
+/// signal: it observes `terminal ∧ inflight-missing` and proposes discarding
+/// the bytes. What follows that proposal in `loop_poll_prologue` is
+/// destruction — the local frontier is consumed and the range is settled
+/// without transport, and neither is reversible. AC2-R forbids a structural
+/// signal from approving destruction on its own, so the predicate produces a
+/// CANDIDATE and this gate is where the ledger gets its refusal.
+///
+/// The warrant is monotone (it only preserves or lowers the candidate) and it
+/// abstains whenever an operand is missing, so a channel with no watcher state,
+/// no reachability ledger, or no episode nonce keeps today's behaviour instead
+/// of having absence-of-evidence read as approval.
+///
+/// The action is [`RelayRecoveryActionKind::DrainPendingQueue`] because that is
+/// what this disposal is: pending relay payload dropped without transport. Its
+/// row of the S6a truth table is exactly the one this arm needs — a live
+/// transport trace (`TransportUnknown`) DENIES the discard, an exact-episode
+/// mismatch DENIES it, and every other verdict passes or abstains.
+#[cfg(unix)]
+pub(crate) async fn post_terminal_disposal_warrants(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    structural_eligible: bool,
+) -> bool {
+    let structural_candidate_apply =
+        crate::services::discord::relay_recovery::structural_candidate_apply(structural_eligible);
+    if !structural_candidate_apply {
+        // Nothing is proposed, so there is nothing to warrant. The early return
+        // also keeps the snapshot composition off every poll pass that was not
+        // already about to destroy.
+        return false;
+    }
+    let snapshot = crate::services::discord::health::watcher_state_snapshot_for_warrant(
+        provider,
+        Arc::clone(shared),
+        channel_id,
+    )
+    .await;
+    let destructive_warrant_bind =
+        crate::services::discord::relay_recovery::destructive_warrant_bind(
+            structural_candidate_apply,
+            crate::services::discord::relay_recovery::RelayRecoveryActionKind::DrainPendingQueue,
+            provider,
+            snapshot.as_ref(),
+            false,
+        );
+    if let Some(reason) = destructive_warrant_bind.skipped_reason {
+        tracing::warn!(
+            channel_id = channel_id.get(),
+            provider = provider.as_str(),
+            skipped_reason = reason,
+            "watcher: post-terminal disposal refused by the axis-B warrant; bytes stay uncommitted"
+        );
+    }
+    destructive_warrant_bind.eligible
+}
+
+#[cfg(all(test, unix))]
+mod post_terminal_disposal_warrant_tests {
+    use super::*;
+
+    /// Veto-only, and monotone: a structural candidate that is already false can
+    /// never be promoted by the warrant. This is the direction AC2-R does NOT
+    /// care about but the warrant contract still owes — the gate may lower a
+    /// candidate, never raise one.
+    #[tokio::test]
+    async fn a_refused_structural_candidate_is_never_promoted() {
+        let temp = tempfile::tempdir().expect("warrant temp root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        assert!(
+            !post_terminal_disposal_warrants(
+                &shared,
+                &ProviderKind::Claude,
+                ChannelId::new(5_464_301),
+                false,
+            )
+            .await,
+            "the warrant may lower a candidate, never raise one"
+        );
+    }
+
+    /// Absent operands ABSTAIN. A channel the health surface can compose no
+    /// watcher state for keeps the structural disposition: absence of evidence
+    /// must not read as approval (the AC2-R violation) and must not read as a
+    /// veto either (which would strand every rowless channel's bytes forever).
+    #[tokio::test]
+    async fn an_absent_snapshot_operand_preserves_the_structural_candidate() {
+        let temp = tempfile::tempdir().expect("warrant temp root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        assert!(
+            post_terminal_disposal_warrants(
+                &shared,
+                &ProviderKind::Claude,
+                ChannelId::new(5_464_302),
+                true,
+            )
+            .await,
+            "a missing operand must preserve the structural judgement, not veto it"
+        );
+    }
+}
+
 #[cfg(test)]
 mod post_terminal_output_tests {
     use super::{

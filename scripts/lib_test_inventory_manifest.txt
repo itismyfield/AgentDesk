@@ -5553,6 +5553,7 @@ services::discord::tmux::tmux_watcher::liveness::tests::legacy_streaming_edit_sa
 services::discord::tmux::tmux_watcher::liveness::tests::rollover_skips_subagent_notification_then_sanitizes_edit_3818
 services::discord::tmux::tmux_watcher::liveness::tests::rollover_skips_tui_chrome_prefixed_subagent_notification_3818
 services::discord::tmux::tmux_watcher::loop_poll_prologue::post_terminal_disposal_tests::carry_forward_uses_proven_frontier_not_local_consumption
+services::discord::tmux::tmux_watcher::loop_poll_prologue::post_terminal_disposal_tests::post_terminal_disposal_needs_the_ledger_warrant_not_the_structural_signal
 services::discord::tmux::tmux_watcher::loop_poll_prologue::post_terminal_disposal_tests::suppressed_poll_keeps_shared_delivery_frontier
 services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppression_tests::completion_footer_tick_requires_registered_unfinished_target
 services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppression_tests::discord_origin_managed_turn_keeps_footer_3969
@@ -5851,6 +5852,8 @@ services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispa
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::live_turn_without_dispatch_keeps_its_inflight_row
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::real_dispatched_origin_ghost_is_consumed_after_the_probe
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::release_that_takes_no_session_row_reports_no_consumed_ghost
+services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_disposal_warrant_tests::a_refused_structural_candidate_is_never_promoted
+services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_disposal_warrant_tests::an_absent_snapshot_operand_preserves_the_structural_candidate
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::post_terminal_hard_result_after_committed_turn_requires_direct_input_evidence
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::post_terminal_output_with_actively_streaming_pane_is_not_suppressed
 services::discord::tmux::watcher_lifecycle::output_policy::post_terminal_output_tests::post_terminal_output_with_pending_synthetic_start_is_not_suppressed

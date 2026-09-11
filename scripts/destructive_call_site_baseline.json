@@ -135,6 +135,7 @@
         "src/services/discord/health/recovery/watchdog_decisions.rs": 1,
         "src/services/discord/relay_recovery.rs": 2,
         "src/services/discord/router/intake_gate/stale_turn.rs": 1,
+        "src/services/discord/watchers/lifecycle/output_policy.rs": 1,
         "src/services/stale_turn_reconciler.rs": 1
       }
     },
@@ -144,6 +145,7 @@
         "src/services/discord/health/recovery/watchdog_decisions.rs": 1,
         "src/services/discord/relay_recovery.rs": 2,
         "src/services/discord/router/intake_gate/stale_turn.rs": 1,
+        "src/services/discord/watchers/lifecycle/output_policy.rs": 1,
         "src/services/stale_turn_reconciler.rs": 1
       }
     }

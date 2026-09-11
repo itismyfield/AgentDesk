@@ -564,7 +564,13 @@ pub(super) async fn poll_watcher_output_or_continue(
             watcher_provider.as_str(),
             channel_id.get(),
         );
-    let post_terminal_no_inflight_should_suppress =
+    // #5464 T5 C2(c): the structural predicate now yields a CANDIDATE only. The
+    // arm below consumes the local frontier and settles the range without
+    // transport — irreversible disposal — and AC2-R forbids a structural signal
+    // from approving that alone, so the candidate must first clear the S6a
+    // axis-B warrant. The warrant is monotone and abstains on a missing
+    // operand, so this can only withhold a discard, never manufacture one.
+    let post_terminal_no_inflight_structural_candidate =
         should_suppress_post_terminal_output_without_inflight(
             turn_result_relayed,
             post_terminal_inflight_missing,
@@ -574,6 +580,13 @@ pub(super) async fn poll_watcher_output_or_continue(
             post_terminal_pane_actively_streaming,
             pending_synthetic_start_present,
         ) && !post_terminal_payload_allows_external_relay;
+    let post_terminal_no_inflight_should_suppress = post_terminal_disposal_warrants(
+        shared,
+        watcher_provider,
+        channel_id,
+        post_terminal_no_inflight_structural_candidate,
+    )
+    .await;
     if post_terminal_payload_allows_external_relay {
         tracing::info!(
             channel_id = channel_id.get(),
