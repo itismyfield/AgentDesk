@@ -615,13 +615,13 @@ pub async fn extend_watchdog_deadline(
     Ok(extension)
 }
 
-/// Read and consume the deadline override for a channel (if any).
+/// Consume a pending override only while this execution token still owns the mailbox.
 pub(super) async fn take_watchdog_deadline_override(
     channel_id: u64,
+    expected_token: &Arc<CancelToken>,
 ) -> Option<crate::services::turn_orchestrator::WatchdogDeadlineExtension> {
-    ChannelMailboxRegistry::global_handle(ChannelId::new(channel_id))?
-        .take_timeout_override()
-        .await
+    let handle = ChannelMailboxRegistry::global_handle(ChannelId::new(channel_id))?;
+    handle.take_timeout_override(expected_token.clone()).await
 }
 
 /// Remove the deadline override for a channel (on turn completion).
