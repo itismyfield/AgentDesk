@@ -6,7 +6,11 @@
 > 과도기를 넘겨 살아남지 않으므로, T6 진입 시 이 파일이 존재한다는 가정이
 > 성립해야 한다.
 >
-> Last refreshed: 2026-09-10 (against exact main d2dd9cbd4a0753410c6126765472823bc71ebd2f; landed source reconciled through PR #5851 and #5848; no claim of full T5 or live acceptance).
+> Last refreshed: 2026-09-11 (against exact main 2ce825830a3fa9c50629138f55582f4bbf6427f3;
+> landed source reconciled through PR #5862. 이번 refresh 는 `310f0809..2ce825830a` 전 구간을
+> 실제 diff 로 훑어 릴레이·inflight·배달 권위 표면 착지분을 아래 대응표에 반영했다.
+> 운영 rollout 은 2026-09-06 에 enforce/100 으로 전환·배포됐고, live acceptance 는 여전히
+> **미측정**이다 — 두 사실을 분리해 읽는다. T5 전체 완료 주장은 하지 않는다.)
 
 정본 계약: `design-t5-r3.md` §12-2. **T5의 각 구현 슬라이스는, 레거시 경로를 대체할 때마다 그 자리에서
 대체된 경로를 이 파일에 기록하고 코드에 deprecated 마킹을 남긴다.** 목적 이중:
@@ -18,24 +22,43 @@
 
 ---
 
-## 현재 판정과 T6 진입 경계 (2026-09-10)
+## 현재 판정과 T6 진입 경계 (2026-09-11)
 
 - **운영 dwell을 별도 대기 단계로 두지 않는다.** 전환 뒤 바로 T6의 철거 작업으로 이어 간다.
   다만 즉시 T6 착수는 모든 후보의 무조건 삭제 승인이나 T5 전체 완료 선언이 아니다.
 - 아래 S1–S6b는 당시 슬라이스의 대체 범위를 기록한 이력이다. “이 슬라이스에서 미구현”은
   최신 main 전체의 미구현 판정이 아니다. 후속 착지의 실제 범위는 아래 별도 대응표로 읽는다.
-- 100% 집행·rollback 종료처럼 각 후보가 요구하는 권위 전제는 유지한다. 기존 절의
-  live acceptance는 해당 경로의 배달·안전성 수용 증거를 뜻하며 추가 체류 시간을 요구하지 않는다.
-  이 문서 갱신은 라이브 설정·배포·fleet 상태를 측정하지 않았으므로 그 전제를 충족했다고 쓰지 않는다.
+- **rollout 과 live acceptance 는 별개 사실이다. 분리해 읽는다.**
+  - **rollout — 전환·배포 완료(2026-09-06).** `relay_authority_mode: enforce` +
+    `relay_authority_cohort_percent: 100` 으로 E05 → E25 → E50 → E100 단계 전환을 마치고
+    배포까지 끝냈다. 따라서 아래 각 절이 조건으로 걸어 둔 3전제 중 **"100% 집행"은 충족됐다.**
+    이 문장은 전환·배포가 일어났다는 사실만 기록하며, 그 결과가 좋았다는 판정이 아니다.
+  - **live acceptance — 미측정.** 수용 판정의 표본 수 N 과 합격 기준이 정의된 적이 없고,
+    전환 이후 그 기준으로 측정한 결과도 없다. **rollback 종료도 선언되지 않았다.** 따라서
+    "100% 집행 · live acceptance · rollback 종료" 3전제 중 충족된 것은 첫 항목 하나뿐이고,
+    아래 각 절의 조건부 좁은 철거 후보는 **여전히 열리지 않았다.**
+  - 기존 절의 live acceptance는 해당 경로의 배달·안전성 수용 증거를 뜻하며 추가 체류 시간을
+    요구하지 않는다. 이 문서 갱신 자체는 라이브 설정·fleet 상태를 재측정하지 않았다 —
+    위 rollout 사실은 2026-09-06 전환 기록에 근거하며, 현재 시점의 라이브 설정 재확인은
+    이 갱신의 범위가 아니다.
 - source에서 제거가 확인된 구 경로를 다시 철거 후보로 세지 않는다. 남은 호환 코드와
   영구 authority guard를 구분하고, 후보별 선행 증거가 없는 항목만 보류한다.
 
-### 후속 착지 대응표 — 관측·완료 신호·receipt (T5 전체 대체 아님)
+### 후속 착지 대응표 — captured-episode 권위·operator lease·관측·완료 신호·receipt (T5 전체 대체 아님)
 
-표의 source 경로는 `src/services/` 기준이다.
+표의 source 경로는 `src/services/` 기준이다. 행은 착지 순서다. 판별 범위는
+`310f0809..2ce825830a` 전 구간이며, 제목이 아니라 각 커밋의 실제 diff 로 릴레이·inflight·배달
+권위 표면 접촉 여부를 판정했다. 자기 슬라이스가 아직 열려 있는 착지는 그 레인의 기록을 따르며
+이 표가 완료로 승격하지 않는다.
 
 | 착지 | 확인한 source / 바뀐 범위 | T6 처분·남은 경계 |
 |---|---|---|
+| #5761 `09356860fd` (#5755 C2(b)) | `discord/tui_prompt_relay/rehydration.rs` 의 `rehydrate_codex_tui_binding_transaction`. 같은 per-source authority lock 안에서 rollout marker 를 재판정해, 경로·`session_id`·relay namespace 가 모두 같으면 `None`(이번 회차 복구 없음)을 반환한다. dedupe 채널 등록은 소유 채널이 실제로 다를 때만 수행하고, namespace 가 바뀐 경우에만 `last_offset` 을 이월해 새 바인딩을 설치한다. | **대체한 레거시 경로:** 변화 없는 유효 바인딩에도 매 주기 `Some((existing, false))` 를 반환해 성공 로그와 dedupe 채널 재등록을 반복하던 경로. **영구 보존:** 실제 marker 교체·namespace 복구 허용, 동일 source 의 cursor·active inflight 정체성 보존, stale/foreign/duplicate marker 가 유효 바인딩을 교체하지 못하는 잠금. no-op 판정은 호환 우회가 아니라 영구 경계이므로 T6 철거 대상이 아니다. 이 착지는 #5755 의 C2(b) 로컬 수리이며 운영 AC2/AC3 확인은 남아 있다. 행 소실(`Missing`)의 원인 규명이나 배달 증명이 아니다 — **미측정.** |
+| #5764 `34869ea957` (#5754 A0) | `discord/turn_finalizer/episode.rs` 신설(+134). `TerminalEvidence` 가 캡처 여부·turn nonce·선택적 `SyntheticClaimSnapshot` 을 finalizer actor 메시지까지 운반한다. `relay_recovery/idle_tmux.rs`·`tmux_reaper.rs`·`tui_direct_pending_start.rs`·`tui_prompt_relay/session_rotation_settle.rs`·`synthetic_start/stale_reclaim.rs` 의 제출부가 `submit_terminal_with_claim_snapshot` / `submit_terminal_with_episode_nonce` 로 바뀌었고, row 가 없는 복구 경로도 snapshot 을 만들어내지 않고 원래 관측한 episode 를 전달한다. | **대체한 레거시 경로:** 관측된 legacy `None` 과 미캡처 상태를 구분하지 못한 채 terminal 을 제출하던 경로. **영구 보존:** 캡처 여부와 legacy `None` 의 구분, 복구 경로의 snapshot 날조 금지. 이 착지는 capture/transport 단계이며 terminal admission·finalize **정책은 바꾸지 않았다**. 캡처 nonce 를 쓰는 권위 판단(#5767)과 운영자 release 표면(#5773/#5774)은 이 착지 밖이다. |
+| #5768 `33a43d2a54` · #5769 `b0a508c94e` · #5771 `e0f2b18135` (#5767 선행) | #5768 은 recovery fixture 의 captured episode 정합성만 고친 테스트 변경이다. #5769 는 `discord/inflight/clear_store/identity.rs` 에 `clear_inflight_state_for_captured_episode` 를 신설해, 기존 full row identity + restart/rebind 검사에 더해 정규화된 nonce 의 **존재와 값 일치**를 추가로 요구한다(같은 file lock 안). #5771 은 claim preparation 을 `tui_prompt_relay/synthetic_start/claim.rs` 로 옮긴 동작 보존 추출이다. | **대체한 레거시 경로: 세 건 모두 없음(순수 추가·테스트·이동).** 기존 ordinary/reconcile clear API 의 nonce 호환성은 그대로 존치한다. #5769 는 착지 시점 프로덕션 호출자 **0** 이고 `TurnKey` 의존도 도입하지 않았다. **영구 보존:** strict API 와 기존 관대 API 의 분리 자체. 세 건 중 어느 것도 권위 전환이 아니며 #5767 의 선행 조건일 뿐이다. |
+| #5767 `27e00aec61` (#5754 권위) | `tmux_watcher.rs` 의 `terminal_projection_settled_turn_id`(u64) 가 `terminal_projection_settled_key`(`TurnKey`)로 바뀌어 채널+turn 쌍으로 식별된다. `tmux_watcher/completion_producer.rs` 의 `release_restored_watcher_active_turn_before_panel_edit` 는 `claim_normal_episode` 로 캡처한 episode 에만 release·mailbox finish·cleanup 을 적용한다. `turn_finalizer/episode.rs`(+384)·`finalize.rs`·`terminal_handler.rs`·`cleanup.rs`·`completion_admission_actor.rs`·`turn_bridge/post_loop_finalize.rs` 가 같은 범위로 좁혀졌고, deferred Start 는 recap/save 전에 검증된 admitted nonce 에 결속된다. | **대체한 레거시 경로:** 캡처된 terminal A 가 채널 키만으로 후임 B 의 행·mailbox·admission 을 해제하거나 변조할 수 있던 경로. **영구 보존:** 후임 token/counter/queue/negative-evidence fence, mailbox identity CAS miss 때의 유효 owned-row 복구, 캡처된 tokenless·no-mailbox 메타데이터 finalize 가 foreign episode 를 취소하지 않는 동작. **S4 절의 S3 종료 소유권 fence 와 같은 권위 표면이므로 T6 철거 대상이 아니다.** 이 착지는 #5754 전체를 닫지 않으며 배포를 승인하지 않는다. |
+| #5773 `c416dea456` → #5774 `90c8d520cd` (#5754 요구 4) | #5773 은 `discord/turn_lease.rs` 를 신설하고 `TerminalEvent::OperatorRelease` variant 를 추가한다. 관측된 runtime/generation/message/nonce/start 신원이 **정확히** 일치할 때만 inspect·release 하며, actor CAS 재수행과 strict owned-row cleanup 을 반복하되 provider 프로세스·컨텍스트는 보존하고 취소 플래그를 세우지 않는다. `CompletionAdmission` 에 `operator_released` 를 추가해 `mailbox_released && operator_released` 일 때만 barrier 를 우회한다. #5774 는 `cli/turn_lease.rs`·`server/routes/turn_lease.rs`·`turn_lease/registry.rs` 로 `agentdesk turn-lease inspect\|release` CLI 와 보호 ops 라우트 GET `/api/turn-lease/{provider}/{channel_id}` · POST `/api/turn-lease/release` 를 노출한다. | **대체한 레거시 경로: 없음(순수 추가).** 기존 파괴적 복구 경로를 제거하지 않고 운영자에게 비파괴 대안을 **추가**한다. **영구 보존:** 정확 신원 일치 요구, 큐 payload·순서와 통상 dispatch claim 보존, 그리고 **운영자 허가가 후임의 부정적 배달 증거를 자격으로 바꾸지 못하게 하는 분리**(`OperatorRelease` 는 terminal status panel reconcile 을 발행하지 않는다). registry 는 모호한 provider/channel 소유를 거부한다. `OperatorRelease` 는 **provider 출력이 배달됐다는 증거가 아니다.** cold-start 완료 신호 유실·자동 stall reconcile·실제 운영 수용은 이 착지 밖 — **미측정.** |
+| #5807 `97ba5c0227` (#5755 C0) | `claude_tui/hook_bundle.rs` 의 `CLAUDE_HOOK_EVENTS` 에 `PreCompact`·`PostCompact` 2건을 `PostToolUse` 뒤에 등록(Claude 이벤트 9개, matcher 없이 manual·auto 양쪽 수용). Codex 등록은 불변. | **대체한 레거시 경로: 없음(순수 추가).** 배달 권위·다이얼·cohort 를 바꾸지 않는다. **영구 보존:** 두 이벤트 등록 자체와 `HookEventKind` 왕복. #5755 의 C0 만 닫으며 이슈 전체를 닫지 않는다. compaction 이벤트 수신이 실제 compaction 구간의 릴레이 손실을 막는지는 이 착지가 보이지 않는다 — **미측정.** |
 | #5810 `ff2f2001c6` → #5851 `f325319527` (#5808) | `cluster/stream_relay/shutdown.rs`의 `shutdown_with_result`가 `Joined`/`NoTask`/`JoinError`를 보존한다. `cluster/watcher_supervisor.rs`의 `observe_relay_shutdown`은 기존 네 shutdown 지점(boot, registry change, lagged reconcile, final drain)에서 결과를 관측한다. | 결과를 버리는 호환 `shutdown` 래퍼는 잔여 호출자·공개 API 호환 확인 뒤에만 좁은 후보다. queue close·admission 차단·join 대기는 보존한다. `Joined`는 배달 ACK나 detached 작업 완료 증명이 아니다. observer 착지는 owner/admission 전환이 아니다. |
 | #5841 `5bd3415321` → #5844 `eaa88ed654` (#5833 S2/S3) | `discord/turn_bridge/context.rs`의 `BridgeCompletionSignal`이 `Finalized`와 `EntryAborted`를 구분한다. `discord/tui_prompt_relay/claude_idle_bridge.rs`의 공통 완료 처리는 abort/수신 오류를 실패로 반환하고, Claude/Codex tail의 delivery-failure broad Cancel은 이미 제거됐다. | 제거된 Cancel은 재철거 대상이 아니다. typed abort 분기와 후임 durable 참조 placeholder 보존은 안전 경계다. `Finalized` 자체는 내구 배달 증명이 아니며 S3의 episode-bound witness 후속 전체를 완료시킨 것으로 세지 않는다. |
 | #5848 `d2dd9cbd4a` (#5845 D1a2) | `claude_tui/hook_server/relay_receipts.rs`의 `RelayReceiptLedger::begin`은 신규 managed 요청의 freshness를 삽입 전에 검사한다. 같은 pin의 InFlight는 유효 기간 중 425, 만료 후 410을 반환하며 Fresh로 재발급하지 않는다. pin 충돌 409와 terminal 응답 재사용은 유지된다. | freshness·pin 충돌·중복 인가 차단은 영구 보존한다. Legacy 요청, 기존 2시간 pruning, terminal 캐시는 존치하며 이 착지가 cardinality cap·tombstone·quarantine 또는 source/reader/owner 전환을 구현한 것은 아니다. |
@@ -92,6 +115,8 @@ S1 지분은 다음과 같고, **T6 철거 대상이 아니라 S9 회수 대상*
 - health detail `relay_authority_rollout` 발행 스캐폴딩 2곳
 
 회수 진입 조건은 S9의 것과 동일하다 — cohort 100% 승격이 확정되고 롤백 계획이 닫힌 뒤.
+cohort 100% 승격은 2026-09-06 enforce/100 전환으로 확정됐고, **롤백 계획 종료는 아직
+선언되지 않았다.** 두 조건 중 하나만 충족됐으므로 회수는 열리지 않았다.
 
 ---
 
@@ -393,8 +418,9 @@ r3까지의 작업 브랜치는 리뷰 캡 3라운드를 소진했고, r3c dual 
 
 §6.1 **S9** 행이 `authority_observation.rs` 전량을 −230 prod 회수 후보로 이미 예약하고 있다.
 S2 지분은 그 파일 전체 + 두 health 발행 지점 + 기록 3지점이며, **회수 진입 조건은 S1과 동일**하다 —
-cohort 100% 승격이 확정되고 롤백 계획이 닫힌 뒤. deprecated 마킹은 하지 않는다(롤아웃이 끝날
-때까지 유효한 권위다).
+cohort 100% 승격이 확정되고 롤백 계획이 닫힌 뒤. S1 절과 같은 이유로 100% 승격만 충족됐고
+롤백 계획 종료는 미선언이므로 회수는 열리지 않았다. deprecated 마킹은 하지 않는다(롤아웃이
+끝날 때까지 유효한 권위다).
 
 추가로 T6가 아니라 **운영**에 남는 항목 1건: JSONL 이벤트 로그에 **보존 정책이 없다**(설계 §5.4,
 §8 L-8). 승격 판정에 ≥7일 window가 필요하므로 파일이 남아야 하고, 그 이상은 무한 누적이다.
