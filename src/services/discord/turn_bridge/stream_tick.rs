@@ -1115,17 +1115,17 @@ pub(super) async fn run_bridge_stream_tick(
 }
 
 #[cfg(test)]
-mod provider_output_guard_tests {
+pub(super) mod provider_output_guard_tests {
     use super::*;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::GatewayFuture;
     use std::sync::Mutex;
 
     #[derive(Default)]
-    pub(super) struct CapturingGateway {
-        pub(super) sends: Mutex<Vec<String>>,
-        pub(super) edits: Mutex<Vec<String>>,
-        pub(super) deletes: Mutex<Vec<u64>>,
+    pub(in crate::services::discord::turn_bridge) struct CapturingGateway {
+        pub(in crate::services::discord::turn_bridge) sends: Mutex<Vec<String>>,
+        pub(in crate::services::discord::turn_bridge) edits: Mutex<Vec<String>>,
+        pub(in crate::services::discord::turn_bridge) deletes: Mutex<Vec<u64>>,
     }
 
     impl TurnGateway for CapturingGateway {

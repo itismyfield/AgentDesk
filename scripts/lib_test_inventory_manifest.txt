@@ -6327,6 +6327,8 @@ services::discord::tui_task_card::tests::parses_tool_use_id_and_derives_kind_fro
 services::discord::tui_task_card::tests::single_subagent_completion_card_previews_not_dumps
 services::discord::tui_task_card::tests::task_card_clamps_many_short_headings_under_discord_limit
 services::discord::tui_task_card::tests::task_card_footer_snapshot_uses_elapsed_icon_and_omits_tokens_4822
+services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals
+services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder
 services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failure_gate_precedes_emit_stream_and_finalize
 services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failure_outcomes_abort_without_arming_cleanup
 services::discord::turn_bridge::bridge_entry_persist::tests::cancelled_watcher_is_unavailable_and_not_pinned_during_reconcile
@@ -6341,6 +6343,7 @@ services::discord::turn_bridge::bridge_entry_persist::tests::saved_competing_bin
 services::discord::turn_bridge::bridge_entry_persist::tests::saved_exit_reconcile_preserves_first_pin_across_registry_replacement
 services::discord::turn_bridge::bridge_entry_persist::tests::saved_reconciliation_preserves_existing_anchor_edit_cache
 services::discord::turn_bridge::bridge_entry_persist::tests::stream_authority_loss_relinquishes_guards_before_visible_finalization
+services::discord::turn_bridge::bridge_entry_persist::tests::the_shipped_dial_admits_no_channel_to_the_entry_rowless_cohort
 services::discord::turn_bridge::bridge_latency_spans::tests::empty_span_renders_all_dashes
 services::discord::turn_bridge::bridge_latency_spans::tests::first_output_never_post_dates_first_relay_when_marked_in_order
 services::discord::turn_bridge::bridge_latency_spans::tests::fresh_span_has_only_the_anchor
