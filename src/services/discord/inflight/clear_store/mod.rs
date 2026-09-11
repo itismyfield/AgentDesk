@@ -645,9 +645,7 @@ pub(super) fn clear_inflight_state_if_matches_identity_after_delivery_in_root(
     if state.rebind_origin {
         return (GuardedClearOutcome::RebindOriginSkipped, false);
     }
-    // #5464 B3: was an inline `expected.user_msg_id == 0`. Same judgment, now
-    // read from the one predicate every clear/release guard shares.
-    if !expected.is_resolved() || !expected.matches_state(&state) {
+    if expected.user_msg_id == 0 || !expected.matches_state(&state) {
         return (GuardedClearOutcome::UserMsgMismatch, false);
     }
     if let Some(expected_offset) = expected_turn_start_offset {

@@ -30,29 +30,26 @@ impl InflightTurnIdentity {
             && self.turn_start_offset == state.turn_start_offset
     }
 
-    /// #5464 B3 — the single "has this turn's dispatch resolved?" judgment.
+    /// #5464 B3 — does this identity fail to name ANY single turn?
     ///
-    /// `user_msg_id == 0` means dispatch has not anchored this turn to a Discord
-    /// user message yet. [`Self::matches_state`] then folds such an identity onto
-    /// ANY id-0 row of the channel on its first axis (`0 == 0`), and a caller
-    /// that built the expected identity from a row it just read supplies the
-    /// remaining three axes from that same read — so the 4-axis guard collapses
-    /// into "the bytes I read are still on disk", which proves recency, not
-    /// ownership. A mid-turn clear that accepts it deletes the LIVE row and the
-    /// terminal that follows is suppressed as `no_inflight_row`.
+    /// `matches_state` compares four axes, and exactly one of them degenerates:
+    /// `user_msg_id == 0` matches every other id-0 row. The repo's answer to
+    /// that is NOT "refuse id-0" — #3161 established that an id-0 turn must
+    /// still clean up its own row, via the dedicated
+    /// `clear_inflight_state_if_matches_zero_owned` path, and `turn_start_offset`
+    /// was introduced (see the struct doc above) precisely to disambiguate two
+    /// consecutive id-0 TUI-direct turns whose `started_at` collides at
+    /// `now_string`'s 1-second resolution.
     ///
-    /// Kept as one function because the same judgment is made in four places —
-    /// the finalizer's mailbox-release guard, the finalizer's inflight-clear
-    /// guard, the identity-clear chokepoint and the after-delivery clear. Two
-    /// shapes of one test drift the moment a later fix touches only one of them.
-    pub(in crate::services::discord) fn is_resolved(&self) -> bool {
-        Self::user_msg_id_is_resolved(self.user_msg_id)
-    }
-
-    /// Field-level form of [`Self::is_resolved`], for the guards that hold a
-    /// bare turn id (the finalizer's `TurnKey`) instead of a built identity.
-    pub(in crate::services::discord) fn user_msg_id_is_resolved(user_msg_id: u64) -> bool {
-        user_msg_id != 0
+    /// So the unnameable shape is the CONJUNCTION `user_msg_id == 0 &&
+    /// turn_start_offset.is_none()` — an id-0 row with no disambiguator left.
+    /// That is the same conjunction every save_store identity gate already uses
+    /// (`identity_gate.rs`, `stream_loop_patch.rs`, `bridge_entry.rs`,
+    /// `runtime_stamp.rs`, `heartbeat.rs`). An id-0 row that still carries its
+    /// offset is nameable and keeps clearing normally, which is what the
+    /// watcher terminal-commit, TUI-direct and stall-exit paths rely on.
+    pub(in crate::services::discord) fn is_unnameable(&self) -> bool {
+        self.user_msg_id == 0 && self.turn_start_offset.is_none()
     }
 }
 
@@ -60,27 +57,24 @@ impl InflightTurnIdentity {
 mod tests {
     use super::*;
 
-    fn identity(user_msg_id: u64) -> InflightTurnIdentity {
+    fn identity(user_msg_id: u64, turn_start_offset: Option<u64>) -> InflightTurnIdentity {
         InflightTurnIdentity {
             user_msg_id,
             started_at: "2026-09-11T00:00:00Z".into(),
             tmux_session_name: Some("tui-direct".into()),
-            turn_start_offset: Some(10),
+            turn_start_offset,
         }
     }
 
     #[test]
-    fn unresolved_dispatch_identity_is_never_reported_resolved_5464() {
-        // An id-0 turn stays unresolved even when every other axis is populated:
-        // the disambiguators order two id-0 turns, they do not anchor either one.
-        assert!(!identity(0).is_resolved());
-        assert!(!InflightTurnIdentity::user_msg_id_is_resolved(0));
-        assert!(identity(7).is_resolved());
-        assert!(InflightTurnIdentity::user_msg_id_is_resolved(7));
-        // Both shapes are the same judgment; a guard may use either.
-        assert_eq!(
-            identity(0).is_resolved(),
-            InflightTurnIdentity::user_msg_id_is_resolved(0)
-        );
+    fn only_an_id_zero_row_without_a_disambiguator_is_unnameable_5464() {
+        // The unnameable shape is the conjunction, not id-0 alone.
+        assert!(identity(0, None).is_unnameable());
+        // An id-0 turn that kept its offset still names itself — #3161's
+        // self-cleanup paths depend on this staying false.
+        assert!(!identity(0, Some(10)).is_unnameable());
+        // A real Discord anchor is always nameable, offset or not.
+        assert!(!identity(7, None).is_unnameable());
+        assert!(!identity(7, Some(10)).is_unnameable());
     }
 }

@@ -52,15 +52,20 @@ fn guarded_identity_clear_outcome(
     if state.rebind_origin {
         return GuardedClearOutcome::RebindOriginSkipped;
     }
-    // #5464 B3 — an UNRESOLVED identity is never a match. `matches_state` folds
-    // `user_msg_id == 0` onto any id-0 row (`0 == 0`), so a caller holding an
-    // identity whose dispatch had not resolved could clear the channel's LIVE
-    // row mid-turn; the terminal that followed was then suppressed as
-    // `no_inflight_row`. Same judgment the after-delivery clear and the
-    // finalizer's mailbox-release guard already make — `is_resolved` is the one
-    // shape all four read. This does NOT relax exact-episode fencing: the nonce,
-    // generation and 4-axis checks below still run for resolved identities.
-    if !expected.is_resolved() {
+    // #5464 B3 — an UNNAMEABLE identity is never a match. When `user_msg_id` is
+    // 0 AND the `turn_start_offset` disambiguator is gone, `matches_state` has
+    // no axis left that distinguishes two id-0 turns of the same channel: it
+    // folds one turn's identity onto another turn's row, and the clear deletes
+    // a LIVE row mid-turn, after which that turn's terminal is suppressed as
+    // `no_inflight_row`.
+    //
+    // Deliberately NOT a blanket id-0 refusal: #3161 established that an id-0
+    // turn must still clean up its OWN row (the dedicated
+    // `clear_inflight_state_if_matches_zero_owned` path), and the watcher
+    // terminal-commit, TUI-direct and stall-exit paths all clear id-0 rows that
+    // still carry their offset. Only the conjunction is refused — the same
+    // shape every save_store identity gate uses.
+    if expected.is_unnameable() {
         return GuardedClearOutcome::UserMsgMismatch;
     }
     if !expected.matches_state(state) || !turn_nonce_matches(expected_turn_nonce, state) {
@@ -264,7 +269,6 @@ fn clear_rebind_origin_inflight_state_if_matches_identity_impl_in_root(
     let outcome = if state.restart_mode.is_some() {
         GuardedClearOutcome::PlannedRestartSkipped
     } else if !state.rebind_origin
-        || !expected.is_resolved()
         || !expected.matches_state(&state)
         || !turn_nonce_matches(expected_turn_nonce, &state)
     {
@@ -552,26 +556,34 @@ mod tests {
         }
     }
 
-    /// #5464 B3 closing test. A row whose dispatch has NOT resolved
-    /// (`user_msg_id == 0`, ledger identity carried by `finalizer_turn_id`) is
-    /// live: the turn is running, the Discord anchor just is not known yet.
-    /// Before the `is_resolved` guard every clear below folded the expected
-    /// identity onto it on `0 == 0` — the remaining three axes come from the
-    /// same row — and deleted it MID-TURN, after which the turn's terminal was
-    /// suppressed as `no_inflight_row` (the C1 loss, reached from upstream).
+    /// #5464 B3 closing test. An UNNAMEABLE row — `user_msg_id == 0` with its
+    /// `turn_start_offset` disambiguator gone — is live: the turn is running,
+    /// but nothing in the identity distinguishes it from another id-0 turn of
+    /// the same channel. Before the guard, one turn's identity folded onto a
+    /// DIFFERENT turn's row and the clear deleted it mid-turn, after which that
+    /// turn's terminal was suppressed as `no_inflight_row`.
     #[test]
-    fn unresolved_identity_row_is_never_matched_by_a_mid_turn_clear_5464() {
+    fn unnameable_identity_never_matches_a_foreign_row_mid_turn_5464() {
         let fixture = Fixture::new();
-        let mut row = fixture.row.clone();
-        row.user_msg_id = 0;
-        let identity = InflightTurnIdentity::from_state(&row);
+
+        // Two genuinely different turns. They differ in `turn_nonce` and
+        // `user_text`, neither of which `InflightTurnIdentity` carries.
+        let mut turn_a = fixture.row.clone();
+        turn_a.user_msg_id = 0;
+        turn_a.turn_start_offset = None;
+        turn_a.turn_nonce = Some("episode-a".into());
+
+        let mut turn_b = turn_a.clone();
+        turn_b.turn_nonce = Some("episode-b".into());
+        turn_b.user_text = "a later, still-running turn".into();
+
+        let identity_a = InflightTurnIdentity::from_state(&turn_a);
+        assert!(identity_a.is_unnameable());
+        // The real degeneracy: turn A's identity folds onto turn B's row. This
+        // is a CROSS-turn comparison, not a row against itself.
         assert!(
-            !identity.is_resolved(),
-            "an id-0 dispatch is unresolved however many disambiguators it carries"
-        );
-        assert!(
-            identity.matches_state(&row),
-            "the 4-axis compare still folds it — that is exactly what the guard must gate"
+            identity_a.matches_state(&turn_b),
+            "all four axes collapse once the id is 0 and the offset is gone"
         );
 
         for site in [
@@ -581,47 +593,48 @@ mod tests {
             "captured_episode",
             "reconcile",
         ] {
-            let bytes = fixture.seed(&row);
+            // Turn B's row is on disk; turn A tries to clear with its identity.
+            let bytes = fixture.seed(&turn_b);
             let outcome = match site {
                 "identity" => clear_inflight_state_if_matches_identity_in_root(
                     &fixture.root,
                     &ProviderKind::Claude,
-                    row.channel_id,
-                    &identity,
+                    turn_b.channel_id,
+                    &identity_a,
                 ),
                 "identity_turn_nonce" => {
                     clear_inflight_state_if_matches_identity_turn_nonce_in_root(
                         &fixture.root,
                         &ProviderKind::Claude,
-                        row.channel_id,
-                        &identity,
-                        Some("episode-a"),
+                        turn_b.channel_id,
+                        &identity_a,
+                        None,
                     )
                 }
                 "returning_row" => {
                     clear_inflight_state_if_matches_identity_returning_row_in_root(
                         &fixture.root,
                         &ProviderKind::Claude,
-                        row.channel_id,
-                        &identity,
+                        turn_b.channel_id,
+                        &identity_a,
                     )
                     .0
                 }
                 "captured_episode" => {
                     crate::services::discord::inflight::clear_inflight_state_for_captured_episode(
                         &ProviderKind::Claude,
-                        row.channel_id,
-                        &identity,
-                        Some("episode-a"),
+                        turn_b.channel_id,
+                        &identity_a,
+                        None,
                     )
                 }
                 "reconcile" => {
                     match clear_inflight_state_if_matches_identity_turn_nonce_for_reconcile_in_root(
                         &fixture.root,
                         &ProviderKind::Claude,
-                        row.channel_id,
-                        &identity,
-                        Some("episode-a"),
+                        turn_b.channel_id,
+                        &identity_a,
+                        None,
                         10,
                     ) {
                         ReconcileClearOutcome::Delegated(outcome) => outcome,
@@ -633,30 +646,30 @@ mod tests {
             assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch, "{site}");
             fixture.assert_preserved(&bytes);
         }
+    }
 
-        // The rebind-origin clear keeps its own inline condition; it reads the
-        // same judgment, so an unresolved rebind row survives too.
-        let mut rebind = row.clone();
-        rebind.rebind_origin = true;
-        let rebind_identity = InflightTurnIdentity::from_state(&rebind);
-        let bytes = fixture.seed(&rebind);
+    /// Narrowness control for #5464 B3. The guard closes ONLY the unnameable
+    /// conjunction. An id-0 row that still carries its `turn_start_offset` is
+    /// nameable and must keep clearing — #3161's "an id-0 turn still cleans up
+    /// its own row", which the watcher terminal-commit, TUI-direct synthetic
+    /// and stall-exit paths all depend on.
+    #[test]
+    fn id_zero_row_that_kept_its_offset_still_clears_5464() {
+        let fixture = Fixture::new();
+        let mut row = fixture.row.clone();
+        row.user_msg_id = 0;
+        row.turn_start_offset = Some(10);
+        let identity = InflightTurnIdentity::from_state(&row);
+        assert!(!identity.is_unnameable());
+
+        fixture.seed(&row);
         assert_eq!(
-            clear_rebind_origin_inflight_state_if_matches_identity_in_root(
+            clear_inflight_state_if_matches_identity_in_root(
                 &fixture.root,
                 &ProviderKind::Claude,
-                rebind.channel_id,
-                &rebind_identity,
-                Some("episode-a"),
+                row.channel_id,
+                &identity,
             ),
-            GuardedClearOutcome::UserMsgMismatch
-        );
-        fixture.assert_preserved(&bytes);
-
-        // Narrowness control: the guard closes ONLY the unresolved fold. The
-        // same row with its dispatch resolved still clears on an exact episode.
-        fixture.seed(&fixture.row);
-        assert_eq!(
-            fixture.captured_clear(Some("episode-a")),
             GuardedClearOutcome::Cleared
         );
         assert!(!fixture.path.exists());

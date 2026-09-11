@@ -43,11 +43,7 @@ pub(in crate::services::discord) async fn claim_normal_episode(
         Some(mailbox) => Some(mailbox.snapshot().await),
         None => None,
     };
-    // Mailbox-release guard: an unresolved turn never releases the channel's
-    // token. `TurnKey` carries no disambiguator, so an id-0 key is unresolved by
-    // construction (#5464 B3 reads this through the shared identity predicate so
-    // it cannot drift away from the inflight-clear guard below).
-    if !super::super::inflight::InflightTurnIdentity::user_msg_id_is_resolved(key.user_msg_id)
+    if key.user_msg_id == 0
         || observed.as_ref().is_some_and(|snapshot| {
             snapshot.cancel_token.is_some()
                 && !key.matches_episode_nonce(snapshot.active_turn_nonce.as_deref())
@@ -83,19 +79,7 @@ pub(in crate::services::discord) async fn claim_normal_episode(
     // Only the separately gated reconciler may release that residual anchor.
     // Row cleanup is independently authorized by the captured row identity;
     // the lock-held recheck still preserves any successor that replaced it.
-    // Inflight-clear guard: the SAME resolved-identity judgment as the mailbox
-    // release above (#5464 B3). The row is selected by `effective_finalizer_turn_id`,
-    // which synthesizes a non-zero id for a row whose raw `user_msg_id` is still
-    // 0 — so this site could hand the clear store an identity that matched any
-    // id-0 row on `0 == 0` and delete the live row mid-turn, suppressing the
-    // following terminal as `no_inflight_row`. The clear store fails the same
-    // way closed; keeping both of the finalizer's guards in one shape is what
-    // stops a later fix from moving only one of them.
-    if clear_inflight
-        && let Some(row) = row.as_ref().filter(|row| {
-            super::super::inflight::InflightTurnIdentity::from_state(row).is_resolved()
-        })
-    {
+    if clear_inflight && let Some(row) = row.as_ref() {
         let _ = super::super::inflight::clear_inflight_state_for_captured_episode(
             provider,
             key.channel_id.get(),
