@@ -45,6 +45,8 @@ WAIT_TIMEOUT_ENV = "ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS"
 # build log (build-release.sh runs cargo through `tail -1`). Absent: stderr.
 DIAG_FD_ENV = "ADK_BUILD_TOKEN_DIAG_FD"
 LEASE_ENV = "ADK_BUILD_TOKEN_LEASE"
+SCCACHE_OPT_OUT_ENV = "ADK_BUILD_TOKEN_SCCACHE"
+_HOMEBREW_BIN = "/opt/homebrew/bin"
 DEFAULT_WAIT_TIMEOUT_SECS = 14400.0
 WAIT_POLL_SECS = 0.5
 WAIT_NOTICE_SECS = 300.0
@@ -355,6 +357,37 @@ def run_protected(command: Sequence[str], env: Mapping[str, str], supervisor: _S
             child.wait()
 
 
+# sccache opt-in mirroring `setup_sccache_env` at scripts/_defaults.sh:25, the shell
+# source of truth build-release.sh and deploy-release.sh call. RUSTC_WRAPPER is the
+# only switch (.cargo/config.toml ships `rustc-wrapper = ""`), and a shell export of
+# it dies with the batch; campaign cargo reaches cargo only through here. The probe
+# and the $HOME/.cache/sccache and 10G defaults are copied from that function -- no
+# shared implementation exists -- so change both. An existing RUSTC_WRAPPER stands,
+# "" included, that being Cargo's own "no wrapper"; run() applies this on POSIX only.
+def apply_sccache_env(env: dict[str, str]) -> None:
+    """Enable sccache for the child when resolvable; otherwise change nothing."""
+    if "RUSTC_WRAPPER" in env or env.get(SCCACHE_OPT_OUT_ENV, "").strip() == "0":
+        return
+    path = env.get("PATH", os.defpath)
+    if _HOMEBREW_BIN not in path.split(os.pathsep) and os.access(
+            os.path.join(_HOMEBREW_BIN, "sccache"), os.X_OK):
+        path = _HOMEBREW_BIN + os.pathsep + path
+    sccache = shutil.which("sccache", path=path)
+    if sccache is None:
+        return  # No sccache: not one variable moves, PATH included.
+    # Unset, sccache picks a per-platform dir and stops sharing hits with releases.
+    cache_dir = env.get("SCCACHE_DIR") or os.path.join(
+        env.get("HOME") or os.path.expanduser("~"), ".cache", "sccache")
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError:
+        return  # An unusable cache directory costs the cache, never the build.
+    env["PATH"] = path
+    env["SCCACHE_DIR"] = cache_dir
+    env["SCCACHE_CACHE_SIZE"] = env.get("SCCACHE_CACHE_SIZE") or "10G"
+    env["RUSTC_WRAPPER"] = sccache
+
+
 def run(command: Sequence[str], env: Mapping[str, str] | None = None,
         path: str = CANONICAL_TOKEN_PATH, *, delegate_lease: bool = False) -> int:
     """Run `command` while holding the build token at `path`."""
@@ -371,6 +404,7 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
         except BuildTokenWindowsError as exc:
             print(f"build token: {exc}", file=sys.stderr)
             return EXIT_TOKEN_UNUSABLE
+    apply_sccache_env(child_env)
     with _supervised() as supervisor:
         try:
             lease = inherited_lease(carrier, path) if carrier is not None else hold_token(path, child_env)

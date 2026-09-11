@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import fcntl
 import contextlib
+import json
 import functools
 import os
 import signal
@@ -761,6 +762,61 @@ class CliTests(TokenTestCase):
         out, err = proc.communicate(timeout=60)
         self.assertEqual(proc.returncode, 7, err)
         self.assertNotIn("fixture breach", err)
+
+
+class SccacheEnvTests(TokenTestCase):
+    """sccache activation lives in the wrapper; fidelity target _defaults.sh:25."""
+
+    DUMP = "import json,os,sys;json.dump(dict(os.environ),open(sys.argv[1],'w'))"
+
+    def child_env(self, *, sccache: bool = True,
+                  env: dict[str, str] | None = None) -> dict[str, str]:
+        """Run one real command through `run()` and return the env the child saw."""
+        brew = self.tmp / "brew"  # A fake dir: never the machine's own sccache.
+        brew.mkdir(exist_ok=True)
+        if sccache:
+            (brew / "sccache").write_text("#!/bin/sh\nexit 0\n")
+            (brew / "sccache").chmod(0o755)
+        out = self.tmp / "env.json"
+        base = {"PATH": "/usr/bin:/bin", "HOME": str(self.tmp)}
+        base.update(env or {})
+        with mock.patch.object(bt, "_HOMEBREW_BIN", str(brew)):
+            rc = bt.run([sys.executable, "-c", self.DUMP, str(out)],
+                        env=base, path=str(self.token))
+        self.assertEqual(rc, 0)
+        return json.loads(out.read_text(encoding="utf-8"))
+
+    def test_a_resolvable_sccache_reaches_the_child_as_an_absolute_wrapper(self) -> None:
+        seen = self.child_env()
+        self.assertEqual(seen["RUSTC_WRAPPER"], str(self.tmp / "brew" / "sccache"))
+        self.assertEqual(seen["SCCACHE_CACHE_SIZE"], "10G")
+        self.assertIn(str(self.tmp / "brew"), seen["PATH"].split(os.pathsep))
+
+    def test_an_unset_cache_dir_defaults_to_the_dir_the_shell_exports(self) -> None:
+        # Unset, sccache uses a platform default and splits the cache away from
+        # the $HOME/.cache/sccache that _defaults.sh gives the release scripts.
+        shared = self.tmp / ".cache" / "sccache"
+        self.assertEqual(self.child_env().get("SCCACHE_DIR"), str(shared))
+        self.assertTrue(shared.is_dir(), "the child needs the dir to exist")
+
+    def test_without_sccache_the_child_environment_is_untouched(self) -> None:
+        seen = self.child_env(sccache=False)
+        for key in ("RUSTC_WRAPPER", "SCCACHE_DIR", "SCCACHE_CACHE_SIZE"):
+            self.assertNotIn(key, seen, f"{key} leaked with no sccache to run")
+        self.assertEqual(seen["PATH"], "/usr/bin:/bin")
+
+    def test_caller_supplied_values_are_respected_including_an_empty_wrapper(self) -> None:
+        self.assertEqual(self.child_env(env={"RUSTC_WRAPPER": ""})["RUSTC_WRAPPER"], "")
+        kept = self.child_env(env={"SCCACHE_DIR": str(self.tmp / "own"),
+                                   "SCCACHE_CACHE_SIZE": "2G"})
+        self.assertEqual(kept["SCCACHE_DIR"], str(self.tmp / "own"))
+        self.assertEqual(kept["SCCACHE_CACHE_SIZE"], "2G")
+        self.assertEqual(kept["RUSTC_WRAPPER"], str(self.tmp / "brew" / "sccache"))
+
+    def test_the_opt_out_skips_activation_entirely(self) -> None:
+        seen = self.child_env(env={bt.SCCACHE_OPT_OUT_ENV: "0"})
+        self.assertNotIn("RUSTC_WRAPPER", seen)
+        self.assertNotIn("SCCACHE_DIR", seen)
 
 
 if __name__ == "__main__":
