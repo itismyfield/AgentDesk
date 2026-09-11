@@ -1771,8 +1771,12 @@ _acquire_release_deploy_lock "$@"
 # high-CPU scan excludes this deploy's own process group. Skipped in the
 # detached-helper dry run (DEPLOY_TEST_MODE=1), which never builds.
 if [ "$DEPLOY_TEST_MODE" != "1" ]; then
-    if ! _preflight_resource_contention; then
-        exit 1
+    # Only source builds below enter the canonical build_token.py queue (#5818).
+    # External artifacts do not acquire that token and keep the original guard.
+    if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
+        _preflight_resource_contention canonical-build-token || exit 1
+    else
+        _preflight_resource_contention || exit 1
     fi
 fi
 
@@ -1848,14 +1852,24 @@ else
     SOURCE_BINARY="$(_resolve_default_release_binary "$DEPLOY_BUILD_PROFILE")"
 fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
+    # #5855: the deploy lock is already held here, and a queued peer deploy only
+    # waits DEPLOY_LOCK_TIMEOUT_SECS for it while the token wait below defaults to
+    # four hours -- so a deploy that is merely queued for the token can starve a
+    # peer that never needed the token at all (artifact deploys included). Bound
+    # the wait by the same deadline every peer already agreed to wait. An explicit
+    # operator override still wins.
+    export ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS="${ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS:-$DEPLOY_LOCK_TIMEOUT_SECS}"
     if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
         echo "▸ Building release binary..."
-        # Serialized behind the build token (#5663).
-        (cd "$REPO" && python3 scripts/build_token.py -- cargo build --release --bin agentdesk)
+        # Recheck under the token: unwrapped/residual builders are still unsafe (#5818).
+        (cd "$REPO" && python3 scripts/build_token.py -- bash -c \
+            '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"' \
+            bash "$SCRIPT_DIR/_defaults.sh" cargo build --release --bin agentdesk)
     else
         echo "▸ Building ${DEPLOY_BUILD_PROFILE} binary (opt-in fast deploy profile)..."
-        (cd "$REPO" && python3 scripts/build_token.py -- \
-            cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk)
+        (cd "$REPO" && python3 scripts/build_token.py -- bash -c \
+            '. "$1"; shift; _preflight_resource_contention || exit 1; exec "$@"' \
+            bash "$SCRIPT_DIR/_defaults.sh" cargo build --profile "$DEPLOY_BUILD_PROFILE" --bin agentdesk)
     fi
     # Cargo tracks embedded migration inputs via build.rs. The freshness gate
     # below is mtime-based, and a successful current-HEAD cargo build can still
