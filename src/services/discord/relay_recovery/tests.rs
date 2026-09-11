@@ -2618,12 +2618,18 @@ async fn manual_relay_recovery_plans_and_admits_on_one_captured_instant() {
     let (registry, shared) = registry_with_shared(provider.clone()).await;
     let channel = ChannelId::new(3_360_010);
     let window_ms = AUTO_HEAL_WINDOW_SECS * 1_000;
-    let base_ms = chrono::Utc::now().timestamp_millis()
-        + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64;
     let reg = &registry;
     let who = Some(provider.as_str());
 
     start_test_turn(&shared, channel, MessageId::new(96)).await;
+    // ORDER MATTERS: capture `base_ms` only AFTER the turn exists. The mailbox
+    // stamps `turn_started_at` from the wall clock, and admission refuses while
+    // `base_ms - turn_started_at_ms < ORPHAN_PENDING_TOKEN_ADMISSION_GRACE`.
+    // Reading the clock first lets any millisecond tick between the two make
+    // the age fall one below the grace and turn the first reclaim into a skip,
+    // which would look exactly like a plan/admit instant-split regression.
+    let base_ms = chrono::Utc::now().timestamp_millis()
+        + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64;
     let first = run_relay_recovery_at(reg, who, channel.get(), true, base_ms)
         .await
         .expect("first manual recovery should evaluate");

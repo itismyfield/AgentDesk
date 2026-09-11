@@ -141,6 +141,34 @@ T6 착수 시 **이 구간부터 다시 대사한다.**
 - 이번 PR은 R2a·R2b 철거와 관련 fixture 수리를 함께 포함하며, 위 동작 변화는 배포 후 효과다.
   실제 compile·기존 테스트·독립 리뷰·CI·배포 검증과 T5/T6 전체 완료는 별도 게이트다.
 
+### R2c — R2a·R2b 철거가 남긴 잔여물 정리 (같은 PR #5860 내 수리 라운드)
+
+- **`RelayRecoveryActionKind::ReportRelayUnreachable` variant 제거.** 유일 생산자였던
+  `relay_recovery/decision.rs` 의 reachability 합성 planner 가 R2b 에서 삭제되면서 생산자 0 이
+  됐고, variant 는 `as_str`·`is_destructive`·`apply` arm 과 **파괴 warrant 진리표의 한 행**
+  (`(ObserveOnly | ReportRelayUnreachable, _) => Deny`)으로만 남아 있었다.
+  **대체한 레거시 경로: 없음(도달 불가 표면 제거).** `#[allow(dead_code)]` 로 덮지 않고 제거한
+  이유는, 진리표 안의 도달 불가 행이 후속 독자에게 "reachability 계층이 여전히 파괴적 액션을
+  고를 수 있다"고 읽히기 때문이다. **영구 보존:** `rule()` 의 전역성(totality). 제거 후에도
+  구성 가능한 모든 액션이 이전과 동일한 `WarrantRule` 로 매핑되므로 판정 의미는 불변이다.
+- **`AxisBSite::StaleTurnIntake` variant 제거.** 유일 생성 지점이 R2b 가 삭제한
+  `router/intake_gate/stale_turn.rs` 의 관측 호출이었다. 같은 PR 이 `OperatorRelayRecovery` 를
+  variant 째 제거했으므로 처리를 대칭으로 맞춘 것이다. `#[cfg_attr(not(unix), allow(dead_code))]`
+  는 유지한다 — `axis_b_site_for_apply` 가 `#[cfg(unix)]` 라서 비unix 에서는 그것만이 생성하는
+  `RelayDeadReattach`·`ProbeAutoHealReattach`·`ProbeAutoHeal` **3개**에 생산자가 없기 때문이다.
+  나머지 4개는 플랫폼 중립이다.
+- **`run_relay_recovery_at(..., now_ms)` 시드 신설.** `run_relay_recovery` 가 `Utc::now()` 를
+  **정확히 1회** 포착해 계획과 admission 양쪽에 같은 시각을 공급한다. R2b 가 제거한 관측자는
+  계획 뒤에 시계를 다시 읽어 Manual auto-heal window 를 더 늦은 시각으로 굴렸고, 경계에 걸친
+  요청이 한 window 에서 계획되고 다음 window 에서 허가됐다. **대체한 레거시 경로:** 계획과
+  허가가 서로 다른 시각을 보던 수동 경로. **영구 보존:** 단일 포착 시각 공급.
+  `manual_relay_recovery_plans_and_admits_on_one_captured_instant` 가 벽시계보다 앞선 명시 시각으로
+  이 불변식을 행동으로 고정한다(어휘 검사 아님).
+- 함께 정리: `watchdog_axis_b_warrants`·`stale_turn_axis_b_warrants` 의 죽은 `shared` 파라미터와
+  호출부 4곳, `automatic_stale_sweep_warrants` 의 `site` 파라미터를 닫힌 분류로 되살려 미매핑
+  사이트를 fail-closed 로 거절한다(shipped 두 사이트는 `ClearStaleThreadProof` 로 종전과 동일).
+- 이 수리 라운드는 R2a·R2b 의 철거 범위를 넓히지 않는다. 배포 효과와 T5/T6 전체 수용은 별도 게이트다.
+
 ---
 
 ## S1 — cohort infra (배포 no-op) · 브랜치 `feat/5464-t5-s1-cohort`
