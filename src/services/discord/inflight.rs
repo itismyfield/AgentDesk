@@ -2697,6 +2697,50 @@ mod stall_recovery_tests {
         )
     }
 
+    /// #5464 B3 / #5880 — `build_inflight_for_guard_tests` above misplaces its
+    /// arguments: the value it names `user_msg_id` is passed to
+    /// `InflightTurnState::new`'s SIXTH parameter (`current_msg_id`), and the
+    /// real `user_msg_id` is the hardcoded `100` in position five. Every row it
+    /// builds is therefore id-100. Correcting that helper would change the
+    /// meaning of all 51 call expressions at once, so it is tracked separately in
+    /// #5880 and deliberately left alone here.
+    ///
+    /// The rebind-origin guards need id-0 rows specifically: a rebind origin is
+    /// `user_msg_id == 0` BY CONSTRUCTION (`build_external_adopted_inflight_state`
+    /// forces it, and the creation site passes a literal `0`). Building those
+    /// fixtures through the broken helper meant the only tests covering
+    /// `clear_rebind_origin_*` ran against id-100 rows and could not observe the
+    /// id-0 behaviour at all. This fixture spells the positions out and asserts
+    /// the invariant so the same trap is not dug twice.
+    fn build_rebind_guard_row(
+        provider: ProviderKind,
+        channel_id: u64,
+        rebind_origin: bool,
+    ) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            provider,
+            channel_id,
+            Some("adk".to_string()),
+            42, // request_owner_user_id
+            0,  // user_msg_id — a rebind origin never anchors a Discord message
+            0,  // current_msg_id
+            "user prompt".to_string(),
+            None,                                     // session_id
+            Some("AgentDesk-claude-adk".to_string()), // tmux_session_name
+            Some("/tmp/out.jsonl".to_string()),       // output_path
+            Some("/tmp/in.fifo".to_string()),         // input_fifo_path
+            0,                                        // last_offset
+        );
+        assert_eq!(
+            state.user_msg_id, 0,
+            "rebind guard fixtures must be genuine id-0 rows (see #5880)"
+        );
+        state.rebind_origin = rebind_origin;
+        state.turn_start_offset = Some(0);
+        state.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        state
+    }
+
     type EnvReset = crate::config::TestEnvVarGuard;
 
     fn set_agentdesk_root_for_test(path: &Path) -> EnvReset {
@@ -4144,14 +4188,13 @@ mod stall_recovery_tests {
             .unwrap_or_else(|poison| poison.into_inner());
         let temp = TempDir::new().unwrap();
         let _env_reset = set_agentdesk_root_for_test(temp.path());
-        let mut state = build_inflight_for_guard_tests(ProviderKind::Codex, 326, 0);
-        state.current_msg_id = 0;
-        state.rebind_origin = true;
-        state.turn_start_offset = Some(0);
-        state.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        let state = build_rebind_guard_row(ProviderKind::Codex, 326, true);
         save_inflight_state_in_root(temp.path(), &state).unwrap();
 
         let expected = InflightTurnIdentity::from_state(&state);
+        // #5880 fixture regression tripwire: these guards are only meaningful
+        // on genuine id-0 rows (a rebind origin is id-0 by construction).
+        assert_eq!(expected.user_msg_id, 0, "rebind guard row must be id-0");
         let outcome = clear_rebind_origin_inflight_state_if_matches_identity_in_root(
             temp.path(),
             &ProviderKind::Codex,
@@ -4171,13 +4214,13 @@ mod stall_recovery_tests {
             .unwrap_or_else(|poison| poison.into_inner());
         let temp = TempDir::new().unwrap();
         let _env_reset = set_agentdesk_root_for_test(temp.path());
-        let mut state = build_inflight_for_guard_tests(ProviderKind::Codex, 327, 0);
-        state.current_msg_id = 0;
-        state.turn_start_offset = Some(0);
-        state.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        let state = build_rebind_guard_row(ProviderKind::Codex, 327, false);
         save_inflight_state_in_root(temp.path(), &state).unwrap();
 
         let expected = InflightTurnIdentity::from_state(&state);
+        // #5880 fixture regression tripwire: these guards are only meaningful
+        // on genuine id-0 rows (a rebind origin is id-0 by construction).
+        assert_eq!(expected.user_msg_id, 0, "rebind guard row must be id-0");
         let outcome = clear_rebind_origin_inflight_state_if_matches_identity_in_root(
             temp.path(),
             &ProviderKind::Codex,
@@ -4200,14 +4243,12 @@ mod stall_recovery_tests {
             .unwrap_or_else(|poison| poison.into_inner());
         let temp = TempDir::new().unwrap();
         let _env_reset = set_agentdesk_root_for_test(temp.path());
-        let mut state = build_inflight_for_guard_tests(ProviderKind::Codex, 328, 0);
-        state.current_msg_id = 0;
-        state.rebind_origin = true;
-        state.turn_start_offset = Some(0);
-        state.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        let state = build_rebind_guard_row(ProviderKind::Codex, 328, true);
         save_inflight_state_in_root(temp.path(), &state).unwrap();
 
         let mut expected = InflightTurnIdentity::from_state(&state);
+        // #5880 fixture regression tripwire (see above).
+        assert_eq!(expected.user_msg_id, 0, "rebind guard row must be id-0");
         expected.turn_start_offset = Some(99);
         let outcome = clear_rebind_origin_inflight_state_if_matches_identity_in_root(
             temp.path(),
