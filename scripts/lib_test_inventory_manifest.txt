@@ -4345,6 +4345,12 @@ services::discord::relay_recovery::authority_observation::tests::only_the_missin
 services::discord::relay_recovery::authority_observation::tests::the_health_block_bounds_how_many_channels_it_keeps
 services::discord::relay_recovery::authority_observation::tests::the_health_ring_is_bounded_and_reports_the_alarm_counter
 services::discord::relay_recovery::authority_observation::tests::the_shipped_dial_admits_no_channel_to_the_observation_cohort
+services::discord::relay_recovery::authority_retention::tests::a_missing_sink_directory_is_not_an_error
+services::discord::relay_recovery::authority_retention::tests::a_retained_cohabiting_file_is_left_byte_identical_never_line_filtered
+services::discord::relay_recovery::authority_retention::tests::an_expired_cohabiting_file_goes_whole_taking_both_axes_together
+services::discord::relay_recovery::authority_retention::tests::expired_files_are_removed_and_files_inside_the_window_never_are
+services::discord::relay_recovery::authority_retention::tests::retention_window_is_not_shorter_than_the_promotion_window_it_must_survive
+services::discord::relay_recovery::authority_retention::tests::unparsable_names_and_future_dates_are_never_touched
 services::discord::relay_recovery::auto_heal_apply::tests::no_transition_apply_reports_not_ok_and_not_applied_end_to_end
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_emission_in_flight_consumes_budget_until_frontier_progress
 services::discord::relay_recovery::auto_heal_apply::tests::relay_recovery_manual_apply_succeeds_after_probe_budget_is_exhausted
