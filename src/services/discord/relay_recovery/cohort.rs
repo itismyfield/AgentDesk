@@ -37,6 +37,8 @@
 //! an observed census of live channel ids, and a real guild's mix remains
 //! unmeasured.
 
+use std::sync::atomic::{AtomicU16, Ordering};
+
 use serde::Serialize;
 
 use crate::config::RelayAuthorityMode;
@@ -68,22 +70,47 @@ pub(crate) fn cohort_bucket(channel_id: u64) -> u8 {
 ///
 /// #5464 T5 S1 review follow-up 1 left the polarity open as a rollout-runbook
 /// decision, and #5071 T5 A6 settles it as option (b) — keep the clamp, publish
-/// both widths. Rejecting `>100` was the alternative and was not taken: an
-/// invalid dial does not reach a caller, it reaches
-/// `config_live_reload::reload_from_path`, which answers `Rejected` and keeps
-/// the last-known-good snapshot. A rejection would therefore not narrow the
-/// cohort on a typo — it would pin the WHOLE config at its previous revision
-/// while the operator believes the file they just edited is live, which is a
-/// wider blast radius than the miswidened cohort it prevents. What was actually
-/// missing was evidence, not a veto, so `RelayAuthorityRolloutReport` carries
-/// the configured width and a clamp flag alongside this result.
+/// both widths. Rejecting `>100` was the alternative and was not taken, though
+/// not for the reason first written here.
+///
+/// A rejection has one place to live, `config::validate_config`, and that gate
+/// is not private to the hot-reload path: it runs inside both
+/// `config::load_from_path` and `config::load`, which have 20 and 10 production
+/// call sites, plus one direct call in `discord::settings::write` — 31 in all,
+/// of which `config_live_reload::reload_from_path` is one. (To re-measure,
+/// classify a `git grep` of those names by `#[cfg(test)]` block.) So a rejected
+/// dial does not merely keep the last-known-good snapshot: it also fails a
+/// Discord settings write (`settings/write.rs:245`, the file this slice tests),
+/// answers HTTP 500 from the voice-config route, and fails four CLI entry
+/// points — wider than the miswidened cohort a veto would prevent. Boot is
+/// outside it: `config::load_graceful` never validates.
+///
+/// Nor is the clamp the quieter option, as the first draft implied. A rejection
+/// IS announced: `config_live_reload` logs path and error at WARN. Nothing
+/// publishes reload state to health, so that WARN is the only notice on the
+/// reject path — and the clamp path had none of its own until the one below.
+/// The report publishes both widths besides, answering the same typo from a poll.
 ///
 /// Every clamp site funnels through here so "the width in force" has exactly
 /// one definition; a second `.min(100)` written elsewhere could disagree with
 /// the value the health block publishes, which is the specific failure this
 /// function exists to make impossible.
 pub(crate) fn effective_cohort_percent(percent: u8) -> u8 {
-    percent.min(100)
+    let effective = percent.min(100);
+    if effective != percent {
+        // One line per distinct out-of-range value, not one per call: `admits`
+        // runs this for every channel it judges, so an unconditional warn would
+        // write a line per admission check for as long as the typo is live.
+        static LAST_WARNED: AtomicU16 = AtomicU16::new(u16::MAX);
+        if LAST_WARNED.swap(u16::from(percent), Ordering::Relaxed) != u16::from(percent) {
+            tracing::warn!(
+                configured = percent,
+                effective,
+                "relay_authority_cohort_percent out of range; clamped to full cohort"
+            );
+        }
+    }
+    effective
 }
 
 /// The single relay-authority cohort predicate.

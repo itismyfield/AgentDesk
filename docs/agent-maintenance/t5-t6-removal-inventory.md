@@ -600,11 +600,21 @@ S1 dual 리뷰(legA/legB)에서 나왔고 S1에서 결정하지 않은 항목이
 health에서 확인 가능하게 만드는 문제로 수렴하므로 함께 닫는다.
 
 **1번(폭 클램프 fail-open) — (b) raw/effective 병기를 택했다.** 클램프의 극성은 바꾸지 않는다.
-(a) `>100` 거부를 택하지 않은 이유는 거부의 도달 지점이 호출자가 아니라
-`config_live_reload::reload_from_path` 이기 때문이다 — 거기서의 거부는 `Rejected` 이고 직전
-스냅샷이 그대로 유지되므로, 오타는 cohort를 좁히는 대신 **config 전체를 이전 리비전에 고정**한다.
-운영자는 방금 편집한 파일이 라이브라고 믿는 상태가 되므로, 막으려던 오타보다 폭발 반경이 넓다.
-실제로 없던 것은 거부권이 아니라 증거였다. `cohort::effective_cohort_percent` 가 클램프의 유일한
+(a) `>100` 거부를 택하지 않은 이유는 거부를 구현할 유일한 훅인 `config::validate_config` 의
+도달 범위가 hot-reload 경로에 국한되지 않기 때문이다. 이 게이트는 `config::load_from_path` 와
+`config::load` 양쪽 안에서 실행되고, 두 함수의 프로덕션 호출부는 **각각 20곳과 10곳**이며 여기에
+`discord::settings::write` 의 직접 호출 1곳을 더해 **총 31곳**이다
+(`config_live_reload::reload_from_path` 은 그 20곳 중 하나일 뿐이다. 재현:
+`git grep -n 'load_from_path\|config::load()'` 후 `#[cfg(test)]` 경계로 분류).
+즉 거부는 직전 스냅샷 유지에 그치지 않고 Discord 설정 쓰기(`settings/write.rs:245` — A6가 테스트를
+추가한 바로 그 파일)를 실패시키고, voice-config 라우트에 HTTP 500 을 내며, CLI 진입점 4곳을
+실패시킨다. 막으려던 miswidened cohort 보다 폭발 반경이 넓다. 부팅은 이 반경 밖이다 —
+`config::load_graceful` 은 `validate_config` 를 호출하지 않는다.
+거부 경로에 증거가 없었다는 최초 서술은 사실이 아니다: `config_live_reload` 는 `Rejected` 시
+경로와 에러 문자열을 WARN 으로 남긴다. 다만 config 재로드 상태는 health 에 전혀 노출되지 않으므로
+그 WARN 이 거부 경로의 유일한 통지 수단이고, 클램프 경로에는 그에 대응하는 로그가 A6 이전까지
+**아예 없었다**(`effective_cohort_percent` 에 클램프 발동 시에만 찍히는 WARN 1건을 추가해 닫았다).
+`cohort::effective_cohort_percent` 가 클램프의 유일한
 정의가 되고, `RelayAuthorityRolloutReport` 는 `cohort_percent`(집행값) 옆에
 `cohort_percent_configured`(YAML 원문값)와 `cohort_percent_clamped`(둘이 다를 때만 `true`)를
 함께 발행한다. 두 조립 지점(standalone `health_api`, registry `health/snapshot`) 모두 detail
@@ -622,5 +632,12 @@ mixed-version 금지 문서 계약은 필요 없다. 다만 그 PR이 남긴 회
 파싱하고 버리는 신규 키 — 은 단언되지 않았다. A6는 프로덕션 코드를 바꾸지 않고
 `bot_settings_write_back_preserves_unknown_keys_inside_modelled_sections` 하나로 그 모양을
 고정했다. 잔여는 이 항목 밖이며 이미 별도로 기록돼 있다: whole-`Config` `save_to_path` writer
-4곳(`voice_config.rs`·`agents_crud.rs`·`agents_setup.rs`·`discord_config_audit.rs`)은 PR #5803이
-명시적으로 유예했고 이슈 #5750 코멘트 5593859378이 후속으로 들고 있다.
+는 **프로덕션 8곳**이다 — `server/routes/voice_config.rs:151`·`server/routes/agents_crud.rs:1018`·
+`server/routes/agents_setup.rs:530`·`services/discord_config_audit.rs:1169`·
+`runtime_layout/config_merge.rs:38`·`cli/migrate/apply.rs:638`·
+`services/onboarding/mod.rs:1331`·`services/onboarding/mod.rs:1805`.
+이전 기록의 "4곳"은 뒤 4곳을 누락한 과소 계수였다(`onboarding/mod.rs` 의 두 곳은 같은 파일의
+`#[cfg(test)]` 블록이 1180-1214·1236-1259·2916-2930 로 모두 작아 프로덕션 함수
+`write_agentdesk_discord_config`·`write_agentdesk_channel_bindings` 안에 있다). 재현:
+`git grep -n 'save_to_path' -- src/` 후 `#[cfg(test)]` 경계로 분류하고 정의 1행을 뺀다.
+PR #5803이 이 writer 들을 명시적으로 유예했고 이슈 #5750 코멘트 5593859378이 후속으로 들고 있다.

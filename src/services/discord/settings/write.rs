@@ -656,13 +656,23 @@ mod yaml_write_back_secret_tests {
     /// the new dial keys", and PR #5803 (#5750) closed it by patching the
     /// parsed document instead of re-rendering it. This asserts that closure at
     /// the dial's own shape rather than inferring it from the top-level case.
+    ///
+    /// The fixture MUST carry a modelled `runtime` key beside the unknown one.
+    /// `Config::runtime` is `skip_serializing_if = "RuntimeSettingsConfig::is_empty"`,
+    /// so a `runtime` section holding only the unknown key parses to all-defaults,
+    /// is omitted from `typed_document`, and reaches the write-back as an UNMATCHED
+    /// top-level key — preserved by the same branch as `unmodelled_section` above,
+    /// which would make this test a duplicate of it rather than the nested case.
     #[test]
     fn bot_settings_write_back_preserves_unknown_keys_inside_modelled_sections() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agentdesk.yaml");
         fs::write(
             &path,
-            format!("{FIXTURE}runtime:\n  relay_authority_dial_from_a_newer_binary: enforce\n"),
+            format!(
+                "{FIXTURE}runtime:\n  relay_authority_cohort_percent: 25\n  \
+relay_authority_dial_from_a_newer_binary: enforce\n"
+            ),
         )
         .expect("write fixture");
         let _config_env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
@@ -673,6 +683,12 @@ mod yaml_write_back_secret_tests {
         let rendered = fs::read_to_string(&path).expect("read written yaml");
         let document: serde_yaml::Value =
             serde_yaml::from_str(&rendered).expect("the written yaml parses");
+        assert_eq!(
+            document["runtime"]["relay_authority_cohort_percent"].as_u64(),
+            Some(25),
+            "the fixture's MODELLED runtime key must survive, which is what puts \
+             this test in the nested regime at all, got:\n{rendered}"
+        );
         assert_eq!(
             document["runtime"]["relay_authority_dial_from_a_newer_binary"].as_str(),
             Some("enforce"),
