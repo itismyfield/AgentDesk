@@ -49,6 +49,7 @@ fn soft_terminal_authority_reads_the_pre_relay_row_not_the_startup_snapshot_5175
         Some(&row(Some(WATCHER_NONCE), RelayOwnerKind::Watcher)),
         FRAME_END,
         Some(WatcherTerminalKind::SoftStopHookSummary),
+        RowlessDeliveryAuthority::default(),
     );
 
     assert!(
@@ -65,6 +66,7 @@ fn missing_pre_relay_row_denies_soft_terminal_direct_send_5175() {
         None,
         FRAME_END,
         Some(WatcherTerminalKind::SoftStopHookSummary),
+        RowlessDeliveryAuthority::default(),
     );
 
     assert!(!authorized);
@@ -92,6 +94,7 @@ fn forged_soft_terminal_is_denied_even_when_the_startup_snapshot_authorized_5175
         Some(&row(Some(WATCHER_NONCE), RelayOwnerKind::None)),
         FRAME_END,
         Some(WatcherTerminalKind::SoftStopHookSummary),
+        RowlessDeliveryAuthority::default(),
     );
 
     assert!(!authorized);
@@ -108,6 +111,7 @@ fn compact_forged_nonce_is_denied_at_the_direct_send_seam_5175() {
         )),
         FRAME_END,
         Some(WatcherTerminalKind::SoftStopHookSummary),
+        RowlessDeliveryAuthority::default(),
     );
 
     assert!(!authorized);
@@ -125,6 +129,7 @@ fn hard_result_terminal_keeps_its_recovery_fallback_and_reports_no_denial_5175()
             None,
             FRAME_END,
             terminal_kind,
+            RowlessDeliveryAuthority::default(),
         );
         assert!(authorized, "hard terminal fallback must be preserved");
         assert_eq!(denial, None);
@@ -155,5 +160,243 @@ fn production_call_site_feeds_the_pre_relay_inflight_row_5175() {
     assert!(
         call_site.contains("current_offset"),
         "the offset containment term needs the consumed offset (#5175)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #5464 T5 C1 — `no_inflight_row` is a STRUCTURAL signal, not a delivery verdict.
+//
+// T5 AC1: the absence of a durable inflight row does not end Discord delivery
+// authority; authority is derived from the DeliveryJournal's OutputObligation
+// and the delivery lease. The 27-hour live sample that opened C1 counted 150
+// `soft_terminal_denial="no_inflight_row"` frames (of 753 `NO delivery owner`)
+// with `inflight_present=false` — terminal bodies that reached no channel.
+// ---------------------------------------------------------------------------
+
+/// Both AC1 operands present, inside the enforcement cohort.
+fn full_rowless_authority() -> RowlessDeliveryAuthority {
+    RowlessDeliveryAuthority {
+        cohort_admits: true,
+        ledger_obligation_open: true,
+        delivery_lease_present: true,
+    }
+}
+
+#[test]
+fn rowless_soft_terminal_stays_a_delivery_candidate_on_a_ledger_obligation_5464_c1() {
+    // The audit's closing scenario: row absent, but the ledger still owes output
+    // for this frame. The structural signal must not end delivery on its own.
+    let (authorized, denial) = watcher_soft_terminal_direct_send_authority(
+        &tui_direct_binding(),
+        None,
+        FRAME_END,
+        Some(WatcherTerminalKind::SoftStopHookSummary),
+        RowlessDeliveryAuthority {
+            cohort_admits: true,
+            ledger_obligation_open: true,
+            delivery_lease_present: false,
+        },
+    );
+
+    assert!(
+        authorized,
+        "an unsettled ledger obligation must keep a rowless soft terminal a delivery candidate (T5 AC1)"
+    );
+    assert_eq!(
+        denial, None,
+        "a frame that is no longer refused must not be blamed for a denial"
+    );
+}
+
+#[test]
+fn rowless_soft_terminal_stays_a_delivery_candidate_on_a_delivery_lease_5464_c1() {
+    // The other AC1 operand, alone: the ledger has nothing open, but a delivery
+    // lease exists on the channel, so delivery authority is derivable without
+    // the row. WHO sends stays the downstream B2 acquire's decision.
+    let (authorized, denial) = watcher_soft_terminal_direct_send_authority(
+        &tui_direct_binding(),
+        None,
+        FRAME_END,
+        Some(WatcherTerminalKind::SoftStopHookSummary),
+        RowlessDeliveryAuthority {
+            cohort_admits: true,
+            ledger_obligation_open: false,
+            delivery_lease_present: true,
+        },
+    );
+
+    assert!(
+        authorized,
+        "a delivery lease must keep a rowless soft terminal a delivery candidate (T5 AC1)"
+    );
+    assert_eq!(denial, None);
+}
+
+#[test]
+fn rowless_soft_terminal_is_still_denied_without_ledger_or_lease_5464_c1() {
+    // The other side of the contract, asserted because AC1 removes the row's
+    // veto without handing delivery to a frame nobody owes. Ledger settled, no
+    // lease → the historical refusal stands unchanged.
+    let (authorized, denial) = watcher_soft_terminal_direct_send_authority(
+        &tui_direct_binding(),
+        None,
+        FRAME_END,
+        Some(WatcherTerminalKind::SoftStopHookSummary),
+        RowlessDeliveryAuthority {
+            cohort_admits: true,
+            ledger_obligation_open: false,
+            delivery_lease_present: false,
+        },
+    );
+
+    assert!(!authorized);
+    assert_eq!(
+        denial,
+        Some(SoftTerminalAuthorityDenial::NoInflightRow),
+        "with neither AC1 operand the structural refusal must survive"
+    );
+}
+
+#[test]
+fn rowless_evidence_is_inert_outside_the_enforcement_cohort_5464_c1() {
+    // The deployment no-op: under the shipped dial `cohort_admits` is false, so
+    // even both operands together change nothing and the channel keeps the
+    // mapping that ships today.
+    let (authorized, denial) = watcher_soft_terminal_direct_send_authority(
+        &tui_direct_binding(),
+        None,
+        FRAME_END,
+        Some(WatcherTerminalKind::SoftStopHookSummary),
+        RowlessDeliveryAuthority {
+            cohort_admits: false,
+            ledger_obligation_open: true,
+            delivery_lease_present: true,
+        },
+    );
+
+    assert!(!authorized);
+    assert_eq!(denial, Some(SoftTerminalAuthorityDenial::NoInflightRow));
+}
+
+#[test]
+fn rowless_evidence_never_relaxes_the_five_exact_episode_conjuncts_5464_c1() {
+    // C1 moves ONE branch. The other five are exact-episode vetoes — the row
+    // that EXISTS names a different session, turn, or nonce — and the #5464 T5
+    // audit judged `turn_start_outside_frame` (522) and `turn_nonce_mismatch`
+    // (81) NON-violations for exactly that reason. Handing each of them the
+    // fullest possible AC1 evidence must change nothing, or the
+    // `/compact`-forged soft boundary #5175 closed re-opens.
+    let mut foreign_session = row(Some(WATCHER_NONCE), RelayOwnerKind::Watcher);
+    foreign_session.tmux_session_name = Some("AgentDesk-someone-else".to_string());
+
+    let mut outside_frame = row(Some(WATCHER_NONCE), RelayOwnerKind::Watcher);
+    outside_frame.turn_start_offset = Some(FRAME_END + 1);
+
+    let cases = [
+        (foreign_session, SoftTerminalAuthorityDenial::SessionMismatch),
+        (
+            outside_frame,
+            SoftTerminalAuthorityDenial::TurnStartOutsideFrame,
+        ),
+        (
+            row(Some(WATCHER_NONCE), RelayOwnerKind::None),
+            SoftTerminalAuthorityDenial::RelayOwnerNone,
+        ),
+        (
+            row(None, RelayOwnerKind::Watcher),
+            SoftTerminalAuthorityDenial::TurnNonceMissing,
+        ),
+        (
+            row(Some("compact-rewritten-nonce"), RelayOwnerKind::Watcher),
+            SoftTerminalAuthorityDenial::TurnNonceMismatch,
+        ),
+    ];
+
+    for (state, expected) in cases {
+        let (authorized, denial) = watcher_soft_terminal_direct_send_authority(
+            &tui_direct_binding(),
+            Some(&state),
+            FRAME_END,
+            Some(WatcherTerminalKind::SoftStopHookSummary),
+            full_rowless_authority(),
+        );
+
+        assert!(
+            !authorized,
+            "{expected:?} is an exact-episode veto and must survive full AC1 evidence"
+        );
+        assert_eq!(denial, Some(expected));
+    }
+}
+
+#[test]
+fn rowless_candidacy_requires_the_cohort_and_one_positive_operand_5464_c1() {
+    // The predicate's whole truth table, so a mutation that drops an operand or
+    // flips the conjunction cannot stay green on the scenarios above alone.
+    for cohort_admits in [false, true] {
+        for ledger_obligation_open in [false, true] {
+            for delivery_lease_present in [false, true] {
+                let evidence = RowlessDeliveryAuthority {
+                    cohort_admits,
+                    ledger_obligation_open,
+                    delivery_lease_present,
+                };
+                assert_eq!(
+                    evidence.retains_delivery_candidacy(),
+                    cohort_admits && (ledger_obligation_open || delivery_lease_present),
+                    "{evidence:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn production_call_site_reads_the_ledger_and_the_delivery_lease_5464_c1() {
+    // The unit tests above pin the DECISION; this pins the LOOKUPS, which is
+    // where the defect actually lives. Deleting either AC1 operand's read — the
+    // durable ledger frontier or the delivery-lease cell — leaves every
+    // behavioural assertion above green while restoring the body drop in
+    // production, so the removal must not be silent.
+    let source = include_str!("terminal_relay_plan.rs");
+    let reader = source
+        .split_once("fn read_rowless_delivery_authority(")
+        .expect("the plan must read rowless delivery authority")
+        .1
+        .split_once("\n}\n")
+        .expect("the reader must terminate")
+        .0;
+
+    assert!(
+        reader.contains("delivered_frontier_end_current_generation"),
+        "the ledger obligation must be read from the durable delivered frontier (T5 AC1)"
+    );
+    assert!(
+        reader.contains("range_already_committed"),
+        "the obligation test must reuse the canonical committed-range predicate"
+    );
+    assert!(
+        reader.contains("delivery_lease(channel_id)"),
+        "the delivery lease must be read from the channel's live lease cell (T5 AC1)"
+    );
+    assert!(
+        reader.contains("LeaseSnapshot::Unleased"),
+        "lease presence must be decided against the unleased state"
+    );
+    assert!(
+        reader.contains("cohort::enforcement_admits"),
+        "the relaxation must be gated by the shared relay-authority cohort predicate"
+    );
+
+    let call_site = source
+        .split_once("let (watcher_direct_fallback_authorized, soft_terminal_authority_denial) =")
+        .expect("the terminal relay plan must decide soft-terminal authority")
+        .1
+        .split_once(");")
+        .expect("the authority call must terminate")
+        .0;
+    assert!(
+        call_site.contains("read_rowless_delivery_authority("),
+        "the authority seam must be fed freshly read AC1 evidence, not a literal"
     );
 }

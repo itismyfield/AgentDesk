@@ -77,6 +77,32 @@ pub(crate) fn admits(mode: RelayAuthorityMode, percent: u8, channel_id: u64) -> 
     mode.consults_cohort() && cohort_bucket(channel_id) < percent.min(100)
 }
 
+/// The relay-authority cohort question for a call site that ENFORCES, asked in
+/// one place so a consumer cannot grow its own dial read beside `admits`.
+///
+/// Identical in shape and meaning to the bridge stream tick's
+/// `stream_loop_suppression_cohort_admits`, and for the same reasons: the mode
+/// predicate is `governs_destructive_authority` and NOT
+/// `records_authority_observations`, because `Observe` is the mode the AC3
+/// promotion evidence is collected under and has to stay behaviour-identical to
+/// `Legacy` for every consumer that is not the recorder. Both operands veto and
+/// both shipped values are the denying one, so a node nobody enrolled keeps the
+/// mapping that ships today.
+///
+/// Callers read this ONCE per decision and pass the answer down, so one pass
+/// through a fence cannot answer the question two different ways.
+pub(crate) fn enforcement_admits(channel_id: u64) -> bool {
+    let (mode, percent) = crate::config_live_reload::current()
+        .map(|config| {
+            (
+                config.runtime.relay_authority_mode,
+                config.runtime.relay_authority_cohort_percent,
+            )
+        })
+        .unwrap_or_default();
+    mode.governs_destructive_authority() && admits(mode, percent, channel_id)
+}
+
 /// Content fingerprint of the live cohort configuration (design §5.2).
 ///
 /// `config_live_reload` keeps no generation counter (r3 §5.2, measured), so
@@ -195,6 +221,29 @@ mod tests {
     /// stays inside the 22-bit field for the counts used here).
     fn low_bit_ids(count: u64) -> impl Iterator<Item = u64> {
         (0..count).map(|index| SNOWFLAKE_BASE + index)
+    }
+
+    /// #5464 T5 C1's deployment no-op, stated the same way S1 states its own:
+    /// under the SHIPPED dial `enforcement_admits` answers `false` for every
+    /// channel, so the watcher's rowless soft-terminal relaxation cannot be
+    /// taken without a config change. `Observe` is deliberately not enough
+    /// either — admitting it would change the behaviour the AC3 evidence
+    /// describes.
+    #[test]
+    fn shipped_defaults_admit_no_channel_to_the_enforcement_cohort() {
+        let defaults = crate::config::RuntimeSettingsConfig::default();
+        assert_eq!(defaults.relay_authority_mode, RelayAuthorityMode::Legacy);
+        assert_eq!(defaults.relay_authority_cohort_percent, 0);
+        assert!(
+            !RelayAuthorityMode::Observe.governs_destructive_authority(),
+            "the observing mode must not be able to enforce",
+        );
+        for channel_id in snowflake_ids(2_000) {
+            assert!(
+                !enforcement_admits(channel_id),
+                "channel {channel_id} was admitted to the enforcement cohort by the shipped dial"
+            );
+        }
     }
 
     /// The S1 deployment no-op proof, stated as the property that makes it one:
