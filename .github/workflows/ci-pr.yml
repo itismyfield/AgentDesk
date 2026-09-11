@@ -95,30 +95,22 @@ jobs:
               # changed file. Every pattern below is load-bearing now: this
               # list is the selection rule, not a statement of intent.
               #
-              # What STOPPED selecting this lane when the `!` went away:
-              # documentation, `dashboard/**`, `tests/**`, and the src modules
-              # this lane never executes. What was ADDED here because removing
-              # the `!` would otherwise have dropped a real input:
-              #   * `migrations/**` -- the `high_risk_recovery::` tests call
-              #     `connect_test_pool_and_migrate`, so migrations execute
-              #     inside this lane, and `build.rs` already declares
-              #     `rerun-if-changed` over `migrations/postgres`.
-              #   * `policies/**` -- `test_engine_with_pg` points
-              #     `config.policies.dir` at this repo's `policies/`, and
-              #     `engine/loader.rs` loads EVERY root-level `*.js` (while
-              #     `check_policy_tree_trust` walks the subdirectories and
-              #     `pipeline::ensure_loaded` reads
-              #     `policies/default-pipeline.yaml`). Naming three `.js`
-              #     files was never the real input surface, so the whole tree
-              #     replaces them.
-              #   * the two scripts this job's own steps execute.
-              # `Cargo.toml` stays because `hang_forensics.rs` reads it via
-              # `include_str!("../../Cargo.toml")` for the `[profile.release]`
-              # assertion described above.
-              #
-              # `tests/test_high_risk_recovery_path_filter.py` pins the
-              # selection this list produces, and fails if any pattern in this
-              # workflow ever starts with `!` again.
+              # STOPPED selecting when the `!` went: docs, `dashboard/**`,
+              # `tests/**`, src this lane never executes. ADDED below, because
+              # dropping the `!` would otherwise drop a real input:
+              # `migrations/**` (these tests call
+              # `connect_test_pool_and_migrate`; `build.rs` already has
+              # `rerun-if-changed` over `migrations/postgres`); `policies/**`
+              # replacing three named `.js` files, because
+              # `test_engine_with_pg` aims `config.policies.dir` here while
+              # `engine/loader.rs` loads EVERY root-level `*.js`,
+              # `check_policy_tree_trust` walks subdirectories and
+              # `pipeline::ensure_loaded` reads `default-pipeline.yaml`; and
+              # the two scripts this job's own steps run. `Cargo.toml` stays --
+              # `hang_forensics.rs` `include_str!`s it for the
+              # `[profile.release]` assertion above.
+              # `tests/test_high_risk_recovery_path_filter.py` pins the result
+              # and fails if any pattern here starts with `!` again.
               - 'Cargo.toml'
               - 'migrations/**'
               - 'policies/**'

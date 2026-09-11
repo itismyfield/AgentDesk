@@ -1,17 +1,11 @@
-"""Selection contract for the `high_risk_recovery` path filter (#5185).
+"""Selection contract for the `high_risk_recovery` path filter (#5232).
 
-`dorny/paths-filter@v3` is not GitHub's native `paths:`. Its `Filter.load`
-parses the `filters` YAML, compiles EVERY pattern into its own
-`picomatch(pattern, {dot: true})` matcher, and a file matches a rule when
-`patterns.some(...)` holds. A leading `!` is therefore not a subtraction: it
-is one more POSITIVE matcher for "anything that is not this", which used to
-make this lane fire on nearly every changed file.
-
-These tests reimplement that semantics for the pattern dialect this workflow
-actually uses, and `test_every_pattern_stays_inside_the_reimplemented_dialect`
-is what keeps the reimplementation honest: it fails the moment a pattern uses
-a picomatch feature (`!`, braces, extglobs, character classes, a non-trailing
-`**`) that the matcher below does not reproduce.
+`dorny/paths-filter@v3` compiles every pattern into its own
+`picomatch(pattern, {dot: true})` matcher and ORs them (`matchers.some(...)`),
+so a leading `!` is not a subtraction but one more POSITIVE matcher for
+"anything that is not this" -- which is what made this lane always true.
+`test_every_pattern_stays_inside_the_reimplemented_dialect` keeps the matcher
+honest: it fails if a pattern uses a picomatch feature it cannot reproduce.
 """
 
 from __future__ import annotations
@@ -25,51 +19,39 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github/workflows/ci-pr.yml"
 LANE = "high_risk_recovery"
-
-# Literal path characters plus `*`. Anything else is outside the dialect the
-# matcher below reproduces, so the guard test rejects it.
 SUPPORTED_SEGMENT = re.compile(r"^[A-Za-z0-9._-]*\*?[A-Za-z0-9._-]*$")
 
 
 def load_filters() -> dict[str, tuple[str, ...]]:
-    """Load the filters exactly as the action does: the step's YAML string."""
     workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
     steps = workflow["jobs"]["changes"]["steps"]
     step = next(s for s in steps if s.get("uses", "").startswith("dorny/paths-filter"))
-    # `predicate-quantifier` defaults to `some`; assert nobody set `every`.
     assert "predicate-quantifier" not in step["with"], "quantifier is no longer `some`"
-    return {
-        name: tuple(patterns)
-        for name, patterns in yaml.safe_load(step["with"]["filters"]).items()
-    }
+    return {n: tuple(p) for n, p in yaml.safe_load(step["with"]["filters"]).items()}
+
+
+def _atom(part: str) -> str:
+    return "[^/]*" if part == "*" else re.escape(part)
 
 
 def pattern_to_regex(pattern: str) -> re.Pattern[str]:
-    """Reproduce `picomatch(pattern, {dot: true})` for the supported dialect.
-
-    * a trailing `/**` matches the prefix itself and anything beneath it;
-    * `*` matches any run of non-`/` characters, including a leading dot and
-      including the empty string (`rust-toolchain*` matches `rust-toolchain`);
-    * every other character is literal, and matching is anchored full-path.
-    """
+    """Trailing `/**` matches the prefix and all beneath it; `*` matches a run
+    of non-`/` characters (possibly empty, dots not special); rest is literal."""
     body, suffix = pattern, ""
     if pattern.endswith("/**"):
         body, suffix = pattern[: -len("/**")], "(?:/.*)?"
     segments = [
-        "".join("[^/]*" if part == "*" else re.escape(part) for part in re.split(r"(\*)", seg))
-        for seg in body.split("/")
+        "".join(map(_atom, re.split(r"(\*)", seg))) for seg in body.split("/")
     ]
     return re.compile("^" + "/".join(segments) + suffix + "$")
 
 
 def select(filters: dict[str, tuple[str, ...]], changed: list[str]) -> set[str]:
-    """Return the filter names dorny would set to `true` for `changed`."""
+    """The filter names dorny would set to `true` for this changed-file list."""
     return {
         name
         for name, patterns in filters.items()
-        if any(
-            pattern_to_regex(pattern).match(path) for pattern in patterns for path in changed
-        )
+        if any(pattern_to_regex(q).match(p) for q in patterns for p in changed)
     }
 
 
@@ -78,21 +60,17 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
         self.filters = load_filters()
 
     def test_no_pattern_is_negated(self) -> None:
-        """The #5185 regression fence: a leading `!` is a positive matcher."""
         negated = [
-            (name, pattern)
-            for name, patterns in self.filters.items()
-            for pattern in patterns
-            if pattern.startswith("!")
+            (n, q) for n, ps in self.filters.items() for q in ps if q.startswith("!")
         ]
-        self.assertEqual(negated, [], "`!` patterns match nearly every changed file")
+        self.assertEqual(negated, [], "a leading `!` re-opens the #5232 defect")
 
     def test_every_pattern_stays_inside_the_reimplemented_dialect(self) -> None:
         for name, patterns in self.filters.items():
-            for pattern in patterns:
-                with self.subTest(filter=name, pattern=pattern):
-                    body = pattern[: -len("/**")] if pattern.endswith("/**") else pattern
-                    self.assertNotIn("**", body, "`**` is only supported as a trailing segment")
+            for q in patterns:
+                with self.subTest(filter=name, pattern=q):
+                    body = q[: -len("/**")] if q.endswith("/**") else q
+                    self.assertNotIn("**", body, "`**` only as a trailing segment")
                     for segment in body.split("/"):
                         self.assertRegex(segment, SUPPORTED_SEGMENT)
 
@@ -124,29 +102,19 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
                 self.assertIn(LANE, select(self.filters, [path]))
 
     def test_multi_area_pull_request_selects_the_union_of_its_lanes(self) -> None:
-        selected = select(
-            self.filters,
-            [
-                "dashboard/src/app.tsx",
-                "src/services/discord/relay_recovery.rs",
-                "migrations/postgres/0102_example.sql",
-                "docs/architecture/relay.md",
-            ],
-        )
-        self.assertEqual(
-            selected,
-            select(self.filters, ["dashboard/src/app.tsx"])
-            | select(self.filters, ["src/services/discord/relay_recovery.rs"])
-            | select(self.filters, ["migrations/postgres/0102_example.sql"])
-            | select(self.filters, ["docs/architecture/relay.md"]),
-        )
-        self.assertLessEqual({"dashboard", LANE, "pg_db"}, selected)
+        areas = [
+            ["dashboard/src/app.tsx"],
+            ["src/services/discord/relay_recovery.rs"],
+            ["migrations/postgres/0102_example.sql"],
+            ["docs/architecture/relay.md"],
+        ]
+        union = set().union(*(select(self.filters, area) for area in areas))
+        self.assertEqual(select(self.filters, [p for a in areas for p in a]), union)
+        self.assertLessEqual({"dashboard", LANE, "pg_db"}, union)
 
     def test_ci_script_checks_runs_this_contract(self) -> None:
         script = (REPO_ROOT / "scripts/ci-script-checks.sh").read_text(encoding="utf-8")
-        self.assertIn(
-            '"$PYTHON" -m unittest tests.test_high_risk_recovery_path_filter', script
-        )
+        self.assertIn("unittest tests.test_high_risk_recovery_path_filter", script)
 
 
 if __name__ == "__main__":
