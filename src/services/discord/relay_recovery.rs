@@ -48,6 +48,8 @@ use crate::services::provider::ProviderKind;
 mod apply;
 #[path = "relay_recovery/authority_observation.rs"]
 pub(crate) mod authority_observation;
+#[path = "relay_recovery/authority_retention.rs"]
+mod authority_retention;
 #[path = "relay_recovery_auto_heal_apply.rs"]
 mod auto_heal_apply;
 #[path = "relay_recovery_auto_heal_attempts.rs"]
