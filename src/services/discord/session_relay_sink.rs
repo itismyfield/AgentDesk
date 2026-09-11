@@ -13,17 +13,15 @@ use std::time::{Duration, Instant};
 
 use serenity::model::id::{ChannelId, MessageId};
 
+#[cfg(test)]
+pub(in crate::services::discord) use self::tests::sink_fixtures::*;
 use super::delivery_lease_cell::source_epoch_observer;
 use super::formatting::{self, ReplaceLongMessageOutcome};
 use super::health::HealthRegistry;
 use super::inflight::{InflightTurnState, RelayOwnerKind, TurnSource};
 use super::outbound::delivery_record as dr;
 use super::outbound::turn_output_controller as toc;
-#[cfg(test)]
-use super::placeholder_controller::PlaceholderLifecycle;
 use super::replace_outcome_policy::edit_fail_fallback_disposition;
-#[cfg(test)]
-use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::{
     RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame,
 };
@@ -31,12 +29,6 @@ use crate::services::cluster::watcher_supervisor::{SupervisorConfig, run_watcher
 use crate::services::provider::ProviderKind;
 use tracing::Instrument;
 
-#[cfg(test)]
-pub(in crate::services::discord) const PURE_SUBAGENT_ZERO_DELIVERY_PAYLOAD: &str = concat!(
-    "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"sub-1\",\"task_type\":\"local_agent\"}\n",
-    "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"sub-1\",\"status\":\"completed\",\"summary\":\"Subagent finished\"}\n",
-    "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n"
-);
 mod delivery_commit;
 mod delivery_frontier;
 mod delivery_outcome_classify;
@@ -49,8 +41,9 @@ mod relay_format;
 mod task_notification_context;
 mod terminal_handoff;
 mod turn_parser;
+use self::idle_jsonl::IdlePending::{Deferred, RetainedForRetry, SentUnconfirmed};
 use self::idle_jsonl::{
-    IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdleRelayRangeAction,
+    IdleCursor, IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdlePending, IdleRelayRangeAction,
     idle_jsonl_apply_active_inflight_gate,
     idle_jsonl_clear_session_init_on_generation_signature_change, idle_jsonl_consume_offset,
     idle_jsonl_current_eof, idle_jsonl_payload_contains_init_event,
@@ -256,22 +249,6 @@ impl SessionBoundExternalInputLeaseGuard {
             channel_id,
             generation: lease.generation,
         })
-    }
-
-    /// Test-only convenience: read the current lease for this target and arm with
-    /// it (the production path threads in the route's single read instead).
-    #[cfg(test)]
-    fn arm_if_present(
-        provider: &ProviderKind,
-        channel_id: u64,
-        tmux_session_name: &str,
-    ) -> Option<Self> {
-        let observed = crate::services::tui_prompt_dedupe::external_input_relay_lease(
-            provider.as_str(),
-            tmux_session_name,
-            channel_id,
-        );
-        Self::arm_with_observed_lease(provider, channel_id, tmux_session_name, observed.as_ref())
     }
 }
 
@@ -501,12 +478,6 @@ fn inflight_turn_id(state: &InflightTurnState) -> Option<String> {
     (state.user_msg_id != 0).then(|| format!("discord:{}:{}", state.channel_id, state.user_msg_id))
 }
 
-#[cfg(test)]
-struct SinkLeaseTestProbe {
-    acquired: tokio::sync::Notify,
-    release: tokio::sync::Notify,
-}
-
 pub(in crate::services::discord) struct SessionBoundDiscordRelaySink {
     health_registry: Arc<HealthRegistry>,
     frames_total: AtomicU64,
@@ -546,16 +517,6 @@ impl SessionBoundDiscordRelaySink {
             #[cfg(test)]
             test_force_legacy_replace: false,
         }
-    }
-
-    #[cfg(test)]
-    fn with_lease_test_probe(
-        health_registry: Arc<HealthRegistry>,
-        lease_test_probe: Arc<SinkLeaseTestProbe>,
-    ) -> Self {
-        let mut sink = Self::new(health_registry);
-        sink.lease_test_probe = Some(lease_test_probe);
-        sink
     }
 
     fn ingest_frame(&self, frame: &StreamFrame) -> Vec<SessionRelayDelivery> {
@@ -1236,8 +1197,8 @@ async fn run_idle_jsonl_relay_loop(
     let registry = crate::services::cluster::session_registry::global_session_registry();
     let producers =
         crate::services::cluster::relay_producer_registry::global_relay_producer_registry();
-    let mut offsets: HashMap<String, u64> = HashMap::new();
-    let mut pending_ends: HashMap<String, u64> = HashMap::new();
+    let mut offsets: HashMap<String, IdleCursor> = HashMap::new();
+    let mut pending_ends: HashMap<String, IdlePending> = HashMap::new();
     let mut first_seen_at: HashMap<String, Instant> = HashMap::new();
     let mut last_inflight_seen_at: HashMap<String, Instant> = HashMap::new();
     let mut session_init_seen: HashSet<String> = HashSet::new();
@@ -1250,7 +1211,7 @@ async fn run_idle_jsonl_relay_loop(
             let session_name = matched.expected_session_name.clone();
             let relay_source = idle_jsonl_relay_source_for_matched(&matched);
             seen_sessions.insert(session_name.clone());
-            let first_seen = *first_seen_at
+            let mut first_seen = *first_seen_at
                 .entry(session_name.clone())
                 .or_insert_with(Instant::now);
             let Ok(channel_id) = matched.channel_id.parse::<u64>() else {
@@ -1260,9 +1221,34 @@ async fn run_idle_jsonl_relay_loop(
                 continue;
             };
             let len = metadata.len();
-            let offset = offsets.entry(session_name.clone()).or_insert(len);
-            if len < *offset {
-                *offset = 0;
+            let expected_file = crate::services::cluster::stream_relay::SourceFileIdentity::Unix {
+                dev: std::os::unix::fs::MetadataExt::dev(&metadata),
+                ino: std::os::unix::fs::MetadataExt::ino(&metadata),
+            };
+            let source = (
+                matched.provider.clone(),
+                channel_id,
+                relay_source.path.clone(),
+                expected_file,
+            );
+            if offsets
+                .get(&session_name)
+                .is_some_and(|cursor| cursor.source != source)
+            {
+                offsets.remove(&session_name);
+                first_seen = Instant::now();
+                first_seen_at.insert(session_name.clone(), first_seen);
+                pending_ends.remove(&session_name);
+                session_init_seen.remove(&session_name);
+            }
+            let cursor = offsets.entry(session_name.clone()).or_insert(IdleCursor {
+                offset: len,
+                source,
+                first_restore: true,
+            });
+            if len < cursor.offset {
+                cursor.offset = 0;
+                cursor.first_restore = false;
                 pending_ends.remove(&session_name);
                 session_init_seen.remove(&session_name);
             }
@@ -1290,6 +1276,16 @@ async fn run_idle_jsonl_relay_loop(
             let Some(shared) = shared_for_dedup else {
                 continue;
             };
+            let durable = dr::delivered_frontier_end_current_generation(
+                &matched.provider,
+                channel,
+                &session_name,
+                Some(len),
+            );
+            if std::mem::take(&mut cursor.first_restore) && (1..=cursor.offset).contains(&durable) {
+                cursor.offset = durable;
+            }
+            let offset = &mut cursor.offset;
             let committed = dr::effective_committed_offset(
                 &shared,
                 &matched.provider,
@@ -1297,15 +1293,11 @@ async fn run_idle_jsonl_relay_loop(
                 &session_name,
                 Some(len),
             )
-            .max(dr::delivered_frontier_end_current_generation(
-                &matched.provider,
-                channel,
-                &session_name,
-                Some(len),
-            ));
+            .max(durable);
 
             macro_rules! consume_idle_offset {
                 ($to:expr, $rearm:expr) => {
+                    pending_ends.remove(&session_name);
                     idle_jsonl_consume_offset(
                         &mut session_init_seen,
                         &session_name,
@@ -1340,21 +1332,19 @@ async fn run_idle_jsonl_relay_loop(
                     );
                     if matches!(
                         decision,
-                        idle_jsonl::IdleJsonlInflightGateDecision::DeferUntilCommitted
+                        idle_jsonl::IdleJsonlInflightGateDecision::DeferUntilCommitted if len > *offset
                     ) {
-                        let pending_end = pending_ends.entry(session_name.clone()).or_insert(len);
-                        *pending_end = (*pending_end).max(len);
+                        pending_ends.insert(session_name.clone(), Deferred);
                         if matches!(
                             idle_jsonl_suppressed_range_action(
                                 committed,
                                 *offset,
-                                *pending_end,
+                                len,
                                 IdleJsonlSuppression::DeferUntilCommitted,
                             ),
                             IdleRelayRangeAction::AdvanceCommitted
                         ) {
-                            consume_idle_offset!(*pending_end, IdleJsonlSessionInitRearm::Keep);
-                            pending_ends.remove(&session_name);
+                            consume_idle_offset!(len, IdleJsonlSessionInitRearm::Keep);
                         }
                     }
                     continue;
@@ -1367,18 +1357,16 @@ async fn run_idle_jsonl_relay_loop(
                 .is_some_and(|seen_at| seen_at.elapsed() < IDLE_JSONL_RELAY_RECENT_INFLIGHT_GRACE);
             let in_new_session_grace =
                 first_seen.elapsed() < IDLE_JSONL_RELAY_RECENT_INFLIGHT_GRACE;
-            if in_recent_inflight_grace || in_new_session_grace {
-                let pending_end = pending_ends.entry(session_name.clone()).or_insert(len);
-                *pending_end = (*pending_end).max(len);
+            if (in_recent_inflight_grace || in_new_session_grace) && len > *offset {
+                pending_ends.insert(session_name.clone(), Deferred);
                 match idle_jsonl_suppressed_range_action(
                     committed,
                     *offset,
-                    *pending_end,
+                    len,
                     IdleJsonlSuppression::DeferUntilCommitted,
                 ) {
                     IdleRelayRangeAction::AdvanceCommitted => {
-                        consume_idle_offset!(*pending_end, IdleJsonlSessionInitRearm::Keep);
-                        pending_ends.remove(&session_name);
+                        consume_idle_offset!(len, IdleJsonlSessionInitRearm::Keep);
                     }
                     IdleRelayRangeAction::HoldPending => {}
                     _ => unreachable!("deferred suppression returns only hold/advance"),
@@ -1386,20 +1374,24 @@ async fn run_idle_jsonl_relay_loop(
                 continue;
             }
             if len <= *offset {
-                pending_ends.remove(&session_name);
                 continue;
             }
 
             let start = *offset;
-            let was_deferred = pending_ends.contains_key(&session_name);
-            let pending_end = pending_ends.remove(&session_name).unwrap_or(len).max(len);
-            let end = pending_end.min(start.saturating_add(IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK));
+            let was_deferred = matches!(
+                pending_ends.get(&session_name),
+                Some(Deferred | SentUnconfirmed | RetainedForRetry(true))
+            );
+            pending_ends.insert(session_name.clone(), RetainedForRetry(was_deferred));
+            let end = len.min(start.saturating_add(IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK));
             let Ok(opened_range) = read_jsonl_range(&relay_source.path, start, end) else {
                 continue;
             };
-            let payload = &opened_range.payload;
+            if opened_range.file_identity != expected_file {
+                continue;
+            }
+            let (payload, end) = (&opened_range.payload, opened_range.end);
             if payload.is_empty() {
-                consume_idle_offset!(end, IdleJsonlSessionInitRearm::Keep);
                 continue;
             }
             if idle_jsonl_payload_contains_schedule_wakeup_setup(payload) {
@@ -1435,9 +1427,10 @@ async fn run_idle_jsonl_relay_loop(
                     let Ok(suffix) = opened_range.suffix(&relay_source.path, from) else {
                         continue;
                     };
-                    if suffix.payload.is_empty() {
+                    if suffix.file_identity != expected_file || suffix.payload.is_empty() {
                         continue;
                     }
+                    let end = suffix.end;
                     let source_stamp = source_marker.and_then(|marker| {
                         source_epoch_observer::source_stamp(
                             &session_name,
@@ -1452,11 +1445,11 @@ async fn run_idle_jsonl_relay_loop(
                         current_generation_signature,
                         source_stamp,
                     ) {
-                        pending_ends.insert(session_name.clone(), end);
+                        pending_ends.insert(session_name.clone(), SentUnconfirmed);
                     }
                 }
                 IdleRelayRangeAction::HoldPending => {
-                    pending_ends.insert(session_name.clone(), end);
+                    pending_ends.insert(session_name.clone(), Deferred);
                 }
             }
         }
@@ -1470,6 +1463,8 @@ async fn run_idle_jsonl_relay_loop(
             &mut session_generation_signatures,
             &mut pending_ends,
         );
+        #[cfg(test)]
+        tests::dc1_observe_tick(&offsets, &pending_ends);
         tokio::time::sleep(IDLE_JSONL_RELAY_POLL_INTERVAL).await;
     }
 }

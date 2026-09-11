@@ -889,6 +889,8 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── intake_delivery_sweep/
 │   │   │   │   └── tests.rs
+│   │   │   ├── queued_placeholders/
+│   │   │   │   └── tests.rs
 │   │   │   ├── deferred_restart.rs
 │   │   │   ├── framework_setup.rs
 │   │   │   ├── gateway_lease.rs
@@ -977,6 +979,8 @@ src/
 │   │   │   │   ├── backstop.rs
 │   │   │   │   ├── backstop_tests.rs
 │   │   │   │   └── idle_gate.rs
+│   │   │   ├── loop_poll_prologue/
+│   │   │   │   └── post_terminal_disposal_tests.rs
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   ├── committed_progress_tests.rs
 │   │   │   │   ├── existing_panel_update.rs
@@ -1081,7 +1085,8 @@ src/
 │   │   ├── turn_bridge/
 │   │   │   ├── completion_guard/
 │   │   │   │   ├── completion_context.rs
-│   │   │   │   └── completion_postgres.rs
+│   │   │   │   ├── completion_postgres.rs
+│   │   │   │   └── span_tests.rs
 │   │   │   ├── completion_postlude/
 │   │   │   │   ├── channel_episode_scope.rs
 │   │   │   │   ├── channel_writeback.rs

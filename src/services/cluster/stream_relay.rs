@@ -446,18 +446,25 @@ impl RelayProducer {
         relay_generation_mtime_ns: Option<i64>,
         relay_source_stamp: Option<SourceStamp>,
     ) -> RelaySendOutcome {
+        self.try_send_request(RelayFrameRequest {
+            payload,
+            terminal,
+            identity,
+            range,
+            generation: relay_generation_mtime_ns,
+            stamp: relay_source_stamp,
+        })
+    }
+
+    /// Consume one owned frame request with the usual drop-oldest behavior.
+    pub fn try_send_request(&self, request: RelayFrameRequest) -> RelaySendOutcome {
         try_send_frame_inner(
             &self.matched,
             &self.queue,
             &self.shutdown,
             &self.metrics,
             &self.sequence,
-            payload,
-            terminal,
-            identity,
-            range,
-            relay_generation_mtime_ns,
-            relay_source_stamp,
+            request,
         )
     }
 
@@ -643,20 +650,33 @@ pub struct TerminalCommitFence {
     pub turn_start_offset: Option<u64>,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Owned input envelope before the relay assigns its queue sequence and routing snapshot.
+#[derive(Clone, Debug)]
+pub struct RelayFrameRequest {
+    pub payload: String,
+    pub terminal: Option<TerminalCommitFence>,
+    pub identity: Option<RelayTurnIdentity>,
+    pub range: Option<(u64, u64)>,
+    pub generation: Option<i64>,
+    pub stamp: Option<SourceStamp>,
+}
+
 fn try_send_frame_inner(
     matched: &MatchedChannel,
     queue: &Arc<RelayFrameQueue>,
     shutdown: &Arc<AtomicBool>,
     metrics: &Arc<RelayMetrics>,
     sequence: &Arc<AtomicU64>,
-    payload: String,
-    terminal: Option<TerminalCommitFence>,
-    frame_identity: Option<RelayTurnIdentity>,
-    relay_range: Option<(u64, u64)>,
-    relay_generation_mtime_ns: Option<i64>,
-    relay_source_stamp: Option<SourceStamp>,
+    request: RelayFrameRequest,
 ) -> RelaySendOutcome {
+    let RelayFrameRequest {
+        payload,
+        terminal,
+        identity: frame_identity,
+        range: relay_range,
+        generation: relay_generation_mtime_ns,
+        stamp: relay_source_stamp,
+    } = request;
     if shutdown.load(Ordering::Acquire) {
         return RelaySendOutcome::closed();
     }
@@ -742,12 +762,14 @@ impl StreamRelayHandle {
             &self.shutdown,
             &self.metrics,
             &self.sequence,
-            payload,
-            None,
-            None,
-            None,
-            None,
-            None,
+            RelayFrameRequest {
+                payload,
+                terminal: None,
+                identity: None,
+                range: None,
+                generation: None,
+                stamp: None,
+            },
         )
     }
 
