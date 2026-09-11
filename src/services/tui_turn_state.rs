@@ -834,8 +834,11 @@ mod tests {
                 let last =
                     serde_json::json!({"type":"event_msg","payload":{"type":tail}}).to_string();
                 let file = write_jsonl(&[&first, &compacted, &last]);
-                assert_eq!(observe_codex_jsonl_turn_state(file.path()), TuiTurnState::Streaming,
-                    "truncated {boundary}/{tail} lacks lifecycle evidence, not proof of a live turn");
+                assert_eq!(
+                    observe_codex_jsonl_turn_state(file.path()),
+                    TuiTurnState::Streaming,
+                    "truncated {boundary}/{tail} lacks lifecycle evidence, not proof of a live turn"
+                );
             }
         }
     }
