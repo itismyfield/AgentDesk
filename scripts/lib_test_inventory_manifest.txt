@@ -4395,8 +4395,10 @@ services::discord::relay_recovery::cohort::tests::cohort_fingerprint_is_pinned_t
 services::discord::relay_recovery::cohort::tests::either_dial_left_at_its_default_admits_nobody
 services::discord::relay_recovery::cohort::tests::fingerprint_separates_dial_positions_and_repeats_for_equal_ones
 services::discord::relay_recovery::cohort::tests::full_width_admits_every_channel_in_a_consuming_mode
+services::discord::relay_recovery::cohort::tests::rollout_report_publishes_the_configured_width_beside_the_clamped_one
 services::discord::relay_recovery::cohort::tests::rollout_report_without_a_live_config_reports_the_dormant_dial
 services::discord::relay_recovery::cohort::tests::shipped_defaults_admit_no_channel_to_the_relay_authority_cohort
+services::discord::relay_recovery::cohort::tests::the_published_effective_width_is_the_width_admission_gates_on
 services::discord::relay_recovery::destructive_warrant::tests::clear_orphan_pending_token_requires_the_same_episode_when_both_operands_exist
 services::discord::relay_recovery::destructive_warrant::tests::exact_episode_distinguishes_match_mismatch_and_missing_operands
 services::discord::relay_recovery::destructive_warrant::tests::pinned_adoption_only_relaxes_transport_unknown_reattach
@@ -5072,6 +5074,7 @@ services::discord::settings::validation::voice_channel_guard_tests::full_guard_p
 services::discord::settings::validation::voice_channel_guard_tests::restart_orphan_classification_separates_provider_rebind_from_cross_bot_skip
 services::discord::settings::validation::voice_channel_guard_tests::restart_routing_change_orphans_provider_rebind_but_preserves_reroutable_and_valid
 services::discord::settings::write::yaml_write_back_secret_tests::bot_settings_write_back_keeps_skip_serializing_secrets_on_disk
+services::discord::settings::write::yaml_write_back_secret_tests::bot_settings_write_back_preserves_unknown_keys_inside_modelled_sections
 services::discord::settings::write::yaml_write_back_secret_tests::bot_settings_write_back_preserves_unowned_document_keys
 services::discord::settings::write::yaml_write_back_secret_tests::invalid_config_is_not_written_back
 services::discord::settings::write::yaml_write_back_secret_tests::scalar_all_unowned_typed_values_are_equal
