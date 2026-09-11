@@ -42,10 +42,24 @@ fn run_reattach_apply_hook_for_tests(point: ReattachApplyHookPoint) {
 /// registry identity CAS in its place. That CAS is not an emission lease, so the
 /// same-incarnation emission race stays a declared non-guarantee.
 ///
-/// That replacement covers the dead-frontier branch and nothing else in this
-/// lane. When the reattach instead rebinds an existing claim,
-/// `watchers::lifecycle::claims` removes through `remove_tmux_session_locked`,
-/// which carries no identity conjunct and is left to T5.
+/// #5071 relay-tail S4 (I-1) then narrowed the emission gap that CAS cannot speak
+/// to: the same dead-frontier removal also carries
+/// `tmux_watcher_registry::TerminalDeliveryFence`, which re-reads the channel's
+/// `DeliveryLeaseCell` under the cell's own payload mutex and refuses while the
+/// destroyed turn's lease is `Leased` with an unelapsed deadline. Unlike the
+/// #5067 fence it replaced it is key-matched and it expires, so a dead holder
+/// cannot latch it. #5464 T5 B1 closed its fail-OPEN residual: a relay owner that
+/// leased under the fallback-offset key is UNMATCHABLE rather than absent, and
+/// the fence now abstains there instead of permitting.
+///
+/// That branch is not the only destruction this lane reaches. When the reattach
+/// rebinds an existing claim, `watchers::lifecycle::claims` removes through
+/// `remove_tmux_session_locked`; #5464 T5 B1 gave that path its own conjunct — a
+/// `TerminalDeliveryFence::capture_foreign_claim` bound to the INCUMBENT's cell —
+/// so a claim from another channel can no longer remove a session while a turn
+/// that is not the claimant's is still delivering. What stays a declared
+/// non-guarantee on both branches is a same-incarnation terminal POST holding no
+/// lease at all: these are lease reads, not HTTP-in-flight observations.
 fn should_reattach_relay_dead_watcher(
     snapshot: &WatcherStateSnapshot,
     channel_id: ChannelId,

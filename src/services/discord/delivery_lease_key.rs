@@ -192,6 +192,32 @@ impl DeliveryLeaseKey {
     pub(in crate::services::discord) fn is_degenerate_legacy(&self) -> bool {
         self.user_msg_id == 0 && self.turn_started_at.is_none() && self.turn_start_offset.is_none()
     }
+
+    /// #5464 T5 B1 (residual 1): the FALLBACK-OFFSET shape `(user_msg_id 0,
+    /// started_at None, turn_start_offset Some)` `pinned_delivery_lease_key`
+    /// produces when no inflight row matched. Exact, not heuristic: an id-0 turn
+    /// with a `started_at` keeps both disambiguators and one with a bare offset
+    /// falls to the degenerate `(0, None, None)`, while a non-zero id clears both.
+    pub(in crate::services::discord) fn is_fallback_offset_only(&self) -> bool {
+        self.user_msg_id == 0 && self.turn_started_at.is_none() && self.turn_start_offset.is_some()
+    }
+
+    /// #5464 T5 B1 (residual 1): whether this LIVE key is a fallback-offset key
+    /// `expected` can never equal, on the same channel and process generation.
+    /// `expected` comes from [`Self::from_inflight_state_for_site`], which never
+    /// produces that shape, leaving such a holder UNREADABLE to a key comparison
+    /// rather than absent — and "cannot be read" is not "says no holder".
+    /// The `(channel, generation)` restriction stops it over-reaching onto an
+    /// earlier generation's lease, whose holder cannot still be delivering here.
+    pub(in crate::services::discord) fn unmatchable_fallback_against(
+        &self,
+        expected: &Self,
+    ) -> bool {
+        self.is_fallback_offset_only()
+            && !expected.is_fallback_offset_only()
+            && self.channel_id == expected.channel_id
+            && self.generation == expected.generation
+    }
 }
 
 #[cfg(test)]

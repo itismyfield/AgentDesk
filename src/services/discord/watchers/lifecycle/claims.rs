@@ -14,6 +14,11 @@ pub(crate) enum WatcherClaimAction {
 // It therefore lives in the cfg-independent `tmux_watcher_registry` module;
 // this re-export keeps the `tmux::WatcherClaimIncarnation` path unchanged.
 pub(in crate::services::discord) use crate::services::discord::tmux_watcher_registry::WatcherClaimIncarnation;
+// #5464 T5 B1 (residual 2): the rebind destruction's delivery conjunct. Reusing
+// the S4 fence type keeps ONE judgment/commit atomicity discipline, not two.
+use crate::services::discord::tmux_watcher_registry::TerminalDeliveryFence;
+/// Static label the rebind conjunct's veto log attributes both claim sites to.
+const SITE: &str = "watcher_claim_rebind";
 // `ClaimAdoptionEvictionGuard` is deliberately not re-exported: every caller
 // binds it as `let _guard = evict_claim_before_adoption_for_test(..)` and never
 // names the type, matching the guard-type policy stated in
@@ -77,6 +82,26 @@ impl WatcherClaimOutcome {
             WatcherClaimAction::ReuseExisting => "reuse_existing",
         }
     }
+}
+
+/// #5464 T5 B1 (residual 2): the delivery conjunct a REBIND destruction binds
+/// before removing the incumbent holding `tmux_session_name`. Bound ONLY for a
+/// cross-channel claim: a same-channel claim is that turn's own relay lifecycle
+/// whose lease is its to supersede, while a claim from a DIFFERENT channel cannot
+/// hold any key the incumbent's cell carries, so a live lease there is an
+/// unrelated turn's. `None` leaves the removal as unconditional as it was.
+fn foreign_claim_delivery_fence(
+    watchers: &TmuxWatcherRegistry,
+    guard: &crate::services::discord::TmuxWatcherRegistryGuard,
+    tmux_session_name: &str,
+    claimant_channel_id: ChannelId,
+) -> Option<TerminalDeliveryFence> {
+    if watchers.owner_channel_for_tmux_session(tmux_session_name) == Some(claimant_channel_id) {
+        return None;
+    }
+    watchers
+        .reserved_delivery_lease_locked(guard, tmux_session_name)
+        .map(|lease| TerminalDeliveryFence::capture_foreign_claim(lease, claimant_channel_id, SITE))
 }
 
 pub(crate) fn find_watcher_by_tmux_session(
@@ -226,12 +251,32 @@ pub(in crate::services::discord) fn try_claim_watcher_with_thread_parent(
             );
         }
         if existing.1 || existing.2 || existing.3 != requested_output_path {
-            if let Some((_, existing_handle)) =
-                watchers.remove_tmux_session_locked(&guard, &requested_tmux)
-            {
-                existing_handle
-                    .cancel
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            let rebind_fence =
+                foreign_claim_delivery_fence(watchers, &guard, &requested_tmux, channel_id);
+            let fenced_rebind = rebind_fence.is_some();
+            match watchers.remove_tmux_session_locked(
+                &guard,
+                &requested_tmux,
+                rebind_fence.as_ref(),
+            ) {
+                Some((_, existing_handle)) => {
+                    existing_handle
+                        .cancel
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                // #5464 T5 B1 (residual 2): the incumbent survived a FENCED
+                // removal, so this claim must not reach `insert_locked`, whose
+                // displacement path would unpair the protected row unfenced. The
+                // inconsistent-row `None` conflates in: it is not removable either.
+                None if fenced_rebind => {
+                    tracing::info!(
+                        requested_channel_id = channel_id.get(),
+                        tmux_session = %requested_tmux,
+                        "watcher claim declined: a live foreign delivery owns the tmux session"
+                    );
+                    return false;
+                }
+                None => {}
             }
         } else {
             record_watcher_invariant(
@@ -391,9 +436,33 @@ pub(crate) fn claim_watcher(
             );
         }
         if replaces_existing {
-            if let Some((_, existing_handle)) =
-                watchers.remove_tmux_session_locked(&guard, &requested_tmux)
-            {
+            let rebind_fence =
+                foreign_claim_delivery_fence(watchers, &guard, &requested_tmux, channel_id);
+            let removed =
+                watchers.remove_tmux_session_locked(&guard, &requested_tmux, rebind_fence.as_ref());
+            // #5464 T5 B1 (residual 2): as in `try_claim_watcher_with_thread_parent`,
+            // a refused fenced removal must not fall through to `insert_locked`.
+            // Report the incumbent as reused so nothing spawns and the live
+            // delivery finishes.
+            if removed.is_none() && rebind_fence.is_some() {
+                let incarnation = watchers
+                    .by_tmux_session
+                    .get(&requested_tmux)
+                    .map(|entry| WatcherClaimIncarnation::from_handle(existing_channel_id, &entry))
+                    .expect("a refused fenced removal leaves the incumbent installed");
+                tracing::info!(
+                    source,
+                    tmux_session = %requested_tmux,
+                    requested_channel_id = channel_id.get(),
+                    "watcher claim declined replacement: a live foreign delivery owns the session"
+                );
+                return WatcherClaimOutcome::new(
+                    WatcherClaimAction::ReuseExisting,
+                    existing_channel_id,
+                    incarnation,
+                );
+            }
+            if let Some((_, existing_handle)) = removed {
                 existing_handle
                     .cancel
                     .store(true, std::sync::atomic::Ordering::Relaxed);

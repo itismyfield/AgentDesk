@@ -494,16 +494,42 @@ impl TmuxWatcherRegistry {
         Some((removed.owner_channel_id, removed.handle))
     }
 
+    /// The already-locked removal the watcher CLAIM path destroys through.
+    /// `delivery` is the #5464 T5 B1 (residual 2) conjunct: `None` keeps the
+    /// historical unconditional removal, `Some` refuses while the incumbent's own
+    /// lease says another turn is mid-flight. Like the `*_if_current_locked` cores
+    /// it removes INSIDE the critical section, so a racing acquire cannot win
+    /// between judgment and mutation.
     pub(in crate::services::discord) fn remove_tmux_session_locked(
         &self,
         guard: &TmuxWatcherRegistryGuard,
         tmux_session_name: &str,
+        delivery: Option<&TerminalDeliveryFence>,
     ) -> Option<(ChannelId, TmuxWatcherHandle)> {
-        let mut removed = self.unpair_locked(guard, tmux_session_name)?;
+        let mut removed = commit_under_delivery_fence(delivery, || {
+            self.unpair_locked(guard, tmux_session_name)
+        })
+        .flatten()?;
         if let Some(record) = removed.reservation.take() {
             self.clear_reservation(guard, record);
         }
         Some((removed.owner_channel_id, removed.handle))
+    }
+
+    /// The delivery-lease cell the live reservation for `tmux_session_name` pairs
+    /// its incumbent to, for a caller fencing against the INCUMBENT's deliveries.
+    /// Reads the paired record, not `resolve_delivery_cell`, so an unreserved
+    /// session yields `None` rather than a fresh always-`Unleased` cell every
+    /// conjunct would permit on. The `Arc` is cloned out before the DashMap ref
+    /// drops, keeping the shard->payload edge the fence requires absent.
+    pub(in crate::services::discord) fn reserved_delivery_lease_locked(
+        &self,
+        _guard: &TmuxWatcherRegistryGuard,
+        tmux_session_name: &str,
+    ) -> Option<Arc<DeliveryLeaseCell>> {
+        self.reservation_by_tmux_session
+            .get(tmux_session_name)
+            .map(|entry| Arc::clone(&entry.value().cell))
     }
 
     pub(in crate::services::discord) fn remove_tmux_session_if_current(

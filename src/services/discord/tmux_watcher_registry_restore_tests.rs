@@ -769,7 +769,9 @@ fn watcher_reservation_all_central_removal_spellings_clear_pair() {
 
     assert!(registry.remove(&identities[0].0).is_some());
     let guard = super::lock_tmux_watcher_registry();
-    assert!(registry.remove_tmux_session_locked(&guard, identities[1].1).is_some());
+    assert!(registry
+        .remove_tmux_session_locked(&guard, identities[1].1, None)
+        .is_some());
     drop(guard);
     assert!(registry
         .remove_tmux_session_if_current(identities[2].1, &identities[2].3)
@@ -796,4 +798,207 @@ fn watcher_reservation_coord_access_under_payload_is_rejected() {
         });
     }));
     assert!(result.is_err(), "payload-held coord access must panic");
+}
+
+/// #5464 T5 B1 (residual 1): the fallback-offset lease key used to fail OPEN.
+///
+/// `tmux_watcher::turn_identity::pinned_delivery_lease_key` mints
+/// `(user_msg_id 0, started_at None, turn_start_offset Some(relay_range_start))`
+/// whenever no inflight row matched the session, while the destructive probe's
+/// key always comes from `DeliveryLeaseKey::from_inflight_state_for_site`, which
+/// passes no fallback offset. The two shapes can never compare equal, so before
+/// this change `identity_matched` answered `None` and the conjunct permitted the
+/// removal however live the delivery was — missing evidence read as approval.
+///
+///   * arm A — a live fallback-offset lease on the probe's own channel and
+///     generation. The removal must be REFUSED: the fence cannot prove the
+///     delivery is not this turn's, so it abstains rather than destroying.
+///   * arm B — the same lease with an elapsed deadline. A dead holder must not
+///     strand the watcher, which is what bounds the new refusal exactly as it
+///     bounds the key-matched one.
+///   * arm C — a live fallback-offset lease minted under a DIFFERENT restart
+///     generation. Its holder cannot still be delivering on this generation, so
+///     this legitimate destruction must still pass. Without the generation
+///     conjunct the fail-CLOSED rule would over-reach into it.
+///
+/// Deleting `unmatchable_fallback_against` from `TerminalDeliveryFence::refusal`
+/// fails arm A; dropping its deadline test fails arm B; dropping its
+/// `(channel, generation)` restriction fails arm C.
+#[test]
+fn unmatchable_fallback_offset_lease_fails_closed_and_expiry_bounds_the_refusal() {
+    use super::tmux_watcher_registry::WatcherIdentityFence;
+    use crate::config::ExecutionIdentityMode;
+
+    const SITE: &str = "b1_fallback_offset_fail_closed";
+    const GENERATION: u64 = 7;
+
+    // The shape `from_inflight_state_for_site` produces for an id-0 turn that
+    // DID match an inflight row: both disambiguators present.
+    fn probe_key(channel: ChannelId) -> DeliveryLeaseKey {
+        DeliveryLeaseKey::new(channel, GENERATION, 0, Some("2026-09-11 10:00:00"), Some(4_096))
+    }
+
+    // The shape `pinned_delivery_lease_key` falls back to when no inflight row
+    // matched: offset only, and unmatchable against any probe key.
+    fn fallback_key(channel: ChannelId, generation: u64) -> DeliveryLeaseKey {
+        DeliveryLeaseKey::new_for_site_with_fallback_offset(
+            channel,
+            generation,
+            0,
+            None,
+            None,
+            Some(9_000),
+            "b1_fallback_offset_fail_closed.watcher",
+        )
+    }
+
+    fn run(channel_raw: u64, tmux: &str, lease_generation: u64, deadline_ms: u64) -> bool {
+        let registry = TmuxWatcherRegistry::new();
+        let channel = ChannelId::new(channel_raw);
+        let handle = live_watcher_handle(tmux);
+        let pinned_cancel = Arc::clone(&handle.cancel);
+        registry.insert(channel, handle);
+
+        let expected = probe_key(channel);
+        let live = fallback_key(channel, lease_generation);
+        assert_ne!(
+            live, expected,
+            "the fallback shape must be unmatchable, or this test proves nothing"
+        );
+
+        let lease = Arc::new(DeliveryLeaseCell::new(channel));
+        assert!(lease.try_acquire(
+            live,
+            super::LeaseHolder::Watcher { instance_id: 5_464 },
+            0,
+            128,
+            deadline_ms,
+        ));
+
+        // `Legacy` reads no `.spawn_nonce` marker and pins no binding, so the
+        // identity conjunct cannot be what decides any arm.
+        let identity_fence =
+            WatcherIdentityFence::capture(ExecutionIdentityMode::Legacy, SITE, tmux);
+        registry
+            .under_identity_fence(identity_fence)
+            .with_terminal_delivery_fence(TerminalDeliveryFence::capture(lease, expected, SITE))
+            .remove_tmux_session_if_current(tmux, &pinned_cancel)
+            .is_some()
+    }
+
+    let live_deadline = super::lease_now_ms().saturating_add(super::DELIVERY_LEASE_DEADLINE_MS);
+    // Strictly in the past on the same monotonic clock the fence reads, which
+    // only moves forward from here.
+    let dead_deadline = super::lease_now_ms().saturating_sub(1);
+
+    assert!(
+        !run(5_464_000_001, "AgentDesk-5464-fallback-live", GENERATION, live_deadline),
+        "a live fallback-offset lease is unreadable evidence, not absent evidence; \
+         the destruction must abstain instead of permitting"
+    );
+    assert!(
+        run(5_464_000_002, "AgentDesk-5464-fallback-expired", GENERATION, dead_deadline),
+        "an expired fallback-offset lease is a dead holder and must not strand the watcher"
+    );
+    assert!(
+        run(5_464_000_003, "AgentDesk-5464-fallback-other-gen", GENERATION + 1, live_deadline),
+        "a fallback lease from another restart generation cannot be delivering on this \
+         one, so this legitimate destruction must still pass"
+    );
+}
+
+/// #5464 T5 B1 (residual 2): the watcher CLAIM rebind path destroyed through
+/// `remove_tmux_session_locked` with no identity conjunct at all, so a claim
+/// arriving from another channel could remove an incumbent that was still
+/// delivering a turn the claimant had no relationship to.
+///
+///   * arm A — a foreign claim while the incumbent's own cell holds a live
+///     lease. The removal must be REFUSED and the row left installed.
+///   * arm B — the same lease, deadline elapsed. Bounded like every other arm of
+///     this fence: a dead holder must not hold the session hostage.
+///   * arm C — the claim comes from the incumbent's OWN channel. That is the
+///     ordinary same-channel handoff/restore/replacement, whose lease is the
+///     claimant's own to supersede, so it must still remove.
+///
+/// Deleting the `ForeignClaim` arm of `TerminalDeliveryFence::refusal` fails
+/// arm A; dropping its deadline test fails arm B; widening it to "any live
+/// lease" fails arm C.
+#[test]
+fn foreign_channel_rebind_cannot_remove_a_session_mid_delivery() {
+    const SITE: &str = "b1_foreign_claim_rebind";
+
+    fn run(incumbent_raw: u64, claimant_raw: u64, tmux: &str, deadline_ms: u64) -> bool {
+        let coords = Arc::new(dashmap::DashMap::new());
+        let registry = TmuxWatcherRegistry::new_with_coords(Arc::clone(&coords));
+        let incumbent = ChannelId::new(incumbent_raw);
+        let claimant = ChannelId::new(claimant_raw);
+        registry.insert(incumbent, live_watcher_handle(tmux));
+
+        // The incumbent's OWN paired cell, which is what the rebind conjunct
+        // binds — not the claimant's channel cell.
+        let guard = super::lock_tmux_watcher_registry();
+        let lease = registry
+            .reserved_delivery_lease_locked(&guard, tmux)
+            .expect("the live reservation pairs a delivery cell");
+        drop(guard);
+        assert!(lease.try_acquire(
+            DeliveryLeaseKey::new(incumbent, 3, 5_464_100_001, None, None),
+            super::LeaseHolder::Sink,
+            0,
+            128,
+            deadline_ms,
+        ));
+
+        let guard = super::lock_tmux_watcher_registry();
+        let removed = registry
+            .remove_tmux_session_locked(
+                &guard,
+                tmux,
+                Some(&TerminalDeliveryFence::capture_foreign_claim(
+                    Arc::clone(&lease),
+                    claimant,
+                    SITE,
+                )),
+            )
+            .is_some();
+        drop(guard);
+        assert_eq!(
+            registry.owner_channel_for_tmux_session(tmux).is_none(),
+            removed,
+            "the row must survive exactly when the conjunct refused"
+        );
+        removed
+    }
+
+    let live_deadline = super::lease_now_ms().saturating_add(super::DELIVERY_LEASE_DEADLINE_MS);
+    let dead_deadline = super::lease_now_ms().saturating_sub(1);
+
+    assert!(
+        !run(
+            5_464_200_001,
+            5_464_200_099,
+            "AgentDesk-5464-foreign-live",
+            live_deadline,
+        ),
+        "a rebind from another turn's channel must not remove a session that is \
+         still delivering"
+    );
+    assert!(
+        run(
+            5_464_200_002,
+            5_464_200_098,
+            "AgentDesk-5464-foreign-expired",
+            dead_deadline,
+        ),
+        "an expired lease is a dead holder and must not block the rebind"
+    );
+    assert!(
+        run(
+            5_464_200_003,
+            5_464_200_003,
+            "AgentDesk-5464-foreign-same-channel",
+            live_deadline,
+        ),
+        "a same-channel claim supersedes its own turn's lease and must still remove"
+    );
 }

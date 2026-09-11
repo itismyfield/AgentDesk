@@ -309,21 +309,17 @@ impl WatcherIdentityFence {
 ///   [`LeaseSnapshot::identity_matched`]), so on that residual class the veto is
 ///   channel-and-generation wide rather than turn-precise. It fails CLOSED —
 ///   toward keeping the watcher — which is the direction this gate wants.
-/// * A turn whose relay owner leased under the FALLBACK-OFFSET key can never be
-///   matched here, so it fails OPEN. `tmux_watcher::turn_identity::
-///   pinned_delivery_lease_key` falls back to
-///   `DeliveryLeaseKey::new_for_site_with_fallback_offset(.., 0, None, None,
-///   Some(relay_range_start))` whenever no inflight row matched the session, and
-///   that key is `(user_msg_id 0, started_at None, turn_start_offset Some)`.
-///   `expected_key` here always comes from
-///   `DestructiveCancelProbeSnapshot::delivery_lease_key`, i.e. from
-///   `DeliveryLeaseKey::from_inflight_state_for_site`, which passes NO fallback
-///   offset and therefore only ever produces `(id, None, None)`, `(0,
-///   Some(started_at), Some(offset))` or the degenerate `(0, None, None)`. None
-///   of those three shapes can equal the fallback shape, so whenever the relay
-///   owner took that branch this conjunct permits regardless of how live the
-///   delivery is. This is a fail-OPEN residual, unlike the degenerate id-0 class
-///   above.
+/// * A turn whose relay owner leased under the FALLBACK-OFFSET key cannot be
+///   matched by key equality — and since #5464 T5 B1 that fails CLOSED, not open.
+///   `turn_identity::pinned_delivery_lease_key` mints `(0, None,
+///   Some(relay_range_start))` when no inflight row matched, a shape
+///   `expected_key` can never carry, so the comparison is UNREADABLE, not
+///   negative. Reading that as permission was the one place the S4 fence turned
+///   absence of evidence into approval, against the S6a rule that an unwarranted
+///   destruction abstains. `DeliveryLeaseKey::unmatchable_fallback_against` now
+///   names that class and refuses on it, on the same `Leased` + unelapsed-deadline
+///   terms as a key match and only for the same `(channel, generation)`. The cost
+///   is precision: the veto is channel-and-generation wide, like the id-0 class.
 /// * Nothing about leases on OTHER channels, and nothing at all about the
 ///   destructive call sites listed as out of scope in the S4 commit body; those
 ///   still reach the unfenced helpers.
@@ -362,10 +358,27 @@ impl WatcherIdentityFence {
 /// call would close the cycle and falsify this paragraph.
 pub(in crate::services::discord) struct TerminalDeliveryFence {
     lease: Arc<DeliveryLeaseCell>,
-    expected_key: DeliveryLeaseKey,
+    identity: DeliveryFenceIdentity,
     /// Static label the veto log attributes this to; mirrors
     /// [`WatcherIdentityFence`]'s `site`.
     site: &'static str,
+}
+
+/// WHOSE delivery the bound fence speaks for. Both variants are judged by the one
+/// [`TerminalDeliveryFence::commit_if_permitted`] under the one payload mutex: a
+/// second question asked of the same lease read, NOT a second fence.
+enum DeliveryFenceIdentity {
+    /// The destroyer owns the turn it is tearing down and pinned its key, so it
+    /// asks "is MY turn's delivery in flight?"; another turn's lease is not its
+    /// business.
+    OwnTurn(DeliveryLeaseKey),
+
+    /// #5464 T5 B1 (residual 2): a watcher CLAIM rebinding a session it does not
+    /// own, so the question inverts to "is a turn that is NOT mine delivering
+    /// through the row I am removing?". The claimant's channel suffices: this
+    /// fence binds the INCUMBENT's cell, so every key it holds names the
+    /// incumbent's channel and a claim from elsewhere cannot be the holder.
+    ForeignClaim(ChannelId),
 }
 
 impl TerminalDeliveryFence {
@@ -380,8 +393,64 @@ impl TerminalDeliveryFence {
     ) -> Self {
         Self {
             lease,
-            expected_key,
+            identity: DeliveryFenceIdentity::OwnTurn(expected_key),
             site,
+        }
+    }
+
+    /// #5464 T5 B1 (residual 2): pin an incumbent's lease cell for a REBIND claim;
+    /// `claimant_channel_id` REQUESTS the session rather than owning the cell.
+    /// `watchers::lifecycle::claims` binds this at both its removal sites — the
+    /// destruction `health/relay_dead_reattach.rs` reaches on a rebinding claim.
+    pub(in crate::services::discord) fn capture_foreign_claim(
+        lease: Arc<DeliveryLeaseCell>,
+        claimant_channel_id: ChannelId,
+        site: &'static str,
+    ) -> Self {
+        Self {
+            lease,
+            identity: DeliveryFenceIdentity::ForeignClaim(claimant_channel_id),
+            site,
+        }
+    }
+
+    /// The channel the veto log attributes this fence to.
+    fn channel_id(&self) -> ChannelId {
+        match &self.identity {
+            DeliveryFenceIdentity::OwnTurn(expected_key) => expected_key.channel_id(),
+            DeliveryFenceIdentity::ForeignClaim(claimant_channel_id) => *claimant_channel_id,
+        }
+    }
+
+    /// The single refusal predicate for both identities: `Some` vetoes and names
+    /// the class, `None` permits. Every arm requires `Leased` with a deadline
+    /// ahead of `now_ms` — `Committed` has no deadline and its holder is done,
+    /// and an elapsed deadline is a dead holder that must not strand the row.
+    fn refusal(&self, snapshot: &LeaseSnapshot, now_ms: u64) -> Option<&'static str> {
+        let live_key = match snapshot {
+            LeaseSnapshot::Leased {
+                key, deadline_ms, ..
+            } if *deadline_ms > now_ms => key,
+            LeaseSnapshot::Unleased
+            | LeaseSnapshot::Leased { .. }
+            | LeaseSnapshot::Committed { .. } => return None,
+        };
+        match &self.identity {
+            DeliveryFenceIdentity::OwnTurn(expected_key) => {
+                if live_key == expected_key {
+                    return Some("identity_matched_lease_live");
+                }
+                // #5464 T5 B1 (residual 1): an unmatchable fallback-offset key
+                // is missing evidence, not evidence of absence. Abstain.
+                live_key
+                    .unmatchable_fallback_against(expected_key)
+                    .then_some("unmatchable_fallback_offset_lease_live")
+            }
+            // #5464 T5 B1 (residual 2): the claimant cannot be the holder of a
+            // lease keyed to another channel, so a live one is another turn's.
+            DeliveryFenceIdentity::ForeignClaim(claimant_channel_id) => {
+                (live_key.channel_id() != *claimant_channel_id).then_some("foreign_turn_lease_live")
+            }
         }
     }
 
@@ -406,18 +475,14 @@ impl TerminalDeliveryFence {
             // Comparing it to a wall clock would make an NTP step decide this
             // conjunct.
             let now_ms = lease_now_ms();
-            if let Some(deadline_ms) = snapshot
-                .identity_matched(&self.expected_key)
-                .and_then(|matched| matched.deadline_ms)
-                && deadline_ms > now_ms
-            {
+            if let Some(refusal) = self.refusal(&snapshot, now_ms) {
                 tracing::info!(
                     counter = "terminal_delivery_fence_veto",
                     site = self.site,
-                    channel_id = self.expected_key.channel_id().get(),
-                    deadline_ms,
+                    channel_id = self.channel_id().get(),
+                    refusal,
                     now_ms,
-                    "identity-matched delivery lease is still live; refusing the destructive watcher removal"
+                    "a live delivery lease forbids this destructive watcher removal"
                 );
                 return None;
             }
