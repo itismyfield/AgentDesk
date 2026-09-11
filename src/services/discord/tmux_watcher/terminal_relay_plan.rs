@@ -671,8 +671,9 @@ pub(super) async fn run_terminal_relay_plan<'a>(
     }
 }
 
-#[cfg(test)]
 #[path = "rowless_delivery_authority.rs"]
 mod rowless_delivery_authority;
+
+#[cfg(test)]
 #[path = "terminal_relay_plan_tests.rs"]
 mod soft_terminal_direct_send_authority_tests;
