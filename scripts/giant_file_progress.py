@@ -55,7 +55,12 @@ def git(*args: str, binary: bool = False) -> str | bytes:
     return result.stdout
 def oid(ref: str, suffix: str = "commit") -> str:
     return str(git("rev-parse", "--verify", f"{ref}^{{{suffix}}}" if suffix else ref)).strip()
-def provenance_matches(candidate: str, base: str, head: str, origin: str, parents: list[str]) -> bool: return parents == [candidate, base, head] and base == origin
+# Provenance binds a verdict to the event's own immutable (base, head, candidate)
+# triple and to the checked-out candidate. It deliberately does NOT require
+# base == origin/main: an unrelated main advance must not invalidate an already
+# verified candidate. Integration-step freshness is a procedural guarantee --
+# see docs/agent-maintenance/merge-driver-inventory.md.
+def provenance_matches(candidate: str, base: str, head: str, parents: list[str]) -> bool: return parents == [candidate, base, head]
 def archive(ref: str, destination: Path) -> None:
     with tarfile.open(fileobj=io.BytesIO(git("archive", "--format=tar", ref, binary=True))) as bundle:
         members = bundle.getmembers()
@@ -574,11 +579,9 @@ def main() -> int:
                 selector = "pr_strict_progress"
                 if repository != "itismyfield/AgentDesk" or env.get("GFP_HEAD_REPOSITORY") != repository:
                     raise RuntimeError("progress requires an exact same-repository PR")
-                git("fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
                 base_sha, head_sha = oid(env.get("GFP_BASE_SHA", "")), oid(env.get("GFP_HEAD_SHA", ""))
                 parents = str(git("rev-list", "--parents", "-n1", candidate_sha)).split()
-                origin_sha = oid("origin/main")
-                if not provenance_matches(candidate_sha, base_sha, head_sha, origin_sha, parents):
+                if not provenance_matches(candidate_sha, base_sha, head_sha, parents):
                     raise RuntimeError("event/base/head/merge object provenance mismatch")
                 base_root = Path(temporary) / "base"
                 base_root.mkdir(); archive(base_sha, base_root)
@@ -618,7 +621,7 @@ def main() -> int:
                     raise RuntimeError("; ".join(errors))
                 if selector == "pr_ledger_repair":
                     retired = set()  # Deadline movement does not retire a source entry.
-                payload.update({"event_base_sha": base_sha, "observed_origin_main_sha": origin_sha,
+                payload.update({"event_base_sha": base_sha,
                     "merge_first_parent": parents[1], "head_sha": head_sha, "merge_sha": candidate_sha,
                     "base_tree": oid(base_sha, "tree"), "base_overdue": base["overdue"],
                     "retired": [{"path": path, "base_prod_loc": base["modules"][path], "candidate_prod_loc": candidate["modules"][path], "children": [{"path": child, "candidate_prod_loc": candidate["modules"][child]} for child in facts["children"][path]]} for path in sorted(retired)],
