@@ -158,6 +158,8 @@ mod pre_emit_guard;
 #[path = "tmux_watcher/terminal_preflight.rs"]
 mod terminal_preflight;
 
+#[path = "tmux_watcher/rowless_delivery_authority.rs"]
+mod rowless_delivery_authority;
 #[path = "tmux_watcher/terminal_relay_plan.rs"]
 mod terminal_relay_plan;
 

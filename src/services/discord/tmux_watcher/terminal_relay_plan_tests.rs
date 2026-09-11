@@ -3,8 +3,10 @@
 //! Split out of `terminal_relay_plan.rs` to keep that module inside the
 //! `src/services/discord/tmux_watcher/**` namespace size cap.
 
+use super::super::rowless_delivery_authority::{lease_has_live_holder, ledger_owes_output};
 use super::*;
 use crate::services::discord::inflight::RelayOwnerKind;
+use crate::services::discord::{DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot};
 
 const SESSION: &str = "AgentDesk-claude-adk-cc";
 const FRAME_START: u64 = 1_534_426;
@@ -293,7 +295,10 @@ fn rowless_evidence_never_relaxes_the_five_exact_episode_conjuncts_5464_c1() {
     outside_frame.turn_start_offset = Some(FRAME_END + 1);
 
     let cases = [
-        (foreign_session, SoftTerminalAuthorityDenial::SessionMismatch),
+        (
+            foreign_session,
+            SoftTerminalAuthorityDenial::SessionMismatch,
+        ),
         (
             outside_frame,
             SoftTerminalAuthorityDenial::TurnStartOutsideFrame,
@@ -359,7 +364,7 @@ fn production_call_site_reads_the_ledger_and_the_delivery_lease_5464_c1() {
     // behavioural assertion above green while restoring the body drop in
     // production, so the removal must not be silent.
     let source = include_str!("terminal_relay_plan.rs");
-    let reader = source
+    let reader = include_str!("rowless_delivery_authority.rs")
         .split_once("fn read_rowless_delivery_authority(")
         .expect("the plan must read rowless delivery authority")
         .1
@@ -372,16 +377,16 @@ fn production_call_site_reads_the_ledger_and_the_delivery_lease_5464_c1() {
         "the ledger obligation must be read from the durable delivered frontier (T5 AC1)"
     );
     assert!(
-        reader.contains("range_already_committed"),
-        "the obligation test must reuse the canonical committed-range predicate"
+        reader.contains("ledger_owes_output("),
+        "the obligation must come from the pure operand whose polarity is pinned"
     );
     assert!(
         reader.contains("delivery_lease(channel_id)"),
         "the delivery lease must be read from the channel's live lease cell (T5 AC1)"
     );
     assert!(
-        reader.contains("LeaseSnapshot::Unleased"),
-        "lease presence must be decided against the unleased state"
+        reader.contains("lease_has_live_holder("),
+        "lease presence must come from the pure operand whose polarity is pinned"
     );
     assert!(
         reader.contains("cohort::enforcement_admits"),
@@ -399,4 +404,32 @@ fn production_call_site_reads_the_ledger_and_the_delivery_lease_5464_c1() {
         call_site.contains("read_rowless_delivery_authority("),
         "the authority seam must be fed freshly read AC1 evidence, not a literal"
     );
+}
+
+#[test]
+fn ac1_operand_polarity_is_pinned_by_behaviour_not_the_source_grep_5464_c1() {
+    // P1-2: dropping either `!` keeps every `include_str!` assertion above green.
+    // P1-3: a `Committed` cell is a FINISHED delivery that is never reclaimed.
+    assert!(ledger_owes_output(FRAME_END, FRAME_START));
+    assert!(!ledger_owes_output(FRAME_END, FRAME_END));
+    assert!(!ledger_owes_output(0, 0));
+
+    let holder = LeaseHolder::Watcher { instance_id: 1 };
+    let key = DeliveryLeaseKey::new(serenity::ChannelId::new(42), 1, 7, None, Some(TURN_START));
+    assert!(!lease_has_live_holder(&LeaseSnapshot::Unleased));
+    assert!(lease_has_live_holder(&LeaseSnapshot::Leased {
+        holder,
+        key: key.clone(),
+        deadline_ms: 1,
+        start: FRAME_START,
+        end: FRAME_END,
+    }));
+    let committed = LeaseSnapshot::Committed {
+        holder,
+        key,
+        start: FRAME_START,
+        end: FRAME_END,
+        outcome: LeaseOutcome::Delivered,
+    };
+    assert!(!lease_has_live_holder(&committed));
 }

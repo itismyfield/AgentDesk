@@ -1,6 +1,9 @@
 use super::*;
 use std::sync::Arc;
 
+use super::rowless_delivery_authority::{
+    RowlessDeliveryAuthority, read_rowless_delivery_authority,
+};
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::TmuxRelayCoord;
@@ -72,79 +75,6 @@ pub(super) struct TerminalRelayPlan<'a> {
     pub(super) watcher_direct_terminal_idle_committed: bool,
     pub(super) tui_direct_anchor_terminal_body_visible: bool,
     pub(super) tui_direct_anchor_or_lease_present_for_lifecycle: bool,
-}
-
-/// #5464 T5 C1: delivery authority for a terminal frame whose durable inflight
-/// row is GONE, read from the two sources T5 AC1 names — the ledger's output
-/// obligation and the delivery lease — plus the rollout cohort that gates them.
-///
-/// Kept as three named operands rather than one fused bool so the flight
-/// recorder's `soft_terminal_denial` stays attributable: a frame that survived
-/// on a ledger obligation and one that survived on a lease are different
-/// operational stories, and a cohort that admitted nobody is a third.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct RowlessDeliveryAuthority {
-    cohort_admits: bool,
-    ledger_obligation_open: bool,
-    delivery_lease_present: bool,
-}
-
-impl RowlessDeliveryAuthority {
-    /// A structural signal alone never ends delivery (T5 AC1) — but it takes a
-    /// POSITIVE operand to keep the frame alive, so a rowless frame that the
-    /// ledger has already settled and that no lease covers is still refused
-    /// exactly as it is today. Inside the enforcement cohort, either an
-    /// unsettled ledger obligation or an existing delivery lease is enough.
-    fn retains_delivery_candidacy(self) -> bool {
-        self.cohort_admits && (self.ledger_obligation_open || self.delivery_lease_present)
-    }
-}
-
-/// Read the two AC1 operands for this frame.
-///
-/// `ledger_obligation_open` asks the DURABLE delivery record whether this
-/// frame's consumed range is still OWED. `delivered_frontier_end_current_generation`
-/// is the ledger's settled side — the release-surviving delivered frontier,
-/// already guarded against a prior wrapper generation (#1270) and against an end
-/// beyond the current transcript EOF (#4188) — so a consumed end that frontier
-/// does not cover is output the ledger still owes. It is deliberately NOT
-/// `committed_floor_for_resend_dedup`: that fuses the IN-MEMORY watermark, which
-/// this seam runs before `reset_relay_watermark_on_generation_change` has had a
-/// chance to heal, and a stale-high watermark would read as "already settled"
-/// and deny the very frame AC1 exists to keep.
-///
-/// `delivery_lease_present` asks the channel's live `DeliveryLeaseCell` whether
-/// ANY holder's lease exists. This watcher has not acquired its own at this
-/// seam (`try_acquire_watcher_delivery_lease` runs after the plan returns), so a
-/// non-`Unleased` cell means delivery authority exists on this channel
-/// independently of the vanished row — and the downstream B2 acquire, not this
-/// predicate, decides who actually sends.
-fn read_rowless_delivery_authority(
-    shared: &SharedData,
-    provider: &ProviderKind,
-    channel_id: serenity::ChannelId,
-    tmux_session_name: &str,
-    output_path: &str,
-    consumed_end: u64,
-) -> RowlessDeliveryAuthority {
-    let transcript_eof = std::fs::metadata(output_path).ok().map(|meta| meta.len());
-    let delivered_end = dr::delivered_frontier_end_current_generation(
-        provider,
-        channel_id,
-        tmux_session_name,
-        transcript_eof,
-    );
-    RowlessDeliveryAuthority {
-        cohort_admits: crate::services::discord::relay_recovery::cohort::enforcement_admits(
-            channel_id.get(),
-        ),
-        ledger_obligation_open: consumed_end > 0
-            && !dr::range_already_committed(consumed_end, delivered_end),
-        delivery_lease_present: !matches!(
-            shared.delivery_lease(channel_id).read(),
-            crate::services::discord::LeaseSnapshot::Unleased
-        ),
-    }
 }
 
 /// #5175: decide whether this watcher may direct-send the terminal body.
