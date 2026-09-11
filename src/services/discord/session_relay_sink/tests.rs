@@ -3973,6 +3973,7 @@ async fn dc1_tick() -> Dc1Snapshot {
 struct Dc1Fixture {
     binding: MatchedChannel,
     health: Arc<HealthRegistry>,
+    sink: Arc<SessionBoundDiscordRelaySink>,
     shutdown: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
     rx: tokio::sync::mpsc::UnboundedReceiver<StreamFrame>,
@@ -3986,6 +3987,7 @@ impl Dc1Fixture {
         binding.expected_rollout_path = path.to_str().unwrap().to_owned();
         std::fs::write(path, initial).unwrap();
         let health = Arc::new(HealthRegistry::new());
+        let sink = Arc::new(SessionBoundDiscordRelaySink::new(health.clone()));
         if shared {
             health
                 .register_standby("claude".into(), super::super::make_shared_data_for_tests())
@@ -4011,10 +4013,11 @@ impl Dc1Fixture {
         let registry = crate::services::cluster::session_registry::global_session_registry();
         registry.upsert(binding.clone(), None);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let task = tokio::spawn(run_idle_jsonl_relay_loop(shutdown.clone(), health.clone()));
+        let task = tokio::spawn(run_idle_jsonl_relay_loop(shutdown.clone(), sink.clone()));
         let result = Self {
             binding,
             health,
+            sink,
             shutdown,
             task,
             rx,
@@ -4063,7 +4066,7 @@ impl Dc1Fixture {
         self.shutdown = Arc::new(AtomicBool::new(false));
         self.task = tokio::spawn(run_idle_jsonl_relay_loop(
             self.shutdown.clone(),
-            self.health.clone(),
+            self.sink.clone(),
         ));
     }
     async fn stop(self) {
