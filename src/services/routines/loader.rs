@@ -1081,7 +1081,10 @@ mod tests {
                 buffer: buffer.clone(),
             })
             .finish();
-        tracing::subscriber::with_default(subscriber, emit);
+        let dispatch = tracing::Dispatch::new(subscriber);
+        // Two live dispatchers prevent parallel registration from caching no interest.
+        let _other_dispatch = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        tracing::dispatcher::with_default(&dispatch, emit);
         String::from_utf8(buffer.lock().unwrap().clone()).unwrap()
     }
 

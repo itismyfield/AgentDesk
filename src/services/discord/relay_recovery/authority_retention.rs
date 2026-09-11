@@ -3,9 +3,10 @@
 //!
 //! **Two axes cohabit one file, so the retention unit is the WHOLE FILE.**
 //! Axis A's lifecycle records ([`super::authority_observation::append_jsonl`])
-//! and axis B's structural/reachability candidate records
-//! ([`super::append_axis_b_jsonl`]) append to the *same* daily path — both build
-//! it as `agentdesk_root()/relay_authority/{Local today}.jsonl`. Measured on the
+//! are the only ones still appended, at
+//! `agentdesk_root()/relay_authority/{Local today}.jsonl`. Axis B's
+//! structural/reachability candidate records shared that exact path until their
+//! writer was retired, so every archived file still carries both. Measured on the
 //! live release sink on 2026-09-11, every one of the 8 files carried both
 //! schemas (2026-09-07 alone: 1127 `relay_authority.axis_a.v3` lines and 1326
 //! `relay_authority.axis_b.v1` lines). Nothing here ever rewrites, truncates or

@@ -4376,11 +4376,7 @@ services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_same
 services::discord::relay_recovery::auto_heal_confirm::tests::relay_recovery_spawn_confirm_requires_stable_heartbeat_advance
 services::discord::relay_recovery::axis_b_tests::automatic_reattach_sources_keep_transport_unknown_recovery_eligible
 services::discord::relay_recovery::axis_b_tests::automatic_warrant_wiring_is_pinned_at_the_four_direct_consumers
-services::discord::relay_recovery::axis_b_tests::axis_b_append_path_uses_the_framing_lock
 services::discord::relay_recovery::axis_b_tests::axis_b_apply_site_mapping_separates_operator_and_automatic_taxonomy
-services::discord::relay_recovery::axis_b_tests::axis_b_emit_covers_all_sites_without_turn_scope
-services::discord::relay_recovery::axis_b_tests::axis_b_observer_runs_every_verdict_without_returning_authority
-services::discord::relay_recovery::axis_b_tests::axis_b_writer_frames_concurrent_records
 services::discord::relay_recovery::axis_b_tests::destructive_consumers_cannot_read_reachability_for_routing
 services::discord::relay_recovery::circuit_breaker::tests::alert_enqueue_failure_stays_pending_and_retry_marks_only_alert_flag
 services::discord::relay_recovery::circuit_breaker::tests::alert_marker_is_exact_episode_scoped
@@ -4411,8 +4407,6 @@ services::discord::relay_recovery::cohort::tests::rollout_report_publishes_the_c
 services::discord::relay_recovery::cohort::tests::rollout_report_without_a_live_config_reports_the_dormant_dial
 services::discord::relay_recovery::cohort::tests::shipped_defaults_admit_no_channel_to_the_relay_authority_cohort
 services::discord::relay_recovery::cohort::tests::the_published_effective_width_is_the_width_admission_gates_on
-services::discord::relay_recovery::decision::reachability_authority_tests::foreground_stream_with_unreachable_relay_reports_without_acting
-services::discord::relay_recovery::decision::reachability_authority_tests::reachability_never_selects_or_enables_a_destructive_action
 services::discord::relay_recovery::destructive_warrant::tests::clear_orphan_pending_token_requires_the_same_episode_when_both_operands_exist
 services::discord::relay_recovery::destructive_warrant::tests::exact_episode_distinguishes_match_mismatch_and_missing_operands
 services::discord::relay_recovery::destructive_warrant::tests::pinned_adoption_only_relaxes_transport_unknown_reattach
@@ -4445,12 +4439,13 @@ services::discord::relay_recovery::tests::idle_tmux_repair_guard_silent_when_tai
 services::discord::relay_recovery::tests::idle_tmux_snapshot_missing_output_path_denies_claude_tui_but_keeps_legacy_pane_fallback
 services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_can_reattach_watcher_when_evidence_is_complete
 services::discord::relay_recovery::tests::live_agentdesk_tmux_relay_dead_without_mailbox_token_can_adopt_ownerless_inflight
+services::discord::relay_recovery::tests::manual_relay_recovery_plans_and_admits_on_one_captured_instant
 services::discord::relay_recovery::tests::old_orphan_shape_remains_auto_heal_eligible
 services::discord::relay_recovery::tests::orphan_token_live_evidence_and_agentdesk_tmux_stay_protected
 services::discord::relay_recovery::tests::post_gate_identity_matched_live_delivery_lease_blocks_dead_frontier_watcher_cancel
 services::discord::relay_recovery::tests::post_gate_relay_emission_no_longer_blocks_dead_frontier_watcher_cancel
 services::discord::relay_recovery::tests::probe_auto_apply_is_rate_limited_per_channel_action
-services::discord::relay_recovery::tests::probe_redrive_reattach_records_the_actual_relay_recovery_observation
+services::discord::relay_recovery::tests::probe_redrive_reattach_stays_eligible_with_unreadable_reachability_operand
 services::discord::relay_recovery::tests::queue_blocked_allows_disk_backed_queue_to_reach_drain_helper
 services::discord::relay_recovery::tests::queue_blocked_does_not_drain_when_live_turn_evidence_remains
 services::discord::relay_recovery::tests::queue_blocked_schedules_bounded_pending_queue_drain_when_idle

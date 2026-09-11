@@ -21,10 +21,8 @@
 //! value produced here cancels a turn, kills a tmux session or a process,
 //! removes a registry entry, or force-cleans a mailbox or an in-flight row.
 //! [`RelayVerdict::authorizes_destructive_action`] answers false on every
-//! composed value, and
-//! `services::discord::relay_recovery::plan_relay_recovery_under_reachability`
-//! is written so a non-`Reachable` verdict can only replace a recovery action
-//! with a milder one.
+//! composed value. Recovery admission remains at the separate permanent
+//! `relay_recovery::destructive_warrant_bind` gate, independent of health polarity.
 //!
 //! # What this composition does NOT establish
 //!

@@ -46,12 +46,8 @@ struct StaleActiveTurnProof {
 /// classification alone decides (the pre-warrant behavior of both stale-turn
 /// release paths).
 #[cfg(not(unix))]
-fn stale_turn_axis_b_warrants(
-    shared: &std::sync::Arc<SharedData>,
-    provider: &ProviderKind,
-    proof: &StaleActiveTurnProof,
-) -> bool {
-    let _ = (shared, provider);
+fn stale_turn_axis_b_warrants(provider: &ProviderKind, proof: &StaleActiveTurnProof) -> bool {
+    let _ = provider;
     matches!(
         proof.classification,
         StaleActiveTurnProofClassification::RelayStalled
@@ -60,11 +56,7 @@ fn stale_turn_axis_b_warrants(
 }
 
 #[cfg(unix)]
-fn stale_turn_axis_b_warrants(
-    shared: &std::sync::Arc<SharedData>,
-    provider: &ProviderKind,
-    proof: &StaleActiveTurnProof,
-) -> bool {
+fn stale_turn_axis_b_warrants(provider: &ProviderKind, proof: &StaleActiveTurnProof) -> bool {
     let structural_candidate_apply =
         crate::services::discord::relay_recovery::structural_candidate_apply(matches!(
             proof.classification,
@@ -73,15 +65,6 @@ fn stale_turn_axis_b_warrants(
         ));
     let action =
         crate::services::discord::relay_recovery::RelayRecoveryActionKind::ClearStaleThreadProof;
-    crate::services::discord::relay_recovery::observe_axis_b_candidate(
-        shared,
-        provider,
-        &proof.snapshot,
-        crate::services::discord::relay_recovery::AxisBSite::StaleTurnIntake,
-        action,
-        structural_candidate_apply,
-        chrono::Utc::now().timestamp_millis(),
-    );
     let destructive_warrant_bind =
         crate::services::discord::relay_recovery::destructive_warrant_bind(
             structural_candidate_apply,
@@ -188,7 +171,7 @@ pub(super) async fn thread_guard_should_force_clean_stale_thread(
     else {
         return false;
     };
-    stale_turn_axis_b_warrants(shared, provider, &proof)
+    stale_turn_axis_b_warrants(provider, &proof)
 }
 
 /// #1446 Layer 2 — perform the THREAD-GUARD's stale-thread cleanup:
@@ -281,7 +264,7 @@ async fn release_queue_blocked_stale_active_turn(
         return false;
     }
 
-    if !stale_turn_axis_b_warrants(shared, provider, &proof) {
+    if !stale_turn_axis_b_warrants(provider, &proof) {
         return false;
     }
     let ts = chrono::Local::now().format("%H:%M:%S");
