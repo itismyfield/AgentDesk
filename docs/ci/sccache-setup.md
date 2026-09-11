@@ -29,6 +29,8 @@ sccache --show-stats   # should report a fresh cache (zero hits / zero misses)
 On macOS the Homebrew binary lives at `/opt/homebrew/bin/sccache`. The helper
 `setup_sccache_env` in `scripts/_defaults.sh` prepends that directory to `PATH`
 when the binary is present but the directory is not already on `PATH`.
+`apply_sccache_env` in `scripts/build_token.py` (§2.4) applies the same prepend
+under the same condition, to the child environment it builds.
 
 ---
 
@@ -124,9 +126,11 @@ binary when installed.
 ### 2.4 Build token wrapper (campaign build path)
 
 Campaign lanes run `python3 scripts/build_token.py -- <cmd>`, which is on none of the
-paths above. `apply_sccache_env` in that file sets the same three variables from the
-same defaults (resolved absolute `sccache`, `$HOME/.cache/sccache`, `10G`), on the
-child environment only, on POSIX only (it is applied after the `win32` early return).
+paths above. `apply_sccache_env` in that file writes four keys, on the child
+environment only, on POSIX only (it is applied after the `win32` early return): the
+same three variables from the same defaults (resolved absolute `sccache`,
+`$HOME/.cache/sccache`, `10G`), plus `PATH`, which carries the `/opt/homebrew/bin`
+prepend of §1 under the same condition.
 
 Its precedence rule is deliberately **not** `setup_sccache_env`'s. That helper is
 imperative — a script calls it to turn sccache on, so overwriting `RUSTC_WRAPPER` is
