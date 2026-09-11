@@ -4,6 +4,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
+impl CancelToken {
+    /// Raise each atomic independently; the returned deadline is not a pair snapshot.
+    pub(crate) fn raise_watchdog_deadlines(&self, deadline: i64, maximum: i64) -> i64 {
+        self.watchdog_max_deadline_ms
+            .fetch_max(maximum, Ordering::Relaxed);
+        self.watchdog_deadline_ms
+            .fetch_max(deadline, Ordering::Relaxed)
+            .max(deadline)
+    }
+}
+
 pub(super) fn current_unix_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -106,6 +117,31 @@ mod tests {
     use crate::services::provider::cancel_token_cleanup::executor::{
         pid_kill_dispatches_for_test, with_executor_dispatch_seam,
     };
+
+    #[test]
+    fn watchdog_monotonic_token_rmw_keeps_independent_high_water_marks() {
+        let token = CancelToken::new();
+        for (deadline, maximum, expected_deadline, expected_maximum) in [
+            (2_000, 4_000, 2_000, 4_000),
+            (1_000, 1_500, 2_000, 4_000),
+            (3_000, 3_000, 3_000, 4_000),
+            (2_500, 5_000, 3_000, 5_000),
+        ] {
+            assert_eq!(
+                token.raise_watchdog_deadlines(deadline, maximum),
+                expected_deadline
+            );
+            assert_eq!(
+                token.watchdog_deadline_ms.load(Ordering::Relaxed),
+                expected_deadline
+            );
+            assert_eq!(
+                token.watchdog_max_deadline_ms.load(Ordering::Relaxed),
+                expected_maximum
+            );
+        }
+        assert!(!token.is_async_managed());
+    }
 
     #[test]
     fn deadline_poll_dispatches_token_current_pid_without_raw_pid_argument() {

@@ -4554,6 +4554,8 @@ services::discord::router::intake_gate::queue_effects::merged_placeholder_reuse_
 services::discord::router::intake_gate::queue_effects::merged_placeholder_reuse_pure_tests::own_id_card_is_never_reused
 services::discord::router::intake_gate::queue_effects::merged_placeholder_reuse_pure_tests::second_merged_followup_reuses_rekeyed_card
 services::discord::router::intake_gate::queue_effects::pending_reaction_failure_adapter_tests::production_adapter_emits_exactly_one_queue_fallback
+services::discord::router::intake_gate::queue_effects::rekey_window_tests::actor_advances_under_persist_lock_and_consumers_redecide
+services::discord::router::intake_gate::queue_effects::rekey_window_tests::reuse_caller_keeps_lock_snapshot_seam_order
 services::discord::router::intake_gate::queue_effects::schedule_post_enqueue_idle_drain_tests::schedules_when_enqueued_and_slot_idle
 services::discord::router::intake_gate::queue_effects::schedule_post_enqueue_idle_drain_tests::skips_when_enqueue_was_refused
 services::discord::router::intake_gate::queue_effects::schedule_post_enqueue_idle_drain_tests::skips_when_real_turn_holds_slot
@@ -4651,6 +4653,7 @@ services::discord::router::message_handler::intake_turn::tui_busy_pre_submit_que
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::gated_stale_lookup_feeds_the_turn_abort_branch
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::preserve_on_cancel_parameter_reaches_the_turn_start_guard_unmodified
 services::discord::router::message_handler::intake_turn::turn_start_dispatch_guard_preservation_tests::turn_start_guard_is_gated_on_preserve_on_cancel
+services::discord::router::message_handler::intake_turn::turn_watchdog::deadline_initialization_tests::text_spawn_preserves_accepted_deadline_and_provider_baseline
 services::discord::router::message_handler::latency_spans::tests::empty_span_renders_all_dashes
 services::discord::router::message_handler::latency_spans::tests::fresh_span_has_only_accept_anchor
 services::discord::router::message_handler::latency_spans::tests::full_span_renders_every_segment
@@ -4739,8 +4742,16 @@ services::discord::router::message_handler::watchdog::cold_start_retry_tests::de
 services::discord::router::message_handler::watchdog::cold_start_retry_tests::headless_retry_after_precheck_preserves_handoff_incarnation
 services::discord::router::message_handler::watchdog::cold_start_retry_tests::message_retry_after_precheck_preserves_handoff_incarnation
 services::discord::router::message_handler::watchdog::relay_state_contract_refs::contract_symbols_exist
+services::discord::router::message_handler::watchdog::timeout_notice_tests::accepted_deadline_survives_init_then_stale_clear
+services::discord::router::message_handler::watchdog::timeout_notice_tests::accepted_deadline_survives_stale_clear_then_init
+services::discord::router::message_handler::watchdog::timeout_notice_tests::headless_spawn_preserves_accepted_deadline_and_provider_baseline
 services::discord::router::message_handler::watchdog::timeout_notice_tests::headless_watchdog_timeout_notice_visibility_requires_visible_surface
+services::discord::router::message_handler::watchdog::timeout_notice_tests::post_init_extension_survives_stale_clear_control
+services::discord::router::message_handler::watchdog::timeout_notice_tests::text_watchdog_uses_shared_initializer
 services::discord::router::message_handler::watchdog::timeout_notice_tests::watchdog_alert_messages_carry_non_turn_provenance
+services::discord::router::message_handler::watchdog::timeout_notice_tests::watchdog_initializer_preserves_explicit_deadlines
+services::discord::router::message_handler::watchdog::timeout_notice_tests::watchdog_monotonic_all_existing_writer_paths_use_token_rmw
+services::discord::router::message_handler::watchdog::timeout_notice_tests::watchdog_monotonic_replay_preserves_newer_actor_extension
 services::discord::router::message_handler::watchdog::timeout_notice_tests::watchdog_timeout_notice_message_matches_foreground_copy
 services::discord::router::queue_status_presentation::tests::queued_user_messages_never_render_status_cards
 services::discord::router::response_format::tests::absent_voluntary_feedback_reminder_leaves_reply_context_unchanged
@@ -4829,6 +4840,9 @@ services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_skips_rows_not_strictly_stale_pg
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_spawns_exactly_once_per_process
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests::sweep_task_can_restart_after_task_death
+services::discord::runtime_bootstrap::queued_placeholders::tests::recovery_consumer_routes_uninstalled_candidates_to_cleanup
+services::discord::runtime_bootstrap::queued_placeholders::tests::restore_rows_and_cleanup_preserve_current_owners
+services::discord::runtime_bootstrap::queued_placeholders::tests::restore_waits_for_channel_lock_and_keeps_other_channel
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::check_deferred_restart_is_noop_without_restart_pending
 services::discord::runtime_bootstrap::restart_lifecycle_characterization_tests::deferred_restart_poller_consumes_marker_token_and_decrements_exactly_once
 services::discord::runtime_bootstrap::session_gc::thread_session_gc_tests::thread_gc_reap_candidate_requires_thread_owner_marker_and_existing_tmux
@@ -4956,6 +4970,8 @@ services::discord::session_relay_sink::task_notification_context::tests::transie
 services::discord::session_relay_sink::tests::a0_characterization_tests::a0_session_bound_predicate_boundary_is_strictly_greater_than_2000
 services::discord::session_relay_sink::tests::controller_skips_empty_body_so_cutover_gate_keeps_it_legacy
 services::discord::session_relay_sink::tests::cutover_short_replace_production_path_advance_is_fresh_identity_gated
+services::discord::session_relay_sink::tests::dc1_actual_scanner_contract
+services::discord::session_relay_sink::tests::dc1_isolated_scanner_child
 services::discord::session_relay_sink::tests::deliver_response_err_path_releases_external_input_lease_via_guard
 services::discord::session_relay_sink::tests::discord_and_tui_direct_have_explicit_terminal_owner_models
 services::discord::session_relay_sink::tests::fenceless_frame_with_complete_result_carries_no_commit_fence
@@ -5536,6 +5552,8 @@ services::discord::tmux::tmux_watcher::liveness::tests::first_user_prompt_text_s
 services::discord::tmux::tmux_watcher::liveness::tests::legacy_streaming_edit_sanitizes_subagent_notification_3818
 services::discord::tmux::tmux_watcher::liveness::tests::rollover_skips_subagent_notification_then_sanitizes_edit_3818
 services::discord::tmux::tmux_watcher::liveness::tests::rollover_skips_tui_chrome_prefixed_subagent_notification_3818
+services::discord::tmux::tmux_watcher::loop_poll_prologue::post_terminal_disposal_tests::carry_forward_uses_proven_frontier_not_local_consumption
+services::discord::tmux::tmux_watcher::loop_poll_prologue::post_terminal_disposal_tests::suppressed_poll_keeps_shared_delivery_frontier
 services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppression_tests::completion_footer_tick_requires_registered_unfinished_target
 services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppression_tests::discord_origin_managed_turn_keeps_footer_3969
 services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppression_tests::gate_suppresses_for_either_mirror_signal_and_keeps_discord_origin_3964
@@ -5608,7 +5626,9 @@ services::discord::tmux::tmux_watcher::supervisor_relay::tests::forward_chunk_su
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::per_turn_fully_mirrored_degrades_when_evicted_victim_matches
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::terminal_event_consumed_offset_excludes_buffered_tail
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::caller_arc_wiring
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::current_zero_id_row_can_complete
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::late_a_preserves_successor_b
+services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::newer_zero_id_row_survives_old_terminal
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::paused_preserves_markers
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::pending_preserves_markers
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::same_a_suppresses_duplicate
@@ -6356,6 +6376,7 @@ services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::terminal_failure_reconciles_phase_gate_and_releases_semaphore_pg
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests::terminal_fallback_finalizes_run_once_pg
 services::discord::turn_bridge::completion_guard::completion_postgres::runtime_completion_policy_tests::runtime_auto_queue_terminal_sync_matches_dispatch_completion_policy
+services::discord::turn_bridge::completion_guard::span_tests::concurrent_completions_keep_dispatch_spans_poll_scoped
 services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_covers_work_dispatch_types_including_plan
 services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_excludes_side_paths_and_review_family
 services::discord::turn_bridge::completion_guard::tests::idle_auto_completion_requires_live_status
@@ -6365,6 +6386,7 @@ services::discord::turn_bridge::completion_postlude::channel_episode_scope::test
 services::discord::turn_bridge::completion_postlude::channel_episode_scope::tests::tui_direct_synthetic_release_is_idle_but_an_active_successor_is_foreign
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::foreign_completion_cannot_select_provider_session_clear
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::normal_turn_writes_back_into_channel_session
+services::discord::turn_bridge::completion_postlude::channel_writeback::tests::sa2_suppressed_transcript_requires_attempt_and_plan
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_does_not_stash_feedback_reminder
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_leaves_channel_session_untouched
 services::discord::turn_bridge::context::tests::intake_completion_waiter_discards_typed_payload_and_only_maps_recv_error
@@ -6468,6 +6490,10 @@ services::discord::turn_bridge::resume_pin_tests::c1_missing_and_idle_tail_misma
 services::discord::turn_bridge::resume_pin_tests::c1_poisoned_resume_lock_does_not_unpause
 services::discord::turn_bridge::resume_pin_tests::c1_same_synthetic_and_handoff_pin_resume_without_clearing_marker
 services::discord::turn_bridge::resume_pin_tests::c1_synthetic_and_handoff_stale_pins_leave_replacement_untouched
+services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_cancelled_pg
+services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_foreign_or_stale_pg
+services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_to_executor_pg
+services::discord::turn_bridge::resume_pin_tests::sa2_capture_hands_off_owned_provider_receiver
 services::discord::turn_bridge::retry_state::sentinel_overwrite_clamp_tests::replay_gate_does_not_reset_offset_for_short_sentinel
 services::discord::turn_bridge::retry_state::sentinel_overwrite_clamp_tests::sync_clamps_offset_within_replaced_body
 services::discord::turn_bridge::retry_state::sentinel_overwrite_clamp_tests::sync_normalizes_prior_offset_inside_leading_multibyte_char
@@ -7613,6 +7639,7 @@ services::provider::cancel_watchdog::tests::delayed_watchdog_preserves_existing_
 services::provider::cancel_watchdog::tests::external_cancel_before_deadline_does_not_become_watchdog_timeout
 services::provider::cancel_watchdog::tests::external_cancel_publication_wins_interleaving_before_timeout_commit
 services::provider::cancel_watchdog::tests::failed_pid_cleanup_keeps_watchdog_alive_for_retry
+services::provider::cancel_watchdog::tests::watchdog_monotonic_token_rmw_keeps_independent_high_water_marks
 services::provider::channel_rules::tests::onboarding_routing_add_override_delete_and_longest_match
 services::provider::channel_rules::tests::onboarding_routing_empty_config_preserves_registry_behavior
 services::provider::channel_rules::tests::onboarding_routing_installed_snapshot_controls_dispatch
@@ -8336,6 +8363,7 @@ services::tui_turn_state::tests::claude_permission_mode_partial_line_classified_
 services::tui_turn_state::tests::claude_permission_mode_trailing_does_not_fall_back_to_previous_result
 services::tui_turn_state::tests::claude_real_terminators_are_turn_end
 services::tui_turn_state::tests::claude_result_marks_idle_even_when_pane_scrape_would_be_ambiguous
+services::tui_turn_state::tests::claude_s1_oversized_active_line_is_busy_at_consumed_eof
 services::tui_turn_state::tests::claude_system_stop_hook_summary_marks_idle
 services::tui_turn_state::tests::claude_system_turn_duration_marks_idle
 services::tui_turn_state::tests::claude_trailing_bare_user_after_assistant_remains_user_submitted
@@ -8350,6 +8378,19 @@ services::tui_turn_state::tests::codex_completed_agent_message_marks_idle
 services::tui_turn_state::tests::codex_function_call_marks_streaming
 services::tui_turn_state::tests::codex_malformed_latest_line_stays_unknown
 services::tui_turn_state::tests::codex_response_item_user_marks_user_submitted
+services::tui_turn_state::tests::codex_s1_agent_reasoning_tail_is_busy
+services::tui_turn_state::tests::codex_s1_complete_token_preserves_idle
+services::tui_turn_state::tests::codex_s1_item_completed_token_is_busy
+services::tui_turn_state::tests::codex_s1_new_task_after_settings_is_busy
+services::tui_turn_state::tests::codex_s1_retained_invalid_utf8_is_not_repaired
+services::tui_turn_state::tests::codex_s1_settings_only_is_unknown
+services::tui_turn_state::tests::codex_s1_task_complete_settings_preserves_drain_not_finalize
+services::tui_turn_state::tests::codex_s1_torn_tail_is_unknown
+services::tui_turn_state::tests::codex_s1_truncated_empty_window_cannot_prove_idle
+services::tui_turn_state::tests::codex_s1_truncated_housekeeping_cannot_prove_not_busy
+services::tui_turn_state::tests::codex_s1_turn_completed_settings_preserves_finalize
+services::tui_turn_state::tests::codex_s1_unknown_tail_is_busy
+services::tui_turn_state::tests::codex_s1_utf8_tail_boundary_preserves_evidence
 services::tui_turn_state::tests::codex_task_complete_and_session_markers_are_not_turn_end
 services::tui_turn_state::tests::codex_task_complete_marks_idle
 services::tui_turn_state::tests::codex_turn_completed_is_turn_end
@@ -8439,6 +8480,12 @@ services::turn_orchestrator::enqueue_refusal_reason_tests::upload_bearing_interv
 services::turn_orchestrator::episode_identity::tests::exact_nonce_guard_has_explicit_legacy_boundary
 services::turn_orchestrator::episode_identity::tests::legacy_episode_only_matches_legacy_active_anchor
 services::turn_orchestrator::episode_identity::tests::stale_episode_cannot_release_pre_cutoff_same_id_successor
+services::turn_orchestrator::episode_identity::tests::watchdog_owner_call_sites_pass_captured_token
+services::turn_orchestrator::episode_identity::tests::watchdog_owner_existing_cancel_guards_keep_pointer_identity
+services::turn_orchestrator::episode_identity::tests::watchdog_owner_matching_take_and_discard_consume_once
+services::turn_orchestrator::episode_identity::tests::watchdog_owner_missing_and_idle_mailboxes_are_noops
+services::turn_orchestrator::episode_identity::tests::watchdog_owner_stale_cleanup_discard_preserves_successor
+services::turn_orchestrator::episode_identity::tests::watchdog_owner_stale_take_preserves_successor
 services::turn_orchestrator::finish_cancelled_turn_tests::finish_cancelled_turn_clears_cancelled_active_without_rehydrating_queue
 services::turn_orchestrator::finish_cancelled_turn_tests::finish_cancelled_turn_is_noop_when_mailbox_is_idle
 services::turn_orchestrator::finish_cancelled_turn_tests::finish_cancelled_turn_preserves_uncancelled_active_turn

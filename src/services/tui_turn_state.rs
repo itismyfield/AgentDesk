@@ -298,6 +298,7 @@ pub(crate) fn observe_claude_jsonl_turn_state(path: &Path) -> TuiTurnState {
         claude_envelope_turn_state,
         claude_partial_turn_state,
         MalformedJsonlLinePolicy::FallbackToPrevious,
+        false,
     )
 }
 
@@ -307,6 +308,7 @@ pub(crate) fn observe_codex_jsonl_turn_state(path: &Path) -> TuiTurnState {
         codex_envelope_turn_state,
         |_| None,
         MalformedJsonlLinePolicy::ReturnUnknown,
+        true,
     )
 }
 
@@ -321,14 +323,22 @@ fn observe_jsonl_turn_state(
     classify: fn(&Value) -> Option<TuiTurnState>,
     classify_partial: fn(&str) -> Option<TuiTurnState>,
     malformed_policy: MalformedJsonlLinePolicy,
+    conservative_truncated: bool,
 ) -> TuiTurnState {
-    let Ok(lines) = read_recent_jsonl_lines(path) else {
+    let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
         return TuiTurnState::Unknown;
     };
-    if lines.is_empty() {
-        return TuiTurnState::Idle;
+    // Nonempty, evidence-free truncated tails are conservative only for Codex.
+    let truncated = conservative_truncated && !window.window_covers_file;
+    // Empty truncated windows cannot prove idle for either provider.
+    if window.lines.is_empty() {
+        return if !window.window_covers_file {
+            TuiTurnState::Streaming
+        } else {
+            TuiTurnState::Idle
+        };
     }
-    for line in lines.iter().rev() {
+    for line in window.lines.iter().rev() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -349,11 +359,11 @@ fn observe_jsonl_turn_state(
             return state;
         }
     }
-    TuiTurnState::Unknown
-}
-
-fn read_recent_jsonl_lines(path: &Path) -> Result<Vec<String>, std::io::Error> {
-    Ok(read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES)?.lines)
+    if truncated {
+        TuiTurnState::Streaming
+    } else {
+        TuiTurnState::Unknown
+    }
 }
 
 /// Result of a bounded tail read: the parsed lines plus whether the window
@@ -383,17 +393,21 @@ fn read_recent_jsonl_window(
     if start > 0 {
         file.seek(SeekFrom::Start(start))?;
     }
-    let mut buf = String::new();
-    file.read_to_string(&mut buf)?;
-    let mut lines = buf.lines().map(ToString::to_string).collect::<Vec<_>>();
-    // When the window does not begin at byte 0 the first "line" is almost
-    // certainly a fragment of an envelope that started before the window, so
-    // we drop it. That dropped fragment also means the window does not cover
-    // the whole file.
-    let dropped_partial_head = start > 0 && !buf.starts_with('\n') && !lines.is_empty();
-    if dropped_partial_head {
-        lines.remove(0);
-    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    // Discard the partial first line before decoding: seek may split UTF-8.
+    // Retained lines must still be valid UTF-8; never repair them lossily.
+    let retained = if start > 0 && !buf.starts_with(b"\n") {
+        &buf[buf
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(buf.len(), |i| i + 1)..]
+    } else {
+        &buf[..]
+    };
+    let text = std::str::from_utf8(retained)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let lines = text.lines().map(ToString::to_string).collect();
     Ok(JsonlTailWindow {
         lines,
         window_covers_file: start == 0,
@@ -622,7 +636,9 @@ fn codex_event_msg_turn_state(json: &Value) -> Option<TuiTurnState> {
     let payload = json.get("payload")?;
     match payload.get("type").and_then(Value::as_str)? {
         "task_complete" => Some(TuiTurnState::Idle),
-        "token_count" | "agent_reasoning" => Some(TuiTurnState::Streaming),
+        // Housekeeping carries no turn boundary; keep scanning for lifecycle evidence.
+        "token_count" | "thread_settings_applied" => None,
+        "task_started" | "item_completed" | "agent_reasoning" => Some(TuiTurnState::Streaming),
         _ => Some(TuiTurnState::Streaming),
     }
 }
@@ -665,6 +681,280 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), lines.join("\n")).unwrap();
         file
+    }
+
+    // Exercise the real file readers together: drain readiness is deliberately
+    // weaker than finalize authority (native task_complete is not turn.completed).
+    fn assert_codex_s1_tail(events: &[&str], observer: TuiTurnState, drain: bool, finalize: bool) {
+        let lines: Vec<String> = events
+            .iter()
+            .map(|event| match *event {
+                "turn.completed" => r#"{"type":"turn.completed"}"#.to_owned(),
+                "torn" => r#"{"type":"event_msg","payload":{"type":"task_started""#.to_owned(),
+                _ => {
+                    serde_json::json!({"type": "event_msg", "payload": {"type": event}}).to_string()
+                }
+            })
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let file = write_jsonl(&refs);
+        // Collect every consumer before asserting, so a failed observer cannot
+        // mask the independent drain/finalize actual values in a regression.
+        let actual = (
+            observe_codex_jsonl_turn_state(file.path()),
+            jsonl_strict_terminator_idle(&ProviderKind::Codex, file.path()),
+            jsonl_completion_scan_idle(&ProviderKind::Codex, file.path()),
+            jsonl_turn_end_terminator_idle(&ProviderKind::Codex, file.path()),
+        );
+        assert_eq!(actual, (observer, drain, finalize, finalize), "{events:?}");
+    }
+
+    #[test]
+    fn claude_s1_oversized_active_line_is_busy_at_consumed_eof() {
+        for kind in ["assistant", "user"] {
+            for text in ["가".repeat(30_000), "a".repeat(90_000)] {
+                for shift in 0..3 {
+                    let line = format!(
+                        "{}{}",
+                        serde_json::json!({"type":kind,
+                        "message":{"role":kind,"content":[{"type":"text","text":text}]}}),
+                        " ".repeat(shift)
+                    );
+                    let file = write_jsonl(&[&line]);
+                    let eof = std::fs::metadata(file.path()).unwrap().len();
+                    assert_eq!(
+                        (
+                            observe_claude_jsonl_turn_state(file.path()),
+                            jsonl_ready_for_input(
+                                &ProviderKind::Claude,
+                                None,
+                                file.path(),
+                                Some(eof)
+                            )
+                        ),
+                        (TuiTurnState::Streaming, Some(TuiReadyState::Busy)),
+                        "{kind}/{shift}"
+                    );
+                    assert!(!jsonl_strict_terminator_idle(
+                        &ProviderKind::Claude,
+                        file.path()
+                    ));
+                    assert!(!jsonl_completion_scan_idle(
+                        &ProviderKind::Claude,
+                        file.path()
+                    ));
+                }
+            }
+        }
+        let empty = write_jsonl(&[]);
+        assert_eq!(
+            observe_claude_jsonl_turn_state(empty.path()),
+            TuiTurnState::Idle
+        );
+        assert_eq!(
+            jsonl_ready_for_input(&ProviderKind::Claude, None, empty.path(), Some(0)),
+            Some(TuiReadyState::Unknown)
+        );
+    }
+
+    #[test]
+    fn codex_s1_utf8_tail_boundary_preserves_evidence() {
+        for text in ["가".repeat(30_000), "a".repeat(90_000)] {
+            for shift in 0..3 {
+                let huge = serde_json::json!({"type":"compacted", "text":text}).to_string();
+                let tail = format!(
+                    "{}{}",
+                    r#"{"type":"event_msg","payload":{"type":"thread_settings_applied"}}"#,
+                    " ".repeat(shift)
+                );
+                let file = write_jsonl(&[&huge, &tail]);
+                assert_eq!(
+                    observe_codex_jsonl_turn_state(file.path()),
+                    TuiTurnState::Streaming,
+                    "shift={shift}"
+                );
+                let complete = write_jsonl(&[&huge, r#"{"type":"turn.completed"}"#, &tail]);
+                assert_eq!(
+                    observe_codex_jsonl_turn_state(complete.path()),
+                    TuiTurnState::Idle
+                );
+                assert!(jsonl_strict_terminator_idle(
+                    &ProviderKind::Codex,
+                    complete.path()
+                ));
+                assert!(jsonl_completion_scan_idle(
+                    &ProviderKind::Codex,
+                    complete.path()
+                ));
+                let claude = write_jsonl(&[&huge, r#"{"type":"result"}"#, &" ".repeat(shift)]);
+                assert_eq!(
+                    observe_claude_jsonl_turn_state(claude.path()),
+                    TuiTurnState::Idle
+                );
+                assert!(jsonl_completion_scan_idle(
+                    &ProviderKind::Claude,
+                    claude.path()
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn codex_s1_retained_invalid_utf8_is_not_repaired() {
+        for bytes in [
+            b"{\"type\":\"turn.completed\"}\n\xff".as_slice(),
+            b"{\"type\":\"event_msg\",\"payload\":\"\xea\xb0".as_slice(),
+        ] {
+            let file = write_jsonl(&[]);
+            std::fs::write(file.path(), bytes).unwrap();
+            assert!(read_recent_jsonl_window(file.path(), TURN_STATE_TAIL_BYTES).is_err());
+            assert_eq!(
+                observe_codex_jsonl_turn_state(file.path()),
+                TuiTurnState::Unknown
+            );
+            assert!(!jsonl_strict_terminator_idle(
+                &ProviderKind::Codex,
+                file.path()
+            ));
+            assert!(!jsonl_completion_scan_idle(
+                &ProviderKind::Codex,
+                file.path()
+            ));
+        }
+    }
+
+    #[test]
+    fn codex_s1_truncated_housekeeping_cannot_prove_not_busy() {
+        let compacted =
+            serde_json::json!({"type": "compacted", "text": "x".repeat(570_000)}).to_string();
+        for boundary in ["task_started", "task_complete"] {
+            for tail in ["thread_settings_applied", "token_count"] {
+                let first =
+                    serde_json::json!({"type":"event_msg","payload":{"type":boundary}}).to_string();
+                let last =
+                    serde_json::json!({"type":"event_msg","payload":{"type":tail}}).to_string();
+                let file = write_jsonl(&[&first, &compacted, &last]);
+                assert_eq!(
+                    observe_codex_jsonl_turn_state(file.path()),
+                    TuiTurnState::Streaming,
+                    "truncated {boundary}/{tail} lacks lifecycle evidence, not proof of a live turn"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn codex_s1_truncated_empty_window_cannot_prove_idle() {
+        let compacted =
+            serde_json::json!({"type": "compacted", "text": "x".repeat(570_000)}).to_string();
+        let file = write_jsonl(&[&compacted]);
+        assert_eq!(
+            observe_codex_jsonl_turn_state(file.path()),
+            TuiTurnState::Streaming
+        );
+        // An empty truncated window cannot prove either provider idle.
+        assert_eq!(
+            observe_claude_jsonl_turn_state(file.path()),
+            TuiTurnState::Streaming
+        );
+    }
+
+    #[test]
+    fn codex_s1_task_complete_settings_preserves_drain_not_finalize() {
+        assert_codex_s1_tail(
+            &["task_complete", "thread_settings_applied"],
+            TuiTurnState::Idle,
+            true,
+            false,
+        );
+    }
+
+    #[test]
+    fn codex_s1_turn_completed_settings_preserves_finalize() {
+        assert_codex_s1_tail(
+            &["turn.completed", "thread_settings_applied"],
+            TuiTurnState::Idle,
+            true,
+            true,
+        );
+    }
+
+    #[test]
+    fn codex_s1_new_task_after_settings_is_busy() {
+        for complete in ["task_complete", "turn.completed"] {
+            assert_codex_s1_tail(
+                &[complete, "thread_settings_applied", "task_started"],
+                TuiTurnState::Streaming,
+                false,
+                false,
+            );
+        }
+    }
+
+    #[test]
+    fn codex_s1_complete_token_preserves_idle() {
+        assert_codex_s1_tail(
+            &["task_complete", "token_count"],
+            TuiTurnState::Idle,
+            true,
+            false,
+        );
+        assert_codex_s1_tail(
+            &["turn.completed", "token_count"],
+            TuiTurnState::Idle,
+            true,
+            true,
+        );
+    }
+
+    #[test]
+    fn codex_s1_item_completed_token_is_busy() {
+        assert_codex_s1_tail(
+            &["turn.completed", "item_completed", "token_count"],
+            TuiTurnState::Streaming,
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn codex_s1_agent_reasoning_tail_is_busy() {
+        assert_codex_s1_tail(
+            &["turn.completed", "agent_reasoning"],
+            TuiTurnState::Streaming,
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn codex_s1_unknown_tail_is_busy() {
+        assert_codex_s1_tail(
+            &["turn.completed", "future_event"],
+            TuiTurnState::Streaming,
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn codex_s1_settings_only_is_unknown() {
+        assert_codex_s1_tail(
+            &["thread_settings_applied"],
+            TuiTurnState::Unknown,
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn codex_s1_torn_tail_is_unknown() {
+        assert_codex_s1_tail(
+            &["turn.completed", "torn"],
+            TuiTurnState::Unknown,
+            false,
+            false,
+        );
     }
 
     #[cfg(unix)]

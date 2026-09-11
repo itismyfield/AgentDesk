@@ -263,33 +263,26 @@ pub(super) fn run_bot_spawn_recovery_and_flush_restart_reports(
                     restored_queued_placeholders,
                     &live_queue_ids,
                 );
-                for (key, placeholder_msg_id) in &filter_outcome.live {
-                    shared_for_tmux2
-                        .queued
-                        .queued_placeholders
-                        .insert(*key, *placeholder_msg_id);
-                }
-                for channel_id in &filter_outcome.channels_with_stale {
-                    super::queued_placeholders_store::persist_channel_from_map(
-                        &shared_for_tmux2.queued.queued_placeholders,
-                        &shared_for_tmux2.provider,
-                        &shared_for_tmux2.token_hash,
-                        *channel_id,
-                    );
-                }
                 let live_count = filter_outcome.live.len();
+                let uninstalled = super::queued_placeholders::install_restored_queued_placeholders(
+                    &shared_for_tmux2,
+                    filter_outcome.live,
+                    &filter_outcome.channels_with_stale,
+                )
+                .await;
                 let stale_count = filter_outcome.stale_count;
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 if stale_count > 0 {
                     tracing::info!(
-                        "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk; pruned {stale_count} stale mapping(s) with no live queue entry"
+                        "  [{ts}] 📋 FLUSH: loaded {live_count} live queued-placeholder candidate(s) from disk; pruned {stale_count} stale mapping(s) with no live queue entry"
                     );
                 } else {
                     tracing::info!(
-                        "  [{ts}] 📋 FLUSH: restored {live_count} queued-placeholder mapping(s) from disk"
+                        "  [{ts}] 📋 FLUSH: loaded {live_count} live queued-placeholder candidate(s) from disk"
                     );
                 }
                 stale_cards_to_delete = filter_outcome.stale_cards;
+                stale_cards_to_delete.extend(uninstalled);
             }
 
             // P1-2: Warn about legacy queue files that cannot be restored

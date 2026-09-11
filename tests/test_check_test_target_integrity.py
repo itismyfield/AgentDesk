@@ -303,8 +303,48 @@ class PathRedirection(unittest.TestCase):
     """#[path = "..."] mod declarations must resolve (review blocker #2)."""
 
     def test_redirected_module_is_not_a_false_positive(self) -> None:
-        self.assertEqual(
-            run_fixture("cargo test --lib redirected_impl::tests"), [])
+        # #5008 item 18 / #5081: prove descent, not just the mod declaration
+        # or a hand-written manifest claiming that the child contains a test.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            command = "cargo test --lib redirected_impl::redirect_only"
+            build_fixture_repo(root, command)
+            (root / integrity.LIB_INVENTORY_MANIFEST_REL).unlink()
+            child = root / "src" / "redirected_impl.rs"
+            child.write_text(
+                "#[cfg(test)]\nmod redirect_only {\n"
+                "    #[test]\n    fn child_case() {}\n}\n",
+                encoding="utf-8",
+            )
+            targets = integrity.discover_targets(root)
+            modules = integrity.collect_modules(targets["lib"], root)
+            self.assertEqual(
+                modules.get("redirect_only"), "src/redirected_impl.rs:2",
+                "module walker must descend into the redirected child",
+            )
+            inventory = integrity.collect_static_tests(targets["lib"], root)
+            test_id = "route::redirected_impl::redirect_only::child_case"
+            self.assertEqual(
+                inventory.tests, {test_id: "src/redirected_impl.rs:4"},
+                "test scanner must collect the real redirected child test",
+            )
+            self.assertEqual(inventory.module_errors, {})
+            self.assertEqual(inventory.duplicate_tests, ())
+            spec = integrity.parse_command(command.split())
+            self.assertIsNotNone(spec)
+            self.assertEqual(integrity.validate_command(
+                spec, {"lib": modules}, root, frozenset(inventory.tests),
+            ), [])
+            # Removing the real test must make the same filter fail even
+            # though both module declarations are still present.
+            child.write_text("#[cfg(test)]\nmod redirect_only {}\n",
+                             encoding="utf-8")
+            empty = integrity.collect_static_tests(targets["lib"], root)
+            self.assertEqual(empty.tests, {})
+            findings = integrity.validate_command(
+                spec, {"lib": modules}, root, frozenset(empty.tests),
+            )
+            self.assertEqual([kind for kind, _ in findings], ["zero-match"])
 
     def test_real_repo_inventories_path_redirected_modules(self) -> None:
         # These real modules are only reachable through #[path] redirections

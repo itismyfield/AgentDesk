@@ -194,20 +194,26 @@ pub(super) async fn run_terminal_commit_epilogue(
         // watcher-owned synthetic rows (suppressed task-notification
         // completions) — their `⏳ → ✅` block fires regardless, and skipping
         // here left their own-pin marker to a false TTL `⚠`.
-        let pinned_committed_clear_identity = if !completion_is_stale_for_newer_turn {
+        // A late row can belong to a newer id-0 external-input turn. Its
+        // matching identity permits an atomic clear, but does not make this
+        // older terminal its owner. Keep the same id-0-inclusive stale veto
+        // already used for this row's history, anchor and FINISHED marker.
+        let committed_row_cleanup_allowed =
+            !completion_is_stale_for_newer_turn && !anchor_cleanup_is_stale_for_newer_turn;
+        let pinned_committed_clear_identity = if committed_row_cleanup_allowed {
             inflight_state
                 .as_ref()
                 .map(crate::services::discord::inflight::InflightTurnIdentity::from_state)
         } else {
             None
         };
-        let pinned_committed_clear_turn_nonce = if !completion_is_stale_for_newer_turn {
+        let pinned_committed_clear_turn_nonce = if committed_row_cleanup_allowed {
             watcher_turn_nonce.as_deref()
         } else {
             None
         };
 
-        if !completion_is_stale_for_newer_turn
+        if committed_row_cleanup_allowed
             && let Some(committed) = inflight_state.as_ref()
             && (tui_direct_anchor_terminal_body_visible
                 || committed_row_requires_marker_tombstone(committed))
@@ -234,7 +240,7 @@ pub(super) async fn run_terminal_commit_epilogue(
                     )
                     .await;
         }
-        if !completion_is_stale_for_newer_turn {
+        if committed_row_cleanup_allowed {
             if let Some(pinned_clear_identity) = pinned_committed_clear_identity.as_ref() {
                 let clear_outcome =
                         crate::services::discord::inflight::clear_inflight_state_if_matches_identity_turn_nonce(
