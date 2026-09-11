@@ -438,6 +438,8 @@ fn ac1_operand_polarity_is_pinned_by_behaviour_not_the_source_grep_5464_c1() {
 const READER_DELIVERED_END: u64 = 4_096;
 
 /// Fixture at REAL session paths: transcript (#4188 EOF), marker (#1270), frontier.
+/// The caller MUST already hold `set_agentdesk_root_for_test`: every path built
+/// here resolves through the runtime root, and so does every later read of it.
 fn reader_fixture(channel: u64, session: &str) -> (serenity::ChannelId, String, String) {
     let transcript = crate::services::tmux_common::session_temp_path(session, "jsonl");
     std::fs::write(&transcript, vec![b'.'; READER_DELIVERED_END as usize]).expect("transcript");
@@ -465,6 +467,20 @@ fn reader_fixture(channel: u64, session: &str) -> (serenity::ChannelId, String, 
 /// `include_str!` test cannot see argument order, the polarity test never enters it.
 #[test]
 fn reader_pins_the_ledger_and_lease_operands_5464_c1() {
+    // Root isolation, held for the WHOLE body rather than just the fixture:
+    // every `read(..)` below re-resolves BOTH roots -- the transcript/marker via
+    // `config::runtime_root()` and the durable frontier via
+    // `runtime_store::runtime_root()` -- so a guard dropped after setup would
+    // leave the later reads racing the other `AGENTDESK_ROOT_DIR` sites in this
+    // binary (`cargo test --lib` runs at default parallelism), and a root
+    // swapped mid-test turns a frontier/marker/EOF read into `None`, failing the
+    // assertions below for an environmental reason. `set_agentdesk_root_for_test`
+    // holds the process-global test env lock for the guard's lifetime, and the
+    // tempdir keeps the session files out of the live
+    // `~/.adk/release/runtime/sessions/` tree. Same shape as `IsolatedRoot` in
+    // `delivery_record.rs` and the frontier test in `session_relay_sink/tests.rs`.
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let shared = crate::services::discord::make_shared_data_for_tests();
     let session = "AgentDesk-claude-5464-c1-reader";
     let (channel, path, marker) = reader_fixture(5_464_001, session);
