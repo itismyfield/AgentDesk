@@ -640,6 +640,62 @@ mod yaml_write_back_secret_tests {
             "unmodelled keys must survive the write-back, got:\n{rendered}"
         );
     }
+
+    /// #5071 T5 A6 — the mixed-version half of the same contract, pinned at the
+    /// shape that actually threatens the #5464 relay-authority rollout dial.
+    ///
+    /// The test above covers a whole top-level section this binary does not
+    /// model. The downgrade case is narrower and is NOT implied by it: a key a
+    /// newer binary wrote inside a section this one DOES model, which this
+    /// binary's typed `Config` parses past and drops (`RuntimeSettingsConfig`
+    /// carries no `deny_unknown_fields`). Were the write-back rendering the
+    /// typed tree, that key would vanish on the first Discord settings command
+    /// an older binary served — silently returning the dial to `Legacy/0` with
+    /// no config edit and no restart to point at. That is the loss #5464 T5 S1
+    /// review follow-up 2 booked as "mixed-version whole-config rewrite loses
+    /// the new dial keys", and PR #5803 (#5750) closed it by patching the
+    /// parsed document instead of re-rendering it. This asserts that closure at
+    /// the dial's own shape rather than inferring it from the top-level case.
+    ///
+    /// The fixture MUST carry a modelled `runtime` key beside the unknown one.
+    /// `Config::runtime` is `skip_serializing_if = "RuntimeSettingsConfig::is_empty"`,
+    /// so a `runtime` section holding only the unknown key parses to all-defaults,
+    /// is omitted from `typed_document`, and reaches the write-back as an UNMATCHED
+    /// top-level key — preserved by the same branch as `unmodelled_section` above,
+    /// which would make this test a duplicate of it rather than the nested case.
+    #[test]
+    fn bot_settings_write_back_preserves_unknown_keys_inside_modelled_sections() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agentdesk.yaml");
+        fs::write(
+            &path,
+            format!(
+                "{FIXTURE}runtime:\n  relay_authority_cohort_percent: 25\n  \
+relay_authority_dial_from_a_newer_binary: enforce\n"
+            ),
+        )
+        .expect("write fixture");
+        let _config_env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_CONFIG", &path);
+
+        persist_bot_auth_to_yaml_checked(BOT_TOKEN, &settings_with_new_allowlist())
+            .expect("write-back should succeed");
+
+        let rendered = fs::read_to_string(&path).expect("read written yaml");
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(&rendered).expect("the written yaml parses");
+        assert_eq!(
+            document["runtime"]["relay_authority_cohort_percent"].as_u64(),
+            Some(25),
+            "the fixture's MODELLED runtime key must survive, which is what puts \
+             this test in the nested regime at all, got:\n{rendered}"
+        );
+        assert_eq!(
+            document["runtime"]["relay_authority_dial_from_a_newer_binary"].as_str(),
+            Some("enforce"),
+            "a newer binary's key inside a modelled section must survive an older \
+             binary's write-back, got:\n{rendered}"
+        );
+    }
     fn round_trip(original: &str) -> crate::config::Config {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agentdesk.yaml");
