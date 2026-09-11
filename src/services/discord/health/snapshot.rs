@@ -1339,6 +1339,21 @@ mod tests {
             rollout.get("cohort_percent").and_then(|v| v.as_u64()),
             Some(0)
         );
+        // #5071 T5 A6: both widths reach the registry branch too. The clamp
+        // flag is the operator-facing half — `cohort_percent` alone cannot
+        // distinguish a deliberate `100` from a typo that was widened to it.
+        assert_eq!(
+            rollout
+                .get("cohort_percent_configured")
+                .and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            rollout
+                .get("cohort_percent_clamped")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
         assert_eq!(
             rollout.get("cohort_fingerprint").and_then(|v| v.as_str()),
             Some(
