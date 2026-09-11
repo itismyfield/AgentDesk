@@ -6315,6 +6315,7 @@ services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failur
 services::discord::turn_bridge::bridge_entry_persist::tests::cancelled_watcher_is_unavailable_and_not_pinned_during_reconcile
 services::discord::turn_bridge::bridge_entry_persist::tests::cleared_watcher_owner_falls_back_to_delivery_channel
 services::discord::turn_bridge::bridge_entry_persist::tests::durable_placeholder_clear_and_response_advance_suppresses_restart_notice_edit
+services::discord::turn_bridge::bridge_entry_persist::tests::missing_row_inside_the_cohort_continues_rowless_without_a_visible_mutation
 services::discord::turn_bridge::bridge_entry_persist::tests::post_authority_owner_snapshot_observes_same_identity_watcher_adoption
 services::discord::turn_bridge::bridge_entry_persist::tests::pre_authority_abort_preserves_same_id_successor_bytes
 services::discord::turn_bridge::bridge_entry_persist::tests::pre_authority_abort_signals_waiter_without_completed_broadcast

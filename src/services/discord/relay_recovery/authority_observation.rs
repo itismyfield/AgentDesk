@@ -10,8 +10,13 @@
 //! answers (`*_old`) and what the AC2-R predicate would answer (`*_new`), records
 //! both, and returns `()`.
 //!
-//! **The no-op claim is about values, not timing.** No caller can consume a
-//! verdict from here, so every judgement and delivery value is what it was. With
+//! **The no-op claim is about values, not timing — and it is S2's claim, not a
+//! standing one.** S2 shipped with no consumer of a verdict from here, so every
+//! judgement and delivery value was what it was. S4 and S7a then took the
+//! `*_new` predicates into the gates that ship, behind the enforcement cohort:
+//! `stream_gate_new`'s moved cell in the stream loop, and `entry_gate_new` at
+//! bridge entry. Inside that cohort those values DO move; outside it — and under
+//! the shipped dial, which admits nobody — they still do not. With
 //! recording ON, though, each stream tick takes [`TURNS`], and publication paths
 //! synchronously encode + append: loop exit; a successor's entry gate *before* its
 //! own lifecycle gate and anchor work; and each completion ownership read after
@@ -109,6 +114,14 @@ impl LifecycleVerdict {
     pub(crate) const fn ends_lifecycle(self) -> bool {
         matches!(self, Self::End)
     }
+
+    /// The one verdict that keeps a turn alive with no durable row behind it.
+    /// `turn_bridge::bridge_entry_persist::establish_bridge_entry_authority`
+    /// reads it to SKIP anchor materialization: there is no row to bind an
+    /// anchor into, so the turn continues having mutated nothing visible (S7a).
+    pub(crate) const fn continues_rowless(self) -> bool {
+        matches!(self, Self::ContinueRowless)
+    }
 }
 
 /// Shipped entry gate — the shape of
@@ -125,7 +138,11 @@ pub(in crate::services::discord) const fn entry_gate_old(
     }
 }
 
-/// AC2-R entry gate (S7a's `BridgeEntryDisposition`). `Missing` is the structural
+/// AC2-R entry gate. S7a made this the SHIPPED gate inside the enforcement
+/// cohort — `turn_bridge::bridge_entry_persist::bridge_entry_lifecycle_verdict`
+/// returns it verbatim there — so this is no longer observation-only, and
+/// `entry_gate_old` above is what still ships outside the cohort.
+/// `Missing` is the structural
 /// signal AC1 forbids ending delivery authority on, so the turn continues rowless;
 /// `IdentityMismatch` says another turn owns the row, which is an exact-episode
 /// veto and still ends this one, and `IoError` stays fail-closed.

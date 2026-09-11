@@ -66,6 +66,12 @@ impl VisibleMutationAuthority {
 /// through a fence cannot answer the question two different ways and the gate
 /// below stays pure — which is what lets `stream_gate_old`/`stream_gate_new`
 /// mirror it operand for operand.
+///
+/// #5464 T5 S7a added the second reader: the bridge ENTRY gate
+/// (`bridge_entry_persist::establish_bridge_entry_authority`) asks this same
+/// function rather than growing its own notion of the cohort, so both gates of
+/// one turn are admitted or refused together. The name still says where the
+/// predicate was introduced; its scope is the AC2-R enforcement cohort.
 pub(in crate::services::discord::turn_bridge) fn stream_loop_suppression_cohort_admits(
     channel_id: u64,
 ) -> bool {

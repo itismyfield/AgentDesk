@@ -884,6 +884,112 @@ class RolloutReportTest(unittest.TestCase):
         self.assertIsNone(summary["target_segment"]["cohort_fingerprint"])
         self.assertFalse(summary["criteria"]["line_integrity"]["met"])
 
+    def test_the_s7a_fields_are_measured_once_the_log_carries_them(self):
+        """S7a's DoD: the three re-assigned fields are computed, not declared
+        unmeasurable.
+
+        S7a's entry enforcement is what makes this window constructible at all —
+        every turn here is `Missing` at entry, continues rowless, and still
+        reaches a loop exit, which is the join that gives
+        ``rowless_no_range_share`` a denominator for the first time. Two shapes
+        in every three leave no advancing range, and both emitted fields are on
+        every exit record, so ``unmeasured_fields`` must be EMPTY rather than
+        counting them — the assertion that fails if the script keeps reporting
+        them as unmeasured while the log carries them.
+        """
+
+        shapes = ("advancing", "absent", "empty")
+        events = []
+        for index in range(210):
+            observed = BASE + timedelta(days=index % 7) + timedelta(minutes=index)
+            turn = 2_000 + index
+            events.append(
+                event(
+                    site="bridge_entry",
+                    turn=turn,
+                    observed=observed,
+                    axis_a={
+                        "guarded_save": "missing",
+                        "old": "end",
+                        "new": "continue_rowless",
+                        "rowless_continuation": True,
+                    },
+                )
+            )
+            events.append(event(site="stream_loop", turn=turn, observed=observed))
+            events.append(
+                event(
+                    site="loop_exit",
+                    turn=turn,
+                    observed=observed,
+                    axis_a={
+                        "lease_range_shape": shapes[index % 3],
+                        "frontier_already_covers": index % 2 == 0,
+                        "unbound_anchor_left": index % 5 == 0,
+                    },
+                )
+            )
+
+        summary = self.run_report(events)
+        target = summary["target_segment"]
+        self.assertEqual(target["unmeasured_fields"], {})
+        self.assertEqual(target["rowless_continuation_turns"], 210)
+        self.assertEqual(target["rowless_exit_samples"], 210)
+        self.assertEqual(target["rowless_no_range_turns"], 140)
+        self.assertAlmostEqual(summary["rowless_no_range_share"], 140 / 210)
+        self.assertEqual(
+            target["frontier_already_covers"],
+            {"true": 105, "measured": 210, "share": 0.5},
+        )
+        self.assertEqual(
+            target["unbound_anchor_left"],
+            {"true": 42, "measured": 210, "share": 42 / 210},
+        )
+
+    def test_a_loop_exit_record_without_the_s7a_fields_is_not_a_measured_false(self):
+        """The absence branch, asserted beside the presence one above.
+
+        A rowless window whose exit records carry neither field must report both
+        as unmeasured and must NOT let a 0/210 aggregate read as "the frontier
+        never covered anything". The rowless share is still computed, because it
+        is joined rather than emitted.
+        """
+
+        events = []
+        for index in range(210):
+            observed = BASE + timedelta(days=index % 7) + timedelta(minutes=index)
+            turn = 3_000 + index
+            events.append(
+                event(
+                    site="bridge_entry",
+                    turn=turn,
+                    observed=observed,
+                    axis_a={
+                        "guarded_save": "missing",
+                        "old": "end",
+                        "new": "continue_rowless",
+                        "rowless_continuation": True,
+                    },
+                )
+            )
+            events.append(
+                event(
+                    site="loop_exit",
+                    turn=turn,
+                    observed=observed,
+                    axis_a={"lease_range_shape": "absent"},
+                )
+            )
+
+        target = self.run_report(events)["target_segment"]
+        self.assertEqual(
+            target["unmeasured_fields"],
+            {field: 210 for field in report.UNMEASURED_UNTIL_S7A},
+        )
+        for field in report.UNMEASURED_UNTIL_S7A:
+            self.assertEqual(target[field], {"true": 0, "measured": 0, "share": None})
+        self.assertEqual(target["rowless_no_range_share"], 1.0)
+
     def test_the_rowless_share_is_reported_as_s7a_owned(self):
         summary = self.run_report(
             turns(210, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))

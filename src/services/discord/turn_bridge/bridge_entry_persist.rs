@@ -80,12 +80,56 @@ pub(super) fn bridge_stream_relay_suppressed(
 
 /// Converts the guarded store result into the bridge lifecycle gate. No bridge
 /// guard/finalizer may be constructed until this returns true.
+///
+/// This is the gate OUTSIDE the enforcement cohort, and only that: inside it,
+/// [`bridge_entry_lifecycle_verdict`] answers, and it is the one production
+/// reader left of this predicate.
 pub(super) fn bridge_entry_lifecycle_can_continue(
     outcome: crate::services::discord::inflight::GuardedSaveOutcome,
 ) -> bool {
     use crate::services::discord::inflight::GuardedSaveOutcome;
 
     matches!(outcome, GuardedSaveOutcome::Saved)
+}
+
+/// The entry gate as it now ships (#5464 T5 S7a) — the axis-A counterpart of
+/// S4's one moved cell, at the other end of the bridge lifecycle.
+///
+/// Outside the cohort this IS `bridge_entry_lifecycle_can_continue`, evaluated
+/// through that function rather than restated, so the shipped mapping cannot
+/// drift from the `entry_gate_old` mirror that the promotion window's evidence
+/// was recorded against. Inside the cohort the answer is
+/// `authority_observation::entry_gate_new` — the predicate S2 recorded for a
+/// whole observation window with zero consumers. This is that consumer.
+///
+/// The cell that moves is `Missing`. AC1 forbids the absence of a durable
+/// inflight row from ending the bridge's Discord delivery authority: that
+/// authority is the `DeliveryJournal` OutputObligation and the delivery lease,
+/// and deleting a row cannot end a lifecycle by itself. So a vanished row
+/// continues the turn ROWLESS instead of terminating it at entry.
+/// `IdentityMismatch` deliberately does NOT move with it — it is an
+/// exact-episode veto saying another turn owns the row, not a structural signal
+/// — and `IoError` stays fail-closed and retryable. That is the same pair S4
+/// held still inside the stream loop, for the same reason.
+///
+/// Callers read the cohort ONCE at entry and pass the answer down, so this stays
+/// pure and one pass through the gate cannot answer the question two ways.
+pub(super) fn bridge_entry_lifecycle_verdict(
+    outcome: crate::services::discord::inflight::GuardedSaveOutcome,
+    cohort_admits: bool,
+) -> crate::services::discord::relay_recovery::authority_observation::LifecycleVerdict {
+    use crate::services::discord::relay_recovery::authority_observation::{
+        LifecycleVerdict, entry_gate_new,
+    };
+
+    if cohort_admits {
+        return entry_gate_new(outcome);
+    }
+    if bridge_entry_lifecycle_can_continue(outcome) {
+        LifecycleVerdict::Continue
+    } else {
+        LifecycleVerdict::End
+    }
 }
 
 /// Wakes a completion waiter on a pre-authority abort without registering a
@@ -257,6 +301,13 @@ pub(super) async fn establish_bridge_entry_authority(
     mut runtime: BridgeEntryRuntimeState<'_>,
     anchor_text: &str,
 ) -> bool {
+    // #5464 T5 S7a: asked once, before the store patch, and passed down — the
+    // same predicate and the same two `runtime.*` knobs the stream-tick gate
+    // reads, so the two gates of one turn cannot answer the cohort question
+    // differently and a dial moved mid-turn lands on the NEXT turn.
+    let cohort_admits = super::stream_tick::guarded_persist::stream_loop_suppression_cohort_admits(
+        ctx.bridge.inflight_state.channel_id,
+    );
     let outcome = persist_bridge_entry_inflight_state(
         &ctx.bridge.inflight_state,
         ctx.shared,
@@ -271,9 +322,24 @@ pub(super) async fn establish_bridge_entry_authority(
         &ctx.bridge.inflight_state,
         outcome,
     );
-    if !bridge_entry_lifecycle_can_continue(outcome) {
+    let verdict = bridge_entry_lifecycle_verdict(outcome, cohort_admits);
+    if verdict.ends_lifecycle() {
         signal_bridge_entry_abort_completion(&mut ctx.bridge.completion_tx);
         return false;
+    }
+    if verdict.continues_rowless() {
+        // #5464 T5 S7a: there is no durable row, so there is nothing for the
+        // anchor materialization below to bind into — it would send a Discord
+        // message, fail its guarded 0 -> real bind, and leave the successor an
+        // orphan to clean up. The turn therefore continues with ZERO visible
+        // mutation at entry and no row recreated. Its delivery authority is the
+        // DeliveryJournal obligation and the delivery lease (AC1), every later
+        // visible mutation is gated per tick by S4's `Missing -> Suppressed`
+        // cell, and the far end is fenced by S3: `completion_postlude` re-reads
+        // the mailbox episode and `permits_channel_effects()` governs every
+        // channel-scoped completion effect, so a rowless bridge that reaches
+        // normal termination cannot pollute a successor.
+        return true;
     }
 
     let anchor_was_absent = durable_current_msg_id_from_detached(*runtime.current_msg_id) == 0;
@@ -337,6 +403,16 @@ mod tests {
     /// asserts the mirror against the production predicate over its whole input
     /// domain, so a change to either side fails here instead of silently
     /// re-basing the evidence.
+    ///
+    /// #5464 T5 S7a: the shipped gate is now cohort-conditional, so the mirror
+    /// is too, and it is asserted on BOTH sides of the cohort over the whole
+    /// domain. Outside, the shipped verdict stays `entry_gate_old` — which is
+    /// what keeps that recorded predicate describing a gate that ships, and what
+    /// keeps every window recorded before this slice comparable. Inside, the
+    /// shipped verdict IS `entry_gate_new`, so the `Missing` cell S2 recorded
+    /// with zero consumers has flipped: the assertion that used to read "the
+    /// shipped gate ends the turn on a missing row and the new one must not" now
+    /// reads the cohort on both sides of it.
     #[test]
     fn recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate() {
         use crate::services::discord::relay_recovery::authority_observation::{
@@ -354,11 +430,183 @@ mod tests {
                 !bridge_entry_lifecycle_can_continue(outcome),
                 "{outcome:?}: recorded old entry verdict disagrees with the shipped gate"
             );
+            assert_eq!(
+                bridge_entry_lifecycle_verdict(outcome, false),
+                entry_gate_old(outcome),
+                "{outcome:?}: outside the cohort the shipped gate must stay the old verdict"
+            );
+            assert_eq!(
+                bridge_entry_lifecycle_verdict(outcome, true),
+                entry_gate_new(outcome),
+                "{outcome:?}: inside the cohort the shipped gate must BE the recorded new verdict"
+            );
         }
         assert!(
             !bridge_entry_lifecycle_can_continue(GuardedSaveOutcome::Missing)
-                && !entry_gate_new(GuardedSaveOutcome::Missing).ends_lifecycle(),
-            "AC1: the shipped gate ends the turn on a missing row and the new one must not"
+                && !bridge_entry_lifecycle_verdict(GuardedSaveOutcome::Missing, true)
+                    .ends_lifecycle(),
+            "AC1: the pre-S7a gate ends the turn on a missing row and the cohort gate must not"
+        );
+        assert!(
+            bridge_entry_lifecycle_verdict(GuardedSaveOutcome::Missing, false).ends_lifecycle(),
+            "outside the cohort a vanished row keeps the shipped termination"
+        );
+    }
+
+    /// #5464 T5 S7a's landing cell, at the seam that decides it. Inside the
+    /// enforcement cohort a vanished durable row must not end the turn, must not
+    /// be recreated, and must not put a Discord anchor on the channel: the turn
+    /// continues rowless having mutated nothing visible, which is what lets it
+    /// reach `post_loop_finalize` instead of orphaning a finished answer inside a
+    /// deleted row (AC1). Outside the cohort the shipped termination stands.
+    ///
+    /// Successor safety is pinned at both ends, because it is the pair of them
+    /// and not either alone that makes continuing rowless safe: here, a successor
+    /// that already owns the channel stays byte-identical because the entry patch
+    /// is identity guarded and an exact-episode veto still ends this turn; at the
+    /// far end it is S3's completion fence, whose fresh mailbox episode read
+    /// governs every channel-scoped effect a rowless bridge could still perform.
+    #[test]
+    fn missing_row_inside_the_cohort_continues_rowless_without_a_visible_mutation() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        let provider = ProviderKind::Codex;
+        let channel_id = 4_259_701;
+        let before = InflightTurnState::new(
+            provider.clone(),
+            channel_id,
+            Some("rowless-entry".to_string()),
+            343_742_347_365_974_026,
+            77_701,
+            18,
+            "rowless prompt".to_string(),
+            Some("rowless-session".to_string()),
+            Some("AgentDesk-rowless-entry".to_string()),
+            Some("/tmp/rowless-entry.jsonl".to_string()),
+            Some("/tmp/rowless-entry.input".to_string()),
+            512,
+        );
+        let root =
+            crate::services::discord::inflight::inflight_runtime_root().expect("runtime root");
+        let path =
+            crate::services::discord::inflight::inflight_state_path(&root, &provider, channel_id);
+        assert!(
+            !path.exists(),
+            "the rowless fixture starts with no durable row"
+        );
+
+        let mut rowless = before.clone();
+        rowless.full_response = "rowless continuation".to_string();
+        let outcome =
+            crate::services::discord::inflight::patch_bridge_entry_state_if_identity_unchanged(
+                &before,
+                &mut rowless,
+                "turn_bridge::bridge_entry_persist::rowless_entry_test",
+            );
+        assert_eq!(outcome, GuardedSaveOutcome::Missing);
+        assert!(
+            !path.exists(),
+            "a vanished row must not be recreated by the entry patch"
+        );
+
+        let inside = bridge_entry_lifecycle_verdict(outcome, true);
+        assert!(
+            inside.continues_rowless() && !inside.ends_lifecycle(),
+            "AC1: inside the cohort a vanished row continues the turn rowless"
+        );
+        assert!(
+            bridge_entry_lifecycle_verdict(outcome, false).ends_lifecycle(),
+            "outside the cohort a vanished row keeps the shipped termination"
+        );
+
+        // A successor that took the channel is not this turn's row to touch: the
+        // guarded patch answers the exact-episode veto, which still ends the turn
+        // inside the cohort, and the successor's bound anchor survives byte for
+        // byte.
+        let mut successor = InflightTurnState::new(
+            provider.clone(),
+            channel_id,
+            Some("rowless-successor".to_string()),
+            343_742_347_365_974_026,
+            77_702,
+            18,
+            "successor prompt".to_string(),
+            Some("successor-session".to_string()),
+            Some("AgentDesk-rowless-successor".to_string()),
+            Some("/tmp/rowless-successor.jsonl".to_string()),
+            Some("/tmp/rowless-successor.input".to_string()),
+            9_100,
+        );
+        successor.current_msg_id = 4_259_702_001;
+        crate::services::discord::inflight::save_inflight_state(&successor)
+            .expect("seed successor row");
+        let successor_bytes = std::fs::read(&path).expect("read successor bytes");
+        let mut stale = before.clone();
+        stale.full_response = "stale bytes must not land".to_string();
+        let after_successor =
+            crate::services::discord::inflight::patch_bridge_entry_state_if_identity_unchanged(
+                &before,
+                &mut stale,
+                "turn_bridge::bridge_entry_persist::rowless_entry_test",
+            );
+        assert_eq!(after_successor, GuardedSaveOutcome::IdentityMismatch);
+        assert!(
+            bridge_entry_lifecycle_verdict(after_successor, true).ends_lifecycle(),
+            "an exact-episode veto is not a structural signal and still ends the turn"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("successor survives"),
+            successor_bytes,
+            "the successor's bound anchor must be untouched by the rowless turn"
+        );
+
+        // The rowless branch returns BEFORE anchor materialization, so the entry
+        // performs no Discord send and binds nothing.
+        let helper = include_str!("bridge_entry_persist.rs");
+        let establish = helper
+            .find("pub(super) async fn establish_bridge_entry_authority")
+            .expect("authority helper remains present");
+        let gate = helper[establish..]
+            .find("if verdict.ends_lifecycle() {")
+            .map(|offset| establish + offset)
+            .expect("authority helper gates persistence");
+        let rowless_return = helper[gate..]
+            .find("if verdict.continues_rowless() {")
+            .map(|offset| gate + offset)
+            .expect("authority helper carries the rowless continuation");
+        let anchor = helper[rowless_return..]
+            .find("if !ensure_bridge_current_message_anchor")
+            .map(|offset| rowless_return + offset)
+            .expect("authority helper guarded-binds an absent anchor");
+        assert!(gate < rowless_return && rowless_return < anchor);
+        assert!(
+            helper[rowless_return..anchor].contains("return true;"),
+            "the rowless verdict must continue the lifecycle"
+        );
+        assert!(
+            !helper[rowless_return..anchor].contains("send_message"),
+            "the rowless continuation must not send a Discord anchor"
+        );
+
+        // ...and `true` is what carries the turn to post-loop finalize, which is
+        // where the loop-exit observation the S7a measurement joins on is written.
+        let caller = include_str!("mod.rs");
+        let authority = caller
+            .find("if !bridge_entry_persist::establish_bridge_entry_authority")
+            .expect("production caller establishes authority");
+        assert!(
+            caller[authority..].contains("post_loop_finalize::run_post_loop_finalize"),
+            "a continued entry must reach post-loop finalize"
+        );
+        assert!(
+            include_str!("post_loop_finalize.rs")
+                .contains("authority_observation::record_loop_exit("),
+            "post-loop finalize remains the rowless turn's loop-exit record point"
+        );
+        assert!(
+            include_str!("completion_postlude.rs").contains("ChannelEpisodeProbe::new")
+                && include_str!("completion_postlude.rs").contains("permits_channel_effects()"),
+            "S3's fresh-episode completion fence is what keeps a rowless bridge off a successor"
         );
     }
 
@@ -572,7 +820,7 @@ mod tests {
             .map(|offset| establish + offset)
             .expect("authority helper persists first");
         let gate = helper[persist..]
-            .find("if !bridge_entry_lifecycle_can_continue")
+            .find("let verdict = bridge_entry_lifecycle_verdict(outcome, cohort_admits);")
             .map(|offset| persist + offset)
             .expect("authority helper gates persistence");
         let anchor = helper[gate..]

@@ -115,14 +115,22 @@ stranded turn reports 0.0 — indistinguishable from a healthy window where no
 turn was ever stranded. A low value is therefore not an all-clear; only a high
 value carries information (legA r3c P2-6).
 
-Reported but deliberately NOT gated, because S2 does not measure them:
-``frontier_already_covers`` and ``unbound_anchor_left`` are S7a fields (that
-slice computes the frontier for its own gate, so recording it there is free —
-S2 will not add a durable read to the completion path just to observe), and
-``rowless_no_range_share`` is S7a's too: a ``Missing``-at-entry turn is ended by
-the shipped gate before the bridge loop starts, so rowless turns cannot reach a
-loop exit until enforcement lands and the ratio has no denominator here
-(ERRATUM R3-E4/E4-6).
+Reported but deliberately NOT gated, and measured from S7a onward rather than
+declared unmeasurable. Before that slice, a ``Missing``-at-entry turn was ended
+by the shipped entry gate before the bridge loop started, so rowless turns could
+not reach a loop exit at all: rowless × loop_exit was the empty set and
+``rowless_no_range_share`` had no denominator to compute over (ERRATUM
+R3-E4/E4-6). S7a's entry enforcement makes that population reachable, so the
+share is computed here — by joining each rowless ``bridge_entry`` record to its
+own turn's ``loop_exit`` record, which is why no emitter field was needed for it
+and why an always-false one was removed instead.
+
+``frontier_already_covers`` and ``unbound_anchor_left`` are emitted fields, and
+this script aggregates each one over every loop-exit record that carries it,
+reporting the measured denominator beside the count. A record that omits one is
+counted in ``unmeasured_fields`` instead
+of read as a measured ``false``: an emitter that never carries the field must not
+be indistinguishable from one reporting zero.
 
 Usage::
 
@@ -174,7 +182,10 @@ SOURCE_FILE_KEY = "_source_file"
 # Per-file line tally keys. `unusable` is derived from the three failure counters.
 INTEGRITY_COUNTERS = ("lines", "unparseable", "schema_mismatch", "undatable")
 COMPLETION_LINES = "_completion_lines"
-# Design §4.3/§5.3 fields the S2 emitter cannot produce; re-assigned to S7a.
+# Design §4.3/§5.3 loop-exit fields, emitted by S7a's frontier gate. Aggregated
+# when a record carries one and counted as unmeasured when it does not: an emitter
+# that never writes the field must not be indistinguishable from one reporting a
+# measured `false`. The name is kept so archived windows stay greppable by it.
 UNMEASURED_UNTIL_S7A = ("frontier_already_covers", "unbound_anchor_left")
 
 
@@ -456,8 +467,11 @@ def tally(events: list[dict]) -> dict:
     entry_verdicts = Counter()
     rowless_turns: set[tuple] = set()
     range_shapes = Counter()
+    exit_shape_of_turn: dict[tuple, str] = {}
     stream = Counter()
     unmeasured = Counter()
+    s7a_measured = Counter()
+    s7a_true = Counter()
     # Provenance is a property of the publication, so it is counted per turn: all
     # three of a turn's site records are written by one call and carry one value.
     # A record without the field is `unattributed` rather than assumed — there are
@@ -486,10 +500,28 @@ def tally(events: list[dict]) -> dict:
                 stream[field] += int(axis_a.get(field) or 0)
         elif site == "loop_exit":
             range_shapes[axis_a.get("lease_range_shape")] += 1
-            # S7a fields. Absent until that slice lands; counted, never inferred.
+            exit_shape_of_turn[turn_key(event)] = axis_a.get("lease_range_shape")
+            # S7a fields. Counted, never inferred: a record that omits one is
+            # unmeasured, not a measured `false`.
             for field in UNMEASURED_UNTIL_S7A:
-                if field not in axis_a:
+                if field in axis_a:
+                    s7a_measured[field] += 1
+                    s7a_true[field] += int(bool(axis_a[field]))
+                else:
                     unmeasured[field] += 1
+
+    # S7a's ratio is JOINED, not emitted: a rowless turn's entry record and its
+    # own loop-exit record share a turn key, which is why the always-false
+    # `rowless_continuation` field was deleted from the exit record rather than
+    # kept. The numerator is design §4.3's `NoRange` residue — the two shapes the
+    # frontier predicate the G-rowless gate needs is undefined over — so an
+    # advancing range is the only shape outside it. The denominator is rowless
+    # turns that REACHED a loop exit, never all rowless turns: a turn that left
+    # the bridge without one cannot be scored either way.
+    rowless_exits = {
+        turn: shape for turn, shape in exit_shape_of_turn.items() if turn in rowless_turns
+    }
+    rowless_no_range = sum(1 for shape in rowless_exits.values() if shape != "advancing")
 
     reasons = Counter(reason_of_turn.values())
     published = sum(reasons.values())
@@ -499,6 +531,21 @@ def tally(events: list[dict]) -> dict:
         "sites": dict(sites),
         "entry_verdict_transitions": dict(entry_verdicts),
         "rowless_continuation_turns": len(rowless_turns),
+        "rowless_exit_samples": len(rowless_exits),
+        "rowless_no_range_turns": rowless_no_range,
+        "rowless_no_range_share": (
+            (rowless_no_range / len(rowless_exits)) if rowless_exits else None
+        ),
+        **{
+            field: {
+                "true": s7a_true[field],
+                "measured": s7a_measured[field],
+                "share": (
+                    (s7a_true[field] / s7a_measured[field]) if s7a_measured[field] else None
+                ),
+            }
+            for field in UNMEASURED_UNTIL_S7A
+        },
         "stream_gate": dict(stream),
         "lease_range_shapes": dict(range_shapes),
         "unmeasured_fields": dict(unmeasured),
@@ -665,7 +712,10 @@ def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
         # Context only. Promotion is judged on the target segment above, because
         # two segments can sit at different dial positions.
         "all_segments_turn_samples": len({turn_key(event) for event in lifecycle_events}),
-        "rowless_no_range_share": None,
+        # S7a: computed from the target segment's own rowless × loop-exit join.
+        # `None` now means "no rowless turn reached a loop exit in this window",
+        # not "this slice cannot measure it".
+        "rowless_no_range_share": target_counts["rowless_no_range_share"],
         "line_integrity": integrity,
         # Context only, for the same reason `all_segments_turn_samples` is: the
         # whole input spans dial positions this promotion case is not about.
@@ -707,8 +757,11 @@ def render(summary: dict, warnings: list[str]) -> str:
             f"  evicted share      : {target['evicted_publication_share']} "
             "(displayed, NOT gated — the share that needed a successor to be"
             " logged at all; S4 owns whether it becomes a floor)",
-            "  rowless no_range   : unmeasured (S7a owns it — a rowless turn cannot"
-            " reach loop exit before enforcement)",
+            f"  rowless no_range   : {summary['rowless_no_range_share']}"
+            f" ({target['rowless_no_range_turns']}/{target['rowless_exit_samples']} rowless"
+            " turns reached a loop exit with no advancing range; displayed, NOT gated)",
+            f"  frontier covers    : {target['frontier_already_covers']}",
+            f"  unbound anchor     : {target['unbound_anchor_left']}",
             f"  integrity scope    : {len(summary['line_integrity']['files'])} file(s) of"
             f" the target segment, excluding"
             f" {summary['line_integrity']['cohabiting_usable_lines']} usable line(s)"
