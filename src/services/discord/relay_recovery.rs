@@ -56,6 +56,8 @@ use crate::services::provider::ProviderKind;
 mod apply;
 #[path = "relay_recovery/authority_observation.rs"]
 pub(crate) mod authority_observation;
+#[path = "relay_recovery/authority_retention.rs"]
+mod authority_retention;
 #[path = "relay_recovery_auto_heal_apply.rs"]
 mod auto_heal_apply;
 #[path = "relay_recovery_auto_heal_attempts.rs"]
@@ -442,6 +444,12 @@ fn append_axis_b_jsonl(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     with_axis_b_writer(|| {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
+            // Axis A appends to this same daily file, so retention is enforced
+            // from both writers and deletes whole files only (#5464 A7).
+            authority_retention::prune_observation_dir_once_per_day(
+                dir,
+                chrono::Local::now().date_naive(),
+            );
         }
         let mut file = fs::OpenOptions::new()
             .create(true)
