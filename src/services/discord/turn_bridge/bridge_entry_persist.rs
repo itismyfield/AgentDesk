@@ -428,12 +428,18 @@ mod tests {
         );
     }
 
-    /// #5464 T5 S7a's source-level reversibility, stated as the property that
-    /// makes it one: under `RuntimeSettingsConfig::default()` no channel is
-    /// admitted, so the call site's operand is `false` and the gate is the
-    /// pre-S7a one. `Observe` is deliberately not enough either.
+    /// What the COMPILED-IN default dial does — NOT what the deployed host does.
+    /// `config_live_reload::install` never runs in a lib test, so `current()` is
+    /// `None` and the wrapper falls back to `Legacy/0`; that fallback, and only
+    /// it, is what the sweep below observes. The release host ships
+    /// `relay_authority_mode: enforce` / `relay_authority_cohort_percent: 100`,
+    /// under which this same wrapper admits EVERY channel — see
+    /// `the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none`,
+    /// which installs those positions and observes it. This is the reversibility
+    /// statement for an UN-ENROLLED node; it is not evidence that the cutover is
+    /// dormant in production and must not be cited as such.
     #[test]
-    fn the_shipped_dial_admits_no_channel_to_the_entry_rowless_cohort() {
+    fn an_uninstalled_live_config_leaves_the_entry_rowless_cohort_empty() {
         use crate::config::RelayAuthorityMode;
 
         let defaults = crate::config::RuntimeSettingsConfig::default();
@@ -453,6 +459,83 @@ mod tests {
             assert!(
                 !bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, admits, true),
                 "channel {channel_id}: a rowless turn must still end outside the cohort"
+            );
+        }
+    }
+
+    /// Re-runs this binary for ONE test with the dial moved: `install` writes a
+    /// process-global `OnceLock` with no uninstall, so moving the dial in-process
+    /// would leak `Enforce/100` into every other test here (the sweep above and
+    /// `cohort::tests::rollout_report_without_a_live_config_...` both read it).
+    /// Same shape, same reason, as `provider::channel_rules::tests::run_child`.
+    fn run_dial_child(name: &str, marker: &str) {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", name, "--nocapture"])
+            .env(marker, "1")
+            .output()
+            .expect("spawn isolated dial child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success()
+                && stdout.lines().any(|line| line
+                    .starts_with("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")),
+            "{name}: {}\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// #5464 T5 S7a's production posture, OBSERVED at the dial the release host
+    /// runs rather than asserted from a compiled-in constant: at `enforce`/`100`
+    /// the entry gate's own cohort wrapper admits every channel, so on merge this
+    /// cutover governs 100% of entry traffic. At `observe`/`100` it admits none —
+    /// `governs_destructive_authority` carrying the veto, not the width.
+    ///
+    /// Both halves call `bridge_entry_rowless_cohort_admits` itself, so a folded
+    /// wrapper body fails here whichever constant it folds to: `false` silently
+    /// reverts the cutover in production, `true` (or a
+    /// `governs_destructive_authority` that stops vetoing) cuts every `Observe`
+    /// host over at once.
+    #[test]
+    fn the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none() {
+        const CHILD: &str = "ADK_ENTRY_ROWLESS_DIAL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_dial_child(
+                "services::discord::turn_bridge::bridge_entry_persist::tests::the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none",
+                CHILD,
+            );
+            return;
+        }
+        use crate::config::RelayAuthorityMode;
+
+        let ids = || (0..512u64).map(|index| 1_534_511_598_012_600_371 + index * 7);
+        let dial = |mode| {
+            let mut config = crate::config::Config::default();
+            config.runtime.relay_authority_mode = mode;
+            config.runtime.relay_authority_cohort_percent = 100;
+            crate::config_live_reload::install(config);
+        };
+
+        dial(RelayAuthorityMode::Enforce);
+        for channel_id in ids() {
+            let admits = bridge_entry_rowless_cohort_admits(channel_id);
+            assert!(
+                admits,
+                "channel {channel_id} is OUTSIDE the cohort at the deployed enforce/100 dial; \
+                 the S7a entry cutover would govern nothing in production"
+            );
+            assert!(
+                bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, admits, true),
+                "channel {channel_id}: at enforce/100 a rowless turn onto a live anchor continues"
+            );
+        }
+
+        dial(RelayAuthorityMode::Observe);
+        for channel_id in ids() {
+            assert!(
+                !bridge_entry_rowless_cohort_admits(channel_id),
+                "channel {channel_id} was admitted at observe/100; only Enforce may govern, and \
+                 Observe must stay behaviour-identical to Legacy for every non-recorder"
             );
         }
     }
