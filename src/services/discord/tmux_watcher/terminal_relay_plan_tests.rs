@@ -3,7 +3,7 @@
 //! Split out of `terminal_relay_plan.rs` to keep that module inside the
 //! `src/services/discord/tmux_watcher/**` namespace size cap.
 
-use super::super::rowless_delivery_authority::{lease_has_live_holder, ledger_owes_output};
+use super::rowless_delivery_authority::{lease_has_live_holder, ledger_owes_output};
 use super::*;
 use crate::services::discord::inflight::RelayOwnerKind;
 use crate::services::discord::{DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot};

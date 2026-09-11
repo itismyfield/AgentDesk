@@ -1,9 +1,7 @@
 use super::*;
 use std::sync::Arc;
 
-use super::rowless_delivery_authority::{
-    RowlessDeliveryAuthority, read_rowless_delivery_authority,
-};
+use self::rowless_delivery_authority::{RowlessDeliveryAuthority, read_rowless_delivery_authority};
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::TmuxRelayCoord;
@@ -674,5 +672,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
 }
 
 #[cfg(test)]
+#[path = "rowless_delivery_authority.rs"]
+mod rowless_delivery_authority;
 #[path = "terminal_relay_plan_tests.rs"]
 mod soft_terminal_direct_send_authority_tests;
