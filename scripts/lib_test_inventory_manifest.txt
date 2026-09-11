@@ -3077,6 +3077,7 @@ services::discord::inflight::clear_store::identity::tests::captured_episode_pres
 services::discord::inflight::clear_store::identity::tests::captured_episode_strictly_separates_legacy_and_modern_nonces
 services::discord::inflight::clear_store::identity::tests::ordinary_and_reconcile_clear_keep_legacy_nonce_wildcards
 services::discord::inflight::clear_store::identity::tests::reconcile_clear_keeps_its_current_generation_fence
+services::discord::inflight::clear_store::identity::tests::unresolved_identity_row_is_never_matched_by_a_mid_turn_clear_5464
 services::discord::inflight::clear_store::reconcile_gate::tests::allocation_route_is_observed_but_never_changes_the_reconcile_decision
 services::discord::inflight::clear_store::reconcile_gate::tests::allow_side_facts_are_wired_from_the_row_then_the_epoch
 services::discord::inflight::clear_store::reconcile_gate::tests::allowed_generation_buckets_separate_the_deferred_populations
@@ -3094,6 +3095,7 @@ services::discord::inflight::destructive_commit::tests::typed_outcomes_cover_mis
 services::discord::inflight::episode_guard::tests::exact_episode_readoption_consumes_marker_before_completion_clear
 services::discord::inflight::model::discord_id_tests::optional_id_helpers_return_none_for_zero_without_panicking
 services::discord::inflight::model::discord_id_tests::slice_a_transfer_end_boundaries
+services::discord::inflight::model::identity::tests::unresolved_dispatch_identity_is_never_reported_resolved_5464
 services::discord::inflight::model::turn_source_tests::default_is_managed_for_legacy_rows
 services::discord::inflight::model::turn_source_tests::intake_outbox_id_is_additive_and_bidirectionally_compatible
 services::discord::inflight::model::turn_source_tests::missing_field_defaults_to_managed_when_deserialised

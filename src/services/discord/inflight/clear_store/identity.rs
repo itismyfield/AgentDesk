@@ -52,6 +52,17 @@ fn guarded_identity_clear_outcome(
     if state.rebind_origin {
         return GuardedClearOutcome::RebindOriginSkipped;
     }
+    // #5464 B3 — an UNRESOLVED identity is never a match. `matches_state` folds
+    // `user_msg_id == 0` onto any id-0 row (`0 == 0`), so a caller holding an
+    // identity whose dispatch had not resolved could clear the channel's LIVE
+    // row mid-turn; the terminal that followed was then suppressed as
+    // `no_inflight_row`. Same judgment the after-delivery clear and the
+    // finalizer's mailbox-release guard already make — `is_resolved` is the one
+    // shape all four read. This does NOT relax exact-episode fencing: the nonce,
+    // generation and 4-axis checks below still run for resolved identities.
+    if !expected.is_resolved() {
+        return GuardedClearOutcome::UserMsgMismatch;
+    }
     if !expected.matches_state(state) || !turn_nonce_matches(expected_turn_nonce, state) {
         return GuardedClearOutcome::UserMsgMismatch;
     }
@@ -253,6 +264,7 @@ fn clear_rebind_origin_inflight_state_if_matches_identity_impl_in_root(
     let outcome = if state.restart_mode.is_some() {
         GuardedClearOutcome::PlannedRestartSkipped
     } else if !state.rebind_origin
+        || !expected.is_resolved()
         || !expected.matches_state(&state)
         || !turn_nonce_matches(expected_turn_nonce, &state)
     {
@@ -538,6 +550,116 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// #5464 B3 closing test. A row whose dispatch has NOT resolved
+    /// (`user_msg_id == 0`, ledger identity carried by `finalizer_turn_id`) is
+    /// live: the turn is running, the Discord anchor just is not known yet.
+    /// Before the `is_resolved` guard every clear below folded the expected
+    /// identity onto it on `0 == 0` — the remaining three axes come from the
+    /// same row — and deleted it MID-TURN, after which the turn's terminal was
+    /// suppressed as `no_inflight_row` (the C1 loss, reached from upstream).
+    #[test]
+    fn unresolved_identity_row_is_never_matched_by_a_mid_turn_clear_5464() {
+        let fixture = Fixture::new();
+        let mut row = fixture.row.clone();
+        row.user_msg_id = 0;
+        let identity = InflightTurnIdentity::from_state(&row);
+        assert!(
+            !identity.is_resolved(),
+            "an id-0 dispatch is unresolved however many disambiguators it carries"
+        );
+        assert!(
+            identity.matches_state(&row),
+            "the 4-axis compare still folds it — that is exactly what the guard must gate"
+        );
+
+        for site in [
+            "identity",
+            "identity_turn_nonce",
+            "returning_row",
+            "captured_episode",
+            "reconcile",
+        ] {
+            let bytes = fixture.seed(&row);
+            let outcome = match site {
+                "identity" => clear_inflight_state_if_matches_identity_in_root(
+                    &fixture.root,
+                    &ProviderKind::Claude,
+                    row.channel_id,
+                    &identity,
+                ),
+                "identity_turn_nonce" => {
+                    clear_inflight_state_if_matches_identity_turn_nonce_in_root(
+                        &fixture.root,
+                        &ProviderKind::Claude,
+                        row.channel_id,
+                        &identity,
+                        Some("episode-a"),
+                    )
+                }
+                "returning_row" => {
+                    clear_inflight_state_if_matches_identity_returning_row_in_root(
+                        &fixture.root,
+                        &ProviderKind::Claude,
+                        row.channel_id,
+                        &identity,
+                    )
+                    .0
+                }
+                "captured_episode" => {
+                    crate::services::discord::inflight::clear_inflight_state_for_captured_episode(
+                        &ProviderKind::Claude,
+                        row.channel_id,
+                        &identity,
+                        Some("episode-a"),
+                    )
+                }
+                "reconcile" => {
+                    match clear_inflight_state_if_matches_identity_turn_nonce_for_reconcile_in_root(
+                        &fixture.root,
+                        &ProviderKind::Claude,
+                        row.channel_id,
+                        &identity,
+                        Some("episode-a"),
+                        10,
+                    ) {
+                        ReconcileClearOutcome::Delegated(outcome) => outcome,
+                        other => panic!("{site}: unexpected {other:?}"),
+                    }
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch, "{site}");
+            fixture.assert_preserved(&bytes);
+        }
+
+        // The rebind-origin clear keeps its own inline condition; it reads the
+        // same judgment, so an unresolved rebind row survives too.
+        let mut rebind = row.clone();
+        rebind.rebind_origin = true;
+        let rebind_identity = InflightTurnIdentity::from_state(&rebind);
+        let bytes = fixture.seed(&rebind);
+        assert_eq!(
+            clear_rebind_origin_inflight_state_if_matches_identity_in_root(
+                &fixture.root,
+                &ProviderKind::Claude,
+                rebind.channel_id,
+                &rebind_identity,
+                Some("episode-a"),
+            ),
+            GuardedClearOutcome::UserMsgMismatch
+        );
+        fixture.assert_preserved(&bytes);
+
+        // Narrowness control: the guard closes ONLY the unresolved fold. The
+        // same row with its dispatch resolved still clears on an exact episode.
+        fixture.seed(&fixture.row);
+        assert_eq!(
+            fixture.captured_clear(Some("episode-a")),
+            GuardedClearOutcome::Cleared
+        );
+        assert!(!fixture.path.exists());
     }
 
     #[test]
