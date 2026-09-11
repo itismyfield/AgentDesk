@@ -276,3 +276,154 @@ fn caller_arc_wiring() {
     assert!(writer.contains("let turn_delivered = context.turn_delivered;"));
     assert!(!writer.contains("shared.tmux_watchers"));
 }
+
+#[cfg(unix)]
+async fn exercise_zero_id_cleanup(name: &str, newer: bool) {
+    use crate::services::discord::{inflight, tui_direct_abort_marker};
+    if std::env::var("ADK_C2_FIXTURE_CHILD").as_deref() != Ok(name) {
+        isolated(name);
+        return;
+    }
+    let root = std::path::PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+    let shared = make_shared_data_for_tests();
+    // Exercise both missing-nonce directions, plus the legacy None/None pair.
+    for (index, (injected, row_nonce, watcher_nonce)) in [
+        (false, None, Some("terminal-A")),
+        (true, Some("row-B"), None),
+        (false, None, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let channel = serenity::ChannelId::new(
+            57_550_000 + u64::from(std::process::id()) * 10 + index as u64,
+        );
+        let session = format!("id0-fixture-{}", channel.get());
+        let output = root.join(format!("output-{index}.jsonl"));
+        std::fs::write(&output, "fixture").unwrap();
+        let a = handle(&session, output.to_str().unwrap());
+        let start = if newer { 50 + index as u64 } else { 10 };
+        let mut row = InflightTurnState::new(
+            ProviderKind::Claude,
+            channel.get(),
+            None,
+            0,
+            0,
+            0,
+            "external input".into(),
+            None,
+            Some(session.clone()),
+            Some(a.output_path.clone()),
+            None,
+            start,
+        );
+        row.turn_source = if injected {
+            inflight::TurnSource::Managed
+        } else {
+            inflight::TurnSource::ExternalInput
+        };
+        row.injected_prompt_message_id = injected.then_some(777);
+        row.turn_nonce = row_nonce.map(str::to_owned);
+        inflight::save_inflight_state(&row).unwrap();
+        let late_row = inflight::load_inflight_state(&ProviderKind::Claude, channel.get());
+        let loaded = late_row.as_ref().expect("fixture row was really saved");
+        assert_eq!(loaded.turn_nonce.as_deref(), row_nonce);
+        let path = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &ProviderKind::Claude,
+            channel.get(),
+        );
+        assert!(path.starts_with(&root));
+        // Saving and compatibility loading can stamp metadata; pin the actual late row.
+        let before = std::fs::read(&path).unwrap();
+        let completion_stale =
+            committed_completion_is_stale_for_newer_turn(None, late_row.as_ref(), &session, 50);
+        let anchor_stale =
+            committed_anchor_cleanup_is_stale_for_newer_turn(None, late_row.as_ref(), &session, 50);
+        assert_eq!((completion_stale, anchor_stale), (false, newer));
+        assert!(tui_direct_abort_marker::load_all().is_empty());
+        assert!(
+            tui_direct_abort_marker::load_commit_tombstones("claude", channel.get()).is_empty()
+        );
+        let watcher_nonce = watcher_nonce.map(str::to_owned);
+        let context = TerminalCommitEpilogueContext {
+            shared: &shared,
+            channel_id: channel,
+            watcher_provider: &ProviderKind::Claude,
+            provider_kind: &ProviderKind::Claude,
+            tmux_session_name: &a.tmux_session_name,
+            output_path: &a.output_path,
+            relay_coord: &Arc::new(TmuxRelayCoord::new(channel)),
+            turn_delivered: &a.turn_delivered,
+        };
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run_terminal_commit_epilogue(
+                &context,
+                TerminalCommitEpilogueLocals {
+                    terminal_output_committed: true,
+                    lifecycle_stage_paused: false,
+                    relay_suppressed: false,
+                    has_assistant_response: false,
+                    completion_is_stale_for_newer_turn: completion_stale,
+                    anchor_cleanup_is_stale_for_newer_turn: anchor_stale,
+                    inflight_state: &late_row,
+                    inflight_before_relay: &None,
+                    full_response: &String::new(),
+                    watcher_turn_nonce: &watcher_nonce,
+                    resolved_did: &None,
+                    dispatch_ok: false,
+                    terminal_delivery_committed: true,
+                    watcher_tui_gate_outcome: TuiCompletionGateOutcome::NotGated,
+                    // This also exercises the changed tombstone guard for id-0 rows.
+                    tui_direct_anchor_terminal_body_visible: true,
+                    terminal_kind: None,
+                    terminal_evidence_offset: Some(50),
+                    finish_mailbox_on_completion: true,
+                    pre_panel_release_drove_finalize: false,
+                    current_offset: 50,
+                    data_start_offset: 0,
+                },
+                &mut TerminalCommitEpilogueState {
+                    turn_result_relayed: &mut false,
+                    watcher_direct_terminal_idle_committed: &mut true,
+                    monitor_auto_turn_claimed: &mut false,
+                    monitor_auto_turn_finished: &mut false,
+                    monitor_auto_turn_synthetic_msg_id: &mut None,
+                    monitor_auto_turn_ledger_generation: &mut None,
+                },
+            ),
+        )
+        .await
+        .expect("actual epilogue completes within fixture timeout");
+        assert_eq!(outcome, TerminalCommitEpilogueOutcome::Fallthrough);
+        if newer {
+            assert_eq!(
+                std::fs::read(&path).ok().as_deref(),
+                Some(before.as_slice()),
+                "older terminal must preserve the newer zero-id row bytes",
+            );
+        } else {
+            assert!(!path.exists(), "current zero-id row must still be cleared");
+        }
+        let tombstones = tui_direct_abort_marker::load_commit_tombstones("claude", channel.get());
+        assert_eq!(
+            tombstones.len(),
+            usize::from(!newer),
+            "only the current row may be tombstoned"
+        );
+        assert!(!root.join("probes").exists(), "no tmux probe was needed");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn newer_zero_id_row_survives_old_terminal() {
+    exercise_zero_id_cleanup("newer_zero_id_row_survives_old_terminal", true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn current_zero_id_row_can_complete() {
+    exercise_zero_id_cleanup("current_zero_id_row_can_complete", false).await;
+}

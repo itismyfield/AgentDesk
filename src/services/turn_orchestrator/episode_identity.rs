@@ -27,6 +27,20 @@ pub(super) fn turn_nonce_guard_matches(
 }
 
 impl ChannelMailboxHandle {
+    pub(crate) async fn take_timeout_override(
+        &self,
+        expected_token: Arc<CancelToken>,
+    ) -> Option<WatchdogDeadlineExtension> {
+        self.request(
+            |reply| ChannelMailboxMsg::TakeTimeoutOverride {
+                expected_token,
+                reply,
+            },
+            None,
+        )
+        .await
+    }
+
     /// Operator recovery preserves queue payloads, ordering and pending claims.
     pub(crate) async fn release_turn_lease_if_matches(
         &self,
@@ -165,6 +179,26 @@ pub(super) fn persist_queue_or_restore(
     }
 }
 
+/// Match an execution token; restoring the same nonce still creates a different Arc.
+pub(super) fn matching_cancel_token(
+    state: &ChannelMailboxState,
+    expected: &Arc<CancelToken>,
+) -> Option<Arc<CancelToken>> {
+    state
+        .cancel_token
+        .clone()
+        .filter(|token| Arc::ptr_eq(token, expected))
+}
+
+/// Called within one mailbox actor command: no await may separate this check and take.
+pub(super) fn take_watchdog_override_if_current(
+    state: &mut ChannelMailboxState,
+    expected: &Arc<CancelToken>,
+) -> Option<WatchdogDeadlineExtension> {
+    matching_cancel_token(state, expected)?;
+    state.watchdog_deadline_override.take()
+}
+
 pub(super) fn reset_watchdog_extension_state(state: &mut ChannelMailboxState) {
     state.watchdog_deadline_override = None;
     state.watchdog_extension_count = 0;
@@ -182,6 +216,187 @@ mod tests {
     use crate::services::turn_orchestrator::{
         ChannelMailboxRegistry, Intervention, InterventionMode,
     };
+
+    use std::sync::atomic::Ordering::Relaxed;
+
+    struct WatchdogOwnerFixture {
+        channel: ChannelId,
+        old: Arc<CancelToken>,
+        current: Arc<CancelToken>,
+        handle: ChannelMailboxHandle,
+        accepted: WatchdogDeadlineExtension,
+    }
+
+    async fn watchdog_owner_take(
+        channel: ChannelId,
+        token: &Arc<CancelToken>,
+    ) -> Option<WatchdogDeadlineExtension> {
+        crate::services::discord::take_watchdog_deadline_override(channel.get(), token).await
+    }
+
+    async fn watchdog_owner_successor(case: u64, nonce: Option<&str>) -> WatchdogOwnerFixture {
+        let channel = ChannelId::new(9_000_000_505_601_000 + case);
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel);
+        let token = || {
+            Arc::new(CancelToken::from_persisted_turn_nonce(
+                nonce.map(str::to_owned),
+            ))
+        };
+        let old = token();
+        assert!(
+            handle
+                .try_start_turn(old.clone(), UserId::new(51), MessageId::new(51))
+                .await
+        );
+        let captured = handle.cancel_token().await.unwrap();
+        assert!(Arc::ptr_eq(&captured, &old));
+        old.cancelled.store(true, Relaxed);
+        assert!(Arc::ptr_eq(
+            &handle.finish_cancelled_turn().await.removed_token.unwrap(),
+            &old
+        ));
+        let current = token();
+        assert!(!Arc::ptr_eq(&captured, &current));
+        assert!(
+            handle
+                .try_start_turn(current.clone(), UserId::new(51), MessageId::new(51))
+                .await
+        );
+        let accepted = handle.extend_timeout(86_400).await.unwrap();
+        WatchdogOwnerFixture {
+            channel,
+            old: captured,
+            current,
+            handle,
+            accepted,
+        }
+    }
+
+    #[tokio::test]
+    async fn watchdog_owner_stale_take_preserves_successor() {
+        for (case, nonce) in [(0, Some("same-episode")), (1, None)] {
+            let f = watchdog_owner_successor(case, nonce).await;
+            assert!(watchdog_owner_take(f.channel, &f.old).await.is_none());
+            let owned = watchdog_owner_take(f.channel, &f.current).await.unwrap();
+            assert_eq!(owned.new_deadline_ms, f.accepted.new_deadline_ms);
+            assert_eq!(
+                f.current.watchdog_deadline_ms.load(Relaxed),
+                f.accepted.new_deadline_ms
+            );
+            assert_eq!(
+                f.current.watchdog_max_deadline_ms.load(Relaxed),
+                f.accepted.max_deadline_ms
+            );
+            assert!(!f.current.cancelled.load(Relaxed));
+        }
+    }
+
+    #[tokio::test]
+    async fn watchdog_owner_stale_cleanup_discard_preserves_successor() {
+        for (case, nonce) in [(2, Some("same-episode")), (3, None)] {
+            let f = watchdog_owner_successor(case, nonce).await;
+            let _ = watchdog_owner_take(f.channel, &f.old).await;
+            assert_eq!(
+                watchdog_owner_take(f.channel, &f.current)
+                    .await
+                    .unwrap()
+                    .new_deadline_ms,
+                f.accepted.new_deadline_ms
+            );
+            assert_eq!(
+                f.current.watchdog_deadline_ms.load(Relaxed),
+                f.accepted.new_deadline_ms
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn watchdog_owner_matching_take_and_discard_consume_once() {
+        let f = watchdog_owner_successor(4, Some("current")).await;
+        assert_eq!(
+            watchdog_owner_take(f.channel, &f.current)
+                .await
+                .unwrap()
+                .new_deadline_ms,
+            f.accepted.new_deadline_ms
+        );
+        assert!(watchdog_owner_take(f.channel, &f.current).await.is_none());
+        let later = f.handle.extend_timeout(86_400).await.unwrap();
+        let _ = watchdog_owner_take(f.channel, &f.current).await;
+        assert!(watchdog_owner_take(f.channel, &f.current).await.is_none());
+        assert_eq!(
+            f.current.watchdog_deadline_ms.load(Relaxed),
+            later.new_deadline_ms
+        );
+    }
+
+    #[tokio::test]
+    async fn watchdog_owner_missing_and_idle_mailboxes_are_noops() {
+        let channel = ChannelId::new(9_000_000_505_601_005);
+        let token = Arc::new(CancelToken::new());
+        assert!(watchdog_owner_take(channel, &token).await.is_none());
+        let registry = ChannelMailboxRegistry::default();
+        let handle = registry.handle(channel);
+        assert!(watchdog_owner_take(channel, &token).await.is_none());
+        assert!(handle.cancel_token().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn watchdog_owner_existing_cancel_guards_keep_pointer_identity() {
+        for (case, reasoned) in [(6, false), (7, true)] {
+            let f = watchdog_owner_successor(case, Some("same-episode")).await;
+            let stale = if reasoned {
+                f.handle
+                    .cancel_active_turn_if_current_with_reason(
+                        f.old.clone(),
+                        "5056 test".to_owned(),
+                    )
+                    .await
+            } else {
+                f.handle.cancel_active_turn_if_current(f.old.clone()).await
+            };
+            assert!(stale.token.is_none());
+            assert!(!f.current.cancelled.load(Relaxed));
+            let current = if reasoned {
+                f.handle
+                    .cancel_active_turn_if_current_with_reason(
+                        f.current.clone(),
+                        "5056 test".to_owned(),
+                    )
+                    .await
+            } else {
+                f.handle
+                    .cancel_active_turn_if_current(f.current.clone())
+                    .await
+            };
+            assert!(Arc::ptr_eq(&current.token.unwrap(), &f.current));
+            assert!(f.current.cancelled.load(Relaxed));
+        }
+    }
+
+    #[test]
+    fn watchdog_owner_call_sites_pass_captured_token() {
+        let headless = include_str!("../discord/router/message_handler/watchdog.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let text = include_str!("../discord/router/message_handler/intake_turn/turn_watchdog.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        for (source, clears) in [(headless, 3), (text, 2)] {
+            assert!(!source.contains("clear_watchdog_deadline_override("));
+            assert_eq!(
+                source
+                    .matches("take_override(watchdog_channel_id_num, &watchdog_token)")
+                    .count(),
+                4
+            );
+            assert_eq!(source.matches("let _ = take_override(").count(), clears);
+        }
+        assert!(headless.contains("take_override(channel_id.get(), watchdog_token).await"));
+    }
 
     fn persistence(label: &str) -> QueuePersistenceContext {
         QueuePersistenceContext::new(&ProviderKind::Claude, label, None)
