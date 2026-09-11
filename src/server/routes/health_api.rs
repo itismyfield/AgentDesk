@@ -1982,7 +1982,13 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["cohort_fingerprint", "cohort_percent", "mode"],
+            [
+                "cohort_fingerprint",
+                "cohort_percent",
+                "cohort_percent_clamped",
+                "cohort_percent_configured",
+                "mode"
+            ],
             "the standalone branch must forward the whole rollout report"
         );
         assert_eq!(
@@ -1993,6 +1999,22 @@ mod tests {
         assert_eq!(
             standalone.get("cohort_percent").and_then(|v| v.as_u64()),
             Some(0)
+        );
+        // #5071 T5 A6: the configured width rides the same branch as the
+        // effective one, so an operator reading a node with no Discord registry
+        // can still tell a clamped dial from a chosen one.
+        assert_eq!(
+            standalone
+                .get("cohort_percent_configured")
+                .and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            standalone
+                .get("cohort_percent_clamped")
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "the shipped dial is in range and must not be flagged as clamped"
         );
         assert!(
             standalone

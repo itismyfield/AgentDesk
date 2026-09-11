@@ -652,3 +652,56 @@ S1 dual 리뷰(legA/legB)에서 나왔고 S1에서 결정하지 않은 항목이
    결과는 health 다이얼이 `Legacy/0` 으로 되돌아가는 관측 변화에 그친다(admission 소비자 0).
    결정해야 할 것: unknown-YAML 보존 또는 mixed-version 금지 계약 중 어느 쪽을, S2가 이 knob를
    관측/집행에 쓰기 전에 세울지. 소유: S2 착수 전.
+
+### 두 항목의 A6 판정 (2026-09-11, #5071 T5 A6)
+
+두 항목의 소유는 위 "S1 리뷰 후속 이관 2번에 대한 S2의 판정" 절에서 S4/S6 집행 슬라이스로
+이관됐고, "같은 롤아웃 런북에서 함께 결정되어야 한다"로 남아 있었다. 그런데 롤아웃(cohort
+5→25→50→100, `Enforce` 전환)은 그 결정 없이 진행됐다. 그러므로 이 판정은 롤아웃 **전** 전제가
+아니라 **이미 집행 중인 상태에 대한 사후 확정**이며, 남은 위험은 처음 기록된 방향의 역방향이다 —
+새 채널을 잘못 등록시키는 쪽이 아니라, 롤백하거나 다이얼을 되돌릴 때 무음으로 `Legacy/0` 으로
+복귀해 `AuthorityLost` 가 부활하는 쪽이다. 두 항목 모두 "지금 무엇이 집행되고 있는가"를
+health에서 확인 가능하게 만드는 문제로 수렴하므로 함께 닫는다.
+
+**1번(폭 클램프 fail-open) — (b) raw/effective 병기를 택했다.** 클램프의 극성은 바꾸지 않는다.
+(a) `>100` 거부를 택하지 않은 이유는 거부를 구현할 유일한 훅인 `config::validate_config` 의
+도달 범위가 hot-reload 경로에 국한되지 않기 때문이다. 이 게이트는 `config::load_from_path` 와
+`config::load` 양쪽 안에서 실행되고, 두 함수의 프로덕션 호출부는 **각각 20곳과 10곳**이며 여기에
+`discord::settings::write` 의 직접 호출 1곳을 더해 **총 31곳**이다
+(`config_live_reload::reload_from_path` 은 그 20곳 중 하나일 뿐이다. 재현:
+`git grep -n 'load_from_path\|config::load()'` 후 `#[cfg(test)]` 경계로 분류).
+즉 거부는 직전 스냅샷 유지에 그치지 않고 Discord 설정 쓰기(`settings/write.rs:245` — A6가 테스트를
+추가한 바로 그 파일)를 실패시키고, voice-config 라우트에 HTTP 500 을 내며, CLI 진입점 4곳을
+실패시킨다. 막으려던 miswidened cohort 보다 폭발 반경이 넓다. 부팅은 이 반경 밖이다 —
+`config::load_graceful` 은 `validate_config` 를 호출하지 않는다.
+거부 경로에 증거가 없었다는 최초 서술은 사실이 아니다: `config_live_reload` 는 `Rejected` 시
+경로와 에러 문자열을 WARN 으로 남긴다. 다만 config 재로드 상태는 health 에 전혀 노출되지 않으므로
+그 WARN 이 거부 경로의 유일한 통지 수단이고, 클램프 경로에는 그에 대응하는 로그가 A6 이전까지
+**아예 없었다**(`effective_cohort_percent` 에 클램프 발동 시에만 찍히는 WARN 1건을 추가해 닫았다).
+`cohort::effective_cohort_percent` 가 클램프의 유일한
+정의가 되고, `RelayAuthorityRolloutReport` 는 `cohort_percent`(집행값) 옆에
+`cohort_percent_configured`(YAML 원문값)와 `cohort_percent_clamped`(둘이 다를 때만 `true`)를
+함께 발행한다. 두 조립 지점(standalone `health_api`, registry `health/snapshot`) 모두 detail
+게이트 뒤에서 같은 producer를 전달하므로 새 필드도 detail 전용이다. 도달 가능한 오타 구간은
+`u8` 파싱이 `256+` 를 거르므로 여전히 `101..=255` 다.
+
+**2번(mixed-version whole-config rewrite) — 이미 닫혀 있었다. A6는 계약만 핀으로 고정했다.**
+이 항목이 지목한 `persist_bot_auth_to_yaml_checked` 의 `serde_yaml::to_string(&Config)` 전체
+재직렬화는 PR #5803(이슈 #5750, main `2836b954f8`)이 `patch_bot_settings_yaml` 로 교체하면서
+사라졌다 — 원본 문서를 `serde_yaml::Value` 로 파싱한 뒤 소유 키만 patch하므로 typed `Config` 가
+모르는 키는 원문 그대로 남는다. 즉 **unknown-YAML 보존(코드 경로)** 이 이미 채택된 상태이고,
+mixed-version 금지 문서 계약은 필요 없다. 다만 그 PR이 남긴 회귀 테스트
+(`bot_settings_write_back_preserves_unowned_document_keys`)는 **최상위 미모델 섹션** 모양만
+단언했고, 이 항목이 실제로 위협하는 모양 — 모델링된 섹션(`runtime`) **안쪽**의, 구 바이너리가
+파싱하고 버리는 신규 키 — 은 단언되지 않았다. A6는 프로덕션 코드를 바꾸지 않고
+`bot_settings_write_back_preserves_unknown_keys_inside_modelled_sections` 하나로 그 모양을
+고정했다. 잔여는 이 항목 밖이며 이미 별도로 기록돼 있다: whole-`Config` `save_to_path` writer
+는 **프로덕션 8곳**이다 — `server/routes/voice_config.rs:151`·`server/routes/agents_crud.rs:1018`·
+`server/routes/agents_setup.rs:530`·`services/discord_config_audit.rs:1169`·
+`runtime_layout/config_merge.rs:38`·`cli/migrate/apply.rs:638`·
+`services/onboarding/mod.rs:1331`·`services/onboarding/mod.rs:1805`.
+이전 기록의 "4곳"은 뒤 4곳을 누락한 과소 계수였다(`onboarding/mod.rs` 의 두 곳은 같은 파일의
+`#[cfg(test)]` 블록이 1180-1214·1236-1259·2916-2930 로 모두 작아 프로덕션 함수
+`write_agentdesk_discord_config`·`write_agentdesk_channel_bindings` 안에 있다). 재현:
+`git grep -n 'save_to_path' -- src/` 후 `#[cfg(test)]` 경계로 분류하고 정의 1행을 뺀다.
+PR #5803이 이 writer 들을 명시적으로 유예했고 이슈 #5750 코멘트 5593859378이 후속으로 들고 있다.
