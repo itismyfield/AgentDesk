@@ -53,7 +53,7 @@ fn rule(
         (DrainPendingQueue, TransportUnknown { .. }) => Deny,
         (DrainPendingQueue, Unreachable { .. }) => RequireEpisode,
         (DrainPendingQueue, Unknown { .. }) => RequireEpisode,
-        (ObserveOnly | ReportRelayUnreachable, _) => Deny,
+        (ObserveOnly, _) => Deny,
     }
 }
 

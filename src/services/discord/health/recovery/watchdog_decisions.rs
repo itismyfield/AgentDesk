@@ -2,7 +2,7 @@ use crate::services::discord::health::snapshot::WatcherStateSnapshot;
 use crate::services::discord::relay_health::{RelayActiveTurn, RelayStallState};
 use crate::services::discord::relay_recovery::AxisBSite;
 use crate::services::discord::relay_recovery::{self, RelayRecoveryActionKind};
-use crate::services::discord::{self as discord, SharedData};
+use crate::services::discord::{self as discord};
 use crate::services::provider::ProviderKind;
 
 /// #1446 stall-deadlock recovery - pure decision helper for the
@@ -289,12 +289,11 @@ pub(crate) fn stall_watchdog_should_force_clean_orphan_explicit_background_work(
 /// predicate alone decides (absence of evidence never manufactures a veto).
 #[cfg(not(unix))]
 pub(crate) fn watchdog_axis_b_warrants(
-    shared: &SharedData,
     provider: &ProviderKind,
     snapshot: &WatcherStateSnapshot,
     site: AxisBSite,
 ) -> bool {
-    let _ = (shared, provider, snapshot, site);
+    let _ = (provider, snapshot, site);
     true
 }
 
@@ -302,7 +301,6 @@ pub(crate) fn watchdog_axis_b_warrants(
 /// helper only preserves or lowers `structural_candidate_apply`.
 #[cfg(unix)]
 pub(crate) fn watchdog_axis_b_warrants(
-    _shared: &SharedData,
     provider: &ProviderKind,
     snapshot: &WatcherStateSnapshot,
     site: AxisBSite,

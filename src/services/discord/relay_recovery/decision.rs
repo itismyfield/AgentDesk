@@ -8,11 +8,6 @@ pub(in crate::services::discord) enum RelayRecoveryActionKind {
     ClearOrphanPendingToken,
     ReattachWatcher,
     DrainPendingQueue,
-    /// #5071 T4-B6 (4987 §4.4 / §7.1): the relay looks unreachable while the
-    /// structural signals still read as a live foreground stream. Observation
-    /// with a distinct label, so the operator sees the contradiction; it
-    /// touches nothing and is never auto-heal eligible.
-    ReportRelayUnreachable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,7 +46,6 @@ impl RelayRecoveryActionKind {
             Self::ClearOrphanPendingToken => "clear_orphan_pending_token",
             Self::ReattachWatcher => "reattach_watcher",
             Self::DrainPendingQueue => "drain_pending_queue",
-            Self::ReportRelayUnreachable => "report_relay_unreachable",
         }
     }
 
@@ -62,7 +56,7 @@ impl RelayRecoveryActionKind {
     /// counted as destructive because their `relay_recovery::apply` arms both
     /// take effect on runtime state — a watcher respawn/rebind and a scheduled
     /// queue drain — even though neither cancels a turn by itself. False is
-    /// reserved for the two arms whose apply path returns `"skipped"` and
+    /// reserved for the one arm whose apply path returns `"skipped"` and
     /// writes nothing. The arms are spelled out rather than collapsed so a new
     /// action has to choose a side before it compiles.
     ///
@@ -71,7 +65,7 @@ impl RelayRecoveryActionKind {
     /// check in `relay_recovery::apply`.
     pub(in crate::services::discord) fn is_destructive(self) -> bool {
         match self {
-            Self::ObserveOnly | Self::ReportRelayUnreachable => false,
+            Self::ObserveOnly => false,
             Self::ClearStaleThreadProof
             | Self::ClearOrphanPendingToken
             | Self::ReattachWatcher

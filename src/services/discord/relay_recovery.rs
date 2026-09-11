@@ -113,7 +113,6 @@ pub(crate) enum AxisBSite {
     ProbeAutoHealReattach,
     WatchdogStaleIdle,
     WatchdogExplicitBackground,
-    StaleTurnIntake,
     RelayDeadReattach,
     ProbeAutoHeal,
     PolicyTickStaleSweep,
@@ -248,11 +247,32 @@ fn set_idle_tmux_reattach_inflight_candidate_hook_for_tests(
     IdleTmuxReattachInflightCandidateHookGuard { previous }
 }
 
+/// Manual (operator) relay recovery. The request instant is captured exactly
+/// once here and handed to both planning and admission; the retired axis-B
+/// observer re-read the clock between those steps and refreshed the Manual
+/// auto-heal window against the later time. `run_relay_recovery_at` is that seam.
 pub(in crate::services::discord) async fn run_relay_recovery(
     registry: &HealthRegistry,
     provider_filter: Option<&str>,
     channel_id: u64,
     apply: bool,
+) -> Result<RelayRecoveryResponse, RelayRecoveryError> {
+    run_relay_recovery_at(
+        registry,
+        provider_filter,
+        channel_id,
+        apply,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+}
+
+async fn run_relay_recovery_at(
+    registry: &HealthRegistry,
+    provider_filter: Option<&str>,
+    channel_id: u64,
+    apply: bool,
+    now_ms: i64,
 ) -> Result<RelayRecoveryResponse, RelayRecoveryError> {
     let parsed_provider = match provider_filter.map(str::trim).filter(|raw| !raw.is_empty()) {
         Some(provider) => Some(
@@ -275,7 +295,6 @@ pub(in crate::services::discord) async fn run_relay_recovery(
         provider: provider_filter.map(str::to_string),
     })?;
 
-    let now_ms = chrono::Utc::now().timestamp_millis();
     let mut decision =
         plan_relay_recovery(&snapshot.relay_health, snapshot.relay_stall_state, now_ms);
     decision.affected.finalizer_turn_id = snapshot.inflight_finalizer_turn_id;
@@ -321,8 +340,12 @@ pub(crate) async fn automatic_stale_sweep_warrants(
     // Non-unix builds have no tmux reachability evidence source, so every
     // warrant operand is absent: the warrant abstains and the structural
     // candidate is preserved (absence of evidence never manufactures a veto).
-    let _ = (registry, session_key, provider_name, site);
-    true
+    // The site taxonomy is closed on every platform, not only under unix.
+    let _ = (registry, session_key, provider_name);
+    matches!(
+        site,
+        AxisBSite::PolicyTickStaleSweep | AxisBSite::BootReconcileSweep
+    )
 }
 
 #[cfg(unix)]
@@ -330,9 +353,17 @@ pub(crate) async fn automatic_stale_sweep_warrants(
     registry: Option<&HealthRegistry>,
     session_key: &str,
     provider_name: &str,
-    _site: AxisBSite,
+    site: AxisBSite,
 ) -> bool {
     let structural_candidate_apply = destructive_warrant::structural_candidate_apply(true);
+    // Closed taxonomy, like the apply path's `axis_b_warrant_site_unmapped` deny:
+    // a future sweep site must name its action here before it can reach a mutation.
+    let action = match site {
+        AxisBSite::PolicyTickStaleSweep | AxisBSite::BootReconcileSweep => {
+            RelayRecoveryActionKind::ClearStaleThreadProof
+        }
+        _ => return false,
+    };
     let Some(registry) = registry else {
         return structural_candidate_apply;
     };
@@ -359,7 +390,7 @@ pub(crate) async fn automatic_stale_sweep_warrants(
     };
     let destructive_warrant_bind = destructive_warrant::destructive_warrant_bind(
         structural_candidate_apply,
-        RelayRecoveryActionKind::ClearStaleThreadProof,
+        action,
         &provider,
         Some(&snapshot),
         false,
@@ -860,7 +891,7 @@ mod axis_b_tests {
             );
         }
         assert_eq!(
-            body(recovery, "run_relay_recovery")
+            body(recovery, "run_relay_recovery_at")
                 .matches("observe_axis_b_candidate(")
                 .count(),
             0,
@@ -889,7 +920,7 @@ mod axis_b_tests {
             ),
             (
                 include_str!("router/intake_gate/stale_turn.rs"),
-                "if !stale_turn_axis_b_warrants(shared, provider, &proof)",
+                "if !stale_turn_axis_b_warrants(provider, &proof)",
             ),
             (
                 include_str!("../../server/mod.rs"),

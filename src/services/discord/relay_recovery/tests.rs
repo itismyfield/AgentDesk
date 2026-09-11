@@ -2504,7 +2504,7 @@ async fn auto_apply_preserves_fresh_admission_token() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn probe_redrive_reattach_records_the_actual_relay_recovery_observation() {
+async fn probe_redrive_reattach_stays_eligible_with_unreadable_reachability_operand() {
     let _guard = auto_heal_test_lock().lock().await;
     clear_auto_heal_attempts_for_tests();
     let (_root_guard, root_dir) = isolated_agentdesk_root();
@@ -2600,6 +2600,57 @@ async fn probe_redrive_reattach_records_the_actual_relay_recovery_observation() 
         "#5464 axis-B redrive fixture cleanup",
     );
     super::super::inflight::clear_inflight_state(&provider, channel.get());
+}
+
+#[tokio::test]
+async fn manual_relay_recovery_plans_and_admits_on_one_captured_instant() {
+    // #5464 P2-1: `run_relay_recovery` hands ONE captured instant to both
+    // planning and admission. The retired axis-B observer re-read the clock
+    // between them and refreshed the Manual auto-heal window against the later
+    // time. Every instant here is passed explicitly and sits AHEAD of the wall
+    // clock, so a re-read would land ~30s behind the first reservation instead
+    // of a full window past it: the window would not roll and the third request
+    // would be refused. That is what makes this behavioral, not lexical.
+    let _guard = auto_heal_test_lock().lock().await;
+    clear_auto_heal_attempts_for_tests();
+    let (_root_guard, _root_dir) = isolated_agentdesk_root();
+    let provider = ProviderKind::Codex;
+    let (registry, shared) = registry_with_shared(provider.clone()).await;
+    let channel = ChannelId::new(3_360_010);
+    let window_ms = AUTO_HEAL_WINDOW_SECS * 1_000;
+    let base_ms = chrono::Utc::now().timestamp_millis()
+        + ORPHAN_PENDING_TOKEN_ADMISSION_GRACE.as_millis() as i64;
+    let reg = &registry;
+    let who = Some(provider.as_str());
+
+    start_test_turn(&shared, channel, MessageId::new(96)).await;
+    let first = run_relay_recovery_at(reg, who, channel.get(), true, base_ms)
+        .await
+        .expect("first manual recovery should evaluate");
+    assert!(first.applied, "a fresh-window manual reclaim must apply");
+
+    // Still inside the window the first reservation opened at `base_ms`.
+    start_test_turn(&shared, channel, MessageId::new(97)).await;
+    let inside = run_relay_recovery_at(reg, who, channel.get(), true, base_ms + window_ms - 1)
+        .await
+        .expect("in-window manual recovery should evaluate");
+    assert!(!inside.applied);
+    assert_eq!(
+        inside.decision.auto_heal.skipped_reason,
+        Some("auto_heal_rate_limited"),
+        "the Manual lane budget is one attempt per window"
+    );
+
+    // Exactly one window later: this admits only because planning and admission
+    // both read the instant passed in.
+    let rolled = run_relay_recovery_at(reg, who, channel.get(), true, base_ms + window_ms)
+        .await
+        .expect("rolled-window manual recovery should evaluate");
+    assert_eq!(rolled.decision.auto_heal.skipped_reason, None);
+    assert!(
+        rolled.applied,
+        "a request planned in the next window must be admitted in that window"
+    );
 }
 
 #[tokio::test]
