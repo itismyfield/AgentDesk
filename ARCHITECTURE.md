@@ -801,6 +801,7 @@ src/
 │   │   │   │   └── circuit_breaker_apply.rs
 │   │   │   ├── apply.rs
 │   │   │   ├── authority_observation.rs
+│   │   │   ├── authority_retention.rs
 │   │   │   ├── cohort.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── destructive_warrant.rs
@@ -1010,6 +1011,7 @@ src/
 │   │   │   ├── prompt_observe.rs
 │   │   │   ├── provider_output_guard.rs
 │   │   │   ├── provider_session_persistence.rs
+│   │   │   ├── rowless_delivery_authority.rs
 │   │   │   ├── session_bound_ack.rs
 │   │   │   ├── session_bound_ack_tests.rs
 │   │   │   ├── single_message_footer.rs

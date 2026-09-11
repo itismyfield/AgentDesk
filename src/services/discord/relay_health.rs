@@ -1381,4 +1381,62 @@ mod tests {
         assert_eq!(value["counterpart_coord_observation"]["kind"], "advanced");
         assert_eq!(value["hypothesis"], "coord_entry_absent_with_durable_row");
     }
+
+    fn contending_identity_resolved_shape() -> RelayHealthSnapshot {
+        RelayHealthSnapshot {
+            active_turn: RelayActiveTurn::Foreground,
+            bridge_inflight_present: true,
+            mailbox_has_cancel_token: true,
+            tmux_alive: Some(true),
+            desynced: true,
+            watcher_attached: true,
+            watcher_attached_stale: false,
+            watcher_owns_live_relay: true,
+            last_relay_ts_ms: Some(1_788_000_000_000),
+            last_relay_offset: 128,
+            last_capture_offset: Some(256),
+            unread_bytes: Some(128),
+            ..RelayHealthSnapshot::test_snapshot()
+        }
+    }
+
+    /// #5833 DoD 4 — the classifier's side of the contending-identity fixture.
+    ///
+    /// The moment AFTER two contending identities resolve to one owner still
+    /// carries the transient `desynced` the race left behind, on a live pane.
+    /// That pair alone must not read as a dead relay: the surviving identity IS
+    /// the recorded live relay owner and its frontier HAS moved, so
+    /// `TmuxAliveRelayDead` — which would recover a channel whose relay is in
+    /// fact live and owned — must not be returned. `ActiveForegroundStream` is
+    /// asserted rather than a bare `!= TmuxAliveRelayDead`, which it subsumes.
+    ///
+    /// Both conjuncts that could fire it are false for a STRUCTURAL reason here,
+    /// not a tail reason: an owner is recorded, and `last_relay_ts_ms` is `Some`
+    /// with `last_relay_offset` off zero. `unread_bytes` therefore cannot move
+    /// this verdict at all — `relay_frontier_never_advanced_with_unread_tail`
+    /// short-circuits on `last_relay_ts_ms.is_none()` — so one measured row is
+    /// asserted, not a loop of readings that cannot differ. The three-valued
+    /// `None` reading stays the subject of the S3 tests above.
+    #[test]
+    fn contending_turn_identities_do_not_classify_tmux_alive_relay_dead() {
+        assert_eq!(
+            RelayStallClassifier::classify(&contending_identity_resolved_shape()),
+            RelayStallState::ActiveForegroundStream,
+            "a resolved contention over a live OWNED relay stays the foreground \
+             stream it is, and is not a dead relay"
+        );
+
+        // Non-vacuity: this shape is ONE field away from the state it denies.
+        // Withdraw the resolution and the same live pane plus desync DOES
+        // classify relay-dead, so the assertion above rests on the contention
+        // having resolved, not on the shape being unable to reach that state.
+        assert_eq!(
+            RelayStallClassifier::classify(&RelayHealthSnapshot {
+                watcher_owns_live_relay: false,
+                ..contending_identity_resolved_shape()
+            }),
+            RelayStallState::TmuxAliveRelayDead,
+            "an UNresolved contention leaves no live owner and must still be caught"
+        );
+    }
 }

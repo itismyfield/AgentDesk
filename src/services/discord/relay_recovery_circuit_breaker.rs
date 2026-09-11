@@ -1624,6 +1624,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn progress_during_pg_stage_cancels_stale_alert_and_reopen_is_distinct() {
+        use super::super::super::inflight;
+
         // Lock hierarchy `E -> P`: `set_agentdesk_root_for_test` takes the
         // shared env lock, so it has to run before the postgres lifecycle lock
         // that `try_create` parks in `pg_db`.
@@ -1658,6 +1660,27 @@ mod tests {
         else {
             panic!("first cycle must open");
         };
+        let inflight_path = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().expect("inflight root"),
+            &provider,
+            channel.get(),
+        );
+        let try_inflight_lock = || {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(inflight_path.with_extension("json.lock"))
+                .map_err(std::fs::TryLockError::Error)?;
+            file.try_lock()
+        };
+        let held = inflight::lock_inflight_episode(&provider, channel.get(), episode.pin())
+            .expect("hold actual production episode guard");
+        assert!(matches!(
+            try_inflight_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        try_inflight_lock().expect("dropping the episode guard releases the same sidecar");
         let reached = Arc::new(tokio::sync::Barrier::new(2));
         let resume = Arc::new(tokio::sync::Barrier::new(2));
         let old_enqueue = Arc::new(BlockingPgEnqueue {
@@ -1666,44 +1689,36 @@ mod tests {
             resume: resume.clone(),
             reasons: Mutex::new(Vec::new()),
         });
-        let old_task = {
-            let shared = shared.clone();
-            let provider = provider.clone();
-            let episode = episode.clone();
-            let first_open = first_open.clone();
-            let old_enqueue = old_enqueue.clone();
-            tokio::spawn(async move {
-                queue_open_alert_once_with_enqueue(
-                    &shared,
-                    &provider,
-                    channel,
-                    &episode,
-                    &first_open,
-                    1,
-                    old_enqueue.as_ref(),
-                )
-                .await;
-            })
+        let progress_during_stage = async {
+            reached.wait().await;
+            let progress = (|| {
+                try_inflight_lock().map_err(|error| {
+                    format!("canonical inflight flock held during PG stage: {error:?}")
+                })?;
+                let mut progressed =
+                    inflight::load_inflight_state_read_only(&provider, channel.get())
+                        .ok_or_else(|| "load episode for progress".to_string())?;
+                progressed.last_watcher_relayed_offset = Some(64);
+                inflight::save_inflight_state(&progressed)
+            })();
+            // Resume and join the staged operation before reporting any probe/write error.
+            resume.wait().await;
+            progress
         };
-
-        reached.wait().await;
-        let mut progressed =
-            super::super::super::inflight::load_inflight_state_read_only(&provider, channel.get())
-                .expect("load episode for progress");
-        progressed.last_watcher_relayed_offset = Some(64);
-        let progress_writer = tokio::task::spawn_blocking(move || {
-            super::super::super::inflight::save_inflight_state(&progressed)
-                .expect("persist authoritative frontier progress");
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(
-            progress_writer.is_finished(),
-            "PG stage await must not hold the canonical inflight flock or block progress"
+        let ((), progress) = tokio::join!(
+            queue_open_alert_once_with_enqueue(
+                &shared,
+                &provider,
+                channel,
+                &episode,
+                &first_open,
+                1,
+                old_enqueue.as_ref(),
+            ),
+            progress_during_stage,
         );
-        progress_writer.await.expect("frontier writer");
+        progress.expect("PG stage must release the canonical inflight flock and permit progress");
 
-        resume.wait().await;
-        old_task.await.expect("old enqueue task");
         let stale_rows: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM message_outbox WHERE target=$1 AND status IN ('held','pending')",
         )
