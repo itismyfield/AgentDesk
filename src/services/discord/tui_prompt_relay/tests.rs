@@ -3192,6 +3192,131 @@ fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
     );
 }
 
+// #5464 S2 — the completion ACK partition, pinned by BEHAVIOR.
+//
+// `finish_idle_bridge_completion` takes four dispositions and EXACTLY ONE —
+// `Finalized` — is an acknowledgement: only it may return `Ok`, and only it
+// may clear the prompt anchor. Three were already pinned (s3t1/s3t5 for
+// `EntryAborted`/`RecvError`, s3t4 for `Finalized`); `Err(Elapsed)` had no
+// behavioral coverage, so `docs/relay-state-contract.md:41` — "Never use
+// `>= N`, another turn's ACK, timeout-as-success, blind skip, or blind
+// resend" — rested on nothing executable for the timeout case. Driving all
+// four against ONE anchor and COUNTING the acks makes a promoted non-ACK
+// (two `Ok`) or a lost ACK (zero `Ok`) RED on the count, not on one message.
+#[cfg(unix)]
+#[test]
+fn completion_timeout_is_not_an_ack_and_preserves_anchor() {
+    let temp = tempfile::tempdir().unwrap();
+    let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+    // Same environment -> dedupe order as `s3_completion_fixture`; held across
+    // `block_on`, never across an `.await`, so no suppression is needed.
+    let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            use crate::services::discord::turn_bridge::BridgeCompletionSignal;
+            use crate::services::tui_prompt_dedupe::{
+                prompt_anchor_for_response, record_prompt_anchor,
+            };
+            let provider = ProviderKind::Claude;
+            let channel = ChannelId::new(880_101);
+            let user = MessageId::new(880_102);
+            let current = MessageId::new(880_103);
+            let tmux = "s2-completion-ack-partition";
+            let lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
+            let gateway = Arc::new(S3Gateway::default());
+
+            record_prompt_anchor(provider.as_str(), tmux, channel.get(), user.get());
+            let anchor = prompt_anchor_for_response(provider.as_str(), tmux, channel.get());
+            // PREMISE: without a recorded anchor every survival check below
+            // would be `None == None` and this test would assert nothing.
+            assert!(
+                anchor.is_some(),
+                "premise: the prompt anchor must exist before any disposition runs"
+            );
+
+            // A live sender keeps the receiver pending, so the zero deadline is
+            // what resolves the timeout rather than a completion racing it.
+            let (never_sent, pending_rx) = tokio::sync::oneshot::channel::<BridgeCompletionSignal>();
+            let timed_out = tokio::time::timeout(Duration::ZERO, pending_rx).await;
+            drop(never_sent);
+            assert!(
+                timed_out.is_err(),
+                "premise: the fixture must produce a real Elapsed, not a completion"
+            );
+            let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel::<BridgeCompletionSignal>();
+            drop(dropped_tx);
+            let recv_error = dropped_rx.await;
+            assert!(
+                recv_error.is_err(),
+                "premise: the dropped sender must produce a real RecvError"
+            );
+
+            // The ACK runs LAST: every non-ACK is checked against a live anchor.
+            let mut acknowledgements = 0usize;
+            for (label, completion, expected) in [
+                (
+                    "Err(Elapsed)",
+                    timed_out,
+                    Err(format!(
+                        "TUI-direct bridge adapter timed out waiting for completion for provider {}",
+                        provider.as_str()
+                    )),
+                ),
+                (
+                    "Ok(Ok(EntryAborted))",
+                    Ok(Ok(BridgeCompletionSignal::EntryAborted)),
+                    Err("TUI-direct bridge entry aborted before authority".to_string()),
+                ),
+                (
+                    "Ok(Err(RecvError))",
+                    Ok(recv_error),
+                    Err("TUI-direct bridge entry aborted before authority".to_string()),
+                ),
+                (
+                    "Ok(Ok(Finalized))",
+                    Ok(Ok(BridgeCompletionSignal::Finalized)),
+                    Ok(()),
+                ),
+            ] {
+                let is_ack = expected.is_ok();
+                let result = super::claude_idle_bridge::finish_idle_bridge_completion(
+                    completion,
+                    gateway.as_ref(),
+                    &provider,
+                    (channel, user, current),
+                    None,
+                    (tmux, &lease, anchor),
+                    true,
+                )
+                .await;
+                assert_eq!(result, expected, "{label}: wrong completion disposition");
+                if result.is_ok() {
+                    acknowledgements += 1;
+                }
+                assert_eq!(
+                    prompt_anchor_for_response(provider.as_str(), tmux, channel.get()),
+                    if is_ack { None } else { anchor },
+                    "{label}: only the acknowledgement may clear the prompt anchor"
+                );
+            }
+            assert_eq!(
+                acknowledgements, 1,
+                "EXACTLY ONE disposition may acknowledge delivery: two means a \
+                 non-ACK was promoted (timeout-as-success, forbidden by \
+                 relay-state-contract.md:41); zero means the ACK was lost"
+            );
+            assert!(
+                gateway.deleted.lock().unwrap().is_empty(),
+                "no disposition may delete a placeholder this adapter never created"
+            );
+        });
+}
+
 #[cfg(unix)]
 fn drain_forwarded_idle_stream(
     prefix: Vec<StreamMessage>,
