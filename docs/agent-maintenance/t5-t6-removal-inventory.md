@@ -588,3 +588,39 @@ S1 dual 리뷰(legA/legB)에서 나왔고 S1에서 결정하지 않은 항목이
    결과는 health 다이얼이 `Legacy/0` 으로 되돌아가는 관측 변화에 그친다(admission 소비자 0).
    결정해야 할 것: unknown-YAML 보존 또는 mixed-version 금지 계약 중 어느 쪽을, S2가 이 knob를
    관측/집행에 쓰기 전에 세울지. 소유: S2 착수 전.
+
+### 두 항목의 A6 판정 (2026-09-11, #5071 T5 A6)
+
+두 항목의 소유는 위 "S1 리뷰 후속 이관 2번에 대한 S2의 판정" 절에서 S4/S6 집행 슬라이스로
+이관됐고, "같은 롤아웃 런북에서 함께 결정되어야 한다"로 남아 있었다. 그런데 롤아웃(cohort
+5→25→50→100, `Enforce` 전환)은 그 결정 없이 진행됐다. 그러므로 이 판정은 롤아웃 **전** 전제가
+아니라 **이미 집행 중인 상태에 대한 사후 확정**이며, 남은 위험은 처음 기록된 방향의 역방향이다 —
+새 채널을 잘못 등록시키는 쪽이 아니라, 롤백하거나 다이얼을 되돌릴 때 무음으로 `Legacy/0` 으로
+복귀해 `AuthorityLost` 가 부활하는 쪽이다. 두 항목 모두 "지금 무엇이 집행되고 있는가"를
+health에서 확인 가능하게 만드는 문제로 수렴하므로 함께 닫는다.
+
+**1번(폭 클램프 fail-open) — (b) raw/effective 병기를 택했다.** 클램프의 극성은 바꾸지 않는다.
+(a) `>100` 거부를 택하지 않은 이유는 거부의 도달 지점이 호출자가 아니라
+`config_live_reload::reload_from_path` 이기 때문이다 — 거기서의 거부는 `Rejected` 이고 직전
+스냅샷이 그대로 유지되므로, 오타는 cohort를 좁히는 대신 **config 전체를 이전 리비전에 고정**한다.
+운영자는 방금 편집한 파일이 라이브라고 믿는 상태가 되므로, 막으려던 오타보다 폭발 반경이 넓다.
+실제로 없던 것은 거부권이 아니라 증거였다. `cohort::effective_cohort_percent` 가 클램프의 유일한
+정의가 되고, `RelayAuthorityRolloutReport` 는 `cohort_percent`(집행값) 옆에
+`cohort_percent_configured`(YAML 원문값)와 `cohort_percent_clamped`(둘이 다를 때만 `true`)를
+함께 발행한다. 두 조립 지점(standalone `health_api`, registry `health/snapshot`) 모두 detail
+게이트 뒤에서 같은 producer를 전달하므로 새 필드도 detail 전용이다. 도달 가능한 오타 구간은
+`u8` 파싱이 `256+` 를 거르므로 여전히 `101..=255` 다.
+
+**2번(mixed-version whole-config rewrite) — 이미 닫혀 있었다. A6는 계약만 핀으로 고정했다.**
+이 항목이 지목한 `persist_bot_auth_to_yaml_checked` 의 `serde_yaml::to_string(&Config)` 전체
+재직렬화는 PR #5803(이슈 #5750, main `2836b954f8`)이 `patch_bot_settings_yaml` 로 교체하면서
+사라졌다 — 원본 문서를 `serde_yaml::Value` 로 파싱한 뒤 소유 키만 patch하므로 typed `Config` 가
+모르는 키는 원문 그대로 남는다. 즉 **unknown-YAML 보존(코드 경로)** 이 이미 채택된 상태이고,
+mixed-version 금지 문서 계약은 필요 없다. 다만 그 PR이 남긴 회귀 테스트
+(`bot_settings_write_back_preserves_unowned_document_keys`)는 **최상위 미모델 섹션** 모양만
+단언했고, 이 항목이 실제로 위협하는 모양 — 모델링된 섹션(`runtime`) **안쪽**의, 구 바이너리가
+파싱하고 버리는 신규 키 — 은 단언되지 않았다. A6는 프로덕션 코드를 바꾸지 않고
+`bot_settings_write_back_preserves_unknown_keys_inside_modelled_sections` 하나로 그 모양을
+고정했다. 잔여는 이 항목 밖이며 이미 별도로 기록돼 있다: whole-`Config` `save_to_path` writer
+4곳(`voice_config.rs`·`agents_crud.rs`·`agents_setup.rs`·`discord_config_audit.rs`)은 PR #5803이
+명시적으로 유예했고 이슈 #5750 코멘트 5593859378이 후속으로 들고 있다.
