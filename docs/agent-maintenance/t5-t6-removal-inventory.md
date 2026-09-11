@@ -45,6 +45,41 @@ lagged 지점은 lexical 검사이고 boot 초기 teardown 목록은 비어 있�
 runtime 배달 검증으로 확대하지 않는다. #5833 S4/S5 및 #5845 D1e1은 위 착지 범위 밖이며,
 이 표는 PARK 항목을 완료로 승격하지 않는다. T5의 S4/S5와 #5833의 동명 S4/S5는 다른 슬라이스다.
 
+### R2a — 자동 복구의 중복 axis-B 관측 제거
+
+- `automatic_stale_sweep_warrants`, `auto_apply_relay_recovery_for_shared_at`,
+  `watchdog_axis_b_warrants`, `stale_turn_axis_b_warrants`의
+  `observe_axis_b_candidate` 호출과 관측만을 위한 shared 조회를 제거한다.
+  세 production 파일의 합계는 41줄 감소하며, destructive warrant의 bind·판정·반환값
+  소비와 actor/durable-frontier 안전 경계는 보존한다.
+- R2a 단독 범위에서는 수동 복구·health report·cohort 설정 및
+  `observe_axis_b_candidate` 자체가 남는다. 아래 R2b가 후속 범위다.
+  R2 전체 철거나 T5 전환 완료로 세지 않는다.
+  자동 관측 종료 뒤 새 관측은 수동 복구만 남으므로, 자동 키 부재를 divergence 0으로 해석하면 안 된다.
+- 기존 `axis_b_tests` 8개와 `destructive_warrant::tests` 5개는 PR의
+  `Library sweep (selection-set gated)`가 `cargo test --lib`로 선택한다.
+  해당 ID는 non-PG 제외 문자열에 걸리지 않으며 lib-test manifest에 이미 존재한다.
+  관측 재삽입·warrant 결과 우회 변이는 기존 wiring assertion을 실패시키는 범위의
+  증거이며, 모든 runtime 분기의 동등성 증거로 확대하지 않는다.
+
+### R2b — 잔여 axis-B 비교·writer·health report 철거
+
+- R2a 코드를 전제로 남은 수동 observer, JSONL writer/queue/counter/report,
+  observer 전용 비교 planner와 6개 테스트를 함께 제거한다. 과거 JSONL 파일과
+  `relay_authority_rollout_report.py`의 axis-B 분리·무결성 테스트는 보존한다.
+- `/api/health/detail`의 `axis_b_observation` 필드는 없어지며 public health에는
+  계속 없다. shared dial, axis-A 관측, S3 completion scope·suppression은 유지한다.
+- 자동 taxonomy와 `Some(site)` 분기, warrant bind와 `.eligible` 소비, episode guard,
+  수동 structural planner 및 실제 attempt reservation은 유지한다. R1/S4 변경과 독립이다.
+- **수동 rate-window의 두 번째 refresh도 제거되는 실제 동작 변화다.** planner와
+  reservation은 최초 `now_ms`를 공유하지만 관측은 더 늦은 시각으로 window를 갱신했다.
+  대기 중 expiry/backoff 경계를 넘은 요청은 이제 최초 시각의 한도에 따라 거절되고,
+  다음 요청의 새 시각에서 허용될 수 있다. 정확히 같은 허가 시점을 보장하지 않는다.
+- 기존 bounded-retry 테스트에 planner+reserve의 같은 시각을 넣어 expiry/backoff
+  직전 거절·경계 허용을 검증한다. 전체 수동 apply 동등성 증거로 확대하지 않는다.
+- 이번 PR은 R2a·R2b 철거와 관련 fixture 수리를 함께 포함하며, 위 동작 변화는 배포 후 효과다.
+  실제 compile·기존 테스트·독립 리뷰·CI·배포 검증과 T5/T6 전체 완료는 별도 게이트다.
+
 ---
 
 ## S1 — cohort infra (배포 no-op) · 브랜치 `feat/5464-t5-s1-cohort`
