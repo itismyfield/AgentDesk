@@ -814,9 +814,32 @@ class SccacheEnvTests(TokenTestCase):
         self.assertEqual(kept["RUSTC_WRAPPER"], str(self.tmp / "brew" / "sccache"))
 
     def test_the_opt_out_skips_activation_entirely(self) -> None:
-        seen = self.child_env(env={bt.SCCACHE_OPT_OUT_ENV: "0"})
-        self.assertNotIn("RUSTC_WRAPPER", seen)
+        # Trimmed and case-folded, so every spelling a caller reaches for lands.
+        for value in ("0", "false", "NO", " off "):
+            with self.subTest(value=value):
+                seen = self.child_env(env={bt.SCCACHE_OPT_OUT_ENV: value})
+                self.assertNotIn("RUSTC_WRAPPER", seen)
+                self.assertNotIn("SCCACHE_DIR", seen)
+
+    def test_a_caller_supplied_cargo_build_wrapper_stands_on_its_own(self) -> None:
+        # docs/ci/sccache-setup.md 2.2: the release scripts clear Cargo's two wrapper
+        # switches as a pair, so either one alone is still the caller's decision.
+        seen = self.child_env(env={"CARGO_BUILD_RUSTC_WRAPPER": ""})
+        self.assertNotIn("RUSTC_WRAPPER", seen, "the pair's other half was ignored")
         self.assertNotIn("SCCACHE_DIR", seen)
+        self.assertEqual(seen["PATH"], "/usr/bin:/bin")
+
+    def test_an_uncreatable_cache_dir_drops_the_cache_not_the_build(self) -> None:
+        # A regular file as the parent makes makedirs raise NotADirectoryError, an
+        # OSError, without depending on permission bits (root ignores those).
+        blocked = self.tmp / "not-a-dir"
+        blocked.write_text("")
+        wanted = blocked / "sccache"
+        seen = self.child_env(env={"SCCACHE_DIR": str(wanted)})
+        for key in ("RUSTC_WRAPPER", "SCCACHE_CACHE_SIZE"):
+            self.assertNotIn(key, seen, f"{key} was written before the dir failed")
+        self.assertEqual(seen["PATH"], "/usr/bin:/bin")
+        self.assertEqual(seen["SCCACHE_DIR"], str(wanted), "the caller's value stands")
 
 
 if __name__ == "__main__":

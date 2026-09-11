@@ -34,7 +34,7 @@ when the binary is present but the directory is not already on `PATH`.
 
 ## 2. Configuration Surface
 
-`sccache` is activated in three layers. Each layer degrades gracefully when the
+`sccache` is activated in four layers. Each layer degrades gracefully when the
 binary is absent — no hard-fail.
 
 ### 2.1 `.cargo/config.toml` (checked in)
@@ -90,8 +90,13 @@ Callers:
 
 - `scripts/build-release.sh` — exports before `cargo build --release`, soft-fail if sccache missing.
 - `scripts/deploy-release.sh` — same, prior to building the agentdesk binary for release promotion.
+- `scripts/install.sh` — sources `_defaults.sh` and calls the helper best-effort before its source build.
 
-If sccache is not installed, both scripts **print a warning and continue** with
+`scripts/build_token.py` also activates sccache, but it is **not** a caller of this
+helper — it carries an independent copy of the same defaults, with a deliberately
+different precedence rule. See §2.4.
+
+If sccache is not installed, both release scripts **print a warning and continue** with
 `RUSTC_WRAPPER=""` + `CARGO_BUILD_RUSTC_WRAPPER=""` explicitly cleared (so the
 `.cargo/config.toml` value does not leak through and cause a hard-fail).
 
@@ -116,6 +121,29 @@ self-hosted macOS jobs in `ci-macos-trusted.yml` do not use the GHA backend;
 they clear `SCCACHE_GHA_ENABLED` and opt into the runner-local `sccache`
 binary when installed.
 
+### 2.4 Build token wrapper (campaign build path)
+
+Campaign lanes run `python3 scripts/build_token.py -- <cmd>`, which is on none of the
+paths above. `apply_sccache_env` in that file sets the same three variables from the
+same defaults (resolved absolute `sccache`, `$HOME/.cache/sccache`, `10G`), on the
+child environment only, on POSIX only (it is applied after the `win32` early return).
+
+Its precedence rule is deliberately **not** `setup_sccache_env`'s. That helper is
+imperative — a script calls it to turn sccache on, so overwriting `RUSTC_WRAPPER` is
+the point of the call. `apply_sccache_env` is ambient: every campaign child gets it
+unasked, so an existing caller decision stands. If either `RUSTC_WRAPPER` or
+`CARGO_BUILD_RUSTC_WRAPPER` is present — **empty string included**, that being Cargo's
+own spelling of "no wrapper" and the pair §2.2 has the release scripts clear — it
+changes nothing. That also makes it a no-op on every CI lane, since the workflows set
+`RUSTC_WRAPPER` at the `env:` level (§2.3).
+
+| Variable | Effect |
+|----------|--------|
+| `ADK_BUILD_TOKEN_SCCACHE` | `0`, `false`, `no` or `off` (trimmed, case-insensitive) skips activation entirely. Unset — or any other value — leaves it enabled. |
+
+No sccache on `PATH`, or a cache directory that cannot be created, leaves the child
+environment byte-identical: the cache is dropped, never the build.
+
 ---
 
 ## 3. Env Var Matrix
@@ -124,7 +152,7 @@ binary when installed.
 |-------|-----------------|-------------|---------------|----------------------|--------|
 | Local dev (bare `cargo build`) | none by default | disabled | n/a | n/a | `.cargo/config.toml` |
 | Local dev (opt-in) | `sccache` | disabled | `$HOME/.cache/sccache` (sccache default) | sccache default (10G advised) | shell env |
-| Campaign worktree build (opt-in) | `sccache` | disabled | `$HOME/.cache/sccache` | sccache default | shell env |
+| Campaign worktree build (`build_token.py`) | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `10G` | `build_token.py :: apply_sccache_env` (§2.4) |
 | `scripts/build-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `10G` | `.cargo/config.toml` + `setup_sccache_env` |
 | `scripts/deploy-release.sh` | resolved `sccache` path | disabled | `$HOME/.cache/sccache` | `10G` | `.cargo/config.toml` + `setup_sccache_env` |
 | CI Linux/Windows (`ci-*.yml`) | `sccache` | disabled | provided by `sccache-action` | provided by `sccache-action` | `.cargo/config.toml` + workflow `env:` + action |
