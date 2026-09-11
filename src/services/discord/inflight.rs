@@ -2702,7 +2702,7 @@ mod stall_recovery_tests {
     /// `InflightTurnState::new`'s SIXTH parameter (`current_msg_id`), and the
     /// real `user_msg_id` is the hardcoded `100` in position five. Every row it
     /// builds is therefore id-100. Correcting that helper would change the
-    /// meaning of all 56 call sites at once, so it is tracked separately in
+    /// meaning of all 51 call expressions at once, so it is tracked separately in
     /// #5880 and deliberately left alone here.
     ///
     /// The rebind-origin guards need id-0 rows specifically: a rebind origin is

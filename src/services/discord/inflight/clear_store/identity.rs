@@ -67,6 +67,13 @@ fn guarded_identity_clear_outcome(
     // terminal-commit, TUI-direct and stall-exit paths all clear id-0 rows that
     // still carry their offset. Only the conjunction is refused — the same
     // shape every save_store identity gate uses.
+    //
+    // Cost of the refusal: a legacy id-0 row whose on-disk JSON predates
+    // `turn_start_offset` (field added 2026-04-16; read back as `None` through
+    // `#[serde(default)]`) is refused at all five identity-guarded entry
+    // points. It is not stranded: `clear_inflight_state_if_matches_zero_owned`
+    // in `clear_store/mod.rs` never enters this chokepoint and clears on the
+    // on-disk `user_msg_id == 0` alone, so recovery self-cleanup still lands.
     if expected.is_unnameable() {
         return GuardedClearOutcome::UserMsgMismatch;
     }
@@ -268,6 +275,20 @@ fn clear_rebind_origin_inflight_state_if_matches_identity_impl_in_root(
             fresh_born_generation: state.born_generation,
         };
     }
+    // #5464 B3: this rebind path decides on `rebind_origin && matches_state &&
+    // nonce` WITHOUT the chokepoint's `is_unnameable` refusal, deliberately.
+    // Every production rebind-origin row is born through
+    // `InflightTurnState::new`, which stamps `turn_start_offset:
+    // Some(last_offset)` (`model.rs`); neither
+    // `build_external_adopted_inflight_state` (`recovery_engine/manual_rebind`)
+    // nor `build_monitor_triggered_inflight_state` (`tmux.rs`) touches that
+    // field, and the monitor path re-stamps `Some(turn_start_offset)`
+    // (`tmux/monitor_auto_turn_inflight.rs`). No production site assigns
+    // `None`. The only `None` a rebind row can carry is a pre-2026-04-16
+    // on-disk row read through `#[serde(default)]`, and `matches_state`
+    // compares the offset by exact `Option` equality, so an unnameable
+    // `expected` can only ever match THAT legacy row — the rollback owner's
+    // OWN row, which refusing would strand (the reverted revision-1 shape).
     let outcome = if state.restart_mode.is_some() {
         GuardedClearOutcome::PlannedRestartSkipped
     } else if !state.rebind_origin
