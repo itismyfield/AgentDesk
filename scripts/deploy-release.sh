@@ -1852,6 +1852,13 @@ else
     SOURCE_BINARY="$(_resolve_default_release_binary "$DEPLOY_BUILD_PROFILE")"
 fi
 if [ -z "${AGENTDESK_DEPLOY_BINARY:-}" ]; then
+    # #5855: the deploy lock is already held here, and a queued peer deploy only
+    # waits DEPLOY_LOCK_TIMEOUT_SECS for it while the token wait below defaults to
+    # four hours -- so a deploy that is merely queued for the token can starve a
+    # peer that never needed the token at all (artifact deploys included). Bound
+    # the wait by the same deadline every peer already agreed to wait. An explicit
+    # operator override still wins.
+    export ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS="${ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS:-$DEPLOY_LOCK_TIMEOUT_SECS}"
     if [ "$DEPLOY_BUILD_PROFILE" = "release" ]; then
         echo "▸ Building release binary..."
         # Recheck under the token: unwrapped/residual builders are still unsafe (#5818).

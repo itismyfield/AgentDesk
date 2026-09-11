@@ -280,6 +280,7 @@ REPO="$1/.."
 SCRIPT_DIR="$6"
 SOURCE_BINARY="$4"
 DEPLOY_BUILD_PROFILE="$5"
+DEPLOY_LOCK_TIMEOUT_SECS="${TEST_LOCK_TIMEOUT:-1800}"
 _preflight_builder_pids() { case "$1" in cargo|rustc) echo 55555;; esac; }
 _preflight_cpu_count() { echo 8; }
 _preflight_loadavg_1min() { echo "${TEST_LOAD:-1}"; }
@@ -343,6 +344,21 @@ ps() {
                     self.assertIn(reason, result.stderr)
                     self.assertNotIn("build token: waiting", result.stderr)
                     self.assertFalse(marker.exists())
+
+            # #5855: the deploy lock is held across the token wait above, so a
+            # wait longer than the deadline a queued peer agreed to wait starves
+            # that peer -- including an artifact deploy that never needs the
+            # token. Without an operator override the wait must be derived from
+            # DEPLOY_LOCK_TIMEOUT_SECS, not build_token's four-hour default.
+            bounded = dict(env, TEST_LOCK_TIMEOUT="1")
+            bounded.pop(bt.WAIT_TIMEOUT_ENV, None)
+            with self.subTest(bound="deploy lock deadline"), token.open("a+") as holder:
+                fcntl.flock(holder, fcntl.LOCK_EX)
+                result = subprocess.run(command + ["release", str(root)], env=bounded,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("still held after 1s", result.stderr)
+                self.assertFalse(marker.exists(), "the build must not start without the token")
 
 
 class WaitTimeoutTests(TokenTestCase):
