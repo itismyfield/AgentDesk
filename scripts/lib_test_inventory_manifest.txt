@@ -8365,6 +8365,7 @@ services::tui_turn_state::tests::claude_permission_mode_partial_line_classified_
 services::tui_turn_state::tests::claude_permission_mode_trailing_does_not_fall_back_to_previous_result
 services::tui_turn_state::tests::claude_real_terminators_are_turn_end
 services::tui_turn_state::tests::claude_result_marks_idle_even_when_pane_scrape_would_be_ambiguous
+services::tui_turn_state::tests::claude_s1_oversized_active_line_is_busy_at_consumed_eof
 services::tui_turn_state::tests::claude_system_stop_hook_summary_marks_idle
 services::tui_turn_state::tests::claude_system_turn_duration_marks_idle
 services::tui_turn_state::tests::claude_trailing_bare_user_after_assistant_remains_user_submitted
@@ -8379,6 +8380,19 @@ services::tui_turn_state::tests::codex_completed_agent_message_marks_idle
 services::tui_turn_state::tests::codex_function_call_marks_streaming
 services::tui_turn_state::tests::codex_malformed_latest_line_stays_unknown
 services::tui_turn_state::tests::codex_response_item_user_marks_user_submitted
+services::tui_turn_state::tests::codex_s1_agent_reasoning_tail_is_busy
+services::tui_turn_state::tests::codex_s1_complete_token_preserves_idle
+services::tui_turn_state::tests::codex_s1_item_completed_token_is_busy
+services::tui_turn_state::tests::codex_s1_new_task_after_settings_is_busy
+services::tui_turn_state::tests::codex_s1_retained_invalid_utf8_is_not_repaired
+services::tui_turn_state::tests::codex_s1_settings_only_is_unknown
+services::tui_turn_state::tests::codex_s1_task_complete_settings_preserves_drain_not_finalize
+services::tui_turn_state::tests::codex_s1_torn_tail_is_unknown
+services::tui_turn_state::tests::codex_s1_truncated_empty_window_cannot_prove_idle
+services::tui_turn_state::tests::codex_s1_truncated_housekeeping_cannot_prove_not_busy
+services::tui_turn_state::tests::codex_s1_turn_completed_settings_preserves_finalize
+services::tui_turn_state::tests::codex_s1_unknown_tail_is_busy
+services::tui_turn_state::tests::codex_s1_utf8_tail_boundary_preserves_evidence
 services::tui_turn_state::tests::codex_task_complete_and_session_markers_are_not_turn_end
 services::tui_turn_state::tests::codex_task_complete_marks_idle
 services::tui_turn_state::tests::codex_turn_completed_is_turn_end
