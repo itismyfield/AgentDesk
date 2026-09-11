@@ -18,8 +18,9 @@
 //! 무한 누적" (`docs/agent-maintenance/t5-t6-removal-inventory.md` §S2, design
 //! §5.4 / §8 L-8). This module is that missing owner.
 
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 use chrono::NaiveDate;
@@ -105,30 +106,36 @@ pub(in crate::services::discord) fn prune_expired_observation_files(
     removed
 }
 
-/// Last publish day this process already pruned for.
-static LAST_PRUNED_DAY: LazyLock<Mutex<Option<NaiveDate>>> = LazyLock::new(|| Mutex::new(None));
+/// Last publish day this process already pruned, per sink directory. The
+/// directory is part of the key: a latch keyed on the day alone let the first
+/// caller's directory win the day and turned every other directory's prune
+/// into a silent no-op (#5891). The path is keyed as given, not canonicalised,
+/// so two spellings of one directory can only prune twice, never skip once.
+static LAST_PRUNED_DAY: LazyLock<Mutex<HashMap<PathBuf, NaiveDate>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Best-effort prune, at most once per process per publish day, driven from the
-/// sink's own write path so retention needs no new task, timer or failure mode.
+/// Best-effort prune, at most once per process per publish day per directory,
+/// driven from the sink's own write path so retention needs no new task, timer
+/// or failure mode.
 ///
 /// Cost is one `read_dir` over a directory this policy holds at ~30 entries plus
 /// at most a handful of unlinks, and it is charged to the first write of each
 /// day only. Like every other step on this path it is best-effort: a failure is
 /// dropped rather than propagated back into the turn that produced the record.
+/// The lock is held across the prune so the latch commits after the work, and
+/// two first writers of one day serialise instead of both seeing an open latch.
 pub(in crate::services::discord) fn prune_observation_dir_once_per_day(
     dir: &Path,
     today: NaiveDate,
 ) {
-    {
-        let mut last = LAST_PRUNED_DAY
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *last == Some(today) {
-            return;
-        }
-        *last = Some(today);
+    let mut last = LAST_PRUNED_DAY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if last.get(dir) == Some(&today) {
+        return;
     }
     let _ = prune_expired_observation_files(dir, today, OBSERVATION_RETENTION_DAYS);
+    last.insert(dir.to_path_buf(), today);
 }
 
 #[cfg(test)]
@@ -268,8 +275,8 @@ mod tests {
     fn the_once_per_day_entry_point_prunes_first_then_latches_for_that_day() {
         let temp = tempfile::TempDir::new().expect("temp sink dir");
         let dir = temp.path();
-        // LAST_PRUNED_DAY is process-wide, so this day is one no other test
-        // and no wall clock in this suite can have already latched.
+        // The latch is keyed by directory, so this fresh temp dir is one no
+        // other test in this binary -- however parallel -- can have latched.
         let today = day("2031-03-07");
         let expired_name = "2031-01-05.jsonl";
 
@@ -285,6 +292,34 @@ mod tests {
         assert!(
             replanted.exists(),
             "a second call the same day must latch to a no-op"
+        );
+    }
+
+    /// Production writers hand the SAME directory in, so a latch keyed on the
+    /// day alone only ever held by coincidence: the first directory of a day
+    /// won it and every other directory -- a second sink, or a parallel test's
+    /// temp root -- was silently skipped for the rest of that day. That is the
+    /// flake CI hit in `Library test sweep` and the defect behind #5891; the
+    /// key must include the directory.
+    #[test]
+    fn two_sink_directories_on_one_publish_day_are_each_pruned() {
+        let first = tempfile::TempDir::new().expect("first sink dir");
+        let second = tempfile::TempDir::new().expect("second sink dir");
+        let today = day("2032-06-15");
+        let expired_name = "2032-04-01.jsonl";
+
+        let in_first = write_cohabiting_file(first.path(), expired_name);
+        let in_second = write_cohabiting_file(second.path(), expired_name);
+        prune_observation_dir_once_per_day(first.path(), today);
+        prune_observation_dir_once_per_day(second.path(), today);
+
+        assert!(
+            !in_first.exists(),
+            "the first directory of the day is pruned"
+        );
+        assert!(
+            !in_second.exists(),
+            "a second directory on the same day must be pruned too, not eaten by the first's latch"
         );
     }
 }
