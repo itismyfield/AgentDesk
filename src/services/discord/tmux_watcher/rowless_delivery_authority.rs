@@ -33,12 +33,16 @@ impl RowlessDeliveryAuthority {
 /// Does the ledger still OWE output for `consumed_end`? Pure, so a dropped `!`
 /// fails a behavioural test, not only a source grep that would stay green.
 ///
-/// The one FAIL-OPEN operand: `delivered_frontier_end_current_generation` returns
-/// `0` on EVERY lookup failure and `range_already_committed(end, 0)` is `false`, so
-/// a rotated transcript promotes an I/O failure into an open obligation. Deliberate
-/// ("message-loss prevention dominates duplicate-suppression"); fail-closed
-/// `cohort_admits` keeps it unreachable under the shipped dial.
-pub(super) fn ledger_owes_output(consumed_end: u64, delivered_end: u64) -> bool {
+/// FAIL-CLOSED on `None`. The frontier lookup reports several DISTINCT "unknown"
+/// states — absent/malformed record, prior-generation frontier, no transcript EOF,
+/// or a frontier END beyond EOF, which is what an in-place `/compact` or rotation
+/// produces. Collapsing them onto `0` made every one an OPEN obligation, restoring
+/// the historical rowless frame #5175 refused as a delivery candidate on this
+/// operand alone. `Some(delivered)` keeps `consumed_end > delivered` unchanged.
+pub(super) fn ledger_owes_output(consumed_end: u64, delivered_end: Option<u64>) -> bool {
+    let Some(delivered_end) = delivered_end else {
+        return false;
+    };
     consumed_end > 0 && !dr::range_already_committed(consumed_end, delivered_end)
 }
 
@@ -54,7 +58,7 @@ pub(super) fn lease_has_live_holder(snapshot: &LeaseSnapshot) -> bool {
 
 /// Read the three operands for this frame: the rollout cohort, the DURABLE ledger
 /// obligation (against the generation-guarded (#1270) and EOF-guarded (#4188)
-/// `delivered_frontier_end_current_generation`, deliberately NOT the in-memory
+/// `resolved_delivered_frontier_end_current_generation`, deliberately NOT the in-memory
 /// watermark-fusing `committed_floor_for_resend_dedup`), and the live delivery
 /// lease. This watcher has not acquired its own lease at this seam
 /// (`try_acquire_watcher_delivery_lease` runs after the plan returns), so the
@@ -68,7 +72,7 @@ pub(super) fn read_rowless_delivery_authority(
     consumed_end: u64,
 ) -> RowlessDeliveryAuthority {
     let transcript_eof = std::fs::metadata(output_path).ok().map(|meta| meta.len());
-    let delivered_end = dr::delivered_frontier_end_current_generation(
+    let delivered_end = dr::resolved_delivered_frontier_end_current_generation(
         provider,
         channel_id,
         tmux_session_name,

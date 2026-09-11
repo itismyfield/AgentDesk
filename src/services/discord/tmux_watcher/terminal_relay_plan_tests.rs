@@ -410,9 +410,10 @@ fn production_call_site_reads_the_ledger_and_the_delivery_lease_5464_c1() {
 fn ac1_operand_polarity_is_pinned_by_behaviour_not_the_source_grep_5464_c1() {
     // P1-2: dropping either `!` keeps every `include_str!` assertion above green.
     // P1-3: a `Committed` cell is a FINISHED delivery that is never reclaimed.
-    assert!(ledger_owes_output(FRAME_END, FRAME_START));
-    assert!(!ledger_owes_output(FRAME_END, FRAME_END));
-    assert!(!ledger_owes_output(0, 0));
+    assert!(ledger_owes_output(FRAME_END, Some(FRAME_START)));
+    assert!(!ledger_owes_output(FRAME_END, Some(FRAME_END)));
+    assert!(!ledger_owes_output(0, Some(0)));
+    assert!(!ledger_owes_output(FRAME_END, None));
 
     let holder = LeaseHolder::Watcher { instance_id: 1 };
     let key = DeliveryLeaseKey::new(serenity::ChannelId::new(42), 1, 7, None, Some(TURN_START));
@@ -432,4 +433,73 @@ fn ac1_operand_polarity_is_pinned_by_behaviour_not_the_source_grep_5464_c1() {
         outcome: LeaseOutcome::Delivered,
     };
     assert!(!lease_has_live_holder(&committed));
+}
+
+const READER_DELIVERED_END: u64 = 4_096;
+
+/// Fixture at REAL session paths: transcript (#4188 EOF), marker (#1270), frontier.
+fn reader_fixture(channel: u64, session: &str) -> (serenity::ChannelId, String, String) {
+    let transcript = crate::services::tmux_common::session_temp_path(session, "jsonl");
+    std::fs::write(&transcript, vec![b'.'; READER_DELIVERED_END as usize]).expect("transcript");
+    let marker = crate::services::tmux_common::session_temp_path(session, "generation");
+    std::fs::write(&marker, "5464-c1").expect("generation marker");
+    let generation_mtime_ns = dr::current_generation_mtime_ns(session);
+    let channel = serenity::ChannelId::new(channel);
+    dr::write_delivered_frontier(
+        &ProviderKind::Claude,
+        channel.get(),
+        session,
+        dr::DeliveredCommit {
+            range: (0, READER_DELIVERED_END),
+            generation_mtime_ns,
+            attempts: 1,
+            panel_msg_id: None,
+            panel_channel_id: None,
+        },
+    )
+    .expect("durable frontier");
+    (channel, transcript, marker)
+}
+
+/// #5464 T5 C1: `read_rowless_delivery_authority` EXECUTED, not grepped — the
+/// `include_str!` test cannot see argument order, the polarity test never enters it.
+#[test]
+fn reader_pins_the_ledger_and_lease_operands_5464_c1() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let session = "AgentDesk-claude-5464-c1-reader";
+    let (channel, path, marker) = reader_fixture(5_464_001, session);
+    let read = |consumed_end| {
+        read_rowless_delivery_authority(
+            &shared,
+            &ProviderKind::Claude,
+            channel,
+            session,
+            &path,
+            consumed_end,
+        )
+    };
+
+    assert!(
+        read(READER_DELIVERED_END + 1).ledger_obligation_open,
+        "owes past frontier"
+    );
+    assert!(!read(READER_DELIVERED_END).ledger_obligation_open);
+
+    let holder = LeaseHolder::Watcher { instance_id: 1 };
+    let key = DeliveryLeaseKey::new(channel, 1, 7, None, Some(TURN_START));
+    let lease = shared.delivery_lease(channel);
+    assert!(!read(READER_DELIVERED_END).delivery_lease_present);
+    assert!(lease.try_acquire(key.clone(), holder, FRAME_START, FRAME_END, u64::MAX));
+    assert!(read(READER_DELIVERED_END).delivery_lease_present);
+    assert!(lease.release(holder, key, FRAME_START, FRAME_END));
+    assert!(!read(READER_DELIVERED_END).delivery_lease_present);
+
+    // `/compact` shrinks the transcript below the frontier END: UNKNOWN (#4188).
+    std::fs::write(&path, b"compacted").expect("shrunk transcript");
+    assert!(
+        !read(READER_DELIVERED_END + 1).ledger_obligation_open,
+        "an unknown frontier must not open a delivery obligation (#5175)"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&marker);
 }

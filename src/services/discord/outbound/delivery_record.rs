@@ -1585,12 +1585,28 @@ pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
     tmux_session_name: &str,
     current_transcript_eof: Option<u64>,
 ) -> u64 {
-    let Some(path) = delivery_record_path(provider, channel.get()) else {
-        return 0;
-    };
+    resolved_delivered_frontier_end_current_generation(
+        provider,
+        channel,
+        tmux_session_name,
+        current_transcript_eof,
+    )
+    .unwrap_or(0)
+}
+
+/// #5464 T5 C1: the same durable frontier END with UNKNOWN kept DISTINCT from
+/// "delivered nothing". [`delivered_frontier_end_current_generation`] collapses an
+/// absent record, a stale generation, a missing EOF and a frontier beyond EOF (an
+/// in-place `/compact`) onto `0` — right for `max`-fusion, fail-OPEN for a gate.
+pub(in crate::services::discord) fn resolved_delivered_frontier_end_current_generation(
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux_session_name: &str,
+    current_transcript_eof: Option<u64>,
+) -> Option<u64> {
+    let path = delivery_record_path(provider, channel.get())?;
     let current_gen = current_generation_mtime_ns(tmux_session_name);
     current_generation_durable_frontier_end_at(&path, current_gen, current_transcript_eof)
-        .unwrap_or(0)
 }
 
 fn current_generation_frontier_exceeding_eof_at(
