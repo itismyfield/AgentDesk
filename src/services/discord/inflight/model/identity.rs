@@ -32,22 +32,39 @@ impl InflightTurnIdentity {
 
     /// #5464 B3 — does this identity fail to name ANY single turn?
     ///
-    /// `matches_state` compares four axes, and exactly one of them degenerates:
-    /// `user_msg_id == 0` matches every other id-0 row. The repo's answer to
-    /// that is NOT "refuse id-0" — #3161 established that an id-0 turn must
-    /// still clean up its own row, via the dedicated
-    /// `clear_inflight_state_if_matches_zero_owned` path, and `turn_start_offset`
-    /// was introduced (see the struct doc above) precisely to disambiguate two
-    /// consecutive id-0 TUI-direct turns whose `started_at` collides at
-    /// `now_string`'s 1-second resolution.
+    /// `matches_state` compares four axes and NOT ONE of them names a turn by
+    /// itself. `user_msg_id` is a constant `0` for every TUI-direct and
+    /// watcher-direct turn; `started_at` is `now_string`, formatted to 1-second
+    /// resolution, so it collides for turns starting in the same second;
+    /// `tmux_session_name` is the pane, shared by consecutive turns of that
+    /// pane and `None == None` when absent. Only `turn_start_offset` is
+    /// monotonic per turn (struct doc above), so it is the single axis that can
+    /// break a tie between two id-0 turns of one channel.
     ///
-    /// So the unnameable shape is the CONJUNCTION `user_msg_id == 0 &&
-    /// turn_start_offset.is_none()` — an id-0 row with no disambiguator left.
-    /// That is the same conjunction every save_store identity gate already uses
-    /// (`identity_gate.rs`, `stream_loop_patch.rs`, `bridge_entry.rs`,
-    /// `runtime_stamp.rs`, `heartbeat.rs`). An id-0 row that still carries its
-    /// offset is nameable and keeps clearing normally, which is what the
-    /// watcher terminal-commit, TUI-direct and stall-exit paths rely on.
+    /// The unnameable shape is therefore the CONJUNCTION `user_msg_id == 0 &&
+    /// turn_start_offset.is_none()` — an id-0 row whose one disambiguator is
+    /// gone.
+    ///
+    /// This predicate deliberately does not read `started_at` or
+    /// `tmux_session_name`, and omits nothing by doing so: it is applied in
+    /// conjunction with `matches_state` at the clear chokepoint, so on any
+    /// input where either of those two axes DIFFERS the four-axis compare
+    /// already refuses with the same `UserMsgMismatch`. The predicate can only
+    /// change the verdict where both axes already agree — exactly the inputs
+    /// where they disambiguate nothing. `clear_store::identity`'s
+    /// `unnameable_guard_only_decides_where_started_at_and_tmux_agree_5464`
+    /// asserts that decomposition per axis.
+    ///
+    /// It is not a blanket id-0 refusal: an id-0 turn must still clean up its
+    /// OWN row through `clear_inflight_state_if_matches_zero_owned`. That rule
+    /// comes from the codex P1 review comment on #3161 as recorded in
+    /// `clear_store/mod.rs`'s doc, not from the #3161 issue body (which is a
+    /// status-panel edit gate). An id-0 row that still carries its offset stays
+    /// nameable, which the watcher terminal-commit, TUI-direct and stall-exit
+    /// paths rely on. The same conjunction guards 10 save_store identity sites
+    /// across 6 files (`identity_gate.rs` x3, `stream_loop_patch.rs` x3,
+    /// `bridge_entry.rs`, `claude_e_stamp.rs`, `heartbeat.rs`,
+    /// `runtime_stamp.rs`).
     pub(in crate::services::discord) fn is_unnameable(&self) -> bool {
         self.user_msg_id == 0 && self.turn_start_offset.is_none()
     }

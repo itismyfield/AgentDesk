@@ -4192,6 +4192,9 @@ mod stall_recovery_tests {
         save_inflight_state_in_root(temp.path(), &state).unwrap();
 
         let expected = InflightTurnIdentity::from_state(&state);
+        // #5880 fixture regression tripwire: these guards are only meaningful
+        // on genuine id-0 rows (a rebind origin is id-0 by construction).
+        assert_eq!(expected.user_msg_id, 0, "rebind guard row must be id-0");
         let outcome = clear_rebind_origin_inflight_state_if_matches_identity_in_root(
             temp.path(),
             &ProviderKind::Codex,
@@ -4215,6 +4218,9 @@ mod stall_recovery_tests {
         save_inflight_state_in_root(temp.path(), &state).unwrap();
 
         let expected = InflightTurnIdentity::from_state(&state);
+        // #5880 fixture regression tripwire: these guards are only meaningful
+        // on genuine id-0 rows (a rebind origin is id-0 by construction).
+        assert_eq!(expected.user_msg_id, 0, "rebind guard row must be id-0");
         let outcome = clear_rebind_origin_inflight_state_if_matches_identity_in_root(
             temp.path(),
             &ProviderKind::Codex,
@@ -4241,6 +4247,8 @@ mod stall_recovery_tests {
         save_inflight_state_in_root(temp.path(), &state).unwrap();
 
         let mut expected = InflightTurnIdentity::from_state(&state);
+        // #5880 fixture regression tripwire (see above).
+        assert_eq!(expected.user_msg_id, 0, "rebind guard row must be id-0");
         expected.turn_start_offset = Some(99);
         let outcome = clear_rebind_origin_inflight_state_if_matches_identity_in_root(
             temp.path(),

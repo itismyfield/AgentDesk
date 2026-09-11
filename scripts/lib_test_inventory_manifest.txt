@@ -3078,6 +3078,7 @@ services::discord::inflight::clear_store::identity::tests::captured_episode_stri
 services::discord::inflight::clear_store::identity::tests::id_zero_row_that_kept_its_offset_still_clears_5464
 services::discord::inflight::clear_store::identity::tests::ordinary_and_reconcile_clear_keep_legacy_nonce_wildcards
 services::discord::inflight::clear_store::identity::tests::reconcile_clear_keeps_its_current_generation_fence
+services::discord::inflight::clear_store::identity::tests::unnameable_guard_only_decides_where_started_at_and_tmux_agree_5464
 services::discord::inflight::clear_store::identity::tests::unnameable_identity_never_matches_a_foreign_row_mid_turn_5464
 services::discord::inflight::clear_store::reconcile_gate::tests::allocation_route_is_observed_but_never_changes_the_reconcile_decision
 services::discord::inflight::clear_store::reconcile_gate::tests::allow_side_facts_are_wired_from_the_row_then_the_epoch

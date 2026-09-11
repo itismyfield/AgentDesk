@@ -54,7 +54,9 @@ fn guarded_identity_clear_outcome(
     }
     // #5464 B3 — an UNNAMEABLE identity is never a match. When `user_msg_id` is
     // 0 AND the `turn_start_offset` disambiguator is gone, `matches_state` has
-    // no axis left that distinguishes two id-0 turns of the same channel: it
+    // no axis left that RELIABLY separates two id-0 turns of one channel
+    // (`started_at` collides at 1-second resolution, `tmux_session_name` is the
+    // shared pane), so with those two axes equal it
     // folds one turn's identity onto another turn's row, and the clear deletes
     // a LIVE row mid-turn, after which that turn's terminal is suppressed as
     // `no_inflight_row`.
@@ -646,6 +648,54 @@ mod tests {
             assert_eq!(outcome, GuardedClearOutcome::UserMsgMismatch, "{site}");
             fixture.assert_preserved(&bytes);
         }
+    }
+
+    /// #5464 B3 sufficiency proof for the two axes `is_unnameable` does NOT
+    /// read. Neither names a turn: `started_at` collides at `now_string`'s
+    /// 1-second resolution and `tmux_session_name` is the shared pane. They are
+    /// not omitted from the decision, though — the guard stands in conjunction
+    /// with `matches_state`, so wherever either axis DIFFERS the four-axis
+    /// compare already refuses with the same outcome, and the guard can only
+    /// decide where both agree, which is where they disambiguate nothing.
+    #[test]
+    fn unnameable_guard_only_decides_where_started_at_and_tmux_agree_5464() {
+        let fixture = Fixture::new();
+        let mut turn_a = fixture.row.clone();
+        turn_a.user_msg_id = 0;
+        turn_a.turn_start_offset = None;
+        let identity_a = InflightTurnIdentity::from_state(&turn_a);
+        assert!(identity_a.is_unnameable());
+
+        for axis in ["started_at", "tmux_session_name"] {
+            let mut other = turn_a.clone();
+            match axis {
+                "started_at" => other.started_at = "2026-09-07T00:00:01Z".into(),
+                "tmux_session_name" => other.tmux_session_name = Some("other-pane".into()),
+                _ => unreachable!(),
+            }
+            // The pre-existing four-axis compare already rejects this row, so
+            // the new guard is not what refuses the clear here.
+            assert!(!identity_a.matches_state(&other), "{axis}");
+            let bytes = fixture.seed(&other);
+            assert_eq!(
+                clear_inflight_state_if_matches_identity_in_root(
+                    &fixture.root,
+                    &ProviderKind::Claude,
+                    other.channel_id,
+                    &identity_a,
+                ),
+                GuardedClearOutcome::UserMsgMismatch,
+                "{axis}"
+            );
+            fixture.assert_preserved(&bytes);
+        }
+
+        // With both axes equal they separate nothing: a genuinely different
+        // turn still folds, and only the new guard stands between it and a
+        // mid-turn delete.
+        let mut turn_b = turn_a.clone();
+        turn_b.turn_nonce = Some("episode-b".into());
+        assert!(identity_a.matches_state(&turn_b));
     }
 
     /// Narrowness control for #5464 B3. The guard closes ONLY the unnameable
