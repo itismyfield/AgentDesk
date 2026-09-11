@@ -648,7 +648,13 @@ fn append_jsonl(lines: &[String], dropped_records: &AtomicU64) {
         return;
     };
     let _ = fs::create_dir_all(&dir);
-    let path = dir.join(format!("{}.jsonl", chrono::Local::now().format("%Y-%m-%d")));
+    // One clock read for both the retention day and the file name, so a write
+    // crossing midnight cannot prune against a different day than it appends to.
+    // Axis B shares this directory and this file, so the prune removes whole
+    // daily files and never line-filters one (#5464 A7).
+    let now = chrono::Local::now();
+    super::authority_retention::prune_observation_dir_once_per_day(&dir, now.date_naive());
+    let path = dir.join(format!("{}.jsonl", now.format("%Y-%m-%d")));
     let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) else {
         drop_records(dropped_records, lines.len());
         return;
