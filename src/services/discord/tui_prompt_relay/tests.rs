@@ -6064,8 +6064,9 @@ fn synthetic_start_offset_carry_forward_never_regresses() {
 /// The invariant is a relayer count of EXACTLY ONE — never zero (a GAP), never
 /// two (a DUPLICATE) — pinned on three axes: (1) each production resolution
 /// names one owner, and that owner yields one relayer under the production
-/// spawn predicates; (2) both identities read the same unchanged registry, so
-/// the owner cannot split; (3) the single `(provider, tmux)` lease slot then
+/// spawn predicates; (2) the REGISTRY, not the identity's vantage point,
+/// decides that owner, so the two cannot split it; (3) the single
+/// `(provider, tmux)` lease slot then
 /// names exactly one key, leaving the superseded identity unreadable as a
 /// second live owner.
 #[cfg(unix)]
@@ -6114,6 +6115,15 @@ fn contending_turn_identities_keep_exactly_one_relay_owner() {
 
     // Axis 1: both production resolutions, on both sides of the session-bound
     // delivery switch, name one owner and leave exactly one relayer.
+    //
+    // Axis 2: the two identities meet that ONE registry from DIFFERENT vantage
+    // points. The synthetic turn carries the transcript path its observation
+    // resolved; the anchor turn contends before that resolution, and production
+    // passes the absent path straight through (`relay_output_path.as_deref()`,
+    // `record_observed_external_turn_lease`). The registry, not the vantage
+    // point, must decide — a split IS the DUPLICATE, one identity standing the
+    // watcher down while the other spawns a bridge tail beside it.
+    let uncovered_path = root.path().join("superseded-transcript.jsonl");
     for session_bound in [false, true] {
         let owner = external_input_relay_owner_for_watchers(
             &shared.tmux_watchers,
@@ -6126,6 +6136,28 @@ fn contending_turn_identities_keep_exactly_one_relay_owner() {
             1,
             "session_bound={session_bound}: a resolved owner must leave exactly one relayer"
         );
+        assert_eq!(
+            external_input_relay_owner_for_watchers(
+                &shared.tmux_watchers,
+                tmux,
+                None,
+                session_bound,
+            ),
+            owner,
+            "session_bound={session_bound}: an identity contending before its transcript \
+             path resolves reads the same registry and must not split the owner"
+        );
+        assert_eq!(
+            external_input_relay_owner_for_watchers(
+                &shared.tmux_watchers,
+                tmux,
+                Some(&uncovered_path),
+                session_bound,
+            ),
+            ExternalInputRelayOwner::BridgeAdapter,
+            "session_bound={session_bound}: control — the resolution really reads the \
+             registry, so an output this live watcher does not cover is not its to relay"
+        );
     }
     let resolved = super::relay_ownership::external_input_relay_owner_for_output(
         &shared,
@@ -6136,18 +6168,6 @@ fn contending_turn_identities_keep_exactly_one_relay_owner() {
         live_relayer_count(resolved),
         1,
         "external_input_relay_owner_for_output must resolve to exactly one relayer"
-    );
-
-    // Axis 2: contention does not move the registry, so the second identity
-    // resolves to the same owner — never two simultaneous owners for one turn.
-    assert_eq!(
-        super::relay_ownership::external_input_relay_owner_for_output(
-            &shared,
-            tmux,
-            Some(&output_path),
-        ),
-        resolved,
-        "two contending identities read one registry and must not split the owner"
     );
 
     // Axis 3: both identities record into the ONE `(provider, tmux)` slot.
