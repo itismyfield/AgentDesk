@@ -5926,3 +5926,148 @@ fn synthetic_start_offset_carry_forward_never_regresses() {
         "a lagging committed frontier must never drag the synthetic start backwards"
     );
 }
+
+/// #5833 DoD 4 — CONTENDING TURN IDENTITIES keep EXACTLY ONE relay owner.
+///
+/// Two identities race for one execution of `(claude, <tmux>)`: the EXTERNAL
+/// SYNTHETIC turn, keyed `external:<provider>:<channel>:<tmux>:<epoch_ms>` by
+/// `external_input_turn_id`, and the DISCORD ANCHOR turn for the same pane,
+/// which mints its own key from a later observation timestamp. #5838 persisted
+/// `lease.turn_id` as the same-execution key, so the store can now answer which
+/// identity owns this execution's relay; this fixture asks it under contention.
+///
+/// The invariant is a relayer count of EXACTLY ONE — never zero (a GAP), never
+/// two (a DUPLICATE) — pinned on three axes: (1) each production resolution
+/// names one owner, and that owner yields one relayer under the production
+/// spawn predicates; (2) both identities read the same unchanged registry, so
+/// the owner cannot split; (3) the single `(provider, tmux)` lease slot then
+/// names exactly one key, leaving the superseded identity unreadable as a
+/// second live owner.
+#[cfg(unix)]
+#[test]
+fn contending_turn_identities_keep_exactly_one_relay_owner() {
+    let root = tempfile::tempdir().expect("isolated runtime root");
+    let _env = crate::config::set_agentdesk_root_for_test(root.path());
+    let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+
+    let shared = super::super::make_shared_data_for_tests();
+    let channel = ChannelId::new(5_833_540_000_001);
+    let tmux = "AgentDesk-5833-contending-identity";
+    let output_path = root.path().join("transcript.jsonl");
+
+    // The LIVE watcher covering this output is the registry state BOTH
+    // contending identities observe; without it every resolution is trivially
+    // BridgeAdapter and the contention has nothing it could split.
+    shared
+        .tmux_watchers
+        .insert(channel, test_watcher_handle(tmux, &output_path));
+
+    let observed_at = chrono::DateTime::from_timestamp_millis(1_788_000_000_000).unwrap();
+    let turn_id = |at| {
+        super::relay_ownership::external_input_turn_id(
+            ProviderKind::Claude.as_str(),
+            channel,
+            tmux,
+            at,
+        )
+    };
+    let synthetic_turn_id = turn_id(observed_at);
+    let anchor_turn_id = turn_id(observed_at + chrono::Duration::milliseconds(1));
+    assert_ne!(
+        synthetic_turn_id, anchor_turn_id,
+        "the fixture must actually contend: two distinct identities, not one repeated"
+    );
+
+    // Relayers a resolved owner produces on the non-deferred path: the
+    // observer's BridgeAdapter idle tail, plus the watcher when it owns.
+    let live_relayer_count = |owner: ExternalInputRelayOwner| -> usize {
+        usize::from(observer_should_spawn_bridge_tail(false, owner))
+            + usize::from(owner == ExternalInputRelayOwner::TmuxWatcher)
+    };
+
+    // Axis 1: both production resolutions, on both sides of the session-bound
+    // delivery switch, name one owner and leave exactly one relayer.
+    for session_bound in [false, true] {
+        let owner = external_input_relay_owner_for_watchers(
+            &shared.tmux_watchers,
+            tmux,
+            Some(&output_path),
+            session_bound,
+        );
+        assert_eq!(
+            live_relayer_count(owner),
+            1,
+            "session_bound={session_bound}: a resolved owner must leave exactly one relayer"
+        );
+    }
+    let resolved = super::relay_ownership::external_input_relay_owner_for_output(
+        &shared,
+        tmux,
+        Some(&output_path),
+    );
+    assert_eq!(
+        live_relayer_count(resolved),
+        1,
+        "external_input_relay_owner_for_output must resolve to exactly one relayer"
+    );
+
+    // Axis 2: contention does not move the registry, so the second identity
+    // resolves to the same owner — never two simultaneous owners for one turn.
+    assert_eq!(
+        super::relay_ownership::external_input_relay_owner_for_output(
+            &shared,
+            tmux,
+            Some(&output_path),
+        ),
+        resolved,
+        "two contending identities read one registry and must not split the owner"
+    );
+
+    // Axis 3: both identities record into the ONE `(provider, tmux)` slot.
+    let contending_lease = |turn_id: &str| ExternalInputRelayLease {
+        channel_id: Some(channel.get()),
+        turn_id: Some(turn_id.to_string()),
+        session_key: Some(format!("token:{tmux}")),
+        relay_owner: resolved,
+        runtime_kind: Some(RuntimeHandoffKind::ClaudeTui),
+        generation:
+            crate::services::tui_prompt_dedupe::EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
+    };
+    let synthetic_lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+        ProviderKind::Claude.as_str(),
+        tmux,
+        contending_lease(&synthetic_turn_id),
+    );
+    let anchor_lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
+        ProviderKind::Claude.as_str(),
+        tmux,
+        contending_lease(&anchor_turn_id),
+    );
+    assert_ne!(
+        synthetic_lease.generation, anchor_lease.generation,
+        "each record must be a distinguishable identity, not a value-equal reuse"
+    );
+
+    let live = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+        ProviderKind::Claude.as_str(),
+        tmux,
+        channel.get(),
+    )
+    .expect("the contended execution must still hold a lease (zero owners is the GAP)");
+    assert_eq!(
+        live.generation, anchor_lease.generation,
+        "one slot, one live lease: the superseded identity is not separately readable"
+    );
+    assert_eq!(
+        live.turn_id.as_deref(),
+        Some(anchor_turn_id.as_str()),
+        "the surviving same-execution key names exactly one contending identity"
+    );
+    assert_eq!(
+        live_relayer_count(live.relay_owner),
+        1,
+        "the surviving lease must still name exactly one relayer"
+    );
+}

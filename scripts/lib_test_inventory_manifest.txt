@@ -4314,6 +4314,7 @@ services::discord::relay_health::tests::a_disagreeing_parent_thread_pair_names_n
 services::discord::relay_health::tests::a_durable_row_needs_two_witnessed_generations_to_agree_or_to_mismatch
 services::discord::relay_health::tests::an_absent_coordinate_entry_is_not_a_zero_frontier
 services::discord::relay_health::tests::an_agreeing_parent_thread_pair_leaves_the_single_row_table_standing
+services::discord::relay_health::tests::contending_turn_identities_do_not_classify_tmux_alive_relay_dead
 services::discord::relay_health::tests::dead_frontier_fires_on_an_unmeasured_tail_only_with_an_independent_witness
 services::discord::relay_health::tests::dead_frontier_shared_conjuncts_still_gate_the_witness_disjunct
 services::discord::relay_health::tests::frontier_provenance_discriminates_h1_from_h2
@@ -6182,6 +6183,7 @@ services::discord::tui_prompt_relay::tests::codex_rehydrate_thread_session_resol
 services::discord::tui_prompt_relay::tests::command_message_skill_wakeup_preserves_assistant_relay_lifecycle
 services::discord::tui_prompt_relay::tests::compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free
 services::discord::tui_prompt_relay::tests::confirmed_existing_session_is_not_dead_even_if_pane_probes_flake
+services::discord::tui_prompt_relay::tests::contending_turn_identities_keep_exactly_one_relay_owner
 services::discord::tui_prompt_relay::tests::dead_orphaned_session_mirror_is_evicted_and_stops_drift_spam
 services::discord::tui_prompt_relay::tests::deferred_claim_adopts_watcher_owner_exactly_one_relayer_no_gap
 services::discord::tui_prompt_relay::tests::deferred_claim_resolves_bridge_owner_exactly_one_relayer_no_gap
