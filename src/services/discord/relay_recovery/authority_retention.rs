@@ -184,7 +184,10 @@ mod tests {
         // 2026-08-12 is exactly today-30: the boundary day is retained, because
         // the safe direction for a promotion window is to keep it.
         assert!(boundary.exists(), "boundary day must never be deleted");
-        assert!(inside.exists(), "a file inside the window must never be deleted");
+        assert!(
+            inside.exists(),
+            "a file inside the window must never be deleted"
+        );
         assert!(current.exists(), "today's file must never be deleted");
     }
 
@@ -252,6 +255,36 @@ mod tests {
         assert_eq!(
             prune_expired_observation_files(&absent, day("2026-09-11"), OBSERVATION_RETENTION_DAYS),
             0
+        );
+    }
+
+    /// Production only ever calls the once-per-day entry point; every test
+    /// above reaches past it straight into the predicate. Without this one,
+    /// emptying that function, dropping its inner call or inverting its latch
+    /// leaves the policy dead and the whole suite green — the exact regression
+    /// this module exists to prevent. Two calls on one publish day pin both
+    /// halves: the work happens, and it happens once.
+    #[test]
+    fn the_once_per_day_entry_point_prunes_first_then_latches_for_that_day() {
+        let temp = tempfile::TempDir::new().expect("temp sink dir");
+        let dir = temp.path();
+        // LAST_PRUNED_DAY is process-wide, so this day is one no other test
+        // and no wall clock in this suite can have already latched.
+        let today = day("2031-03-07");
+        let expired_name = "2031-01-05.jsonl";
+
+        let expired = write_cohabiting_file(dir, expired_name);
+        prune_observation_dir_once_per_day(dir, today);
+        assert!(
+            !expired.exists(),
+            "the first call of a publish day must actually prune"
+        );
+
+        let replanted = write_cohabiting_file(dir, expired_name);
+        prune_observation_dir_once_per_day(dir, today);
+        assert!(
+            replanted.exists(),
+            "a second call the same day must latch to a no-op"
         );
     }
 }

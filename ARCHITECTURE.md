@@ -801,6 +801,7 @@ src/
 │   │   │   │   └── circuit_breaker_apply.rs
 │   │   │   ├── apply.rs
 │   │   │   ├── authority_observation.rs
+│   │   │   ├── authority_retention.rs
 │   │   │   ├── cohort.rs
 │   │   │   ├── decision.rs
 │   │   │   ├── destructive_warrant.rs
