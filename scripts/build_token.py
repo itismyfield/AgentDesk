@@ -45,6 +45,14 @@ WAIT_TIMEOUT_ENV = "ADK_BUILD_TOKEN_WAIT_TIMEOUT_SECS"
 # build log (build-release.sh runs cargo through `tail -1`). Absent: stderr.
 DIAG_FD_ENV = "ADK_BUILD_TOKEN_DIAG_FD"
 LEASE_ENV = "ADK_BUILD_TOKEN_LEASE"
+# Opt-out for the sccache activation below: these spellings (trimmed, case-folded)
+# turn it off, anything else -- unset included -- leaves it on.
+SCCACHE_OPT_OUT_ENV = "ADK_BUILD_TOKEN_SCCACHE"
+_SCCACHE_OFF = frozenset({"0", "false", "no", "off"})
+# Cargo's two wrapper switches. The release scripts clear them as a pair
+# (docs/ci/sccache-setup.md), so either one present is already a caller decision.
+_WRAPPER_ENV_KEYS = ("RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER")
+_HOMEBREW_BIN = "/opt/homebrew/bin"
 DEFAULT_WAIT_TIMEOUT_SECS = 14400.0
 WAIT_POLL_SECS = 0.5
 WAIT_NOTICE_SECS = 300.0
@@ -355,6 +363,46 @@ def run_protected(command: Sequence[str], env: Mapping[str, str], supervisor: _S
             child.wait()
 
 
+# sccache opt-in for campaign cargo, which reaches cargo only through here: a shell
+# export of RUSTC_WRAPPER dies with the batch, and .cargo/config.toml ships
+# `rustc-wrapper = ""`, so the environment is the only switch. The probe order and the
+# /opt/homebrew/bin, $HOME/.cache/sccache and 10G literals are copied from
+# `setup_sccache_env` (scripts/_defaults.sh:25) -- a bash function and a dict cannot
+# share an implementation -- so those three defaults move in both places or neither.
+# Two rules deliberately do NOT mirror it; do not "fix" them into agreement.
+# (1) Precedence. setup_sccache_env is imperative -- build-release.sh, deploy-release.sh
+# and install.sh call it to turn sccache on, so overwriting RUSTC_WRAPPER is the point
+# of the call. This is ambient, so a caller decision stands, "" included: env beats
+# .cargo/config.toml and "" is that file's own "no wrapper", which the release scripts
+# export paired with CARGO_BUILD_RUSTC_WRAPPER. Both keys are therefore honoured, which
+# also makes this a no-op under CI, whose workflows set RUSTC_WRAPPER at the `env:`
+# level. (2) An unusable cache dir: the shell exports first and leaks mkdir's exit code,
+# while here nothing is written at all. POSIX only; see docs/ci/sccache-setup.md 2.4.
+def apply_sccache_env(env: dict[str, str]) -> None:
+    """Enable sccache for the child when resolvable; otherwise change nothing."""
+    if any(key in env for key in _WRAPPER_ENV_KEYS) or env.get(
+            SCCACHE_OPT_OUT_ENV, "").strip().lower() in _SCCACHE_OFF:
+        return
+    path = env.get("PATH", os.defpath)
+    if _HOMEBREW_BIN not in path.split(os.pathsep) and os.access(
+            os.path.join(_HOMEBREW_BIN, "sccache"), os.X_OK):
+        path = _HOMEBREW_BIN + os.pathsep + path
+    sccache = shutil.which("sccache", path=path)
+    if sccache is None:
+        return  # No sccache: not one variable moves, PATH included.
+    # Unset, sccache picks a per-platform dir and stops sharing hits with releases.
+    cache_dir = env.get("SCCACHE_DIR") or os.path.join(
+        env.get("HOME") or os.path.expanduser("~"), ".cache", "sccache")
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError:
+        return  # An unusable cache directory costs the cache, never the build.
+    env["PATH"] = path
+    env["SCCACHE_DIR"] = cache_dir
+    env["SCCACHE_CACHE_SIZE"] = env.get("SCCACHE_CACHE_SIZE") or "10G"
+    env["RUSTC_WRAPPER"] = sccache
+
+
 def run(command: Sequence[str], env: Mapping[str, str] | None = None,
         path: str = CANONICAL_TOKEN_PATH, *, delegate_lease: bool = False) -> int:
     """Run `command` while holding the build token at `path`."""
@@ -371,6 +419,7 @@ def run(command: Sequence[str], env: Mapping[str, str] | None = None,
         except BuildTokenWindowsError as exc:
             print(f"build token: {exc}", file=sys.stderr)
             return EXIT_TOKEN_UNUSABLE
+    apply_sccache_env(child_env)
     with _supervised() as supervisor:
         try:
             lease = inherited_lease(carrier, path) if carrier is not None else hold_token(path, child_env)

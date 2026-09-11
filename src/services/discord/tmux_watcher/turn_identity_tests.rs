@@ -1092,6 +1092,7 @@ async fn live_long_chunk_delivery_fingerprint_uses_raw_body_4081() {
         Some(lease_key),
         1,
         super::super::loop_poll_prologue::WatcherSourceAuthority {
+            source_file: crate::services::cluster::stream_relay::SourceFileIdentity::Unavailable,
             generation_mtime_ns:
                 crate::services::discord::outbound::delivery_record::current_generation_mtime_ns(
                     session,
