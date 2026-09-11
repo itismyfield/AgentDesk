@@ -83,26 +83,47 @@ jobs:
               # own subject cannot trigger it is the #5185 defect, so the files
               # under guard are listed here alongside the tests.
               #
-              # NO-OP, stated so nobody reads this filter as narrow: the
-              # `'!src/services/discord/placeholder_live_events/**'` line below
-              # already makes `high_risk_recovery` effectively always true.
+              # The `'!src/services/discord/placeholder_live_events/**'` line
+              # that used to sit below `src/services/discord/**` is GONE, and
+              # with it the accident that made this filter always true.
               # dorny/paths-filter@v3 is NOT GitHub's native `paths:` -- it
-              # compiles every pattern into its own picomatch matcher and ORs
-              # them (`matchers.some(...)`), so a leading `!` is just another
-              # positive matcher for "anything that is not this", and it matches
-              # nearly every changed file. The patterns #5147 adds here and
-              # below therefore change nothing about what runs; they are kept
-              # as a statement of which files this lane is meant to guard, and
-              # they become load-bearing the moment that `!` line is fixed.
-              # Fixing it is a separate change: narrowing the filter would
-              # silently stop running whatever has been relying on it.
+              # compiles every pattern into its own picomatch matcher
+              # (`{dot: true}`) and ORs them (`matchers.some(...)`; no
+              # `predicate-quantifier` is set here, so the default `some`
+              # applies), so a leading `!` was just another POSITIVE matcher
+              # for "anything that is not this" and matched nearly every
+              # changed file. Every pattern below is load-bearing now: this
+              # list is the selection rule, not a statement of intent.
+              #
+              # What STOPPED selecting this lane when the `!` went away:
+              # documentation, `dashboard/**`, `tests/**`, and the src modules
+              # this lane never executes. What was ADDED here because removing
+              # the `!` would otherwise have dropped a real input:
+              #   * `migrations/**` -- the `high_risk_recovery::` tests call
+              #     `connect_test_pool_and_migrate`, so migrations execute
+              #     inside this lane, and `build.rs` already declares
+              #     `rerun-if-changed` over `migrations/postgres`.
+              #   * `policies/**` -- `test_engine_with_pg` points
+              #     `config.policies.dir` at this repo's `policies/`, and
+              #     `engine/loader.rs` loads EVERY root-level `*.js` (while
+              #     `check_policy_tree_trust` walks the subdirectories and
+              #     `pipeline::ensure_loaded` reads
+              #     `policies/default-pipeline.yaml`). Naming three `.js`
+              #     files was never the real input surface, so the whole tree
+              #     replaces them.
+              #   * the two scripts this job's own steps execute.
+              # `Cargo.toml` stays because `hang_forensics.rs` reads it via
+              # `include_str!("../../Cargo.toml")` for the `[profile.release]`
+              # assertion described above.
+              #
+              # `tests/test_high_risk_recovery_path_filter.py` pins the
+              # selection this list produces, and fails if any pattern in this
+              # workflow ever starts with `!` again.
               - 'Cargo.toml'
-              - 'policies/auto-queue.js'
-              - 'policies/kanban-rules.js'
-              - 'policies/timeouts.js'
-              - 'policies/timeouts/**'
-              - 'policies/lib/**'
-              - 'policies/__tests__/**'
+              - 'migrations/**'
+              - 'policies/**'
+              - 'scripts/check_test_target_integrity.py'
+              - 'scripts/ci/postgres-service.sh'
               - 'src/db/**'
               - 'src/dispatch/**'
               - 'src/engine/**'
@@ -122,11 +143,10 @@ jobs:
               - 'src/services/scheduled_messages/**'
               - 'src/services/discord/outbound/source_registry.rs'
               - 'src/services/discord/**'
-              - '!src/services/discord/placeholder_live_events/**'
               # #5147: the forensics module, the health-path DB awaits it
               # brackets, and the boot site that starts the self-watchdog (and
-              # with it the runtime beacon). Inert today -- see the `!` note
-              # above.
+              # with it the runtime beacon). Load-bearing now that the `!`
+              # line above is gone -- see the note above.
               - 'src/cli/dcserver.rs'
               - 'src/services/hang_forensics.rs'
               - 'src/services/health_diagnostics.rs'

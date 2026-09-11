@@ -350,6 +350,12 @@ banner "Process-global Mutex<()> poison-recovery gate (#5185)"
 banner "Scheduled-message PG path-filter wiring contract"
 "$PYTHON" -m unittest tests.test_scheduled_messages_ci_wiring
 
+banner "High-risk recovery path-filter selection contract (#5185)"
+# dorny/paths-filter ORs one picomatch matcher per pattern, so a leading `!`
+# is a POSITIVE "anything but this" matcher. This pins the selection the
+# filter actually produces and fails if a `!` pattern ever returns.
+"$PYTHON" -m unittest tests.test_high_risk_recovery_path_filter
+
 banner "Scratch file guard"
 FAIL=0
 for scratch_file in plan.md scratch.md scratch.txt scratch.sh scratchpad.md scratchpad.txt scratchpad.sh sql_test.rs test_scratch.rs plan.txt pr-body.md test.sh test.sql verify.sh; do
