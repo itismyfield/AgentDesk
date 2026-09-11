@@ -9,7 +9,9 @@
 > Last refreshed: 2026-09-11 (against exact main 2ce825830a3fa9c50629138f55582f4bbf6427f3;
 > landed source 대사(對査)가 닿은 최신 지점은 **PR #5848 `d2dd9cbd4a`** 이며, 그 이전 구간도
 > 전수 대사는 아니다(대응표 머리말 참조). 그 뒤 구간
-> `d2dd9cbd4a..2ce825830a`(#5849~#5862, 17커밋)은 커밋 단위로 대사하지 않았고, 배달·cleanup
+> `d2dd9cbd4a..2ce825830a`(17커밋. 이 구간의 PR 번호는 #5823 과 #5849~#5869 가 뒤섞여 있고
+> 머지 순서와 번호 순서가 다르므로, 구간 경계는 PR 번호가 아니라 이 git 범위와 아래 SHA
+> 열거로 읽는다)은 커밋 단위로 대사하지 않았고, 배달·cleanup
 > 권위 표면을 실제로 바꾼 것이 확인된 #5861·#5869 두 건만 개별 확인해 표에 넣었다 —
 > **그 구간의 나머지는 미대사다**(아래 "미대사 구간" 항에 목록).
 > 운영 rollout 은 2026-09-06 에 enforce/100 으로 전환·배포됐고, live acceptance 는 여전히
@@ -33,7 +35,8 @@
   최신 main 전체의 미구현 판정이 아니다. 후속 착지의 실제 범위는 아래 별도 대응표로 읽는다.
 - **rollout 과 live acceptance 는 별개 사실이다. 분리해 읽는다.**
   - **rollout — 관측된 것은 단계 램프가 아니라 단일 컷오버다(2026-09-06).** AC3 관측 sink
-    (`~/.adk/release/relay_authority/*.jsonl`, 2026-09-04~09-11, 7,014 레코드) 전량의 distinct
+    (`~/.adk/release/relay_authority/*.jsonl`, 2026-09-04~09-11, `2026-09-11 17:56 KST` 판독 시점
+    7,030 레코드 — append-only sink 이라 이후 판독은 더 큰 수를 본다) 전량의 distinct
     `cohort_fingerprint` 는 **2개뿐**이다 — `5ce20688c105144b` = Observe/100(마지막 관측
     `2026-09-06 17:13:38`), `d1d48477e7e326bd` = Enforce/100(최초 관측 `2026-09-06 17:44:41`).
     `cohort_fingerprint` 는 `(mode, percent)` 만 정규화 해싱하므로
@@ -80,7 +83,7 @@
 | #5841 `5bd3415321` → #5844 `eaa88ed654` (#5833 S2/S3) | `discord/turn_bridge/context.rs`의 `BridgeCompletionSignal`이 `Finalized`와 `EntryAborted`를 구분한다. `discord/tui_prompt_relay/claude_idle_bridge.rs`의 공통 완료 처리는 abort/수신 오류를 실패로 반환하고, Claude/Codex tail의 delivery-failure broad Cancel은 이미 제거됐다. | 제거된 Cancel은 재철거 대상이 아니다. typed abort 분기와 후임 durable 참조 placeholder 보존은 안전 경계다. `Finalized` 자체는 내구 배달 증명이 아니며 S3의 episode-bound witness 후속 전체를 완료시킨 것으로 세지 않는다. |
 | #5848 `d2dd9cbd4a` (#5845 D1a2) | `claude_tui/hook_server/relay_receipts.rs`의 `RelayReceiptLedger::begin`은 신규 managed 요청의 freshness를 삽입 전에 검사한다. 같은 pin의 InFlight는 유효 기간 중 425, 만료 후 410을 반환하며 Fresh로 재발급하지 않는다. pin 충돌 409와 terminal 응답 재사용은 유지된다. | freshness·pin 충돌·중복 인가 차단은 영구 보존한다. Legacy 요청, 기존 2시간 pruning, terminal 캐시는 존치하며 이 착지가 cardinality cap·tombstone·quarantine 또는 source/reader/owner 전환을 구현한 것은 아니다. |
 | #5813 `d91d59d1d5` → #5826 `bad5b0b90e` (#5808 C1/C2, 2026-09-09·09-10) | `turn_bridge/finalize_epilogue.rs` 의 `finalize_and_drain_queued_turns` 인자가 `watcher_owner_channel_id: ChannelId` → `watcher_delivery_pin: Option<WatcherClaimIncarnation>` 로 바뀌었고, deferred drain 의 watcher 재개는 신설 `resume_pinned_watcher` 가 `pin.adopt_if_current` 안에서만 `resume_offset` 을 쓰고 `paused` 를 내린다. `watchers/lifecycle/claims.rs` 에 `WatcherClaimIncarnation::capture_for_source`(tmux 세션명·`output_path`·미취소 cancel 이 모두 일치할 때만 포착) 신설. `turn_bridge/mod.rs` 는 `spawn_turn_bridge_with_pin` 을 추가하고 기존 `spawn_turn_bridge` 는 `None` 위임 래퍼가 됐으며, `TurnBridgeContext` 는 `mod.rs` → `context.rs` 로 이동(동작 보존). #5826 은 `terminal_commit_epilogue` generation-separation **characterization 테스트 전용**이고 프로덕션 변경은 `#[cfg(test)] mod` 부착 1건뿐이다. | **대체한 레거시 경로:** 후임 incarnation 이 이미 소유한 watcher 를 채널 키만으로 registry 에서 조회해 `resume_offset` 을 쓰고 `paused` 를 내리던 경로. **영구 보존:** 재개 전 incarnation 일치 요구, `owns_channel_effects` 게이트, 큐 payload·순서 보존. 이 행은 C1/C2 이며 #5808 의 A 체인(위 #5810→#5851 행)과 별개다. **#5813 의 25개 변경 파일 중 확인한 것은 프로덕션 4개(`context.rs`·`claims.rs`·`mod.rs`·`finalize_epilogue.rs`)뿐이고 나머지는 미대사** — 이 행을 #5808 C1 전체 범위로 읽지 말 것. |
-| #5836 `ee4d936b75` (#5752 A1, 2026-09-10) | `inflight/save_store/identity_gate.rs` 의 `persist_leak_recovery_response_offset_if_matches_identity_locked` 시그니처가 `(&InflightTurnIdentity, expected_current_msg_id: u64)` → `(&InflightTurnState)` 로 바뀌어, 신원과 `current_msg_id` 를 전달된 상태 하나에서 함께 유도한다. 저장 전 경계 검사는 `delivered_offset > full_response.len() \|\| !is_char_boundary(delivered_offset)` 에서 `transfer_end(&delivered.full_response, delivered_offset, &on_disk.full_response)` 가 `Some` 일 것을 요구하는 형태로 대체됐다(prefix 일치까지 요구). | **대체한 레거시 경로:** 호출자가 따로 넘긴 `expected_current_msg_id` 만 on-disk 값과 비교하고, 전달 본문과 on-disk 본문의 prefix 일치는 보지 않은 채 char-boundary 만으로 leak-recovery offset 을 승격시키던 inflight save-gate. **영구 보존:** `response_sent_offset` 단조 증가 요구, 신원 불일치 시 파일 무변경, 잠금 안 수행. 이 착지는 #5752 의 A1 이며 이슈 전체를 닫지 않는다. 실제 배달 증명이 아니다 — **미측정.** |
+| #5836 `ee4d936b75` (#5752 A1, 2026-09-10) | `inflight/save_store/identity_gate.rs` 의 `persist_leak_recovery_response_offset_if_matches_identity_locked` 시그니처가 `(&InflightTurnIdentity, expected_current_msg_id: u64)` → `(&InflightTurnState)` 로 바뀌어, 신원과 `current_msg_id` 를 전달된 상태 하나에서 함께 유도한다. 저장 전 경계 검사는 `delivered_offset > full_response.len() \|\| !is_char_boundary(delivered_offset)` 에서 `transfer_end(&delivered.full_response, delivered_offset, &on_disk.full_response)` 가 `Some` 일 것을 요구하는 형태로 대체됐다(prefix 일치까지 요구). 같은 착지의 `inflight/save_store/identity_gate/bridge_entry.rs` 는 `full_response` 와 `response_sent_offset` 을 독립 2필드 경합 판정에서 `(&String, usize)` 튜플 1단위 판정으로 바꿔, 경합 검사와 적용 양쪽에서 두 값을 한 단위로 다룬다. `inflight/model.rs` 의 `transfer_end` 는 이 착지가 신설했다. | **대체한 레거시 경로:** 호출자가 따로 넘긴 `expected_current_msg_id` 만 on-disk 값과 비교하고, 전달 본문과 on-disk 본문의 prefix 일치는 보지 않은 채 char-boundary 만으로 leak-recovery offset 을 승격시키던 inflight save-gate. 그리고 bridge-entry 경로에서 본문과 offset 을 각각 독립 CAS 필드로 보아 한쪽만 바뀐 혼합 쌍을 지속시키던 판정. **영구 보존:** `response_sent_offset` 단조 증가 요구, 신원 불일치 시 파일 무변경, 잠금 안 수행. **#5836 의 6개 변경 파일 중 이 행이 서술한 것은 `identity_gate.rs`·`bridge_entry.rs`·`model.rs` 이고, `health/recovery.rs`·`inflight.rs`·`scripts/lib_test_inventory_manifest.txt` 는 미대사** — 이 행을 #5752 A1 전체 범위로 읽지 말 것. 이 착지는 #5752 의 A1 이며 이슈 전체를 닫지 않는다. 실제 배달 증명이 아니다 — **미측정.** |
 | #5838 `383ba68205` (#5833 S1, 선행 #5846 `091f7d95b5`, 2026-09-10) | `inflight/model.rs` 에 `InflightTurnState.external_turn_id: Option<String>` 를 `#[serde(default)]` 로 신설(`INFLIGHT_STATE_VERSION` 범프 없음)하고, `restamp_external_turn_lease` 가 lease 의 `session_key`·`runtime_kind`·`turn_id` 를 한 단위로 각인한다. `tui_prompt_relay/codex_idle_rollout.rs`·`synthetic_start.rs` 2곳의 인라인 2필드 restamp 가 이 호출로 대체됐고, `synthetic_start/claim.rs` 는 생성 시점에 `external_turn_id` 를 채운다. #5846 은 그 생성자를 `claim.rs` 로 옮긴 move-only 선행이다. | **대체한 레거시 경로:** `session_key`·`runtime_kind` 만 개별 대입해 외부 입력 실행 신원을 부분 각인하던 2개 호출지점. **영구 보존:** 레거시 행의 `None` 을 "알 수 없는 실행 신원"으로 읽고 보수적 경로를 타는 규약(`None == None` 도 신원 증명이 아님), 비어 있지 않은 `Some` 일치만 신원 증명으로 인정. 표의 #5833 행(위 #5841→#5844)은 S2/S3 이며 이 S1 과 별개다. #5833 의 S4/S5 는 여전히 착지 범위 밖이고 이 착지가 그것을 완료시키지 않는다. |
 | #5861 `8437628476` (#5755 / #5071 T1 S3b 보정, 2026-09-11) | `tmux_watcher/loop_poll_prologue.rs` 의 post-terminal 억제 경로에서 `advance_watcher_confirmed_end(..., "src/services/discord/tmux.rs:post_terminal_no_inflight_suppressed_output")` 호출이 **통째로 삭제**됐다. 로컬 `last_relayed_offset`·generation mtime 기록과 구간당 1회 `journal_watcher::settle_without_transport` 관측은 그대로 남는다. `scripts/check_durable_frontier_writer_call_sites.py` 의 `EXPECTED_CALL_SITES` 에서 같은 파일 항목이 제거되어 durable frontier writer 인구가 48 → 47 로 줄었다. | **대체한 레거시 경로:** transport 증거 없이 억제 관측만으로 **공유 배달 frontier 를 전진**시키던 호출지점. 공유 권위 표면에서 레거시 경로를 실제로 제거한 착지이므로 §12-2 기록 대상이다. **영구 보존:** 억제가 로컬 구간만 소비하고 공유 배달 권위를 움직이지 않는 경계, synthetic claim 이 generation 검증된 공유 frontier 를 계속 읽는 동작, writer 인구 census 게이트. 나머지 억제 경로와 local-consumption 경합은 이 착지 밖이며 #5755·#5071 어느 쪽도 닫지 않는다. 라이브 Discord 배달 증명이 아니다 — **미측정.** |
 | #5869 `b635d7bee1` (#5755 / #5464, 2026-09-11) | `tmux_watcher/terminal_commit_epilogue.rs` 가 `committed_row_cleanup_allowed = !completion_is_stale_for_newer_turn && !anchor_cleanup_is_stale_for_newer_turn` 를 도입해, cleanup 신원 포착·tombstone 기록/배수·행 clear 3지점이 모두 이 결합 veto 뒤로 들어갔다(기존에는 세 지점 모두 `completion_is_stale_for_newer_turn` 단독 판정). 시작이 terminal 종료보다 앞선 현재 zero-id 행의 통상 cleanup 은 유지된다. 프로덕션 변경 10줄. | **대체한 레거시 경로:** completion staleness 만 보고 anchor staleness 를 보지 않아, 오래된 terminal 이 더 새로운 anchored/external zero-id inflight 행을 제거하거나 그 completion tombstone 을 만들 수 있던 판정. **영구 보존:** id-0 을 포함하는 결합 stale veto, 기존 identity·nonce·restart·rebind 보호. **이 착지는 위 #5767 행이 서술한 terminal cleanup 권위를 3일 뒤 좁힌 보정이므로, #5767 행은 착지 시점 기준으로 읽는다.** #5808 C1/C2, watcher/retention 전체 수용, 과거 인시던트는 이 착지 밖 — **미측정.** |
@@ -90,7 +93,9 @@ lagged 지점은 lexical 검사이고 boot 초기 teardown 목록은 비어 있�
 runtime 배달 검증으로 확대하지 않는다. #5833 S4/S5 및 #5845 D1e1은 위 착지 범위 밖이며,
 이 표는 PARK 항목을 완료로 승격하지 않는다. T5의 S4/S5와 #5833의 동명 S4/S5는 다른 슬라이스다.
 
-**미대사 구간 — `d2dd9cbd4a..2ce825830a`(#5849~#5862, 17커밋).** 이 구간은 커밋 단위로 대사하지
+**미대사 구간 — `d2dd9cbd4a..2ce825830a`(17커밋).** 이 구간의 PR 번호는 #5823 과 #5849~#5869 가
+뒤섞여 있다 — 머지 순서와 번호 순서가 다르므로 구간 경계를 PR 번호로 읽지 말고, 이 git 범위와
+아래 SHA 열거를 정본으로 삼는다. 이 구간은 커밋 단위로 대사하지
 않았다. 위 표의 #5861·#5869 는 배달·cleanup 권위 표면을 실제로 바꾼 것이 확인돼 개별 추가한
 두 건이고, **같은 구간의 나머지는 판정되지 않은 채 남아 있다.** 그중 `src/services/` 를 건드린
 착지는 #5823 `a7f18f8d1f`, #5849 `cf1bed07d1`, #5859 `d5f062f8ef`, #5862 `2ce825830a`,
@@ -147,8 +152,8 @@ S1 지분은 다음과 같고, **T6 철거 대상이 아니라 S9 회수 대상*
 - `relay_recovery/cohort.rs` 전량
 - health detail `relay_authority_rollout` 발행 스캐폴딩 2곳
 
-회수 진입 조건은 S9의 것과 동일하다 — cohort 100% 승격이 확정되고 롤백 계획이 닫힌 뒤.
-cohort 100% 승격은 2026-09-06 enforce/100 전환으로 확정됐고, **롤백 계획 종료는 아직
+회수 진입 조건은 S9의 것과 동일하다 — enforce 100% 집행이 확정되고 롤백 계획이 닫힌 뒤.
+enforce 100% 집행은 2026-09-06 enforce/100 전환으로 확정됐고, **롤백 계획 종료는 아직
 선언되지 않았다.** 두 조건 중 하나만 충족됐으므로 회수는 열리지 않았다.
 
 ---
@@ -451,7 +456,7 @@ r3까지의 작업 브랜치는 리뷰 캡 3라운드를 소진했고, r3c dual 
 
 §6.1 **S9** 행이 `authority_observation.rs` 전량을 −230 prod 회수 후보로 이미 예약하고 있다.
 S2 지분은 그 파일 전체 + 두 health 발행 지점 + 기록 3지점이며, **회수 진입 조건은 S1과 동일**하다 —
-cohort 100% 승격이 확정되고 롤백 계획이 닫힌 뒤. S1 절과 같은 이유로 100% 승격만 충족됐고
+enforce 100% 집행이 확정되고 롤백 계획이 닫힌 뒤. S1 절과 같은 이유로 enforce 100% 집행만 충족됐고
 롤백 계획 종료는 미선언이므로 회수는 열리지 않았다. deprecated 마킹은 하지 않는다(롤아웃이
 끝날 때까지 유효한 권위다).
 
