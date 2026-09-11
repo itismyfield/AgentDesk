@@ -106,6 +106,69 @@ runtime 배달 검증으로 확대하지 않는다. #5833 S4/S5 및 #5845 D1e1�
 대상은 아니지만 이 문서 아래쪽의 승격 판정 서술을 읽을 때 함께 확인해야 한다.
 T6 착수 시 **이 구간부터 다시 대사한다.**
 
+### R2a — 자동 복구의 중복 axis-B 관측 제거
+
+- `automatic_stale_sweep_warrants`, `auto_apply_relay_recovery_for_shared_at`,
+  `watchdog_axis_b_warrants`, `stale_turn_axis_b_warrants`의
+  `observe_axis_b_candidate` 호출과 관측만을 위한 shared 조회를 제거한다.
+  세 production 파일의 합계는 41줄 감소하며, destructive warrant의 bind·판정·반환값
+  소비와 actor/durable-frontier 안전 경계는 보존한다.
+- R2a 단독 범위에서는 수동 복구·health report·cohort 설정 및
+  `observe_axis_b_candidate` 자체가 남는다. 아래 R2b가 후속 범위다.
+  R2 전체 철거나 T5 전환 완료로 세지 않는다.
+  자동 관측 종료 뒤 새 관측은 수동 복구만 남으므로, 자동 키 부재를 divergence 0으로 해석하면 안 된다.
+- 기존 `axis_b_tests` 8개와 `destructive_warrant::tests` 5개는 PR의
+  `Library sweep (selection-set gated)`가 `cargo test --lib`로 선택한다.
+  해당 ID는 non-PG 제외 문자열에 걸리지 않으며 lib-test manifest에 이미 존재한다.
+  관측 재삽입·warrant 결과 우회 변이는 기존 wiring assertion을 실패시키는 범위의
+  증거이며, 모든 runtime 분기의 동등성 증거로 확대하지 않는다.
+
+### R2b — 잔여 axis-B 비교·writer·health report 철거
+
+- R2a 코드를 전제로 남은 수동 observer, JSONL writer/queue/counter/report,
+  observer 전용 비교 planner와 6개 테스트를 함께 제거한다. 과거 JSONL 파일과
+  `relay_authority_rollout_report.py`의 axis-B 분리·무결성 테스트는 보존한다.
+- `/api/health/detail`의 `axis_b_observation` 필드는 없어지며 public health에는
+  계속 없다. shared dial, axis-A 관측, S3 completion scope·suppression은 유지한다.
+- 자동 taxonomy와 `Some(site)` 분기, warrant bind와 `.eligible` 소비, episode guard,
+  수동 structural planner 및 실제 attempt reservation은 유지한다. R1/S4 변경과 독립이다.
+- **수동 rate-window의 두 번째 refresh도 제거되는 실제 동작 변화다.** planner와
+  reservation은 최초 `now_ms`를 공유하지만 관측은 더 늦은 시각으로 window를 갱신했다.
+  대기 중 expiry/backoff 경계를 넘은 요청은 이제 최초 시각의 한도에 따라 거절되고,
+  다음 요청의 새 시각에서 허용될 수 있다. 정확히 같은 허가 시점을 보장하지 않는다.
+- 기존 bounded-retry 테스트에 planner+reserve의 같은 시각을 넣어 expiry/backoff
+  직전 거절·경계 허용을 검증한다. 전체 수동 apply 동등성 증거로 확대하지 않는다.
+- 이번 PR은 R2a·R2b 철거와 관련 fixture 수리를 함께 포함하며, 위 동작 변화는 배포 후 효과다.
+  실제 compile·기존 테스트·독립 리뷰·CI·배포 검증과 T5/T6 전체 완료는 별도 게이트다.
+
+### R2c — R2a·R2b 철거가 남긴 잔여물 정리 (같은 PR #5860 내 수리 라운드)
+
+- **`RelayRecoveryActionKind::ReportRelayUnreachable` variant 제거.** 유일 생산자였던
+  `relay_recovery/decision.rs` 의 reachability 합성 planner 가 R2b 에서 삭제되면서 생산자 0 이
+  됐고, variant 는 `as_str`·`is_destructive`·`apply` arm 과 **파괴 warrant 진리표의 한 행**
+  (`(ObserveOnly | ReportRelayUnreachable, _) => Deny`)으로만 남아 있었다.
+  **대체한 레거시 경로: 없음(도달 불가 표면 제거).** `#[allow(dead_code)]` 로 덮지 않고 제거한
+  이유는, 진리표 안의 도달 불가 행이 후속 독자에게 "reachability 계층이 여전히 파괴적 액션을
+  고를 수 있다"고 읽히기 때문이다. **영구 보존:** `rule()` 의 전역성(totality). 제거 후에도
+  구성 가능한 모든 액션이 이전과 동일한 `WarrantRule` 로 매핑되므로 판정 의미는 불변이다.
+- **`AxisBSite::StaleTurnIntake` variant 제거.** 유일 생성 지점이 R2b 가 삭제한
+  `router/intake_gate/stale_turn.rs` 의 관측 호출이었다. 같은 PR 이 `OperatorRelayRecovery` 를
+  variant 째 제거했으므로 처리를 대칭으로 맞춘 것이다. `#[cfg_attr(not(unix), allow(dead_code))]`
+  는 유지한다 — `axis_b_site_for_apply` 가 `#[cfg(unix)]` 라서 비unix 에서는 그것만이 생성하는
+  `RelayDeadReattach`·`ProbeAutoHealReattach`·`ProbeAutoHeal` **3개**에 생산자가 없기 때문이다.
+  나머지 4개는 플랫폼 중립이다.
+- **`run_relay_recovery_at(..., now_ms)` 시드 신설.** `run_relay_recovery` 가 `Utc::now()` 를
+  **정확히 1회** 포착해 계획과 admission 양쪽에 같은 시각을 공급한다. R2b 가 제거한 관측자는
+  계획 뒤에 시계를 다시 읽어 Manual auto-heal window 를 더 늦은 시각으로 굴렸고, 경계에 걸친
+  요청이 한 window 에서 계획되고 다음 window 에서 허가됐다. **대체한 레거시 경로:** 계획과
+  허가가 서로 다른 시각을 보던 수동 경로. **영구 보존:** 단일 포착 시각 공급.
+  `manual_relay_recovery_plans_and_admits_on_one_captured_instant` 가 벽시계보다 앞선 명시 시각으로
+  이 불변식을 행동으로 고정한다(어휘 검사 아님).
+- 함께 정리: `watchdog_axis_b_warrants`·`stale_turn_axis_b_warrants` 의 죽은 `shared` 파라미터와
+  호출부 4곳, `automatic_stale_sweep_warrants` 의 `site` 파라미터를 닫힌 분류로 되살려 미매핑
+  사이트를 fail-closed 로 거절한다(shipped 두 사이트는 `ClearStaleThreadProof` 로 종전과 동일).
+- 이 수리 라운드는 R2a·R2b 의 철거 범위를 넓히지 않는다. 배포 효과와 T5/T6 전체 수용은 별도 게이트다.
+
 ---
 
 ## S1 — cohort infra (배포 no-op) · 브랜치 `feat/5464-t5-s1-cohort`

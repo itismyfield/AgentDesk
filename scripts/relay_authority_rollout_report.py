@@ -229,6 +229,11 @@ def is_complete_axis_b(event: dict) -> bool:
     if any(type(event.get(key)) is not bool
            for key in ("structural_eligible", "ledger_eligible")):
         return False
+    # Historical wire vocabulary, deliberately wider than the current Rust enums:
+    # these labels classify records WRITTEN BEFORE the observation path retired.
+    # Dropping `report_relay_unreachable` / `operator_relay_recovery` /
+    # `stale_turn_intake` would send archived lines down the schema-mismatch path
+    # instead of `axis_b_lines`, changing the axis-A denominator for past files.
     actions = ("observe_only", "clear_stale_thread_proof", "clear_orphan_pending_token",
                "reattach_watcher", "drain_pending_queue", "report_relay_unreachable")
     sites = ("operator_relay_recovery", "probe_auto_heal_reattach", "watchdog_stale_idle",

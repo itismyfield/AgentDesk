@@ -1783,7 +1783,7 @@ pub(crate) async fn run_stall_watchdog_pass(
                 channel_id.get(),
             )
             .unwrap_or(false)
-            && watchdog_axis_b_warrants(&shared, provider, &snapshot, AxisBSite::WatchdogStaleIdle)
+            && watchdog_axis_b_warrants(provider, &snapshot, AxisBSite::WatchdogStaleIdle)
         {
             let Some(result) = clear_idle_tmux_stale_turn(
                 registry,
@@ -1821,12 +1821,8 @@ pub(crate) async fn run_stall_watchdog_pass(
             snapshot.relay_health.last_outbound_activity_ms,
             now_unix_secs,
             STALL_WATCHDOG_THRESHOLD_SECS,
-        ) && watchdog_axis_b_warrants(
-            &shared,
-            provider,
-            &snapshot,
-            AxisBSite::WatchdogExplicitBackground,
-        ) {
+        ) && watchdog_axis_b_warrants(provider, &snapshot, AxisBSite::WatchdogExplicitBackground)
+        {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(
                 "  [{ts}] ⚡ STALL-WATCHDOG: forced cleanup for orphan explicit background work in channel {}",
