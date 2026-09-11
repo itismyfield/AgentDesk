@@ -6052,6 +6052,8 @@ services::discord::tui_prompt_relay::anchor_completion::tests::pinned_anchor_cle
 services::discord::tui_prompt_relay::anchor_completion::tests::relay_drain_decision_completes_and_consumes_matching_turn_marker
 services::discord::tui_prompt_relay::anchor_completion::tests::relay_drain_decision_does_not_cross_consume_other_turn_marker
 services::discord::tui_prompt_relay::anchor_completion::tests::relay_drain_decision_fails_open_when_http_unavailable
+services::discord::tui_prompt_relay::bridge_completion::tests::foreign_durable_row_is_contracted_as_no_evidence_not_failure
+services::discord::tui_prompt_relay::bridge_completion::tests::missing_durable_row_is_contracted_as_no_evidence_not_failure
 services::discord::tui_prompt_relay::bridge_completion::tests::tui_direct_bridge_completion_rejects_uncommitted_matching_inflight
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::continuation_adoption_requires_every_safety_fact
 services::discord::tui_prompt_relay::claude_idle_runtime::tests::continuation_candidate_requires_growth_across_two_samples
@@ -6181,6 +6183,7 @@ services::discord::tui_prompt_relay::tests::codex_ownerless_external_input_undel
 services::discord::tui_prompt_relay::tests::codex_rehydrate_thread_session_resolves_thread_channel_id
 services::discord::tui_prompt_relay::tests::command_message_skill_wakeup_preserves_assistant_relay_lifecycle
 services::discord::tui_prompt_relay::tests::compact_continuation_injection_skips_synthetic_and_leaves_mailbox_free
+services::discord::tui_prompt_relay::tests::completion_timeout_is_not_an_ack_and_preserves_anchor
 services::discord::tui_prompt_relay::tests::confirmed_existing_session_is_not_dead_even_if_pane_probes_flake
 services::discord::tui_prompt_relay::tests::dead_orphaned_session_mirror_is_evicted_and_stops_drift_spam
 services::discord::tui_prompt_relay::tests::deferred_claim_adopts_watcher_owner_exactly_one_relayer_no_gap
