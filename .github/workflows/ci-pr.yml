@@ -737,8 +737,8 @@ jobs:
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
 
-      # See `check_fast` for rationale: `target/` excluded to protect sccache
-      # GHA cache quota.
+      # See `check_fast` for rationale: `target/` excluded to protect the
+      # sccache GHA cache quota.
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -1012,7 +1012,7 @@ jobs:
   # `server::routes::health_api::tests` (4),
   # `server::worker_registry::leader_takeover_tests` (1) and
   # `services::health_diagnostics::tests` (4), `services::hang_forensics::tests` (30),
-  # `services::discord::recovery_engine::terminal_text_idempotency::tests` (5),
+  # `services::discord::recovery_engine::terminal_text_idempotency::tests` (5) and
   # `services::discord::session_relay_sink::journal::controller::controller_terminal_semantics_tests` (5) and
   # `services::discord::session_relay_sink::journal::recovery::recovery_terminal_semantics_tests` (5). They
   # track the manifest, so a later PR that adds or removes a library test dates
@@ -1603,6 +1603,11 @@ jobs:
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_inside_the_cohort_and_still_ends_lifecycle_outside_it -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1
+          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1
           env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1
 
       - name: Require relay-authority mutations to be killed
@@ -1615,7 +1620,7 @@ jobs:
         run: bash scripts/run_relay_authority_mutations.sh
 
       # Independent out-of-band backstop: conditional helper or gate mutations
-      # still change bytes and must fail this required, unconditional context.
+      # still change and must fail this required, unconditional context.
       # Run the gate only after its bytes match the reviewed pin, so this job
       # catches a skipped Script checks publisher as well as helper tampering.
       - name: Pin required-check mirror content (#5321)
