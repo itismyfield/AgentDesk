@@ -115,14 +115,16 @@ stranded turn reports 0.0 — indistinguishable from a healthy window where no
 turn was ever stranded. A low value is therefore not an all-clear; only a high
 value carries information (legA r3c P2-6).
 
-Reported but deliberately NOT gated, because S2 does not measure them:
-``frontier_already_covers`` and ``unbound_anchor_left`` are S7a fields (that
-slice computes the frontier for its own gate, so recording it there is free —
-S2 will not add a durable read to the completion path just to observe), and
-``rowless_no_range_share`` is S7a's too: a ``Missing``-at-entry turn is ended by
-the shipped gate before the bridge loop starts, so rowless turns cannot reach a
-loop exit until enforcement lands and the ratio has no denominator here
-(ERRATUM R3-E4/E4-6).
+S7a range telemetry is reported, never gated. ``rowless_no_range_share`` joins
+Missing-at-entry and loop-exit records from the same observed episode; the entry
+``rowless_continuation`` predicate alone is counterfactual, not proof of execution.
+Missing/ambiguous pairs leave the headline ratio unknown, with the measured
+subset and unresolved population shown separately. A completed pair proves only
+that a rowless bridge reached loop exit and recorded a range shape, NOT delivery
+of its body. Whole turns lost before publication are still unobservable here.
+
+``frontier_already_covers`` and ``unbound_anchor_left`` remain unmeasured S7a
+fields. No durable read, new runtime writer, or promotion criterion is added.
 
 Usage::
 
@@ -516,6 +518,83 @@ def tally(events: list[dict]) -> dict:
     }
 
 
+def rowless_range_measurement(events: list[dict]) -> dict:
+    """Measure only paired Missing-at-entry / loop-exit observations.
+
+    `rowless_continuation` at entry is a counterfactual predicate, not an
+    execution receipt. A loop-exit record from the same observed episode and
+    `loop_exit` publication is required before its range enters the denominator.
+    This is range telemetry, NOT proof that Discord received the response.
+
+    Pair on the complete available episode stamp, not on turn_id alone. Missing
+    or conflicting records remain unresolved; duplicate records are ambiguous,
+    not extra completed turns. The headline share is unknown if any observed
+    Missing entry cannot be resolved. The paired subset's observed_share is
+    reported separately. Whole turns lost before publication remain invisible,
+    exactly as they are to the report's existing coverage criteria.
+    """
+    groups: dict[tuple, dict[str, list[dict]]] = {}
+    unattributable = 0
+    text_keys = ("host", "runtime_ptr", "provider", "observed_at")
+    int_keys = ("api_port", "process_generation", "channel_id", "turn_id")
+    for event in events:
+        site, axis = event.get("site"), event.get("axis_a")
+        if site not in ("bridge_entry", "loop_exit") or not isinstance(axis, dict):
+            continue
+        valid_stamp = (
+            all(isinstance(event.get(key), str) and event[key] for key in text_keys)
+            and all(type(event.get(key)) is int and event[key] >= 0 for key in int_keys)
+        )
+        if not valid_stamp:
+            unattributable += int(site == "bridge_entry" and axis.get("guarded_save") == "missing")
+            continue
+        key = tuple(event[field] for field in (*text_keys, *int_keys))
+        pair = groups.setdefault(key, {"bridge_entry": [], "loop_exit": []})
+        pair[site].append(event)
+
+    candidates = paired = no_range = 0
+    reasons: Counter = Counter()
+    for pair in groups.values():
+        entries, exits = pair["bridge_entry"], pair["loop_exit"]
+        if not any(item["axis_a"].get("guarded_save") == "missing" for item in entries):
+            continue
+        candidates += 1
+        if len(entries) != 1 or len(exits) > 1:
+            reasons["ambiguous_records"] += 1
+            continue
+        if not exits:
+            reasons["missing_loop_exit"] += 1
+            continue
+        entry, exit_record = entries[0], exits[0]
+        axis = entry["axis_a"]
+        if not (axis.get("old") == "end" and axis.get("new") == "continue_rowless"
+                and axis.get("rowless_continuation") is True):
+            reasons["inconsistent_entry"] += 1
+            continue
+        if entry.get("publish_reason") != "loop_exit" or exit_record.get("publish_reason") != "loop_exit":
+            reasons["unconfirmed_publication"] += 1
+            continue
+        shape = exit_record["axis_a"].get("lease_range_shape")
+        if shape not in ("absent", "empty", "advancing"):
+            reasons["unknown_range_shape"] += 1
+            continue
+        paired += 1
+        no_range += int(shape in ("absent", "empty"))
+    unresolved = sum(reasons.values())
+    observed_share = no_range / paired if paired else None
+    return {
+        "basis": "paired_missing_entry_loop_exit",
+        "missing_entry_turns": candidates,
+        "paired_loop_exit_turns": paired,
+        "no_range_turns": no_range,
+        "unresolved_entry_turns": unresolved,
+        "unattributable_missing_entries": unattributable,
+        "unresolved_reasons": dict(reasons),
+        "observed_share": observed_share,
+        "share": observed_share if not unresolved and not unattributable else None,
+    }
+
+
 def site_coverage(counts: dict, site: str) -> dict:
     entries = counts.get("bridge_entry", 0)
     covered = counts.get(site, 0)
@@ -646,6 +725,7 @@ def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
     )
     integrity = scoped_integrity(target, by_file)
     criteria = criteria_for(target_counts, stage, integrity)
+    rowless = rowless_range_measurement(target["events"] if target else [])
 
     return {
         "stage": stage,
@@ -670,7 +750,8 @@ def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
         # Context only. Promotion is judged on the target segment above, because
         # two segments can sit at different dial positions.
         "all_segments_turn_samples": len({turn_key(event) for event in lifecycle_events}),
-        "rowless_no_range_share": None,
+        "rowless_no_range_share": rowless["share"],
+        "rowless_range_measurement": rowless,
         "line_integrity": integrity,
         # Context only, for the same reason `all_segments_turn_samples` is: the
         # whole input spans dial positions this promotion case is not about.
@@ -683,6 +764,7 @@ def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
 def render(summary: dict, warnings: list[str]) -> str:
     target = summary["target_segment"]
     days = target["days"]
+    rowless = summary["rowless_range_measurement"]
     lines = [
         f"relay-authority axis-A rollout report (stage {summary['stage']})",
         "",
@@ -712,8 +794,16 @@ def render(summary: dict, warnings: list[str]) -> str:
             f"  evicted share      : {target['evicted_publication_share']} "
             "(displayed, NOT gated — the share that needed a successor to be"
             " logged at all; S4 owns whether it becomes a floor)",
-            "  rowless no_range   : unmeasured (S7a owns it — a rowless turn cannot"
-            " reach loop exit before enforcement)",
+            f"  rowless no_range   : {summary['rowless_no_range_share']} "
+            "(displayed, NOT gated; range telemetry, not delivery proof)",
+            f"  rowless pairs      : {rowless['paired_loop_exit_turns']} / "
+            f"{rowless['missing_entry_turns']} missing-entry episodes; "
+            f"no_range={rowless['no_range_turns']}; "
+            f"observed_share={rowless['observed_share']}",
+            f"  rowless unresolved : {rowless['unresolved_entry_turns']} "
+            f"{rowless['unresolved_reasons']}; unattributable missing entries="
+            f"{rowless['unattributable_missing_entries']} "
+            "(any unresolved entry keeps the headline unknown)",
             f"  integrity scope    : {len(summary['line_integrity']['files'])} file(s) of"
             f" the target segment, excluding"
             f" {summary['line_integrity']['cohabiting_usable_lines']} usable line(s)"

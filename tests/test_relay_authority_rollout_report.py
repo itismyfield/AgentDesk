@@ -895,5 +895,121 @@ class RolloutReportTest(unittest.TestCase):
         )
 
 
+class RowlessRangeReportTest(unittest.TestCase):
+    @staticmethod
+    def pair(turn=1, shape="advancing", observed=BASE, fingerprint=FINGERPRINT):
+        return [
+            event(site="bridge_entry", turn=turn, observed=observed,
+                  fingerprint=fingerprint,
+                  axis_a={"guarded_save": "missing", "old": "end",
+                          "new": "continue_rowless", "rowless_continuation": True}),
+            event(site="loop_exit", turn=turn, observed=observed,
+                  fingerprint=fingerprint, axis_a={"lease_range_shape": shape}),
+        ]
+
+    def test_same_episode_pairs_measure_only_rowless_ranges(self):
+        rows = self.pair(1, "absent") + self.pair(2, "empty") + self.pair(3)
+        # A row-present turn with no range must not inflate the numerator.
+        rows += turns(1, days=1, sites=("bridge_entry", "loop_exit"))
+        rows[-1]["axis_a"]["lease_range_shape"] = "absent"
+        summary = RolloutReportTest().run_report(rows)
+        self.assertEqual(summary["rowless_no_range_share"], 2 / 3)
+        measured = summary["rowless_range_measurement"]
+        self.assertEqual(measured["missing_entry_turns"], 3)
+        self.assertEqual(measured["paired_loop_exit_turns"], 3)
+        self.assertEqual(measured["no_range_turns"], 2)
+        self.assertEqual(report.rowless_range_measurement(rows[::-1]), measured)
+        self.assertIn("range telemetry, not delivery proof", report.render(summary, []))
+
+    def test_counterfactual_or_partial_entries_remain_unknown_not_zero(self):
+        for rows in ([], self.pair()[:1], self.pair(1) + self.pair(2)[:1]):
+            with self.subTest(rows=len(rows)):
+                summary = RolloutReportTest().run_report(rows)
+                self.assertIsNone(summary["rowless_no_range_share"])
+        measured = summary["rowless_range_measurement"]
+        self.assertEqual(measured["paired_loop_exit_turns"], 1)
+        self.assertEqual(measured["observed_share"], 0.0)
+        self.assertEqual(measured["unresolved_entry_turns"], 1)
+        self.assertEqual(measured["unresolved_reasons"], {"missing_loop_exit": 1})
+
+    def test_pairing_requires_the_full_available_episode_stamp(self):
+        changes = {"host": "other", "runtime_ptr": "0x2", "provider": "claude",
+                   "observed_at": "2026-08-01 09:00:01", "api_port": 8791,
+                   "process_generation": 8, "channel_id": 4259301, "turn_id": 2}
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                rows = self.pair()
+                rows[1][field] = value
+                measured = report.rowless_range_measurement(rows)
+                self.assertEqual(measured["paired_loop_exit_turns"], 0)
+                self.assertIsNone(measured["share"])
+
+    def test_duplicate_or_conflicting_records_are_not_extra_completions(self):
+        for index in (0, 1):
+            for conflicting in (False, True):
+                with self.subTest(index=index, conflicting=conflicting):
+                    rows = self.pair()
+                    extra = json.loads(json.dumps(rows[index]))
+                    if conflicting:
+                        extra["axis_a"].update(guarded_save="saved", lease_range_shape="empty")
+                    rows.append(extra)
+                    measured = report.rowless_range_measurement(rows)
+                    self.assertEqual(measured["paired_loop_exit_turns"], 0)
+                    self.assertEqual(measured["unresolved_reasons"], {"ambiguous_records": 1})
+                    self.assertIsNone(measured["share"])
+
+    def test_unproven_publication_and_unknown_shape_are_not_measurements(self):
+        for index in (0, 1):
+            rows = self.pair()
+            rows[index].pop("publish_reason")
+            self.assertEqual(report.rowless_range_measurement(rows)["unresolved_reasons"],
+                             {"unconfirmed_publication": 1})
+        rows = self.pair()
+        rows[0]["publish_reason"] = "evicted"
+        self.assertIsNone(report.rowless_range_measurement(rows)["share"])
+        for value in (None, "unknown", [], True):
+            measured = report.rowless_range_measurement(self.pair(shape=value))
+            self.assertIsNone(measured["share"])
+            self.assertEqual(measured["unresolved_reasons"], {"unknown_range_shape": 1})
+        for value in (False, 1, "true", None):
+            rows = self.pair()
+            rows[0]["axis_a"]["rowless_continuation"] = value
+            self.assertEqual(report.rowless_range_measurement(rows)["unresolved_reasons"],
+                             {"inconsistent_entry": 1})
+
+    def test_missing_or_untyped_identity_cannot_create_zero_success(self):
+        for field, bad in (("runtime_ptr", None), ("provider", ""),
+                           ("process_generation", True), ("api_port", "8790")):
+            with self.subTest(field=field):
+                rows = self.pair(1) + self.pair(2, "absent")
+                rows[2][field] = bad
+                measured = report.rowless_range_measurement(rows)
+                self.assertEqual(measured["paired_loop_exit_turns"], 1)
+                self.assertEqual(measured["unattributable_missing_entries"], 1)
+                self.assertIsNone(measured["share"])
+
+    def test_only_the_newest_segment_contributes_rowless_pairs(self):
+        history = self.pair(1, "empty")
+        excursion = self.pair(2, "absent", BASE + timedelta(hours=1), "observe:50:other")
+        current = self.pair(3, "advancing", BASE + timedelta(hours=2))
+        summary = RolloutReportTest().run_report(history + excursion + current)
+        self.assertEqual(len(summary["segments"]), 3)
+        self.assertEqual(summary["rowless_no_range_share"], 0.0)
+        self.assertEqual(summary["rowless_range_measurement"]["paired_loop_exit_turns"], 1)
+
+    def test_range_telemetry_never_changes_the_six_promotion_criteria(self):
+        rows = turns(210, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))
+        baseline = RolloutReportTest().run_report(rows)
+        rows[0]["axis_a"].update(guarded_save="missing", old="end", new="continue_rowless",
+                                  rowless_continuation=True)
+        rows[2]["axis_a"]["lease_range_shape"] = "empty"
+        measured = RolloutReportTest().run_report(rows)
+        self.assertEqual(measured["rowless_no_range_share"], 1.0)
+        self.assertEqual(measured["criteria"], baseline["criteria"])
+        self.assertEqual(measured["promotion_ready"], baseline["promotion_ready"])
+        self.assertEqual(measured["target_segment"]["unmeasured_fields"],
+                         baseline["target_segment"]["unmeasured_fields"])
+
+
 if __name__ == "__main__":
     unittest.main()
