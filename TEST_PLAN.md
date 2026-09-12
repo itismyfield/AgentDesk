@@ -12,7 +12,7 @@ Every PR must include:
 - Why
 - WorkFingerprint (Agent, Boundary, Primary files, Queue hygiene invariant, Related PRs/issues, Non-overlapping reason)
 - Duplicate/overlap check
-- Verification commands and results
+- Verification commands and results (If the change is docs-only, explicitly state 'docs-only' and list the source files or commands used to verify the documentation)
 - Skipped checks and reasons
 - Risk and rollback notes
 

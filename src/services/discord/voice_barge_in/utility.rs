@@ -1,3 +1,5 @@
+use crate::voice::utils::expand_tilde;
+
 use super::*;
 
 pub(super) fn pcm_i16_to_le_bytes(samples: &[i16]) -> Vec<u8> {
@@ -52,19 +54,6 @@ pub(super) async fn remove_file_quietly_silent(path: &Path) {
 
 pub(super) fn transcript_dirs_from_config(config: &VoiceConfig) -> Vec<PathBuf> {
     vec![expand_tilde(&config.audio.transcripts_dir)]
-}
-
-fn expand_tilde(path: &Path) -> PathBuf {
-    let raw = path.to_string_lossy();
-    if raw == "~" {
-        return dirs::home_dir().unwrap_or_else(|| path.to_path_buf());
-    }
-    if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
-    }
-    path.to_path_buf()
 }
 
 pub(super) fn lock_monitor(

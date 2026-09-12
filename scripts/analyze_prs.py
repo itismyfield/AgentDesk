@@ -123,6 +123,17 @@ def has_stale_branch_cleanup_ack(body):
         ],
     )
 
+def has_pr_size_ack(body):
+    if re.search(r"(?im)^[ \t]*[-*][ \t]*\[[xX]\][ \t]*\*\*pr size:\*\*", body):
+        return True
+    return has_non_empty_body_field(
+        body,
+        [
+            "pr size",
+            "pr-size",
+        ],
+    )
+
 def has_scratch_file_cleanup_ack(body):
     if re.search(r"(?im)^[ \t]*[-*][ \t]*\[[xX]\][ \t]*\*\*scratch file cleanup:\*\*", body):
         return True
@@ -189,6 +200,7 @@ def is_scratch_file_path(path):
 
     global_scratch_files = {
         "pr-body.md",
+        "pr_body.md",
         "plan.md",
         "plan.txt",
         "prs.json",
@@ -278,6 +290,8 @@ def main():
             print("  [!] MISSING OVERLAP CHECK: PR body lacks a completed duplicate/overlap guard acknowledgement.")
         if not has_scratch_file_cleanup_ack(body):
             print("  [!] MISSING SCRATCH FILE CLEANUP CHECK: PR body lacks a completed scratch file cleanup acknowledgement.")
+        if not has_pr_size_ack(body):
+            print("  [!] MISSING PR SIZE CHECK: PR body lacks a completed PR size acknowledgement.")
         if not has_non_empty_body_field(body, ["verification commands and results", "verification"]):
             print("  [!] MISSING VERIFICATION: PR body lacks the required 'verification' commands and results.")
         if not has_non_empty_body_field(

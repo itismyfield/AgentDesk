@@ -150,7 +150,7 @@ export default function AgentFormModal({
               aria-label={tr("스프라이트 번호", "Sprite Number")}
               aria-valuenow={spriteNum || 0}
               aria-valuemin={0}
-              aria-valuetext={spriteNum ? t({ ko: `선택된 스프라이트: ${spriteNum}`, en: `Selected sprite: ${spriteNum}` }) : tr("선택 안됨", "Not selected")}
+              aria-valuetext={spriteNum ? tr(`선택된 스프라이트: ${spriteNum}`, `Selected sprite: ${spriteNum}`) : tr("선택 안됨", "Not selected")}
               tabIndex={0}
               onKeyDown={(e) => {
                 if (e.currentTarget !== e.target) {
@@ -170,6 +170,7 @@ export default function AgentFormModal({
               <div className="flex flex-col items-center gap-1">
                 <button
                   type="button"
+                  tabIndex={-1}
                   aria-label={tr("다음 스프라이트", "Next Sprite")}
                   className="w-6 h-6 rounded flex items-center justify-center text-xs transition-colors"
                   style={{
@@ -191,18 +192,15 @@ export default function AgentFormModal({
                   {spriteNum > 0 ? (
                     <img
                       src={`/sprites/${spriteNum}-D-1.png`}
-                      alt={t({ ko: `선택된 스프라이트 미리보기: ${spriteNum}`, en: `Selected sprite preview: ${spriteNum}` })}
+                      alt=""
+                      aria-hidden="true"
                       className="w-full h-full object-cover"
                       style={{ imageRendering: "pixelated" }}
                     />
                   ) : (
                     <span
                       className="text-2xl"
-                      role="img"
-                      aria-label={t({
-                        ko: `선택된 이모지 미리보기: ${formValues.avatar_emoji || "🤖"}`,
-                        en: `Selected emoji preview: ${formValues.avatar_emoji || "🤖"}`,
-                      })}
+                      aria-hidden="true"
                     >
                       {formValues.avatar_emoji || "🤖"}
                     </span>
@@ -210,6 +208,7 @@ export default function AgentFormModal({
                 </div>
                 <button
                   type="button"
+                  tabIndex={-1}
                   aria-label={tr("이전 스프라이트", "Previous Sprite")}
                   className="w-6 h-6 rounded flex items-center justify-center text-xs transition-colors"
                   style={{
