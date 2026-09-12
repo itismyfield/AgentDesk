@@ -55,12 +55,34 @@ def git(*args: str, binary: bool = False) -> str | bytes:
     return result.stdout
 def oid(ref: str, suffix: str = "commit") -> str:
     return str(git("rev-parse", "--verify", f"{ref}^{{{suffix}}}" if suffix else ref)).strip()
-# Provenance binds a verdict to the event's own immutable (base, head, candidate)
-# triple and to the checked-out candidate. It deliberately does NOT require
-# base == origin/main: an unrelated main advance must not invalidate an already
-# verified candidate. Integration-step freshness is a procedural guarantee --
-# see docs/agent-maintenance/merge-driver-inventory.md.
+# Bind the verdict to the immutable candidate and its ordered (base, head)
+# parents, never to a live origin/main ref. The event's base SHA may lag the
+# base used by GitHub to synthesize that candidate; retain it as evidence and
+# require it to be an ancestor of the candidate's comparison base.
+# Merge-time freshness remains the integrator's separate responsibility.
 def provenance_matches(candidate: str, base: str, head: str, parents: list[str]) -> bool: return parents == [candidate, base, head]
+
+def pr_comparison_base(candidate: str, event_base: str, head: str,
+                       parents: list[str]) -> str:
+    """Resolve only a forward base advance on the event-provided candidate.
+
+    GITHUB_SHA pins the candidate and the second parent must still be the
+    event's exact head. A rewind, unrelated base, unavailable object, or Git
+    error fails closed. No fetch or mutable branch lookup is involved.
+    """
+    mismatch = "event/base/head/merge object provenance mismatch"
+    if len(parents) != 3 or not provenance_matches(candidate, parents[1], head, parents):
+        raise RuntimeError(mismatch)
+    comparison_base = parents[1]
+    if comparison_base != event_base:
+        try:
+            git("merge-base", "--is-ancestor", event_base, comparison_base)
+        except subprocess.CalledProcessError as error:
+            if error.returncode == 1:
+                raise RuntimeError(mismatch) from error
+            raise  # Operational errors are not evidence of ancestry.
+    return comparison_base
+
 def archive(ref: str, destination: Path) -> None:
     with tarfile.open(fileobj=io.BytesIO(git("archive", "--format=tar", ref, binary=True))) as bundle:
         members = bundle.getmembers()
@@ -204,7 +226,7 @@ def production_line_numbers(text: str, production_loc: int) -> set[int]:
             continue
         brace = text.rindex("{", match.start(), match.end())
         try:
-            _body, end = inventory.scan_balanced(text, brace, "{", "}")
+            _body, end = inventory.scan_balanced(text, brace, "{", "}"))
         except inventory.ParseError:
             continue
         test_lines.update(range(inventory.offset_to_line(text, match.start()),
@@ -570,19 +592,24 @@ def main() -> int:
         candidate_sha = oid(candidate_sha)
         if oid("HEAD") != candidate_sha:
             raise RuntimeError("candidate SHA is not checked-out HEAD")
+        if event == "pull_request":
+            selector = "pr_strict_progress"
+            if repository != "itismyfield/AgentDesk" or env.get("GFP_HEAD_REPOSITORY") != repository:
+                raise RuntimeError("progress requires an exact same-repository PR")
+            event_base_sha = oid(env.get("GFP_BASE_SHA", ""))
+            head_sha = oid(env.get("GFP_HEAD_SHA", ""))
+            parents = str(git("rev-list", "--parents", "-n1", candidate_sha)).split()
+            payload.update({"event_base_sha": event_base_sha, "head_sha": head_sha,
+                            "merge_sha": candidate_sha, "candidate_parents": parents[1:]})
+            base_sha = pr_comparison_base(candidate_sha, event_base_sha, head_sha, parents)
+            payload.update({"comparison_base_sha": base_sha, "merge_first_parent": base_sha})
+        # Reject malformed provenance before archiving or inventory scanning.
         today = inventory.today_utc()
         with tempfile.TemporaryDirectory() as temporary:
             candidate_root = Path(temporary) / "candidate"
             candidate_root.mkdir(); archive(candidate_sha, candidate_root)
             candidate = inventory.giant_file_snapshot(candidate_root, evaluation_date=today)
             if event == "pull_request":
-                selector = "pr_strict_progress"
-                if repository != "itismyfield/AgentDesk" or env.get("GFP_HEAD_REPOSITORY") != repository:
-                    raise RuntimeError("progress requires an exact same-repository PR")
-                base_sha, head_sha = oid(env.get("GFP_BASE_SHA", "")), oid(env.get("GFP_HEAD_SHA", ""))
-                parents = str(git("rev-list", "--parents", "-n1", candidate_sha)).split()
-                if not provenance_matches(candidate_sha, base_sha, head_sha, parents):
-                    raise RuntimeError("event/base/head/merge object provenance mismatch")
                 base_root = Path(temporary) / "base"
                 base_root.mkdir(); archive(base_sha, base_root)
                 base = inventory.giant_file_snapshot(base_root, evaluation_date=today)
@@ -621,7 +648,7 @@ def main() -> int:
                     raise RuntimeError("; ".join(errors))
                 if selector == "pr_ledger_repair":
                     retired = set()  # Deadline movement does not retire a source entry.
-                payload.update({"event_base_sha": base_sha,
+                payload.update({"event_base_sha": event_base_sha,
                     "merge_first_parent": parents[1], "head_sha": head_sha, "merge_sha": candidate_sha,
                     "base_tree": oid(base_sha, "tree"), "base_overdue": base["overdue"],
                     "retired": [{"path": path, "base_prod_loc": base["modules"][path], "candidate_prod_loc": candidate["modules"][path], "children": [{"path": child, "candidate_prod_loc": candidate["modules"][child]} for child in facts["children"][path]]} for path in sorted(retired)],
