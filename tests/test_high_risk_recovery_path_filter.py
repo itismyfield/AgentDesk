@@ -20,6 +20,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIR = REPO_ROOT / ".github/workflows"
 WORKFLOW_PATH = WORKFLOW_DIR / "ci-pr.yml"
 LANE = "high_risk_recovery"
+GATES_DOC = REPO_ROOT / "docs/ci/release-gates.md"
+ALWAYS_ON = "### Always-on (필터 없음)"
 # One file per module imported by the three SUTs this lane runs:
 # `src/high_risk_recovery.rs`, `services::hang_forensics` and
 # `services::health_diagnostics`.
@@ -117,6 +119,22 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
         self.assertNotIn("if", job["high-risk-recovery"])
         self.assertNotIn("needs", job["high-risk-recovery"])
         self.assertEqual(list(filter_blocks(workflow)), [])
+
+    def test_release_gates_doc_agrees_with_ci_main_gating(self) -> None:
+        """Nothing read `docs/ci/release-gates.md`, so the commit above left
+        it still describing a `needs: changes` gate on main. A reader who
+        trusts the doc restores that `if:` -- which is #5232 re-opening.
+        Anchor both directions on the job's own `name`, not on prose."""
+        job = yaml.safe_load(
+            (WORKFLOW_DIR / "ci-main.yml").read_text(encoding="utf-8")
+        )["jobs"]["high-risk-recovery"]
+        _, heading, rest = GATES_DOC.read_text(encoding="utf-8").partition(ALWAYS_ON)
+        self.assertTrue(heading, f"release-gates.md: `{ALWAYS_ON}` section is gone")
+        self.assertEqual(
+            not {"if", "needs"} & job.keys(),
+            job["name"] in rest.split("\n###", 1)[0],
+            "ci-main gating and the release-gates.md always-on list disagree",
+        )
 
     def test_every_pattern_stays_inside_the_reimplemented_dialect(self) -> None:
         """Same scope as the `!` guard: a pattern `pattern_to_regex` cannot
