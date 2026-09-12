@@ -144,6 +144,11 @@ jobs:
               - 'src/services/hang_forensics.rs'
               - 'src/services/health_diagnostics.rs'
               - 'src/services/message_outbox.rs'
+              # #5232 R3: these five, and `outbound/source_registry.rs` above
+              # (already covered by `src/services/discord/**`), match no target
+              # among this job's 21 `cargo test --lib` invocations. They stay as
+              # part of the deliberate superset -- not, as previously claimed,
+              # because a ci-pr-only target shadows them.
               - 'src/services/message_outbox_recovery.rs'
               - 'src/services/message_outbox_recovery_support.rs'
               - 'src/services/message_outbox_recovery_tests.rs'
@@ -161,6 +166,19 @@ jobs:
               - 'src/services/observability/**'
               - 'Cargo.lock'
               - '.cargo/**'
+              # #5232 R3: 1-hop imports of the lane's OTHER two SUTs. The list
+              # above only ever tracked `src/high_risk_recovery.rs`, but this
+              # job also runs `services::hang_forensics::tests` and
+              # `services::health_diagnostics::tests`, and the latter reaches
+              # all four of these from its production path
+              # (`health_diagnostics.rs:65,311,448,469`). `platform/mod.rs` is
+              # the re-export `high_risk_recovery.rs:992` goes through, and its
+              # own comment declares itself temporary.
+              - 'src/config_live_reload.rs'
+              - 'src/services/dispatch_gate.rs'
+              - 'src/services/health_active_session_audit.rs'
+              - 'src/services/platform/mod.rs'
+              - 'src/services/session_activity.rs'
             pg_db:
               - '.github/workflows/**'
               - 'justfile'

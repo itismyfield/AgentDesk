@@ -20,12 +20,22 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIR = REPO_ROOT / ".github/workflows"
 WORKFLOW_PATH = WORKFLOW_DIR / "ci-pr.yml"
 LANE = "high_risk_recovery"
-# Every module `src/high_risk_recovery.rs` imports, one file each.
+# One file per module imported by the three SUTs this lane runs:
+# `src/high_risk_recovery.rs`, `services::hang_forensics` and
+# `services::health_diagnostics`.
 ONE_HOP_IMPORTS = """defaults.json policies/default-pipeline.yaml src/config.rs
     src/pipeline.rs src/services/dispatches/discord_delivery/mod.rs
     src/services/dispatches/outbox_queue.rs src/services/observability/mod.rs
-    src/services/git/commit_resolver.rs""".split()
+    src/services/git/commit_resolver.rs src/services/platform/mod.rs
+    src/config_live_reload.rs src/services/dispatch_gate.rs
+    src/services/health_active_session_audit.rs
+    src/services/session_activity.rs""".split()
 SUPPORTED_SEGMENT = re.compile(r"^[A-Za-z0-9._-]*\*?[A-Za-z0-9._-]*$")
+
+
+def workflow_files() -> list[Path]:
+    """GitHub honours both extensions; walking one leaves a blind spot."""
+    return sorted(q for ext in ("*.yml", "*.yaml") for q in WORKFLOW_DIR.glob(ext))
 
 
 def filter_blocks(workflow: Path):
@@ -39,7 +49,12 @@ def filter_blocks(workflow: Path):
 
 
 def load_filters(workflow: Path = WORKFLOW_PATH) -> dict[str, tuple[str, ...]]:
-    return {n: tuple(p) for n, p in next(filter_blocks(workflow)).items()}
+    """The block defining this lane -- not merely the first block declared,
+    which any new paths-filter job ahead of `changes` would displace."""
+    for block in filter_blocks(workflow):
+        if LANE in block:
+            return {n: tuple(p) for n, p in block.items()}
+    raise AssertionError(f"{workflow.name}: no paths-filter block defines {LANE}")
 
 
 def _atom(part: str) -> str:
@@ -76,7 +91,7 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
         same `!` line. Walk the directory so new workflows are covered too."""
         blocks = [
             (wf.name, b)
-            for wf in sorted(WORKFLOW_DIR.glob("*.yml"))
+            for wf in workflow_files()
             for b in filter_blocks(wf)
         ]
         negated = [
@@ -84,25 +99,37 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
             if q.startswith("!")
         ]
         self.assertEqual(negated, [], "a leading `!` re-opens the #5232 defect")
-        self.assertLessEqual({"ci-pr.yml", "ci-main.yml"}, {wf for wf, _ in blocks})
+        self.assertIn("ci-pr.yml", {wf for wf, _ in blocks})
 
-    def test_both_workflows_select_the_lane_for_its_one_hop_imports(self) -> None:
-        """Both workflows run `cargo test --lib high_risk_recovery::`, so both
-        must select for every module `src/high_risk_recovery.rs` imports."""
-        for workflow in ("ci-pr.yml", "ci-main.yml"):
-            filters = load_filters(WORKFLOW_DIR / workflow)
-            for path in ONE_HOP_IMPORTS:
-                with self.subTest(workflow=workflow, path=path):
-                    self.assertIn(LANE, select(filters, [path]))
+    def test_the_lane_selects_for_every_one_hop_import_of_its_suts(self) -> None:
+        """`ci-pr.yml` gates this lane on a path list, so the list has to reach
+        every module its SUTs import; a miss skips the lane silently."""
+        for path in ONE_HOP_IMPORTS:
+            with self.subTest(path=path):
+                self.assertIn(LANE, select(self.filters, [path]))
+
+    def test_ci_main_runs_the_lane_unconditionally(self) -> None:
+        """#5232 R3: ci-main has no library sweep behind this lane, so a filter
+        miss there is unrecoverable. It pays the lane once per merge instead of
+        gating it, and keeps no unread filter to drift out of date."""
+        workflow = WORKFLOW_DIR / "ci-main.yml"
+        job = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"]
+        self.assertNotIn("if", job["high-risk-recovery"])
+        self.assertNotIn("needs", job["high-risk-recovery"])
+        self.assertEqual(list(filter_blocks(workflow)), [])
 
     def test_every_pattern_stays_inside_the_reimplemented_dialect(self) -> None:
-        for name, patterns in self.filters.items():
-            for q in patterns:
-                with self.subTest(filter=name, pattern=q):
-                    body = q[: -len("/**")] if q.endswith("/**") else q
-                    self.assertNotIn("**", body, "`**` only as a trailing segment")
-                    for segment in body.split("/"):
-                        self.assertRegex(segment, SUPPORTED_SEGMENT)
+        """Same scope as the `!` guard: a pattern `pattern_to_regex` cannot
+        reproduce would make every `select()` assertion above meaningless."""
+        for wf in workflow_files():
+            for block in filter_blocks(wf):
+                for name, patterns in block.items():
+                    for q in patterns:
+                        with self.subTest(workflow=wf.name, filter=name, pattern=q):
+                            body = q[: -len("/**")] if q.endswith("/**") else q
+                            self.assertNotIn("**", body, "`**` only trails")
+                            for segment in body.split("/"):
+                                self.assertRegex(segment, SUPPORTED_SEGMENT)
 
     def test_unrelated_documentation_change_does_not_select_the_lane(self) -> None:
         changed = ["docs/architecture/relay.md", "README.md", "AGENTS.md"]
