@@ -102,7 +102,7 @@
 | #5869 `b635d7bee1` (#5755 / #5464, 2026-09-11) | `tmux_watcher/terminal_commit_epilogue.rs` 가 `committed_row_cleanup_allowed = !completion_is_stale_for_newer_turn && !anchor_cleanup_is_stale_for_newer_turn` 를 도입해, cleanup 신원 포착·tombstone 기록/배수·행 clear 3지점이 모두 이 결합 veto 뒤로 들어갔다(기존에는 세 지점 모두 `completion_is_stale_for_newer_turn` 단독 판정). 시작이 terminal 종료보다 앞선 현재 zero-id 행의 통상 cleanup 은 유지된다. 프로덕션 변경 10줄. | **대체한 레거시 경로:** completion staleness 만 보고 anchor staleness 를 보지 않아, 오래된 terminal 이 더 새로운 anchored/external zero-id inflight 행을 제거하거나 그 completion tombstone 을 만들 수 있던 판정. **영구 보존:** id-0 을 포함하는 결합 stale veto, 기존 identity·nonce·restart·rebind 보호. **이 착지는 위 #5767 행이 서술한 terminal cleanup 권위를 3일 뒤 좁힌 보정이므로, #5767 행은 착지 시점 기준으로 읽는다.** #5808 C1/C2, watcher/retention 전체 수용, 과거 인시던트는 이 착지 밖 — **미측정.** |
 | #5867 `ccb2eddb1b` (#5071, 2026-09-11) | `tmux_watcher/utf8_chunk_decoder.rs`의 `Utf8ChunkDecoder::decode`가 `decode_source`로 바뀌어 `WatcherSourceAuthority`(신설 `source_file` 포함)를 동반한다. partial-scalar carry는 authority 완전 일치·file identity·generation 존재·offset 연속성이 모두 성립할 때만 유지되고, 하나라도 어긋나면 mixed로 남는다(기존 decode byte/output 자체는 무변경). `session_relay_sink.rs`·`turn_stream_collector.rs`·`loop_poll_prologue.rs` 동반 변경. 9파일 +291/−44. | **대체한 레거시 경로:** partial UTF-8 scalar가 연속 read에 걸칠 때 source provenance 없이(파일이 rename/rotate 돼도 구분 없이) 그대로 이어붙이던 `decode`. **영구 보존:** 기존 decoder byte/output 동작 자체, 4축 불일치 시 mixed 유지. PR 본문 자기 판정상 `source_stamp`는 착지 시점 default `Legacy` 경로에서 아직 소비자가 없고, retained-frame handoff·collector-task 런타임 수용은 이 착지 밖 — **미측정.** |
 | #5875 `afb1cc7727` (#5464 T5 B3, 2026-09-12) | `inflight/clear_store/identity.rs`에 `InflightTurnIdentity::is_unnameable()`(`user_msg_id == 0 && turn_start_offset.is_none()`) 신설, `guarded_identity_clear_outcome` 등 identity-guarded clear 진입점에서 기존 4축 `matches_state`(user_msg_id·started_at·tmux_session_name·turn_start_offset) 판정과의 결합 조건으로 추가했다. `inflight.rs`·`inflight/model/identity.rs` 동반. 4파일 +330/−14. | **대체한 레거시 경로:** `user_msg_id`(id-0 상시 0)·`started_at`(초 단위 충돌)·`tmux_session_name`(공유 pane, None==None)이 우연히 겹치고 `turn_start_offset`마저 `None`인 id-0 행을 서로 다른 turn과 구분하지 못한 채 mid-turn 삭제를 허용하던 4축 `matches_state` 단독 판정. **영구 보존:** `clear_inflight_state_if_matches_zero_owned`를 통한 id-0 행의 자기 own-row 정리(이 predicate 미경유), `rebind_origin && matches_state && nonce`인 rebind-origin clear 경로(is_unnameable 미적용), nonce·generation exact-episode fencing. `build_inflight_for_guard_tests` 인자 오배치 결함(#5880)은 이 착지 밖 — **미측정.** |
-| #5883 `bff57eb9af` (#5464 T5 A7, 2026-09-12) | `relay_recovery/authority_retention.rs` 신설, `prune_observation_dir_once_per_day`가 axis-A(`authority_observation::append_jsonl`)·axis-B(`relay_recovery::append_axis_b_jsonl`) 양쪽 진입점에서 같은 일자 디렉터리에 대해 하루 1회만 호출된다. 보존 윈도 30일, 파일 단위 삭제(라인 필터링 없음). 5파일 +349/−1. | **대체한 레거시 경로: 없음(순수 추가).** `relay_authority/YYYY-MM-DD.jsonl` 공유 관측 싱크에 정리 소유자가 없어 무한 누적되던 상태(§S2/design §5.4/audit §8 L-8)에 처음으로 보존 정책을 붙였다. **영구 보존:** 30일 창(promotion 게이트가 요구하는 13일 세그먼트를 담보), 디렉터리+일자 키 latch, 파일 단위(라인 미필터) 삭제. 라이브 운영 디렉터리는 착지 중 손대지 않았다(테스트는 temp dir만 사용). 삭제 카운트 미기록(#5893), 파괴적 호출부 ratchet 미인식(#5894) 등 알려진 잔여는 이 착지 밖 — **미측정.** |
+| #5883 `bff57eb9af` (#5464 T5 A7, 2026-09-12) | `relay_recovery/authority_retention.rs` 신설, `prune_observation_dir_once_per_day`가 axis-A(`authority_observation::append_jsonl`)·axis-B(`relay_recovery::append_axis_b_jsonl`) 양쪽 진입점에서 같은 일자 디렉터리에 대해 하루 1회만 호출된다. 보존 윈도 30일, 파일 단위 삭제(라인 필터링 없음). 5파일 +349/−1. axis-B 진입점은 이후 `730ccd418a` 가 제거해, base 기준 프로덕션 호출자는 axis-A 하나뿐이다. | **대체한 레거시 경로: 없음(순수 추가).** `relay_authority/YYYY-MM-DD.jsonl` 공유 관측 싱크에 정리 소유자가 없어 무한 누적되던 상태(§S2/design §5.4/audit §8 L-8)에 처음으로 보존 정책을 붙였다. **영구 보존:** 30일 창(promotion 게이트가 요구하는 13일 세그먼트를 담보), 디렉터리+일자 키 latch, 파일 단위(라인 미필터) 삭제. 라이브 운영 디렉터리는 착지 중 손대지 않았다(테스트는 temp dir만 사용). 삭제 카운트 미기록(#5893), 파괴적 호출부 ratchet 미인식(#5894) 등 알려진 잔여는 이 착지 밖 — **미측정.** **단 "영구 보존"은 싱크가 살아 있는 동안의 정책 의미이고 이 모듈 자체는 S9 회수 대상이다** — `authority_observation.rs` 회수 시 호출자가 0 이 되므로 §S1 "S9 예약 절감치 정정" 의 A3 목록에 141줄로 계상된다. |
 
 #5851의 production-loop 이벤트 테스트는 registry change와 final drain을 행사한다.
 lagged 지점은 lexical 검사이고 boot 초기 teardown 목록은 비어 있으므로 네 지점 모두의
@@ -238,7 +238,13 @@ enforce 100% 집행은 2026-09-06 enforce/100 전환으로 확정됐고, **롤�
 
 #### S9 예약 절감치 정정 — −230 은 S1 시점 수치다 (2026-09-12 재측정, base `26687f6264`)
 
-−230 은 S1(`af89885c8b`, #5470) 착지분만 반영한 값이다(그 PR 자기보고 prod +238 과 일치).
+−230 은 S1(#5470) 착지분만 반영한 값이다. 단 그 PR 자기보고 **+238** 은 착지 커밋에서 재현되지
+않는다 — 같은 정의로 재측정하면 스쿼시 머지 `af89885c8b` 가 **+261**, 스쿼시 전 브랜치 커밋
+`667dec6a3` 이 **+238** 이고 차이 23줄은 전량 `cohort.rs`(124 → 147, 스쿼시 직전 리뷰 수리분)다.
+이 리포의 기준 SHA 는 착지(트렁크 first-parent) 커밋이고 `667dec6a3` 은 트렁크에 없으므로, S1
+기준값은 `af89885c8b` 의 **+261** 이며 +238 은 브랜치 시점 값으로만 인용한다(`change-surfaces.md:2258`
+의 "the landed commit `667dec6a3`" 오기는 같이 정정했다). −230 은 +238 과 8줄, +261 과 31줄
+차이라 "일치"가 아니라 같은 자릿수의 근사다.
 이후 §S2 가 같은 행에 `authority_observation.rs`(prod 759)를, A7(#5883)이
 `authority_retention.rs`(prod 141)를 얹는 동안 한 번도 재계산되지 않았다. 재측정치는
 **기준에 따라 둘**이고 둘 다 이 리포 자신의 정의를 쓴다 —
@@ -249,15 +255,30 @@ enforce 100% 집행은 2026-09-06 enforce/100 전환으로 확정됐고, **롤�
 | 기준 | 재측정 | 구성 |
 |---|---|---|
 | **A3 목록** — 예약 파일 전량만 | **−1,148 prod** | `authority_observation.rs` 759 + `cohort.rs` 248 + `authority_retention.rs` 141 |
-| **컴파일 클로저** — A3 목록 + 소비자를 잃는 줄 | **−1,353 prod** | 1,148 + 위성 205(`config.rs` 81 / `health_api.rs` 28 / `health/snapshot.rs` 22 / 기록 4지점 38 / mod 선언 6 / cohort 게이트 소비자 2개 30) |
+| **컴파일 클로저** — A3 목록 + 소비자를 잃는 줄 | **−1,357 prod** | 1,148 + 위성 209(`config.rs` 85 / `health_api.rs` 28 / `health/snapshot.rs` 22 / 기록 5호출지점·4파일 38 / mod 선언 6 / cohort 게이트 소비자 2개 30) |
 
 클로저의 판정 경계는 cohort 게이트 소비자 2개(합 30줄)다 — enforce/100 에서는 삭제가 아니라
 무조건분기로 접히므로 회수분에 넣을지는 설계 판단이다.
+
+`config.rs` 85 의 유도: S1 이 그 파일에 넣은 160줄 중 프로덕션은 3훵크(enum+3술어+skip guard 74 /
+`runtime` 2필드 9 / `is_default` 2)뿐이고, 나머지 75줄은 `#[cfg(test)] mod` 안이라 prod 가 아니다.
+`기록` 38 의 단위는 호출지점이며(§S2 "기록 3지점"과 같은 용법) 5호출지점이 4파일에 흩어져 있다.
+
+**A3 목록이 `authority_retention.rs` 를 포함하는 근거** (S1 지분·S2 지분과 같은 형식으로 남긴다).
+이 파일은 `authority_observation.rs` 의 순수 종속이다 — `prune_observation_dir_once_per_day` 의
+프로덕션 호출자는 base 기준 `authority_observation.rs:656`(`append_jsonl` 내부) 하나뿐이고, A7 착지
+시점의 axis-B 진입점 `relay_recovery::append_axis_b_jsonl` 은 `730ccd418a`("retire axis-B recovery
+observation")가 통째로 제거했다. S9 가 `authority_observation.rs` 전량을 회수하면 호출자가 0 이 되어
+이 파일도 함께 사라진다. 위 클로저의 "mod 선언 6" 도 이미 `relay_recovery.rs:51-52`(이 파일의 선언)를
+회수분으로 세고 있다. A7 행(`:105`)의 "영구 보존"은 싱크가 살아 있는 동안의 정책 의미이지 이 모듈의
+S9 면제가 아니다 — 그 행도 같이 갱신했다.
 
 **한계 — 정본 §6.1 의 S9 행 원문은 아무도 읽지 못했다.** `design-t5-r3.md` 가 리포·파일시스템
 어디에도 없어 −230 의 원 정의는 2차 자료(#5464 감사 코멘트 A3 행 + S1 PR 자기보고)로 재구성한
 것이다. "S1 시점 수치"라는 귀속은 그 재구성에 근거한 판정이지 원문 대조가 아니며, 클로저 값도
 정적 열거일 뿐 `cargo` dead-code 판정으로 검증하지 않았다.
+같은 booking 을 `change-surfaces.md:2258` 은 **§6.3** 으로 가리킨다 — 원문이 없어 어느 절 번호가
+맞는지 판정할 수 없으므로 두 포인터를 모두 열어 둔다.
 
 ---
 
