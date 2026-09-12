@@ -47,22 +47,17 @@ jobs:
               # able to trigger it here too -- otherwise the guard is absent
               # from main entirely, which is the #5185 class of defect.
               #
-              # NO-OP, same as in ci-pr.yml: the
-              # `'!src/services/discord/placeholder_live_events/**'` line below
-              # already makes this filter effectively always true, because
-              # dorny/paths-filter@v3 ORs one picomatch matcher per pattern and
-              # a leading `!` is just a matcher for "anything that is not
-              # this". These patterns run nothing new; they record which files
-              # the lane guards, and become load-bearing once that `!` line is
-              # fixed (a separate change -- narrowing the filter would silently
-              # stop running whatever relies on it being always-true).
+              # #5232 R2: the `'!.../placeholder_live_events/**'` line is GONE;
+              # dorny ORs one picomatch matcher per pattern, so that `!` was a
+              # POSITIVE matcher that made this filter always true. Every
+              # pattern now decides selection, so this block carries ci-pr.yml's
+              # inputs -- `migrations/**`, `policies/**` (no `policies/*.js`
+              # line here ever matched `default-pipeline.yaml`) and this job's
+              # own `scripts/ci/postgres-service.sh` step included.
               - 'Cargo.toml'
-              - 'policies/auto-queue.js'
-              - 'policies/kanban-rules.js'
-              - 'policies/timeouts.js'
-              - 'policies/timeouts/**'
-              - 'policies/lib/**'
-              - 'policies/__tests__/**'
+              - 'migrations/**'
+              - 'policies/**'
+              - 'scripts/ci/postgres-service.sh'
               - 'src/db/**'
               - 'src/dispatch/**'
               - 'src/engine/**'
@@ -78,14 +73,21 @@ jobs:
               - 'src/services/auto_queue/**'
               - 'src/services/scheduled_messages.rs'
               - 'src/services/discord/**'
-              - '!src/services/discord/placeholder_live_events/**'
-              # #5147: see ci-pr.yml. Inert today -- see the `!` note above.
+              # #5147: see ci-pr.yml. Load-bearing now that the `!` is gone.
               - 'src/cli/dcserver.rs'
               - 'src/services/hang_forensics.rs'
               - 'src/services/health_diagnostics.rs'
               - 'src/services/message_outbox.rs'
               - 'src/services/platform/tmux.rs'
               - 'src/services/tmux_common.rs'
+              - 'defaults.json'
+              - 'src/config.rs'
+              - 'src/pipeline.rs'
+              - 'src/services/dispatches/**'
+              - 'src/services/git/**'
+              - 'src/services/observability/**'
+              - 'Cargo.lock'
+              - '.cargo/**'
 
   full_non_pg:
     name: Full tests (ubuntu-latest)

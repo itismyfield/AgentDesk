@@ -92,8 +92,9 @@ jobs:
               # `predicate-quantifier` is set here, so the default `some`
               # applies), so a leading `!` was just another POSITIVE matcher
               # for "anything that is not this" and matched nearly every
-              # changed file. Every pattern below is load-bearing now: this
-              # list is the selection rule, not a statement of intent.
+              # changed file. Nothing below subtracts, so this list IS the
+              # whole selection rule: a path no pattern matches silently skips
+              # the lane; it is deliberately a superset of what the lane runs.
               #
               # STOPPED selecting when the `!` went: docs, `dashboard/**`,
               # `tests/**`, src this lane never executes. ADDED below, because
@@ -148,6 +149,18 @@ jobs:
               - 'src/services/message_outbox_recovery_tests.rs'
               - 'src/services/platform/tmux.rs'
               - 'src/services/tmux_common.rs'
+              # #5232 R2: 1-hop imports this list missed -- `src/pipeline.rs`
+              # reads the tracked `policies/**`, `Config::default` is in
+              # `src/config.rs` (`include_str!`s `defaults.json`), and
+              # `platform::git_head_commit` re-exports `src/services/git/**`.
+              - 'defaults.json'
+              - 'src/config.rs'
+              - 'src/pipeline.rs'
+              - 'src/services/dispatches/**'
+              - 'src/services/git/**'
+              - 'src/services/observability/**'
+              - 'Cargo.lock'
+              - '.cargo/**'
             pg_db:
               - '.github/workflows/**'
               - 'justfile'

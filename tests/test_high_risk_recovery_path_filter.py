@@ -17,17 +17,29 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW_PATH = REPO_ROOT / ".github/workflows/ci-pr.yml"
+WORKFLOW_DIR = REPO_ROOT / ".github/workflows"
+WORKFLOW_PATH = WORKFLOW_DIR / "ci-pr.yml"
 LANE = "high_risk_recovery"
+# Every module `src/high_risk_recovery.rs` imports, one file each.
+ONE_HOP_IMPORTS = """defaults.json policies/default-pipeline.yaml src/config.rs
+    src/pipeline.rs src/services/dispatches/discord_delivery/mod.rs
+    src/services/dispatches/outbox_queue.rs src/services/observability/mod.rs
+    src/services/git/commit_resolver.rs""".split()
 SUPPORTED_SEGMENT = re.compile(r"^[A-Za-z0-9._-]*\*?[A-Za-z0-9._-]*$")
 
 
-def load_filters() -> dict[str, tuple[str, ...]]:
-    workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["changes"]["steps"]
-    step = next(s for s in steps if s.get("uses", "").startswith("dorny/paths-filter"))
-    assert "predicate-quantifier" not in step["with"], "quantifier is no longer `some`"
-    return {n: tuple(p) for n, p in yaml.safe_load(step["with"]["filters"]).items()}
+def filter_blocks(workflow: Path):
+    """Each `dorny/paths-filter` step's parsed `filters:` block, any job."""
+    jobs = (yaml.safe_load(workflow.read_text(encoding="utf-8")) or {}).get("jobs") or {}
+    for job in jobs.values():
+        for step in job.get("steps") or []:
+            if str(step.get("uses", "")).startswith("dorny/paths-filter"):
+                assert "predicate-quantifier" not in step["with"], "quantifier moved"
+                yield yaml.safe_load(step["with"]["filters"])
+
+
+def load_filters(workflow: Path = WORKFLOW_PATH) -> dict[str, tuple[str, ...]]:
+    return {n: tuple(p) for n, p in next(filter_blocks(workflow)).items()}
 
 
 def _atom(part: str) -> str:
@@ -59,11 +71,29 @@ class HighRiskRecoveryPathFilterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.filters = load_filters()
 
-    def test_no_pattern_is_negated(self) -> None:
+    def test_no_pattern_is_negated_in_any_workflow(self) -> None:
+        """#5232 is a defect class, not one file -- `ci-main.yml` carried the
+        same `!` line. Walk the directory so new workflows are covered too."""
+        blocks = [
+            (wf.name, b)
+            for wf in sorted(WORKFLOW_DIR.glob("*.yml"))
+            for b in filter_blocks(wf)
+        ]
         negated = [
-            (n, q) for n, ps in self.filters.items() for q in ps if q.startswith("!")
+            (wf, n, q) for wf, b in blocks for n, ps in b.items() for q in ps
+            if q.startswith("!")
         ]
         self.assertEqual(negated, [], "a leading `!` re-opens the #5232 defect")
+        self.assertLessEqual({"ci-pr.yml", "ci-main.yml"}, {wf for wf, _ in blocks})
+
+    def test_both_workflows_select_the_lane_for_its_one_hop_imports(self) -> None:
+        """Both workflows run `cargo test --lib high_risk_recovery::`, so both
+        must select for every module `src/high_risk_recovery.rs` imports."""
+        for workflow in ("ci-pr.yml", "ci-main.yml"):
+            filters = load_filters(WORKFLOW_DIR / workflow)
+            for path in ONE_HOP_IMPORTS:
+                with self.subTest(workflow=workflow, path=path):
+                    self.assertIn(LANE, select(filters, [path]))
 
     def test_every_pattern_stays_inside_the_reimplemented_dialect(self) -> None:
         for name, patterns in self.filters.items():
