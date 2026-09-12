@@ -1543,7 +1543,7 @@ pub(in crate::services::discord::outbound) fn current_generation_durable_frontie
 /// [`delivered_frontier_end_current_generation`] and the flag-gated
 /// [`effective_committed_offset`] both funnel through it so the generation and
 /// EOF-bounds gating logic exists in exactly one place.
-fn current_generation_durable_frontier_end_at(
+pub(in crate::services::discord::outbound) fn current_generation_durable_frontier_end_at(
     path: &Path,
     current_gen_mtime: i64,
     current_transcript_eof: Option<u64>,
@@ -1568,46 +1568,12 @@ pub(in crate::services::discord) fn current_generation_mtime_ns(tmux_session_nam
     }
 }
 
-/// #3593 (flag-INDEPENDENT): the CURRENT-generation durable `delivered_frontier`
-/// END, or `0` when there is none to trust (absent/malformed record, a stale
-/// prior-generation frontier per the #1270 guard, missing transcript EOF, or a
-/// frontier END beyond the current EOF). UNLIKE
-/// [`effective_committed_offset`], this NEVER consults
-/// `AGENTDESK_DELIVERY_RECORD_AUTHORITY` — it is the durable frontier the legacy
-/// #3520 new-message floor read, surfaced so the synthetic-resume dedup gate can
-/// fuse it (`max`) with the in-memory committed offset and remain a TRUE superset
-/// of #3520 under BOTH authority states. Returning `0` (not `None`) keeps the
-/// caller's `committed.max(this)` fusion a plain `u64` op; `0` is the safe floor
-/// (`range_already_committed` suppresses NOTHING at `committed == 0`).
-pub(in crate::services::discord) fn delivered_frontier_end_current_generation(
-    provider: &ProviderKind,
-    channel: ChannelId,
-    tmux_session_name: &str,
-    current_transcript_eof: Option<u64>,
-) -> u64 {
-    resolved_delivered_frontier_end_current_generation(
-        provider,
-        channel,
-        tmux_session_name,
-        current_transcript_eof,
-    )
-    .unwrap_or(0)
-}
-
-/// #5464 T5 C1: the same durable frontier END with UNKNOWN kept DISTINCT from
-/// "delivered nothing". [`delivered_frontier_end_current_generation`] collapses an
-/// absent record, a stale generation, a missing EOF and a frontier beyond EOF (an
-/// in-place `/compact`) onto `0` — right for `max`-fusion, fail-OPEN for a gate.
-pub(in crate::services::discord) fn resolved_delivered_frontier_end_current_generation(
-    provider: &ProviderKind,
-    channel: ChannelId,
-    tmux_session_name: &str,
-    current_transcript_eof: Option<u64>,
-) -> Option<u64> {
-    let path = delivery_record_path(provider, channel.get())?;
-    let current_gen = current_generation_mtime_ns(tmux_session_name);
-    current_generation_durable_frontier_end_at(&path, current_gen, current_transcript_eof)
-}
+// #4712 decomposition: the env-resolved delivered-frontier END readers moved to
+// the `delivery_frontier_probe` sibling, beside the other delivered-frontier
+// readers. Re-exported so every `delivery_record::…` call site is unchanged.
+pub(in crate::services::discord) use super::delivery_frontier_probe::{
+    delivered_frontier_end_current_generation, resolved_delivered_frontier_end_current_generation,
+};
 
 fn current_generation_frontier_exceeding_eof_at(
     path: &Path,
