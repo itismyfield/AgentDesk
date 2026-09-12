@@ -226,7 +226,7 @@ def production_line_numbers(text: str, production_loc: int) -> set[int]:
             continue
         brace = text.rindex("{", match.start(), match.end())
         try:
-            _body, end = inventory.scan_balanced(text, brace, "{", "}"))
+            _body, end = inventory.scan_balanced(text, brace, "{", "}")
         except inventory.ParseError:
             continue
         test_lines.update(range(inventory.offset_to_line(text, match.start()),
