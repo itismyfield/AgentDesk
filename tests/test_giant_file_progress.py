@@ -154,12 +154,14 @@ class GiantFileProgressTest(unittest.TestCase):
             PROGRESS.pr_evaluation(base, candidate, facts)[1]))
 
     def test_provenance_rejects_base_spoof(self):
-        self.assertFalse(PROGRESS.provenance_matches(
-            "merge", "base", "head", "stale", ["merge", "base", "head"]))
-        self.assertFalse(PROGRESS.provenance_matches(
-            "merge", "base", "head", "base", ["merge", "spoof", "head"]))
+        # The event triple is the whole input: origin/main is not consulted, so a
+        # main advance past "base" cannot turn a legitimate candidate into a reject.
         self.assertTrue(PROGRESS.provenance_matches(
-            "merge", "base", "head", "base", ["merge", "base", "head"]))
+            "merge", "base", "head", ["merge", "base", "head"]))
+        self.assertFalse(PROGRESS.provenance_matches(
+            "merge", "base", "head", ["merge", "spoof", "head"]))
+        self.assertTrue(PROGRESS.provenance_matches(
+            "merge", "base", "head", ["merge", "base", "head"]))
 
     def test_rename_and_copy_are_not_progress(self):
         self.reject(lambda b, c, f: f.update(rename_copy=True), "rename/copy")
@@ -949,25 +951,27 @@ class GiantFileLedgerIntegrationTest(unittest.TestCase):
                 with mock.patch.object(G, "now_utc", return_value=now), self.assertRaisesRegex(G.ParseError, error):
                     G.giant_file_snapshot(root)
 
-    def run_main(self, before, after, now):
+    def run_main(self, before, after, now, *, candidate="merge", base="base",
+                 head="head", origin="base", checkout=None, parents=None):
         env = {"GFP_EVENT_NAME": "pull_request", "GFP_REPOSITORY": "itismyfield/AgentDesk",
-               "GFP_HEAD_REPOSITORY": "itismyfield/AgentDesk", "GFP_CANDIDATE_SHA": "merge",
-               "GFP_BASE_SHA": "base", "GFP_HEAD_SHA": "head"}
+               "GFP_HEAD_REPOSITORY": "itismyfield/AgentDesk", "GFP_CANDIDATE_SHA": candidate,
+               "GFP_BASE_SHA": base, "GFP_HEAD_SHA": head}
+        lineage = [candidate, base, head] if parents is None else parents
         def git(*args, **kwargs):
             if args[0] in {"status", "fetch"}:
                 return ""
             if args[0] == "rev-list":
-                return "merge base head\n"
+                return " ".join(lineage) + "\n"
             raise AssertionError(args)
         def oid(ref, suffix="commit"):
-            return {"HEAD": "merge", "origin/main": "base"}.get(ref, ref)
+            return {"HEAD": checkout or candidate, "origin/main": origin}.get(ref, ref)
         facts = {"changed": {path for path in before.keys() | after.keys() if before.get(path) != after.get(path)}, "additions": 4,
                  "numstat": {}, "statuses": {}}
         with tempfile.TemporaryDirectory() as directory:
             evidence = Path(directory) / "evidence.json"
             with mock.patch.dict(P.os.environ, env, clear=True), mock.patch.multiple(
                     P, EVIDENCE=evidence, git=git, oid=oid,
-                    archive=lambda ref, root: self.write(root, before if ref == "base" else after),
+                    archive=lambda ref, root: self.write(root, before if ref == base else after),
                     diff_facts=lambda *_: copy.deepcopy(facts), movement_ledger=lambda *_: {}), mock.patch.object(
                     G, "now_utc", return_value=now), mock.patch.object(G, "today_utc", return_value=now.date()), mock.patch.object(
                     P, "pr_evaluation", wraps=P.pr_evaluation) as evaluation, redirect_stderr(io.StringIO()):
@@ -987,6 +991,60 @@ class GiantFileLedgerIntegrationTest(unittest.TestCase):
         rc, evidence, calls = self.run_main(self.files(), self.files(deadline=NEW, history=marker()), NOW)
         self.assertEqual((rc, calls, evidence["selector"]), (0, 1, "pr_ledger_repair"))
         self.assertEqual(evidence["retired"], [])
+
+    def repair_pair(self):
+        return self.files(), self.files(deadline=NEW, history=marker())
+
+    def test_unrelated_main_advance_does_not_invalidate_the_same_candidate(self):
+        """An identical, legitimate candidate must not fail merely because main moved.
+
+        Same (candidate, base, head, parents); only the origin/main tip differs.
+        Both runs must reach the same verdict with byte-identical attribution.
+        """
+        before, after = self.repair_pair()
+        pinned_rc, pinned, pinned_calls = self.run_main(before, after, NOW, origin="base")
+        moved_rc, moved, moved_calls = self.run_main(
+            before, after, NOW, origin="4d1e0fa11adcb2e0main-moved-on-without-us")
+        self.assertEqual((pinned_rc, pinned_calls), (0, 1), pinned)
+        self.assertEqual((moved_rc, moved_calls), (0, 1), moved)
+        for field in ("selector", "verdict", "reason", "merge_sha", "event_base_sha",
+                      "head_sha", "merge_first_parent", "base_tree", "candidate_tree"):
+            self.assertEqual(pinned[field], moved[field], field)
+        self.assertNotIn("observed_origin_main_sha", moved)
+
+    def test_spoofed_triple_or_wrong_checkout_is_still_rejected(self):
+        """Retained bindings: base spoof, head spoof, and candidate != checked-out HEAD."""
+        self.assertFalse(P.provenance_matches("merge", "base", "head", ["merge", "spoof", "head"]))
+        self.assertFalse(P.provenance_matches("merge", "base", "head", ["merge", "base", "spoof"]))
+        before, after = self.repair_pair()
+        for lineage in (["merge", "spoof", "head"], ["merge", "base", "spoof"],
+                        ["spoof", "base", "head"], ["merge", "base"]):
+            rc, evidence, calls = self.run_main(before, after, NOW, parents=lineage)
+            self.assertEqual((rc, calls), (2, 0), evidence)
+            self.assertEqual(evidence["reason"],
+                             "event/base/head/merge object provenance mismatch", lineage)
+        rc, evidence, calls = self.run_main(before, after, NOW, checkout="some-other-commit")
+        self.assertEqual((rc, calls), (2, 0), evidence)
+        self.assertEqual(evidence["reason"], "candidate SHA is not checked-out HEAD")
+
+    def test_evidence_attribution_is_per_candidate_and_never_shared(self):
+        """A new integration candidate gets its own evidence; the old one is not reusable.
+
+        The procedural rule ("a changed candidate invalidates the previous CI
+        result") is enforceable only because every attribution field names the
+        candidate it was produced from. Pin that: no field bleeds between runs.
+        """
+        before, after = self.repair_pair()
+        attribution = ("merge_sha", "merge_first_parent", "head_sha", "event_base_sha",
+                       "base_tree", "candidate_tree")
+        first = self.run_main(before, after, NOW, candidate="cand1", base="base1", head="head1")[1]
+        second = self.run_main(before, after, NOW, candidate="cand2", base="base2", head="head2")[1]
+        self.assertEqual(tuple(first[field] for field in attribution),
+                         ("cand1", "base1", "head1", "base1", "base1", "cand1"), first)
+        self.assertEqual(tuple(second[field] for field in attribution),
+                         ("cand2", "base2", "head2", "base2", "base2", "cand2"), second)
+        for field in attribution:
+            self.assertNotEqual(first[field], second[field], field)
 
     def test_r2_14_exhausted_keep_reclassification_and_overdue_remain_blocked(self):
         history = marker("2026-04-30", "2026-06-30") + marker("2026-06-30", OLD)

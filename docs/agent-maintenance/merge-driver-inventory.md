@@ -122,3 +122,57 @@ merge drivers. The driver's value is entirely local (developer rebases/merges).
 The server-side gate does not rely on the driver: it regenerates from the merged
 source tree, validates inventory invariants, and rejects drift in the remaining
 tracked outputs.
+
+## Integration step: who guarantees freshness, and how
+
+This section owns the *merge-time* half of the contract that the sections above
+describe from the git-driver side. It is the named alternative guarantee for
+per-PR gates that are deliberately pinned to immutable inputs.
+
+### Per-PR verification is base-pinned on purpose
+
+A required PR context verifies an **immutable input triple**: the event's
+`base`, its `head`, and the synthetic merge `candidate` GitHub built from them.
+`scripts/giant_file_progress.py` binds its verdict to exactly that triple
+(`provenance_matches`) and to the candidate actually checked out, and it does
+**not** require `base` to equal the current `origin/main`. So an unrelated main
+advance — someone else's PR landing — does not invalidate an already-verified
+candidate, and re-running a PR's checks purely because `main` moved is not a
+correctness requirement. Branch protection is consistent with this:
+`main` sets `required_status_checks.strict = false`, so GitHub itself does not
+demand branch currency either.
+
+### The freshness guarantee lives at the merge step
+
+There is **no merge queue** on this repository (no ruleset, and no workflow
+carries a `merge_group` trigger), so nothing automatically re-verifies a
+candidate against the latest `main`. The guarantee is therefore procedural, and
+a single orchestrator owns it end to end:
+
+1. **One integrator.** One orchestrator performs integration and merge for the
+   batch. Contributors do not self-merge into `main`.
+2. **Build the final candidate.** Immediately before merging, run
+   `gh pr update-branch` so the PR's candidate sits on top of current `main`.
+3. **Re-pass on that candidate.** Merge only after the **required contexts pass
+   on that final candidate**. A green run from an earlier candidate is not a
+   merge authorization.
+4. **A changed candidate voids the previous evidence.** If `main` moves again
+   between step 2 and the merge, the candidate is a different artifact: repeat
+   steps 2-3. Never carry the previous candidate's CI result forward as
+   approval for the new one.
+5. **Reuse review; re-review what integration changed.** Source review of a PR
+   whose own commits did not change is reused as-is. Re-review is scoped to
+   what integration actually altered: conflict resolutions, and any shared
+   contract the merge touched (public signature, DB schema, gate semantics,
+   generated-doc surface).
+
+### Why "I just checked `main`" is not the guarantee
+
+Reading `main` immediately before merging leaves the entire lookup→merge window
+open; another integrator can land in it. What actually closes the race is step
+3 — **the re-pass on the final candidate**, which is the artifact being merged —
+not how recently `main` was queried. Evidence supports this because
+`scripts/giant_file_progress.py` attributes every record to its own candidate
+(`merge_sha`, `merge_first_parent`, `head_sha`, `event_base_sha`,
+`candidate_tree`), so a stale result cannot be silently read as covering a
+newer candidate.
