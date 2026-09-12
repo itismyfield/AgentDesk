@@ -122,11 +122,16 @@ Pass condition: all six `[PASS]` at the fingerprint you intend to accept —
 confirm `target fingerprint` equals the dial you are accepting, not a stale
 segment. `promotion_ready` is advisory by design (§5.3): the decision is human.
 
-Two fields the criteria cannot see, and which a reader must check by eye: the
+Two numbers the criteria cannot see, which a reader must check by eye. Both are
+on the plaintext render, but only the first under a name you can grep for:
 `evicted share` (turns that reached the log only because a successor arrived — a
 low value is *not* an all-clear, it moves the wrong way under the loss it
-describes) and `out_of_scope_unusable_lines` (fail-open, invisible to
-`line_integrity`).
+describes), and the fail-open residual, which the render spells out as a clause
+inside the `integrity scope` line — "… and N unusable line(s) in files with no
+target record (that second exclusion is FAIL-OPEN and no criterion sees it …)"
+(`relay_authority_rollout_report.py:717-723`). Its field name,
+`out_of_scope_unusable_lines` (`:623`), exists only in `--json` output, nested
+under `line_integrity`; do not search the plaintext for that string.
 
 Measured 2026-09-12 at `26687f6264`, target `d1d48477e7e326bd`: stage 1 — six of
 six PASS, `promotion_ready: True`, rc 0 (328 turns / 7 days, `new_stricter` 0,
@@ -170,12 +175,35 @@ Do **not** roll back by deleting the two keys (see below).
 
 ### After the rollback: confirm
 
-1. Re-poll `/api/health/detail` and confirm `mode` **and** `cohort_percent`
-   equal what you intended, and that `cohort_percent_clamped` is `false`.
-2. Confirm the dcserver log carries no
-   `relay_authority_cohort_percent out of range; clamped to full cohort`
-   (`cohort.rs:106`) for your edit.
-3. **Run the §"Known Residual Risk" check below.** This is not optional.
+1. **Run the check in
+   §[Known Residual Risk](#known-residual-risk-of-the-rollback-direction) with
+   the `INTENDED_` values set to the position you just wrote. This is not
+   optional.** It reads the dial from **two** sources — the keys in
+   `agentdesk.yaml` you edited, and the `cohort_percent` `/api/health/detail`
+   publishes — and exits non-zero when they disagree. That disagreement *is* the
+   clamp evidence, and it needs no field the deployed binary lacks: both the
+   deployed and the current binary publish `cohort_percent` **after** the clamp
+   (deployed `eaa88ed654:cohort.rs:158` `percent.min(100)`; current
+   `cohort.rs:239-242` `effective`), so a `200` typed for `20` reads back as
+   `100` beside a YAML that says `200`, and the comparison fails.
+2. **Do not look for `cohort_percent_clamped`, and do not look for the clamp
+   WARN. Neither exists on the binary running today.** Both arrived with #5874
+   (`4160e3d673`) and the deployed head `eaa88ed6549e` predates it
+   (`git merge-base --is-ancestor 4160e3d673 eaa88ed654` → false, exit 1), so the
+   live block is the three fields §"Reading the Live Dial" measured. Reading
+   `r["cohort_percent_clamped"]` raises `KeyError`, and
+   `grep -c "clamped to full cohort" ~/.adk/release/logs/dcserver.stdout.log`
+   answers `0` under **every** dial position, right or wrong — its absence proves
+   nothing. (That file has also never rotated: no `newsyslog`/`logrotate` rule
+   matches it and no rotated sibling exists, so it covers only
+   2026-09-08T14:26Z onward. A grep of it cannot speak for an older window.)
+   Once #5874 is deployed both signals become available; step 1 keeps working
+   either way, so it stays the primary check.
+3. **`cohort_fingerprint` cannot substitute for step 1.** It hashes the
+   *clamped* width (deployed `cohort.rs:106`, current `cohort.rs:159-162`), so a
+   typo'd `Enforce/200` and a deliberate `Enforce/100` both publish
+   `d1d48477e7e326bd`. The fingerprint identifies the position in force; only
+   step 1 says whether that is the position you asked for.
 
 ## Known Residual Risk of the Rollback Direction
 
@@ -197,14 +225,31 @@ is 34 of 328 turns (`entry old->new: end->continue_rowless: 34`).
 
 **Why it can be silent.** Four production read sites resolve the dial with
 `.unwrap_or_default()` — i.e. to `Legacy/0` — with no log line:
-`cohort.rs:219` (health), `authority_observation.rs:350` (observation),
+`cohort.rs:227` (health), `authority_observation.rs:350` (observation),
 `guarded_persist.rs:79` (stream gate), and the entry gate via
 `bridge_entry_persist.rs:97`. Both fields are `#[serde(default, …)]`
 (`config.rs:1858,1864`), so a **deleted, misspelled or dropped key parses
-clean and reads as `Legacy/0`** — no rejection, no warning. Both also carry
-`skip_serializing_if`, so a whole-config rewrite by a binary that predates the
-keys removes them outright; the inventory books that path at
-`t5-t6-removal-inventory.md:374-385` and `:559`.
+clean and reads as `Legacy/0`** — no rejection, no warning. A whole-config
+rewrite by a binary whose typed `Config` has no such fields drops them outright;
+the inventory books that path at `t5-t6-removal-inventory.md:547-554` and
+`:723-733`. (`skip_serializing_if` is not the cause — it omits a key only when
+the value is *already* `Legacy`/`0` (`config.rs:1858,1864`), so it cannot lose a
+non-default dial.)
+
+**Where that rewrite can still come from.** Not from the writer the inventory
+first named: PR #5803 replaced `persist_bot_auth_to_yaml_checked`'s
+`serde_yaml::to_string(&Config)` with `patch_bot_settings_yaml`, which patches
+the parsed document and leaves keys the typed `Config` does not model byte-for-
+byte, and A6 pinned that shape with
+`bot_settings_write_back_preserves_unknown_keys_inside_modelled_sections`
+(`src/services/discord/settings/write.rs:667-698`) — inventory `:767-772`. **Do
+not spend the watch there.** What still rewrites the whole `Config` is the eight
+production `save_to_path` call sites the inventory enumerates at `:777-781`:
+`server/routes/voice_config.rs:151`, `server/routes/agents_crud.rs:1018`,
+`server/routes/agents_setup.rs:530`, `services/discord_config_audit.rs:1169`,
+`runtime_layout/config_merge.rs:38`, `cli/migrate/apply.rs:638`,
+`services/onboarding/mod.rs:1331` and `:1805`. Any of those, executed by a binary
+older than the dial, writes `agentdesk.yaml` back without the two keys.
 
 Neither existing WARN covers this. `cohort.rs:106` fires only on the *widening*
 typo band `101..=255`, and `config_live_reload.rs:536-540` fires only on a
@@ -212,23 +257,42 @@ config that fails to parse — which keeps the previous dial installed
 (fail-stale, `cohort.rs:211-218`). **A silent return to `Legacy/0` produces no
 log line at all.** That gap is the risk; this step is the compensating control.
 
-**Mandatory check, immediately after any rollback or dial move:**
+**Mandatory check, immediately after any rollback or dial move.** Edit the two
+`INTENDED_` values to the position you just wrote, then paste the whole block:
 
 ```bash
-curl -s http://127.0.0.1:8791/api/health/detail | python3 -c '
-import sys,json
-r = json.load(sys.stdin)["relay_authority_rollout"]
-print(r)
-assert r["mode"] != "legacy" or "<intended legacy>", "dial is Legacy — intended?"
-assert r["cohort_percent"] != 0 or "<intended 0>", "cohort is 0 — intended?"'
+export AGENTDESK_ROOT_DIR="$HOME/.adk/release"   # release host; see §Acceptance 1
+export INTENDED_MODE=legacy INTENDED_PERCENT=0   # <-- the position you just wrote
 grep -n "relay_authority" "$AGENTDESK_ROOT_DIR/config/agentdesk.yaml"
+curl -s http://127.0.0.1:8791/api/health/detail | python3 -c '
+import json, os, re, sys
+y = open(os.path.expanduser(os.environ["AGENTDESK_ROOT_DIR"]) + "/config/agentdesk.yaml").read()
+g = lambda k: (re.search(r"^\s*" + k + r":\s*(\S+)\s*$", y, re.M) or [None, None])[1]
+cm, cp = g("relay_authority_mode"), g("relay_authority_cohort_percent")
+im, ip = os.environ["INTENDED_MODE"], os.environ["INTENDED_PERCENT"]
+h = json.load(sys.stdin)["relay_authority_rollout"]
+print("yaml:", cm, cp, "| health:", json.dumps(h, sort_keys=True))
+if cm is None or cp is None:
+    raise SystemExit("FAIL keys lost: yaml has mode=%r percent=%r; restore both explicitly" % (cm, cp))
+if (cm, cp) != (im, ip):
+    raise SystemExit("FAIL yaml says %s/%s, you intended %s/%s" % (cm, cp, im, ip))
+if h["mode"] != cm:
+    raise SystemExit("FAIL mode in force %r != yaml %r; edit rejected, previous dial still installed" % (h["mode"], cm))
+if str(h["cohort_percent"]) != cp:
+    raise SystemExit("FAIL clamped: width in force %s != width configured %s" % (h["cohort_percent"], cp))
+print("OK: in force == configured == intended")'
 ```
 
-Both keys must be **present in the YAML** and the health block must report the
-position you intended. `mode: legacy` / `cohort_percent: 0` read back after an
-edit that did not ask for them is the failure this check exists to catch: the
-keys were lost, not set. Restore them explicitly rather than assuming the file
-is authoritative.
+`AGENTDESK_ROOT_DIR` must be **exported**. The `AGENTDESK_ROOT_DIR=… python3 …`
+form in §Acceptance 2 is a prefix assignment scoped to that one process; with it
+the `grep` above reads `/config/agentdesk.yaml` and exits 2.
+
+The block exits non-zero on each failure this section describes: both keys gone
+(the silent `Legacy/0` return), a YAML that does not say what you meant to write,
+a health block disagreeing with a well-formed YAML because the edit was rejected
+and the previous dial is still installed (fail-stale, `cohort.rs:211-218`), and a
+width the runtime clamped — `200` in the file, `100` in force. Restore lost keys
+explicitly rather than assuming the file is authoritative.
 
 ## What This Runbook Does Not Cover
 
