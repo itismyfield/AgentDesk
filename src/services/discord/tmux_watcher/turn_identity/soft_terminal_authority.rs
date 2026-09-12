@@ -185,4 +185,54 @@ impl WatcherSoftTerminalAuthority {
         }
         Ok(())
     }
+
+    /// #5464 T5 C1 (#5071 AC1): the same six-conjunct decision, with the ONE
+    /// STRUCTURAL conjunct relaxed by delivery authority that does not come from
+    /// the durable row.
+    ///
+    /// T5 AC1 is the contract this restores: *the absence of a durable inflight
+    /// row does not end Discord delivery authority; delivery authority is
+    /// derived from the DeliveryJournal's OutputObligation and the delivery
+    /// lease.* `NoInflightRow` says a row could not be READ — it does not say
+    /// this frame belongs to a different episode — so on its own it is not
+    /// evidence that nobody may deliver. Deciding delivery on it anyway is what
+    /// the 27-hour live sample caught: 150 of 753 `NO delivery owner` frames
+    /// denied under `soft_terminal_denial="no_inflight_row"` with
+    /// `inflight_present=false`, every one of them a terminal body that reached
+    /// no Discord channel while the session-bound sink stood down believing the
+    /// watcher owned the send.
+    ///
+    /// When `rowless_delivery_authority` holds, the frame stays a delivery
+    /// CANDIDATE rather than being authorized outright: the downstream
+    /// single-holder acquire (`try_acquire_watcher_delivery_lease`, #3041 B2)
+    /// is still the arbiter of WHO sends it, and a live foreign holder still
+    /// makes this watcher stand down. With the operand absent the historical
+    /// refusal stands unchanged.
+    ///
+    /// The other five conjuncts deliberately do NOT move with it, and this
+    /// method cannot move them: it matches only `NoInflightRow` and returns
+    /// every other verdict untouched. `SessionMismatch`, `TurnStartOutsideFrame`,
+    /// `RelayOwnerNone`, `TurnNonceMissing` and `TurnNonceMismatch` are
+    /// EXACT-EPISODE vetoes — the row that exists names a different tmux
+    /// session, a different turn, or a different nonce — which is why the #5464
+    /// T5 audit judged `turn_start_outside_frame` and `turn_nonce_mismatch`
+    /// NON-violations. Relaxing any of them would re-open the
+    /// `/compact`-forged soft boundary that #5175 closed.
+    ///
+    /// Shaped after the one cell T5 S4 moved in the bridge stream tick
+    /// (`guarded_persist::visible_mutation_authority_after_guarded_save`'s
+    /// `GuardedSaveOutcome::Missing if cohort_admits => Suppressed`): one
+    /// structural signal, relaxed inside the enforcement cohort only, with the
+    /// exact-episode veto (`IdentityMismatch` there) left where it was.
+    pub(crate) fn authorize_pre_relay_inflight_with_rowless_authority(
+        &self,
+        inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,
+        current_offset: u64,
+        rowless_delivery_authority: bool,
+    ) -> Result<(), SoftTerminalAuthorityDenial> {
+        match self.authorize_pre_relay_inflight(inflight_before_relay, current_offset) {
+            Err(SoftTerminalAuthorityDenial::NoInflightRow) if rowless_delivery_authority => Ok(()),
+            other => other,
+        }
+    }
 }

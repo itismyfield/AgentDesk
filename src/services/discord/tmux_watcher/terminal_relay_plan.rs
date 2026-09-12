@@ -1,6 +1,7 @@
 use super::*;
 use std::sync::Arc;
 
+use self::rowless_delivery_authority::{RowlessDeliveryAuthority, read_rowless_delivery_authority};
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::stream_relay::RelayProducer;
 use crate::services::discord::TmuxRelayCoord;
@@ -88,9 +89,14 @@ fn watcher_soft_terminal_direct_send_authority(
     inflight_before_relay: Option<&InflightTurnState>,
     current_offset: u64,
     terminal_kind: Option<WatcherTerminalKind>,
+    rowless_delivery_authority: RowlessDeliveryAuthority,
 ) -> (bool, Option<SoftTerminalAuthorityDenial>) {
     let denial = binding
-        .authorize_pre_relay_inflight(inflight_before_relay, current_offset)
+        .authorize_pre_relay_inflight_with_rowless_authority(
+            inflight_before_relay,
+            current_offset,
+            rowless_delivery_authority.retains_delivery_candidacy(),
+        )
         .err();
     let authorized = watcher_direct_fallback_has_turn_authority(terminal_kind, denial.is_none());
     // A hard provider result keeps its recovery fallback regardless of the soft
@@ -332,6 +338,14 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                 inflight_before_relay.as_ref(),
                 current_offset,
                 terminal_kind,
+                read_rowless_delivery_authority(
+                    &shared,
+                    &watcher_provider,
+                    channel_id,
+                    &tmux_session_name,
+                    &output_path,
+                    terminal_event_consumed_offset(current_offset, &all_data),
+                ),
             );
         let watcher_direct_fallback_intended =
             watcher_direct_fallback_requested && watcher_direct_fallback_authorized;
@@ -656,6 +670,9 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         })
     }
 }
+
+#[path = "rowless_delivery_authority.rs"]
+mod rowless_delivery_authority;
 
 #[cfg(test)]
 #[path = "terminal_relay_plan_tests.rs"]
