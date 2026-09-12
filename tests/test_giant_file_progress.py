@@ -156,12 +156,12 @@ class GiantFileProgressTest(unittest.TestCase):
     def test_provenance_rejects_base_spoof(self):
         # The event triple is the whole input: origin/main is not consulted, so a
         # main advance past "base" cannot turn a legitimate candidate into a reject.
+        # The surviving pair is the whole contract here: the honest triple is
+        # accepted, and swapping base for an unrelated SHA is not.
         self.assertTrue(PROGRESS.provenance_matches(
             "merge", "base", "head", ["merge", "base", "head"]))
         self.assertFalse(PROGRESS.provenance_matches(
             "merge", "base", "head", ["merge", "spoof", "head"]))
-        self.assertTrue(PROGRESS.provenance_matches(
-            "merge", "base", "head", ["merge", "base", "head"]))
 
     def test_rename_and_copy_are_not_progress(self):
         self.reject(lambda b, c, f: f.update(rename_copy=True), "rename/copy")
@@ -1013,12 +1013,17 @@ class GiantFileLedgerIntegrationTest(unittest.TestCase):
         self.assertNotIn("observed_origin_main_sha", moved)
 
     def test_spoofed_triple_or_wrong_checkout_is_still_rejected(self):
-        """Retained bindings: base spoof, head spoof, and candidate != checked-out HEAD."""
+        """Retained bindings: base/head spoof, parent ORDER, and candidate != checked-out HEAD."""
         self.assertFalse(P.provenance_matches("merge", "base", "head", ["merge", "spoof", "head"]))
         self.assertFalse(P.provenance_matches("merge", "base", "head", ["merge", "base", "spoof"]))
+        # Order is load-bearing, not incidental: the same three SHAs merged the
+        # other way round is a different merge, so a set/reordered comparison
+        # must not be mistaken for the list equality the contract actually is.
+        self.assertFalse(P.provenance_matches("merge", "base", "head", ["merge", "head", "base"]))
         before, after = self.repair_pair()
         for lineage in (["merge", "spoof", "head"], ["merge", "base", "spoof"],
-                        ["spoof", "base", "head"], ["merge", "base"]):
+                        ["spoof", "base", "head"], ["merge", "base"],
+                        ["merge", "head", "base"]):
             rc, evidence, calls = self.run_main(before, after, NOW, parents=lineage)
             self.assertEqual((rc, calls), (2, 0), evidence)
             self.assertEqual(evidence["reason"],
