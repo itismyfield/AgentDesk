@@ -102,6 +102,11 @@ class ManifestContract(unittest.TestCase):
             "t4-single-actor-recovery-decision",
             "t5-s4-missing-row-cohort-lifecycle",
             "t5-s4-same-authority-watcher-epoch",
+            "t5-s7a-entry-outcome-matrix",
+            "t5-s7a-live-dial-isolation",
+            "t5-s7a-no-anchor-no-visible-mutation",
+            "t5-s7a-detached-rowless-state-preserved",
+            "t5-c1-rowless-terminal-ledger-and-lease",
             "relay-e2e-local-model-queue-wake",
         ])
         self.assertEqual({gap["boundary"] for gap in gaps}, {"T2", "T3", "T5"})
@@ -125,6 +130,33 @@ class ManifestContract(unittest.TestCase):
                 path.write_text(workflow.replace(command, ""), encoding="utf-8")
                 with self.assertRaisesRegex(contract.ManifestError, "must exactly match"):
                     contract.validate_workflow_contract(root, lanes, True)
+
+    def test_s7a_and_c1_witnesses_cannot_be_omitted_or_narrowed(self) -> None:
+        lanes, gaps = contract.load_active_lanes(
+            REPO_ROOT / "scripts" / "relay_authority_contract_targets.json",
+            REPO_ROOT,
+        )
+        selected = [lane for lane in lanes
+                    if lane.name.startswith(("t5-s7a-", "t5-c1-"))]
+        self.assertEqual(len(selected), 5)
+        self.assertEqual([lane.minimum for lane in selected], [1, 1, 1, 1, 15])
+        self.assertIn("t5-structural-signal-authority-teardown",
+                      {gap["name"] for gap in gaps})
+        job = contract.load_relay_authority_job(REPO_ROOT)
+        self.assertNotIn("if", job)
+        self.assertNotIn("needs", job)
+        workflow = (REPO_ROOT / contract.PR_WORKFLOW).read_text(encoding="utf-8")
+        for lane in selected:
+            command = contract.expected_workflow_command(lane)
+            self.assertEqual(workflow.count(command), 1)
+            for replacement in ("", command.replace(lane.command[-1], "missing::test")):
+                with self.subTest(lane=lane.name, replacement=replacement), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    path = root / contract.PR_WORKFLOW
+                    path.parent.mkdir(parents=True)
+                    path.write_text(workflow.replace(command, replacement), encoding="utf-8")
+                    with self.assertRaisesRegex(contract.ManifestError, "must exactly match"):
+                        contract.validate_workflow_contract(root, lanes, True)
 
     def test_condition3_false_rejects_existing_mutation_script(self) -> None:
         temporary, path = manifest_path([active_lane()])

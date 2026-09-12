@@ -911,7 +911,9 @@ targets = {
     # result helper and the gate before executing that verified gate.
     # #5464 A12 re-pins after adding two existing S4 named witnesses;
     # no commands or enforcement checks are removed or relaxed.
-    "job_sha256" => "bea72bed3d9f683bb9a53cdaedd15a092ed50d9221c3edd7dd1c5f4187859fac",
+    # #5908 adds four S7a witnesses and the C1 module; retain their exact
+    # commands below and refresh both workflow gate pins with this file.
+    "job_sha256" => "331d9a0865750477f3b0349fd76d0c280fe64fd5d6bd7b5f420a5645d7d6abca",
     "job_timeout_minutes" => 50,
     "cargo_steps" => {
       "Verify named relay-authority targets and selection floors" => {
@@ -924,6 +926,11 @@ targets = {
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_inside_the_cohort_and_still_ends_lifecycle_outside_it -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1",
+          "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1",
           "env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1",
         ],
         "timeout_minutes" => 30,
@@ -1292,7 +1299,7 @@ if [ -f "$trusted_workflow" ]; then
   grep -Eq '^[[:space:]]+push:' "$trusted_workflow" \
     || error "$trusted_workflow must have a trusted push trigger"
   grep -Eq '^[[:space:]]+workflow_dispatch:' "$trusted_workflow" \
-    || error "$trusted_workflow must have a trusted workflow_dispatch trigger"
+    || error "$trusted_workflow must have a workflow_dispatch trigger"
   grep -Eq '^[[:space:]]+merge_group:' "$trusted_workflow" \
     || error "$trusted_workflow must have a merge_group trigger"
   grep -q 'MACOS_RUNNER_GROUP' "$trusted_workflow" \

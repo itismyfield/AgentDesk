@@ -111,11 +111,71 @@
       "derivation": "Measured on origin/main b4ee089369f12cb052993560b77e375226680342: the declared named selector plus -- --list selects one test; execution with -- --test-threads=1 passes one test (no ignored tests or DB soft-skip). Existing S4 witness only, not full T5 teardown or S7a coverage."
     },
     {
+      "name": "t5-s7a-entry-outcome-matrix",
+      "boundary": "T5",
+      "status": "active",
+      "module": "services::discord::turn_bridge::bridge_entry_persist::tests",
+      "command": [
+        "cargo", "test", "--lib",
+        "services::discord::turn_bridge::bridge_entry_persist::tests::recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate"
+      ],
+      "minimum": 1,
+      "derivation": "Existing #5902 witness at 2554366addb110455b86e651e4e39ef702cd8ac0, located by its Rust test declaration: Saved/Missing/IdentityMismatch/IoError across cohort and anchor states. The floor is one explicitly named test; the existing CI verifier must enumerate it and the execution step must pass it. No new local Cargo execution is claimed by this registration."
+    },
+    {
+      "name": "t5-s7a-live-dial-isolation",
+      "boundary": "T5",
+      "status": "active",
+      "module": "services::discord::turn_bridge::bridge_entry_persist::tests",
+      "command": [
+        "cargo", "test", "--lib",
+        "services::discord::turn_bridge::bridge_entry_persist::tests::the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none"
+      ],
+      "minimum": 1,
+      "derivation": "Existing #5902 isolated-process test at 2554366addb110455b86e651e4e39ef702cd8ac0 exercises the actual entry cohort wrapper with Enforce/100 and Observe/100. One named-test floor; actual list and execution are verified by CI, not inferred from a compiled-in Legacy default. This is not a live deployment acceptance test."
+    },
+    {
+      "name": "t5-s7a-no-anchor-no-visible-mutation",
+      "boundary": "T5",
+      "status": "active",
+      "module": "services::discord::turn_bridge::bridge_entry_persist::tests",
+      "command": [
+        "cargo", "test", "--lib",
+        "services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder"
+      ],
+      "minimum": 1,
+      "derivation": "Existing #5902 CapturingGateway witness at 2554366addb110455b86e651e4e39ef702cd8ac0: no-anchor rowless gate emits neither send nor delete; a positive control executes the anchor function and observes the send/delete bind failure. One named-test floor, to be enumerated and executed in CI. Does not prove full bridge-to-finalizer integration."
+    },
+    {
+      "name": "t5-s7a-detached-rowless-state-preserved",
+      "boundary": "T5",
+      "status": "active",
+      "module": "services::discord::turn_bridge::bridge_entry_persist::tests",
+      "command": [
+        "cargo", "test", "--lib",
+        "services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals"
+      ],
+      "minimum": 1,
+      "derivation": "Existing #5902 test at 2554366addb110455b86e651e4e39ef702cd8ac0 exercises the real guarded store under an isolated temporary runtime root and checks Missing does not reconcile away the detached response. One named-test floor; CI owns actual enumeration and execution."
+    },
+    {
+      "name": "t5-c1-rowless-terminal-ledger-and-lease",
+      "boundary": "T5",
+      "status": "active",
+      "module": "services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests",
+      "command": [
+        "cargo", "test", "--lib",
+        "services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests"
+      ],
+      "minimum": 15,
+      "derivation": "#5881's final merge report at 49e44d44b869e597efac1075104bf99b953afe9b measured this existing module as 15 passed, including the real ledger/lease reader, Unknown frontier, Committed-vs-Leased, and the five exact-episode vetoes. That prior report motivates the floor; this candidate must independently enumerate and execute it in CI. Candidacy is not an exact terminal receipt or live end-to-end delivery guarantee."
+    },
+    {
       "name": "t5-structural-signal-authority-teardown",
       "boundary": "T5",
       "status": "gap",
       "module": "services::discord::inflight",
-      "reason": "The two active T5 S4 witnesses cover Missing-row cohort suppression and same-authority watcher epoch advance only. Full structural-signal authority teardown remains incomplete: inflight and structural signals still participate in recovery/lifecycle authority, and S7a rowless terminal-body/frontier/receipt authority is not implemented by these targets."
+      "reason": "Active T5 targets cover S4 lifecycle preservation, #5902 S7a's gated entry matrix/anchor/detached state, and #5881 C1's rowless terminal candidacy. Full T5 remains incomplete: entry-to-terminal/receipt/next-turn integration, synthetic claim handoff, remaining suppression paths and live acceptance are not established by registering these tests. Keep rollback closure and T6 authorization separate."
     },
     {
       "name": "relay-e2e-local-model-queue-wake",
