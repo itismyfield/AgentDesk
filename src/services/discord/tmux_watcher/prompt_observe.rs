@@ -23,9 +23,20 @@ pub(super) fn watcher_batch_contains_relayable_response(data: &[u8]) -> bool {
         || text.contains("\"type\": \"result\"")
 }
 
+/// Post-terminal continuation veto used by the watcher suppression gate.
+///
+/// The historical name predates direct-input/TUI follow-up support. Besides an
+/// `assistant` envelope, a `user` envelope is positive evidence that the bytes
+/// crossed a turn boundary and therefore must not be consumed as late
+/// result-only ghost noise from the previous terminal turn. Keeping the legacy
+/// function name avoids broad call-site churn while making its actual authority
+/// contract explicit.
 pub(super) fn watcher_batch_contains_assistant_event(data: &[u8]) -> bool {
     let text = String::from_utf8_lossy(data);
-    text.contains("\"type\":\"assistant\"") || text.contains("\"type\": \"assistant\"")
+    text.contains("\"type\":\"assistant\"")
+        || text.contains("\"type\": \"assistant\"")
+        || text.contains("\"type\":\"user\"")
+        || text.contains("\"type\": \"user\"")
 }
 
 pub(super) fn legacy_wrapper_prompt_candidates_from_pane(pane: &str) -> Vec<String> {
