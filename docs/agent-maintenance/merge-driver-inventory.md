@@ -131,16 +131,28 @@ per-PR gates that are deliberately pinned to immutable inputs.
 
 ### Per-PR verification is base-pinned on purpose
 
-A required PR context verifies an **immutable input triple**: the event's
-`base`, its `head`, and the synthetic merge `candidate` GitHub built from them.
-`scripts/giant_file_progress.py` binds its verdict to exactly that triple
-(`provenance_matches`) and to the candidate actually checked out, and it does
-**not** require `base` to equal the current `origin/main`. So an unrelated main
-advance — someone else's PR landing — does not invalidate an already-verified
-candidate, and re-running a PR's checks purely because `main` moved is not a
-correctness requirement. Branch protection is consistent with this:
-`main` sets `required_status_checks.strict = false`, so GitHub itself does not
-demand branch currency either.
+A required PR context verifies the immutable synthetic merge `candidate`
+provided by `github.sha`, with the checkout required to equal that SHA.
+`scripts/giant_file_progress.py::pr_comparison_base` requires exactly two ordered
+parents: the candidate's comparison base first, and the event's exact PR head
+second. The event's `pull_request.base.sha` can lag that first parent (as in
+#5904/#5905). Equality is accepted directly; a different event base must be an
+ancestor of the comparison base. Rewinds, unrelated histories, unavailable
+objects and Git errors fail closed. The candidate is trusted as GitHub's event
+input; this check does not independently reconstruct its merge tree.
+
+Archives, diffs, frozen-blob checks and debt accounting all use the candidate's
+actual first parent, so another PR's intervening changes cannot be credited or
+charged to this PR. Evidence preserves the original `event_base_sha` separately
+from `comparison_base_sha` / `merge_first_parent`; `base_tree` belongs to the
+comparison base. Malformed provenance is rejected before the evaluator archives
+or scans inventory, with the observed event and parent IDs retained in failure
+evidence. This does not move the evaluator ahead of earlier CI script checks.
+
+No live `origin/main` lookup or fetch participates in this verdict. Moving that
+ref later cannot invalidate the same immutable candidate. A different candidate
+needs its own verification, and merge-time freshness remains the integrator's
+separate responsibility below.
 
 ### The freshness guarantee lives at the merge step
 
