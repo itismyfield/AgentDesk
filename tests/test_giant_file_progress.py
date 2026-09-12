@@ -156,12 +156,12 @@ class GiantFileProgressTest(unittest.TestCase):
     def test_provenance_rejects_base_spoof(self):
         # The event triple is the whole input: origin/main is not consulted, so a
         # main advance past "base" cannot turn a legitimate candidate into a reject.
-        # The surviving pair is the whole contract here: the honest triple is
-        # accepted, and swapping base for an unrelated SHA is not.
         self.assertTrue(PROGRESS.provenance_matches(
             "merge", "base", "head", ["merge", "base", "head"]))
         self.assertFalse(PROGRESS.provenance_matches(
             "merge", "base", "head", ["merge", "spoof", "head"]))
+        self.assertTrue(PROGRESS.provenance_matches(
+            "merge", "base", "head", ["merge", "base", "head"]))
 
     def test_rename_and_copy_are_not_progress(self):
         self.reject(lambda b, c, f: f.update(rename_copy=True), "rename/copy")
@@ -962,6 +962,8 @@ class GiantFileLedgerIntegrationTest(unittest.TestCase):
                 return ""
             if args[0] == "rev-list":
                 return " ".join(lineage) + "\n"
+            if args[0] == "merge-base":
+                raise subprocess.CalledProcessError(1, ["git", *args])
             raise AssertionError(args)
         def oid(ref, suffix="commit"):
             return {"HEAD": checkout or candidate, "origin/main": origin}.get(ref, ref)
@@ -1013,17 +1015,12 @@ class GiantFileLedgerIntegrationTest(unittest.TestCase):
         self.assertNotIn("observed_origin_main_sha", moved)
 
     def test_spoofed_triple_or_wrong_checkout_is_still_rejected(self):
-        """Retained bindings: base/head spoof, parent ORDER, and candidate != checked-out HEAD."""
+        """Retained bindings: base spoof, head spoof, and candidate != checked-out HEAD."""
         self.assertFalse(P.provenance_matches("merge", "base", "head", ["merge", "spoof", "head"]))
         self.assertFalse(P.provenance_matches("merge", "base", "head", ["merge", "base", "spoof"]))
-        # Order is load-bearing, not incidental: the same three SHAs merged the
-        # other way round is a different merge, so a set/reordered comparison
-        # must not be mistaken for the list equality the contract actually is.
-        self.assertFalse(P.provenance_matches("merge", "base", "head", ["merge", "head", "base"]))
         before, after = self.repair_pair()
         for lineage in (["merge", "spoof", "head"], ["merge", "base", "spoof"],
-                        ["spoof", "base", "head"], ["merge", "base"],
-                        ["merge", "head", "base"]):
+                        ["spoof", "base", "head"], ["merge", "base"]):
             rc, evidence, calls = self.run_main(before, after, NOW, parents=lineage)
             self.assertEqual((rc, calls), (2, 0), evidence)
             self.assertEqual(evidence["reason"],
@@ -1180,6 +1177,168 @@ class GiantFileLedgerIntegrationTest(unittest.TestCase):
                 self.assertIn(error, "; ".join(errors))
             else:
                 self.assertEqual(errors, [])
+
+
+class GiantFileCandidateBaseTest(unittest.TestCase):
+    """Real Git DAG regressions for #5904/#5905's stale event-base failure."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.repo = Path(self.temp.name) / "repo"
+        self.repo.mkdir()
+        self.evidence = Path(self.temp.name) / "evidence.json"
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "candidate@example.invalid")
+        self.git("config", "user.name", "Candidate Base Test")
+        self.put(P.EVALUATOR, Path(P.__file__).read_text(encoding="utf-8"))
+        self.put(P.REGISTRY, "# fixture registry\n")
+        for path in P.FROZEN:
+            self.put(path, "# unchanged authority\n")
+        self.put("src/fixture.rs", "pub fn fixture() {}\n" * 1200)
+        self.event_base = self.commit("event base")
+        self.git("checkout", "-qb", "pr")
+        self.put("docs/pr.txt", "PR-only change\n")
+        self.head = self.commit("PR head")
+        self.git("checkout", "-q", "main")
+        # Another PR shrinks a giant before GitHub synthesizes our candidate.
+        self.put("src/fixture.rs", "pub fn fixture() {}\n" * 1100)
+        self.put("docs/unrelated.txt", "another PR\n")
+        self.comparison_base = self.commit("main advanced")
+        self.git("merge", "--no-ff", "-qm", "candidate", "pr")
+        self.candidate = self.git("rev-parse", "HEAD")
+        self.parents = [self.candidate, self.comparison_base, self.head]
+        patch = mock.patch.object(P, "ROOT", self.repo)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def put(self, path, text):
+        target = self.repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    def commit(self, message):
+        self.git("add", "-A")
+        self.git("commit", "-qm", message)
+        return self.git("rev-parse", "HEAD")
+
+    def resolve(self, *, event_base=None, head=None, parents=None):
+        return P.pr_comparison_base(
+            self.candidate, event_base or self.event_base, head or self.head,
+            self.parents if parents is None else parents)
+
+    def run_candidate(self, *, event_base=None, head=None, candidate=None):
+        env = {"GFP_EVENT_NAME": "pull_request", "GFP_REPOSITORY": "itismyfield/AgentDesk",
+               "GFP_HEAD_REPOSITORY": "itismyfield/AgentDesk",
+               "GFP_CANDIDATE_SHA": candidate or self.candidate,
+               "GFP_BASE_SHA": event_base or self.event_base,
+               "GFP_HEAD_SHA": head or self.head}
+        # This fixture isolates provenance, archive/diff selection and evidence;
+        # real inventory parsing remains covered by the existing integration tests.
+        def snapshot(root, evaluation_date=None):
+            return {"overdue": ["src/fixture.rs"],
+                    "modules": {"src/fixture.rs": len((root / "src/fixture.rs").read_text().splitlines())},
+                    "registrations": {"src/fixture.rs": META_ROOT}}
+        with mock.patch.dict(P.os.environ, env, clear=True), mock.patch.object(
+                P, "EVIDENCE", self.evidence), mock.patch.object(
+                G, "giant_file_snapshot", side_effect=snapshot) as scan, mock.patch.object(
+                P, "archive", wraps=P.archive) as archive, mock.patch.object(
+                P, "diff_facts", wraps=P.diff_facts) as diff, redirect_stderr(io.StringIO()):
+            rc = P.main()
+        return rc, json.loads(self.evidence.read_text()), scan, archive, diff
+
+    def test_equal_and_advanced_event_bases_resolve_to_candidate_parent(self):
+        self.assertEqual(self.resolve(event_base=self.comparison_base), self.comparison_base)
+        self.assertEqual(self.resolve(), self.comparison_base)
+
+    def test_reverse_ancestry_and_unrelated_base_are_rejected(self):
+        tree = self.git("rev-parse", self.comparison_base + "^{tree}")
+        newer = self.git("commit-tree", tree, "-p", self.comparison_base, "-m", "newer")
+        unrelated = self.git("commit-tree", tree, "-m", "unrelated root")
+        for event_base in (newer, unrelated):
+            with self.subTest(event_base=event_base), self.assertRaisesRegex(RuntimeError, "provenance mismatch"):
+                self.resolve(event_base=event_base)
+
+    def test_shape_order_candidate_and_head_bindings_are_not_relaxed(self):
+        bad = [[], [self.candidate], [self.candidate, self.comparison_base],
+               [self.candidate, self.comparison_base, self.head, self.event_base],
+               [self.candidate, self.head, self.comparison_base],
+               [self.head, self.comparison_base, self.head],
+               [self.candidate, self.comparison_base, self.event_base]]
+        for parents in bad:
+            with self.subTest(parents=parents), self.assertRaisesRegex(RuntimeError, "provenance mismatch"):
+                self.resolve(parents=parents)
+        with self.assertRaisesRegex(RuntimeError, "provenance mismatch"):
+            self.resolve(head=self.event_base)
+
+    def test_missing_object_and_git_operational_error_fail_closed(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.resolve(event_base="0" * 40)
+        with mock.patch.object(P, "git", side_effect=subprocess.CalledProcessError(128, "git")):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.resolve()
+
+    def test_main_uses_actual_parent_for_archive_diff_and_evidence(self):
+        rc, evidence, scan, archive, diff = self.run_candidate()
+        self.assertEqual(rc, 0, evidence)
+        self.assertEqual(evidence["selector"], "pr_ordinary_no_regression")
+        self.assertEqual(evidence["event_base_sha"], self.event_base)
+        self.assertEqual(evidence["comparison_base_sha"], self.comparison_base)
+        self.assertEqual(evidence["merge_first_parent"], self.comparison_base)
+        self.assertEqual(evidence["base_tree"], self.git("rev-parse", self.comparison_base + "^{tree}"))
+        self.assertNotEqual(evidence["base_tree"], self.git("rev-parse", self.event_base + "^{tree}"))
+        self.assertEqual(evidence["changed_files"], 1)
+        self.assertEqual(evidence["retired"], [])
+        self.assertEqual(scan.call_count, 2)
+        self.assertEqual([call.args[0] for call in archive.call_args_list],
+                         [self.candidate, self.comparison_base])
+        diff.assert_called_once_with(self.comparison_base, self.candidate)
+
+    def test_later_origin_advance_does_not_change_candidate_evidence(self):
+        self.git("update-ref", "refs/remotes/origin/main", self.comparison_base)
+        first = self.run_candidate()
+        # Even a completely unrelated mutable ref must not participate in a
+        # verdict already pinned to the event candidate's immutable objects.
+        tree = self.git("rev-parse", self.candidate + "^{tree}")
+        unrelated = self.git("commit-tree", tree, "-m", "unrelated tip")
+        self.git("update-ref", "refs/remotes/origin/main", unrelated)
+        second = self.run_candidate()
+        self.assertEqual((first[0], second[0]), (0, 0))
+        self.assertEqual(first[1], second[1])
+
+    def test_invalid_provenance_fails_before_snapshot_and_diff(self):
+        for options in ({"head": self.event_base}, {"event_base": self.head},
+                        {"candidate": self.head}):
+            with self.subTest(options=options):
+                rc, evidence, scan, archive, diff = self.run_candidate(**options)
+                self.assertEqual(rc, 2, evidence)
+                self.assertEqual(evidence["verdict"], "fail")
+                scan.assert_not_called()
+                archive.assert_not_called()
+                diff.assert_not_called()
+
+    def test_advanced_base_does_not_hide_giant_growth_or_frozen_authority_changes(self):
+        tree = self.git("rev-parse", self.candidate + "^{tree}")
+        for path, text, reason in (
+                ("src/fixture.rs", "pub fn fixture() {}\n" * 1101, "new or growing giant"),
+                (P.GIANT_PIN, "changed authority\n", "frozen authority blob changed")):
+            with self.subTest(path=path):
+                self.git("read-tree", "--reset", "-u", tree)
+                self.put(path, text)
+                self.git("add", "-A")
+                changed_tree = self.git("write-tree")
+                changed = self.git("commit-tree", changed_tree, "-p", self.comparison_base,
+                                   "-p", self.head, "-m", "invalid integration candidate")
+                self.git("checkout", "-qf", "--detach", changed)
+                rc, evidence, _, _, _ = self.run_candidate(candidate=changed)
+                self.assertEqual(rc, 2, evidence)
+                self.assertIn(reason, evidence["reason"])
+                self.assertEqual(evidence["event_base_sha"], self.event_base)
+                self.assertEqual(evidence["comparison_base_sha"], self.comparison_base)
 
 
 if __name__ == "__main__":
