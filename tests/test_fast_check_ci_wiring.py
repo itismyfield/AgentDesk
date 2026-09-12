@@ -19,7 +19,7 @@ REQUIRED_CHECK_MIRROR_SHA256 = (
     "57c78a2ea1d5587ff1c74d5d25e2e32d25814198c5ee966e2297845c6230a30d"
 )
 CI_RUNNER_HARDENING_SHA256 = (
-    "a326da6e45343e8c0f3e842b58886593dde6d8af5571ebcb8d3a3691742433f1"
+    "a5a399d3faa892c39cc135c2fdad92aea9ef7f2d4889576c981aa13654072cf2"
 )
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
 CROSS_OS_CONSUMER_SCRIPT = REPO_ROOT / "scripts/cross_os_consumer_paths.py"
@@ -740,6 +740,11 @@ class FastCheckCiWiringTests(unittest.TestCase):
             r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::relay_recovery::tests -- --test-threads=1\n"
             r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::a_vanished_row_suppresses_inside_the_cohort_and_still_ends_lifecycle_outside_it -- --test-threads=1\n"
             r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::stream_tick::guarded_persist::tests::same_authority_watcher_epoch_advance_keeps_bridge_lifecycle_authority -- --test-threads=1\n"
+            r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::recorded_entry_gate_old_mirrors_the_shipped_lifecycle_gate -- --test-threads=1\n"
+            r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none -- --test-threads=1\n"
+            r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder -- --test-threads=1\n"
+            r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals -- --test-threads=1\n"
+            r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests -- --test-threads=1\n"
             r"          env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tui_prompt_relay::local_model_queue_wake_e2e -- --test-threads=1$",
         )
         self.assertRegex(
@@ -1013,14 +1018,23 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 scripts,
                 scripts.replace(
                     "      - name: Protect writer gate aggregate wiring (#5308)\n",
-                    "      - name: Replace aggregate before protection\n"
-                    "        run: printf '#!/usr/bin/env bash\\nexit 0\\n' > scripts/ci-script-checks.sh\n\n"
                     "      - name: Protect writer gate aggregate wiring (#5308)\n",
                     1,
                 ),
                 1,
             ),
         }
+        cases["pre-pair aggregate overwrite"] = workflow.replace(
+            scripts,
+            scripts.replace(
+                "      - name: Protect writer gate aggregate wiring (#5308)\n",
+                "      - name: Replace aggregate before protection\n"
+                "        run: printf '#!/usr/bin/env bash\\nexit 0\\n' > scripts/ci-script-checks.sh\n\n"
+                "      - name: Protect writer gate aggregate wiring (#5308)\n",
+                1,
+            ),
+            1,
+        )
         for label, mutated in cases.items():
             with self.subTest(mutation=label):
                 self.assertNotEqual(mutated, workflow)
@@ -1356,6 +1370,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     )
                     pin_only = run.rsplit("\nscripts/check-ci-runner-hardening.sh\n", 1)[0]
                     if pin_to_corrupt is not None:
+                        self.assertEqual(pin_only.count(pin_to_corrupt), 1)
                         pin_only = pin_only.replace(
                             pin_to_corrupt,
                             "0" * 64,
@@ -1384,6 +1399,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                     mutated_gate, encoding="utf-8"
                 )
                 pin_only = run.rsplit("\nscripts/check-ci-runner-hardening.sh\n", 1)[0]
+                self.assertEqual(pin_only.count(CI_RUNNER_HARDENING_SHA256), 1)
                 pin_only = pin_only.replace(
                     CI_RUNNER_HARDENING_SHA256,
                     repinned_gate_sha256,
