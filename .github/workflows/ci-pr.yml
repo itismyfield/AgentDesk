@@ -83,26 +83,40 @@ jobs:
               # own subject cannot trigger it is the #5185 defect, so the files
               # under guard are listed here alongside the tests.
               #
-              # NO-OP, stated so nobody reads this filter as narrow: the
-              # `'!src/services/discord/placeholder_live_events/**'` line below
-              # already makes `high_risk_recovery` effectively always true.
+              # The `'!src/services/discord/placeholder_live_events/**'` line
+              # that used to sit below `src/services/discord/**` is GONE, and
+              # with it the accident that made this filter always true.
               # dorny/paths-filter@v3 is NOT GitHub's native `paths:` -- it
-              # compiles every pattern into its own picomatch matcher and ORs
-              # them (`matchers.some(...)`), so a leading `!` is just another
-              # positive matcher for "anything that is not this", and it matches
-              # nearly every changed file. The patterns #5147 adds here and
-              # below therefore change nothing about what runs; they are kept
-              # as a statement of which files this lane is meant to guard, and
-              # they become load-bearing the moment that `!` line is fixed.
-              # Fixing it is a separate change: narrowing the filter would
-              # silently stop running whatever has been relying on it.
+              # compiles every pattern into its own picomatch matcher
+              # (`{dot: true}`) and ORs them (`matchers.some(...)`; no
+              # `predicate-quantifier` is set here, so the default `some`
+              # applies), so a leading `!` was just another POSITIVE matcher
+              # for "anything that is not this" and matched nearly every
+              # changed file. Nothing below subtracts, so this list IS the
+              # whole selection rule: a path no pattern matches silently skips
+              # the lane; it is deliberately a superset of what the lane runs.
+              #
+              # STOPPED selecting when the `!` went: docs, `dashboard/**`,
+              # `tests/**`, src this lane never executes. ADDED below, because
+              # dropping the `!` would otherwise drop a real input:
+              # `migrations/**` (these tests call
+              # `connect_test_pool_and_migrate`; `build.rs` already has
+              # `rerun-if-changed` over `migrations/postgres`); `policies/**`
+              # replacing three named `.js` files, because
+              # `test_engine_with_pg` aims `config.policies.dir` here while
+              # `engine/loader.rs` loads EVERY root-level `*.js`,
+              # `check_policy_tree_trust` walks subdirectories and
+              # `pipeline::ensure_loaded` reads `default-pipeline.yaml`; and
+              # the two scripts this job's own steps run. `Cargo.toml` stays --
+              # `hang_forensics.rs` `include_str!`s it for the
+              # `[profile.release]` assertion above.
+              # `tests/test_high_risk_recovery_path_filter.py` pins the result
+              # and fails if any pattern here starts with `!` again.
               - 'Cargo.toml'
-              - 'policies/auto-queue.js'
-              - 'policies/kanban-rules.js'
-              - 'policies/timeouts.js'
-              - 'policies/timeouts/**'
-              - 'policies/lib/**'
-              - 'policies/__tests__/**'
+              - 'migrations/**'
+              - 'policies/**'
+              - 'scripts/check_test_target_integrity.py'
+              - 'scripts/ci/postgres-service.sh'
               - 'src/db/**'
               - 'src/dispatch/**'
               - 'src/engine/**'
@@ -122,20 +136,49 @@ jobs:
               - 'src/services/scheduled_messages/**'
               - 'src/services/discord/outbound/source_registry.rs'
               - 'src/services/discord/**'
-              - '!src/services/discord/placeholder_live_events/**'
               # #5147: the forensics module, the health-path DB awaits it
               # brackets, and the boot site that starts the self-watchdog (and
-              # with it the runtime beacon). Inert today -- see the `!` note
-              # above.
+              # with it the runtime beacon). Load-bearing now that the `!`
+              # line above is gone -- see the note above.
               - 'src/cli/dcserver.rs'
               - 'src/services/hang_forensics.rs'
               - 'src/services/health_diagnostics.rs'
               - 'src/services/message_outbox.rs'
+              # #5232 R3: these five, and `outbound/source_registry.rs` above
+              # (already covered by `src/services/discord/**`), match no target
+              # among this job's 21 `cargo test --lib` invocations. They stay as
+              # part of the deliberate superset -- not, as previously claimed,
+              # because a ci-pr-only target shadows them.
               - 'src/services/message_outbox_recovery.rs'
               - 'src/services/message_outbox_recovery_support.rs'
               - 'src/services/message_outbox_recovery_tests.rs'
               - 'src/services/platform/tmux.rs'
               - 'src/services/tmux_common.rs'
+              # #5232 R2: 1-hop imports this list missed -- `src/pipeline.rs`
+              # reads the tracked `policies/**`, `Config::default` is in
+              # `src/config.rs` (`include_str!`s `defaults.json`), and
+              # `platform::git_head_commit` re-exports `src/services/git/**`.
+              - 'defaults.json'
+              - 'src/config.rs'
+              - 'src/pipeline.rs'
+              - 'src/services/dispatches/**'
+              - 'src/services/git/**'
+              - 'src/services/observability/**'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              # #5232 R3: 1-hop imports of the lane's OTHER two SUTs. The list
+              # above only ever tracked `src/high_risk_recovery.rs`, but this
+              # job also runs `services::hang_forensics::tests` and
+              # `services::health_diagnostics::tests`, and the latter reaches
+              # all four of these from its production path
+              # (`health_diagnostics.rs:65,311,448,469`). `platform/mod.rs` is
+              # the re-export `high_risk_recovery.rs:992` goes through, and its
+              # own comment declares itself temporary.
+              - 'src/config_live_reload.rs'
+              - 'src/services/dispatch_gate.rs'
+              - 'src/services/health_active_session_audit.rs'
+              - 'src/services/platform/mod.rs'
+              - 'src/services/session_activity.rs'
             pg_db:
               - '.github/workflows/**'
               - 'justfile'

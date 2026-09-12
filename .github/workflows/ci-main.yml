@@ -25,68 +25,6 @@ env:
   POSTGRES_SERVICE_IMAGE: ${{ vars.AGENTDESK_POSTGRES_SERVICE_IMAGE }}
 
 jobs:
-  changes:
-    name: Changed paths
-    runs-on: ubuntu-latest
-    outputs:
-      high_risk_recovery: ${{ steps.filter.outputs.high_risk_recovery }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Detect changed areas
-        id: filter
-        uses: dorny/paths-filter@v3
-        with:
-          filters: |
-            high_risk_recovery:
-              - '.github/workflows/**'
-              # #5147: mirrors ci-pr.yml. `[profile.release]` is guarded by a
-              # test in this lane, so the manifest that test reads has to be
-              # able to trigger it here too -- otherwise the guard is absent
-              # from main entirely, which is the #5185 class of defect.
-              #
-              # NO-OP, same as in ci-pr.yml: the
-              # `'!src/services/discord/placeholder_live_events/**'` line below
-              # already makes this filter effectively always true, because
-              # dorny/paths-filter@v3 ORs one picomatch matcher per pattern and
-              # a leading `!` is just a matcher for "anything that is not
-              # this". These patterns run nothing new; they record which files
-              # the lane guards, and become load-bearing once that `!` line is
-              # fixed (a separate change -- narrowing the filter would silently
-              # stop running whatever relies on it being always-true).
-              - 'Cargo.toml'
-              - 'policies/auto-queue.js'
-              - 'policies/kanban-rules.js'
-              - 'policies/timeouts.js'
-              - 'policies/timeouts/**'
-              - 'policies/lib/**'
-              - 'policies/__tests__/**'
-              - 'src/db/**'
-              - 'src/dispatch/**'
-              - 'src/engine/**'
-              - 'src/high_risk_recovery.rs'
-              - 'src/kanban/**'
-              - 'src/reconcile.rs'
-              - 'src/server/routes/auto_queue.rs'
-              - 'src/server/routes/dispatched_sessions.rs'
-              - 'src/server/routes/dispatches/**'
-              - 'src/server/routes/scheduled_messages.rs'
-              - 'src/server/worker_registry.rs'
-              - 'src/services/auto_queue.rs'
-              - 'src/services/auto_queue/**'
-              - 'src/services/scheduled_messages.rs'
-              - 'src/services/discord/**'
-              - '!src/services/discord/placeholder_live_events/**'
-              # #5147: see ci-pr.yml. Inert today -- see the `!` note above.
-              - 'src/cli/dcserver.rs'
-              - 'src/services/hang_forensics.rs'
-              - 'src/services/health_diagnostics.rs'
-              - 'src/services/message_outbox.rs'
-              - 'src/services/platform/tmux.rs'
-              - 'src/services/tmux_common.rs'
-
   full_non_pg:
     name: Full tests (ubuntu-latest)
     runs-on: ubuntu-latest
@@ -234,8 +172,11 @@ jobs:
 
   high-risk-recovery:
     name: High-risk recovery
-    needs: changes
-    if: needs.changes.outputs.high_risk_recovery == 'true'
+    # #5232 R3: deliberately UNCONDITIONAL here, unlike ci-pr.yml. ci-main has
+    # no library sweep to catch a path-filter miss, so the filter would have to
+    # be exhaustive to be safe; a main push pays this lane once per merge, so it
+    # just runs. The `changes` job that gated it was the filter's only consumer
+    # and is removed with it rather than left as dead configuration.
     runs-on: ubuntu-latest
     env:
       RUST_BACKTRACE: 1

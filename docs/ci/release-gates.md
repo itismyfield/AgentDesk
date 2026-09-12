@@ -12,7 +12,7 @@
 | --- | --- | --- | --- | --- |
 | **Full tests** | `full_non_pg` | `library_sweep` (+ `check_fast` compile/policy) | `full_macos` + `full_windows` | main/nightly always run non-PG tests. PR side: `library_sweep` runs the whole `--lib` harness minus the `_pg`/`pg_`/`postgres` id filters on the broad `rust_or_policy` filter (#5185), **with its own PostgreSQL service** — those filters are substring matches over ids and 61 PG-dependent tests carry none of them; `check_fast` stays compile/policy only. |
 | **PostgreSQL tests** | `postgres` | `test_fast`의 PG 서비스 | `postgres_full` | main/nightly는 항상 실행. PR의 `test_fast`와 selection observer는 `pg_db` path filter가 true일 때만 실행하며, false이면 required mirror가 명시적으로 green을 반환. |
-| **High-risk recovery** | `high-risk-recovery` | `high-risk-recovery` | `high_risk_recovery_full` | path filter hit 시에만 실행. nightly full job은 무조건. |
+| **High-risk recovery** | `high-risk-recovery` | `high-risk-recovery` | `high_risk_recovery_full` | main/nightly는 무조건 실행 — #5232 R3 에서 `ci-main.yml`의 path filter를 제거했다. PR의 `high-risk-recovery`만 path filter hit 시 실행. |
 
 Selection observer required gate가 red로 만드는 observer 사망은 **프로세스 수준
 사망**이다. observer의 비정상 종료 코드나 시그널, summary 0줄 또는 2줄 이상,
@@ -268,57 +268,23 @@ AGENTDESK_CI_TIMEOUT_REPORT=1 "$PYTHON" scripts/ci-timeout.py 900 "$PYTHON" scri
 
 ### Always-on (필터 없음)
 
-- **Full tests** / **PostgreSQL tests** 은 path filter 없이 `main` push 시 무조건 실행. 이 두 gate는 `changes` job의 outputs에 의존하지 않으며 `if:` 조건 없이 정의.
-- 즉, 커밋이 어떤 파일만 건드리든 Full/PG는 실행되고 red면 merge 차단에 준하는 신호다.
+- **Full tests** / **PostgreSQL tests** / **High-risk recovery** 는 path filter 없이 `main` push 시 무조건 실행. 이 세 gate는 `changes` job의 outputs에 의존하지 않으며 `if:` 조건 없이 정의된다 — `ci-main.yml`에는 `changes` job 자체가 없다(#5232 R3).
+- 즉, 커밋이 어떤 파일만 건드리든 이 셋은 실행되고 red면 merge 차단에 준하는 신호다.
 
-### Conditional (`high_risk_recovery` path filter)
+### Conditional (`high_risk_recovery` path filter — `ci-pr.yml` 전용)
 
-`ci-main.yml`과 `ci-pr.yml`의 `high-risk-recovery` job은 `needs: changes` +
-`if: needs.changes.outputs.high_risk_recovery == 'true'` 로 실행된다. 두 workflow의
-`changes` job / `Detect changed areas` step에 공통인 필터는 다음과 같다:
+`needs: changes` + `if: needs.changes.outputs.high_risk_recovery == 'true'` 로 게이팅되는
+것은 `ci-pr.yml`의 `high-risk-recovery` job **하나뿐**이다. `ci-main.yml`은 #5232 R3 에서
+`changes` job과 그 `needs:`/`if:` 를 함께 제거해 위 Always-on 으로 옮겼다. main 쪽 필터가
+"유실됐다"고 판단해 그것들을 복원하면 `services::hang_forensics::tests` 와
+`services::health_diagnostics::tests` 가 main 에서 다시 조용히 미실행된다 —
+`tests/test_high_risk_recovery_path_filter.py` 가 그 복원과 이 문서 Always-on 목록의 이탈을
+양방향으로 red 로 만든다.
 
-```yaml
-high_risk_recovery:
-  - '.github/workflows/**'
-  - 'policies/auto-queue.js'
-  - 'policies/kanban-rules.js'
-  - 'policies/timeouts.js'
-  - 'policies/timeouts/**'
-  - 'policies/lib/**'
-  - 'policies/__tests__/**'
-  - 'src/db/**'
-  - 'src/dispatch/**'
-  - 'src/engine/**'
-  - 'src/high_risk_recovery.rs'
-  - 'src/kanban/**'
-  - 'src/reconcile.rs'
-  - 'src/server/routes/auto_queue.rs'
-  - 'src/server/routes/dispatched_sessions.rs'
-  - 'src/server/routes/dispatches/**'
-  - 'src/server/routes/scheduled_messages.rs'
-  - 'src/server/worker_registry.rs'
-  - 'src/services/auto_queue.rs'
-  - 'src/services/auto_queue/**'
-  - 'src/services/scheduled_messages.rs'
-  - 'src/services/discord/**'
-  - '!src/services/discord/placeholder_live_events/**'
-  - 'src/services/message_outbox.rs'
-  - 'src/services/platform/tmux.rs'
-  - 'src/services/tmux_common.rs'
-```
-
-`ci-pr.yml`의 같은 filter에는 PR required lane이 소유하는 아래 경계가 추가로
-등재돼 있다:
-
-```yaml
-high_risk_recovery: # ci-pr.yml only additions
-  - 'src/server/routes/message_outbox.rs'
-  - 'src/services/scheduled_messages/**'
-  - 'src/services/discord/outbound/source_registry.rs'
-  - 'src/services/message_outbox_recovery.rs'
-  - 'src/services/message_outbox_recovery_support.rs'
-  - 'src/services/message_outbox_recovery_tests.rs'
-```
+필터 패턴 목록의 정본은 `ci-pr.yml`의 `changes` job `Detect changed areas` step 의
+`filters:` 하나이며 여기에 사본을 두지 않는다 — 낡은 사본이 이 절을 한 번 거짓으로
+만들었다. 선택 규칙의 계약(선두 `!` 패턴 금지, SUT 의 1-hop import 전수 포함)은 같은
+테스트가 단언한다.
 
 중요: `src/services/auto_queue.rs` (파일)과 `src/services/auto_queue/**`
 (디렉터리), `src/services/scheduled_messages.rs`와
