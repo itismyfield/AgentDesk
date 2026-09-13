@@ -413,6 +413,72 @@ mod tests {
         state
     }
 
+    #[test]
+    fn admitted_source_witness_advances_only_the_original_allocation() {
+        use inflight::InflightEpisodePin;
+        let mut before = synthetic_state(
+            ChannelId::new(5_071_581),
+            MessageId::new(5_071_582),
+            "witness-5071",
+            false,
+        );
+        before.relay_ownership_only = false;
+        before.session_id = None;
+        before.output_path = Some("/var/tmp/witness-5071.jsonl".into());
+        before.external_turn_id = Some("external-witness-5071".into());
+        let original = Arc::new(CancelToken::new());
+        before.turn_nonce = original.turn_nonce().map(str::to_owned);
+        let before_pin = InflightEpisodePin::from_state(&before);
+        let mut admitted = before.clone();
+        admitted.session_id = Some("native-session-5071".into());
+        admitted.output_path = Some("/private/var/tmp/witness-5071.jsonl".into());
+
+        bridge_handoff::preserve_admitted_source(&before_pin, &admitted, &original);
+        assert!(bridge_handoff::retained_actor(&admitted).unwrap().is_none());
+        assert!(bridge_handoff::record(&before, Some(&original), None));
+        bridge_handoff::preserve_admitted_source(&before_pin, &admitted, &original);
+        assert!(Arc::ptr_eq(
+            &bridge_handoff::retained_actor(&admitted).unwrap().unwrap(),
+            &original
+        ));
+        assert!(matches!(
+            bridge_handoff::original_session_pin(&admitted, Some(&original)),
+            Some(None)
+        ));
+
+        let successor = Arc::new(CancelToken::from_persisted_turn_nonce(
+            before.turn_nonce.clone(),
+        ));
+        let mut next = admitted.clone();
+        next.current_msg_id = 5_071_583;
+        // Even equal nonces cannot let B advance A's current witness.
+        bridge_handoff::preserve_admitted_source(
+            &InflightEpisodePin::from_state(&admitted),
+            &next,
+            &successor,
+        );
+        assert!(Arc::ptr_eq(
+            &bridge_handoff::retained_actor(&admitted).unwrap().unwrap(),
+            &original
+        ));
+        // A also cannot reuse its stale before-pin after admission.
+        bridge_handoff::preserve_admitted_source(&before_pin, &next, &original);
+        assert!(Arc::ptr_eq(
+            &bridge_handoff::retained_actor(&admitted).unwrap().unwrap(),
+            &original
+        ));
+        assert!(bridge_handoff::record(&next, Some(&successor), None));
+        bridge_handoff::preserve_admitted_source(
+            &InflightEpisodePin::from_state(&next),
+            &admitted,
+            &original,
+        );
+        assert!(Arc::ptr_eq(
+            &bridge_handoff::retained_actor(&next).unwrap().unwrap(),
+            &successor
+        ));
+    }
+
     async fn seed_synthetic_mailbox_owner(
         shared: &Arc<SharedData>,
         channel_id: ChannelId,

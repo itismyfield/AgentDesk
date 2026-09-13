@@ -214,6 +214,30 @@ pub(super) fn retained_actor(row: &InflightTurnState) -> Result<Option<Arc<Cance
     Ok(Some(actor))
 }
 
+/// Successful typed admission can learn the native SID and canonical source
+/// path. Advance only its existing allocation witness under the same lock;
+/// a missing witness or a successor allocation cannot be replaced here.
+/// The admission caller still holds its durable row and source guards.
+pub(in crate::services::discord) fn preserve_admitted_source(
+    before: &InflightEpisodePin,
+    admitted: &InflightTurnState,
+    actor: &Arc<CancelToken>,
+) {
+    let mut claims = CLAIMS.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(witness) = claims
+        .get_mut(&(admitted.provider.clone(), admitted.channel_id))
+        .filter(|witness| {
+            witness.episode == *before
+                && witness
+                    .actor
+                    .upgrade()
+                    .is_some_and(|saved| Arc::ptr_eq(&saved, actor))
+        })
+    {
+        witness.episode = InflightEpisodePin::from_state(admitted);
+    }
+}
+
 pub(super) fn record(
     row: &InflightTurnState,
     actor: Option<&Arc<CancelToken>>,

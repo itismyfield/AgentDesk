@@ -1343,11 +1343,12 @@ impl InflightTurnState {
             {
                 return Err(mismatch);
             }
+            let before_admission = InflightEpisodePin::from_state(&fresh);
             fresh.session_id.clone_from(&binding.session_id);
             let range = persist_terminal_range(
                 &root,
                 &path,
-                (self, baseline),
+                (self, &mut *baseline),
                 fresh,
                 (&result, canonical, &session),
                 (
@@ -1356,6 +1357,11 @@ impl InflightTurnState {
                     Some((source_file_dev, source_file_ino)),
                 ),
             )?;
+            crate::services::discord::tui_prompt_relay::preserve_admitted_source(
+                &before_admission,
+                baseline,
+                &captured,
+            );
             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding_under_source_authority(authority, binding);
             Ok((
                 StreamMessage::Done { result, session_id },

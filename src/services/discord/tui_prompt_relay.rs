@@ -116,7 +116,7 @@ mod synthetic_orphan_reclaim; // #3982 orphan-at-birth reclaim trigger (see modu
 pub(in crate::services::discord) mod synthetic_start;
 #[cfg(unix)]
 pub(in crate::services::discord) use synthetic_start::bridge_handoff::{
-    DormantSyntheticClaim, capture_dormant_partial,
+    DormantSyntheticClaim, capture_dormant_partial, preserve_admitted_source,
 };
 mod synthetic_start_wiring; // #4002 shared Path-X wiring with #4082 neutral-note gate
 #[cfg(test)]
