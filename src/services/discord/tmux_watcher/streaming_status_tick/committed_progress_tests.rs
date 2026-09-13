@@ -506,6 +506,51 @@ fn active_progress_tick_emits_once() {
     });
 }
 
+/// #5833: isolate the visible HTTP boundary from collector admission. A recovered
+/// SBR row alone must not be mistaken for proof that the streaming tick ran.
+#[test]
+fn recovered_session_bound_codex_stream_tick_reaches_http() {
+    let (_lock, guard) = isolate_root();
+    capture_warns(async {
+        let mut fx = seed_row(guard.root.path(), 5833, false, false);
+        let mut row = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
+        std::fs::remove_file(fx.path()).unwrap();
+        fx.provider = ProviderKind::Codex;
+        row.provider = fx.provider.as_str().to_owned();
+        row.current_msg_id = 0;
+        row.current_msg_len = 3;
+        row.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+        row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
+        row.set_relay_owner_kind(
+            crate::services::discord::inflight::RelayOwnerKind::SessionBoundRelay,
+        );
+        row.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
+        row.turn_nonce = Some("recovered-original-5833".into());
+        row.injected_prompt_message_id = Some(row.user_msg_id);
+        save_inflight_state(&row).unwrap();
+        fx.identity = InflightTurnIdentity::from_state(&row);
+        let before = fx.row_bytes();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let rec = recorder(fx.channel, true).await;
+        let mut locals = tick_locals(&fx, None);
+        assert_eq!(
+            run_tick(&mut locals, &rec, &shared, &fx, false).await,
+            FALLTHROUGH
+        );
+        assert_eq!(
+            rec.seen("POST").len(),
+            1,
+            "a reached native streaming tick must publish its first frame"
+        );
+        assert_eq!(locals.placeholder, msg(SERVER_MSG));
+        assert_eq!(
+            fx.row_bytes(),
+            before,
+            "planned-restart row still rejects the ordinary progress writer"
+        );
+    });
+}
+
 #[test]
 fn active_silent_progress_is_durable() {
     let (_lock, guard) = isolate_root();
