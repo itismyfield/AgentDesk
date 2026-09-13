@@ -529,7 +529,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                 let mut pinned_handled = false;
                 #[cfg(unix)]
-                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled);
+                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled terminal_outcome);
                 if !pinned_handled && long {
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                     let bridge_end = tmux_last_offset.unwrap_or(0);

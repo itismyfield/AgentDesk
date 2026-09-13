@@ -7,7 +7,23 @@ pub(super) struct TerminalBarrier {
     pub(super) release: tokio::sync::Notify,
 }
 
-fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, empty_terminal: bool) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceRace {
+    Unchanged,
+    Generation,
+    FileIdentity,
+    Session,
+    RevalidationIo,
+    PinGeneration,
+    LiveHolder,
+}
+
+fn terminal_ordering_fixture(
+    replace_actor: bool,
+    replace_after_delivery: bool,
+    empty_terminal: bool,
+    source_race: Option<SourceRace>,
+) {
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
@@ -22,6 +38,7 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, 
             let tmux = "synthetic-terminal-ordering-5833";
             let generation_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
             std::fs::write(&generation_path, b"1").unwrap();
+            let generation_time = std::fs::metadata(&generation_path).unwrap().modified().unwrap();
             let output = temp.path().join("transcript.jsonl");
             let body = if empty_terminal { String::new() } else {
                 "synthetic terminal publication keeps its original actor ".repeat(12)
@@ -53,8 +70,18 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, 
                 &provider, channel.get()).expect("synthetic admission persists A's row");
             assert_eq!(original_actor.turn_nonce(), original_row.turn_nonce.as_deref());
             let barrier = Arc::new(TerminalBarrier::default());
+            let prepare = source_race.map(|_| Arc::new(crate::services::discord::turn_bridge::TerminalPrepareTestHook {
+                channel_id: channel.get(), ..Default::default()
+            }));
+            *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK.lock().unwrap() = prepare.clone();
+            let row_path = crate::services::discord::inflight::inflight_state_path(temp.path(), &provider, channel.get());
+            let lock_path = row_path.with_extension("json.lock");
+            let holder_key = crate::services::discord::DeliveryLeaseKey::from_inflight_state_for_site(
+                channel, shared.restart.current_generation, &original_row, "bridge");
+            let holder = crate::services::discord::LeaseHolder::Watcher { instance_id: 5833 };
+            let cell = shared.delivery_lease(channel);
             let gateway = Arc::new(S3Gateway {
-                local_delivery: true, terminal_barrier: Some(barrier.clone()),
+                local_delivery: true, terminal_barrier: source_race.is_none().then(|| barrier.clone()),
                 ..Default::default()
             });
             let (tx, rx) = mpsc::channel();
@@ -67,8 +94,9 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, 
                 "terminal ordering prompt", Vec::new(), rx, Some(reader_end_rx), &lease, gateway.clone(), 0,
             );
             let observe = async {
-                tokio::time::timeout(Duration::from_secs(5), barrier.entered.notified())
-                    .await.expect("actual adapter enters terminal transport");
+                let entered = if let Some(prepare) = prepare.as_ref() { &prepare.entered } else { &barrier.entered };
+                tokio::time::timeout(Duration::from_secs(5), entered.notified())
+                    .await.expect("actual adapter reaches the admitted terminal publication boundary");
                 let before = crate::services::discord::mailbox_snapshot(&shared, channel).await;
                 assert!(before.cancel_token.as_ref().is_some_and(|token| Arc::ptr_eq(token, &original_actor)),
                     "the original synthetic actor must still own the turn DURING terminal transport");
@@ -80,6 +108,46 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, 
                 assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux)
                     .unwrap().session_id.as_deref(), Some("native-ordering-session"),
                     "the actual source witness connects the original missing session before publication");
+                if let Some(race) = source_race {
+                    use std::os::unix::fs::MetadataExt;
+                    let metadata = std::fs::metadata(&output).unwrap();
+                    assert_eq!(row.tui_terminal_source_file_identity, Some((metadata.dev(), metadata.ino())),
+                        "real reader admission captured the original opened FD before mutation");
+                    assert_eq!(row.last_offset, metadata.len());
+                    assert_eq!(row.full_response, body);
+                    assert!(!row.terminal_delivery_committed);
+                    match race {
+                        SourceRace::Unchanged => {}
+                        SourceRace::Generation => {
+                            std::fs::File::open(&generation_path).unwrap().set_times(std::fs::FileTimes::new()
+                                .set_modified(generation_time + Duration::from_secs(1))).unwrap();
+                        }
+                        SourceRace::FileIdentity => {
+                            std::fs::rename(&output, output.with_extension("original")).unwrap();
+                            std::fs::copy(output.with_extension("original"), &output).unwrap();
+                        }
+                        SourceRace::Session => {
+                            let mut binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap();
+                            binding.session_id = Some("different-known-session".into());
+                            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(tmux, binding);
+                        }
+                        SourceRace::RevalidationIo => {
+                            std::fs::rename(&lock_path, lock_path.with_extension("saved")).unwrap();
+                            std::fs::create_dir(&lock_path).unwrap();
+                        }
+                        SourceRace::PinGeneration => {
+                            let generation_path = generation_path.clone();
+                            *prepare.as_ref().unwrap().after_revalidation.lock().unwrap() = Some(Box::new(move || {
+                                std::fs::File::open(generation_path).unwrap().set_times(std::fs::FileTimes::new()
+                                    .set_modified(generation_time + Duration::from_secs(1))).unwrap();
+                            }));
+                        }
+                        SourceRace::LiveHolder => {
+                            assert!(cell.try_acquire(holder_key.clone(), holder, 0, metadata.len(),
+                                crate::services::discord::lease_now_ms() + 30_000));
+                        }
+                    }
+                }
                 let replacement = if replace_actor {
                     let actor = Arc::new(CancelToken::from_persisted_turn_nonce(
                         original_actor.turn_nonce().map(str::to_owned)));
@@ -92,13 +160,68 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, 
                     assert_eq!(swapped.active_turn_nonce, before.active_turn_nonce);
                     Some((actor, row))
                 } else { None };
-                barrier.release.notify_one();
+                if let Some(prepare) = prepare.as_ref() { prepare.release.notify_one(); }
+                else { barrier.release.notify_one(); }
                 replacement
             };
             let (delivered, replacement) = tokio::join!(
                 tokio::time::timeout(Duration::from_secs(5), delivery), observe);
             let delivered = delivered.expect("terminal transport must settle");
             tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
+            *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK.lock().unwrap() = None;
+            if let Some(race) = source_race.filter(|race| *race != SourceRace::Unchanged) {
+                assert!(delivered.is_err(), "{race:?} cannot signal terminal completion");
+                assert!(gateway.bodies.lock().unwrap().is_empty(), "{race:?} must execute zero gateway sends/edits");
+                assert!(crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get())
+                    .is_none_or(|record| record.confirmed_deliveries.is_empty()), "no exact receipt before transport");
+                assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap().last_offset, 0);
+                if race == SourceRace::RevalidationIo {
+                    std::fs::remove_dir(&lock_path).unwrap();
+                    std::fs::rename(lock_path.with_extension("saved"), &lock_path).unwrap();
+                }
+                let retained = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get())
+                    .expect("source loss retains the original durable delivery obligation");
+                assert_eq!(retained.turn_nonce, original_row.turn_nonce);
+                assert_eq!(retained.current_msg_id, original_row.current_msg_id);
+                assert_eq!(retained.full_response, body);
+                assert!(!retained.terminal_delivery_committed);
+                let actor = replacement.as_ref().map(|(actor, _)| actor).unwrap_or(&original_actor);
+                assert!(crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token
+                    .is_some_and(|current| Arc::ptr_eq(&current, actor)), "source loss preserves the actual actor");
+                assert!(!actor.cancelled.load(std::sync::atomic::Ordering::Acquire));
+                if race == SourceRace::LiveHolder {
+                    assert!(cell.release(holder, holder_key.clone(), 0, retained.last_offset), "real Skip leaves its actual holder intact");
+                } else {
+                    assert!(cell.try_acquire(holder_key.clone(), holder, 0, retained.last_offset,
+                        crate::services::discord::lease_now_ms() + 30_000), "failed preparation releases its own lease");
+                    assert!(cell.release(holder, holder_key.clone(), 0, retained.last_offset));
+                }
+                if replace_actor { return; }
+                match race {
+                    SourceRace::Generation | SourceRace::PinGeneration => {
+                        std::fs::File::open(&generation_path).unwrap().set_times(std::fs::FileTimes::new()
+                            .set_modified(generation_time)).unwrap();
+                    }
+                    SourceRace::FileIdentity => {
+                        std::fs::remove_file(&output).unwrap();
+                        std::fs::rename(output.with_extension("original"), &output).unwrap();
+                    }
+                    SourceRace::Session => {
+                        let mut binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap();
+                        binding.session_id = Some("native-ordering-session".into());
+                        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(tmux, binding);
+                    }
+                    _ => {}
+                }
+                let (tx, rx) = mpsc::channel();
+                let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+                let reader = super::synthetic_bridge_handoff_pg_tests::spawn_handoff_reader(&output, 0, tmux, tx, end_tx);
+                tokio::time::timeout(Duration::from_secs(5), claude_idle_bridge::stream_tui_idle_response_with_gateway(
+                    &shared, provider.clone(), channel, tmux, &output, 0, "terminal ordering prompt", Vec::new(),
+                    rx, Some(end_rx), &lease, gateway.clone(), 0,
+                )).await.expect("retry is bounded").expect("restored original source resumes the retained obligation");
+                tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
+            }
             let replacement = if replace_after_delivery {
                 delivered.as_ref().expect("A completed before the duplicate-finalizer race");
                 let after_a = crate::services::discord::mailbox_snapshot(&shared, channel).await;
@@ -142,7 +265,14 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, 
                 assert!(duplicate.cancel_token.as_ref().is_some_and(|active| Arc::ptr_eq(active, &replacement)));
                 assert!(!replacement.cancelled.load(std::sync::atomic::Ordering::Acquire));
             } else {
-                delivered.expect("original synthetic delivery completes");
+                if source_race.is_none_or(|race| race == SourceRace::Unchanged) {
+                    delivered.expect("original synthetic delivery completes");
+                }
+                let record = crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get()).unwrap();
+                assert_eq!(record.confirmed_deliveries.len(), 1, "one exact receipt settles the original obligation");
+                assert_eq!(record.confirmed_deliveries[0].source.range, (0, std::fs::metadata(&output).unwrap().len()));
+                assert_eq!(record.confirmed_deliveries[0].source.turn_nonce, original_actor.turn_nonce().unwrap());
+                assert!(crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).is_none());
                 assert!(after.cancel_token.is_none(), "A releases only after successful publication");
                 assert!(gateway.bodies.lock().unwrap().iter().any(|sent| !sent.trim().is_empty() && sent.contains(&body)));
                 let next = Arc::new(CancelToken::new());
@@ -155,17 +285,43 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, 
 
 #[test]
 fn synthetic_terminal_gateway_retains_original_actor_until_publication() {
-    terminal_ordering_fixture(false, false, false);
-    terminal_ordering_fixture(false, false, true);
+    terminal_ordering_fixture(false, false, false, None);
+    terminal_ordering_fixture(false, false, true, None);
 }
 
 #[test]
 fn synthetic_terminal_gateway_preserves_same_nonce_recovery_actor() {
-    terminal_ordering_fixture(true, false, false);
-    terminal_ordering_fixture(true, false, true);
+    terminal_ordering_fixture(true, false, false, None);
+    terminal_ordering_fixture(true, false, true, None);
 }
 
 #[test]
 fn synthetic_terminal_duplicate_finalizer_preserves_same_nonce_recovery_actor() {
-    terminal_ordering_fixture(false, true, false);
+    terminal_ordering_fixture(false, true, false, None);
+}
+
+#[test]
+fn synthetic_terminal_gateway_rejects_lost_admitted_source() {
+    for race in [
+        SourceRace::Unchanged,
+        SourceRace::Generation,
+        SourceRace::FileIdentity,
+        SourceRace::Session,
+        SourceRace::RevalidationIo,
+        SourceRace::PinGeneration,
+        SourceRace::LiveHolder,
+    ] {
+        terminal_ordering_fixture(false, false, false, Some(race));
+    }
+}
+
+#[test]
+fn synthetic_terminal_gateway_source_loss_preserves_same_nonce_successor() {
+    for race in [
+        SourceRace::Generation,
+        SourceRace::FileIdentity,
+        SourceRace::Session,
+    ] {
+        terminal_ordering_fixture(true, false, false, Some(race));
+    }
 }

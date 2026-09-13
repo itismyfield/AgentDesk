@@ -189,6 +189,9 @@ pub(super) fn ordered_terminal_range_end(
         (ProviderKind::Codex, Some(RuntimeHandoffKind::CodexTui)) => {
             admitted.map(CodexRange::complete_record_end)
         }
+        (ProviderKind::Claude, Some(RuntimeHandoffKind::ClaudeTui)) if admitted.is_some() => {
+            admitted.map(CodexRange::complete_record_end)
+        }
         _ => tmux_last_offset,
     }
 }

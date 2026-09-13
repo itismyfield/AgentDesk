@@ -10,6 +10,30 @@ use super::super::{streaming_edit_text::TuiErrorClassification, *};
 use super::exit_reconcile::StreamLoopOutcome;
 use crate::services::discord::inflight::CodexRange;
 
+#[cfg(test)]
+pub(crate) mod terminal_prepare_test {
+    use super::*;
+    #[derive(Default)]
+    pub(crate) struct TerminalPrepareTestHook {
+        pub(crate) channel_id: u64,
+        pub(crate) entered: tokio::sync::Notify,
+        pub(crate) release: tokio::sync::Notify,
+        pub(crate) after_revalidation: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+    pub(crate) static TERMINAL_PREPARE_TEST_HOOK: std::sync::Mutex<
+        Option<Arc<TerminalPrepareTestHook>>,
+    > = std::sync::Mutex::new(None);
+
+    pub(crate) fn for_channel(channel: ChannelId) -> Option<Arc<TerminalPrepareTestHook>> {
+        TERMINAL_PREPARE_TEST_HOOK
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|hook| hook.channel_id == channel.get())
+            .cloned()
+    }
+}
+
 #[cfg(unix)]
 pub(in super::super) struct PinnedTerminalTransport<'a> {
     pub(in super::super) source: (&'a SharedData, &'a dyn TurnGateway, &'a ProviderKind),
@@ -107,6 +131,7 @@ pub(in super::super) fn persist_pinned_terminal_anchor(
 
 pub(in crate::services::discord::turn_bridge) enum PreparedBridgeLease {
     Legacy(BridgeLeaseAcquire),
+    Unresolved,
     #[cfg(unix)]
     Pinned(super::super::terminal_delivery::PinnedBridgeDeliveryLease),
 }
@@ -126,43 +151,54 @@ pub(in crate::services::discord::turn_bridge) fn prepare_bridge_lease(
     if matches!(acquire, Skip) {
         return PreparedBridgeLease::Legacy(acquire);
     }
+    // A positively admitted Claude terminal may publish only with its exact
+    // source. Losing that proof does not restore legacy publication authority.
+    #[cfg(unix)]
+    let unavailable = || {
+        if matches!(provider, ProviderKind::Claude) {
+            PreparedBridgeLease::Unresolved
+        } else {
+            PreparedBridgeLease::Legacy(NoRange)
+        }
+    };
     #[cfg(not(unix))]
     return PreparedBridgeLease::Legacy(acquire);
     #[cfg(unix)]
     match admitted.revalidated_source(inflight) {
-        // #5264 PR-B: revalidation failing is not evidence that another actor holds this
-        // turn. `Err(())` covers plain I/O failures — no inflight runtime root, a failed
-        // state lock, an unreadable row — and fabricating `Skip` made the caller set
-        // `bridge_skip_holder_owns_inflight`, asserting a live holder owns the delivery
-        // and its inflight lifecycle when in fact this bridge held the lease and dropped
-        // it. Pass the real acquire outcome through, as the `admitted == None` arm does.
-        Err(()) => PreparedBridgeLease::Legacy(acquire),
-        Ok(None) => PreparedBridgeLease::Legacy(NoRange),
+        // #5264: Codex I/O failure keeps the real acquire result; inventing a
+        // Skip here would claim another holder owns a lease we just released.
+        Err(()) if !matches!(provider, ProviderKind::Claude) => {
+            PreparedBridgeLease::Legacy(acquire)
+        }
+        Err(()) | Ok(None) => unavailable(),
         Ok(Some(source)) => match acquire {
-            // #5264 PR-B: the same holder fabrication the `Err(())` arm above dropped, and
-            // worse here. `pin_exact_source` CONSUMES the lease and can still return None —
-            // the generation can flip between revalidation and the pin, because the inflight
-            // flock revalidation holds does not cover the tmux `.generation` file — so the
-            // lease is dropped and the cell released. Reporting `Skip` then makes the caller
-            // set both `bridge_skip_holder_owns_inflight` and `handled`, so the legacy
-            // fallback never runs and the turn is not delivered at all. `NoRange` is the
-            // honest report: no range and no lease are held any more, and the fallback still
-            // delivers.
-            Held(lease) => lease
-                .pin_exact_source(shared, provider, delivery_channel, source)
-                .map_or(
-                    PreparedBridgeLease::Legacy(NoRange),
-                    PreparedBridgeLease::Pinned,
-                ),
-            NoRange => PreparedBridgeLease::Legacy(NoRange),
+            // Pin consumes the lease, including on failure. Only Codex retains
+            // legacy retry permission after that release; Claude needs its proof.
+            Held(lease) => {
+                #[cfg(test)]
+                if let Some(hook) = terminal_prepare_test::for_channel(delivery_channel) {
+                    if let Some(mutate) = hook.after_revalidation.lock().unwrap().take() {
+                        mutate();
+                    }
+                }
+                lease
+                    .pin_exact_source(shared, provider, delivery_channel, source)
+                    .map_or_else(unavailable, PreparedBridgeLease::Pinned)
+            }
+            NoRange => unavailable(),
             Skip => unreachable!(),
         },
     }
 }
 
 macro_rules! dispatch_pinned_terminal {
-    ($shared:ident $gateway:ident $provider:ident $owner:ident $inflight:ident $end:ident $admitted:ident $channel:ident $message:ident $body:ident $start:ident $dispatch:ident $session:ident $turn:ident $long:ident $full:ident $footer_mode:ident $committed:ident $visible:ident $sent:ident $footer:ident $preserve:ident $skip_owner:ident $handled:ident) => {{
+    ($shared:ident $gateway:ident $provider:ident $owner:ident $inflight:ident $end:ident $admitted:ident $channel:ident $message:ident $body:ident $start:ident $dispatch:ident $session:ident $turn:ident $long:ident $full:ident $footer_mode:ident $committed:ident $visible:ident $sent:ident $footer:ident $preserve:ident $skip_owner:ident $handled:ident $outcome:ident) => {{
         if $admitted.is_some() {
+            #[cfg(test)]
+            if let Some(hook) = $crate::services::discord::turn_bridge::stream_loop::types::terminal_prepare_test::for_channel($channel) {
+                hook.entered.notify_one();
+                hook.release.notified().await;
+            }
             let prepared = $crate::services::discord::turn_bridge::stream_loop::types::prepare_bridge_lease(
                 bridge_delivery_lease_for_inflight(
                     $shared.as_ref(),
@@ -178,6 +214,13 @@ macro_rules! dispatch_pinned_terminal {
                 $channel,
             );
             match prepared {
+                $crate::services::discord::turn_bridge::stream_loop::types::PreparedBridgeLease::Unresolved => {
+                    $preserve = true;
+                    $outcome = $crate::services::discord::turn_bridge::terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::Unresolved {
+                        error: "admitted Claude terminal lost its verified source or delivery lease".into(),
+                    };
+                    $handled = true;
+                }
                 $crate::services::discord::turn_bridge::stream_loop::types::PreparedBridgeLease::Pinned(pinned) => {
                     let transport = PinnedTerminalTransport {
                         source: ($shared.as_ref(), $gateway.as_ref(), &$provider),

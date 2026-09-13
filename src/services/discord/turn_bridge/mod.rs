@@ -28,6 +28,10 @@ mod skill_usage;
 mod stale_resume;
 mod status_panel;
 mod stream_loop;
+#[cfg(test)]
+pub(crate) use stream_loop::types::terminal_prepare_test::{
+    TERMINAL_PREPARE_TEST_HOOK, TerminalPrepareTestHook,
+};
 mod stream_receiver;
 mod stream_tick;
 mod streaming_edit_text;
