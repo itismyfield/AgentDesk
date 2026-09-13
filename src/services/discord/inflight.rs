@@ -196,7 +196,6 @@ pub(crate) use self::clear_store::{
 };
 pub(in crate::services::discord) use self::clear_store::{
     ReconcileClearOutcome, archive_inflight_state_if_matches_identity_generation,
-    request_inflight_abandon_for_captured_episode,
     clear_inflight_state_for_captured_episode, clear_inflight_state_for_reconcile,
     clear_inflight_state_for_snapshot, clear_inflight_state_if_matches_identity,
     clear_inflight_state_if_matches_identity_after_delivery,
@@ -205,7 +204,8 @@ pub(in crate::services::discord) use self::clear_store::{
     clear_inflight_state_if_matches_identity_turn_nonce,
     clear_lifecycle_inflight_state_if_matches_identity_after_death_evidence,
     clear_rebind_origin_for_reconcile, clear_rebind_origin_inflight_state_if_matches_identity,
-    refresh_inflight_last_offset_if_matches_identity, row_is_current_generation,
+    refresh_inflight_last_offset_if_matches_identity,
+    request_inflight_abandon_for_captured_episode, row_is_current_generation,
 };
 // `clear_*_in_root` seams reached by inflight-core in production (health recovery
 // engine): the clear child declares them `pub(in crate::services::discord)`.

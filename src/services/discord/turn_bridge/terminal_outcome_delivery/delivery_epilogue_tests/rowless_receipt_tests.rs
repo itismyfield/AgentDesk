@@ -258,7 +258,15 @@ assert r['completion_scope_counts'](events) == {}
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_dominates_all_publication_branches_5521() {
     for case in [
-        "short", "long", "fallback", "cancel", "ptl", "empty", "recovery", "headless", "owned_recovery",
+        "short",
+        "long",
+        "fallback",
+        "cancel",
+        "ptl",
+        "empty",
+        "recovery",
+        "headless",
+        "owned_recovery",
     ] {
         let body = match case {
             "long" => "chunk ".repeat(1_200),
@@ -907,37 +915,79 @@ async fn exact_receipt_rowless_terminal_custody_empty_recovery_stays_inside_sour
         if native_claude {
             // Native TUI has no session marker. Carry an actual decoded reader
             // range (including the opened FD) before replacing its durable row.
-            state.cancel_token = Arc::new(crate::services::provider::CancelToken::from_persisted_turn_nonce(
-                state.inflight_state.turn_nonce.clone(),
-            ));
+            state.cancel_token = Arc::new(
+                crate::services::provider::CancelToken::from_persisted_turn_nonce(
+                    state.inflight_state.turn_nonce.clone(),
+                ),
+            );
             crate::services::discord::mailbox_recovery_kickoff(
-                &driver.shared, ctx.channel_id, state.cancel_token.clone(),
-                serenity::all::UserId::new(state.inflight_state.request_owner_user_id), ctx.user_msg_id,
-            ).await;
+                &driver.shared,
+                ctx.channel_id,
+                state.cancel_token.clone(),
+                serenity::all::UserId::new(state.inflight_state.request_owner_user_id),
+                ctx.user_msg_id,
+            )
+            .await;
             inflight::save_inflight_state(&state.inflight_state).unwrap();
             let (tx, rx) = std::sync::mpsc::channel();
-            let (read, stats) = crate::services::session_backend::read_output_file_until_result_with_harvest(
-                state.inflight_state.output_path.as_deref().unwrap(), 0, tx, None,
-                crate::services::provider::SessionProbe::process(|| false),
-            ).unwrap();
-            let crate::services::provider::ReadOutputResult::Completed { offset } = read else { panic!("native source must contain its decoded terminal") };
+            let (read, stats) =
+                crate::services::session_backend::read_output_file_until_result_with_harvest(
+                    state.inflight_state.output_path.as_deref().unwrap(),
+                    0,
+                    tx,
+                    None,
+                    crate::services::provider::SessionProbe::process(|| false),
+                )
+                .unwrap();
+            let crate::services::provider::ReadOutputResult::Completed { offset } = read else {
+                panic!("native source must contain its decoded terminal")
+            };
             assert!(stats.decoded_terminal);
-            assert_eq!(offset, 256, "the reader stops at A before successor B's source bytes");
-            let crate::services::cluster::stream_relay::SourceFileIdentity::Unix { dev, ino } = stats.source_file.unwrap() else { panic!("reader must carry the opened file identity") };
-            let session_id = rx.into_iter().find_map(|frame| match frame {
-                crate::services::agent_protocol::StreamMessage::Done { session_id, .. } => Some(session_id), _ => None,
-            }).unwrap();
+            assert_eq!(
+                offset, 256,
+                "the reader stops at A before successor B's source bytes"
+            );
+            let crate::services::cluster::stream_relay::SourceFileIdentity::Unix { dev, ino } =
+                stats.source_file.unwrap()
+            else {
+                panic!("reader must carry the opened file identity")
+            };
+            let session_id = rx
+                .into_iter()
+                .find_map(|frame| match frame {
+                    crate::services::agent_protocol::StreamMessage::Done { session_id, .. } => {
+                        Some(session_id)
+                    }
+                    _ => None,
+                })
+                .unwrap();
             let frame = crate::services::agent_protocol::StreamMessage::ClaudeTuiTerminalDone {
-                result: String::new(), session_id, transcript_path: state.inflight_state.output_path.clone().unwrap(),
-                tmux_session_name: DRIVER_TMUX_SESSION.into(), turn_nonce: state.inflight_state.turn_nonce.clone().unwrap(),
-                source_start: 0, complete_record_end: offset, generation_mtime_ns: dr::current_generation_mtime_ns(DRIVER_TMUX_SESSION),
-                source_file_dev: dev, source_file_ino: ino, actor: Arc::downgrade(&state.cancel_token),
+                result: String::new(),
+                session_id,
+                transcript_path: state.inflight_state.output_path.clone().unwrap(),
+                tmux_session_name: DRIVER_TMUX_SESSION.into(),
+                turn_nonce: state.inflight_state.turn_nonce.clone().unwrap(),
+                source_start: 0,
+                complete_record_end: offset,
+                generation_mtime_ns: dr::current_generation_mtime_ns(DRIVER_TMUX_SESSION),
+                source_file_dev: dev,
+                source_file_ino: ino,
+                actor: Arc::downgrade(&state.cancel_token),
             };
             let mut baseline = state.inflight_state.clone();
             let expected = InflightTurnIdentity::from_state(&baseline);
-            let (_, admitted, _) = state.inflight_state.admit_tui_terminal_frame(
-                &mut baseline, &expected, true, (&driver.shared, &state.cancel_token), "", frame,
-            ).await.unwrap();
+            let (_, admitted, _) = state
+                .inflight_state
+                .admit_tui_terminal_frame(
+                    &mut baseline,
+                    &expected,
+                    true,
+                    (&driver.shared, &state.cancel_token),
+                    "",
+                    frame,
+                )
+                .await
+                .unwrap();
             ctx.codex_tui_terminal_range = admitted;
         }
         let mut successor = state.inflight_state.clone();
@@ -1073,8 +1123,12 @@ async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_succe
         let original = state.inflight_state.clone();
         inflight::save_inflight_state(&original).unwrap();
         assert!(
-            ctx.codex_tui_terminal_range.as_ref().unwrap()
-                .revalidated_source(&original).unwrap().is_some(),
+            ctx.codex_tui_terminal_range
+                .as_ref()
+                .unwrap()
+                .revalidated_source(&original)
+                .unwrap()
+                .is_some(),
             "the lifecycle fixture must exercise pinned delivery, not Unknown/NoRange"
         );
         ctx.entry_was_rowless = true;
