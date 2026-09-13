@@ -42,7 +42,7 @@ pub(super) async fn capture_session_pin(
         (Some(pool), Some(key)) => session_actor::capture_hook_session_actor_pin_pg(pool, key)
             .await
             .map(Some)
-            .map_err(|error| error.to_string()),
+            .map_err(|error| format!("{error:?}")),
         _ => Ok(None),
     }
 }
@@ -364,7 +364,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn capture(
                 pg_pin.as_ref().ok_or_else(failure)?,
             )
             .await
-            .map_err(|error| error.to_string())?,
+            .map_err(|error| format!("{error:?}"))?,
         );
     }
     let current = super::super::super::mailbox_snapshot(shared, channel).await;
