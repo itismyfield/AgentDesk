@@ -72,7 +72,7 @@ pub(in crate::services::discord) async fn recover_idle_partial_response(
 
 /// The caller has already observed a ready pane. Keep the source, dormant
 /// claim and delivery settlement identical for production and gateway fixtures.
-pub(super) async fn recover_idle_partial_response_from_ready_source(
+pub(in crate::services::discord) async fn recover_idle_partial_response_from_ready_source(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     row: &inflight::InflightTurnState,
