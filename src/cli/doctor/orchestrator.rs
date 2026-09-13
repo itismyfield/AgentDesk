@@ -1064,7 +1064,7 @@ fn check_health_db_dashboard(snapshot: &HealthSnapshot) -> Check {
             CheckGroup::Core,
             "DB/Dashboard Health",
             detail.clone(),
-            "DB health is false. Check the Postgres/SQLite source-of-truth status first.",
+            "DB health is false. Check the Postgres source-of-truth status first.",
         )
         .with_subsystem("health")
         .with_severity(Severity::Error)
