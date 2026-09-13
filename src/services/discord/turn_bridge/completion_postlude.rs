@@ -1,9 +1,4 @@
-//! #4230 S3 completion postlude + inflight epilogue for `turn_bridge::spawn_turn_bridge`.
-//!
-//! Moved from the final post-loop tail of `spawn_turn_bridge`: status-panel
-//! completion, final ADK status, watcher resume, transcript/memory/analytics
-//! persistence, metrics, restart-report cleanup, inflight preserve/clear,
-//! mailbox recovery marker cleanup, and the final queued-turn drain.
+//! Completion projection, bookkeeping, and retry-preserving cleanup for a bridge attempt.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -414,15 +409,9 @@ pub(super) async fn run_completion_postlude(
         push_transcript_event(&mut transcript_events, reminder_transcript_event(reminder));
         recall_feedback_analysis = Some(analyze_recall_feedback_turn(&transcript_events));
     }
-    // #4196: if this turn ends with uncommitted changes in its worktree, stash a
-    // WIP warning (provider-scoped key) so the NEXT turn's intake takes it and
-    // injects it into the model context (turn N+1). Reuses the #3792 detector via
-    // `turn_end_wip_warning_text` — no re-implementation of git status parsing.
-    // Gated on channel ownership (mirrors the feedback stash) so a scheduled or
-    // isolated snapshot turn never nudges the interactive session. A clean
-    // worktree yields `None` here, so nothing is stashed and turn N+1 is
-    // byte-for-byte unchanged. A stash failure only loses the next-turn nudge
-    // (the channel-post backstop still fires), so warn+skip.
+    // #4196: stash an uncommitted-worktree warning for the next intake using
+    // the existing #3792 detector. Only the channel owner may affect the session.
+    // A clean worktree returns None; a failed stash leaves the channel-post backstop.
     if !channel_effects_suppressed
         && let Some(wip_warning) =
             super::super::turn_end_wip_warning::turn_end_wip_warning_text(Some(&inflight_state))
@@ -466,6 +455,12 @@ pub(super) async fn run_completion_postlude(
     } else {
         "completed"
     };
+    let turn_outcome = turn_analytics::pending_delivery_outcome(
+        completion_guard.completion_signal(),
+        preserve_inflight_for_cleanup_retry,
+        bridge_skip_holder_owns_inflight,
+    )
+    .unwrap_or(turn_outcome);
     crate::services::observability::emit_turn_finished_with_dispatch_kind(
         provider.as_str(),
         channel_id.get(),
@@ -495,6 +490,8 @@ pub(super) async fn run_completion_postlude(
         turn_quality_event_type,
         serde_json::json!({
             "outcome": turn_outcome,
+            "terminal_delivery_committed": terminal_delivery_committed,
+            "preserved_for_retry": preserve_inflight_for_cleanup_retry,
             "duration_ms": turn_duration_ms(turn_start),
             "cancelled": cancelled,
             "recovery_retry": recovery_retry,

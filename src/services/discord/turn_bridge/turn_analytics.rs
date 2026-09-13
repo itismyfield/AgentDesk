@@ -1,6 +1,21 @@
 use super::*;
 use crate::db::turns::PersistTurnOwned;
 
+pub(super) fn pending_delivery_outcome(
+    signal: BridgeCompletionSignal,
+    preserve: bool,
+    held_by_other: bool,
+) -> Option<&'static str> {
+    match signal {
+        BridgeCompletionSignal::DeferredToCustody | BridgeCompletionSignal::DeferredToOwner => {
+            Some("delivery_pending")
+        }
+        _ if preserve && held_by_other => Some("delivery_pending"),
+        BridgeCompletionSignal::Unresolved if preserve => Some("delivery_unresolved"),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_turn_quality_event(
     provider: &ProviderKind,

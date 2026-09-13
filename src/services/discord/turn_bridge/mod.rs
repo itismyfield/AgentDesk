@@ -855,7 +855,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             }
             terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::Unresolved { ref error } => {
                 tracing::error!(event = "rowless_terminal_delivery_unresolved", channel_id = channel_id.get(), %error,
-                    "terminal answer has neither confirmed delivery nor durable retry obligation");
+                    "terminal delivery remains unconfirmed; retaining any captured retry obligation");
             }
         }
         let shared_owned = terminal_outcome_delivery_output.shared_owned;

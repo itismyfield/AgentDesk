@@ -26,6 +26,10 @@ impl CompletionGuard {
         self.completion_signal = signal;
     }
 
+    pub(super) fn completion_signal(&self) -> BridgeCompletionSignal {
+        self.completion_signal
+    }
+
     pub(super) fn note_terminal_projection_settled(&self, allow_queue: bool) {
         self.turn_finalizer.note_terminal_projection_settled(
             self.turn_key,
