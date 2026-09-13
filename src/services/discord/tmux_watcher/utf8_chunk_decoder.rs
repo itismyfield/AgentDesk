@@ -200,6 +200,10 @@ impl Utf8ChunkDecoder {
         }
     }
 
+    pub(super) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     pub(super) fn clear_pending(&mut self) {
         self.pending_source = None;
         self.pending.clear();
