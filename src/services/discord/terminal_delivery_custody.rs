@@ -267,3 +267,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod pg_tests;

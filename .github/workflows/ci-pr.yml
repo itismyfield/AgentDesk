@@ -240,6 +240,8 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/**'
               - 'src/services/discord/tmux_watcher.rs'
               - 'src/services/discord/tmux_watcher/**'
+              - 'src/services/discord/terminal_delivery_custody.rs'
+              - 'src/services/discord/terminal_delivery_custody/**'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/**'
               - 'src/services/discord/turn_bridge/headless_delivery.rs'
