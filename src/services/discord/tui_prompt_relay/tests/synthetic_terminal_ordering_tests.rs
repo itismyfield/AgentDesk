@@ -24,6 +24,8 @@ fn terminal_ordering_fixture(
     empty_terminal: bool,
     source_race: Option<SourceRace>,
 ) {
+    let _telemetry = crate::services::observability::test_runtime_lock();
+    crate::services::observability::reset_for_tests();
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
@@ -34,7 +36,7 @@ fn terminal_ordering_fixture(
             let shared = crate::services::discord::make_shared_data_for_tests();
             let provider = ProviderKind::Claude;
             let channel = ChannelId::new(583_310_001);
-            let anchor = MessageId::new(583_310_002);
+            let anchor = MessageId::new(if source_race.is_some() { 583_310_002_000_000 } else { 583_310_002 });
             let tmux = "synthetic-terminal-ordering-5833";
             let generation_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
             std::fs::write(&generation_path, b"1").unwrap();
@@ -69,6 +71,15 @@ fn terminal_ordering_fixture(
             let original_row = crate::services::discord::inflight::load_inflight_state_read_only(
                 &provider, channel.get()).expect("synthetic admission persists A's row");
             assert_eq!(original_actor.turn_nonce(), original_row.turn_nonce.as_deref());
+            if source_race.is_some() {
+                use crate::services::discord::turn_view_reconciler::{TurnViewTarget, TurnViewOwner, TurnViewIdentity};
+                assert!(shared.turn_view_reconciler.note_turn_started(
+                    &shared, TurnViewTarget::intake_user_message(channel, anchor),
+                    TurnViewOwner::for_message(channel, anchor, original_row.born_generation),
+                    TurnViewIdentity::IntakeShared, "admitted_source_race_fixture",
+                ).await);
+            }
+            let pending_view = shared.turn_view_reconciler.ops();
             let barrier = Arc::new(TerminalBarrier::default());
             let prepare = source_race.map(|_| Arc::new(crate::services::discord::turn_bridge::TerminalPrepareTestHook {
                 channel_id: channel.get(), ..Default::default()
@@ -115,10 +126,14 @@ fn terminal_ordering_fixture(
                     .unwrap().session_id.as_deref(), Some("native-ordering-session"),
                     "the actual source witness connects the original missing session before publication");
                 if let Some(race) = source_race {
+                    assert_eq!(shared.turn_view_reconciler.ops(), pending_view,
+                        "admitted Claude keeps its pending view until confirmed publication");
                     use std::os::unix::fs::MetadataExt;
                     let metadata = std::fs::metadata(&output).unwrap();
                     assert_eq!(row.tui_terminal_source_file_identity, Some((metadata.dev(), metadata.ino())),
                         "real reader admission captured the original opened FD before mutation");
+                    assert_eq!(row.tui_terminal_generation_mtime_ns,
+                        Some(crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux)));
                     assert_eq!(row.last_offset, metadata.len());
                     assert_eq!(row.full_response, body);
                     assert!(!row.terminal_delivery_committed);
@@ -177,6 +192,27 @@ fn terminal_ordering_fixture(
             *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK.lock().unwrap() = None;
             if let Some(race) = source_race.filter(|race| *race != SourceRace::Unchanged) {
                 assert!(delivered.is_err(), "{race:?} cannot signal terminal completion");
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while shared.restart.finalizing_turns.load(std::sync::atomic::Ordering::Acquire) != 0
+                        || !crate::services::observability::events::recent(200).iter().any(|event|
+                            event.channel_id == Some(channel.get()) && event.event_type == "agent_quality_event") {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }).await.expect("unresolved bridge finishes its postlude within a bound");
+                let events = crate::services::observability::events::recent(200);
+                let finished: Vec<_> = events.iter().filter(|event|
+                    event.channel_id == Some(channel.get()) && event.event_type == "turn_finished").collect();
+                assert_eq!(finished.len(), 1);
+                let expected_outcome = if race == SourceRace::LiveHolder { "delivery_pending" } else { "delivery_unresolved" };
+                assert_eq!(finished[0].payload["status"], expected_outcome);
+                let quality: Vec<_> = events.iter().filter(|event|
+                    event.channel_id == Some(channel.get()) && event.event_type == "agent_quality_event").collect();
+                assert_eq!(quality.len(), 1);
+                assert_eq!(quality[0].payload["quality_event_type"], "turn_error");
+                assert_eq!(quality[0].payload["payload"]["details"]["outcome"], expected_outcome);
+                assert_eq!(quality[0].payload["payload"]["details"]["terminal_delivery_committed"], false);
+                assert_eq!(shared.turn_view_reconciler.ops(), pending_view,
+                    "source loss does not clear or complete the pending view");
                 assert!(gateway.bodies.lock().unwrap().is_empty(), "{race:?} must execute zero gateway sends/edits");
                 assert!(crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get())
                     .is_none_or(|record| record.confirmed_deliveries.is_empty()), "no exact receipt before transport");
@@ -195,6 +231,7 @@ fn terminal_ordering_fixture(
                 assert_eq!(retained.output_path, admitted_row.output_path);
                 assert_eq!(retained.session_id, admitted_row.session_id);
                 assert_eq!(retained.tui_terminal_source_file_identity, admitted_row.tui_terminal_source_file_identity);
+                assert_eq!(retained.tui_terminal_generation_mtime_ns, admitted_row.tui_terminal_generation_mtime_ns);
                 assert!(!retained.terminal_delivery_committed);
                 let actor = replacement.as_ref().map(|(actor, _)| actor).unwrap_or(&original_actor);
                 assert!(crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token
@@ -224,18 +261,14 @@ fn terminal_ordering_fixture(
                     }
                     _ => {}
                 }
-                let (tx, rx) = mpsc::channel();
-                let (end_tx, end_rx) = tokio::sync::oneshot::channel();
-                let reader = super::synthetic_bridge_handoff_pg_tests::spawn_handoff_reader(&output, 0, tmux, tx, end_tx);
-                tokio::time::timeout(Duration::from_secs(5), claude_idle_bridge::stream_tui_idle_response_with_gateway(
-                    &shared, provider.clone(), channel,
-                    claude_idle_bridge::IdleBridgeSource {
-                        tmux_session_name: tmux, output_path: &output, start_offset: 0,
-                        prompt_text: "terminal ordering prompt", lease: &lease,
-                    },
-                    (Vec::new(), rx, Some(end_rx)), gateway.clone(), 0,
-                )).await.expect("retry is bounded").expect("restored original source resumes the retained obligation");
-                tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
+                assert!(crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                    provider.as_str(), tmux, channel.get()).is_none(), "the original bridge lease was retired");
+                let http = Arc::new(serenity::Http::new("Bot test-token"));
+                assert!(tokio::time::timeout(Duration::from_secs(5),
+                    crate::services::discord::recovery_engine::recover_idle_partial_response_from_ready_source(
+                        &http, &shared, &retained, &output, gateway.as_ref(),
+                    )).await.expect("dormant recovery is bounded"),
+                    "the actual dormant recovery renews custody and settles the original exact source");
             }
             let replacement = if replace_after_delivery {
                 delivered.as_ref().expect("A completed before the duplicate-finalizer race");
@@ -289,6 +322,9 @@ fn terminal_ordering_fixture(
                 assert_eq!(record.confirmed_deliveries[0].source.turn_nonce, original_actor.turn_nonce().unwrap());
                 assert!(crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).is_none());
                 assert!(after.cancel_token.is_none(), "A releases only after successful publication");
+                if source_race.is_some() {
+                    assert_eq!(gateway.bodies.lock().unwrap().len(), 1, "one confirmed publication settles the pending body");
+                }
                 assert!(gateway.bodies.lock().unwrap().iter().any(|sent| !sent.trim().is_empty() && sent.contains(&body)));
                 let next = Arc::new(CancelToken::new());
                 assert!(crate::services::discord::mailbox_try_start_turn(
