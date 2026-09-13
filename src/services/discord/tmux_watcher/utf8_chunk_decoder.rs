@@ -2,6 +2,9 @@
 //! Split scalars retain every original byte; source continuity is tracked apart
 //! from decoding so a mixed or non-contiguous carry never gains a clean stamp.
 use crate::services::cluster::stream_relay::{SourceFileIdentity, SourceWitness};
+use crate::services::discord::tmux::tmux_output_stream::{
+    read_native_codex_state, watcher_source_witness,
+};
 use std::io::{Read, Seek, SeekFrom};
 
 type SourceChunk = Result<WatcherReadBatch, String>;
@@ -39,6 +42,29 @@ pub(super) fn read_watcher_source_chunk(path: &str, offset: u64) -> SourceChunk 
         std::fs::File::open(path).map_err(|error| format!("open: {error}"))?,
         offset,
     )
+}
+
+pub(super) async fn read_watcher_source_chunk_with_witness(
+    ctx: &super::TurnStreamCollectorContext,
+    offset: u64,
+) -> (
+    Result<Result<SourceChunk, tokio::task::JoinError>, tokio::time::error::Elapsed>,
+    Option<SourceWitness>,
+) {
+    let witness = watcher_source_witness(
+        &ctx.watcher_provider,
+        &ctx.tmux_session_name,
+        &ctx.output_path,
+    );
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking({
+            let path = ctx.output_path.clone();
+            move || read_watcher_source_chunk(&path, offset)
+        }),
+    )
+    .await;
+    (read, witness)
 }
 
 fn read_watcher_source_chunk_from_file(file: std::fs::File, offset: u64) -> SourceChunk {
@@ -79,6 +105,24 @@ pub(super) fn source_authority_for_read(
 }
 
 impl super::loop_poll_prologue::WatcherSourceAuthority {
+    pub(super) fn restore_stream_decoder(
+        &self,
+        ctx: &super::TurnStreamCollectorContext,
+        cursor: u64,
+        response: &mut String,
+    ) -> Result<(super::WatcherToolState, Option<super::InflightTurnState>), ()> {
+        let mut tool_state = super::WatcherToolState::new();
+        tool_state.set_provider(&ctx.watcher_provider);
+        let row = crate::services::discord::inflight::load_inflight_state(
+            &ctx.watcher_provider,
+            ctx.channel_id.get(),
+        );
+        if let Some(decoder) = self.restore_native_prefix(ctx, row.as_ref(), cursor)? {
+            tool_state.restore_native_codex(decoder, response);
+        }
+        Ok((tool_state, row))
+    }
+
     pub(super) fn restore_native_prefix(
         &self,
         ctx: &super::TurnStreamCollectorContext,
@@ -102,7 +146,7 @@ impl super::loop_poll_prologue::WatcherSourceAuthority {
                 })
                 .flatten()
                 .ok_or(())?;
-            return super::read_native_codex_state(
+            return read_native_codex_state(
                 &ctx.output_path, start, cursor, self.source_file,
                 &ctx.tmux_session_name, self.generation_mtime_ns, self.source_stamp,
             ).map(Some).map_err(|error| {

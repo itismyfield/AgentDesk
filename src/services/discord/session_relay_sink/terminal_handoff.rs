@@ -6,7 +6,9 @@ use crate::services::cluster::stream_relay::{
 };
 
 fn recover_native_frame_response(frame: &StreamFrame) -> Result<Option<String>, RelaySinkError> {
-    use crate::services::discord::tmux::{is_native_codex_payload, read_native_codex_state};
+    use crate::services::discord::tmux::tmux_output_stream::{
+        is_native_codex_payload, read_native_codex_state,
+    };
     if !is_native_codex_payload(&frame.binding.provider, &frame.payload) {
         return Ok(None);
     }
@@ -86,7 +88,7 @@ impl SessionBoundDiscordRelaySink {
 impl RelaySink for SessionBoundDiscordRelaySink {
     async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
         if frame.relay_range.is_some()
-            && (super::super::tmux::is_native_codex_payload(
+            && (super::super::tmux::tmux_output_stream::is_native_codex_payload(
                 &frame.binding.provider,
                 &frame.payload,
             ) || super::idle_jsonl_relay_source_for_matched(&frame.binding)

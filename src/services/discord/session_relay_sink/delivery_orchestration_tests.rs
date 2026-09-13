@@ -194,7 +194,7 @@ async fn native_codex_restart_sink_fixture() {
                 &std::fs::File::open(&path).unwrap(),
             );
         // Native recovery needs the actual opened file even in the default Legacy mode.
-        let witness = crate::services::discord::tmux::watcher_source_witness(
+        let witness = crate::services::discord::tmux::tmux_output_stream::watcher_source_witness(
             &ProviderKind::Codex,
             tmux,
             path.to_str().unwrap(),
@@ -257,7 +257,7 @@ async fn native_codex_restart_sink_fixture() {
         let mut response = row.full_response.clone();
         let mut tools = crate::services::discord::tmux::WatcherToolState::new();
         tools.set_provider(&ProviderKind::Codex);
-        let decoder = crate::services::discord::tmux::read_native_codex_state(
+        let decoder = crate::services::discord::tmux::tmux_output_stream::read_native_codex_state(
             path.to_str().unwrap(),
             start,
             cursor,

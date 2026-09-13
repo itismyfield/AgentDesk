@@ -271,8 +271,6 @@ pub(super) async fn collect_turn_stream_until_terminal(
     // #3041 P1-3 B1: restored assistant text was not mirrored into StreamRelay,
     // so reset it after the deferred initial forward and keep watcher ownership.
     let mut full_response = stream_seed.full_response;
-    let mut tool_state = WatcherToolState::new();
-    tool_state.set_provider(&watcher_provider);
 
     let mut spin_idx: usize = 0;
     let mut placeholder_msg_id: Option<serenity::MessageId> = stream_seed.placeholder_msg_id;
@@ -286,23 +284,13 @@ pub(super) async fn collect_turn_stream_until_terminal(
     // #3003 (codex P2 r4): cache whether this turn is a TUI-direct
     // external-input turn while the inflight row is still present, so the
     // orphan-panel reclaim can run after a stop/cancel clears inflight.
-    let startup_inflight_snapshot = crate::services::discord::inflight::load_inflight_state(
-        &watcher_provider,
-        channel_id.get(),
-    );
-    match source_authority.restore_native_prefix(
-        ctx,
-        startup_inflight_snapshot.as_ref(),
-        turn_data_start_offset,
-    ) {
-        Ok(Some(decoder)) => tool_state.restore_native_codex(decoder, &mut full_response),
-        Ok(None) => {}
-        Err(()) => {
-            *parser.current_offset = data_start_offset;
-            utf8_decoder.clear_pending();
-            return CollectOutcome::ContinueWatcherLoop;
-        }
-    }
+    let Ok((mut tool_state, startup_inflight_snapshot)) =
+        source_authority.restore_stream_decoder(ctx, turn_data_start_offset, &mut full_response)
+    else {
+        *parser.current_offset = data_start_offset;
+        utf8_decoder.clear_pending();
+        return CollectOutcome::ContinueWatcherLoop;
+    };
     // #3805 P2 (PR-C): this turn's status-panel generation epoch, SEEDED from
     // the on-disk row so a restart re-hydrating an existing panel carries the
     // SAME epoch it was created with (a stale-epoch completion is thus never
@@ -658,17 +646,8 @@ pub(super) async fn collect_turn_stream_until_terminal(
                 break;
             }
 
-            let read_witness =
-                watcher_source_witness(&watcher_provider, &tmux_session_name, &output_path);
-            let read_more = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                tokio::task::spawn_blocking({
-                    let path = output_path.clone();
-                    let offset = current_offset;
-                    move || read_watcher_source_chunk(&path, offset)
-                }),
-            )
-            .await;
+            let (read_more, read_witness) =
+                read_watcher_source_chunk_with_witness(ctx, current_offset).await;
 
             match read_more.map(|r| r.map(|r| r.map(|batch| batch.into_parts()))) {
                 Ok(Ok(Ok((chunk, off, file_identity)))) if !chunk.is_empty() => {

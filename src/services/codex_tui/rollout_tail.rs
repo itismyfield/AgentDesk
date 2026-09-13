@@ -9,7 +9,8 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::{CancelToken, ReadOutputResult, cancel_requested};
 use parser::{
-    RolloutParseState, process_rollout_line_bytes, task_complete_fallback_supersedes_final_text,
+    RolloutParseState, emit_done, process_rollout_line_bytes,
+    task_complete_fallback_supersedes_final_text,
 };
 pub(crate) use parser::{RolloutRecordDecoder, recover_captured_rollout_response};
 // REQ-006: share the single rollout discovery primitive so `session.rs` and
@@ -1496,72 +1497,6 @@ fn heuristic_finalize_allowed(
         state.heuristic_finalize_waiting_for_completion_logged = true;
     }
     false
-}
-
-fn emit_done(
-    sender: &RelaySuppressionSender<'_>,
-    state: &mut RolloutParseState,
-    finalize_path: RolloutFinalizePath,
-    rollout_path: &Path,
-    offset: u64,
-    terminal_range: (u64, Option<&str>, bool),
-) {
-    let (source_start, turn_nonce, terminal_range_eligible) = terminal_range;
-    let complete_record_end = source_start.saturating_add(state.bytes_read);
-    state.harvest.decoded_terminal = finalize_path != RolloutFinalizePath::Heuristic
-        && offset == complete_record_end
-        && !state.has_pending_tool_call()
-        && !state.dropped_assistant_content
-        && state.turn_complete_seen;
-    tracing::info!(
-        rollout_path = %rollout_path.display(),
-        offset,
-        finalize_path = finalize_path.as_str(),
-        session_id = state.session_id.as_deref(),
-        lines_read = state.lines_read,
-        bytes_read = state.bytes_read,
-        source_start,
-        complete_record_end,
-        saw_assistant_text = state.saw_assistant_text,
-        hook_completion_seen = state.hook_completion_seen,
-        composer_ready_seen = state.composer_ready_seen,
-        final_text_len = state.final_text.len(),
-        task_complete_fallback_len = state
-            .task_complete_fallback_text
-            .as_deref()
-            .map(str::len)
-            .unwrap_or(0),
-        "codex rollout tail emitting Done"
-    );
-    let identity = state
-        .tmux_session_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .zip(turn_nonce.map(str::trim).filter(|value| !value.is_empty()));
-    if terminal_range_eligible
-        && finalize_path != RolloutFinalizePath::Heuristic
-        && offset == complete_record_end
-        && state.saw_assistant_text
-        && complete_record_end > source_start
-        && let Some((tmux_session_name, turn_nonce)) = identity
-    {
-        sender.send(StreamMessage::CodexTuiTerminalDone {
-            result: state.final_text.clone(),
-            session_id: state.session_id.clone(),
-            rollout_path: rollout_path.display().to_string(),
-            tmux_session_name: tmux_session_name.to_string(),
-            turn_nonce: turn_nonce.to_string(),
-            source_start,
-            complete_record_end,
-            captured_source: None,
-        });
-    } else {
-        sender.send(StreamMessage::Done {
-            result: state.final_text.clone(),
-            session_id: state.session_id.clone(),
-        });
-    }
 }
 
 #[cfg(test)]

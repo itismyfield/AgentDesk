@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::discord::session_relay_sink::journal::watcher as journal_watcher;
+use crate::services::discord::tmux::tmux_output_stream::watcher_source_witness;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 

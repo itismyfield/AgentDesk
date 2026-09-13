@@ -130,7 +130,7 @@ impl SessionRelayParser {
             // can authorize native delivery; the sink replays that source range.
             if frame.terminal_consumed_end.is_none()
                 && frame.relay_range.is_none()
-                && super::super::tmux::is_native_codex_payload(
+                && super::super::tmux::tmux_output_stream::is_native_codex_payload(
                     &frame.binding.provider,
                     &frame.payload,
                 )
