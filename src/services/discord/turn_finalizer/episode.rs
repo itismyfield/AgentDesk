@@ -39,6 +39,7 @@ pub(in crate::services::discord) async fn claim_normal_episode(
     if key.episode.is_none() {
         return Ok(None);
     }
+    let captured_actor = expected_actor.as_ref().map(Arc::downgrade);
     let observed_before = std::time::Instant::now();
     let observed = match shared.mailbox_peek(key.channel_id) {
         Some(mailbox) => Some(mailbox.snapshot().await),
@@ -77,6 +78,11 @@ pub(in crate::services::discord) async fn claim_normal_episode(
             persistence_error: None,
         }
     };
+    if captured_actor.is_some() && finish.removed_token.is_none() {
+        // A strict actor miss authorizes neither row cleanup nor finalization
+        // side effects, even when the replacement kept the same ID and nonce.
+        return Err(());
+    }
     // Same-episode ID misses retain the ordinary guarded-miss recovery owner.
     // Only the separately gated reconciler may release that residual anchor.
     // Row cleanup is independently authorized by the captured row identity;
@@ -90,7 +96,11 @@ pub(in crate::services::discord) async fn claim_normal_episode(
         );
     }
     Ok(Some(CapturedFinish {
-        snapshot: row.as_ref().map(SyntheticClaimSnapshot::from_row),
+        snapshot: row.as_ref().map(|row| {
+            let mut snapshot = SyntheticClaimSnapshot::from_row(row);
+            snapshot.recovery_actor = captured_actor;
+            snapshot
+        }),
         finish,
     }))
 }

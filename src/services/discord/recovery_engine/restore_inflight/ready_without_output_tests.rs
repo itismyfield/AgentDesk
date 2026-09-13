@@ -830,3 +830,74 @@ async fn partial_eof_actual_fallback_uses_own_anchor_snapshot_and_refuses_foreig
         }
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn captured_episode_claim_preserves_actor_witness_and_refuses_mismatched_row_cleanup() {
+    use crate::services::discord::turn_finalizer::{TurnKey, claim_normal_episode};
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    for replace in [false, true] {
+        let mut fixture = Fixture::new(5_072_850 + replace as u64);
+        fixture.state.turn_nonce = None;
+        fixture.claim().await;
+        let state = fixture.load().expect("A row");
+        let channel = ChannelId::new(state.channel_id);
+        let original = mailbox_snapshot(&fixture.shared, channel)
+            .await
+            .cancel_token
+            .expect("A actor");
+        let replacement = Arc::new(CancelToken::from_persisted_turn_nonce(None));
+        if replace {
+            fixture
+                .shared
+                .mailbox(channel)
+                .recovery_kickoff(
+                    replacement.clone(),
+                    UserId::new(state.request_owner_user_id),
+                    Some(MessageId::new(state.effective_finalizer_turn_id())),
+                )
+                .await;
+        }
+        let path = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().expect("root"),
+            &ProviderKind::Claude,
+            state.channel_id,
+        );
+        let before = std::fs::read(&path).expect("captured row bytes");
+        let result = claim_normal_episode(
+            &fixture.shared,
+            &ProviderKind::Claude,
+            TurnKey::new(
+                channel,
+                state.effective_finalizer_turn_id(),
+                fixture.shared.restart.current_generation,
+            )
+            .with_episode_nonce(None),
+            true,
+            Some(original.clone()),
+        )
+        .await;
+        if replace {
+            assert!(
+                result.is_err(),
+                "actor mismatch must refuse before clear_inflight"
+            );
+            assert_eq!(std::fs::read(&path).expect("B row survives"), before);
+            let active = mailbox_snapshot(&fixture.shared, channel)
+                .await
+                .cancel_token
+                .expect("B actor survives");
+            assert!(Arc::ptr_eq(&active, &replacement));
+        } else {
+            let captured = result.ok().flatten().expect("original actor claimed");
+            let witness = captured
+                .snapshot
+                .expect("captured row")
+                .recovery_actor
+                .expect("original actor witness")
+                .upgrade()
+                .expect("original still held");
+            assert!(Arc::ptr_eq(&witness, &original));
+            assert!(fixture.load().is_none());
+        }
+    }
+}
