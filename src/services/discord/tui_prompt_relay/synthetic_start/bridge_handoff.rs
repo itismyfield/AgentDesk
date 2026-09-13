@@ -1,0 +1,168 @@
+//! Transport the admitted synthetic actor allocation, not just its nonce.
+use super::*;
+use crate::services::discord::inflight::{InflightEpisodePin, InflightTurnIdentity};
+
+#[derive(Clone)]
+struct Witness {
+    episode: InflightEpisodePin,
+    actor: std::sync::Weak<CancelToken>,
+}
+
+static CLAIMS: LazyLock<Mutex<std::collections::HashMap<(String, u64), Witness>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+pub(super) fn record(row: &InflightTurnState, actor: Option<&Arc<CancelToken>>) {
+    let Some(actor) = actor else { return };
+    if row.effective_relay_owner_kind() != RelayOwnerKind::None
+        || row.external_turn_id.as_deref().is_none_or(str::is_empty)
+        || row.turn_nonce.as_deref() != actor.turn_nonce()
+    {
+        return;
+    }
+    let mut claims = CLAIMS.lock().unwrap_or_else(|error| error.into_inner());
+    claims.retain(|_, witness| witness.actor.strong_count() > 0);
+    claims.insert(
+        (row.provider.clone(), row.channel_id),
+        Witness {
+            episode: InflightEpisodePin::from_state(row),
+            actor: Arc::downgrade(actor),
+        },
+    );
+}
+
+pub(in crate::services::discord::tui_prompt_relay) struct BridgeClaim {
+    pub(in crate::services::discord::tui_prompt_relay) row: InflightTurnState,
+    pub(in crate::services::discord::tui_prompt_relay) actor: Arc<CancelToken>,
+    // Drop the exact lease before releasing serialization to another adapter.
+    _lease: TuiDirectExternalInputLeaseGuard,
+    _serial: tokio::sync::OwnedMutexGuard<()>,
+}
+
+pub(in crate::services::discord::tui_prompt_relay) async fn capture(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    tmux: &str,
+    output: &Path,
+    lease: &ExternalInputRelayLease,
+) -> Result<BridgeClaim, String> {
+    let failure = || "synthetic bridge has no verified delivery actor".to_string();
+    let key = (provider.as_str().to_owned(), channel.get());
+    let deadline = tokio::time::Instant::now()
+        + super::super::super::tui_direct_pending_start::PENDING_START_BACKSTOP;
+    let (serial, witness) = loop {
+        let serial = super::super::super::tui_direct_pending_start::channel_lock(
+            provider.as_str(),
+            channel.get(),
+        )
+        .lock_owned()
+        .await;
+        let witness = CLAIMS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&key)
+            .cloned();
+        if let Some(witness) = witness {
+            break (serial, witness);
+        }
+        drop(serial);
+        if tokio::time::Instant::now() >= deadline {
+            return Err(failure());
+        }
+        tokio::time::sleep(super::super::super::tui_direct_pending_start::PENDING_START_POLL).await;
+    };
+    let actor = witness.actor.upgrade().ok_or_else(failure)?;
+    let snapshot = super::super::super::mailbox_snapshot(shared, channel).await;
+    if snapshot
+        .cancel_token
+        .as_ref()
+        .is_none_or(|active| !Arc::ptr_eq(active, &actor))
+    {
+        return Err(failure());
+    }
+    let live_lease = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+        provider.as_str(),
+        tmux,
+        channel.get(),
+    )
+    .ok_or_else(failure)?;
+    let locked = super::super::super::inflight::lock_inflight_episode(
+        provider,
+        channel.get(),
+        &witness.episode,
+    )
+    .map_err(|_| failure())?;
+    let mut row = locked.state().clone();
+    if row.external_turn_id.as_deref().is_none_or(str::is_empty)
+        || row.external_turn_id != lease.turn_id
+        || row.external_turn_id != live_lease.turn_id
+        || live_lease.relay_owner != ExternalInputRelayOwner::BridgeAdapter
+        || row.session_key != lease.session_key
+        || row.output_path.as_deref().map(Path::new) != Some(output)
+        || row.tmux_session_name.as_deref() != Some(tmux)
+        || row.turn_source != TurnSource::ExternalInput
+        || row.terminal_delivery_committed
+        || snapshot.active_user_message_id.map(MessageId::get) != Some(row.user_msg_id)
+        || row.injected_prompt_message_id != Some(row.user_msg_id)
+        || row.user_msg_id == 0
+    {
+        return Err(failure());
+    }
+    let identity = InflightTurnIdentity::from_state(&row);
+    drop(locked);
+    if let (Some(pool), Some(session_key)) = (shared.pg_pool.as_ref(), row.session_key.as_deref()) {
+        crate::db::dispatched_sessions::upsert_hook_session_pg(
+            pool,
+            crate::db::dispatched_sessions::HookSessionUpsert {
+                session_key,
+                provider: provider.as_str(),
+                status: "turn_active",
+                channel_id: Some(&channel.get().to_string()),
+                turn_start_nonce: row.turn_nonce.as_deref(),
+                instance_id: None,
+                agent_id: None,
+                session_info: None,
+                model: None,
+                tokens: None,
+                cwd: None,
+                active_dispatch_id: None,
+                thread_channel_id: None,
+                claude_session_id: None,
+                raw_provider_session_id: None,
+                dispatched_origin: false,
+            },
+        )
+        .await?;
+    }
+    let current = super::super::super::mailbox_snapshot(shared, channel).await;
+    if current
+        .cancel_token
+        .as_ref()
+        .is_none_or(|active| !Arc::ptr_eq(active, &actor))
+    {
+        return Err(failure());
+    }
+    if row.current_msg_id == 0 {
+        row.current_msg_id = row.user_msg_id;
+    }
+    let saved = super::super::super::inflight::adopt_and_lock_inflight_episode(
+        &row,
+        &identity,
+        &witness.episode,
+        row.turn_start_offset,
+        None,
+    )
+    .map_err(|_| failure())?;
+    row = saved.state().clone();
+    drop(saved);
+    CLAIMS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&key);
+    Ok(BridgeClaim {
+        row,
+        actor,
+        _lease: TuiDirectExternalInputLeaseGuard::new(provider.clone(), tmux, channel, &live_lease),
+        _serial: serial,
+    })
+}

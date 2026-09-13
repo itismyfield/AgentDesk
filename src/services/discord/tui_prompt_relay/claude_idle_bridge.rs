@@ -166,43 +166,26 @@ pub(super) async fn relay_tui_idle_response_through_bridge(
         super::super::adk_session::fetch_context_thresholds(shared.api_port)
             .await
             .compact_pct_for(&provider);
-    let anchor = prompt_anchor_for_response_after_wait(
+    let claim = super::synthetic_start::bridge_handoff::capture(
+        shared,
+        &provider,
+        channel_id,
+        tmux_session_name,
+        output_path,
+        lease,
+    )
+    .await?;
+    let user_msg_id = MessageId::new(claim.row.user_msg_id);
+    let current_msg_id = MessageId::new(claim.row.current_msg_id);
+    let anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
         provider.as_str(),
         tmux_session_name,
         channel_id.get(),
     )
-    .await;
-    let reference = anchor.map(|anchor| {
-        (
-            ChannelId::new(anchor.channel_id),
-            MessageId::new(anchor.message_id),
-        )
-    });
-    let current_msg_id = super::super::gateway::send_intake_placeholder(
-        http.clone(),
-        shared.clone(),
-        channel_id,
-        reference,
-        // #3082 P2-3: a TUI idle-response placeholder is an ACTIVE-turn card, not a queued "📬" notice — it must not wait on the answer-flush barrier.
-        false,
-    )
-    .await?;
-    let user_msg_id = anchor
-        .map(|anchor| MessageId::new(anchor.message_id))
-        .unwrap_or(current_msg_id);
+    .filter(|anchor| anchor.message_id == user_msg_id.get());
     let (tx, rx) = mpsc::channel();
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    let inflight_state = build_tui_direct_bridge_inflight_state(
-        provider.clone(),
-        channel_id,
-        user_msg_id,
-        current_msg_id,
-        prompt_text,
-        tmux_session_name,
-        output_path,
-        start_offset,
-        lease,
-    );
+    let inflight_state = claim.row.clone();
     let gateway = Arc::new(TuiDirectBridgeGateway {
         http,
         shared: shared.clone(),
@@ -244,7 +227,7 @@ pub(super) async fn relay_tui_idle_response_through_bridge(
     );
     crate::services::discord::turn_bridge::spawn_turn_bridge_with_pin(
         shared.clone(),
-        Arc::new(CancelToken::new()),
+        claim.actor.clone(),
         rx,
         bridge,
         pin,
@@ -332,43 +315,26 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
         super::super::adk_session::fetch_context_thresholds(shared.api_port)
             .await
             .compact_pct_for(&provider);
-    let anchor = prompt_anchor_for_response_after_wait(
+    let claim = super::synthetic_start::bridge_handoff::capture(
+        shared,
+        &provider,
+        channel_id,
+        tmux_session_name,
+        output_path,
+        lease,
+    )
+    .await?;
+    let user_msg_id = MessageId::new(claim.row.user_msg_id);
+    let current_msg_id = MessageId::new(claim.row.current_msg_id);
+    let anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
         provider.as_str(),
         tmux_session_name,
         channel_id.get(),
     )
-    .await;
-    let reference = anchor.map(|anchor| {
-        (
-            ChannelId::new(anchor.channel_id),
-            MessageId::new(anchor.message_id),
-        )
-    });
-    // EXACTLY ONE intake placeholder card per external turn.
-    let current_msg_id = super::super::gateway::send_intake_placeholder(
-        http.clone(),
-        shared.clone(),
-        channel_id,
-        reference,
-        false,
-    )
-    .await?;
-    let user_msg_id = anchor
-        .map(|anchor| MessageId::new(anchor.message_id))
-        .unwrap_or(current_msg_id);
+    .filter(|anchor| anchor.message_id == user_msg_id.get());
     let (tx, rx) = mpsc::channel();
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    let inflight_state = build_tui_direct_bridge_inflight_state(
-        provider.clone(),
-        channel_id,
-        user_msg_id,
-        current_msg_id,
-        prompt_text,
-        tmux_session_name,
-        output_path,
-        start_offset,
-        lease,
-    );
+    let inflight_state = claim.row.clone();
     let gateway = Arc::new(TuiDirectBridgeGateway {
         http,
         shared: shared.clone(),
@@ -411,7 +377,7 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
     );
     crate::services::discord::turn_bridge::spawn_turn_bridge_with_pin(
         shared.clone(),
-        Arc::new(CancelToken::new()),
+        claim.actor.clone(),
         rx,
         bridge,
         pin,

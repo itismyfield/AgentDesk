@@ -1,5 +1,6 @@
 use super::*;
 
+pub(super) mod bridge_handoff;
 mod claim;
 mod stale_reclaim;
 pub(in crate::services::discord) use claim::build_tui_direct_synthetic_inflight_state;
@@ -293,6 +294,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
                 .turn_start_times
                 .insert(channel_id, std::time::Instant::now());
         }
+        bridge_handoff::record(&existing, active_snapshot.cancel_token.as_ref());
         return TuiDirectSyntheticTurnClaim {
             relay_owner,
             claimed: true,
@@ -361,6 +363,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
             .turn_start_times
             .insert(channel_id, std::time::Instant::now());
     }
+    bridge_handoff::record(&inflight_state, active_snapshot.cancel_token.as_ref());
     tracing::info!(
         provider = %provider.as_str(),
         channel_id = channel_id.get(),
