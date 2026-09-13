@@ -1,6 +1,41 @@
 //! A2 operation outcomes, emitted after the real decision (never at loop exit).
 use super::*;
+use crate::services::discord::outbound::delivery_frontier_probe::CurrentGenerationAnchor;
+use crate::services::discord::outbound::delivery_record::ExactJsonlSourceIdentity;
 use crate::services::provider::ProviderKind;
+
+pub(in crate::services::discord) struct TerminalReceiptDecisionRecord<'a> {
+    pub provider: &'a ProviderKind,
+    pub channel_id: u64,
+    pub turn_id: u64,
+    pub source: Option<&'a ExactJsonlSourceIdentity>,
+    pub anchor: Option<CurrentGenerationAnchor>,
+    pub current_message_id: u64,
+    pub frontier_already_covers: Option<bool>,
+    pub disposition: &'static str,
+}
+
+/// Consume the terminal gate's result; no independent authority or receipt read.
+pub(in crate::services::discord) fn record_terminal_receipt_decision(
+    record: TerminalReceiptDecisionRecord<'_>,
+) {
+    record_operation(
+        record.provider,
+        record.channel_id,
+        "completion_terminal_receipt",
+        serde_json::json!({
+            "turn_id": record.turn_id,
+            "source": record.source,
+            "anchor": record.anchor.map(|anchor| serde_json::json!({
+                "channel_id": anchor.panel_channel_id, "message_id": anchor.panel_msg_id,
+                "range": anchor.range,
+            })),
+            "current_message_id": record.current_message_id,
+            "frontier_already_covers": record.frontier_already_covers,
+            "disposition": record.disposition,
+        }),
+    );
+}
 
 /// Only the caller's known unbound candidate belongs here, never a foreign anchor.
 pub(in crate::services::discord) fn record_unbound_anchor_cleanup(

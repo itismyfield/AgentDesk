@@ -496,6 +496,7 @@ async fn run_codex_idle_response_tail(
         &prompt_text,
         prefix,
         reader_rx,
+        None,
         &lease,
     )
     .await;

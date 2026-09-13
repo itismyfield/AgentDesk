@@ -2,6 +2,8 @@ use super::*;
 use crate::services::{agent_protocol::RuntimeHandoffKind, discord::inflight::CodexRange};
 
 pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryContext {
+    pub(in crate::services::discord::turn_bridge) preloop_receipt_confirmed: bool,
+    pub(in crate::services::discord::turn_bridge) entry_was_rowless: bool,
     pub(in crate::services::discord::turn_bridge) watcher_delivery_pin:
         Option<WatcherClaimIncarnation>,
     pub(in crate::services::discord::turn_bridge) channel_id: ChannelId,
@@ -73,6 +75,9 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryStat
 
 pub(in crate::services::discord::turn_bridge) enum TerminalOutcomeDeliveryOutcome {
     Completed,
+    DeferredToCustody { key: String },
+    DeferredToOwner,
+    Unresolved { error: String },
 }
 
 pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryOutput {
@@ -184,6 +189,9 @@ pub(super) fn ordered_terminal_range_end(
         (ProviderKind::Codex, Some(RuntimeHandoffKind::CodexTui)) => {
             admitted.map(CodexRange::complete_record_end)
         }
+        (ProviderKind::Claude, Some(RuntimeHandoffKind::ClaudeTui)) if admitted.is_some() => {
+            admitted.map(CodexRange::complete_record_end)
+        }
         _ => tmux_last_offset,
     }
 }
@@ -226,4 +234,69 @@ mod tests {
             (Some(99), Some(99))
         );
     }
+}
+
+impl TerminalOutcomeDeliveryOutput {
+    pub(in crate::services::discord::turn_bridge) fn handoff_completion_authority(
+        &self,
+        guard: &mut super::super::guards::CompletionGuard,
+    ) {
+        use super::super::context::BridgeCompletionSignal;
+        guard.note_completion_signal(match &self.outcome {
+            TerminalOutcomeDeliveryOutcome::Completed if self.terminal_delivery_committed => {
+                BridgeCompletionSignal::Finalized
+            }
+            TerminalOutcomeDeliveryOutcome::Completed
+            | TerminalOutcomeDeliveryOutcome::Unresolved { .. } => {
+                BridgeCompletionSignal::Unresolved
+            }
+            TerminalOutcomeDeliveryOutcome::DeferredToCustody { .. } => {
+                BridgeCompletionSignal::DeferredToCustody
+            }
+            TerminalOutcomeDeliveryOutcome::DeferredToOwner => {
+                BridgeCompletionSignal::DeferredToOwner
+            }
+        });
+        if !matches!(self.outcome, TerminalOutcomeDeliveryOutcome::Completed) {
+            guard.relinquish_bridge_authority();
+        }
+    }
+}
+
+pub(super) struct DeliveryEpilogueContext<'a> {
+    pub(super) shared_owned: &'a Arc<SharedData>,
+    pub(super) gateway: &'a Arc<dyn TurnGateway>,
+    pub(super) provider: &'a ProviderKind,
+    pub(super) channel_id: ChannelId,
+    pub(super) user_msg_id: Option<MessageId>,
+    pub(super) current_msg_id: MessageId,
+    pub(super) adk_session_key: &'a Option<String>,
+    pub(super) adk_cwd: &'a Option<String>,
+    pub(super) dispatch_id: &'a Option<String>,
+    pub(super) turn_id: &'a String,
+    pub(super) user_text_owned: &'a String,
+    pub(super) full_response: &'a String,
+    pub(super) delivery_response: &'a String,
+    pub(super) spoken_delivery_response: &'a String,
+    pub(super) cancelled: bool,
+    pub(super) is_prompt_too_long: bool,
+    pub(super) transport_error: bool,
+    pub(super) recovery_retry: bool,
+    pub(super) resume_failure_detected: bool,
+    pub(super) claude_tui_followup_pre_submit_requeue_candidate: bool,
+    pub(super) claude_tui_busy_requeue_pending: bool,
+    pub(super) tui_error_classification: TuiErrorClassification,
+    #[cfg(unix)]
+    pub(super) bridge_tui_gate_outcome_early:
+        Option<super::super::super::tmux::TuiCompletionGateOutcome>,
+    pub(super) terminal_delivery_committed: bool,
+    pub(super) already_receipted: bool,
+    pub(super) terminal_body_visible: bool,
+    pub(super) preserve_inflight_for_cleanup_retry: bool,
+    pub(super) should_complete_work_dispatch_after_delivery: bool,
+    pub(super) should_fail_dispatch_after_delivery: bool,
+    pub(super) bridge_relay_delegated_to_watcher: bool,
+    pub(super) watcher_delivery_pin: Option<&'a WatcherClaimIncarnation>,
+    pub(super) can_chain_locally: bool,
+    pub(super) inflight_generation: u64,
 }

@@ -496,7 +496,7 @@ fn terminal_outcome_delivery_awaits_one_settlement_call_with_branch_flags() {
         "the bridge must bind exactly one turn-start snapshot"
     );
     let spawn = bridge_source
-        .find("pub(super) fn spawn_turn_bridge")
+        .find("pub(in crate::services::discord) fn spawn_turn_bridge_with_pin")
         .expect("bridge spawn remains present");
     let bind = bridge_source
         .find("intake_settlement::bind_bridge_turn_snapshot")

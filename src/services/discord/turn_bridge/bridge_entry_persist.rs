@@ -3,6 +3,55 @@
 use super::context::BridgeCompletionSignal;
 use super::*;
 
+pub(in crate::services::discord) fn spawn_turn_bridge(
+    shared_owned: Arc<SharedData>,
+    cancel_token: Arc<CancelToken>,
+    rx: mpsc::Receiver<StreamMessage>,
+    bridge: TurnBridgeContext,
+) {
+    spawn_turn_bridge_with_pin(shared_owned, cancel_token, rx, bridge, None);
+}
+
+pub(super) async fn voice_progress_playback_channel(
+    shared_owned: &SharedData,
+    bridge: &TurnBridgeContext,
+    turn_id: &str,
+) -> Option<ChannelId> {
+    if bridge.inflight_state.source == crate::dispatch::Source::Voice {
+        resolve_voice_turn_link_for_playback(
+            shared_owned.pg_pool.as_ref(),
+            bridge.dispatch_id.as_deref(),
+            bridge.user_msg_id,
+            Some(turn_id),
+        )
+        .await
+        .and_then(|link| {
+            (link.background_channel_id == bridge.channel_id.get())
+                .then(|| ChannelId::new(link.voice_channel_id))
+        })
+    } else {
+        None
+    }
+}
+
+// The non-Clone receiver is the phase witness: capture consumes it before stream processing.
+pub(super) async fn capture_bridge_clear_fence(
+    shared: &SharedData,
+    channel: ChannelId,
+    rx: mpsc::Receiver<StreamMessage>,
+    fence: &tokio::sync::OnceCell<ChannelClearFence>,
+) -> StreamMessageReceiverAdapter {
+    #[cfg(all(test, unix))]
+    let channel = resume_pin_tests::capture_channel(channel);
+    crate::db::session_transcripts::observe_channel_clear_fence_once(
+        fence,
+        shared.pg_pool.as_ref(),
+        &channel.get().to_string(),
+    )
+    .await;
+    spawn_stream_message_receiver_adapter(rx)
+}
+
 pub(super) struct BridgeEntryRuntimeState<'a> {
     pub(super) inflight_state: &'a mut InflightTurnState,
     pub(super) full_response: &'a mut String,
@@ -277,6 +326,7 @@ pub(super) fn persist_bridge_entry_inflight_state(
 }
 
 pub(super) struct BridgeEntryAuthorityContext<'a> {
+    pub(super) entry_was_rowless: &'a mut bool,
     pub(super) bridge: &'a mut TurnBridgeContext,
     pub(super) shared: &'a SharedData,
     pub(super) bridge_created_placeholder: &'a mut Option<MessageId>,
@@ -306,6 +356,8 @@ pub(super) async fn establish_bridge_entry_authority(
         outcome,
     );
     let anchor_was_absent = durable_current_msg_id_from_detached(*runtime.current_msg_id) == 0;
+    *ctx.entry_was_rowless =
+        outcome == crate::services::discord::inflight::GuardedSaveOutcome::Missing;
     if !bridge_entry_disposition_continues(
         outcome,
         bridge_entry_rowless_cohort_admits(ctx.bridge.inflight_state.channel_id),
@@ -795,7 +847,7 @@ mod tests {
         let caller = normalize_ws(include_str!("mod.rs"));
         let helper = normalize_ws(include_str!("bridge_entry_persist.rs"));
         let spawn = caller
-            .find("pub(super) fn spawn_turn_bridge")
+            .find("pub(in crate::services::discord) fn spawn_turn_bridge_with_pin")
             .expect("production bridge entry remains present");
         let authority = caller[spawn..]
             .find("if !bridge_entry_persist::establish_bridge_entry_authority")

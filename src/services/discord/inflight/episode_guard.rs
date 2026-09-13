@@ -91,6 +91,34 @@ impl LockedInflightEpisode {
         }
     }
 
+    pub(in crate::services::discord) fn bind_synthetic_anchor_under_guard(
+        &mut self,
+    ) -> GuardedSaveOutcome {
+        if self.state.user_msg_id == 0
+            || self.state.current_msg_id != 0
+            || self.state.injected_prompt_message_id != Some(self.state.user_msg_id)
+            || self.state.effective_relay_owner_kind() != RelayOwnerKind::None
+            || self.state.restart_mode.is_some()
+            || self.state.rebind_origin
+        {
+            return GuardedSaveOutcome::IdentityMismatch;
+        }
+        let mut updated = self.state.clone();
+        updated.current_msg_id = updated.user_msg_id;
+        match super::store::persist_under_lock_with_snapshot(
+            &self.root,
+            &self.path,
+            &updated,
+            "synthetic_bridge_anchor_handoff",
+        ) {
+            Ok(Some(saved)) => {
+                self.state = saved;
+                GuardedSaveOutcome::Saved
+            }
+            _ => GuardedSaveOutcome::IoError,
+        }
+    }
+
     pub(in crate::services::discord) fn mark_readopted_under_guard(
         &mut self,
     ) -> GuardedSaveOutcome {

@@ -7,6 +7,14 @@ pub(super) fn render_terminal_guidance(existing_guidance: &str) -> String {
     super::super::response_delivery::prompt_too_long_guidance(detail)
 }
 
+pub(super) fn render_for_requester(existing_guidance: &str, mention: Option<&str>) -> String {
+    let guidance = render_terminal_guidance(existing_guidance);
+    match mention.filter(|mention| !mention.is_empty()) {
+        Some(mention) => format!("{mention} {guidance}"),
+        None => guidance,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::cancel_prompt_replace::{

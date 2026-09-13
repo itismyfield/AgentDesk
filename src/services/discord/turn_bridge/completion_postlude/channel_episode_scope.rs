@@ -4,19 +4,18 @@
 //! 1. no mailbox handle => [`ChannelEpisodeScope::Unprovable`];
 //! 2. mailbox and bridge hold the same token allocation => [`ChannelEpisodeScope::Mine`];
 //! 3. mailbox has neither a token nor an active user message => [`ChannelEpisodeScope::Idle`];
-//! 4. otherwise, equal non-empty durable turn nonces => [`ChannelEpisodeScope::Mine`];
+//! 4. legacy callers may use equal non-empty nonces => [`ChannelEpisodeScope::Mine`];
 //! 5. every other state => [`ChannelEpisodeScope::Foreign`].
 //!
 //! `Mine` and `Idle` permit effects; `Foreign` and `Unprovable` fail closed. An
 //! `Idle` read still has a read-to-effect race and cannot distinguish “no successor”
 //! from “a successor already finished.” A nonce-fallback `Mine` proves an episode,
 //! not one rehydration attempt, so duplicate actors for the same nonce can both pass.
-//! TUI-direct first creates a synthetic mailbox claim but its bridge mints a separate
-//! token. After synthetic release it reads `Idle` when no successor exists and
-//! `Foreign` when a successor is active, not normally `Unprovable`. A foreign read
-//! can suppress the final status write and leave the namespaced TUI session stuck
-//! `TURN_ACTIVE`; this round makes that residue unconditionally visible rather than
-//! transporting the synthetic claim witness into the bridge.
+//! TUI-direct carries its synthetic claim's token allocation into the bridge,
+//! preserving the same-actor witness while the mailbox remains owned. After
+//! release it reads `Idle` without a successor and `Foreign` with any different
+//! allocation, even when a recovery actor reused the nonce. These later reads
+//! still guard each channel-scoped effect group.
 
 use std::sync::Arc;
 
@@ -76,10 +75,20 @@ impl ChannelEpisodeDecision {
     }
 }
 
+#[cfg(test)]
 fn classify_channel_episode(
     snapshot: Option<&ChannelMailboxSnapshot>,
     mine: &Arc<CancelToken>,
     own_nonce: Option<&str>,
+) -> ChannelEpisodeDecision {
+    classify_channel_episode_with_actor_policy(snapshot, mine, own_nonce, false)
+}
+
+fn classify_channel_episode_with_actor_policy(
+    snapshot: Option<&ChannelMailboxSnapshot>,
+    mine: &Arc<CancelToken>,
+    own_nonce: Option<&str>,
+    require_captured_actor: bool,
 ) -> ChannelEpisodeDecision {
     let Some(snapshot) = snapshot else {
         return ChannelEpisodeDecision {
@@ -103,9 +112,10 @@ fn classify_channel_episode(
             reason: ChannelEpisodeScopeReason::MailboxIdle,
         };
     }
-    if own_nonce
-        .filter(|nonce| !nonce.is_empty())
-        .is_some_and(|nonce| snapshot.active_turn_nonce.as_deref() == Some(nonce))
+    if !require_captured_actor
+        && own_nonce
+            .filter(|nonce| !nonce.is_empty())
+            .is_some_and(|nonce| snapshot.active_turn_nonce.as_deref() == Some(nonce))
     {
         return ChannelEpisodeDecision {
             scope: ChannelEpisodeScope::Mine,
@@ -126,9 +136,77 @@ pub(super) struct ChannelEpisodeProbe<'a> {
     turn_source: &'static str,
     own_nonce: Option<String>,
     mine: Arc<CancelToken>,
+    require_captured_actor: bool,
 }
 
 impl<'a> ChannelEpisodeProbe<'a> {
+    // The actual synthetic actor remains active through terminal transport and
+    // projection. Submit its original allocation only after those boundaries
+    // settle; an actor-only same-nonce replacement must survive both the first
+    // and AlreadyFinalized paths.
+    pub(super) async fn finalize_synthetic_actor(
+        &self,
+        shared_owned: &Arc<SharedData>,
+        inflight_state: &InflightTurnState,
+        cancelled: bool,
+        terminal_projection_committed: bool,
+        has_queued_turns: bool,
+    ) -> bool {
+        if !self.require_captured_actor
+            || !terminal_projection_committed
+            || !self
+                .read("completion_synthetic_finalize")
+                .await
+                .permits_channel_effects()
+        {
+            return has_queued_turns;
+        }
+        let channel_id = self.channel_id;
+        let provider = self.provider;
+        let cancel_token = &self.mine;
+        let outcome = shared_owned
+            .turn_finalizer
+            .submit_terminal_with_claim_snapshot(
+                crate::services::discord::turn_finalizer::TurnKey::new(
+                    channel_id,
+                    inflight_state.effective_finalizer_turn_id(),
+                    shared_owned.restart.current_generation,
+                )
+                .with_episode_nonce(inflight_state.turn_nonce.as_deref()),
+                provider.clone(),
+                if cancelled {
+                    crate::services::discord::turn_finalizer::TerminalEvent::Cancel
+                } else {
+                    crate::services::discord::turn_finalizer::TerminalEvent::Complete
+                },
+                crate::services::discord::turn_finalizer::FinalizeContext::bridge(),
+                Some(super::post_loop_finalize::bridge_terminal_claim_snapshot(
+                    inflight_state,
+                    Some(cancel_token),
+                )),
+                shared_owned.clone(),
+            )
+            .await;
+        if let crate::services::discord::turn_finalizer::FinalizeOutcome::Finalized {
+            has_pending,
+            ..
+        } = outcome
+        {
+            has_pending
+        } else {
+            has_queued_turns
+        }
+    }
+
+    pub(super) async fn owns_synthetic_cleanup(&self, terminal_delivery_committed: bool) -> bool {
+        !self.require_captured_actor
+            || (terminal_delivery_committed
+                && self
+                    .read("completion_synthetic_cleanup")
+                    .await
+                    .permits_channel_effects())
+    }
+
     pub(super) fn new(
         shared: &'a SharedData,
         channel_id: ChannelId,
@@ -144,7 +222,13 @@ impl<'a> ChannelEpisodeProbe<'a> {
             turn_source: state.turn_source.as_str(),
             own_nonce: state.turn_nonce.clone(),
             mine: mine.clone(),
+            require_captured_actor: false,
         }
+    }
+
+    pub(super) fn requiring_captured_actor(mut self, required: bool) -> Self {
+        self.require_captured_actor = required;
+        self
     }
 
     /// Each call is a fresh witness for one effect group. Callers must not reuse it
@@ -157,8 +241,12 @@ impl<'a> ChannelEpisodeProbe<'a> {
             Some(handle) => Some(handle.snapshot().await),
             None => None,
         };
-        let decision =
-            classify_channel_episode(snapshot.as_ref(), &self.mine, self.own_nonce.as_deref());
+        let decision = classify_channel_episode_with_actor_policy(
+            snapshot.as_ref(),
+            &self.mine,
+            self.own_nonce.as_deref(),
+            self.require_captured_actor,
+        );
         authority_observation::record_completion_scope(
             authority_observation::CompletionScopeRecord {
                 shared: self.shared,
@@ -361,9 +449,9 @@ mod tests {
     }
 
     /// Source pin for design L-4. This fixes the complete production caller set and
-    /// its token-registration contract. TUI-direct bridges intentionally mint a token
-    /// distinct from their preceding synthetic claim, yielding Idle after release or
-    /// Foreign when a successor has claimed the retained mailbox handle.
+    /// its token-registration contract. TUI-direct bridges retain their synthetic
+    /// claim's token, yielding Idle after release or Foreign when a successor has
+    /// claimed the retained mailbox handle.
     #[test]
     fn bridge_entry_sites_pin_mailbox_token_registration_contract() {
         let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -378,7 +466,8 @@ mod tests {
                 continue;
             }
             if (source.contains(&spawn) || source.contains(&pinned))
-                && !source.contains("fn spawn_turn_bridge(")
+                && !source.contains(&format!("fn {spawn}"))
+                && !source.contains(&format!("fn {pinned}"))
             {
                 callers.push(
                     path.strip_prefix(&source_root)
@@ -417,7 +506,7 @@ mod tests {
                 .matches(concat!(
                     "spawn_turn_bridge_with_pin(\n",
                     "        shared.clone(),\n",
-                    "        Arc::new(CancelToken::new()),\n",
+                    "        claim.actor.clone(),\n",
                     "        rx,\n",
                     "        bridge,\n",
                     "        pin,\n",
@@ -425,7 +514,7 @@ mod tests {
                 ))
                 .count(),
             2,
-            "both TUI-direct entries intentionally omit mailbox registration"
+            "both TUI-direct entries preserve the captured synthetic mailbox actor"
         );
     }
 }

@@ -2,6 +2,50 @@ use super::super::turn_bridge::BridgeCompletionSignal;
 use super::*;
 
 #[cfg(unix)]
+#[derive(Clone, Copy)]
+pub(super) struct IdleReaderCompletion {
+    pub(super) offset: u64,
+    pub(super) decoded_terminal: bool,
+    pub(super) source_file: Option<crate::services::cluster::stream_relay::SourceFileIdentity>,
+    pub(super) generation_mtime_ns: i64,
+}
+
+#[cfg(unix)]
+impl IdleReaderCompletion {
+    pub(super) fn from_harvest(
+        result: ReadOutputResult,
+        stats: crate::services::session_backend::ReadHarvestStats,
+        generation_mtime_ns: i64,
+    ) -> Self {
+        let (offset, decoded_terminal) = match result {
+            ReadOutputResult::Completed { offset } => (offset, stats.decoded_terminal),
+            ReadOutputResult::Cancelled { offset } | ReadOutputResult::SessionDied { offset } => {
+                (offset, false)
+            }
+        };
+        Self {
+            offset,
+            decoded_terminal,
+            source_file: stats.source_file,
+            generation_mtime_ns,
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(super) type IdleReaderEnd =
+    tokio::sync::oneshot::Receiver<Result<IdleReaderCompletion, String>>;
+
+#[cfg(unix)]
+struct IdleTerminalSource {
+    transcript_path: String,
+    tmux_session_name: String,
+    turn_nonce: String,
+    source_start: u64,
+    actor: std::sync::Weak<CancelToken>,
+}
+
+#[cfg(unix)]
 #[derive(Clone)]
 struct IdleStreamFrameLogContext {
     provider: String,
@@ -39,16 +83,14 @@ fn log_idle_stream_text_decision(
 /// or a transport error. A bare terminal `Done` with an empty result (the
 /// synthetic completion frame the reader emits at turn end) or pure control /
 /// offset frames are NOT content; if the whole turn yields only those, the
-/// idle tail takes the no-card empty path (preserving today's behavior).
+/// idle tail still admits an empty terminal to deliver recovery guidance.
 #[cfg(unix)]
 pub(super) fn idle_stream_message_is_content(message: &StreamMessage) -> bool {
     match message {
         // #3256: a `Text`/`Done` body that is ONLY leading TUI chrome (e.g.
         // `No response requested.` / `Continue from where you left off.`) is NOT
-        // real content — the old path stripped that chrome with
-        // `strip_leading_tui_response_chrome` and produced an empty response, i.e.
-        // the no-card empty path. Strip BEFORE the emptiness test so a chrome-only
-        // turn keeps spawning no placeholder card (parity with prior behavior).
+        // real content. Strip before classifying prose; an empty Done remains
+        // a separate terminal boundary requiring admitted recovery guidance.
         StreamMessage::Text { content } => {
             !super::super::response_sanitizer::strip_leading_tui_response_chrome(content)
                 .trim()
@@ -65,8 +107,7 @@ pub(super) fn idle_stream_message_is_content(message: &StreamMessage) -> bool {
 }
 
 /// #3256: the stream-through path commits the runtime-binding offset whenever
-/// the single bridge turn delivered successfully. (The empty-response branch
-/// commits independently before finishing the synthetic turn.)
+/// the single bridge turn delivered successfully, including empty-response guidance.
 #[cfg(unix)]
 pub(super) fn tui_idle_tail_stream_should_commit_runtime_binding_offset(
     discord_delivery_succeeded: bool,
@@ -166,43 +207,26 @@ pub(super) async fn relay_tui_idle_response_through_bridge(
         super::super::adk_session::fetch_context_thresholds(shared.api_port)
             .await
             .compact_pct_for(&provider);
-    let anchor = prompt_anchor_for_response_after_wait(
+    let claim = super::synthetic_start::bridge_handoff::capture(
+        shared,
+        &provider,
+        channel_id,
+        tmux_session_name,
+        output_path,
+        lease,
+    )
+    .await?;
+    let user_msg_id = MessageId::new(claim.row.user_msg_id);
+    let current_msg_id = MessageId::new(claim.row.current_msg_id);
+    let anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
         provider.as_str(),
         tmux_session_name,
         channel_id.get(),
     )
-    .await;
-    let reference = anchor.map(|anchor| {
-        (
-            ChannelId::new(anchor.channel_id),
-            MessageId::new(anchor.message_id),
-        )
-    });
-    let current_msg_id = super::super::gateway::send_intake_placeholder(
-        http.clone(),
-        shared.clone(),
-        channel_id,
-        reference,
-        // #3082 P2-3: a TUI idle-response placeholder is an ACTIVE-turn card, not a queued "📬" notice — it must not wait on the answer-flush barrier.
-        false,
-    )
-    .await?;
-    let user_msg_id = anchor
-        .map(|anchor| MessageId::new(anchor.message_id))
-        .unwrap_or(current_msg_id);
+    .filter(|anchor| anchor.message_id == user_msg_id.get());
     let (tx, rx) = mpsc::channel();
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    let inflight_state = build_tui_direct_bridge_inflight_state(
-        provider.clone(),
-        channel_id,
-        user_msg_id,
-        current_msg_id,
-        prompt_text,
-        tmux_session_name,
-        output_path,
-        start_offset,
-        lease,
-    );
+    let inflight_state = claim.row.clone();
     let gateway = Arc::new(TuiDirectBridgeGateway {
         http,
         shared: shared.clone(),
@@ -244,7 +268,7 @@ pub(super) async fn relay_tui_idle_response_through_bridge(
     );
     crate::services::discord::turn_bridge::spawn_turn_bridge_with_pin(
         shared.clone(),
-        Arc::new(CancelToken::new()),
+        claim.actor.clone(),
         rx,
         bridge,
         pin,
@@ -260,16 +284,18 @@ pub(super) async fn relay_tui_idle_response_through_bridge(
     drop(tx);
 
     let completion = tokio::time::timeout(Duration::from_secs(180), completion_rx).await;
-    finish_idle_bridge_completion(
+    let result = finish_idle_bridge_completion(
         completion,
         gateway.as_ref(),
         &provider,
         (channel_id, user_msg_id, current_msg_id),
-        Some(current_msg_id),
+        None,
         (tmux_session_name, lease, anchor),
         false,
     )
-    .await
+    .await;
+    claim.preserve_continuation(shared).await;
+    result
 }
 
 /// #3256: STREAM-THROUGH variant of `relay_tui_idle_response_through_bridge`
@@ -302,8 +328,9 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
     prompt_text: &str,
     prefix: Vec<StreamMessage>,
     reader_rx: mpsc::Receiver<StreamMessage>,
+    reader_end: Option<IdleReaderEnd>,
     lease: &ExternalInputRelayLease,
-) -> Result<(), String> {
+) -> Result<Option<u64>, String> {
     let _lease_guard = TuiDirectExternalInputLeaseGuard::new(
         provider.clone(),
         tmux_session_name,
@@ -332,48 +359,105 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
         super::super::adk_session::fetch_context_thresholds(shared.api_port)
             .await
             .compact_pct_for(&provider);
-    let anchor = prompt_anchor_for_response_after_wait(
-        provider.as_str(),
-        tmux_session_name,
-        channel_id.get(),
-    )
-    .await;
-    let reference = anchor.map(|anchor| {
-        (
-            ChannelId::new(anchor.channel_id),
-            MessageId::new(anchor.message_id),
-        )
-    });
-    // EXACTLY ONE intake placeholder card per external turn.
-    let current_msg_id = super::super::gateway::send_intake_placeholder(
-        http.clone(),
-        shared.clone(),
-        channel_id,
-        reference,
-        false,
-    )
-    .await?;
-    let user_msg_id = anchor
-        .map(|anchor| MessageId::new(anchor.message_id))
-        .unwrap_or(current_msg_id);
-    let (tx, rx) = mpsc::channel();
-    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    let inflight_state = build_tui_direct_bridge_inflight_state(
-        provider.clone(),
-        channel_id,
-        user_msg_id,
-        current_msg_id,
-        prompt_text,
-        tmux_session_name,
-        output_path,
-        start_offset,
-        lease,
-    );
     let gateway = Arc::new(TuiDirectBridgeGateway {
         http,
         shared: shared.clone(),
         provider: provider.clone(),
     });
+    stream_tui_idle_response_with_gateway(
+        shared,
+        provider,
+        channel_id,
+        IdleBridgeSource {
+            tmux_session_name,
+            output_path,
+            start_offset,
+            prompt_text,
+            lease,
+        },
+        (prefix, reader_rx, reader_end),
+        gateway,
+        context_compact_percent,
+    )
+    .await
+}
+
+#[cfg(unix)]
+pub(super) struct IdleBridgeSource<'a> {
+    pub(super) tmux_session_name: &'a str,
+    pub(super) output_path: &'a Path,
+    pub(super) start_offset: u64,
+    pub(super) prompt_text: &'a str,
+    pub(super) lease: &'a ExternalInputRelayLease,
+}
+
+#[cfg(unix)]
+pub(super) async fn stream_tui_idle_response_with_gateway(
+    shared: &Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+    source: IdleBridgeSource<'_>,
+    reader: (
+        Vec<StreamMessage>,
+        mpsc::Receiver<StreamMessage>,
+        Option<IdleReaderEnd>,
+    ),
+    gateway: Arc<dyn super::super::gateway::TurnGateway>,
+    context_compact_percent: u64,
+) -> Result<Option<u64>, String> {
+    let IdleBridgeSource {
+        tmux_session_name,
+        output_path,
+        start_offset,
+        prompt_text,
+        lease,
+    } = source;
+    let (prefix, reader_rx, reader_end) = reader;
+    let claim = super::synthetic_start::bridge_handoff::capture(
+        shared,
+        &provider,
+        channel_id,
+        tmux_session_name,
+        output_path,
+        lease,
+    )
+    .await?;
+    if !claim.row.full_response.is_empty() && start_offset < claim.row.last_offset {
+        return Err("idle continuation must resume from its saved source cursor".into());
+    }
+    let user_msg_id = MessageId::new(claim.row.user_msg_id);
+    let current_msg_id = MessageId::new(claim.row.current_msg_id);
+    let anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
+        provider.as_str(),
+        tmux_session_name,
+        channel_id.get(),
+    )
+    .filter(|anchor| anchor.message_id == user_msg_id.get());
+    let (tx, rx) = mpsc::channel();
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let source = if provider == ProviderKind::Claude && reader_end.is_some() {
+        Some(IdleTerminalSource {
+            transcript_path: std::fs::canonicalize(output_path)
+                .map_err(|error| error.to_string())?
+                .to_string_lossy()
+                .into_owned(),
+            tmux_session_name: tmux_session_name.to_owned(),
+            turn_nonce: claim
+                .actor
+                .turn_nonce()
+                .filter(|nonce| !nonce.is_empty())
+                .ok_or("missing captured Claude actor nonce")?
+                .to_owned(),
+            source_start: claim
+                .row
+                .turn_start_offset
+                .ok_or("missing captured Claude source boundary")?,
+            actor: Arc::downgrade(&claim.actor),
+        })
+    } else {
+        None
+    };
+    let inflight_state = claim.row.clone();
     let bridge = TurnBridgeContext {
         provider: provider.clone(),
         gateway: gateway.clone(),
@@ -392,8 +476,8 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
         context_window_tokens: 0,
         context_compact_percent,
         current_msg_id: Some(current_msg_id),
-        response_sent_offset: 0,
-        full_response: String::new(),
+        response_sent_offset: claim.row.response_sent_offset,
+        full_response: claim.row.full_response.clone(),
         tmux_last_offset: Some(start_offset),
         new_session_id: None,
         defer_watcher_resume: false,
@@ -411,7 +495,7 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
     );
     crate::services::discord::turn_bridge::spawn_turn_bridge_with_pin(
         shared.clone(),
-        Arc::new(CancelToken::new()),
+        claim.actor.clone(),
         rx,
         bridge,
         pin,
@@ -432,10 +516,17 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
     // Forward the buffered prefix + the live reader stream into the SINGLE
     // bridge `tx` on a blocking thread (the reader receiver and the bridge
     // sender are both sync `mpsc`). The bridge finalizes on the first terminal
-    // `Done`; we send a fallback `Done` only if the reader closed without one
-    // so the bridge always finalizes EXACTLY ONCE.
+    // `Done`; Claude terminal frames wait for the reader completion proof.
+    // A failed reader leaves the captured episode available for recovery.
     let forward_handle = tokio::task::spawn_blocking(move || {
-        forward_idle_stream_into_bridge_with_logging(prefix, reader_rx, tx, Some(frame_log_context))
+        forward_idle_stream_into_bridge_with_logging(
+            prefix,
+            reader_rx,
+            tx,
+            reader_end,
+            source,
+            Some(frame_log_context),
+        )
     });
 
     // #3256: the forward thread runs for the WHOLE turn — it only returns once the
@@ -447,22 +538,26 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
     // placed before this join made >180s turns return `Err` despite a normal
     // delivery, which skipped the runtime-binding offset commit and risked a
     // duplicate re-relay on the next idle poll.
-    let _ = forward_handle.await;
+    let reader_outcome = forward_handle.await.map_err(|error| error.to_string());
 
     // Only NOW bound the post-`Done` bridge finalization (Discord edit/flush),
     // which should land within seconds of the terminal frame being forwarded.
     let completion = tokio::time::timeout(Duration::from_secs(180), completion_rx).await;
 
-    finish_idle_bridge_completion(
+    let result = finish_idle_bridge_completion(
         completion,
         gateway.as_ref(),
         &provider,
         (channel_id, user_msg_id, current_msg_id),
-        Some(current_msg_id),
+        None,
         (tmux_session_name, lease, anchor),
         true,
     )
-    .await
+    .await;
+    claim.preserve_continuation(shared).await;
+    let (_, source_offset) = reader_outcome?;
+    let source_offset = source_offset?;
+    result.map(|()| source_offset)
 }
 
 // Shared by both adapters; only Finalized may acknowledge delivery or clear the anchor.
@@ -538,6 +633,13 @@ pub(super) async fn finish_idle_bridge_completion(
                 reason = ?aborted, "TUI-direct bridge entry aborted before authority");
             Err("TUI-direct bridge entry aborted before authority".to_string())
         }
+        Ok(Ok(
+            signal @ (BridgeCompletionSignal::DeferredToCustody
+            | BridgeCompletionSignal::DeferredToOwner
+            | BridgeCompletionSignal::Unresolved),
+        )) => Err(format!(
+            "TUI-direct bridge delivery remains pending: {signal:?}"
+        )),
         Err(_) => Err(format!(
             "TUI-direct bridge adapter timed out waiting for completion for provider {}",
             provider.as_str()
@@ -553,11 +655,10 @@ pub(super) async fn finish_idle_bridge_completion(
 ///   left off.`) is stripped from the FIRST non-empty `Text` frame, matching
 ///   the old `compose_tui_idle_response` behavior so the streamed card never
 ///   flashes that chrome.
-/// - The transcript reader normally emits a terminal `Done` itself; if the
-///   stream closes WITHOUT one (e.g. dead session mid-stream), a synthetic
-///   `Done` is appended so the bridge still finalizes. A `Done` is forwarded at
-///   most once — subsequent frames after a `Done` are dropped, since the bridge
-///   has already claimed the turn outcome ("first wins").
+/// - The legacy forwarding helper retains its existing fallback Done. The
+///   production Claude adapter supplies reader completion evidence and keeps
+///   one Done pending until a real decoded terminal is confirmed. Failed reads
+///   close the stream while preserving the durable episode for recovery.
 ///
 /// Returns the number of `Text`-content frames forwarded (used by tests to
 /// prove progressive relay: more than one before the terminal `Done`).
@@ -568,7 +669,7 @@ pub(super) fn forward_idle_stream_into_bridge(
     reader_rx: mpsc::Receiver<StreamMessage>,
     tx: mpsc::Sender<StreamMessage>,
 ) -> usize {
-    forward_idle_stream_into_bridge_with_logging(prefix, reader_rx, tx, None)
+    forward_idle_stream_into_bridge_with_logging(prefix, reader_rx, tx, None, None, None).0
 }
 
 #[cfg(unix)]
@@ -576,8 +677,10 @@ fn forward_idle_stream_into_bridge_with_logging(
     prefix: Vec<StreamMessage>,
     reader_rx: mpsc::Receiver<StreamMessage>,
     tx: mpsc::Sender<StreamMessage>,
+    reader_end: Option<IdleReaderEnd>,
+    source: Option<IdleTerminalSource>,
     log_context: Option<IdleStreamFrameLogContext>,
-) -> usize {
+) -> (usize, Result<Option<u64>, String>) {
     let mut first_text_seen = false;
     let mut done_forwarded = false;
     let mut text_frames_forwarded = 0usize;
@@ -640,34 +743,98 @@ fn forward_idle_stream_into_bridge_with_logging(
         true
     };
 
-    for message in prefix {
+    // Source readers can synthesize Done or defer Error until shutdown. Keep one
+    // terminal frame until their positive decoder evidence arrives; prose still
+    // flows immediately. A failed reader closes the bridge without claiming Done.
+    let strict_terminal = reader_end.is_some();
+    let mut terminal = None;
+    for message in prefix.into_iter().chain(reader_rx) {
+        if strict_terminal
+            && (terminal.is_some()
+                || matches!(
+                    message,
+                    StreamMessage::Done { .. } | StreamMessage::Error { .. }
+                ))
+        {
+            if terminal.is_none() {
+                terminal = Some(message);
+            }
+            continue;
+        }
         if !forward(
             message,
             &mut first_text_seen,
             &mut done_forwarded,
             &mut text_frames_forwarded,
         ) {
-            return text_frames_forwarded;
+            return (
+                text_frames_forwarded,
+                Err("idle bridge receiver closed".into()),
+            );
         }
     }
-    while let Ok(message) = reader_rx.recv() {
-        if !forward(
-            message,
-            &mut first_text_seen,
-            &mut done_forwarded,
-            &mut text_frames_forwarded,
-        ) {
-            return text_frames_forwarded;
-        }
-    }
-
-    if !done_forwarded {
-        let _ = tx.send(StreamMessage::Done {
+    let completed = match reader_end {
+        Some(end) => match end.blocking_recv() {
+            Ok(Ok(completed)) if completed.decoded_terminal => Ok(Some(completed)),
+            Ok(Ok(_)) => Err("idle source reader ended without a decoded terminal".into()),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(format!("idle source reader lost its completion: {error}")),
+        },
+        None => Ok(None),
+    };
+    let source_offset = completed
+        .as_ref()
+        .map(|done| done.map(|done| done.offset))
+        .map_err(Clone::clone);
+    if let Ok(completed) = completed
+        && !done_forwarded
+    {
+        let done = terminal.unwrap_or(StreamMessage::Done {
             result: String::new(),
             session_id: None,
         });
+        let message = match (completed, source, done) {
+            (Some(completed), Some(source), StreamMessage::Done { result, session_id }) => {
+                let Some(crate::services::cluster::stream_relay::SourceFileIdentity::Unix {
+                    dev,
+                    ino,
+                }) = completed.source_file
+                else {
+                    return (
+                        text_frames_forwarded,
+                        Err("Claude terminal reader has no opened-file identity".into()),
+                    );
+                };
+                StreamMessage::ClaudeTuiTerminalDone {
+                    result,
+                    session_id,
+                    transcript_path: source.transcript_path,
+                    tmux_session_name: source.tmux_session_name,
+                    turn_nonce: source.turn_nonce,
+                    source_start: source.source_start,
+                    complete_record_end: completed.offset,
+                    generation_mtime_ns: completed.generation_mtime_ns,
+                    source_file_dev: dev,
+                    source_file_ino: ino,
+                    actor: source.actor,
+                }
+            }
+            (Some(_), _, _) => {
+                return (
+                    text_frames_forwarded,
+                    Err("Claude terminal source witness missing".into()),
+                );
+            }
+            (None, _, done) => done,
+        };
+        if tx.send(message).is_err() {
+            return (
+                text_frames_forwarded,
+                Err("idle bridge receiver closed before terminal".into()),
+            );
+        }
     }
-    text_frames_forwarded
+    (text_frames_forwarded, source_offset)
 }
 
 #[cfg(unix)]

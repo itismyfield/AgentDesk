@@ -8,7 +8,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::{CancelToken, ReadOutputResult, cancel_requested};
-use parser::{RolloutParseState, process_rollout_line_bytes};
+pub(crate) use parser::recover_captured_rollout_response;
+use parser::{
+    RolloutParseState, process_rollout_line_bytes, task_complete_fallback_supersedes_final_text,
+};
 // REQ-006: share the single rollout discovery primitive so `session.rs` and
 // `rollout_tail.rs` do not maintain two divergent directory walkers. Tailing
 // semantics are unchanged — callers here still apply their own cwd/session/mtime
@@ -1417,12 +1420,6 @@ fn promote_task_complete_fallback_text(state: &mut RolloutParseState) {
         );
         state.final_text = text;
     }
-}
-
-fn task_complete_fallback_supersedes_final_text(final_text: &str, fallback_text: &str) -> bool {
-    let streamed = final_text.trim();
-    let fallback = fallback_text.trim();
-    !streamed.is_empty() && fallback.len() > streamed.len() && fallback.ends_with(streamed)
 }
 
 // The fallback counts as already mirrored only when it IS the final text or

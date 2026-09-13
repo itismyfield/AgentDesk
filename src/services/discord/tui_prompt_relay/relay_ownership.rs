@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) enum RelayEmissionKind {
+    Poll,
+    ObservedPrompt,
+}
+
 pub(super) struct TuiDirectExternalInputLeaseGuard {
     provider: ProviderKind,
     tmux_session_name: String,

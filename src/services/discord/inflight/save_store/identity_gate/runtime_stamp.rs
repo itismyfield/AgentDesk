@@ -3,14 +3,18 @@ use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
 use crate::services::discord::outbound::delivery_record::ExactJsonlSourceIdentity;
 use crate::services::discord::turn_bridge::{tmux_generation_file_mtime_ns, tmux_runtime_paths};
-#[derive(Clone, Debug)]
-pub(in crate::services::discord) struct CodexRange {
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(in crate::services::discord) struct TuiTerminalRange {
     pub(in crate::services::discord) identity: InflightTurnIdentity,
     pub(in crate::services::discord) result: String,
     pub(in crate::services::discord) rollout_path: String,
     pub(in crate::services::discord) session_id: String,
     pub(in crate::services::discord) source: ExactJsonlSourceIdentity,
+    #[serde(default)]
+    pub(in crate::services::discord) source_file_identity: Option<(u64, u64)>,
 }
+pub(in crate::services::discord) type CodexRange = TuiTerminalRange;
+
 fn nonempty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
@@ -38,6 +42,13 @@ fn binding_matches(tmux: &str, path: &Path, session: &str, offsets: [u64; 2]) ->
 }
 
 impl InflightTurnState {
+    pub(in crate::services::discord) fn requires_pinned_terminal_recovery(&self) -> bool {
+        self.provider_kind() == Some(ProviderKind::Claude)
+            && self.runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
+            && (self.tui_terminal_source_file_identity.is_some()
+                || self.tui_terminal_generation_mtime_ns.is_some())
+    }
+
     #[allow(dead_code)]
     pub(in crate::services::discord) fn admit_codex_tui_terminal_frame(
         &mut self,
@@ -105,7 +116,7 @@ fn admit_codex_terminal_range_in_root(
     }
     let path = inflight_state_path(root, &ProviderKind::Codex, local.channel_id);
     let _lock = lock_inflight_state_path(&path).map_err(|_| GuardedSaveOutcome::IoError)?;
-    let mut fresh = read_inflight_state_for_guarded_write(
+    let fresh = read_inflight_state_for_guarded_write(
         &path,
         &ProviderKind::Codex,
         local.channel_id,
@@ -151,76 +162,181 @@ fn admit_codex_terminal_range_in_root(
     if (!cold && !warm) || generation == 0 {
         return Err(GuardedSaveOutcome::IdentityMismatch);
     }
+    persist_terminal_range(
+        root,
+        &path,
+        (local, baseline),
+        fresh,
+        (result, canonical, session),
+        ((start, end), generation, None),
+    )
+}
+
+fn persist_terminal_range(
+    root: &Path,
+    path: &Path,
+    states: (&mut InflightTurnState, &mut InflightTurnState),
+    mut fresh: InflightTurnState,
+    frame: (&str, PathBuf, &str),
+    source: ((u64, u64), i64, Option<(u64, u64)>),
+) -> Result<TuiTerminalRange, GuardedSaveOutcome> {
+    let (local, baseline) = states;
+    let (result, canonical, session) = frame;
+    let (range, generation, source_file_identity) = source;
     let canonical = canonical.display().to_string();
     fresh.output_path = Some(canonical.clone());
     fresh.full_response = result.to_string();
-    fresh.last_offset = end;
+    fresh.last_offset = range.1;
+    fresh.tui_terminal_source_file_identity = source_file_identity;
+    fresh.tui_terminal_generation_mtime_ns = Some(generation);
     let persisted = persist_under_lock_with_snapshot(
         root,
-        &path,
+        path,
         &fresh,
-        "inflight::runtime_stamp::admit_codex_terminal_range",
+        "inflight::runtime_stamp::admit_terminal_range",
     )
     .map_err(|_| GuardedSaveOutcome::IoError)?
     .ok_or(GuardedSaveOutcome::IdentityMismatch)?;
     baseline.clone_from(&persisted);
     local.output_path.clone_from(&persisted.output_path);
+    local.session_id.clone_from(&persisted.session_id);
+    local.tui_terminal_source_file_identity = persisted.tui_terminal_source_file_identity;
+    local.tui_terminal_generation_mtime_ns = persisted.tui_terminal_generation_mtime_ns;
     local.last_offset = persisted.last_offset;
     local.save_generation = persisted.save_generation;
-    Ok(CodexRange {
+    Ok(TuiTerminalRange {
         identity: InflightTurnIdentity::from_state(&persisted),
         result: result.to_string(),
         rollout_path: canonical,
         session_id: session.to_string(),
+        source_file_identity,
         source: ExactJsonlSourceIdentity {
-            provider: ProviderKind::Codex.as_str().to_string(),
-            tmux_session_name: tmux.to_string(),
-            turn_nonce: nonce.to_string(),
-            range: (start, end),
+            provider: persisted.provider.clone(),
+            tmux_session_name: persisted.tmux_session_name.clone().unwrap_or_default(),
+            turn_nonce: persisted.turn_nonce.clone().unwrap_or_default(),
+            range,
             generation_mtime_ns: generation,
             offset_authority_channel_id: persisted.delivery_record_owner_channel_id(),
             delivery_channel_id: persisted.channel_id,
         },
     })
 }
-impl CodexRange {
+
+impl TuiTerminalRange {
+    /// Reconstruct only previously admitted evidence; live validation remains
+    /// the existing publisher's responsibility.
+    pub(in crate::services::discord) fn from_retained_claude_terminal(
+        row: &InflightTurnState,
+    ) -> Option<Self> {
+        if row.provider_kind() != Some(ProviderKind::Claude)
+            || row.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+        {
+            return None;
+        }
+        let captured = Self {
+            identity: InflightTurnIdentity::from_state(row),
+            result: row.full_response.clone(),
+            rollout_path: row.output_path.clone()?,
+            session_id: row.session_id.clone().unwrap_or_default(),
+            source_file_identity: Some(row.tui_terminal_source_file_identity?),
+            source: ExactJsonlSourceIdentity {
+                provider: row.provider.clone(),
+                tmux_session_name: row.tmux_session_name.clone()?,
+                turn_nonce: row.turn_nonce.clone()?,
+                range: (row.turn_start_offset?, row.last_offset),
+                generation_mtime_ns: row.tui_terminal_generation_mtime_ns?,
+                offset_authority_channel_id: row.delivery_record_owner_channel_id(),
+                delivery_channel_id: row.channel_id,
+            },
+        };
+        captured.source.is_authoritative().then_some(captured)
+    }
+
     pub(in crate::services::discord) fn complete_record_end(&self) -> u64 {
         self.source.range.1
     }
 
     pub(in crate::services::discord) fn live_source_path(&self) -> Option<PathBuf> {
+        self.source_path(false)
+    }
+
+    pub(in crate::services::discord) fn receipt_source_path(&self) -> Option<PathBuf> {
+        self.source_path(true)
+    }
+
+    fn source_path(&self, receipt: bool) -> Option<PathBuf> {
         let source = &self.source;
         let (path, len) = canonical_regular_file(&self.rollout_path)?;
         let (start, end) = source.range;
-        let tmux = &source.tmux_session_name;
-        (len >= end && marker_matches(tmux, &path, &self.session_id, start)).then_some(path)
+        if source.provider == ProviderKind::Claude.as_str() {
+            return (start < end
+                && len >= end
+                && self
+                    .source_file_identity
+                    .is_some_and(|expected| file_identity(&path) == Some(expected)))
+            .then_some(path);
+        }
+        let marker = crate::services::codex_tui::session::read_codex_tui_rollout_marker(
+            &source.tmux_session_name,
+        )?;
+        let marker_offset = marker.rollout_start_offset?;
+        (len >= end
+            && nonempty(marker.session_id.as_deref()) == Some(self.session_id.as_str())
+            && std::fs::canonicalize(marker.rollout_path).ok().as_deref() == Some(&path)
+            && (marker_offset == start
+                || (receipt && marker_offset > start && marker_offset <= len)))
+            .then_some(path)
     }
 
     pub(in crate::services::discord) fn source_authority_is_live(
         &self,
         authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     ) -> bool {
+        self.source_binding_matches(authority, false)
+    }
+    /// Cursor progress preserves an old exact receipt; new publication still
+    /// requires the captured end to be the current binding cursor.
+    pub(in crate::services::discord) fn source_receipt_is_live(
+        &self,
+        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    ) -> bool {
+        self.source_binding_matches(authority, true)
+    }
+    fn source_binding_matches(
+        &self,
+        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+        receipt: bool,
+    ) -> bool {
         // The caller holds `authority` through Current advance + receipt, so
         // this marker/generation/binding tuple cannot change after the check.
         let source = &self.source;
         let tmux = &source.tmux_session_name;
-        let Some(path) = self.live_source_path() else {
+        let Some(path) = self.source_path(receipt) else {
             return false;
         };
+        if source.provider == ProviderKind::Claude.as_str() {
+            return tmux_generation_file_mtime_ns(tmux) == source.generation_mtime_ns
+                && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
+                    .is_some_and(|binding| claude_binding_matches(&binding, &path, &self.session_id, source.range, receipt));
+        }
         tmux_generation_file_mtime_ns(tmux) == source.generation_mtime_ns
             && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority).is_some_and(|binding| {
                 binding.runtime_kind == RuntimeHandoffKind::CodexTui
                     && canonical_regular_file(&binding.output_path).is_some_and(|(bound, _)| bound == path)
                     && nonempty(binding.session_id.as_deref()) == Some(self.session_id.as_str())
-                    && binding.last_offset == source.range.1
+                    && (!receipt || crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux)
+                        .and_then(|marker| marker.rollout_start_offset).is_some_and(|offset| offset <= binding.last_offset))
+                    && (binding.last_offset == source.range.1
+                        || (receipt && binding.last_offset > source.range.1))
             })
     }
-    pub(in crate::services::discord) fn revalidated_source(
+    fn with_revalidated_row<T>(
         &self,
         local: &InflightTurnState,
-    ) -> Result<Option<CodexRange>, ()> {
+        validate: impl FnOnce(&InflightTurnState) -> T,
+    ) -> Result<T, ()> {
         let source = &self.source;
-        let (start, end) = source.range;
+        let (start, _) = source.range;
         if source.delivery_channel_id != local.channel_id
             || !self.identity.matches_state(local)
             || !StreamRelayAuthority::from_state(local).bridge_owns_relay()
@@ -231,18 +347,27 @@ impl CodexRange {
             return Err(());
         }
         let root = inflight_runtime_root().ok_or(())?;
-        let path = inflight_state_path(&root, &ProviderKind::Codex, local.channel_id);
+        let provider = ProviderKind::from_str_or_unsupported(&source.provider);
+        let runtime = if provider == ProviderKind::Claude {
+            RuntimeHandoffKind::ClaudeTui
+        } else if provider == ProviderKind::Codex {
+            RuntimeHandoffKind::CodexTui
+        } else {
+            return Err(());
+        };
+        let path = inflight_state_path(&root, &provider, local.channel_id);
         let _lock = lock_inflight_state_path(&path).map_err(|_| ())?;
         let fresh = read_inflight_state_for_guarded_write(
             &path,
-            &ProviderKind::Codex,
+            &provider,
             local.channel_id,
             &self.identity,
             "terminal_delivery::codex_terminal_range",
         )
         .map_err(|_| ())?;
         if !self.identity.matches_state(&fresh)
-            || fresh.runtime_kind != Some(RuntimeHandoffKind::CodexTui)
+            || fresh.provider_kind() != Some(provider.clone())
+            || fresh.runtime_kind != Some(runtime)
             || fresh.tmux_session_name.as_deref() != Some(source.tmux_session_name.as_str())
             || nonempty(fresh.turn_nonce.as_deref()) != Some(source.turn_nonce.as_str())
             || fresh.turn_start_offset != Some(start)
@@ -256,19 +381,94 @@ impl CodexRange {
         {
             return Err(());
         }
-        let Some(canonical) = self.live_source_path() else {
-            return Ok(None);
-        };
-        let exact = fresh.output_path.as_deref() == Some(canonical.to_string_lossy().as_ref())
-            && fresh.last_offset == end
+        Ok(validate(&fresh))
+    }
+
+    fn matches_durable_terminal(&self, fresh: &InflightTurnState, path: &Path) -> bool {
+        fresh.output_path.as_deref() == Some(path.to_string_lossy().as_ref())
+            && fresh.last_offset == self.source.range.1
             && fresh.full_response == self.result
-            && binding_matches(
+    }
+
+    pub(in crate::services::discord) fn revalidated_source(
+        &self,
+        local: &InflightTurnState,
+    ) -> Result<Option<CodexRange>, ()> {
+        self.with_revalidated_row(local, |fresh| {
+            let source = &self.source;
+            let (start, end) = source.range;
+            let canonical = self.live_source_path()?;
+            let exact = self.matches_durable_terminal(fresh, &canonical)
+                && if fresh.provider_kind() == Some(ProviderKind::Claude) {
+                    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+                        &source.tmux_session_name,
+                    )
+                    .is_some_and(|binding| {
+                        claude_binding_matches(
+                            &binding,
+                            &canonical,
+                            &self.session_id,
+                            (start, end),
+                            false,
+                        )
+                    })
+                } else {
+                    binding_matches(
+                        &source.tmux_session_name,
+                        &canonical,
+                        &self.session_id,
+                        [end; 2],
+                    )
+                };
+            exact.then(|| self.clone())
+        })
+    }
+
+    /// Consume an existing ACK after process-local bindings disappear. This
+    /// never returns publication authority or installs a replacement binding.
+    pub(in crate::services::discord) fn confirmed_receipt_for_captured_row(
+        &self,
+        local: &InflightTurnState,
+        message_id: u64,
+    ) -> bool {
+        use crate::services::{discord::outbound::delivery_record, tui_prompt_dedupe as dedupe};
+        self.with_revalidated_row(local, |fresh| {
+            let source = &self.source;
+            if !source.is_authoritative()
+                || nonempty(fresh.session_id.as_deref()) != nonempty(Some(&self.session_id))
+                || (fresh.runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
+                    && fresh.tui_terminal_source_file_identity != self.source_file_identity)
+            {
+                return false;
+            }
+            crate::services::tmux_common::with_tmux_source_authority(
                 &source.tmux_session_name,
-                &canonical,
-                &self.session_id,
-                [end; 2],
-            );
-        Ok(exact.then(|| self.clone()))
+                |authority| {
+                    let Some(path) = self.receipt_source_path() else {
+                        return false;
+                    };
+                    if !self.matches_durable_terminal(fresh, &path)
+                        || tmux_generation_file_mtime_ns(&source.tmux_session_name)
+                            != source.generation_mtime_ns
+                    {
+                        return false;
+                    }
+                    if dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
+                        .is_some()
+                        && !self.source_receipt_is_live(authority)
+                    {
+                        return false;
+                    }
+                    delivery_record::confirmed_delivery_receipt_exists(
+                        &ProviderKind::from_str_or_unsupported(&source.provider),
+                        poise::serenity_prelude::ChannelId::new(fresh.channel_id),
+                        message_id,
+                        source,
+                    )
+                },
+            )
+        })
+        .unwrap_or(false)
     }
 }
 
@@ -979,3 +1179,199 @@ mod tests {
         );
     }
 }
+
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).ok()?;
+        metadata
+            .is_file()
+            .then_some((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+fn claude_binding_matches(
+    binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
+    path: &Path,
+    session: &str,
+    (start, end): (u64, u64),
+    receipt: bool,
+) -> bool {
+    binding.runtime_kind == RuntimeHandoffKind::ClaudeTui
+        && nonempty(binding.session_id.as_deref()) == nonempty(Some(session))
+        && canonical_regular_file(binding.relay_output_path())
+            .is_some_and(|(bound, _)| bound == path)
+        && (binding.relay_last_offset() >= start)
+        && (binding.relay_last_offset() <= end || receipt)
+}
+
+impl InflightTurnState {
+    /// Claude requires the actual reader's complete-record end, file descriptor
+    /// identity and original actor. Invalid typed evidence never degrades to an
+    /// unpinned successful Done. Codex retains its established admission rules.
+    pub(in crate::services::discord) async fn admit_tui_terminal_frame(
+        &mut self,
+        baseline: &mut InflightTurnState,
+        expected: &InflightTurnIdentity,
+        can_chain_locally: bool,
+        actor_authority: (
+            &crate::services::discord::SharedData,
+            &std::sync::Arc<crate::services::provider::CancelToken>,
+        ),
+        observed_response: &str,
+        message: StreamMessage,
+    ) -> Result<(StreamMessage, Option<TuiTerminalRange>, bool), GuardedSaveOutcome> {
+        let StreamMessage::ClaudeTuiTerminalDone {
+            result,
+            session_id,
+            transcript_path,
+            tmux_session_name,
+            turn_nonce,
+            source_start,
+            complete_record_end,
+            generation_mtime_ns,
+            source_file_dev,
+            source_file_ino,
+            actor,
+        } = message
+        else {
+            return Ok(self.admit_codex_tui_terminal_frame(
+                baseline,
+                expected,
+                can_chain_locally,
+                message,
+            ));
+        };
+        let (shared, bridge_actor) = actor_authority;
+        let result = if result.trim().is_empty() {
+            observed_response.to_owned()
+        } else {
+            result
+        };
+        let mismatch = GuardedSaveOutcome::IdentityMismatch;
+        let captured = actor.upgrade().ok_or(mismatch)?;
+        if !std::sync::Arc::ptr_eq(&captured, bridge_actor)
+            || bridge_actor.turn_nonce() != Some(turn_nonce.as_str())
+        {
+            return Err(mismatch);
+        }
+        let mailbox = shared
+            .mailbox_peek(serenity::all::ChannelId::new(self.channel_id))
+            .ok_or(mismatch)?;
+        if !mailbox
+            .snapshot()
+            .await
+            .cancel_token
+            .as_ref()
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, &captured))
+        {
+            return Err(mismatch);
+        }
+        let root = inflight_runtime_root().ok_or(mismatch)?;
+        let path = inflight_state_path(&root, &ProviderKind::Claude, self.channel_id);
+        let _lock = lock_inflight_state_path(&path).map_err(|_| GuardedSaveOutcome::IoError)?;
+        let mut fresh = read_inflight_state_for_guarded_write(
+            &path,
+            &ProviderKind::Claude,
+            self.channel_id,
+            expected,
+            "turn_bridge::claude_terminal_range",
+        )?;
+        crate::services::tmux_common::with_tmux_source_authority(&tmux_session_name, |authority| {
+            let (canonical, file_len) = canonical_regular_file(&transcript_path).ok_or(mismatch)?;
+            let mut binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
+            .ok_or(mismatch)?;
+            let session = nonempty(session_id.as_deref())
+                .or(nonempty(self.session_id.as_deref()))
+                .unwrap_or_default()
+                .to_owned();
+            // Fresh native TUI rows and bindings omit session ID. Only this decoded
+            // FD/generation/original-actor witness can fill that missing value;
+            // conflicting known sessions remain a hard mismatch.
+            if [
+                self.session_id.as_deref(),
+                fresh.session_id.as_deref(),
+                binding.session_id.as_deref(),
+            ]
+            .into_iter()
+            .filter_map(nonempty)
+            .any(|known| known != session)
+            {
+                return Err(mismatch);
+            }
+            binding.session_id = nonempty(Some(&session)).map(str::to_owned);
+            if !can_chain_locally
+                || self.provider_kind() != Some(ProviderKind::Claude)
+                || self.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+                || self.turn_start_offset != Some(source_start)
+                || source_start >= complete_record_end
+                || file_len < complete_record_end
+                || generation_mtime_ns <= 0
+                || tmux_generation_file_mtime_ns(&tmux_session_name) != generation_mtime_ns
+                || file_identity(&canonical) != Some((source_file_dev, source_file_ino))
+                || !claude_binding_matches(
+                    &binding,
+                    &canonical,
+                    &session,
+                    (source_start, complete_record_end),
+                    false,
+                )
+            {
+                return Err(mismatch);
+            }
+            if fresh.turn_nonce.as_deref() != Some(turn_nonce.as_str())
+                || fresh.tmux_session_name.as_deref() != Some(tmux_session_name.as_str())
+                || fresh.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+                || fresh.turn_start_offset != Some(source_start)
+                || fresh.last_offset > complete_record_end
+                || fresh.restart_mode.is_some()
+                || fresh.rebind_origin
+                || fresh.terminal_delivery_committed
+                || !StreamRelayAuthority::from_state(&fresh).bridge_owns_relay()
+                || fresh
+                    .output_path
+                    .as_deref()
+                    .and_then(|path| std::fs::canonicalize(path).ok())
+                    .as_deref()
+                    != Some(canonical.as_path())
+            {
+                return Err(mismatch);
+            }
+            let before_admission = InflightEpisodePin::from_state(&fresh);
+            fresh.session_id.clone_from(&binding.session_id);
+            let range = persist_terminal_range(
+                &root,
+                &path,
+                (self, &mut *baseline),
+                fresh,
+                (&result, canonical, &session),
+                (
+                    (source_start, complete_record_end),
+                    generation_mtime_ns,
+                    Some((source_file_dev, source_file_ino)),
+                ),
+            )?;
+            crate::services::discord::tui_prompt_relay::preserve_admitted_source(
+                &before_admission,
+                baseline,
+                &captured,
+            );
+            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding_under_source_authority(authority, binding);
+            Ok((
+                StreamMessage::Done { result, session_id },
+                Some(range),
+                true,
+            ))
+        })
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "runtime_stamp/claude_terminal_tests.rs"]
+mod claude_terminal_tests;

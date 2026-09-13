@@ -724,6 +724,19 @@ async fn run_worker_inner(
                 // turn into an infinite spin or an unsafe overwrite.
                 backstop_cycles = backstop_cycles.saturating_add(1);
                 if backstop_cycles >= PENDING_START_MAX_BACKSTOP_CYCLES {
+                    if record.captured_source.is_some() {
+                        // A failed inline save captured undelivered bytes before this
+                        // foreign owner appeared. Keep that restart obligation; a
+                        // predecessor's completion cannot settle this source range.
+                        update_claim_attempt_count(&mut record, PENDING_START_MAX_CLAIM_ATTEMPTS);
+                        release_prompt_anchor_slot(&record);
+                        tracing::warn!(
+                            channel_id = record.channel_id,
+                            anchor_message_id = record.anchor_message_id,
+                            "captured TUI source still blocked by foreign owner; retaining pending restart obligation"
+                        );
+                        return;
+                    }
                     // ABORT SAFELY (P1-1): a foreign prior inflight stayed live
                     // across the escalation budget. We refuse to overwrite it.
                     // Surface an observability event and drop only the synthetic

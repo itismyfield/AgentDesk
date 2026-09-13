@@ -40,6 +40,7 @@ use crate::services::session_backend::{
 mod active_usage;
 #[cfg(unix)]
 mod backend_routing;
+mod stream_result;
 use self::active_usage::{AssistantUsageState, observe_assistant_usage};
 #[cfg(unix)]
 use self::backend_routing::{
@@ -1207,18 +1208,16 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     StreamMessage::Done { result, session_id }
                     | StreamMessage::CodexTuiTerminalDone {
                         result, session_id, ..
+                    }
+                    | StreamMessage::ClaudeTuiTerminalDone {
+                        result, session_id, ..
                     } => {
-                        let result_preview: String = result.chars().take(100).collect();
-                        debug_log(&format!(
-                            "  >>> Done: result_len={}, session_id={:?}, preview={:?}",
-                            result.len(),
+                        stream_result::capture_terminal_result(
+                            result,
                             session_id,
-                            result_preview
-                        ));
-                        final_result = Some(result.clone());
-                        if session_id.is_some() {
-                            last_session_id = session_id.clone();
-                        }
+                            &mut final_result,
+                            &mut last_session_id,
+                        );
                     }
                     StreamMessage::Error { message, .. } => {
                         debug_log(&format!("  >>> Error: {}", message));
@@ -2398,6 +2397,8 @@ mod claude_tui_ready_probe_tests {
         let harvested = ReadHarvestStats {
             forwarded_messages: 3,
             assistant_text_bytes: 42,
+            decoded_terminal: false,
+            source_file: None,
         };
         assert!(tui_delivered_zero_harvest(
             &ReadOutputResult::Completed { offset: 100 },

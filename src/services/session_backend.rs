@@ -793,6 +793,10 @@ pub use terminal_usage::{
 pub struct ReadHarvestStats {
     pub forwarded_messages: u64,
     pub assistant_text_bytes: u64,
+    /// A terminal result decoded from source, excluding synthesized idle Done.
+    pub decoded_terminal: bool,
+    /// Identity of the file actually opened by the polling reader.
+    pub source_file: Option<crate::services::cluster::stream_relay::SourceFileIdentity>,
 }
 
 pub fn read_output_file_until_result(
@@ -842,6 +846,7 @@ pub fn read_output_file_until_result_with_harvest(
     let synthetic_sender = sender.clone();
     let error_sender = sender.clone();
 
+    let mut source_file = None;
     let result = crate::services::provider::poll_output_file_until_result(
         output_path,
         start_offset,
@@ -872,11 +877,18 @@ pub fn read_output_file_until_result_with_harvest(
                 });
             }
         },
+        |file| {
+            source_file = Some(
+                crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(file),
+            );
+        },
     );
 
     let stats = ReadHarvestStats {
         forwarded_messages: state.forwarded_message_count,
         assistant_text_bytes: state.forwarded_assistant_text_bytes,
+        decoded_terminal: state.final_result.is_some(),
+        source_file,
     };
     result.map(|result| (result, stats))
 }

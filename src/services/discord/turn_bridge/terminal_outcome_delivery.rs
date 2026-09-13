@@ -46,25 +46,42 @@ mod delivery_epilogue;
 #[cfg(test)]
 mod delivery_epilogue_tests;
 mod empty_response_recovery;
+mod foreign_terminal_handoff;
 mod prompt_too_long_guidance;
 mod queue_retry_silence;
 mod recovery_retry;
+pub(super) mod rowless_receipt;
 
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
 
+const TERMINAL_DELIVERY_LOG_TARGET: &str = module_path!();
+
 pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
-    state: TerminalOutcomeDeliveryState,
+    mut state: TerminalOutcomeDeliveryState,
 ) -> TerminalOutcomeDeliveryOutput {
+    let claude_tui_followup_busy_readiness_timeout =
+        bridge_claude_tui_followup_busy_readiness_timeout(
+            &state.provider,
+            state.inflight_state.runtime_kind,
+            ctx.tui_error_classification,
+        );
+    let (receipt_disposition, mut preserve_inflight_for_cleanup_retry, mut terminal_outcome) =
+        foreign_terminal_handoff::prepare_receipt_disposition(
+            &ctx,
+            &mut state,
+            claude_tui_followup_busy_readiness_timeout,
+        )
+        .await;
+    let already_receipted =
+        receipt_disposition == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
+    let may_publish = receipt_disposition == rowless_receipt::TerminalReceiptDisposition::Continue;
     let (channel_id, user_msg_id) = (ctx.channel_id, ctx.user_msg_id);
     let (current_msg_id, status_panel_msg_id) = (ctx.current_msg_id, ctx.status_panel_msg_id);
     let (cancelled, transport_error) = (ctx.cancelled, ctx.transport_error);
     let (recovery_retry, rx_disconnected) = (ctx.recovery_retry, ctx.rx_disconnected);
     let tmux_last_offset = ctx.tmux_last_offset;
-    let codex_tui_terminal_range = ctx.codex_tui_terminal_range;
     let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
-    let watcher_handoff_claim_outcome = ctx.watcher_handoff_claim_outcome;
-    let bridge_created_response_placeholder_msg_id = ctx.bridge_created_response_placeholder_msg_id;
     let bridge_relay_delegated_to_watcher = ctx.bridge_relay_delegated_to_watcher;
     let bridge_output_owner = ctx.bridge_output_owner;
     let should_complete_work_dispatch_after_delivery =
@@ -76,12 +93,6 @@ pub(super) async fn run_terminal_outcome_delivery(
     let claude_tui_followup_pre_submit_requeue_candidate =
         ctx.claude_tui_followup_pre_submit_requeue_candidate;
     let tui_error_classification = ctx.tui_error_classification;
-    let claude_tui_followup_busy_readiness_timeout =
-        bridge_claude_tui_followup_busy_readiness_timeout(
-            &state.provider,
-            state.inflight_state.runtime_kind,
-            tui_error_classification,
-        );
     let had_prior_session_id_at_turn_start = ctx.had_prior_session_id_at_turn_start;
     let session_handshake_seen = ctx.session_handshake_seen;
     let turn_start = ctx.turn_start;
@@ -105,7 +116,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         state.pending_long_running_retarget_after_state_save;
     let mut long_running_placeholder_active = state.long_running_placeholder_active;
     let mut inflight_state = state.inflight_state;
-    let admitted = codex_tui_terminal_range.as_ref();
+    let admitted = ctx.codex_tui_terminal_range.as_ref();
     let mut api_friction_reports = state.api_friction_reports;
     let review_dispatch_warning = state.review_dispatch_warning;
     let last_edit_text = state.last_edit_text;
@@ -114,7 +125,6 @@ pub(super) async fn run_terminal_outcome_delivery(
     let mut resume_failure_detected = state.resume_failure_detected;
     let mut response_sent_offset = state.response_sent_offset;
 
-    let mut preserve_inflight_for_cleanup_retry = false;
     // #3041 P1-2 (codex P1-2 R3): set ONLY on a delivery-lease `Skip`, where
     // the live HOLDER (the watcher) — a different actor sharing the same
     // per-channel `DeliveryLeaseCell` — owns this turn's delivery AND its
@@ -149,9 +159,14 @@ pub(super) async fn run_terminal_outcome_delivery(
     let mut bridge_should_emit_completion = true;
     let inflight_generation = inflight_state.born_generation;
 
-    if !bridge_output_owner
-        .map(|owner| owner.skips_bridge_spinner_cleanup())
-        .unwrap_or(false)
+    if may_publish
+        && !(provider == ProviderKind::Claude
+            && inflight_state.runtime_kind
+                == Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
+            && admitted.is_some())
+        && !bridge_output_owner
+            .map(|owner| owner.skips_bridge_spinner_cleanup())
+            .unwrap_or(false)
         && let Some(user_msg_id) = user_msg_id
     {
         tv_clear(
@@ -164,7 +179,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         .await;
     }
 
-    if recovery_retry {
+    if may_publish && recovery_retry {
         let outcome = handle_recovery_retry(
             RecoveryRetryMessage::SessionDiedDuringRecovery,
             RecoveryRetryContext {
@@ -190,7 +205,13 @@ pub(super) async fn run_terminal_outcome_delivery(
         }
     }
 
-    if cancelled || is_prompt_too_long {
+    let mut epilogue_response = None;
+    if already_receipted {
+        (terminal_delivery_committed, terminal_body_visible) = (true, true);
+        epilogue_response = Some((full_response.clone(), full_response.clone()));
+    } else if !may_publish {
+        bridge_should_emit_completion = false;
+    } else if cancelled || is_prompt_too_long {
         let message = if cancelled {
             CancelPromptReplaceMessage::Cancelled
         } else {
@@ -233,40 +254,15 @@ pub(super) async fn run_terminal_outcome_delivery(
             CancelPromptReplaceOutcome::Continue => {}
         }
     } else if let Some(owner) = bridge_output_owner {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        match owner {
-            BridgeOutputOwner::WatcherRelay => {
-                tracing::info!(
-                    "  [{ts}] 👁 tmux watcher owns assistant relay; bridge skipped direct response delivery (channel {})",
-                    channel_id
-                );
-                if should_delete_bridge_created_watcher_orphan_response(
-                    shared_owned.ui.status_panel_v2_enabled,
-                    watcher_handoff_claim_outcome,
-                    bridge_created_response_placeholder_msg_id,
-                    current_msg_id,
-                ) {
-                    // #3607: terminal-anchor guard + durable delete
-                    // observability live in the sibling so the hot file only
-                    // dispatches. The guard skips deleting a committed
-                    // terminal anchor (the accident this fixes); a genuine
-                    // non-terminal orphan is deleted, recorded, and retried.
-                    cleanup_or_preserve_watcher_orphan_spinner(
-                        shared_owned.clone(),
-                        &provider,
-                        gateway.clone(),
-                        channel_id,
-                        current_msg_id,
-                        &inflight_state,
-                    )
-                    .await;
-                }
-            }
-            BridgeOutputOwner::StandbyRelay => tracing::info!(
-                "  [{ts}] 👁 standby relay owns assistant relay; bridge skipped direct response delivery (channel {})",
-                channel_id
-            ),
-        }
+        foreign_terminal_handoff::handle_known_owner(
+            owner,
+            &ctx,
+            &shared_owned,
+            &gateway,
+            &provider,
+            &inflight_state,
+        )
+        .await;
     } else {
         queue_retry_silence::apply(
             claude_tui_followup_pre_submit_requeue_candidate,
@@ -424,7 +420,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                 let mut pinned_handled = false;
                 #[cfg(unix)]
-                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled);
+                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled terminal_outcome);
                 if !pinned_handled && long {
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                     let bridge_end = tmux_last_offset.unwrap_or(0);
@@ -759,6 +755,9 @@ pub(super) async fn run_terminal_outcome_delivery(
             }
         }
 
+        epilogue_response = Some((delivery_response, spoken_delivery_response));
+    }
+    if let Some((delivery_response, spoken_delivery_response)) = epilogue_response {
         handle_delivery_epilogue(
             DeliveryEpilogueMessage::PostCommit,
             DeliveryEpilogueContext {
@@ -787,6 +786,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 #[cfg(unix)]
                 bridge_tui_gate_outcome_early,
                 terminal_delivery_committed,
+                already_receipted,
                 terminal_body_visible,
                 preserve_inflight_for_cleanup_retry,
                 should_complete_work_dispatch_after_delivery,
@@ -823,21 +823,27 @@ pub(super) async fn run_terminal_outcome_delivery(
     }
     // Consume, rather than re-sample, the stamp snapshot under the
     // `SettlementCapabilities` contract.
-    intake_settlement::settle_intake_row_at_bridge_exit(
-        &shared_owned,
-        &inflight_state,
-        intake_settlement::classify(
-            terminal_delivery_committed,
-            status_panel_terminal_committed,
-            preserve_inflight_for_cleanup_retry,
-            bridge_skip_holder_owns_inflight,
-            bridge_output_owner.is_some(),
-        ),
-        inflight_state.intake_delivery_capabilities(),
-    )
-    .await;
+    // A failure of both delivery sinks is not a no-body success settlement.
+    if !matches!(
+        terminal_outcome,
+        TerminalOutcomeDeliveryOutcome::Unresolved { .. }
+    ) {
+        intake_settlement::settle_intake_row_at_bridge_exit(
+            &shared_owned,
+            &inflight_state,
+            intake_settlement::classify(
+                terminal_delivery_committed,
+                status_panel_terminal_committed,
+                preserve_inflight_for_cleanup_retry,
+                bridge_skip_holder_owns_inflight,
+                bridge_output_owner.is_some(),
+            ),
+            inflight_state.intake_delivery_capabilities(),
+        )
+        .await;
+    }
     TerminalOutcomeDeliveryOutput {
-        outcome: TerminalOutcomeDeliveryOutcome::Completed,
+        outcome: terminal_outcome,
         shared_owned,
         gateway,
         provider,
@@ -869,4 +875,12 @@ pub(super) async fn run_terminal_outcome_delivery(
         response_sent_offset,
         turn_start,
     }
+}
+
+pub(in crate::services::discord) async fn resume_foreign_terminal_custody(
+    registry: &crate::services::discord::health::HealthRegistry,
+    payload: &mut serde_json::Value,
+    checkpoint: &crate::services::discord::terminal_delivery_custody::CustodyCheckpoint,
+) -> Result<bool, String> {
+    foreign_terminal_handoff::resume(registry, payload, checkpoint).await
 }

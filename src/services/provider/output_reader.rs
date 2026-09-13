@@ -1,11 +1,25 @@
 //! Shared output-file polling for provider streams.
 
-use crate::services::session_backend::ReadOutputFailure;
-
+#[cfg(test)]
+use super::read_fault;
 use super::{
     CancelToken, ReadOutputResult, ReadyForInputIdleState, ReadyForInputIdleTracker,
     cancel_requested,
 };
+use crate::services::session_backend::ReadOutputFailure;
+
+pub fn fold_read_output_result<T>(
+    read_result: ReadOutputResult,
+    on_ready: impl FnOnce(u64) -> T,
+    on_session_died: impl FnOnce(u64) -> T,
+) -> T {
+    match read_result {
+        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+            on_ready(offset)
+        }
+        ReadOutputResult::SessionDied { offset } => on_session_died(offset),
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn poll_output_file_until_result<
@@ -17,6 +31,7 @@ pub fn poll_output_file_until_result<
     HasFinal,
     EmitSyntheticDone,
     EmitDeferredError,
+    OpenedFile,
 >(
     output_path: &str,
     start_offset: u64,
@@ -29,6 +44,7 @@ pub fn poll_output_file_until_result<
     has_final: HasFinal,
     mut emit_synthetic_done: EmitSyntheticDone,
     mut emit_deferred_error: EmitDeferredError,
+    opened_file: OpenedFile,
 ) -> Result<ReadOutputResult, ReadOutputFailure>
 where
     IsAlive: FnMut() -> bool,
@@ -38,6 +54,7 @@ where
     HasFinal: Fn(&State) -> bool,
     EmitSyntheticDone: FnMut(&State) -> bool,
     EmitDeferredError: FnMut(&State),
+    OpenedFile: FnOnce(&std::fs::File),
 {
     use std::io::{Read, Seek, SeekFrom};
     use std::time::{Duration, Instant};
@@ -84,6 +101,7 @@ where
             false,
         )
     })?;
+    opened_file(&file);
     file.seek(SeekFrom::Start(start_offset)).map_err(|e| {
         ReadOutputFailure::new(
             format!("Failed to seek output file: {e}"),
@@ -106,7 +124,11 @@ where
             });
         }
 
-        match file.read(&mut buf) {
+        #[cfg(test)]
+        let read_result = read_fault::read(output_path, current_offset, || file.read(&mut buf));
+        #[cfg(not(test))]
+        let read_result = file.read(&mut buf);
+        match read_result {
             Ok(0) => {
                 if crate::services::tmux_common::rotation_target_was_swapped(
                     &file,

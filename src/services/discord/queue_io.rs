@@ -864,6 +864,7 @@ mod presleep_tests {
             observed_at_ms: 0,
             state: super::super::tui_direct_pending_start::PendingStartState::Waiting,
             attempt_count: super::super::tui_direct_pending_start::PENDING_START_MAX_CLAIM_ATTEMPTS,
+            captured_source: None,
         }
     }
 

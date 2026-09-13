@@ -11,6 +11,7 @@ use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
 fn terminal_snapshot(user_msg_id: u64, turn_nonce: &str) -> SyntheticClaimSnapshot {
     SyntheticClaimSnapshot {
+        recovery_actor: None,
         user_msg_id,
         turn_nonce: Some(turn_nonce.to_string()),
         turn_source_external: false,

@@ -26,7 +26,7 @@ pub(in crate::services::discord) async fn release_restored_watcher_active_turn_b
         );
 
     let finish = match crate::services::discord::turn_finalizer::claim_normal_episode(
-        shared, provider, key, false,
+        shared, provider, key, false, None,
     )
     .await
     {

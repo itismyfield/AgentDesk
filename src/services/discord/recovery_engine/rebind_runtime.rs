@@ -916,6 +916,9 @@ fn codex_rebind_stream_message_json(
             "cache_read_input_tokens": cache_read_tokens,
             "output_tokens": output_tokens,
         })),
+        // This writer consumes only Codex rollout frames; Claude terminal authority
+        // must stay on its actor-bound admission path, never become plain success JSON.
+        crate::services::agent_protocol::StreamMessage::ClaudeTuiTerminalDone { .. } => None,
         crate::services::agent_protocol::StreamMessage::ActiveUsageSnapshot { .. }
         | crate::services::agent_protocol::StreamMessage::StatusEvents { .. }
         | crate::services::agent_protocol::StreamMessage::RetryBoundary
@@ -1024,6 +1027,24 @@ mod tests {
             input_tokens: 560_000,
             cache_create_tokens: 0,
             cache_read_tokens: 0,
+        };
+        assert_eq!(codex_rebind_stream_message_json(message), None);
+    }
+
+    #[test]
+    fn claude_terminal_is_not_normalized_into_codex_rebind_success() {
+        let message = crate::services::agent_protocol::StreamMessage::ClaudeTuiTerminalDone {
+            result: "answer".into(),
+            session_id: Some("claude-session".into()),
+            transcript_path: "/tmp/claude-transcript.jsonl".into(),
+            tmux_session_name: "claude-tui".into(),
+            turn_nonce: "claude-turn".into(),
+            source_start: 0,
+            complete_record_end: 42,
+            generation_mtime_ns: 1,
+            source_file_dev: 1,
+            source_file_ino: 2,
+            actor: std::sync::Weak::new(),
         };
         assert_eq!(codex_rebind_stream_message_json(message), None);
     }

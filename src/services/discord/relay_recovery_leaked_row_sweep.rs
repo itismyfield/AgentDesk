@@ -46,6 +46,7 @@ async fn recover_candidate(
         observed_at_ms: 0,
         state: tui_direct_pending_start::PendingStartState::Waiting,
         attempt_count: 0,
+        captured_source: None,
     };
     tui_direct_pending_start::demote_stale_foreign_inflight_if_current(&shared, &record).await
 }

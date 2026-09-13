@@ -49,10 +49,7 @@ pub(super) async fn run_stream_loop(
     let (footer_owner, status_panel_started_at) = (ctx.footer_owner, ctx.status_panel_started_at);
     let (status_interval, context_window_tokens) = (ctx.status_interval, ctx.context_window_tokens);
     let context_compact_percent = ctx.context_compact_percent;
-    let context_compact_lower_bound_tokens =
-        crate::services::discord::adk_session::fetch_context_thresholds(shared_owned.api_port)
-            .await
-            .compact_lower_bound_tokens;
+    let context_compact_lower_bound_tokens = compact_lower_bound(shared_owned.api_port).await;
 
     let rx = &mut *state.rx;
     let mut full_response = std::mem::take(state.full_response);
@@ -125,21 +122,15 @@ pub(super) async fn run_stream_loop(
         crate::services::discord::inflight::InflightTurnIdentity::from_state(&inflight_state);
     let mut persisted_inflight_baseline = inflight_state.clone();
 
-    macro_rules! refresh_expected_after_handoff {
-        ($outcome:expr) => {
+    macro_rules! refresh_or_retain_runtime_handoff {
+        ($outcome:expr, $retry_pending:ident, $retry_retained:ident) => {{
+            let outcome = $outcome;
             refresh_stream_tick_expected_identity_after_handoff(
                 &mut stream_tick_expected_identity,
                 &mut persisted_inflight_baseline,
                 &inflight_state,
-                $outcome,
-            )
-        };
-    }
-
-    macro_rules! refresh_or_retain_runtime_handoff {
-        ($outcome:expr, $retry_pending:ident, $retry_retained:ident) => {{
-            let outcome = $outcome;
-            refresh_expected_after_handoff!(outcome.guarded_save_outcome);
+                outcome.guarded_save_outcome,
+            );
             if let Some(retry_message) = outcome.retry_message {
                 pending_stream_messages.push_front(retry_message.into_stream_message());
                 $retry_pending = true;
@@ -176,7 +167,12 @@ pub(super) async fn run_stream_loop(
                         previous_restart_generation,
                         "turn_bridge::stream_loop::cancel_restart_mode",
                     );
-                refresh_expected_after_handoff!(Some(outcome));
+                refresh_stream_tick_expected_identity_after_handoff(
+                    &mut stream_tick_expected_identity,
+                    &mut persisted_inflight_baseline,
+                    &inflight_state,
+                    Some(outcome),
+                );
             }
             cancelled = true;
             close_all_tracked_background_children(
@@ -305,7 +301,10 @@ pub(super) async fn run_stream_loop(
                         break 'outer;
                     }
                     #[rustfmt::skip]
-                    let (msg, admission, was_codex_terminal) = inflight_state.admit_codex_tui_terminal_frame(&mut persisted_inflight_baseline, &stream_tick_expected_identity, gateway.can_chain_locally(), msg);
+                    let (msg, admission, was_codex_terminal) = match inflight_state.admit_tui_terminal_frame(&mut persisted_inflight_baseline, &stream_tick_expected_identity, gateway.can_chain_locally(), (shared_owned.as_ref(), &cancel_token), &full_response, msg).await {
+                        Ok(admitted) => admitted,
+                        Err(_) => { loop_outcome = StreamLoopOutcome::AuthorityLost; break 'outer; }
+                    };
                     admitted_codex_terminal_range = admission.or(admitted_codex_terminal_range);
                     terminal_control_ready_observed |= was_codex_terminal;
                     match msg {
@@ -775,7 +774,8 @@ pub(super) async fn run_stream_loop(
                                 break;
                             }
                         }
-                        StreamMessage::CodexTuiTerminalDone { .. } => unreachable!(),
+                        StreamMessage::CodexTuiTerminalDone { .. }
+                        | StreamMessage::ClaudeTuiTerminalDone { .. } => unreachable!(),
                     }
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,

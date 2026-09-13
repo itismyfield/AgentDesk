@@ -102,7 +102,7 @@ use self::relay_ownership::external_input_relay_owner_for_watchers;
 #[cfg(unix)]
 use self::relay_ownership::resolved_codex_idle_relay_binding;
 use self::relay_ownership::{
-    TuiDirectExternalInputLeaseGuard, TuiDirectObservedLeaseEarlyReturnGuard,
+    RelayEmissionKind, TuiDirectExternalInputLeaseGuard, TuiDirectObservedLeaseEarlyReturnGuard,
     bridge_adapter_owns_external_turn, claim_should_adopt_relay_owner,
     clear_external_input_bridge_lease_if_current, clear_observed_external_turn_lease_if_current,
     deferred_claim_requires_bridge_tail_relayer, external_input_relay_binding,
@@ -114,6 +114,11 @@ use self::relay_ownership::{
 
 mod synthetic_orphan_reclaim; // #3982 orphan-at-birth reclaim trigger (see module doc)
 pub(in crate::services::discord) mod synthetic_start;
+pub(in crate::services::discord) use synthetic_start::bridge_handoff::preserve_admitted_source;
+#[cfg(unix)]
+pub(in crate::services::discord) use synthetic_start::bridge_handoff::{
+    DormantSyntheticClaim, capture_dormant_partial,
+};
 mod synthetic_start_wiring; // #4002 shared Path-X wiring with #4082 neutral-note gate
 #[cfg(test)]
 pub(in crate::services::discord) use self::synthetic_start::synthetic_start_offset_carry_forward;
@@ -767,12 +772,6 @@ fn owner_channel_for_prompt(
         &prompt.tmux_session_name,
         RelayEmissionKind::ObservedPrompt,
     )
-}
-
-#[derive(Clone, Copy)]
-enum RelayEmissionKind {
-    Poll,
-    ObservedPrompt,
 }
 
 /// Resolve the owner channel for a tmux session.

@@ -151,6 +151,7 @@ mod tmux_watcher_registry;
 mod tmux_watcher_registry_restore_tests;
 #[cfg(test)]
 mod relay_coord_tests;
+pub(crate) mod terminal_delivery_custody;
 mod tui_direct_abort_marker;
 mod tui_direct_pending_start;
 mod tui_prompt_relay;
@@ -182,13 +183,13 @@ pub(in crate::services::discord) use delivery_lease_cell::{
     DELIVERY_LEASE_DEADLINE_MS, DELIVERY_LEASE_HEARTBEAT_MS, DeliveryLeaseCell,
     DeliveryLeaseHeartbeat, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
 };
-pub(crate) use meeting_orchestrator as meeting;
 #[allow(unused_imports)]
 pub(in crate::services) use relay_coord::TmuxRelayCoord;
 pub(in crate::services::discord) use {
     delivery_lease_key::DeliveryLeaseKey,
     relay_health::{RelayFrontierMutationGuard, RelayFrontierToken},
 };
+pub(crate) use {meeting_orchestrator as meeting, recovery_engine::CapturedReadyDeliveryCommit};
 // #3479 item-2: re-export the catch-up subsystem entry points referenced
 // outside the extracted cluster (`maybe_schedule_catch_up_retry_after_queue_drain`
 // here in mod.rs and `catch_up_missed_messages` in runtime_bootstrap recovery).
@@ -1216,19 +1217,6 @@ impl SharedData {
             .entry(channel_id)
             .or_insert_with(|| Arc::new(TmuxRelayCoord::new(channel_id)))
             .clone()
-    }
-
-    /// #3041 P1-1: the LIVE per-channel delivery-lease cell, created on first
-    /// access alongside the relay coord. The watcher acquires/commits through
-    /// this to make terminal delivery + offset advance a single-holder unit
-    /// (§5.2). The returned `Arc` is shared across all watcher instances for the
-    /// channel so a replacement watcher sees the live holder and skips the
-    /// duplicate send (B2).
-    pub(in crate::services::discord) fn delivery_lease(
-        &self,
-        channel_id: ChannelId,
-    ) -> Arc<DeliveryLeaseCell> {
-        self.tmux_relay_coord(channel_id).delivery_lease.clone()
     }
 
     /// #3041 P1-1 (B3): reclaim any delivery lease whose acquire deadline has

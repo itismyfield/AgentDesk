@@ -24,6 +24,14 @@ const REDRIVE_MAX_NO_PROGRESS_ATTEMPTS: u8 = 6;
 const REDRIVE_CAPPED_REARM_SECS: i64 = 3600;
 const _: () = assert!(REDRIVE_BACKOFF_SECS.len() == REDRIVE_MAX_NO_PROGRESS_ATTEMPTS as usize);
 
+pub(in crate::services::discord) fn relay_recovery_retry_delay_secs(attempts: u32) -> i64 {
+    match attempts {
+        0 => 0,
+        n if n >= u32::from(REDRIVE_MAX_NO_PROGRESS_ATTEMPTS) => REDRIVE_CAPPED_REARM_SECS,
+        n => REDRIVE_BACKOFF_SECS[n as usize - 1],
+    }
+}
+
 type RedriveKey = (String, String, u64);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -176,7 +184,7 @@ impl SharedData {
             };
         }
         if state.attempts > 0 {
-            let delay = REDRIVE_BACKOFF_SECS[usize::from(state.attempts - 1)];
+            let delay = relay_recovery_retry_delay_secs(u32::from(state.attempts));
             if now_unix.saturating_sub(state.last_attempt_unix).max(0) < delay {
                 return RedriveAttemptDecision {
                     attempt: None,

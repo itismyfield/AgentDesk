@@ -5,6 +5,27 @@ use crate::services::agent_protocol::StreamMessage;
 
 use super::RelaySuppressionSender;
 
+/// Detached terminal recovery uses the native parser and its existing fallback
+/// text policy. Missing completion/text remains unknown, just as the live
+/// explicit-completion schema-drift guard requires.
+pub(crate) fn recover_captured_rollout_response(bytes: &[u8]) -> Result<String, String> {
+    let mut state = replay_captured_lines(bytes)?;
+    super::promote_task_complete_fallback_text(&mut state);
+    if state.has_pending_tool_call() || !state.turn_complete_seen || !state.saw_assistant_text {
+        return Err("captured Codex range has no completed assistant response".into());
+    }
+    Ok(state.final_text)
+}
+
+pub(super) fn task_complete_fallback_supersedes_final_text(
+    final_text: &str,
+    fallback_text: &str,
+) -> bool {
+    let streamed = final_text.trim();
+    let fallback = fallback_text.trim();
+    !streamed.is_empty() && fallback.len() > streamed.len() && fallback.ends_with(streamed)
+}
+
 #[derive(Debug, Default)]
 pub(super) struct RolloutParseState {
     pub(super) session_id: Option<String>,
@@ -402,4 +423,16 @@ fn compact_json_or_string(value: &Value) -> String {
         .as_str()
         .map(ToString::to_string)
         .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
+}
+
+/// Replay a captured range through the same native Codex event parser, without
+/// a tmux actor or a live stream sender. Malformed bytes remain unresolved.
+pub(super) fn replay_captured_lines(bytes: &[u8]) -> Result<RolloutParseState, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+    let mut state = RolloutParseState::default();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let json = serde_json::from_str::<Value>(line).map_err(|e| e.to_string())?;
+        let _ = rollout_messages(&json, &mut state);
+    }
+    Ok(state)
 }

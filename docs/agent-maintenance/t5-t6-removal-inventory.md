@@ -187,6 +187,44 @@ T6 착수 시 **이 구간부터 다시 대사한다.**
 
 ---
 
+## §12-2 추가 — #5917 A/C 최종 소스 대응 (2026-09-13, 수용 대기)
+
+이 절은 main `fe5d192ebf729c6f822600cdfdec228ef1b504ea` 대비 통합 소스
+`f7df7ef199b1fab084ca1d98f658e76d6ef1f36a`(tree `121fa6538f30892cc00aaa0c93657ad4ce58dbde`)의
+직접 호출 경로만 대사한다. 위 미대사 구간을 닫거나 저장소 전수 census를 대신하지 않는다.
+#5910/#5911 watcher-local 수리와 #5912/#5913/#5914/#5915/#5916 선행 변경은 main에 착지했다.
+**#5917 core는 OPEN·CI 미완료이며 소스 구현/로컬 주입 transport 리뷰·테스트 증거와
+배포·live acceptance·signoff는 별개다. 후자 셋은 이 절에서 승인하지 않는다.**
+현재 [체크포인트](https://github.com/itismyfield/AgentDesk/issues/5464#issuecomment-5650847622)와
+[PR 증거](https://github.com/itismyfield/AgentDesk/pull/5917#issuecomment-5652838307)를 함께 읽는다.
+
+경로는 `src/services/discord/` 기준이며, 각 행의 대체는 해당 분기만 뜻한다.
+
+| 범위·현재 직접 호출 경로 | 대체한 레거시 경로 / 순수 추가 | 영구 보호·T6 처분 |
+|---|---|---|
+| A 원래 actor: `synthetic_start.rs` → `bridge_handoff::{prepare_admission,record_admitted,refresh_existing}` → `claude_idle_bridge.rs`의 `capture` → bridge | idle bridge가 별도 actor를 만들거나 현재 mailbox/anchor를 다시 읽어 합성 턴을 구성하던 경로를, admission에서 포착한 `Arc<CancelToken>`·row·session pin 운반으로 대체한다. | `Arc::ptr_eq` 원래 allocation, `InflightEpisodePin`, PG `HookSessionActorPin`, 외부 입력 lease·직렬 guard를 보존한다. 같은 nonce만으로 successor를 원래 actor로 취급하지 않는다. 영구 identity/lease 보호는 철거 대상이 아니다. |
+| A source·재개: `bridge_handoff::{preserve_admitted_source,preserve_continuation,resume_unpublished}`; `claude_idle_runtime.rs` → `resume_unpublished`, `recovery_engine/idle_captured_response.rs` → `capture_dormant_partial` | 기존 row refresh의 source 시작점·진행을 다시 구성하던 경로를 원래 boundary와 consumed/delivered 진행 보존으로 대체한다. continuation·미발행 재개 witness 자체는 **대체한 레거시 경로 없음(순수 추가)**. | 원래 actor/source·episode·session pin, rollover frozen anchor 증명, guarded row save와 foreign/successor 거부를 보존한다. 재개 가능성을 T6 삭제 근거로 쓰지 않는다. |
+| A empty terminal: `claude_idle_bridge.rs`의 reader completion/source 증거 → bridge terminal 경로 | chrome-only/빈 결과를 no-card empty 경로에서 별도로 offset commit하고 synthetic finish하던 경로를, terminal admission 후 recovery guidance를 배달하는 경로로 대체한다. | decoded terminal·source file/generation과 배달 성공에 따른 offset commit 경계를 보존한다. 단순 EOF/control frame을 배달 완료로 승격하지 않는다. |
+| C receipt: `terminal_outcome_delivery.rs` → `foreign_terminal_handoff::prepare_receipt_disposition` → `rowless_receipt::decision`; `terminal_delivery.rs`의 `BridgeDeliveryLease::pin_exact_source` → `PinnedBridgeDeliveryLease::commit_after_send` | row 존재/소실·frontier만으로 terminal 배달을 추정하던 해당 분기를 exact source/anchor receipt 판정으로 대체한다. source 교체 뒤 confirmed transport receipt를 다시 미배달로 해석하지 않는다. | provider·source file/generation·nonce·range·owner/delivery channel과 real message receipt, shared delivery lease, reset incarnation을 보존한다. foreign anchor edit 금지와 current/historical receipt 구분은 영구 보호다. |
+| C custody·retry: `foreign_terminal_handoff::preserve_or_publish` → `terminal_delivery_custody::persist`; `terminal_delivery_custody::drain` → `turn_bridge::resume_foreign_terminal_custody` → `foreign_terminal_handoff::resume` | **대체한 레거시 경로 없음(순수 추가):** detached terminal payload의 별도 durable custody·재시도 checkpoint를 추가한다. 이것을 기존 row/receipt store 철거 실적으로 세지 않는다. | fsync된 payload·digest·episode identity, custody file lock과 동일 source lease를 유지한 chunk별 real POST receipt 저장, acknowledged prefix부터 재개, 완료 전 custody 유지가 영구 보호다. foreign row clear·cursor advance·anchor adoption 권한은 부여하지 않는다. |
+| C completion: `completion_postlude.rs` → `ChannelEpisodeProbe::requiring_captured_actor(is_external_input_tui_direct)` → channel effect 판정 | external-input TUI-direct 완료를 원래 actor 증명 없이 현재 채널 상태만으로 허용하던 분기를 captured actor 필수 판정으로 좁힌다. | 원래 actor/episode·PG session pin, completion ledger·task settlement와 successor 채널 효과 차단을 보존한다. delivery custody 인계는 채널 완료 권한이나 latest-binary 수용 증거가 아니다. |
+
+**철거·예산 경계:** 이 갱신의 실제 T6 삭제는 0건이며 production 변경도 0줄이다.
+[승인 #5464](https://github.com/itismyfield/AgentDesk/issues/5464#issuecomment-5351858098)의
+구조 신호는 ledger/lease veto를 받는 후보 지목자로 존치한다. 원문 literal “destroy all signals”는
+현 승인 해석이 아니다. [resync](https://github.com/itismyfield/AgentDesk/issues/5464#issuecomment-5649045672)의
+최신 cycle 요구를 유지한다. 기존 Enforce/100 관측은 최신 바이너리 배달 증명이 아니며,
+새 dwell을 요구하지도 않는다. 필요한 rollback·identity·lease·receipt·ledger 보호는 계속 보존한다.
+승인 band는 S9 전 prod net **+1.0k..+2.1k**, S9 후 **+0.4k..+1.7k**다.
+위 exact core 범위 실측은 raw **107파일 +11,348/−1,253**, prod **+5,017/−1,093 = +3,924**,
+tests net **+5,828**, generated net **+337**, tooling net **+6**이다.
+기존 landed **+2,830**/projection **+3,200**에 이 delta를 흡수하려면 귀속 근거가 필요하며,
+현재 attribution/final budget은 미해결이다. raw PR 예외는 campaign budget 면제가 아니다.
+§S1의 예약 **−1,148/−1,357**은 old base `26687f6264` 값이고 현재 절감 credit이 아니다.
+이 절은 pending-source 인벤토리이며 T5 완료·T6 무조건 삭제·rollback 종료 선언이 아니다.
+
+---
+
 ## S1 — cohort infra (배포 no-op) · 브랜치 `feat/5464-t5-s1-cohort`
 
 **S1: 대체한 레거시 경로 없음(순수 추가).**

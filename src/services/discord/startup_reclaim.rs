@@ -831,6 +831,7 @@ mod tests {
             observed_at_ms: 0,
             state: super::super::tui_direct_pending_start::PendingStartState::Waiting,
             attempt_count: 0,
+            captured_source: None,
         };
         let plan = reclaim_scan_plan_from_rows(
             Vec::new(),

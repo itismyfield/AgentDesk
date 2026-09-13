@@ -250,6 +250,7 @@ fn abort_cleanup_records_marker_and_keeps_hourglass() {
         observed_at_ms: 0,
         state: super::super::tui_direct_pending_start::PendingStartState::Waiting,
         attempt_count: 0,
+        captured_source: None,
     };
     let cleanup = pending_start_abort_cleanup_fn();
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2806,6 +2807,8 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
 #[cfg(unix)]
 #[derive(Default)]
 struct S3Gateway {
+    local_delivery: bool,
+    terminal_barrier: Option<Arc<synthetic_terminal_ordering_tests::TerminalBarrier>>,
     bodies: std::sync::Mutex<Vec<String>>,
     deleted: std::sync::Mutex<Vec<MessageId>>,
 }
@@ -2857,6 +2860,10 @@ impl TurnGateway for S3Gateway {
         Result<super::super::formatting::ReplaceLongMessageOutcome, String>,
     > {
         Box::pin(async move {
+            if let Some(barrier) = self.terminal_barrier.as_ref() {
+                barrier.entered.notify_one();
+                barrier.release.notified().await;
+            }
             self.bodies.lock().unwrap().push(content.to_string());
             Ok(super::super::formatting::ReplaceLongMessageOutcome::EditedOriginal)
         })
@@ -2914,7 +2921,7 @@ impl TurnGateway for S3Gateway {
     }
 
     fn can_chain_locally(&self) -> bool {
-        false
+        self.local_delivery
     }
 
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
@@ -3155,7 +3162,16 @@ fn s3t2_delivery_failure_never_cancels_successor_or_commits_cursor() {
             .next()
             .unwrap();
         assert!(!branch.contains("finish_tui_direct_synthetic_turn_if_current"));
-        assert!(source.contains("tui_idle_tail_stream_should_commit_runtime_binding_offset("));
+        assert!(!branch.contains("advance_"));
+        let commit = if source.contains("advance_claude_tmux_runtime_binding_offset(") {
+            "if let Ok(Some(final_offset)) = delivery_result {"
+        } else {
+            "tui_idle_tail_stream_should_commit_runtime_binding_offset("
+        };
+        assert!(
+            source.contains(commit),
+            "cursor commit must remain delivery-gated"
+        );
     }
     s3_completion_fixture(true, Some(false), Some(880003), Some(880005));
 }
@@ -3186,7 +3202,7 @@ fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
     let source = include_str!("claude_idle_bridge.rs");
     assert_eq!(
         source
-            .matches("    finish_idle_bridge_completion(\n        completion,")
+            .matches("    let result = finish_idle_bridge_completion(\n        completion,")
             .count(),
         2
     );
@@ -3478,8 +3494,8 @@ fn idle_stream_strips_leading_chrome_from_first_text_only() {
 #[cfg(unix)]
 #[test]
 fn idle_stream_content_classifier_ignores_pure_control_and_empty_done() {
-    // Empty / control-only frames are NOT content: a turn yielding only
-    // these takes the no-card empty path (preserving today's behavior).
+    // Empty / control-only frames are not prose. An empty Done still enters
+    // terminal admission so recovery guidance requires an exact receipt.
     assert!(!idle_stream_message_is_content(
         &StreamMessage::OutputOffset { offset: 10 }
     ));
@@ -3505,9 +3521,8 @@ fn idle_stream_content_classifier_ignores_pure_control_and_empty_done() {
         stderr: String::new(),
         exit_code: None,
     }));
-    // #3256 parity: a Text/Done body that is ONLY leading TUI chrome must NOT
-    // count as content — otherwise a "No response requested." turn would now
-    // spawn a placeholder card the old path never produced.
+    // Leading TUI chrome alone is not assistant prose; Done remains a separate
+    // terminal boundary regardless of this content classification.
     assert!(!idle_stream_message_is_content(&StreamMessage::Text {
         content: "No response requested.".to_string(),
     }));
@@ -3832,7 +3847,7 @@ fn s5833_s1t1_external_turn_id_is_observation_derived_not_call_site_derived() {
 /// Real claim admission + existing-row CAS, never the create-only builder.
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
-async fn s5833_r2_synthetic_refresh_replaces_stale_durable_key() {
+async fn s5833_r2_synthetic_refresh_preserves_existing_episode_key() {
     use super::super::inflight;
     let root = tempfile::tempdir().expect("isolated inflight root");
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
@@ -3840,22 +3855,69 @@ async fn s5833_r2_synthetic_refresh_replaces_stale_durable_key() {
     let channel = ChannelId::new(5_833_201);
     let anchor = MessageId::new(5_833_301);
     let tmux = "AgentDesk-5833-refresh";
-    let mut stale = build_tui_direct_synthetic_inflight_state(
-        ProviderKind::Claude,
+    let original_lease = s1_lease_5833(Some("stale-turn"));
+    // Real deferred admission creates the original actor witness and Pending
+    // finalizer obligation; a hand-built orphan row cannot prove their survival.
+    let (initial, _) = synthetic_start::claim_tui_direct_synthetic_turn_inner::<true>(
+        &shared,
+        &ProviderKind::Claude,
         channel,
-        anchor,
-        None,
-        "prompt",
         tmux,
+        "prompt",
+        anchor,
+        &original_lease,
         None,
-        0,
-        &s1_lease_5833(Some("stale-turn")),
-        RelayOwnerKind::None,
+    )
+    .await;
+    assert!(initial.claimed);
+    let original_actor = super::super::mailbox_snapshot(&shared, channel)
+        .await
+        .cancel_token
+        .expect("original admitted actor");
+    let stale = inflight::load_inflight_state(&ProviderKind::Claude, channel.get()).unwrap();
+    assert_eq!(stale.turn_nonce.as_deref(), original_actor.turn_nonce());
+    assert!(
+        shared
+            .turn_finalizer
+            .has_live_watcher_pending(channel, shared.restart.current_generation)
+            .await
     );
-    // Marker proves that refresh preserved the old row rather than recreating it.
-    stale.any_tool_used = true;
-    inflight::save_inflight_state(&stale).unwrap();
     let lease = s1_lease_5833(Some("current-turn"));
+    let claim = synthetic_start::claim_tui_direct_synthetic_turn(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        tmux,
+        "prompt",
+        anchor,
+        &lease,
+    )
+    .await;
+    assert!(
+        !claim.claimed,
+        "a different external turn cannot appropriate the old source"
+    );
+    let preserved = inflight::load_inflight_state(&ProviderKind::Claude, channel.get()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&preserved).unwrap(),
+        serde_json::to_value(&stale).unwrap()
+    );
+    let survivor = super::super::mailbox_snapshot(&shared, channel).await;
+    assert!(Arc::ptr_eq(
+        survivor.cancel_token.as_ref().unwrap(),
+        &original_actor
+    ));
+    assert!(!original_actor.cancelled.load(Ordering::Relaxed));
+    assert!(
+        shared
+            .turn_finalizer
+            .has_live_watcher_pending(channel, shared.restart.current_generation)
+            .await
+    );
+
+    // The original allocation can still refresh after the foreign lease was
+    // refused; reissuing a new actor for an orphan row would fail these checks.
+    let lease = original_lease;
     let claim = synthetic_start::claim_tui_direct_synthetic_turn(
         &shared,
         &ProviderKind::Claude,
@@ -3871,7 +3933,21 @@ async fn s5833_r2_synthetic_refresh_replaces_stale_durable_key() {
     assert_eq!(durable.external_turn_id, lease.turn_id);
     assert_eq!(durable.session_key, lease.session_key);
     assert_eq!(durable.runtime_kind, lease.runtime_kind);
-    assert!(durable.any_tool_used);
+    let refreshed = super::super::mailbox_snapshot(&shared, channel).await;
+    assert!(Arc::ptr_eq(
+        refreshed.cancel_token.as_ref().unwrap(),
+        &original_actor
+    ));
+    assert!(!original_actor.cancelled.load(Ordering::Relaxed));
+    assert_eq!(durable.turn_nonce, stale.turn_nonce);
+    assert!(
+        shared
+            .turn_finalizer
+            .has_live_watcher_pending(channel, shared.restart.current_generation)
+            .await
+    );
+    assert_eq!(durable.turn_start_offset, stale.turn_start_offset);
+    assert_eq!(durable.last_offset, stale.last_offset);
 }
 
 /// Exercise the shared repair operation and guarded durable save; pin its exact
@@ -6216,3 +6292,9 @@ fn contending_turn_identities_keep_exactly_one_relay_owner() {
         "the surviving lease must still name exactly one relayer"
     );
 }
+
+#[cfg(all(test, unix))]
+mod synthetic_bridge_handoff_pg_tests;
+
+#[cfg(unix)]
+mod synthetic_terminal_ordering_tests;
