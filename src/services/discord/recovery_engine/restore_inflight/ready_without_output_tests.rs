@@ -1282,6 +1282,8 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
                 b"ready-receipt",
             )
             .unwrap();
+            fixture.state.tui_terminal_generation_mtime_ns =
+                Some(dr::current_generation_mtime_ns(&tmux));
             if provider == ProviderKind::Codex {
                 codex_session::write_codex_tui_rollout_marker_with_start_offset(
                     &tmux,
