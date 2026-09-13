@@ -52,6 +52,13 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         return;
     }
     let (_lock, root) = isolate_root();
+    if captured {
+        // install has no uninstall; this executes only in the isolated child.
+        let mut config = crate::config::Config::default();
+        config.runtime.relay_authority_mode = crate::config::RelayAuthorityMode::Enforce;
+        config.runtime.relay_authority_cohort_percent = 100;
+        crate::config_live_reload::install(config);
+    }
     capture_warns(async {
         let (mut fx, mut row) = seed_recovered_row(root.root.path(), 5834);
         let _pane = captured.then(|| {
@@ -135,7 +142,13 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         row.last_offset = source_start;
         save_inflight_state(&row).unwrap();
         fx.identity = InflightTurnIdentity::from_state(&row);
-        let shared = crate::services::discord::make_shared_data_for_tests();
+        let mut shared = crate::services::discord::make_shared_data_for_tests();
+        if captured {
+            let ui = &mut Arc::get_mut(&mut shared).expect("unshared fixture").ui;
+            ui.status_panel_v2_enabled = true;
+            ui.two_message_panel_enabled = true;
+            ui.placeholder_live_events_enabled = true;
+        }
         let rec = recorder(fx.channel, true).await;
         let cancel = Arc::new(AtomicBool::new(false));
         let ctx = TurnStreamCollectorContext {
