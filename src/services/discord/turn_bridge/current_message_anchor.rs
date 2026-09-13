@@ -355,6 +355,9 @@ mod tests {
         config.runtime.relay_authority_mode = crate::config::RelayAuthorityMode::Enforce;
         config.runtime.relay_authority_cohort_percent = 100;
         crate::config_live_reload::install(config);
+        // The production boot allocates its generation before cleanup runs.
+        let generation = crate::services::discord::runtime_store::allocate_process_generation();
+        assert_ne!(generation, 0);
         let provider = ProviderKind::Codex;
         let channel_id = ChannelId::new(50_710_003);
         for delete_fails in [false, true] {
@@ -391,6 +394,7 @@ mod tests {
             assert_eq!(record["current_message_id"], 100 + u64::from(failed));
             assert_eq!(record["site"], "completion_unbound_anchor_cleanup");
             assert_eq!(record["provider"], "codex");
+            assert_eq!(record["process_generation"], generation);
             assert_eq!(record["channel_id"], channel_id.get());
             assert!(record.get("turn_id").is_none());
         }
@@ -407,7 +411,7 @@ assert r['completion_scope_counts'](events) == {}
 integrity = r['all_file_integrity'](by_file)
 assert integrity['lines'] == 2 and integrity['unparseable'] == 1 and integrity['schema_mismatch'] == 1
 metric = r['delivery_boundary_counts'](events)['unbound_anchor_left']
-assert (metric['true'], metric['false'], metric['unknown'], metric['recovery_unknown']) == (1, 1, 0, 1)
+assert (metric['true'], metric['false'], metric['unknown'], metric['recovery_unknown']) == (1, 1, 0, 1), metric
 "#]).arg(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/relay_authority_rollout_report.py"))
             .arg(&root).output().unwrap();
         assert!(checked.status.success(), "{checked:?}");
