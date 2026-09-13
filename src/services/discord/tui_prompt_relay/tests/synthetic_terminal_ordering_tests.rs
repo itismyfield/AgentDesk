@@ -20,6 +20,8 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) 
             let channel = ChannelId::new(583_310_001);
             let anchor = MessageId::new(583_310_002);
             let tmux = "synthetic-terminal-ordering-5833";
+            let generation_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
+            std::fs::write(&generation_path, b"1").unwrap();
             let output = temp.path().join("transcript.jsonl");
             let body = "synthetic terminal publication keeps its original actor ".repeat(12);
             let assistant = serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text", "text":body}]}});
@@ -55,7 +57,7 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) 
             let (tx, rx) = mpsc::channel();
             let (reader_end_tx, reader_end_rx) = tokio::sync::oneshot::channel();
             let reader = super::synthetic_bridge_handoff_pg_tests::spawn_handoff_reader(
-                &output, 0, tx, reader_end_tx,
+                &output, 0, tmux, tx, reader_end_tx,
             );
             let delivery = claude_idle_bridge::stream_tui_idle_response_with_gateway(
                 &shared, provider.clone(), channel, tmux, &output, 0,
