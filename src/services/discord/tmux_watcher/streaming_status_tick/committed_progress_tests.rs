@@ -11,6 +11,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tracing_subscriber::fmt::MakeWriter;
 
+#[path = "native_collector_tests.rs"]
+mod native_collector_tests;
+
 const WARN_EVENT: &str = "watcher_stream_progress_terminal_rejected";
 const PANEL_CHILD_ENV: &str = "AGENTDESK_5191_PANEL_FIXTURE_CHILD";
 const COMMITTED_BODY: &str = "완료된 응답 A";
@@ -148,6 +151,7 @@ fn wrapper_patch(fx: &Fixture, identity: Option<&InflightTurnIdentity>,
 
 struct Recorder {
     calls: Arc<Mutex<Vec<(String, String)>>>,
+    bodies: Arc<Mutex<Vec<String>>>,
     http: Arc<serenity::Http>,
     server: tokio::task::AbortHandle,
 }
@@ -177,9 +181,12 @@ async fn recorder(channel: ChannelId, delete_ok: bool) -> Recorder {
     use axum::{Json, Router, routing::any};
     let calls = Arc::new(Mutex::new(Vec::new()));
     let recorded = calls.clone();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let captured_bodies = bodies.clone();
     let channel_text = channel.get().to_string();
     let app = Router::new().fallback(any(move |method: Method, uri: Uri, body: Bytes| {
-        let (recorded, channel_text) = (recorded.clone(), channel_text.clone());
+        let (recorded, channel_text, bodies) =
+            (recorded.clone(), channel_text.clone(), captured_bodies.clone());
         async move {
             let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             recorded.lock().unwrap().push((method.to_string(), uri.to_string()));
@@ -187,6 +194,16 @@ async fn recorder(channel: ChannelId, delete_ok: bool) -> Recorder {
                 let status = if delete_ok { StatusCode::NO_CONTENT }
                     else { StatusCode::INTERNAL_SERVER_ERROR };
                 return (status, String::new()).into_response();
+            }
+            if let Some(content) = payload["content"].as_str() {
+                bodies.lock().unwrap().push(content.to_owned());
+                if content.chars().count() > 2000 {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                        "code": 50035, "message": "Invalid Form Body",
+                        "errors": {"content": {"_errors": [{"code": "BASE_TYPE_MAX_LENGTH",
+                            "message": "Must be 2000 or fewer in length."}]}}
+                    }))).into_response();
+                }
             }
             Json(serde_json::json!({
                 "id": SERVER_MSG.to_string(), "channel_id": channel_text,
@@ -206,7 +223,7 @@ async fn recorder(channel: ChannelId, delete_ok: bool) -> Recorder {
             .build(),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Recorder { calls, http, server: server.abort_handle() }
+    Recorder { calls, bodies, http, server: server.abort_handle() }
 }
 
 #[rustfmt::skip]
@@ -512,23 +529,7 @@ fn active_progress_tick_emits_once() {
 fn recovered_session_bound_codex_stream_tick_reaches_http() {
     let (_lock, guard) = isolate_root();
     capture_warns(async {
-        let mut fx = seed_row(guard.root.path(), 5833, false, false);
-        let mut row = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
-        std::fs::remove_file(fx.path()).unwrap();
-        fx.provider = ProviderKind::Codex;
-        row.provider = fx.provider.as_str().to_owned();
-        row.current_msg_id = 0;
-        row.current_msg_len = 3;
-        row.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
-        row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
-        row.set_relay_owner_kind(
-            crate::services::discord::inflight::RelayOwnerKind::SessionBoundRelay,
-        );
-        row.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
-        row.turn_nonce = Some("recovered-original-5833".into());
-        row.injected_prompt_message_id = Some(row.user_msg_id);
-        save_inflight_state(&row).unwrap();
-        fx.identity = InflightTurnIdentity::from_state(&row);
+        let (fx, _) = native_collector_tests::seed_recovered_row(guard.root.path(), 5833);
         let before = fx.row_bytes();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let rec = recorder(fx.channel, true).await;
