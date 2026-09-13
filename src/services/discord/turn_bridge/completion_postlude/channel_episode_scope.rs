@@ -140,6 +140,73 @@ pub(super) struct ChannelEpisodeProbe<'a> {
 }
 
 impl<'a> ChannelEpisodeProbe<'a> {
+    // The actual synthetic actor remains active through terminal transport and
+    // projection. Submit its original allocation only after those boundaries
+    // settle; an actor-only same-nonce replacement must survive both the first
+    // and AlreadyFinalized paths.
+    pub(super) async fn finalize_synthetic_actor(
+        &self,
+        shared_owned: &Arc<SharedData>,
+        inflight_state: &InflightTurnState,
+        cancelled: bool,
+        terminal_projection_committed: bool,
+        has_queued_turns: bool,
+    ) -> bool {
+        if !self.require_captured_actor
+            || !terminal_projection_committed
+            || !self
+                .read("completion_synthetic_finalize")
+                .await
+                .permits_channel_effects()
+        {
+            return has_queued_turns;
+        }
+        let channel_id = self.channel_id;
+        let provider = self.provider;
+        let cancel_token = &self.mine;
+        let outcome = shared_owned
+            .turn_finalizer
+            .submit_terminal_with_claim_snapshot(
+                crate::services::discord::turn_finalizer::TurnKey::new(
+                    channel_id,
+                    inflight_state.effective_finalizer_turn_id(),
+                    shared_owned.restart.current_generation,
+                )
+                .with_episode_nonce(inflight_state.turn_nonce.as_deref()),
+                provider.clone(),
+                if cancelled {
+                    crate::services::discord::turn_finalizer::TerminalEvent::Cancel
+                } else {
+                    crate::services::discord::turn_finalizer::TerminalEvent::Complete
+                },
+                crate::services::discord::turn_finalizer::FinalizeContext::bridge(),
+                Some(super::post_loop_finalize::bridge_terminal_claim_snapshot(
+                    inflight_state,
+                    Some(cancel_token),
+                )),
+                shared_owned.clone(),
+            )
+            .await;
+        if let crate::services::discord::turn_finalizer::FinalizeOutcome::Finalized {
+            has_pending,
+            ..
+        } = outcome
+        {
+            has_pending
+        } else {
+            has_queued_turns
+        }
+    }
+
+    pub(super) async fn owns_synthetic_cleanup(&self, terminal_delivery_committed: bool) -> bool {
+        !self.require_captured_actor
+            || (terminal_delivery_committed
+                && self
+                    .read("completion_synthetic_cleanup")
+                    .await
+                    .permits_channel_effects())
+    }
+
     pub(super) fn new(
         shared: &'a SharedData,
         channel_id: ChannelId,

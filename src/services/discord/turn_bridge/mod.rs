@@ -105,8 +105,8 @@ pub(in crate::services::discord) use status_panel::{
 // and the tmux WATCHER completion guard, so both paths supersede a stale
 // status edit by the SAME epoch semantics (parity).
 pub(super) use stream_receiver::{
-    StreamMessageReceiverAdapter, spawn_stream_message_receiver_adapter,
-    turn_bridge_stream_wait_duration,
+    StreamMessageReceiverAdapter, capture_bridge_clear_fence,
+    spawn_stream_message_receiver_adapter, turn_bridge_stream_wait_duration,
 };
 pub(super) use streaming_edit_text::{
     CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE, bridge_claude_tui_followup_requeue_prompt_error,
@@ -217,23 +217,6 @@ pub(super) enum WatcherHandoffClaimOutcome {
 // (#4230 S6) — must live at module scope so both resolve them.
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-// The non-Clone receiver is the phase witness: capture consumes it before stream processing.
-async fn capture_bridge_clear_fence(
-    shared: &SharedData,
-    channel: ChannelId,
-    rx: mpsc::Receiver<StreamMessage>,
-    fence: &tokio::sync::OnceCell<ChannelClearFence>,
-) -> StreamMessageReceiverAdapter {
-    #[cfg(all(test, unix))]
-    let channel = resume_pin_tests::capture_channel(channel);
-    crate::db::session_transcripts::observe_channel_clear_fence_once(
-        fence,
-        shared.pg_pool.as_ref(),
-        &channel.get().to_string(),
-    )
-    .await;
-    spawn_stream_message_receiver_adapter(rx)
-}
 pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,

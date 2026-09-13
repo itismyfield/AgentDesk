@@ -244,38 +244,19 @@ pub(super) async fn run_terminal_outcome_delivery(
             preserve_inflight_for_cleanup_retry = true;
             terminal_outcome = TerminalOutcomeDeliveryOutcome::DeferredToOwner;
         } else {
-            let banner = DiscordTurnSessionBanner::new_with_turn_key(
+            let delivery_body = foreign_terminal_handoff::detached_delivery_body(
                 &shared_owned,
                 channel_id,
                 &provider,
-                inflight_state.user_msg_id,
-                Some(&inflight_state.started_at),
-                inflight_state.turn_start_offset,
+                &inflight_state,
+                &full_response,
+                response_sent_offset,
+                &cancel_token,
+                cancelled,
+                is_prompt_too_long,
+                gateway.as_ref(),
+                terminal_empty_response_notice.as_deref(),
             );
-            let delivery_body = if cancelled {
-                Some(cancel_prompt_replace::cancelled_terminal_response(
-                    &full_response,
-                    response_sent_offset,
-                    cancel_token.restart_mode(),
-                    &banner,
-                ))
-            } else if is_prompt_too_long {
-                Some(banner.prefix(
-                    response_sent_offset == 0,
-                    prompt_too_long_guidance::render_for_requester(
-                        &full_response,
-                        gateway.requester_mention().as_deref(),
-                    ),
-                ))
-            } else {
-                terminal_empty_response_notice.as_deref().map(|notice| {
-                    terminal_delivery_response_after_offset(
-                        &full_response,
-                        response_sent_offset,
-                        Some(notice),
-                    )
-                })
-            };
             match foreign_terminal_handoff::preserve_or_publish(foreign_terminal_handoff::Handoff {
                 provider: &provider,
                 local: &inflight_state,

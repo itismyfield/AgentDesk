@@ -62,6 +62,53 @@ pub(super) enum Outcome {
     Unresolved { error: String },
 }
 
+pub(super) fn detached_delivery_body(
+    shared_owned: &SharedData,
+    channel_id: ChannelId,
+    provider: &ProviderKind,
+    inflight_state: &InflightTurnState,
+    full_response: &str,
+    response_sent_offset: usize,
+    cancel_token: &CancelToken,
+    cancelled: bool,
+    is_prompt_too_long: bool,
+    gateway: &dyn TurnGateway,
+    terminal_empty_response_notice: Option<&str>,
+) -> Option<String> {
+    let banner = DiscordTurnSessionBanner::new_with_turn_key(
+        shared_owned,
+        channel_id,
+        provider,
+        inflight_state.user_msg_id,
+        Some(&inflight_state.started_at),
+        inflight_state.turn_start_offset,
+    );
+    if cancelled {
+        Some(cancel_prompt_replace::cancelled_terminal_response(
+            full_response,
+            response_sent_offset,
+            cancel_token.restart_mode(),
+            &banner,
+        ))
+    } else if is_prompt_too_long {
+        Some(banner.prefix(
+            response_sent_offset == 0,
+            prompt_too_long_guidance::render_for_requester(
+                full_response,
+                gateway.requester_mention().as_deref(),
+            ),
+        ))
+    } else {
+        terminal_empty_response_notice.map(|notice| {
+            terminal_delivery_response_after_offset(
+                full_response,
+                response_sent_offset,
+                Some(notice),
+            )
+        })
+    }
+}
+
 pub(super) async fn preserve_or_publish(ctx: Handoff<'_>) -> Outcome {
     let snapshot = RetrySnapshot {
         version: 1,

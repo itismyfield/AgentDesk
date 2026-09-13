@@ -7,6 +7,15 @@
 //! stable. Moved verbatim except for module-local path qualification required by
 //! the new child-module boundary.
 
+#[cfg(test)]
+use super::idle_captured_response::{
+    finish_recovered_turn_mailbox_for_captured_state, retire_captured_ready_response,
+    settle_ready_without_output_for_actor,
+};
+use super::idle_captured_response::{
+    finish_recovered_turn_mailbox_with_snapshot, settle_ready_without_output,
+};
+
 use super::terminal_watcher::restart_report_watcher_start;
 use super::{restart_report::clear_loaded_restart_report, *};
 
@@ -57,57 +66,6 @@ pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
     let _ = stop_source;
 }
 
-async fn finish_recovered_turn_mailbox_for_captured_state(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    state: &inflight::InflightTurnState,
-    snapshot: super::turn_finalizer::SyntheticClaimSnapshot,
-) -> Option<super::turn_finalizer::FinalizeOutcome> {
-    // A row recovered without a mailbox actor cannot authorize releasing one
-    // admitted later while its Discord request was in flight.
-    if snapshot.recovery_actor.is_none() {
-        return None;
-    }
-    if let Some(channel_id) = inflight::opt_channel_id(state.channel_id) {
-        Some(
-            finish_recovered_turn_mailbox_with_snapshot(
-                shared,
-                provider,
-                channel_id,
-                state.effective_finalizer_turn_id(),
-                Some(snapshot),
-            )
-            .await,
-        )
-    } else {
-        None
-    }
-}
-
-async fn finish_recovered_turn_mailbox_with_snapshot(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    channel_id: ChannelId,
-    user_msg_id: u64,
-    snapshot: Option<super::turn_finalizer::SyntheticClaimSnapshot>,
-) -> super::turn_finalizer::FinalizeOutcome {
-    shared
-        .turn_finalizer
-        .submit_terminal_with_claim_snapshot(
-            super::turn_finalizer::TurnKey::new(
-                channel_id,
-                user_msg_id,
-                shared.restart.current_generation,
-            ),
-            provider.clone(),
-            super::turn_finalizer::TerminalEvent::Complete,
-            super::turn_finalizer::FinalizeContext::monitor(),
-            snapshot,
-            shared.clone(),
-        )
-        .await
-}
-
 #[cfg(unix)]
 fn tmux_pane_pid(tmux_session_name: &str) -> Option<u32> {
     let mut cmd = Command::new("tmux");
@@ -155,165 +113,6 @@ pub(super) fn detect_live_tmux_output_path(
     };
     let candidates = parse_lsof_output_candidates(&stdout);
     detect_rebind_output_path_from_candidates(fallback_path, candidates)
-}
-
-async fn settle_ready_without_output<F, Fut>(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    state: &inflight::InflightTurnState,
-    relay: F,
-) -> bool
-where
-    F: FnOnce(String) -> Fut,
-    Fut: std::future::Future,
-    Fut::Output: Into<CapturedRecoveryDelivery>,
-{
-    settle_ready_without_output_for_actor(shared, provider, state, None, relay).await
-}
-
-pub(super) async fn settle_ready_without_output_for_actor<F, Fut>(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    state: &inflight::InflightTurnState,
-    actor: Option<&Arc<CancelToken>>,
-    relay: F,
-) -> bool
-where
-    F: FnOnce(String) -> Fut,
-    Fut: std::future::Future,
-    Fut::Output: Into<CapturedRecoveryDelivery>,
-{
-    if state.restart_mode.is_some() || state.rebind_origin {
-        return false;
-    }
-    // A pre-existing actor must be the caller's captured incarnation. IDs and
-    // even equal nonces cannot identify two actors representing one execution.
-    let owner = super::mailbox_snapshot(shared, ChannelId::new(state.channel_id)).await;
-    let admissible_actor = match (actor, owner.cancel_token.as_ref()) {
-        (Some(expected), Some(current)) => {
-            Arc::ptr_eq(expected, current)
-                && !crate::services::provider::cancel_requested(Some(expected))
-        }
-        (None, None) => true,
-        _ => false,
-    };
-    let current = inflight::load_inflight_state(provider, state.channel_id);
-    if !admissible_actor
-        || current.as_ref().is_none_or(|current| {
-            !inflight::InflightEpisodePin::from_state(state).matches_state(current)
-                || current.save_generation != state.save_generation
-        })
-    {
-        return false;
-    }
-    let mut snapshot = super::turn_finalizer::SyntheticClaimSnapshot::from_row(state);
-    snapshot.recovery_actor = actor.map(Arc::downgrade);
-    if recovery_ready_without_output_already_delivered(state) {
-        retire_captured_ready_response(shared, provider, state, snapshot, |snapshot| {
-            finish_recovered_turn_mailbox_for_captured_state(shared, provider, state, snapshot)
-        })
-        .await;
-        return true;
-    }
-    if recovery_ready_without_output_has_captured_response(state) {
-        // response_sent_offset covers frozen Discord prefixes, unlike last_offset
-        // and last_watcher_relayed_offset, which use source JSONL coordinates.
-        let response = &state.full_response[state.response_sent_offset..];
-        let final_text = super::formatting::format_for_discord_with_provider(response, provider);
-        let delivery = relay(final_text).await.into();
-        // A captured partial answer remains a delivery obligation even after a
-        // permanent channel error. Reuse the same nonce/save-generation CAS as
-        // the idle drain; legacy force-clear/budget identity is too broad here.
-        settle_captured_ready_delivery(shared, provider, state, actor, snapshot, delivery).await;
-        return true;
-    }
-    tracing::warn!(
-        channel_id = state.channel_id,
-        "recovery: ready source at EOF has no terminal receipt or recoverable response suffix; preserving for watcher reattach"
-    );
-    false
-}
-
-async fn settle_captured_ready_delivery(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    state: &inflight::InflightTurnState,
-    actor: Option<&Arc<CancelToken>>,
-    snapshot: super::turn_finalizer::SyntheticClaimSnapshot,
-    delivery: CapturedRecoveryDelivery,
-) {
-    let Some(committed) = shared
-        .mailbox(ChannelId::new(state.channel_id))
-        .commit_captured_ready_delivery(CapturedReadyDeliveryCommit {
-            shared: shared.clone(),
-            state: state.clone(),
-            actor: actor.cloned(),
-            delivery,
-        })
-        .await
-    else {
-        return;
-    };
-    let delivered = committed.state;
-    let mut committed_snapshot =
-        super::turn_finalizer::SyntheticClaimSnapshot::from_row(&delivered);
-    committed_snapshot.recovery_actor = snapshot.recovery_actor;
-    retire_captured_ready_response(
-        shared,
-        provider,
-        &delivered,
-        committed_snapshot,
-        |snapshot| {
-            finish_recovered_turn_mailbox_for_captured_state(shared, provider, &delivered, snapshot)
-        },
-    )
-    .await;
-}
-
-async fn retire_captured_ready_response<F, Fut>(
-    shared: &Arc<SharedData>,
-    provider: &ProviderKind,
-    committed: &inflight::InflightTurnState,
-    snapshot: super::turn_finalizer::SyntheticClaimSnapshot,
-    finalize: F,
-) where
-    F: FnOnce(super::turn_finalizer::SyntheticClaimSnapshot) -> Fut,
-    Fut: std::future::Future<Output = Option<super::turn_finalizer::FinalizeOutcome>>,
-{
-    use super::turn_finalizer::FinalizeOutcome;
-    let expected_actor = snapshot
-        .recovery_actor
-        .as_ref()
-        .and_then(std::sync::Weak::upgrade);
-    let outcome = finalize(snapshot).await;
-    match outcome {
-        Some(FinalizeOutcome::Deferred) => return,
-        Some(FinalizeOutcome::Finalized {
-            removed_token: Some(removed),
-            ..
-        }) => {
-            if !expected_actor
-                .as_ref()
-                .is_some_and(|expected| Arc::ptr_eq(expected, &removed))
-            {
-                return;
-            }
-        }
-        _ => {
-            // AlreadyFinalized can run a guarded mailbox cleanup. Its ledger
-            // answer alone does not prove that the original actor was released.
-            if super::mailbox_snapshot(shared, ChannelId::new(committed.channel_id))
-                .await
-                .cancel_token
-                .is_some()
-            {
-                return;
-            }
-        }
-    }
-    // Finalization awaited other actors. Compare the committed anchor, nonce,
-    // generation and identity again under the canonical row lock before removal.
-    inflight::clear_inflight_state_for_snapshot(provider, committed);
 }
 
 fn observe_restore_inflight_snapshot(

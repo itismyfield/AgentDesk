@@ -192,47 +192,15 @@ pub(super) async fn run_completion_postlude(
         );
     }
 
-    // The actual synthetic actor remains active through terminal transport and
-    // projection. Submit its original allocation only after those boundaries
-    // settle; an actor-only same-nonce replacement must survive both the first
-    // and AlreadyFinalized paths.
-    if is_external_input_tui_direct
-        && terminal_delivery_committed
-        && status_panel_completion_committed
-        && ownership
-            .read("completion_synthetic_finalize")
-            .await
-            .permits_channel_effects()
-    {
-        let outcome = shared_owned
-            .turn_finalizer
-            .submit_terminal_with_claim_snapshot(
-                super::super::turn_finalizer::TurnKey::new(
-                    channel_id,
-                    inflight_state.effective_finalizer_turn_id(),
-                    shared_owned.restart.current_generation,
-                )
-                .with_episode_nonce(inflight_state.turn_nonce.as_deref()),
-                provider.clone(),
-                if cancelled {
-                    super::super::turn_finalizer::TerminalEvent::Cancel
-                } else {
-                    super::super::turn_finalizer::TerminalEvent::Complete
-                },
-                super::super::turn_finalizer::FinalizeContext::bridge(),
-                Some(post_loop_finalize::bridge_terminal_claim_snapshot(
-                    &inflight_state,
-                    Some(&cancel_token),
-                )),
-                shared_owned.clone(),
-            )
-            .await;
-        if let super::super::turn_finalizer::FinalizeOutcome::Finalized { has_pending, .. } =
-            outcome
-        {
-            has_queued_turns = has_pending;
-        }
-    }
+    has_queued_turns = ownership
+        .finalize_synthetic_actor(
+            &shared_owned,
+            &inflight_state,
+            cancelled,
+            terminal_delivery_committed && status_panel_completion_committed,
+            has_queued_turns,
+        )
+        .await;
 
     let completion_r1 = ownership.read("completion_r1").await;
     if completion_r1.permits_channel_effects()
@@ -762,12 +730,9 @@ pub(super) async fn run_completion_postlude(
         );
     }
 
-    let synthetic_cleanup_owned = !is_external_input_tui_direct
-        || (terminal_delivery_committed
-            && ownership
-                .read("completion_synthetic_cleanup")
-                .await
-                .permits_channel_effects());
+    let synthetic_cleanup_owned = ownership
+        .owns_synthetic_cleanup(terminal_delivery_committed)
+        .await;
     if !synthetic_cleanup_owned {
         // Durable identity may be unchanged by RecoveryKickoff. Never use the
         // nonce-only row guard after the captured mailbox allocation changed.
