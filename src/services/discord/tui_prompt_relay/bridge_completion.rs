@@ -88,7 +88,9 @@ mod tests {
     fn tui_direct_bridge_completion_rejects_uncommitted_matching_inflight() {
         use crate::services::discord::gateway::HeadlessGateway;
         use crate::services::discord::turn_bridge::BridgeCompletionSignal;
-        use crate::services::tui_prompt_dedupe::{prompt_anchor_for_response, record_prompt_anchor};
+        use crate::services::tui_prompt_dedupe::{
+            prompt_anchor_for_response, record_prompt_anchor,
+        };
 
         let temp = tempfile::tempdir().expect("temp runtime root");
         let _root = crate::config::set_agentdesk_root_for_test(temp.path());
@@ -167,8 +169,8 @@ mod tests {
             .build()
             .expect("completion fixture runtime");
         let tmux = "AgentDesk-codex-test";
-        let root = super::super::super::inflight::inflight_runtime_root()
-            .expect("test inflight root");
+        let root =
+            super::super::super::inflight::inflight_runtime_root().expect("test inflight root");
         let path =
             super::super::super::inflight::inflight_state_path(&root, &provider, channel_id.get());
         let delivered = "fallback already delivered";
@@ -182,7 +184,13 @@ mod tests {
                     false,
                     false,
                 ),
-                ("fallback delivered", delivered, delivered.len(), false, true),
+                (
+                    "fallback delivered",
+                    delivered,
+                    delivered.len(),
+                    false,
+                    true,
+                ),
                 ("committed fallback", delivered, delivered.len(), true, true),
                 ("committed empty", "", 0, true, true),
             ] {
