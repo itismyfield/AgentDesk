@@ -370,6 +370,7 @@ src/
 │   ├── multinode_regression.rs
 │   ├── outbox_actionable_delivery.rs
 │   ├── outbox_delivery_alert.rs
+│   ├── outbox_worker.rs
 │   ├── rate_limit_sync.rs
 │   ├── resource_locks.rs
 │   ├── routine_script_audit.rs
@@ -439,7 +440,8 @@ src/
 │   │   └── iteration_result_tests.rs
 │   ├── claude/
 │   │   ├── active_usage.rs
-│   │   └── backend_routing.rs
+│   │   ├── backend_routing.rs
+│   │   └── stream_result.rs
 │   ├── claude_e/
 │   │   ├── cancellation.rs
 │   │   ├── jsonl_parser.rs
@@ -508,6 +510,8 @@ src/
 │   │   ├── session_routing.rs
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
+│   ├── codex/
+│   │   └── followup_reader.rs
 │   ├── codex_tmux_wrapper/
 │   │   └── input.rs
 │   ├── codex_tui/
@@ -644,6 +648,8 @@ src/
 │   │   │   │   └── turn_kinds.rs
 │   │   │   ├── save_store/
 │   │   │   │   ├── identity_gate/
+│   │   │   │   │   ├── runtime_stamp/
+│   │   │   │   │   │   └── claude_terminal_tests.rs
 │   │   │   │   │   ├── bridge_entry.rs
 │   │   │   │   │   ├── claude_e_stamp.rs
 │   │   │   │   │   ├── completion_preserve.rs
@@ -768,9 +774,12 @@ src/
 │   │   │   │   └── watcher_claim.rs
 │   │   │   ├── rebind_runtime/
 │   │   │   │   └── codex_relay_generation.rs
+│   │   │   ├── restore_inflight/
+│   │   │   │   └── ready_without_output_tests.rs
 │   │   │   ├── analytics_transcript.rs
 │   │   │   ├── completion_delivery.rs
 │   │   │   ├── crash_resume_guard.rs
+│   │   │   ├── idle_captured_response.rs
 │   │   │   ├── jsonl_extract.rs
 │   │   │   ├── manual_rebind_output_path.rs
 │   │   │   ├── manual_rebind_override.rs
@@ -797,6 +806,8 @@ src/
 │   │   ├── relay_health/
 │   │   │   └── frontier.rs
 │   │   ├── relay_recovery/
+│   │   │   ├── authority_observation/
+│   │   │   │   └── delivery_boundary.rs
 │   │   │   ├── tests/
 │   │   │   │   └── circuit_breaker_apply.rs
 │   │   │   ├── apply.rs
@@ -964,6 +975,9 @@ src/
 │   │   ├── task_supervisor/
 │   │   │   ├── watcher_completion.rs
 │   │   │   └── watcher_completion_tests.rs
+│   │   ├── terminal_delivery_custody/
+│   │   │   ├── pg_tests.rs
+│   │   │   └── tests.rs
 │   │   ├── tmux/
 │   │   │   ├── monitor_auto_turn_inflight.rs
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
@@ -1061,8 +1075,12 @@ src/
 │   │   │   ├── rehydration/
 │   │   │   │   └── idempotency_tests.rs
 │   │   │   ├── synthetic_start/
+│   │   │   │   ├── bridge_handoff.rs
 │   │   │   │   ├── claim.rs
 │   │   │   │   └── stale_reclaim.rs
+│   │   │   ├── tests/
+│   │   │   │   ├── synthetic_bridge_handoff_pg_tests.rs
+│   │   │   │   └── synthetic_terminal_ordering_tests.rs
 │   │   │   ├── anchor_completion.rs
 │   │   │   ├── bridge_completion.rs
 │   │   │   ├── bridge_gateway.rs
@@ -1132,6 +1150,11 @@ src/
 │   │   │   ├── terminal_controller_cutover/
 │   │   │   │   └── unix_journal.rs
 │   │   │   ├── terminal_outcome_delivery/
+│   │   │   │   ├── delivery_epilogue_tests/
+│   │   │   │   │   ├── rowless_receipt_tests/
+│   │   │   │   │   │   ├── pg_tests.rs
+│   │   │   │   │   │   └── preloop_cleanup_tests.rs
+│   │   │   │   │   └── rowless_receipt_tests.rs
 │   │   │   │   ├── empty_response_recovery/
 │   │   │   │   │   ├── guidance.rs
 │   │   │   │   │   └── handler.rs
@@ -1141,9 +1164,11 @@ src/
 │   │   │   │   ├── delivery_epilogue.rs
 │   │   │   │   ├── delivery_epilogue_tests.rs
 │   │   │   │   ├── empty_response_recovery.rs
+│   │   │   │   ├── foreign_terminal_handoff.rs
 │   │   │   │   ├── prompt_too_long_guidance.rs
 │   │   │   │   ├── queue_retry_silence.rs
-│   │   │   │   └── recovery_retry.rs
+│   │   │   │   ├── recovery_retry.rs
+│   │   │   │   └── rowless_receipt.rs
 │   │   │   ├── tmux_runtime/
 │   │   │   │   ├── claude_stop_delivery.rs
 │   │   │   │   ├── interrupt_policy.rs
@@ -1366,6 +1391,7 @@ src/
 │   │   ├── synthetic_headless_message_id.rs
 │   │   ├── task_supervisor.rs
 │   │   ├── terminal_coordinate.rs
+│   │   ├── terminal_delivery_custody.rs
 │   │   ├── terminal_ui_obligation.rs
 │   │   ├── tmux.rs
 │   │   ├── tmux_error_detect.rs
@@ -1483,7 +1509,9 @@ src/
 │   │   ├── cancel_token_cleanup.rs
 │   │   ├── cancel_watchdog.rs
 │   │   ├── channel_rules.rs
+│   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
+│   │   ├── read_fault.rs
 │   │   └── registry.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs
@@ -1500,6 +1528,7 @@ src/
 │   │   ├── snapshot.rs
 │   │   └── upgrade.rs
 │   ├── qwen/
+│   │   ├── followup_reader.rs
 │   │   ├── fresh_session.rs
 │   │   └── session_lifecycle.rs
 │   ├── review_decision/
