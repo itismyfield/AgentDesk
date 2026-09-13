@@ -6,6 +6,7 @@ use super::{
     CancelToken, ReadOutputResult, ReadyForInputIdleState, ReadyForInputIdleTracker,
     cancel_requested,
 };
+use crate::services::session_backend::ReadOutputFailure;
 
 #[allow(clippy::too_many_arguments)]
 pub fn poll_output_file_until_result<
@@ -31,7 +32,7 @@ pub fn poll_output_file_until_result<
     mut emit_synthetic_done: EmitSyntheticDone,
     mut emit_deferred_error: EmitDeferredError,
     opened_file: OpenedFile,
-) -> Result<ReadOutputResult, String>
+) -> Result<ReadOutputResult, ReadOutputFailure>
 where
     IsAlive: FnMut() -> bool,
     IsReady: FnMut() -> bool,
@@ -58,7 +59,11 @@ where
             });
         }
         if wait_start.elapsed() > Duration::from_secs(30) {
-            return Err("Timeout waiting for output file".to_string());
+            return Err(ReadOutputFailure::new(
+                "Timeout waiting for output file",
+                start_offset,
+                false,
+            ));
         }
         if cancel_requested(cancel_token.as_deref()) {
             return Ok(ReadOutputResult::Cancelled {
@@ -76,11 +81,21 @@ where
         emit_output_offset(start_offset);
     }
 
-    let mut file = std::fs::File::open(output_path)
-        .map_err(|e| format!("Failed to open output file: {}", e))?;
+    let mut file = std::fs::File::open(output_path).map_err(|e| {
+        ReadOutputFailure::new(
+            format!("Failed to open output file: {e}"),
+            start_offset,
+            false,
+        )
+    })?;
     opened_file(&file);
-    file.seek(SeekFrom::Start(start_offset))
-        .map_err(|e| format!("Failed to seek output file: {}", e))?;
+    file.seek(SeekFrom::Start(start_offset)).map_err(|e| {
+        ReadOutputFailure::new(
+            format!("Failed to seek output file: {e}"),
+            start_offset,
+            false,
+        )
+    })?;
 
     let mut current_offset = start_offset;
     let mut committed_offset = start_offset;
@@ -106,9 +121,18 @@ where
                     &file,
                     std::path::Path::new(output_path),
                 )
-                .map_err(|error| format!("Failed to verify output file identity: {error}"))?
-                {
-                    return Err("Output file rotated before a terminal result".into());
+                .map_err(|error| {
+                    ReadOutputFailure::new(
+                        format!("Failed to verify output file identity: {error}"),
+                        committed_offset,
+                        true,
+                    )
+                })? {
+                    return Err(ReadOutputFailure::new(
+                        "Output file rotated before a terminal result",
+                        committed_offset,
+                        true,
+                    ));
                 }
                 no_data_count += 1;
                 if no_data_count % 25 == 0 {
