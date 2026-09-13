@@ -72,7 +72,10 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_matches_ide
     if on_disk.restart_mode.is_some() || on_disk.rebind_origin {
         return GuardedSaveOutcome::IdentityMismatch;
     }
-    if expected.user_msg_id == 0 || !expected.matches_state(&on_disk) {
+    if expected.user_msg_id == 0
+        || !expected.matches_state(&on_disk)
+        || on_disk.turn_nonce != state.turn_nonce
+    {
         return GuardedSaveOutcome::IdentityMismatch;
     }
     if let Some(expected_offset) = expected_turn_start_offset {

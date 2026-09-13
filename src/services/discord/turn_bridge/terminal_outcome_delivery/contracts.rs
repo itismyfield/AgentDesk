@@ -74,6 +74,8 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryStat
 
 pub(in crate::services::discord::turn_bridge) enum TerminalOutcomeDeliveryOutcome {
     Completed,
+    DeferredToOutbox { outbox_id: i64 },
+    Unresolved { error: String },
 }
 
 pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryOutput {

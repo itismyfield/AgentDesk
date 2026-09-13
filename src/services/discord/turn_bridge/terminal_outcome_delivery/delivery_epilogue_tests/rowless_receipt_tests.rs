@@ -1,6 +1,9 @@
 //! Drive the production terminal boundary with a real source file and receipt.
 
 use super::*;
+
+#[cfg(test)]
+mod pg_tests;
 use crate::services::{
     agent_protocol::RuntimeHandoffKind,
     discord::{
@@ -271,18 +274,47 @@ async fn exact_receipt_rowless_terminal_preserves_foreign_anchor_and_successor_5
 }
 
 #[tokio::test]
-async fn exact_receipt_rowless_terminal_unknown_foreign_anchor_preserves_retry_5521() {
-    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
-    let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
-    let mut successor = state.inflight_state.clone();
-    successor.user_msg_id += 1;
-    successor.turn_nonce = Some("successor".into());
-    inflight::save_inflight_state(&successor).unwrap();
-    ctx.codex_tui_terminal_range = None;
-    let output = run(ctx, state).await;
-    assert!(!output.terminal_delivery_committed);
-    assert!(output.preserve_inflight_for_cleanup_retry && output.bridge_skip_holder_owns_inflight);
-    assert!(driver.observations().is_empty());
+async fn exact_receipt_rowless_terminal_foreign_anchor_fallback_and_dual_failure_5521() {
+    for (post_fails, live_gateway) in [(false, true), (true, true), (false, false)] {
+        let replace = if post_fails {
+            ReplaceBehaviour::FailedPost
+        } else {
+            ReplaceBehaviour::Edited
+        };
+        let driver = TerminalDeliveryDriver::new(replace, 1);
+        let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
+        let mut successor = state.inflight_state.clone();
+        successor.turn_nonce = Some("successor".into());
+        successor.turn_start_offset = Some(64);
+        inflight::save_inflight_state(&successor).unwrap();
+        ctx.codex_tui_terminal_range = None;
+        ctx.can_chain_locally = live_gateway;
+        let output = run(ctx, state).await;
+        assert!(
+            !output.bridge_skip_holder_owns_inflight && !output.preserve_inflight_for_cleanup_retry
+        );
+        if post_fails || !live_gateway {
+            assert!(!output.terminal_delivery_committed);
+            assert!(
+                matches!(&output.outcome, TerminalOutcomeDeliveryOutcome::Unresolved { error } if error.contains("outbox") && (error.contains("POST failed") || error.contains("no live Discord")))
+            );
+        } else {
+            assert!(output.terminal_delivery_committed);
+            assert_eq!(driver.completed_publications(), 1);
+        }
+        run_postlude(&driver, output, false, false).await;
+        assert!(
+            driver
+                .observations()
+                .iter()
+                .all(|o| o.call == DriverCall::Send),
+            "foreign anchor is never an edit/delete target"
+        );
+        let fresh =
+            inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID)
+                .unwrap();
+        assert_eq!(fresh.turn_nonce, successor.turn_nonce);
+    }
 }
 
 #[tokio::test]
@@ -451,7 +483,12 @@ async fn exact_receipt_rowless_terminal_runs_postlude_without_footer_or_status_m
 
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_postlude_preserves_same_user_and_zero_id_successor_5521() {
-    for user_id in [DRIVER_USER_MSG_ID, 0] {
+    for (user_id, successor_offset) in [
+        (DRIVER_USER_MSG_ID, 0),
+        (DRIVER_USER_MSG_ID, 64),
+        (0, 0),
+        (0, 64),
+    ] {
         let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
         let (mut ctx, mut state, source) = receipt_parts(&driver, ProviderKind::Codex);
         state.inflight_state.user_msg_id = user_id;
@@ -460,7 +497,7 @@ async fn exact_receipt_rowless_terminal_postlude_preserves_same_user_and_zero_id
             InflightTurnIdentity::from_state(&state.inflight_state);
         let mut successor = state.inflight_state.clone();
         successor.turn_nonce = Some("same-user-successor".into());
-        successor.turn_start_offset = Some(64);
+        successor.turn_start_offset = Some(successor_offset);
         inflight::save_inflight_state(&successor).unwrap();
         dr::record_current_pinned_delivery(&source, DRIVER_CURRENT_MSG_ID).unwrap();
         let output = run(ctx, state).await;
@@ -474,61 +511,4 @@ async fn exact_receipt_rowless_terminal_postlude_preserves_same_user_and_zero_id
         assert!(!fresh.terminal_delivery_committed);
         assert!(driver.observations().is_empty());
     }
-}
-
-#[tokio::test]
-async fn exact_receipt_rowless_terminal_cancellation_settles_work_before_postlude_5521() {
-    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
-    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
-        "receipt_cancel",
-        "rowless receipt cancellation",
-    )
-    .await;
-    let pool = db.connect_and_migrate().await;
-    Arc::get_mut(&mut driver.shared).unwrap().pg_pool = Some(pool.clone());
-    let dispatch_id = "receipt-cancel-5521";
-    crate::dispatch::test_support::seed_pg_dispatch(&pool, dispatch_id, "receipt cancellation")
-        .await;
-    sqlx::query("INSERT INTO sessions (session_key, provider, status) VALUES ('receipt-parent', 'codex', 'turn_active')").execute(&pool).await.unwrap();
-    let child = crate::db::session_observability::insert_background_child_pg(
-        &pool,
-        &crate::db::session_observability::BackgroundChildSpawn {
-            parent_session_key: "receipt-parent".into(),
-            provider: Some("codex".into()),
-            tool_name: "Task".into(),
-            tool_input: "{}".into(),
-        },
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let (mut ctx, mut state, source) = receipt_parts(&driver, ProviderKind::Codex);
-    ctx.cancelled = true;
-    ctx.entry_was_rowless = true;
-    state.dispatch_id = Some(dispatch_id.into());
-    state.active_background_child_session_ids.push(child);
-    inflight::save_inflight_state(&state.inflight_state).unwrap();
-    dr::record_current_pinned_delivery(&source, DRIVER_CURRENT_MSG_ID).unwrap();
-    let output = run(ctx, state).await;
-    assert!(output.active_background_child_session_ids.is_empty());
-    assert!(!output.preserve_inflight_for_cleanup_retry);
-    run_postlude(&driver, output, false, true).await;
-    let status: String = sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id=$1")
-        .bind(dispatch_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(status, "cancelled");
-    let child_status: String = sqlx::query_scalar("SELECT status FROM sessions WHERE id=$1")
-        .bind(child)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(child_status, "aborted");
-    assert!(
-        inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID).is_none()
-    );
-    assert!(driver.observations().is_empty());
-    pool.close().await;
-    db.drop().await;
 }

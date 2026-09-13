@@ -162,7 +162,10 @@ fn save_inflight_state_identity_gated_in_root<T: GuardedStampTarget>(
         );
         return GuardedSaveOutcome::IdentityMismatch;
     }
-    if on_disk.restart_mode.is_some() || on_disk.rebind_origin || !expected.matches_state(&on_disk)
+    if on_disk.restart_mode.is_some()
+        || on_disk.rebind_origin
+        || !expected.matches_state(&on_disk)
+        || (state.terminal_delivery_committed && on_disk.turn_nonce != state.turn_nonce)
     {
         tracing::info!(
             provider = %provider.as_str(),

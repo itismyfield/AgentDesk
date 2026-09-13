@@ -846,6 +846,14 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             .await;
         match terminal_outcome_delivery_output.outcome {
             terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::Completed => {}
+            terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::DeferredToOutbox { outbox_id } => {
+                tracing::info!(event = "rowless_terminal_outbox_handoff", channel_id = channel_id.get(), outbox_id,
+                    "detached terminal answer retained by durable outbox");
+            }
+            terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::Unresolved { ref error } => {
+                tracing::error!(event = "rowless_terminal_delivery_unresolved", channel_id = channel_id.get(), %error,
+                    "terminal answer has neither confirmed delivery nor durable retry obligation");
+            }
         }
         let shared_owned = terminal_outcome_delivery_output.shared_owned;
         let gateway = terminal_outcome_delivery_output.gateway;

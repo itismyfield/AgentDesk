@@ -46,6 +46,7 @@ mod delivery_epilogue;
 #[cfg(test)]
 mod delivery_epilogue_tests;
 mod empty_response_recovery;
+mod foreign_terminal_handoff;
 mod prompt_too_long_guidance;
 mod queue_retry_silence;
 mod recovery_retry;
@@ -195,6 +196,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         }
     }
 
+    let mut terminal_outcome = TerminalOutcomeDeliveryOutcome::Completed;
     let mut epilogue_response = None;
     if already_receipted {
         (terminal_delivery_committed, terminal_body_visible) = (true, true);
@@ -208,11 +210,24 @@ pub(super) async fn run_terminal_outcome_delivery(
         }
         epilogue_response = Some((full_response.clone(), full_response.clone()));
     } else if !may_publish {
-        preserve_inflight_for_cleanup_retry = true;
-        // The row belongs to the successor. Retain source recovery without
-        // overwriting that row with this actor's detached snapshot.
-        bridge_skip_holder_owns_inflight = true;
         bridge_should_emit_completion = false;
+        // A foreign row is not this episode's live holder. The existing outbox
+        // retains a separate, stable obligation; otherwise only a fresh POST
+        // may publish, with an explicit unresolved result if both sinks fail.
+        match foreign_terminal_handoff::preserve_or_publish(foreign_terminal_handoff::Handoff {
+            shared: &shared_owned, gateway: gateway.as_ref(), provider: &provider,
+            local: &inflight_state, admitted, content: &full_response,
+            response_sent_offset, channel_id, old_anchor: current_msg_id, can_chain_locally,
+        }).await {
+            foreign_terminal_handoff::Outcome::Deferred { outbox_id } => {
+                preserve_inflight_for_cleanup_retry = true;
+                terminal_outcome = TerminalOutcomeDeliveryOutcome::DeferredToOutbox { outbox_id };
+            }
+            foreign_terminal_handoff::Outcome::Published => terminal_delivery_committed = true,
+            foreign_terminal_handoff::Outcome::Unresolved { error } => {
+                terminal_outcome = TerminalOutcomeDeliveryOutcome::Unresolved { error };
+            }
+        }
     } else if cancelled || is_prompt_too_long {
         let message = if cancelled {
             CancelPromptReplaceMessage::Cancelled
@@ -850,21 +865,24 @@ pub(super) async fn run_terminal_outcome_delivery(
     }
     // Consume, rather than re-sample, the stamp snapshot under the
     // `SettlementCapabilities` contract.
-    intake_settlement::settle_intake_row_at_bridge_exit(
-        &shared_owned,
-        &inflight_state,
-        intake_settlement::classify(
-            terminal_delivery_committed,
-            status_panel_terminal_committed,
-            preserve_inflight_for_cleanup_retry,
-            bridge_skip_holder_owns_inflight,
-            bridge_output_owner.is_some(),
-        ),
-        inflight_state.intake_delivery_capabilities(),
-    )
-    .await;
+    // A failure of both delivery sinks is not a no-body success settlement.
+    if !matches!(terminal_outcome, TerminalOutcomeDeliveryOutcome::Unresolved { .. }) {
+        intake_settlement::settle_intake_row_at_bridge_exit(
+            &shared_owned,
+            &inflight_state,
+            intake_settlement::classify(
+                terminal_delivery_committed,
+                status_panel_terminal_committed,
+                preserve_inflight_for_cleanup_retry,
+                bridge_skip_holder_owns_inflight,
+                bridge_output_owner.is_some(),
+            ),
+            inflight_state.intake_delivery_capabilities(),
+        )
+        .await;
+    }
     TerminalOutcomeDeliveryOutput {
-        outcome: TerminalOutcomeDeliveryOutcome::Completed,
+        outcome: terminal_outcome,
         shared_owned,
         gateway,
         provider,

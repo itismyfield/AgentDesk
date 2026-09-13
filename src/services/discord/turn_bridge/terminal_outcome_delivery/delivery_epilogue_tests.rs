@@ -296,6 +296,7 @@ enum ReplaceBehaviour {
     #[allow(dead_code)]
     FallbackAfterEditFailure,
     Failed,
+    FailedPost,
     /// Unwinds from inside the production publish call, which is how the P0
     /// rollback witness (W-P0) will reach the guard's `Drop`.
     PanicMidPublish,
@@ -353,8 +354,10 @@ impl TurnGateway for DriverGateway {
         self.observe(DriverCall::Send);
         let yields = self.yields_per_call;
         let completed = Arc::clone(&self.completed_publications);
+        let failed = self.replace == ReplaceBehaviour::FailedPost;
         Box::pin(async move {
             Yields(yields).await;
+            if failed { return Err("driver POST failed".into()); }
             completed.fetch_add(1, Ordering::Release);
             Ok(MessageId::new(DRIVER_FALLBACK_ANCHOR_MSG_ID))
         })
@@ -410,7 +413,7 @@ impl TurnGateway for DriverGateway {
                         replacement_anchor: Some(MessageId::new(DRIVER_FALLBACK_ANCHOR_MSG_ID)),
                     })
                 }
-                ReplaceBehaviour::Failed => Err("driver terminal replace failed".to_string()),
+                ReplaceBehaviour::Failed | ReplaceBehaviour::FailedPost => Err("driver terminal replace failed".to_string()),
                 ReplaceBehaviour::PanicMidPublish => panic!("{DRIVER_PUBLISH_PANIC}"),
             }
         })
