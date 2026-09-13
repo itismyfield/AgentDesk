@@ -43,7 +43,9 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
     .0
 }
 
-pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_synthetic_turn_inner<const DEFERRED: bool>(
+pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_synthetic_turn_inner<
+    const DEFERRED: bool,
+>(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: ChannelId,

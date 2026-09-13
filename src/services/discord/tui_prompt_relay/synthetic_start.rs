@@ -66,7 +66,21 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         register_deferred_start,
     } = identity;
 
-    let cancel_token = Arc::new(CancelToken::new());
+    let (cancel_token, pg_pin) = match bridge_handoff::prepare_admission(
+        shared,
+        provider,
+        channel_id,
+        anchor_message_id,
+        lease,
+    )
+    .await
+    {
+        Ok(admission) => admission,
+        Err(error) => {
+            tracing::warn!(%error, "synthetic ownership capture failed before admission");
+            return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
+        }
+    };
     super::super::turn_bridge::bind_cancel_token_tmux_runtime(
         provider,
         &cancel_token,
@@ -239,53 +253,26 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         && existing.tmux_session_name.as_deref() == Some(tmux_session_name)
         && existing.turn_source == TurnSource::ExternalInput
         && existing.user_msg_id == anchor_message_id.get()
+        && existing.output_path.as_deref().map(Path::new) == output_path.as_deref()
+        && existing.external_turn_id == lease.turn_id
+        && existing.session_key == lease.session_key
         && bridge_handoff::refresh_actor_matches(
             &existing,
             active_snapshot.cancel_token.as_ref(),
             mailbox_activation_occurred,
         )
     {
-        let expected = super::super::inflight::InflightTurnIdentity::from_state(&existing);
-        let mut existing = existing;
-        existing.turn_nonce = active_turn_nonce.clone();
-        existing.set_relay_owner_kind(relay_owner_kind);
-        existing.restamp_external_turn_lease(lease);
-        existing.output_path = output_path
-            .as_deref()
-            .and_then(|path| path.to_str().map(str::to_string));
-        existing.last_offset = start_offset;
-        existing.turn_start_offset = Some(start_offset);
-        // #3099 codex re-review (P2): keep this turn's own injected `⏳` message id
-        // pinned so completion cleanup never reads a later injection's overwrite of
-        // the shared prompt-anchor slot.
-        existing.injected_prompt_message_id = Some(anchor_message_id.get());
-        let outcome =
-            super::super::inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
-                &existing,
-                &expected,
-                "tui_direct_synthetic_refresh",
-            );
-        if !matches!(outcome, super::super::inflight::GuardedSaveOutcome::Saved) {
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel_id = channel_id.get(),
-                tmux_session_name = %tmux_session_name,
-                ?outcome,
-                "skipped TUI-direct synthetic inflight ownership refresh"
-            );
-            if mailbox_activation_occurred {
-                finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
-            }
-            return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
-        }
-        if mailbox_activation_occurred {
-            super::super::increment_global_active(shared, "tui_direct_synthetic_refresh");
-            shared
-                .turn_start_times
-                .insert(channel_id, std::time::Instant::now());
-        }
-        bridge_handoff::record(&existing, active_snapshot.cancel_token.as_ref());
-        return TuiDirectSyntheticTurnClaim::new(relay_owner, true, start_offset);
+        return bridge_handoff::refresh_existing(
+            shared,
+            existing,
+            lease,
+            relay_owner,
+            relay_owner_kind,
+            active_snapshot.cancel_token.as_ref(),
+            mailbox_activation_occurred,
+            pg_pin,
+        )
+        .await;
     }
 
     let mut inflight_state = build_tui_direct_synthetic_inflight_state(
@@ -316,7 +303,13 @@ async fn claim_tui_direct_synthetic_turn_prepared(
                 "skipped TUI-direct synthetic inflight because a durable row already exists"
             );
             if mailbox_activation_occurred {
-                finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
+                bridge_handoff::release_unrecorded_actor(
+                    shared,
+                    &inflight_state,
+                    active_snapshot.cancel_token.as_ref(),
+                    false,
+                )
+                .await;
             }
             return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
         }
@@ -329,7 +322,13 @@ async fn claim_tui_direct_synthetic_turn_prepared(
                 "failed to save TUI-direct synthetic inflight"
             );
             if mailbox_activation_occurred {
-                finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
+                bridge_handoff::release_unrecorded_actor(
+                    shared,
+                    &inflight_state,
+                    active_snapshot.cancel_token.as_ref(),
+                    false,
+                )
+                .await;
             }
             return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
         }
@@ -341,7 +340,22 @@ async fn claim_tui_direct_synthetic_turn_prepared(
             .turn_start_times
             .insert(channel_id, std::time::Instant::now());
     }
-    bridge_handoff::record(&inflight_state, active_snapshot.cancel_token.as_ref());
+    if !bridge_handoff::record(
+        &inflight_state,
+        active_snapshot.cancel_token.as_ref(),
+        pg_pin,
+    ) {
+        if mailbox_activation_occurred {
+            bridge_handoff::release_unrecorded_actor(
+                shared,
+                &inflight_state,
+                active_snapshot.cancel_token.as_ref(),
+                true,
+            )
+            .await;
+        }
+        return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
+    }
     tracing::info!(
         provider = %provider.as_str(),
         channel_id = channel_id.get(),

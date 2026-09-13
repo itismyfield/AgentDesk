@@ -770,6 +770,8 @@ pub use terminal_usage::{
 pub struct ReadHarvestStats {
     pub forwarded_messages: u64,
     pub assistant_text_bytes: u64,
+    /// A terminal result decoded from source, excluding synthesized idle Done.
+    pub decoded_terminal: bool,
 }
 
 pub fn read_output_file_until_result(
@@ -857,6 +859,7 @@ pub fn read_output_file_until_result_with_harvest(
     let stats = ReadHarvestStats {
         forwarded_messages: state.forwarded_message_count,
         assistant_text_bytes: state.forwarded_assistant_text_bytes,
+        decoded_terminal: state.final_result.is_some(),
     };
     match result {
         Ok(result) => Ok((result, stats)),

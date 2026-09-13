@@ -1,11 +1,15 @@
 //! Transport the admitted synthetic actor allocation, not just its nonce.
 use super::*;
+use crate::db::dispatched_session_canonical_identity::{
+    self as session_actor, HookSessionActorPin,
+};
 use crate::services::discord::inflight::{GuardedSaveOutcome, InflightEpisodePin};
 
 #[derive(Clone)]
 struct Witness {
     episode: InflightEpisodePin,
     actor: std::sync::Weak<CancelToken>,
+    pg_pin: Option<HookSessionActorPin>,
 }
 
 static CLAIMS: LazyLock<Mutex<std::collections::HashMap<(String, u64), Witness>>> =
@@ -30,13 +34,135 @@ pub(super) fn refresh_actor_matches(
     }
 }
 
-pub(super) fn record(row: &InflightTurnState, actor: Option<&Arc<CancelToken>>) {
+pub(super) async fn capture_session_pin(
+    shared: &Arc<SharedData>,
+    session_key: Option<&str>,
+) -> Result<Option<HookSessionActorPin>, String> {
+    match (shared.pg_pool.as_ref(), session_key) {
+        (Some(pool), Some(key)) => session_actor::capture_hook_session_actor_pin_pg(pool, key)
+            .await
+            .map(Some)
+            .map_err(|error| error.to_string()),
+        _ => Ok(None),
+    }
+}
+
+/// Preserve a detached live allocation before entering a mailbox slot.
+pub(super) async fn prepare_admission(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    anchor: MessageId,
+    lease: &ExternalInputRelayLease,
+) -> Result<(Arc<CancelToken>, Option<HookSessionActorPin>), String> {
+    let pg_pin = capture_session_pin(shared, lease.session_key.as_deref()).await?;
+    let retained =
+        super::super::super::inflight::load_inflight_state_read_only(provider, channel.get())
+            .filter(|row| row.user_msg_id == anchor.get())
+            .map(|row| retained_actor(&row))
+            .transpose()
+            .map_err(|()| "synthetic original actor proof changed")?;
+    Ok((
+        retained
+            .flatten()
+            .unwrap_or_else(|| Arc::new(CancelToken::new())),
+        pg_pin,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn refresh_existing(
+    shared: &Arc<SharedData>,
+    mut row: InflightTurnState,
+    lease: &ExternalInputRelayLease,
+    relay_owner: ExternalInputRelayOwner,
+    owner_kind: RelayOwnerKind,
+    actor: Option<&Arc<CancelToken>>,
+    freshly_admitted: bool,
+    pg_pin: Option<HookSessionActorPin>,
+) -> TuiDirectSyntheticTurnClaim {
+    use super::super::super::inflight;
+    let pg_pin = original_session_pin(&row, actor).unwrap_or(pg_pin);
+    let expected = inflight::InflightTurnIdentity::from_state(&row);
+    let start = row.turn_start_offset.unwrap_or(row.last_offset);
+    row.turn_nonce = actor.and_then(|actor| actor.turn_nonce().map(str::to_owned));
+    row.set_relay_owner_kind(owner_kind);
+    row.restamp_external_turn_lease(lease);
+    // Preserve the original source boundary and both consumed/delivered progress.
+    let saved = inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
+        &row,
+        &expected,
+        "tui_direct_synthetic_refresh",
+    );
+    let claimed = saved == GuardedSaveOutcome::Saved && record(&row, actor, pg_pin);
+    if freshly_admitted {
+        if claimed {
+            super::super::super::increment_global_active(shared, "tui_direct_synthetic_refresh");
+            shared
+                .turn_start_times
+                .insert(ChannelId::new(row.channel_id), std::time::Instant::now());
+        } else {
+            release_unrecorded_actor(shared, &row, actor, false).await;
+        }
+    }
+    TuiDirectSyntheticTurnClaim::new(relay_owner, claimed, start)
+}
+
+pub(super) async fn release_unrecorded_actor(
+    shared: &Arc<SharedData>,
+    row: &InflightTurnState,
+    actor: Option<&Arc<CancelToken>>,
+    counted: bool,
+) {
     let Some(actor) = actor else { return };
-    if row.effective_relay_owner_kind() != RelayOwnerKind::None
-        || row.external_turn_id.as_deref().is_none_or(str::is_empty)
+    let provider = ProviderKind::from_str_or_unsupported(row.provider.as_str());
+    let result = super::super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+        shared, &provider, ChannelId::new(row.channel_id), MessageId::new(row.user_msg_id),
+        row.turn_nonce.clone(), std::time::Instant::now(), Some(actor.clone()),
+    ).await;
+    if counted && result.removed_token.is_some() {
+        super::super::super::saturating_decrement_global_active(shared);
+    }
+}
+
+pub(super) fn original_session_pin(
+    row: &InflightTurnState,
+    actor: Option<&Arc<CancelToken>>,
+) -> Option<Option<HookSessionActorPin>> {
+    let claims = CLAIMS.lock().unwrap_or_else(|error| error.into_inner());
+    let witness = claims.get(&(row.provider.clone(), row.channel_id))?;
+    let saved = witness.actor.upgrade()?;
+    (actor.is_some_and(|actor| Arc::ptr_eq(&saved, actor)) && witness.episode.matches_state(row))
+        .then(|| witness.pg_pin.clone())
+}
+
+pub(super) fn retained_actor(row: &InflightTurnState) -> Result<Option<Arc<CancelToken>>, ()> {
+    let claims = CLAIMS.lock().unwrap_or_else(|error| error.into_inner());
+    let Some((witness, actor)) = claims
+        .get(&(row.provider.clone(), row.channel_id))
+        .and_then(|witness| witness.actor.upgrade().map(|actor| (witness, actor)))
+    else {
+        return Ok(None);
+    };
+    if !witness.episode.matches_state(row) || actor.cancelled.load(Ordering::Relaxed) {
+        return Err(());
+    }
+    Ok(Some(actor))
+}
+
+pub(super) fn record(
+    row: &InflightTurnState,
+    actor: Option<&Arc<CancelToken>>,
+    pg_pin: Option<HookSessionActorPin>,
+) -> bool {
+    let Some(actor) = actor else { return false };
+    if row.effective_relay_owner_kind() != RelayOwnerKind::None {
+        return true;
+    }
+    if row.external_turn_id.as_deref().is_none_or(str::is_empty)
         || row.turn_nonce.as_deref() != actor.turn_nonce()
     {
-        return;
+        return false;
     }
     let mut claims = CLAIMS.lock().unwrap_or_else(|error| error.into_inner());
     claims.retain(|_, witness| witness.actor.strong_count() > 0);
@@ -50,15 +176,17 @@ pub(super) fn record(row: &InflightTurnState, actor: Option<&Arc<CancelToken>>) 
                     .is_some_and(|saved| !Arc::ptr_eq(&saved, actor))
         })
     {
-        return;
+        return false;
     }
     claims.insert(
         (row.provider.clone(), row.channel_id),
         Witness {
             episode: InflightEpisodePin::from_state(row),
             actor: Arc::downgrade(actor),
+            pg_pin,
         },
     );
+    true
 }
 
 pub(in crate::services::discord::tui_prompt_relay) struct BridgeClaim {
@@ -67,6 +195,55 @@ pub(in crate::services::discord::tui_prompt_relay) struct BridgeClaim {
     // Drop the exact lease before releasing serialization to another adapter.
     _lease: TuiDirectExternalInputLeaseGuard,
     _serial: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl BridgeClaim {
+    /// A rollover keeps the same captured actor/source and records its old
+    /// anchor among frozen chunks. Carry that exact transition into recovery.
+    pub(in crate::services::discord::tui_prompt_relay) async fn preserve_continuation(
+        &self,
+        shared: &Arc<SharedData>,
+    ) {
+        let provider = ProviderKind::from_str_or_unsupported(&self.row.provider);
+        let Some(row) = super::super::super::inflight::load_inflight_state_read_only(
+            &provider,
+            self.row.channel_id,
+        ) else {
+            return;
+        };
+        let mut before_rollover = row.clone();
+        before_rollover.current_msg_id = self.row.current_msg_id;
+        if !InflightEpisodePin::from_state(&self.row).matches_state(&before_rollover)
+            || row.external_turn_id != self.row.external_turn_id
+            || row.session_key != self.row.session_key
+            || (row.current_msg_id != self.row.current_msg_id
+                && !row
+                    .streaming_rollover_frozen_msg_ids
+                    .contains(&self.row.current_msg_id))
+        {
+            return;
+        }
+        let active =
+            super::super::super::mailbox_snapshot(shared, ChannelId::new(row.channel_id)).await;
+        if active
+            .cancel_token
+            .as_ref()
+            .is_some_and(|active| !Arc::ptr_eq(active, &self.actor))
+        {
+            return;
+        }
+        let Some(pin) = original_session_pin(&self.row, Some(&self.actor)) else {
+            return;
+        };
+        let Ok(locked) = super::super::super::inflight::lock_inflight_episode(
+            &provider,
+            row.channel_id,
+            &InflightEpisodePin::from_state(&row),
+        ) else {
+            return;
+        };
+        record(locked.state(), Some(&self.actor), pin);
+    }
 }
 
 pub(in crate::services::discord::tui_prompt_relay) async fn capture(
@@ -143,29 +320,34 @@ pub(in crate::services::discord::tui_prompt_relay) async fn capture(
         return Err(failure());
     }
     drop(locked);
+    let mut pg_pin = witness.pg_pin.clone();
     if let (Some(pool), Some(session_key)) = (shared.pg_pool.as_ref(), row.session_key.as_deref()) {
-        crate::db::dispatched_sessions::upsert_hook_session_pg(
-            pool,
-            crate::db::dispatched_sessions::HookSessionUpsert {
-                session_key,
-                provider: provider.as_str(),
-                status: "turn_active",
-                channel_id: Some(&channel.get().to_string()),
-                turn_start_nonce: row.turn_nonce.as_deref(),
-                instance_id: None,
-                agent_id: None,
-                session_info: None,
-                model: None,
-                tokens: None,
-                cwd: None,
-                active_dispatch_id: None,
-                thread_channel_id: None,
-                claude_session_id: None,
-                raw_provider_session_id: None,
-                dispatched_origin: false,
-            },
-        )
-        .await?;
+        pg_pin = Some(
+            session_actor::upsert_hook_session_with_actor_pin_pg(
+                pool,
+                crate::db::dispatched_sessions::HookSessionUpsert {
+                    session_key,
+                    provider: provider.as_str(),
+                    status: "turn_active",
+                    channel_id: Some(&channel.get().to_string()),
+                    turn_start_nonce: row.turn_nonce.as_deref(),
+                    instance_id: None,
+                    agent_id: None,
+                    session_info: None,
+                    model: None,
+                    tokens: None,
+                    cwd: None,
+                    active_dispatch_id: None,
+                    thread_channel_id: None,
+                    claude_session_id: None,
+                    raw_provider_session_id: None,
+                    dispatched_origin: false,
+                },
+                pg_pin.as_ref().ok_or_else(failure)?,
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+        );
     }
     let current = super::super::super::mailbox_snapshot(shared, channel).await;
     if current
@@ -193,7 +375,9 @@ pub(in crate::services::discord::tui_prompt_relay) async fn capture(
     }
     row = saved.state().clone();
     drop(saved);
-    record(&row, Some(&actor));
+    if !record(&row, Some(&actor), pg_pin) {
+        return Err(failure());
+    }
     Ok(BridgeClaim {
         row,
         actor,
@@ -282,6 +466,9 @@ async fn capture_dormant(
     }) {
         return None;
     }
+    let captured_pg_pin = capture_session_pin(shared, row.session_key.as_deref())
+        .await
+        .ok()?;
     let pin = InflightEpisodePin::from_state(row);
     let locked =
         super::super::super::inflight::lock_inflight_episode(&provider, row.channel_id, &pin)
@@ -315,9 +502,20 @@ async fn capture_dormant(
         }
         actor
     } else {
-        let actor = Arc::new(CancelToken::from_persisted_turn_nonce(
-            row.turn_nonce.clone(),
-        ));
+        // Re-admit the original allocation while its proof remains live.
+        let retained = retained_actor(row).ok()?;
+        if retained.is_none()
+            && captured_pg_pin
+                .as_ref()
+                .is_some_and(|pin| pin.active_for_other_actor(row.turn_nonce.as_deref()))
+        {
+            return None;
+        }
+        let actor = retained.unwrap_or_else(|| {
+            Arc::new(CancelToken::from_persisted_turn_nonce(
+                row.turn_nonce.clone(),
+            ))
+        });
         if !super::super::super::mailbox_try_start_turn(
             shared,
             channel,
@@ -335,7 +533,11 @@ async fn capture_dormant(
             .insert(channel, std::time::Instant::now());
         actor
     };
-    record(locked.state(), Some(&actor));
+    let pg_pin = original_session_pin(locked.state(), Some(&actor)).unwrap_or(captured_pg_pin);
+    if !record(locked.state(), Some(&actor), pg_pin) {
+        release_unrecorded_actor(shared, locked.state(), Some(&actor), true).await;
+        return None;
+    }
     let current = locked.state().clone();
     drop(locked);
     let mut lease = ExternalInputRelayLease::unassigned(Some(row.channel_id));
@@ -356,4 +558,80 @@ async fn capture_dormant(
         lease,
         _serial: serial,
     })
+}
+
+/// Capture before the reader awaits: an empty/failed reader cannot borrow a
+/// later row's authority merely because it reused the same provider session.
+#[cfg(unix)]
+pub(in crate::services::discord::tui_prompt_relay) async fn capture_empty_tail_episode(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    output: &Path,
+    start: u64,
+    lease: &ExternalInputRelayLease,
+) -> Option<(InflightTurnState, Arc<CancelToken>)> {
+    let _serial =
+        super::super::super::tui_direct_pending_start::channel_lock("claude", channel.get())
+            .lock_owned()
+            .await;
+    let row = super::super::super::inflight::load_inflight_state_read_only(
+        &ProviderKind::Claude,
+        channel.get(),
+    )?;
+    if row.output_path.as_deref().map(Path::new) != Some(output)
+        || row.turn_start_offset != Some(start)
+        || row.external_turn_id != lease.turn_id
+        || row.session_key != lease.session_key
+        || row.external_turn_id.as_deref().is_none_or(str::is_empty)
+        || !row.full_response.is_empty()
+        || row.response_sent_offset != 0
+        || row.terminal_delivery_committed
+    {
+        return None;
+    }
+    let actor = retained_actor(&row).ok()??;
+    let active = super::super::super::mailbox_snapshot(shared, channel).await;
+    active
+        .cancel_token
+        .as_ref()
+        .is_some_and(|active| Arc::ptr_eq(active, &actor))
+        .then_some((row, actor))
+}
+
+#[cfg(unix)]
+pub(in crate::services::discord::tui_prompt_relay) async fn finish_empty_tail_episode(
+    shared: &Arc<SharedData>,
+    row: &InflightTurnState,
+    actor: Arc<CancelToken>,
+) -> bool {
+    use super::super::super::{inflight, turn_finalizer};
+    let channel = ChannelId::new(row.channel_id);
+    let _serial =
+        super::super::super::tui_direct_pending_start::channel_lock("claude", row.channel_id)
+            .lock_owned()
+            .await;
+    if inflight::clear_inflight_state_for_snapshot(&ProviderKind::Claude, row)
+        != inflight::GuardedClearOutcome::Cleared
+    {
+        return false;
+    }
+    let mut snapshot = turn_finalizer::SyntheticClaimSnapshot::from_row(row);
+    snapshot.recovery_actor = Some(Arc::downgrade(&actor));
+    shared
+        .turn_finalizer
+        .submit_terminal_with_claim_snapshot(
+            turn_finalizer::TurnKey::new(
+                channel,
+                row.effective_finalizer_turn_id(),
+                shared.restart.current_generation,
+            )
+            .with_episode_nonce(row.turn_nonce.as_deref()),
+            ProviderKind::Claude,
+            turn_finalizer::TerminalEvent::Complete,
+            turn_finalizer::FinalizeContext::watcher(),
+            Some(snapshot),
+            shared.clone(),
+        )
+        .await;
+    true
 }

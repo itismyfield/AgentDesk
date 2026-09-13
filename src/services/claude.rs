@@ -2398,6 +2398,7 @@ mod claude_tui_ready_probe_tests {
         let harvested = ReadHarvestStats {
             forwarded_messages: 3,
             assistant_text_bytes: 42,
+            decoded_terminal: false,
         };
         assert!(tui_delivered_zero_harvest(
             &ReadOutputResult::Completed { offset: 100 },

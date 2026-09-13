@@ -243,16 +243,18 @@ pub(super) async fn relay_tui_idle_response_through_bridge(
     drop(tx);
 
     let completion = tokio::time::timeout(Duration::from_secs(180), completion_rx).await;
-    finish_idle_bridge_completion(
+    let result = finish_idle_bridge_completion(
         completion,
         gateway.as_ref(),
         &provider,
         (channel_id, user_msg_id, current_msg_id),
-        Some(current_msg_id),
+        None,
         (tmux_session_name, lease, anchor),
         false,
     )
-    .await
+    .await;
+    claim.preserve_continuation(shared).await;
+    result
 }
 
 /// #3256: STREAM-THROUGH variant of `relay_tui_idle_response_through_bridge`
@@ -315,6 +317,44 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
         super::super::adk_session::fetch_context_thresholds(shared.api_port)
             .await
             .compact_pct_for(&provider);
+    let gateway = Arc::new(TuiDirectBridgeGateway {
+        http,
+        shared: shared.clone(),
+        provider: provider.clone(),
+    });
+    stream_tui_idle_response_with_gateway(
+        shared,
+        provider,
+        channel_id,
+        tmux_session_name,
+        output_path,
+        start_offset,
+        prompt_text,
+        prefix,
+        reader_rx,
+        lease,
+        gateway,
+        context_compact_percent,
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn stream_tui_idle_response_with_gateway(
+    shared: &Arc<SharedData>,
+    provider: ProviderKind,
+    channel_id: ChannelId,
+    tmux_session_name: &str,
+    output_path: &Path,
+    start_offset: u64,
+    prompt_text: &str,
+    prefix: Vec<StreamMessage>,
+    reader_rx: mpsc::Receiver<StreamMessage>,
+    lease: &ExternalInputRelayLease,
+    gateway: Arc<dyn super::super::gateway::TurnGateway>,
+    context_compact_percent: u64,
+) -> Result<(), String> {
     let claim = super::synthetic_start::bridge_handoff::capture(
         shared,
         &provider,
@@ -335,11 +375,6 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
     let (tx, rx) = mpsc::channel();
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
     let inflight_state = claim.row.clone();
-    let gateway = Arc::new(TuiDirectBridgeGateway {
-        http,
-        shared: shared.clone(),
-        provider: provider.clone(),
-    });
     let bridge = TurnBridgeContext {
         provider: provider.clone(),
         gateway: gateway.clone(),
@@ -419,16 +454,18 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
     // which should land within seconds of the terminal frame being forwarded.
     let completion = tokio::time::timeout(Duration::from_secs(180), completion_rx).await;
 
-    finish_idle_bridge_completion(
+    let result = finish_idle_bridge_completion(
         completion,
         gateway.as_ref(),
         &provider,
         (channel_id, user_msg_id, current_msg_id),
-        Some(current_msg_id),
+        None,
         (tmux_session_name, lease, anchor),
         true,
     )
-    .await
+    .await;
+    claim.preserve_continuation(shared).await;
+    result
 }
 
 // Shared by both adapters; only Finalized may acknowledge delivery or clear the anchor.

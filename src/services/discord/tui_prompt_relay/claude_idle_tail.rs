@@ -321,6 +321,15 @@ pub(super) async fn run_claude_idle_response_tail(
         &lease,
     );
 
+    let captured = synthetic_start::bridge_handoff::capture_empty_tail_episode(
+        &shared,
+        channel_id,
+        &transcript_path,
+        start_offset,
+        &lease,
+    )
+    .await;
+
     // #3256: STREAM the operator's external-input prose THROUGH a single bridge
     // turn instead of pre-collecting the whole response and posting it as one
     // batched `[Text{full}, Done]` at turn end. The transcript reader
@@ -335,34 +344,35 @@ pub(super) async fn run_claude_idle_response_tail(
     // intermediate channel (`reader_rx`) and reports the final transcript byte
     // offset over `offset_tx` after it returns (done / idle / dead). We BUFFER
     // the leading frames until the first content frame arrives so that a turn
-    // that produces NO prose still takes the original empty-response path (no
-    // intake card, just advance the binding offset + finish the synthetic turn)
-    // — preserving today's behavior for the common no-op case.
+    // without treating a reader failure or a synthesized idle Done as delivery.
     let (reader_tx, reader_rx) = mpsc::channel::<StreamMessage>();
-    let (offset_tx, offset_rx) = tokio::sync::oneshot::channel::<Result<u64, String>>();
+    let (offset_tx, offset_rx) = tokio::sync::oneshot::channel::<Result<(u64, bool), String>>();
     let transcript_for_reader = transcript_path.clone();
     let tmux_for_reader = tmux_session_name.clone();
     std::thread::Builder::new()
         .name("claude_idle_response_tail_reader".to_string())
         .spawn(move || {
             let transcript_string = transcript_for_reader.display().to_string();
-            let read_result = crate::services::session_backend::read_output_file_until_result(
-                &transcript_string,
-                start_offset,
-                reader_tx,
-                None,
-                crate::services::provider::SessionProbe::tmux_with_structured_output(
-                    tmux_for_reader,
-                    ProviderKind::Claude,
-                    Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
-                    transcript_string.clone(),
-                ),
-            );
-            let offset_result = read_result.map(|result| match result {
-                ReadOutputResult::Completed { offset }
-                | ReadOutputResult::Cancelled { offset }
-                | ReadOutputResult::SessionDied { offset } => offset,
-            });
+            let read_result =
+                crate::services::session_backend::read_output_file_until_result_with_harvest(
+                    &transcript_string,
+                    start_offset,
+                    reader_tx,
+                    None,
+                    crate::services::provider::SessionProbe::tmux_with_structured_output(
+                        tmux_for_reader,
+                        ProviderKind::Claude,
+                        Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui),
+                        transcript_string.clone(),
+                    ),
+                );
+            let offset_result = read_result
+                .map(|(result, stats)| match result {
+                    ReadOutputResult::Completed { offset } => (offset, stats.decoded_terminal),
+                    ReadOutputResult::Cancelled { offset }
+                    | ReadOutputResult::SessionDied { offset } => (offset, false),
+                })
+                .map_err(|error| error.error);
             let _ = offset_tx.send(offset_result);
         })
         .expect("spawn claude idle response tail reader thread");
@@ -399,40 +409,25 @@ pub(super) async fn run_claude_idle_response_tail(
                 error = %error,
                 "Claude idle transcript response tail buffering panicked"
             );
-            finish_tui_direct_synthetic_turn_if_current(
-                &shared,
-                &ProviderKind::Claude,
-                channel_id,
-                &tmux_session_name,
-                lease.session_key.as_deref(),
-                "claude_tui_direct_tail_panicked",
-            )
-            .await;
             return;
         }
     };
 
     if !has_content {
-        // No prose / no terminal body for this turn: keep today's no-card empty
-        // path. Drain any residual frames so the reader thread can finish, then
-        // commit the binding offset.
         let _ = tokio::task::spawn_blocking(move || while reader_rx.recv().is_ok() {}).await;
-        if let Ok(Ok(final_offset)) = offset_rx.await {
+        // Only an actual source terminal can settle an empty episode. Unknown
+        // reads keep its durable row and original cursor for the existing idle retry.
+        if let Ok(Ok((final_offset, true))) = offset_rx.await
+            && let Some((row, actor)) = captured
+            && synthetic_start::bridge_handoff::finish_empty_tail_episode(&shared, &row, actor)
+                .await
+        {
             advance_claude_tmux_runtime_binding_offset(
                 &tmux_session_name,
                 &transcript_path,
                 final_offset,
             );
         }
-        finish_tui_direct_synthetic_turn_if_current(
-            &shared,
-            &ProviderKind::Claude,
-            channel_id,
-            &tmux_session_name,
-            lease.session_key.as_deref(),
-            "claude_tui_direct_empty_response",
-        )
-        .await;
         return;
     }
 
@@ -456,7 +451,7 @@ pub(super) async fn run_claude_idle_response_tail(
     // the watcher / idle paths never double-send this turn's bytes. The reader
     // reports the authoritative final offset over `offset_rx`.
     let final_offset = match offset_rx.await {
-        Ok(Ok(offset)) => Some(offset),
+        Ok(Ok((offset, _))) => Some(offset),
         _ => None,
     };
     if let Some(final_offset) = final_offset
