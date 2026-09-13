@@ -1015,6 +1015,8 @@ async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_succe
         let (mut ctx, mut state, source) = receipt_parts(&driver, ProviderKind::Codex);
         let channel = ctx.channel_id;
         state.inflight_state.turn_source = inflight::TurnSource::ExternalInput;
+        // The real terminal entry has already persisted the admitted raw body.
+        state.inflight_state.full_response = state.full_response.clone();
         state.cancel_token = Arc::new(
             crate::services::provider::CancelToken::from_persisted_turn_nonce(
                 state.inflight_state.turn_nonce.clone(),
@@ -1023,6 +1025,11 @@ async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_succe
         let original_actor = state.cancel_token.clone();
         let original = state.inflight_state.clone();
         inflight::save_inflight_state(&original).unwrap();
+        assert!(
+            ctx.codex_tui_terminal_range.as_ref().unwrap()
+                .revalidated_source(&original).unwrap().is_some(),
+            "the lifecycle fixture must exercise pinned delivery, not Unknown/NoRange"
+        );
         ctx.entry_was_rowless = true;
         crate::services::discord::mailbox_recovery_kickoff(
             &driver.shared,
