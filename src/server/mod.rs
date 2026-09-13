@@ -2944,6 +2944,8 @@ async fn message_outbox_loop(pg_pool: Arc<PgPool>, health_registry: Option<Arc<H
     loop {
         tokio::time::sleep(poll_interval).await;
 
+        crate::services::discord::terminal_delivery_custody::drain(&health_registry).await;
+
         // #3651: the message outbox drain delivers headless terminal responses
         // — foreground turns enqueue here and synchronously block on the row
         // becoming `sent` — so this loop is NOT backpressured. Yielding it under
