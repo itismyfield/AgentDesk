@@ -32,7 +32,7 @@ pub(super) async fn run_completion_postlude(
     let request_owner_name = ctx.request_owner_name;
     let final_session_status = ctx.final_session_status;
     let status_panel_started_at = ctx.status_panel_started_at;
-    let has_queued_turns = ctx.has_queued_turns;
+    let mut has_queued_turns = ctx.has_queued_turns;
     let defer_watcher_resume = ctx.defer_watcher_resume;
     let can_chain_locally = ctx.can_chain_locally;
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;
@@ -86,7 +86,7 @@ pub(super) async fn run_completion_postlude(
     let cancelled = state.cancelled;
     let restart_followup_pending = state.restart_followup_pending;
     let bridge_skip_holder_owns_inflight = state.bridge_skip_holder_owns_inflight;
-    let completion_guard = state.completion_guard;
+    let mut completion_guard = state.completion_guard;
     let mut inflight_guard = state.inflight_guard;
     let mut inflight_state = state.inflight_state;
 
@@ -96,7 +96,8 @@ pub(super) async fn run_completion_postlude(
         &provider,
         &inflight_state,
         &cancel_token,
-    );
+    )
+    .requiring_captured_actor(is_external_input_tui_direct);
     let completion_r0 = ownership.read("completion_r0").await;
     let mut status_panel_completion_committed = true;
     if status_panel_terminal_committed
@@ -189,6 +190,48 @@ pub(super) async fn run_completion_postlude(
             channel_id,
             "claude_tui_followup_requeue_after_completion_postlude_projection",
         );
+    }
+
+    // The actual synthetic actor remains active through terminal transport and
+    // projection. Submit its original allocation only after those boundaries
+    // settle; an actor-only same-nonce replacement must survive both the first
+    // and AlreadyFinalized paths.
+    if is_external_input_tui_direct
+        && terminal_delivery_committed
+        && status_panel_completion_committed
+        && ownership
+            .read("completion_synthetic_finalize")
+            .await
+            .permits_channel_effects()
+    {
+        let outcome = shared_owned
+            .turn_finalizer
+            .submit_terminal_with_claim_snapshot(
+                super::super::turn_finalizer::TurnKey::new(
+                    channel_id,
+                    inflight_state.effective_finalizer_turn_id(),
+                    shared_owned.restart.current_generation,
+                )
+                .with_episode_nonce(inflight_state.turn_nonce.as_deref()),
+                provider.clone(),
+                if cancelled {
+                    super::super::turn_finalizer::TerminalEvent::Cancel
+                } else {
+                    super::super::turn_finalizer::TerminalEvent::Complete
+                },
+                super::super::turn_finalizer::FinalizeContext::bridge(),
+                Some(post_loop_finalize::bridge_terminal_claim_snapshot(
+                    &inflight_state,
+                    Some(&cancel_token),
+                )),
+                shared_owned.clone(),
+            )
+            .await;
+        if let super::super::turn_finalizer::FinalizeOutcome::Finalized { has_pending, .. } =
+            outcome
+        {
+            has_queued_turns = has_pending;
+        }
     }
 
     let completion_r1 = ownership.read("completion_r1").await;
@@ -719,7 +762,18 @@ pub(super) async fn run_completion_postlude(
         );
     }
 
-    if cancelled && cancel_token.restart_mode().is_some() {
+    let synthetic_cleanup_owned = !is_external_input_tui_direct
+        || (terminal_delivery_committed
+            && ownership
+                .read("completion_synthetic_cleanup")
+                .await
+                .permits_channel_effects());
+    if !synthetic_cleanup_owned {
+        // Durable identity may be unchanged by RecoveryKickoff. Never use the
+        // nonce-only row guard after the captured mailbox allocation changed.
+        inflight_guard.defuse();
+        completion_guard.relinquish_bridge_authority();
+    } else if cancelled && cancel_token.restart_mode().is_some() {
         use crate::services::discord::inflight::{
             GuardedSaveOutcome, patch_restart_full_response_if_identity_unchanged,
             save_inflight_state_if_identity_unchanged,
@@ -947,6 +1001,9 @@ pub(super) async fn run_completion_postlude(
         );
     }
     let completion_r4 = ownership.read("completion_r4").await;
+    if is_external_input_tui_direct && !completion_r4.permits_channel_effects() {
+        completion_guard.relinquish_bridge_authority();
+    }
     if completion_r4.permits_channel_effects() {
         super::super::mailbox_clear_recovery_marker(&shared_owned, channel_id).await;
     }

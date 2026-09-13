@@ -62,6 +62,7 @@ async fn run_from_postloop(
             turn_id: state.turn_id.clone(),
             current_msg_id: ctx.current_msg_id,
             entry_was_rowless: ctx.entry_was_rowless,
+            synthetic_actor: None,
             codex_tui_terminal_range: ctx.codex_tui_terminal_range.clone(),
             cancelled: ctx.cancelled,
             transport_error: ctx.transport_error,

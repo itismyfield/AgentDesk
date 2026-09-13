@@ -2808,6 +2808,7 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
 #[derive(Default)]
 struct S3Gateway {
     local_delivery: bool,
+    terminal_barrier: Option<Arc<synthetic_terminal_ordering_tests::TerminalBarrier>>,
     bodies: std::sync::Mutex<Vec<String>>,
     deleted: std::sync::Mutex<Vec<MessageId>>,
 }
@@ -2859,6 +2860,10 @@ impl TurnGateway for S3Gateway {
         Result<super::super::formatting::ReplaceLongMessageOutcome, String>,
     > {
         Box::pin(async move {
+            if let Some(barrier) = self.terminal_barrier.as_ref() {
+                barrier.entered.notify_one();
+                barrier.release.notified().await;
+            }
             self.bodies.lock().unwrap().push(content.to_string());
             Ok(super::super::formatting::ReplaceLongMessageOutcome::EditedOriginal)
         })
@@ -6221,3 +6226,6 @@ fn contending_turn_identities_keep_exactly_one_relay_owner() {
 
 #[cfg(unix)]
 mod synthetic_bridge_handoff_pg_tests;
+
+#[cfg(unix)]
+mod synthetic_terminal_ordering_tests;

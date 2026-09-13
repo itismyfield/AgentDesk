@@ -4,7 +4,7 @@
 //! 1. no mailbox handle => [`ChannelEpisodeScope::Unprovable`];
 //! 2. mailbox and bridge hold the same token allocation => [`ChannelEpisodeScope::Mine`];
 //! 3. mailbox has neither a token nor an active user message => [`ChannelEpisodeScope::Idle`];
-//! 4. otherwise, equal non-empty durable turn nonces => [`ChannelEpisodeScope::Mine`];
+//! 4. legacy callers may use equal non-empty nonces => [`ChannelEpisodeScope::Mine`];
 //! 5. every other state => [`ChannelEpisodeScope::Foreign`].
 //!
 //! `Mine` and `Idle` permit effects; `Foreign` and `Unprovable` fail closed. An
@@ -13,8 +13,9 @@
 //! not one rehydration attempt, so duplicate actors for the same nonce can both pass.
 //! TUI-direct carries its synthetic claim's token allocation into the bridge,
 //! preserving the same-actor witness while the mailbox remains owned. After
-//! release it reads `Idle` without a successor and `Foreign` with an active
-//! successor. These later reads still guard each channel-scoped effect group.
+//! release it reads `Idle` without a successor and `Foreign` with any different
+//! allocation, even when a recovery actor reused the nonce. These later reads
+//! still guard each channel-scoped effect group.
 
 use std::sync::Arc;
 
@@ -74,10 +75,20 @@ impl ChannelEpisodeDecision {
     }
 }
 
+#[cfg(test)]
 fn classify_channel_episode(
     snapshot: Option<&ChannelMailboxSnapshot>,
     mine: &Arc<CancelToken>,
     own_nonce: Option<&str>,
+) -> ChannelEpisodeDecision {
+    classify_channel_episode_with_actor_policy(snapshot, mine, own_nonce, false)
+}
+
+fn classify_channel_episode_with_actor_policy(
+    snapshot: Option<&ChannelMailboxSnapshot>,
+    mine: &Arc<CancelToken>,
+    own_nonce: Option<&str>,
+    require_captured_actor: bool,
 ) -> ChannelEpisodeDecision {
     let Some(snapshot) = snapshot else {
         return ChannelEpisodeDecision {
@@ -101,9 +112,10 @@ fn classify_channel_episode(
             reason: ChannelEpisodeScopeReason::MailboxIdle,
         };
     }
-    if own_nonce
-        .filter(|nonce| !nonce.is_empty())
-        .is_some_and(|nonce| snapshot.active_turn_nonce.as_deref() == Some(nonce))
+    if !require_captured_actor
+        && own_nonce
+            .filter(|nonce| !nonce.is_empty())
+            .is_some_and(|nonce| snapshot.active_turn_nonce.as_deref() == Some(nonce))
     {
         return ChannelEpisodeDecision {
             scope: ChannelEpisodeScope::Mine,
@@ -124,6 +136,7 @@ pub(super) struct ChannelEpisodeProbe<'a> {
     turn_source: &'static str,
     own_nonce: Option<String>,
     mine: Arc<CancelToken>,
+    require_captured_actor: bool,
 }
 
 impl<'a> ChannelEpisodeProbe<'a> {
@@ -142,7 +155,13 @@ impl<'a> ChannelEpisodeProbe<'a> {
             turn_source: state.turn_source.as_str(),
             own_nonce: state.turn_nonce.clone(),
             mine: mine.clone(),
+            require_captured_actor: false,
         }
+    }
+
+    pub(super) fn requiring_captured_actor(mut self, required: bool) -> Self {
+        self.require_captured_actor = required;
+        self
     }
 
     /// Each call is a fresh witness for one effect group. Callers must not reuse it
@@ -155,8 +174,12 @@ impl<'a> ChannelEpisodeProbe<'a> {
             Some(handle) => Some(handle.snapshot().await),
             None => None,
         };
-        let decision =
-            classify_channel_episode(snapshot.as_ref(), &self.mine, self.own_nonce.as_deref());
+        let decision = classify_channel_episode_with_actor_policy(
+            snapshot.as_ref(),
+            &self.mine,
+            self.own_nonce.as_deref(),
+            self.require_captured_actor,
+        );
         authority_observation::record_completion_scope(
             authority_observation::CompletionScopeRecord {
                 shared: self.shared,

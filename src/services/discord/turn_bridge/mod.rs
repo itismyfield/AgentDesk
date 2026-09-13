@@ -707,6 +707,14 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 return;
             }
         }
+        if is_external_input_tui_direct && rx_disconnected {
+            // The reader never supplied an admitted terminal frame. Preserve
+            // the captured source/row for recovery; a partial stream is not a
+            // successfully published terminal response.
+            completion_guard.relinquish_bridge_authority();
+            inflight_guard.defuse();
+            return;
+        }
         #[rustfmt::skip]
         let (pending_long_running_open_after_state_save, pending_long_running_retarget_after_state_save) = (stream_loop_output.pending_long_running_open_after_state_save, stream_loop_output.pending_long_running_retarget_after_state_save);
 
@@ -725,6 +733,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 turn_id: turn_id.clone(),
                 current_msg_id,
                 entry_was_rowless,
+                synthetic_actor: is_external_input_tui_direct.then(|| cancel_token.clone()),
                 codex_tui_terminal_range: stream_loop_output.codex_tui_terminal_range.clone(),
                 cancelled,
                 transport_error,

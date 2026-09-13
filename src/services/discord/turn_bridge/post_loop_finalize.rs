@@ -31,6 +31,7 @@ pub(super) struct PostLoopFinalizeContext {
     pub(super) role_binding: Option<RoleBinding>,
     pub(super) turn_id: String,
     pub(super) current_msg_id: MessageId,
+    pub(super) synthetic_actor: Option<Arc<CancelToken>>,
     pub(super) entry_was_rowless: bool,
     pub(super) codex_tui_terminal_range: Option<super::super::inflight::CodexRange>,
     pub(super) cancelled: bool,
@@ -105,6 +106,7 @@ pub(super) async fn run_post_loop_finalize(
     let role_binding = ctx.role_binding;
     let turn_id = ctx.turn_id;
     let current_msg_id = ctx.current_msg_id;
+    let synthetic_actor = ctx.synthetic_actor;
     let cancelled = ctx.cancelled;
     let transport_error = ctx.transport_error;
     let tui_error_classification = ctx.tui_error_classification;
@@ -487,7 +489,12 @@ pub(super) async fn run_post_loop_finalize(
         channel_id,
     )
     .await;
-    let has_queued_turns = if bridge_relay_delegated_to_watcher {
+    // TUI-direct owns its captured mailbox actor until terminal publication
+    // and projection settle. Admission flags alone only defer queue eligibility;
+    // submitting Complete here would still cancel its token before transport.
+    let has_queued_turns = if synthetic_actor.is_some() {
+        false
+    } else if bridge_relay_delegated_to_watcher {
         // #1452 (Codex P1): the actual `mailbox_finalize_owed.store(true,
         // Release)` happens EARLIER, at the watcher-unpause site in the
         // `TmuxReady` branch (~line 1980). Doing it there guarantees we
@@ -563,11 +570,10 @@ pub(super) async fn run_post_loop_finalize(
                         super::super::turn_finalizer::TerminalEvent::Complete
                     },
                     super::super::turn_finalizer::FinalizeContext::bridge(),
-                    Some(
-                        super::super::turn_finalizer::SyntheticClaimSnapshot::from_row(
-                            &inflight_state,
-                        ),
-                    ),
+                    Some(bridge_terminal_claim_snapshot(
+                        &inflight_state,
+                        synthetic_actor.as_ref(),
+                    )),
                     shared_owned.clone(),
                 )
                 .await;
@@ -649,9 +655,10 @@ pub(super) async fn run_post_loop_finalize(
                     super::super::turn_finalizer::TerminalEvent::Complete
                 },
                 super::super::turn_finalizer::FinalizeContext::bridge(),
-                Some(
-                    super::super::turn_finalizer::SyntheticClaimSnapshot::from_row(&inflight_state),
-                ),
+                Some(bridge_terminal_claim_snapshot(
+                    &inflight_state,
+                    synthetic_actor.as_ref(),
+                )),
                 shared_owned.clone(),
             )
             .await;
@@ -737,4 +744,15 @@ pub(super) async fn run_post_loop_finalize(
         #[cfg(unix)]
         bridge_tui_gate_outcome_early,
     }
+}
+
+/// Retain the captured actor for both first and duplicate finalizer submissions.
+/// Historical callers without an actor retain the existing row-only behavior.
+pub(super) fn bridge_terminal_claim_snapshot(
+    state: &InflightTurnState,
+    actor: Option<&Arc<CancelToken>>,
+) -> super::super::turn_finalizer::SyntheticClaimSnapshot {
+    let mut snapshot = super::super::turn_finalizer::SyntheticClaimSnapshot::from_row(state);
+    snapshot.recovery_actor = actor.map(Arc::downgrade);
+    snapshot
 }
