@@ -19,10 +19,7 @@ use poise::serenity_prelude::ChannelId;
 use serde::{Deserialize, Serialize};
 
 use super::super::inflight::opt_channel_id;
-use super::super::recovery_engine::{
-    finish_recovered_turn_mailbox, finish_recovered_turn_mailbox_for_state,
-    save_missing_session_handoff,
-};
+use super::super::recovery_engine::{finish_recovered_turn_mailbox, save_missing_session_handoff};
 use super::super::runtime_store::{atomic_write, discord_recovery_force_clear_root};
 use super::super::{SharedData, inflight};
 use super::shared::{
@@ -108,17 +105,24 @@ pub(in crate::services::discord) async fn dispose_recovery_relay_outcome(
                 );
                 return;
             };
-            // The transport callback can outlive this actor. Finish only its
-            // captured episode, and retain a replacement or restart-owned row.
-            finish_recovered_turn_mailbox_for_state(shared, provider, state).await;
-            let clear = inflight::clear_inflight_state_for_reconcile(provider, state);
-            tracing::debug!(
-                channel_id = channel_id.get(),
-                branch,
-                finish_stop_source,
-                ?clear,
-                "recovery delivered row disposition"
-            );
+            finish_recovered_turn_mailbox(shared, provider, channel_id, finish_stop_source).await;
+            // #3918: do NOT silently ignore the clear result. A `false` here
+            // means the row is still on disk, so the next boot re-enters this
+            // branch — for the anchor-repost path that would re-probe the gone
+            // anchor and, absent a durable marker, re-post. Correctness no
+            // longer depends on this call succeeding (the `anchor_reposted`
+            // marker set BEFORE this dispose blocks a duplicate send-new), but a
+            // persistent clear failure is an operational signal worth surfacing.
+            if !inflight::clear_inflight_state(provider, state.channel_id) {
+                tracing::warn!(
+                    provider = %provider.as_str(),
+                    channel_id = state.channel_id,
+                    branch,
+                    "recovery: clear_inflight_state returned false (row still on disk) after a \
+                     delivered relay — next boot may re-enter this branch (an anchor-repost \
+                     re-run is blocked by the durable 'anchor_reposted' marker)"
+                );
+            }
         }
         disposition => {
             apply_undeliverable_relay_disposition(

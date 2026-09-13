@@ -56,20 +56,24 @@ pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
     let _ = stop_source;
 }
 
-pub(in crate::services::discord) async fn finish_recovered_turn_mailbox_for_state(
+async fn finish_recovered_turn_mailbox_for_captured_state(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
+    snapshot: super::turn_finalizer::SyntheticClaimSnapshot,
 ) {
+    // A row recovered without a mailbox actor cannot authorize releasing one
+    // admitted later while its Discord request was in flight.
+    if snapshot.recovery_actor.is_none() {
+        return;
+    }
     if let Some(channel_id) = inflight::opt_channel_id(state.channel_id) {
         finish_recovered_turn_mailbox_with_snapshot(
             shared,
             provider,
             channel_id,
             state.effective_finalizer_turn_id(),
-            Some(super::turn_finalizer::SyntheticClaimSnapshot::from_row(
-                state,
-            )),
+            Some(snapshot),
         )
         .await;
     }
@@ -175,24 +179,30 @@ where
     if state.restart_mode.is_some() || state.rebind_origin {
         return false;
     }
-    if let Some(actor) = actor {
-        let owner = super::mailbox_snapshot(shared, ChannelId::new(state.channel_id)).await;
-        let current = inflight::load_inflight_state(provider, state.channel_id);
-        if crate::services::provider::cancel_requested(Some(actor))
-            || !owner
-                .cancel_token
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, actor))
-            || current.as_ref().is_none_or(|current| {
-                !inflight::InflightEpisodePin::from_state(state).matches_state(current)
-                    || current.save_generation != state.save_generation
-            })
-        {
-            return false;
+    // A pre-existing actor must be the caller's captured incarnation. IDs and
+    // even equal nonces cannot identify two actors representing one execution.
+    let owner = super::mailbox_snapshot(shared, ChannelId::new(state.channel_id)).await;
+    let admissible_actor = match (actor, owner.cancel_token.as_ref()) {
+        (Some(expected), Some(current)) => {
+            Arc::ptr_eq(expected, current)
+                && !crate::services::provider::cancel_requested(Some(expected))
         }
+        (None, None) => true,
+        _ => false,
+    };
+    let current = inflight::load_inflight_state(provider, state.channel_id);
+    if !admissible_actor
+        || current.as_ref().is_none_or(|current| {
+            !inflight::InflightEpisodePin::from_state(state).matches_state(current)
+                || current.save_generation != state.save_generation
+        })
+    {
+        return false;
     }
+    let mut snapshot = super::turn_finalizer::SyntheticClaimSnapshot::from_row(state);
+    snapshot.recovery_actor = actor.map(Arc::downgrade);
     if recovery_ready_without_output_already_delivered(state) {
-        finish_recovered_turn_mailbox_for_state(shared, provider, state).await;
+        finish_recovered_turn_mailbox_for_captured_state(shared, provider, state, snapshot).await;
         inflight::clear_inflight_state_for_reconcile(provider, state);
         return true;
     }
@@ -202,22 +212,10 @@ where
         let response = &state.full_response[state.response_sent_offset..];
         let final_text = super::formatting::format_for_discord_with_provider(response, provider);
         let outcome = relay(final_text).await;
-        if let Some(actor) = actor {
-            settle_captured_ready_delivery(shared, provider, state, actor, outcome).await;
-            return true;
-        }
-        dispose_recovery_relay_outcome(
-            shared,
-            provider,
-            state,
-            outcome,
-            true,
-            "recovery_ready_without_output",
-            "ready_without_output",
-            &state.full_response,
-            false,
-        )
-        .await;
+        // A captured partial answer remains a delivery obligation even after a
+        // permanent channel error. Reuse the same nonce/save-generation CAS as
+        // the idle drain; legacy force-clear/budget identity is too broad here.
+        settle_captured_ready_delivery(shared, provider, state, actor, snapshot, outcome).await;
         return true;
     }
     tracing::warn!(
@@ -231,16 +229,17 @@ async fn settle_captured_ready_delivery(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
-    actor: &Arc<CancelToken>,
+    actor: Option<&Arc<CancelToken>>,
+    snapshot: super::turn_finalizer::SyntheticClaimSnapshot,
     outcome: RecoveryRelayOutcome,
 ) {
     let channel = ChannelId::new(state.channel_id);
     let owner = super::mailbox_snapshot(shared, channel).await;
-    if !owner
-        .cancel_token
-        .as_ref()
-        .is_some_and(|current| Arc::ptr_eq(current, actor))
-    {
+    if !match (actor, owner.cancel_token.as_ref()) {
+        (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
+        (None, None) => true,
+        _ => false,
+    } {
         return;
     }
     let mut delivered = state.clone();
@@ -262,7 +261,7 @@ async fn settle_captured_ready_delivery(
     {
         return;
     }
-    finish_recovered_turn_mailbox_for_state(shared, provider, &delivered).await;
+    finish_recovered_turn_mailbox_for_captured_state(shared, provider, &delivered, snapshot).await;
     inflight::clear_inflight_state_for_captured_episode(
         provider,
         state.channel_id,

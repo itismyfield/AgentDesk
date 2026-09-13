@@ -51,6 +51,24 @@ impl Fixture {
         );
     }
 
+    async fn settle<F, Fut>(&self, state: &inflight::InflightTurnState, relay: F) -> bool
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: std::future::Future<Output = RecoveryRelayOutcome>,
+    {
+        let owner = mailbox_snapshot(&self.shared, ChannelId::new(state.channel_id)).await;
+        let mut captured = state.clone();
+        captured.save_generation = self.load().expect("persisted fixture").save_generation;
+        settle_ready_without_output_for_actor(
+            &self.shared,
+            &ProviderKind::Claude,
+            &captured,
+            owner.cancel_token.as_ref(),
+            relay,
+        )
+        .await
+    }
+
     fn load(&self) -> Option<inflight::InflightTurnState> {
         inflight::load_inflight_state(&ProviderKind::Claude, self.state.channel_id)
     }
@@ -70,15 +88,16 @@ async fn partial_eof_delivers_only_unposted_response_and_releases_for_next_input
         );
         let mut delivered = Vec::new();
         assert!(
-            settle_ready_without_output(&fixture.shared, &ProviderKind::Claude, &state, |text| {
-                assert!(
-                    fixture.load().is_some(),
-                    "obligation survives until transport completes"
-                );
-                delivered.push(text);
-                std::future::ready(RecoveryRelayOutcome::Delivered)
-            },)
-            .await
+            fixture
+                .settle(&state, |text| {
+                    assert!(
+                        fixture.load().is_some(),
+                        "obligation survives until transport completes"
+                    );
+                    delivered.push(text);
+                    std::future::ready(RecoveryRelayOutcome::Delivered)
+                },)
+                .await
         );
         assert_eq!(
             delivered,
@@ -118,11 +137,12 @@ async fn watcher_offset_at_eof_preserves_unsent_body_on_failed_delivery_then_ret
     ] {
         let state = fixture.load().expect("retryable obligation");
         assert!(
-            settle_ready_without_output(&fixture.shared, &ProviderKind::Claude, &state, |text| {
-                attempts.push(text);
-                std::future::ready(outcome)
-            },)
-            .await
+            fixture
+                .settle(&state, |text| {
+                    attempts.push(text);
+                    std::future::ready(outcome)
+                },)
+                .await
         );
         if matches!(outcome, RecoveryRelayOutcome::TransientFailure) {
             let retained = fixture.load().expect("transient transport preserves row");
@@ -165,15 +185,11 @@ async fn committed_eof_skips_transport_but_unknown_or_restart_rows_remain_owned(
             fixture.persist();
         }
         assert_eq!(
-            settle_ready_without_output(
-                &fixture.shared,
-                &ProviderKind::Claude,
-                &fixture.state,
-                |_| async {
+            fixture
+                .settle(&fixture.state, |_| async {
                     panic!("committed, ambiguous, or separately owned rows must not POST")
-                },
-            )
-            .await,
+                },)
+                .await,
             case == 0
         );
         assert_eq!(fixture.load().is_none(), case == 0);
@@ -198,11 +214,8 @@ async fn delivered_partial_eof_cannot_finish_or_clear_successor_during_transport
     successor.current_msg_id += 10;
     successor.turn_nonce = Some("successor-after-cancel".to_string());
     assert!(
-        settle_ready_without_output(
-            &fixture.shared,
-            &ProviderKind::Claude,
-            &fixture.state,
-            |_| async {
+        fixture
+            .settle(&fixture.state, |_| async {
                 mailbox_finish_turn(&fixture.shared, &ProviderKind::Claude, channel).await;
                 inflight::save_inflight_state(&successor).expect("successor row");
                 assert!(
@@ -210,9 +223,8 @@ async fn delivered_partial_eof_cannot_finish_or_clear_successor_during_transport
                         .await
                 );
                 RecoveryRelayOutcome::Delivered
-            },
-        )
-        .await
+            },)
+            .await
     );
     let remaining = fixture
         .load()
@@ -254,11 +266,8 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
         fixture.shared.restart.current_generation,
     );
     assert!(
-        settle_ready_without_output(
-            &fixture.shared,
-            &ProviderKind::Claude,
-            &fixture.state,
-            |text| {
+        fixture
+            .settle(&fixture.state, |text| {
                 let gateway = &gateway;
                 let shared = &fixture.shared;
                 let http = &http;
@@ -276,9 +285,8 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
                     )
                     .await
                 }
-            },
-        )
-        .await
+            },)
+            .await
     );
     let replacements = gateway
         .replacements
@@ -408,4 +416,143 @@ async fn captured_partial_eof_never_commits_new_same_turn_progress_or_replacemen
                 .is_some()
         );
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn captured_partial_eof_all_outcomes_preserve_legacy_and_nonce_only_successors() {
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    for legacy in [true, false] {
+        for outcome in [
+            RecoveryRelayOutcome::Delivered,
+            RecoveryRelayOutcome::PermanentFailure,
+            RecoveryRelayOutcome::TransientFailure,
+        ] {
+            let mut fixture = Fixture::new(5_071_811);
+            fixture.state.turn_nonce = (!legacy).then(|| "captured-A".to_string());
+            fixture.claim().await;
+            let channel = ChannelId::new(fixture.state.channel_id);
+            let state = fixture.load().expect("captured A");
+            let mut successor = state.clone();
+            if legacy {
+                successor.turn_start_offset = Some(1);
+            } else {
+                successor.turn_nonce = Some("successor-B".to_string());
+            }
+            assert!(
+                fixture
+                    .settle(&state, |_| async {
+                        mailbox_finish_turn(&fixture.shared, &ProviderKind::Claude, channel).await;
+                        inflight::save_inflight_state(&successor).expect("successor");
+                        assert!(
+                            super::super::reregister_active_turn_from_inflight(
+                                &fixture.shared,
+                                &successor
+                            )
+                            .await
+                        );
+                        outcome
+                    })
+                    .await
+            );
+            let surviving = fixture.load().expect("successor survives every outcome");
+            assert_eq!(surviving.turn_nonce, successor.turn_nonce);
+            assert_eq!(surviving.turn_start_offset, successor.turn_start_offset);
+            assert_eq!(
+                surviving.recovery_relay_attempts,
+                successor.recovery_relay_attempts
+            );
+            assert!(!surviving.terminal_delivery_completed());
+            assert!(
+                mailbox_snapshot(&fixture.shared, channel)
+                    .await
+                    .cancel_token
+                    .is_some()
+            );
+            mailbox_finish_turn(&fixture.shared, &ProviderKind::Claude, channel).await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn restart_partial_eof_preserves_unproven_actor_and_retries_ownerless_failures() {
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let mut fixture = Fixture::new(5_071_812);
+    fixture.state.turn_nonce = None;
+    fixture.claim().await;
+    let state = fixture.load().expect("legacy row");
+    assert!(
+        !settle_ready_without_output(&fixture.shared, &ProviderKind::Claude, &state, |_| async {
+            panic!("existing same-ID/NoneNonce actor cannot be adopted without an Arc witness")
+        })
+        .await
+    );
+    let channel = ChannelId::new(state.channel_id);
+    mailbox_finish_turn(&fixture.shared, &ProviderKind::Claude, channel).await;
+    for outcome in [
+        RecoveryRelayOutcome::PermanentFailure,
+        RecoveryRelayOutcome::TransientFailure,
+        RecoveryRelayOutcome::Delivered,
+    ] {
+        let before = fixture.load().expect("ownerless obligation");
+        assert!(
+            settle_ready_without_output(
+                &fixture.shared,
+                &ProviderKind::Claude,
+                &before,
+                |_| async { outcome }
+            )
+            .await
+        );
+        if !matches!(outcome, RecoveryRelayOutcome::Delivered) {
+            let after = fixture.load().expect("failure preserves body");
+            assert_eq!(after.full_response, before.full_response);
+            assert_eq!(
+                after.recovery_relay_attempts,
+                before.recovery_relay_attempts + 1
+            );
+        }
+    }
+    assert!(fixture.load().is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn captured_finalizer_refuses_same_id_legacy_recovery_actor_replacement() {
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let mut fixture = Fixture::new(5_071_813);
+    fixture.state.turn_nonce = None;
+    fixture.claim().await;
+    let channel = ChannelId::new(fixture.state.channel_id);
+    let state = fixture.load().expect("A row");
+    let original = mailbox_snapshot(&fixture.shared, channel)
+        .await
+        .cancel_token
+        .expect("original actor");
+    let mut snapshot =
+        super::super::super::turn_finalizer::SyntheticClaimSnapshot::from_row(&state);
+    snapshot.recovery_actor = Some(Arc::downgrade(&original));
+    let successor = Arc::new(CancelToken::from_persisted_turn_nonce(None));
+    // RecoveryKickoff can replace the token without advancing turn_started_instant.
+    // Only the actual actor comparison can protect this same-ID legacy successor.
+    fixture
+        .shared
+        .mailbox(channel)
+        .recovery_kickoff(
+            successor.clone(),
+            UserId::new(state.request_owner_user_id),
+            Some(MessageId::new(state.effective_finalizer_turn_id())),
+        )
+        .await;
+    finish_recovered_turn_mailbox_for_captured_state(
+        &fixture.shared,
+        &ProviderKind::Claude,
+        &state,
+        snapshot,
+    )
+    .await;
+    let surviving = mailbox_snapshot(&fixture.shared, channel)
+        .await
+        .cancel_token
+        .expect("replacement survives finalizer");
+    assert!(Arc::ptr_eq(&surviving, &successor));
+    assert!(fixture.load().is_some());
 }

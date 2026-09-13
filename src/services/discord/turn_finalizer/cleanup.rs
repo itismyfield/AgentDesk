@@ -185,6 +185,9 @@ pub(super) fn should_ensure_synthetic_claim_marker(
 /// to the submitted turn, closes that guarantee hole.
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct SyntheticClaimSnapshot {
+    /// Recovery captures this before transport; compare it in the mailbox actor.
+    pub(in crate::services::discord) recovery_actor:
+        Option<std::sync::Weak<crate::services::provider::CancelToken>>,
     pub(in crate::services::discord) user_msg_id: u64,
     pub(in crate::services::discord) turn_nonce: Option<String>,
     pub(in crate::services::discord) turn_source_external: bool,
@@ -207,6 +210,7 @@ impl SyntheticClaimSnapshot {
     ) -> Self {
         use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
         Self {
+            recovery_actor: None,
             user_msg_id: row.user_msg_id,
             turn_nonce: row.turn_nonce.clone(),
             turn_source_external: row.turn_source == TurnSource::ExternalInput,
@@ -431,10 +435,11 @@ pub(super) async fn already_finalized_active_state(
     }
 
     let owned_role_override = snapshot_role_override(shared, key.channel_id);
-    let captured = match super::episode::claim_normal_episode(shared, provider, key, true).await {
-        Ok(captured) => captured,
-        Err(()) => return,
-    };
+    let captured =
+        match super::episode::claim_normal_episode(shared, provider, key, true, None).await {
+            Ok(captured) => captured,
+            Err(()) => return,
+        };
     let finish = if let Some(capture) = captured {
         capture.publish_release(shared, key);
         capture.finish

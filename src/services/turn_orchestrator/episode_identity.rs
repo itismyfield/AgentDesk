@@ -51,6 +51,7 @@ impl ChannelMailboxHandle {
     ) -> FinishTurnResult {
         self.request(
             |reply| ChannelMailboxMsg::FinishTurnIfMatches {
+                expected_actor: None,
                 expected_user_message_id,
                 active_started_before: Some(active_started_before),
                 turn_nonce_guard: TurnNonceGuard::exact(Some(expected_turn_nonce)),
@@ -78,8 +79,27 @@ impl ChannelMailboxHandle {
         active_started_before: Instant,
         persistence: QueuePersistenceContext,
     ) -> FinishTurnResult {
+        self.finish_turn_if_matches_episode_and_actor_started_before(
+            expected_user_message_id,
+            expected_turn_nonce,
+            active_started_before,
+            None,
+            persistence,
+        )
+        .await
+    }
+
+    pub(crate) async fn finish_turn_if_matches_episode_and_actor_started_before(
+        &self,
+        expected_user_message_id: MessageId,
+        expected_turn_nonce: Option<String>,
+        active_started_before: Instant,
+        expected_actor: Option<Arc<CancelToken>>,
+        persistence: QueuePersistenceContext,
+    ) -> FinishTurnResult {
         self.request(
             |reply| ChannelMailboxMsg::FinishTurnIfMatches {
+                expected_actor,
                 expected_user_message_id,
                 active_started_before: Some(active_started_before),
                 turn_nonce_guard: TurnNonceGuard::exact(expected_turn_nonce),
@@ -110,6 +130,7 @@ impl ChannelMailboxHandle {
     ) -> FinishTurnResult {
         self.request(
             |reply| ChannelMailboxMsg::FinishTurnIfMatches {
+                expected_actor: None,
                 expected_user_message_id,
                 active_started_before: None,
                 turn_nonce_guard: TurnNonceGuard::Ignore,
@@ -143,6 +164,7 @@ impl ChannelMailboxHandle {
     ) -> FinishTurnResult {
         self.request(
             |reply| ChannelMailboxMsg::FinishTurnIfMatches {
+                expected_actor: None,
                 expected_user_message_id,
                 active_started_before: Some(active_started_before),
                 turn_nonce_guard: TurnNonceGuard::Ignore,

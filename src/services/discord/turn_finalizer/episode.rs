@@ -34,6 +34,7 @@ pub(in crate::services::discord) async fn claim_normal_episode(
     provider: &ProviderKind,
     key: TurnKey,
     clear_inflight: bool,
+    expected_actor: Option<Arc<crate::services::provider::CancelToken>>,
 ) -> Result<Option<CapturedFinish>, ()> {
     if key.episode.is_none() {
         return Ok(None);
@@ -57,13 +58,14 @@ pub(in crate::services::discord) async fn claim_normal_episode(
                 && key.matches_episode_nonce(row.turn_nonce.as_deref())
         });
     let finish = if let Some(active) = observed.as_ref().filter(|s| s.cancel_token.is_some()) {
-        super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_without_completion(
+        super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
             shared,
             provider,
             key.channel_id,
             serenity::model::id::MessageId::new(key.user_msg_id),
             active.active_turn_nonce.clone(),
             observed_before,
+            expected_actor,
         )
         .await
     } else {
