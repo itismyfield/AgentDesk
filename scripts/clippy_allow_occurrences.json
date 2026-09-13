@@ -798,7 +798,7 @@
       "count": 1
     },
     {
-      "path": "src/services/provider.rs",
+      "path": "src/services/provider/output_reader.rs",
       "lint": "too_many_arguments",
       "count": 1
     },

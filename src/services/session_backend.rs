@@ -15,7 +15,6 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
@@ -23,6 +22,30 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 pub struct ReadOutputFailure {
     pub error: String,
     pub last_offset: u64,
+    /// The opened source can no longer be verified; pathname fallback is unsafe.
+    pub source_changed: bool,
+}
+
+impl ReadOutputFailure {
+    pub(crate) fn new(error: impl Into<String>, last_offset: u64, source_changed: bool) -> Self {
+        Self {
+            error: error.into(),
+            last_offset,
+            source_changed,
+        }
+    }
+
+    pub(crate) fn recover_followup(
+        self,
+        fallback: impl FnOnce(Self) -> Result<crate::services::provider::FollowupResult, String>,
+    ) -> Result<crate::services::provider::FollowupResult, String> {
+        if self.source_changed {
+            return Ok(crate::services::provider::FollowupResult::RecreateSession {
+                error: self.error,
+            });
+        }
+        fallback(self)
+    }
 }
 
 /// Configuration for creating a new session.
@@ -814,12 +837,10 @@ pub fn read_output_file_until_result_with_harvest(
         is_alive,
         is_ready_for_input,
     } = probe;
-    let last_offset = Arc::new(AtomicU64::new(start_offset));
     let offset_sender = sender.clone();
     let line_sender = sender.clone();
     let synthetic_sender = sender.clone();
     let error_sender = sender.clone();
-    let last_offset_for_emit = last_offset.clone();
 
     let result = crate::services::provider::poll_output_file_until_result(
         output_path,
@@ -829,7 +850,6 @@ pub fn read_output_file_until_result_with_harvest(
         move || is_alive(),
         move || is_ready_for_input(),
         move |offset| {
-            last_offset_for_emit.store(offset, Ordering::Relaxed);
             let _ = offset_sender.send(StreamMessage::OutputOffset { offset });
         },
         move |line, state| process_stream_line(line, &line_sender, state),
@@ -858,13 +878,7 @@ pub fn read_output_file_until_result_with_harvest(
         forwarded_messages: state.forwarded_message_count,
         assistant_text_bytes: state.forwarded_assistant_text_bytes,
     };
-    match result {
-        Ok(result) => Ok((result, stats)),
-        Err(error) => Err(ReadOutputFailure {
-            error,
-            last_offset: last_offset.load(Ordering::Relaxed),
-        }),
-    }
+    result.map(|result| (result, stats))
 }
 
 #[cfg(test)]
@@ -873,9 +887,115 @@ mod stream_tail_guard_tests {
     use crate::services::agent_protocol::StreamMessage;
     use crate::services::provider::{ReadOutputResult, SessionProbe};
     use std::io::Write;
+    use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+
+    #[cfg(unix)]
+    #[test]
+    fn larger_path_rotation_returns_recoverable_failure_without_foreign_terminal() {
+        for alive in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let output_path = dir.path().join("stream.jsonl");
+            let complete = concat!(
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"original"}]}}"#,
+                "\n",
+            );
+            std::fs::write(&output_path, format!("{complete}{{\"type\":")).unwrap();
+            let cancel = Arc::new(crate::services::provider::CancelToken::new());
+            let reader_cancel = cancel.clone();
+            let (sender, receiver) = mpsc::channel();
+            let (finished_sender, finished) = mpsc::channel();
+            let reader_path = output_path.to_string_lossy().into_owned();
+            let reader = thread::spawn(move || {
+                let result = read_output_file_until_result_tracked(
+                    &reader_path,
+                    0,
+                    sender,
+                    Some(reader_cancel),
+                    SessionProbe::new(move || alive, || true),
+                );
+                finished_sender.send(result).unwrap();
+            });
+            // An emitted offset proves the actual reader has opened and read the old FD.
+            let first = receiver.recv_timeout(Duration::from_secs(3));
+            if first.is_ok() {
+                std::fs::rename(&output_path, output_path.with_extension("captured")).unwrap();
+                std::fs::write(
+                    &output_path,
+                    format!(
+                        "{}\n{}\n{}",
+                        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"foreign"}]}}"#,
+                        r#"{"type":"result","subtype":"success","result":"foreign terminal"}"#,
+                        " ".repeat(1024),
+                    ),
+                )
+                .unwrap();
+            }
+            let result = finished.recv_timeout(Duration::from_secs(3));
+            // A regressed reader must fail this test without leaking a polling thread.
+            cancel.cancelled.store(true, Ordering::Relaxed);
+            reader.join().unwrap();
+            assert!(
+                matches!(first, Ok(StreamMessage::OutputOffset { offset }) if offset == complete.len() as u64)
+            );
+            let failure = result
+                .expect("rotation must return without cancellation")
+                .unwrap_err();
+            assert!(failure.error.contains("rotated"), "{failure:?}");
+            assert!(failure.source_changed);
+            let recreation = failure
+                .clone()
+                .recover_followup(|_| {
+                    panic!("source rotation must bypass the Codex/Qwen fallback closure")
+                })
+                .unwrap();
+            assert!(matches!(
+                recreation,
+                crate::services::provider::FollowupResult::RecreateSession { .. }
+            ));
+            assert_eq!(failure.last_offset, complete.len() as u64);
+            let messages: Vec<_> = receiver.try_iter().collect();
+            assert!(messages.iter().any(|message| matches!(message, StreamMessage::Text { content } if content == "original")));
+            assert!(!messages.iter().any(|message| matches!(
+                message,
+                StreamMessage::Done { .. } | StreamMessage::Error { .. }
+            )));
+            assert!(!messages.iter().any(|message| matches!(message, StreamMessage::Text { content } if content.contains("foreign"))));
+        }
+    }
+
+    #[test]
+    fn ordinary_read_failure_preserves_followup_watcher_fallback() {
+        use crate::services::provider::{FollowupResult, tmux_followup_fallback_after_read_error};
+        for (file_len, ready, expected_done) in
+            [(64, true, true), (128, true, false), (64, false, false)]
+        {
+            let failure = ReadOutputFailure::new("Failed to open output file", 64, false);
+            let mut fallback_called = false;
+            let result = failure
+                .recover_followup(|failure| {
+                    fallback_called = true;
+                    let fallback = tmux_followup_fallback_after_read_error(
+                        0,
+                        failure.last_offset,
+                        Some(file_len),
+                        true,
+                        ready,
+                        true,
+                        true,
+                    )
+                    .expect("ordinary I/O failure retains the live-session fallback");
+                    assert_eq!(fallback.last_offset, 64);
+                    assert_eq!(fallback.emit_synthetic_done, expected_done);
+                    Ok(FollowupResult::Delivered)
+                })
+                .unwrap();
+            assert!(fallback_called);
+            assert_eq!(result, FollowupResult::Delivered);
+        }
+    }
 
     #[test]
     fn read_output_file_until_result_buffers_split_jsonl_line() {
