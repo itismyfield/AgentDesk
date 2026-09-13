@@ -346,7 +346,7 @@ fn synthetic_bridge_handoff_fixture(
                     }
                     let offset = result.expect("empty terminal guidance is delivered").unwrap();
                     assert_eq!(offset, std::fs::metadata(&output).unwrap().len());
-                    assert!(gateway.bodies.lock().unwrap().iter().any(|sent| !sent.trim().is_empty()),
+                    assert!(gateway.bodies.lock().unwrap().iter().any(|sent| sent.contains("응답 내용 없이 턴을 종료")),
                         "empty terminal must publish recovery guidance, never a zero-byte success");
                     let record = crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get()).unwrap();
                     assert!(record.confirmed_deliveries.iter().any(|receipt| {

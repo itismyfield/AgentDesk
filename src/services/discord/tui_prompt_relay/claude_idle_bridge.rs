@@ -89,10 +89,8 @@ pub(super) fn idle_stream_message_is_content(message: &StreamMessage) -> bool {
     match message {
         // #3256: a `Text`/`Done` body that is ONLY leading TUI chrome (e.g.
         // `No response requested.` / `Continue from where you left off.`) is NOT
-        // real content — the old path stripped that chrome with
-        // `strip_leading_tui_response_chrome` and produced an empty response, i.e.
-        // the no-card empty path. Strip BEFORE the emptiness test so a chrome-only
-        // turn keeps spawning no placeholder card (parity with prior behavior).
+        // real content. Strip before classifying prose; an empty Done remains
+        // a separate terminal boundary requiring admitted recovery guidance.
         StreamMessage::Text { content } => {
             !super::super::response_sanitizer::strip_leading_tui_response_chrome(content)
                 .trim()
