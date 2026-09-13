@@ -3162,7 +3162,16 @@ fn s3t2_delivery_failure_never_cancels_successor_or_commits_cursor() {
             .next()
             .unwrap();
         assert!(!branch.contains("finish_tui_direct_synthetic_turn_if_current"));
-        assert!(source.contains("tui_idle_tail_stream_should_commit_runtime_binding_offset("));
+        assert!(!branch.contains("advance_"));
+        let commit = if source.contains("advance_claude_tmux_runtime_binding_offset(") {
+            "if let Ok(Some(final_offset)) = delivery_result {"
+        } else {
+            "tui_idle_tail_stream_should_commit_runtime_binding_offset("
+        };
+        assert!(
+            source.contains(commit),
+            "cursor commit must remain delivery-gated"
+        );
     }
     s3_completion_fixture(true, Some(false), Some(880003), Some(880005));
 }
@@ -3193,7 +3202,7 @@ fn s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion() {
     let source = include_str!("claude_idle_bridge.rs");
     assert_eq!(
         source
-            .matches("    finish_idle_bridge_completion(\n        completion,")
+            .matches("    let result = finish_idle_bridge_completion(\n        completion,")
             .count(),
         2
     );
@@ -3838,7 +3847,7 @@ fn s5833_s1t1_external_turn_id_is_observation_derived_not_call_site_derived() {
 /// Real claim admission + existing-row CAS, never the create-only builder.
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
-async fn s5833_r2_synthetic_refresh_replaces_stale_durable_key() {
+async fn s5833_r2_synthetic_refresh_preserves_existing_episode_key() {
     use super::super::inflight;
     let root = tempfile::tempdir().expect("isolated inflight root");
     let _env = crate::config::set_agentdesk_root_for_test(root.path());
@@ -3861,7 +3870,37 @@ async fn s5833_r2_synthetic_refresh_replaces_stale_durable_key() {
     // Marker proves that refresh preserved the old row rather than recreating it.
     stale.any_tool_used = true;
     inflight::save_inflight_state(&stale).unwrap();
+    let stale = inflight::load_inflight_state(&ProviderKind::Claude, channel.get()).unwrap();
     let lease = s1_lease_5833(Some("current-turn"));
+    let claim = synthetic_start::claim_tui_direct_synthetic_turn(
+        &shared,
+        &ProviderKind::Claude,
+        channel,
+        tmux,
+        "prompt",
+        anchor,
+        &lease,
+    )
+    .await;
+    assert!(
+        !claim.claimed,
+        "a different external turn cannot appropriate the old source"
+    );
+    let preserved = inflight::load_inflight_state(&ProviderKind::Claude, channel.get()).unwrap();
+    assert_eq!(preserved.external_turn_id, stale.external_turn_id);
+    assert_eq!(preserved.turn_nonce, stale.turn_nonce);
+    assert_eq!(preserved.save_generation, stale.save_generation);
+    assert!(preserved.any_tool_used);
+    assert!(
+        super::super::mailbox_snapshot(&shared, channel)
+            .await
+            .cancel_token
+            .is_none()
+    );
+
+    // Refresh remains available to the original episode, including its marker
+    // and source progress. Refusing the changed lease must not strand this row.
+    let lease = s1_lease_5833(Some("stale-turn"));
     let claim = synthetic_start::claim_tui_direct_synthetic_turn(
         &shared,
         &ProviderKind::Claude,
@@ -3878,6 +3917,8 @@ async fn s5833_r2_synthetic_refresh_replaces_stale_durable_key() {
     assert_eq!(durable.session_key, lease.session_key);
     assert_eq!(durable.runtime_kind, lease.runtime_kind);
     assert!(durable.any_tool_used);
+    assert_eq!(durable.turn_start_offset, stale.turn_start_offset);
+    assert_eq!(durable.last_offset, stale.last_offset);
 }
 
 /// Exercise the shared repair operation and guarded durable save; pin its exact

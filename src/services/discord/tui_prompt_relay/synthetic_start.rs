@@ -551,7 +551,6 @@ mod tests {
         let tmux = "AgentDesk-codex-4018-aged";
         let stale_id = MessageId::new(4_018_301);
         let next_id = MessageId::new(4_018_401);
-        let stale_token = seed_synthetic_mailbox_owner(&shared, channel_id, stale_id).await;
         let record = crate::services::discord::tui_direct_pending_start::TuiDirectPendingStart {
             provider: provider.as_str().into(),
             channel_id: channel_id.get(),
@@ -560,7 +559,7 @@ mod tests {
             anchor_message_id: stale_id.get(),
             lease_relay_owner: ExternalInputRelayOwner::BridgeAdapter.as_str().into(),
             lease_runtime_kind: None,
-            lease_turn_id: None,
+            lease_turn_id: Some("external:codex:4018-aged".into()),
             lease_session_key: None,
             generation: shared.restart.current_generation,
             created_at_ms: 0,
@@ -569,7 +568,13 @@ mod tests {
             attempt_count: 0,
             captured_source: None,
         };
+        // Admit the original allocation through the real deferred claim path;
+        // an unrelated preseeded mailbox token cannot be adopted by the bridge.
         assert!(pending_start_claim_fn()(&shared, &record).await);
+        let stale_token = crate::services::discord::mailbox_snapshot(&shared, channel_id)
+            .await
+            .cancel_token
+            .expect("deferred claim owns the mailbox");
         let row = inflight::load_inflight_state(&provider, channel_id.get()).unwrap();
         assert_eq!(row.turn_nonce.as_deref(), stale_token.turn_nonce());
         assert_eq!(
@@ -807,14 +812,24 @@ mod tests {
         let channel_id = ChannelId::new(4_019_230);
         let tmux = "AgentDesk-claude-4019-adopt";
         let anchor_id = MessageId::new(4_019_330);
-        let token = seed_synthetic_mailbox_owner(&shared, channel_id, anchor_id).await;
-        shared.restart.global_active.store(0, Ordering::Relaxed);
-        let mut state = synthetic_state(channel_id, anchor_id, tmux, false);
-        state.turn_nonce = Some("stale-row-episode".to_string());
-        inflight::save_inflight_state(&state).expect("save adopted synthetic inflight");
-
         let mut lease = ExternalInputRelayLease::unassigned(Some(channel_id.get()));
         lease.session_key = Some("session-4019-adopt".to_string());
+        lease.turn_id = Some("external:claude:4019-adopt".to_string());
+        // The first admission records the exact actor/episode witness that a
+        // subsequent claim must reuse; matching message IDs alone are insufficient.
+        assert!(
+            claim_tui_direct_synthetic_turn(
+                &shared, &provider, channel_id, tmux, "continue", anchor_id, &lease,
+            )
+            .await
+            .claimed
+        );
+        let token = crate::services::discord::mailbox_snapshot(&shared, channel_id)
+            .await
+            .cancel_token
+            .expect("original admitted actor");
+        let original = inflight::load_inflight_state(&provider, channel_id.get()).unwrap();
+        shared.restart.global_active.store(0, Ordering::Relaxed);
         let claim = claim_tui_direct_synthetic_turn(
             &shared, &provider, channel_id, tmux, "continue", anchor_id, &lease,
         )
@@ -832,9 +847,50 @@ mod tests {
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
         assert_eq!(snapshot.active_user_message_id, Some(anchor_id));
         assert_eq!(snapshot.active_turn_nonce.as_deref(), token.turn_nonce());
+        assert!(Arc::ptr_eq(snapshot.cancel_token.as_ref().unwrap(), &token));
         let persisted = inflight::load_inflight_state(&provider, channel_id.get())
             .expect("adopted synthetic inflight must persist");
         assert_eq!(persisted.turn_nonce.as_deref(), token.turn_nonce());
+        assert_eq!(persisted.external_turn_id, original.external_turn_id);
+        assert_eq!(persisted.turn_start_offset, original.turn_start_offset);
+        assert_eq!(persisted.last_offset, original.last_offset);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn claim_rejects_existing_mailbox_without_original_actor_witness() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let _env = crate::config::set_agentdesk_root_for_test(root.path());
+        let provider = ProviderKind::Claude;
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let channel_id = ChannelId::new(5_071_923);
+        let tmux = "AgentDesk-5071-foreign-adoption";
+        let anchor_id = MessageId::new(5_071_924);
+        let token = seed_synthetic_mailbox_owner(&shared, channel_id, anchor_id).await;
+        let mut state = synthetic_state(channel_id, anchor_id, tmux, false);
+        state.turn_nonce = Some("stale-row-episode".to_string());
+        inflight::save_inflight_state(&state).expect("save foreign synthetic inflight");
+        let original = inflight::load_inflight_state(&provider, channel_id.get()).unwrap();
+        let mut lease = ExternalInputRelayLease::unassigned(Some(channel_id.get()));
+        lease.session_key = Some("session-4019-adopt".to_string());
+
+        let claim = claim_tui_direct_synthetic_turn(
+            &shared, &provider, channel_id, tmux, "continue", anchor_id, &lease,
+        )
+        .await;
+
+        assert!(
+            !claim.claimed,
+            "same message ID is not original actor authority"
+        );
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        assert!(!token.cancelled.load(Ordering::Relaxed));
+        let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
+        assert!(Arc::ptr_eq(snapshot.cancel_token.as_ref().unwrap(), &token));
+        let persisted = inflight::load_inflight_state(&provider, channel_id.get()).unwrap();
+        assert_eq!(
+            serde_json::to_value(persisted).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
     }
 
     #[cfg(unix)]

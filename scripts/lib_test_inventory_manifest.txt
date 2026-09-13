@@ -6169,6 +6169,7 @@ services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::pending_st
 services::discord::tui_prompt_relay::synthetic_start::tests::admitted_source_witness_advances_only_the_original_allocation
 services::discord::tui_prompt_relay::synthetic_start::tests::aged_rowless_synthetic_owner_reclaims_and_finalizes_ledger
 services::discord::tui_prompt_relay::synthetic_start::tests::claim_adopting_existing_mailbox_does_not_increment_global_active
+services::discord::tui_prompt_relay::synthetic_start::tests::claim_rejects_existing_mailbox_without_original_actor_witness
 services::discord::tui_prompt_relay::synthetic_start::tests::finalized_reclaim_of_readopted_real_owner_does_not_suppress_completion_footer
 services::discord::tui_prompt_relay::synthetic_start::tests::monitor_auto_turn_slot_is_not_reclaimed_even_when_aged
 services::discord::tui_prompt_relay::synthetic_start::tests::path_b_absent_row_in_ledger_aged_reclaims_and_evicts
@@ -6302,7 +6303,7 @@ services::discord::tui_prompt_relay::tests::s3t3_abort_deletes_only_owned_unrefe
 services::discord::tui_prompt_relay::tests::s3t4_finalized_accepts_successor_and_missing_row
 services::discord::tui_prompt_relay::tests::s3t5_codex_abort_and_recv_error_use_shared_fail_closed_completion
 services::discord::tui_prompt_relay::tests::s5833_r2_codex_repair_replaces_stale_durable_key
-services::discord::tui_prompt_relay::tests::s5833_r2_synthetic_refresh_replaces_stale_durable_key
+services::discord::tui_prompt_relay::tests::s5833_r2_synthetic_refresh_preserves_existing_episode_key
 services::discord::tui_prompt_relay::tests::s5833_s1t1_external_turn_id_is_observation_derived_not_call_site_derived
 services::discord::tui_prompt_relay::tests::s5833_s1t1_synthetic_owns_durable_key_bridge_entry_is_read_only
 services::discord::tui_prompt_relay::tests::s5833_s1t2_legacy_rows_without_external_turn_id_still_deserialize
