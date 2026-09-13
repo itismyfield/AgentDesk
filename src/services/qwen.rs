@@ -690,13 +690,10 @@ fn qwen_read_output_file_until_result_tracked(
         |_| {},
     );
 
-    match result {
-        Ok(result) => Ok(result),
-        Err(error) => Err(ReadOutputFailure {
-            error,
-            last_offset: last_offset.load(Ordering::Relaxed),
-        }),
-    }
+    result.map_err(|error| ReadOutputFailure {
+        error,
+        last_offset: last_offset.load(Ordering::Relaxed),
+    })
 }
 
 pub(crate) fn observe_qwen_user_prompt_line(

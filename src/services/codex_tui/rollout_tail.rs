@@ -8,7 +8,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::{CancelToken, ReadOutputResult, cancel_requested};
-use parser::{RolloutParseState, process_rollout_line_bytes};
+pub(crate) use parser::recover_captured_rollout_response;
+use parser::{
+    RolloutParseState, process_rollout_line_bytes, task_complete_fallback_supersedes_final_text,
+};
 // REQ-006: share the single rollout discovery primitive so `session.rs` and
 // `rollout_tail.rs` do not maintain two divergent directory walkers. Tailing
 // semantics are unchanged — callers here still apply their own cwd/session/mtime
@@ -1419,12 +1422,6 @@ fn promote_task_complete_fallback_text(state: &mut RolloutParseState) {
     }
 }
 
-fn task_complete_fallback_supersedes_final_text(final_text: &str, fallback_text: &str) -> bool {
-    let streamed = final_text.trim();
-    let fallback = fallback_text.trim();
-    !streamed.is_empty() && fallback.len() > streamed.len() && fallback.ends_with(streamed)
-}
-
 // The fallback counts as already mirrored only when it IS the final text or
 // sits at the end after a message boundary — a mid-sentence substring match
 // (e.g. commentary quoting the terminal verdict) must still append. The
@@ -1525,18 +1522,6 @@ fn emit_done(
             session_id: state.session_id.clone(),
         });
     }
-}
-
-/// Detached terminal recovery uses the native parser and its existing fallback
-/// text policy. Missing completion/text remains unknown, just as the live
-/// explicit-completion schema-drift guard requires.
-pub(crate) fn recover_captured_rollout_response(bytes: &[u8]) -> Result<String, String> {
-    let mut state = parser::replay_captured_lines(bytes)?;
-    promote_task_complete_fallback_text(&mut state);
-    if state.has_pending_tool_call() || !state.turn_complete_seen || !state.saw_assistant_text {
-        return Err("captured Codex range has no completed assistant response".into());
-    }
-    Ok(state.final_text)
 }
 
 #[cfg(test)]

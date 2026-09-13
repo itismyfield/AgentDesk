@@ -2,6 +2,21 @@ use super::{ChannelId, DeliveryLeaseKey};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+impl super::SharedData {
+    /// #3041 P1-1: the LIVE per-channel delivery-lease cell, created on first
+    /// access alongside the relay coord. The watcher acquires/commits through
+    /// this to make terminal delivery + offset advance a single-holder unit
+    /// (§5.2). The returned `Arc` is shared across all watcher instances for the
+    /// channel so a replacement watcher sees the live holder and skips the
+    /// duplicate send (B2).
+    pub(in crate::services::discord) fn delivery_lease(
+        &self,
+        channel_id: ChannelId,
+    ) -> Arc<DeliveryLeaseCell> {
+        self.tmux_relay_coord(channel_id).delivery_lease.clone()
+    }
+}
+
 #[cfg(test)]
 mod exact_lease;
 #[cfg(unix)]
