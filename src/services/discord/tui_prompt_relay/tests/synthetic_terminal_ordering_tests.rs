@@ -26,8 +26,8 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, 
             let body = if empty_terminal { String::new() } else {
                 "synthetic terminal publication keeps its original actor ".repeat(12)
             };
-            let assistant = serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text", "text":body}]}});
-            let terminal = serde_json::json!({"type":"result", "subtype":"success", "result":body});
+            let assistant = serde_json::json!({"type":"assistant", "sessionId":"native-ordering-session", "message":{"content":[{"type":"text", "text":body}]}});
+            let terminal = serde_json::json!({"type":"result", "session_id":"native-ordering-session", "subtype":"success", "result":body});
             std::fs::write(&output, format!("{assistant}\n{terminal}\n")).unwrap();
             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(tmux,
                 crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
@@ -76,6 +76,10 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, 
                 let row = crate::services::discord::inflight::load_inflight_state_read_only(
                     &provider, channel.get()).expect("terminal transport retains its delivery obligation");
                 assert_eq!(row.turn_nonce, original_row.turn_nonce);
+                assert_eq!(row.session_id.as_deref(), Some("native-ordering-session"));
+                assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux)
+                    .unwrap().session_id.as_deref(), Some("native-ordering-session"),
+                    "the actual source witness connects the original missing session before publication");
                 let replacement = if replace_actor {
                     let actor = Arc::new(CancelToken::from_persisted_turn_nonce(
                         original_actor.turn_nonce().map(str::to_owned)));

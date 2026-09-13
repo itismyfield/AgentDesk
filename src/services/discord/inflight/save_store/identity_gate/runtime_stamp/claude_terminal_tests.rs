@@ -207,6 +207,8 @@ fn claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_withou
                 "beyond-eof",
                 "foreign-actor",
                 "successor",
+                "known-session-conflict",
+                "unobserved-binding-session",
             ]
             .into_iter()
             .enumerate()
@@ -220,9 +222,13 @@ fn claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_withou
                     source_start,
                     complete_record_end,
                     actor,
+                    session_id,
                     ..
                 } = &mut frame
                 {
+                    if defect != "unobserved-binding-session" {
+                        *session_id = Some("observed-native-session".into());
+                    }
                     match defect {
                         "different-fd" => *source_file_ino = source_file_ino.wrapping_add(1),
                         "rotated-file" => {
@@ -238,6 +244,15 @@ fn claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_withou
                         "empty-range" => *complete_record_end = *source_start,
                         "reversed-range" => *source_start = *complete_record_end + 1,
                         "beyond-eof" => *complete_record_end += 1,
+                        "known-session-conflict" | "unobserved-binding-session" => {
+                            let mut binding =
+                                dedupe::runtime_binding_for_tmux_session(&fixture.tmux).unwrap();
+                            binding.session_id = Some("bound-original-session".into());
+                            dedupe::register_tmux_runtime_binding(&fixture.tmux, binding);
+                            if defect == "known-session-conflict" {
+                                *session_id = Some("different-source-session".into());
+                            }
+                        }
                         "foreign-actor" | "successor" => {
                             let successor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
                                 "same-nonce".into(),
@@ -261,12 +276,23 @@ fn claude_terminal_range_rejects_unproven_source_and_same_nonce_successor_withou
                 }
                 let before = fixture.durable();
                 let local_before = serde_json::to_value(&fixture.local).unwrap();
+                let binding_session_before =
+                    dedupe::runtime_binding_for_tmux_session(&fixture.tmux)
+                        .unwrap()
+                        .session_id;
                 assert!(
                     fixture.admit(frame).await.is_err(),
                     "{defect} must preserve the obligation"
                 );
                 assert_eq!(fixture.durable(), before, "{defect} cannot write the row");
                 assert_eq!(serde_json::to_value(&fixture.local).unwrap(), local_before);
+                assert_eq!(
+                    dedupe::runtime_binding_for_tmux_session(&fixture.tmux)
+                        .unwrap()
+                        .session_id,
+                    binding_session_before,
+                    "{defect} cannot upgrade the binding"
+                );
                 if defect == "successor" {
                     let current = crate::services::discord::mailbox_snapshot(
                         &fixture.shared,

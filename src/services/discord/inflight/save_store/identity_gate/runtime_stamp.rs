@@ -190,6 +190,7 @@ fn persist_terminal_range(
     .ok_or(GuardedSaveOutcome::IdentityMismatch)?;
     baseline.clone_from(&persisted);
     local.output_path.clone_from(&persisted.output_path);
+    local.session_id.clone_from(&persisted.session_id);
     local.last_offset = persisted.last_offset;
     local.save_generation = persisted.save_generation;
     Ok(TuiTerminalRange {
@@ -1172,80 +1173,95 @@ impl InflightTurnState {
             return Err(mismatch);
         }
         let root = inflight_runtime_root().ok_or(mismatch)?;
-        let (canonical, file_len) = canonical_regular_file(&transcript_path).ok_or(mismatch)?;
-        let session = session_id
-            .clone()
-            .or(self.session_id.clone())
-            .unwrap_or_default();
-        let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
-            &tmux_session_name,
-        )
-        .ok_or(mismatch)?;
-        if !can_chain_locally
-            || self.provider_kind() != Some(ProviderKind::Claude)
-            || self.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
-            || self.turn_start_offset != Some(source_start)
-            || source_start >= complete_record_end
-            || result.trim().is_empty()
-            || file_len < complete_record_end
-            || generation_mtime_ns <= 0
-            || tmux_generation_file_mtime_ns(&tmux_session_name) != generation_mtime_ns
-            || file_identity(&canonical) != Some((source_file_dev, source_file_ino))
-            || !claude_binding_matches(
-                &binding,
-                &canonical,
-                &session,
-                (source_start, complete_record_end),
-                false,
-            )
-        {
-            return Err(mismatch);
-        }
         let path = inflight_state_path(&root, &ProviderKind::Claude, self.channel_id);
         let _lock = lock_inflight_state_path(&path).map_err(|_| GuardedSaveOutcome::IoError)?;
-        let fresh = read_inflight_state_for_guarded_write(
+        let mut fresh = read_inflight_state_for_guarded_write(
             &path,
             &ProviderKind::Claude,
             self.channel_id,
             expected,
             "turn_bridge::claude_terminal_range",
         )?;
-        if fresh.turn_nonce.as_deref() != Some(turn_nonce.as_str())
-            || fresh.tmux_session_name.as_deref() != Some(tmux_session_name.as_str())
-            || fresh.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
-            || fresh.turn_start_offset != Some(source_start)
-            || fresh.last_offset > complete_record_end
-            || fresh.restart_mode.is_some()
-            || fresh.rebind_origin
-            || fresh.terminal_delivery_committed
-            || !StreamRelayAuthority::from_state(&fresh).bridge_owns_relay()
-            || fresh
-                .output_path
-                .as_deref()
-                .and_then(|path| std::fs::canonicalize(path).ok())
-                .as_deref()
-                != Some(canonical.as_path())
-            || nonempty(fresh.session_id.as_deref()) != nonempty(Some(&session))
-        {
-            return Err(mismatch);
-        }
-        let range = persist_terminal_range(
-            &root,
-            &path,
-            (self, baseline),
-            fresh,
-            (&result, canonical, &session),
-            (
-                (source_start, complete_record_end),
-                generation_mtime_ns,
-                Some((source_file_dev, source_file_ino)),
-            ),
-        )?;
-        Ok((
-            StreamMessage::Done { result, session_id },
-            Some(range),
-            true,
-        ))
+        crate::services::tmux_common::with_tmux_source_authority(&tmux_session_name, |authority| {
+            let (canonical, file_len) = canonical_regular_file(&transcript_path).ok_or(mismatch)?;
+            let mut binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
+            .ok_or(mismatch)?;
+            let session = nonempty(session_id.as_deref())
+                .or(nonempty(self.session_id.as_deref()))
+                .unwrap_or_default()
+                .to_owned();
+            // Fresh native TUI rows and bindings omit session ID. Only this decoded
+            // FD/generation/original-actor witness can fill that missing value;
+            // conflicting known sessions remain a hard mismatch.
+            if [
+                self.session_id.as_deref(),
+                fresh.session_id.as_deref(),
+                binding.session_id.as_deref(),
+            ]
+            .into_iter()
+            .filter_map(nonempty)
+            .any(|known| known != session)
+            {
+                return Err(mismatch);
+            }
+            binding.session_id = nonempty(Some(&session)).map(str::to_owned);
+            if !can_chain_locally
+                || self.provider_kind() != Some(ProviderKind::Claude)
+                || self.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+                || self.turn_start_offset != Some(source_start)
+                || source_start >= complete_record_end
+                || file_len < complete_record_end
+                || generation_mtime_ns <= 0
+                || tmux_generation_file_mtime_ns(&tmux_session_name) != generation_mtime_ns
+                || file_identity(&canonical) != Some((source_file_dev, source_file_ino))
+                || !claude_binding_matches(
+                    &binding,
+                    &canonical,
+                    &session,
+                    (source_start, complete_record_end),
+                    false,
+                )
+            {
+                return Err(mismatch);
+            }
+            if fresh.turn_nonce.as_deref() != Some(turn_nonce.as_str())
+                || fresh.tmux_session_name.as_deref() != Some(tmux_session_name.as_str())
+                || fresh.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+                || fresh.turn_start_offset != Some(source_start)
+                || fresh.last_offset > complete_record_end
+                || fresh.restart_mode.is_some()
+                || fresh.rebind_origin
+                || fresh.terminal_delivery_committed
+                || !StreamRelayAuthority::from_state(&fresh).bridge_owns_relay()
+                || fresh
+                    .output_path
+                    .as_deref()
+                    .and_then(|path| std::fs::canonicalize(path).ok())
+                    .as_deref()
+                    != Some(canonical.as_path())
+            {
+                return Err(mismatch);
+            }
+            fresh.session_id.clone_from(&binding.session_id);
+            let range = persist_terminal_range(
+                &root,
+                &path,
+                (self, baseline),
+                fresh,
+                (&result, canonical, &session),
+                (
+                    (source_start, complete_record_end),
+                    generation_mtime_ns,
+                    Some((source_file_dev, source_file_ino)),
+                ),
+            )?;
+            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding_under_source_authority(authority, binding);
+            Ok((
+                StreamMessage::Done { result, session_id },
+                Some(range),
+                true,
+            ))
+        })
     }
 }
 
