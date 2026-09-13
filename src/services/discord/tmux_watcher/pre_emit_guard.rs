@@ -17,6 +17,8 @@ pub(super) struct PreEmitGuardContext<'a> {
     pub(super) output_path: &'a String,
     pub(super) paused: &'a Arc<AtomicBool>,
     pub(super) pause_epoch: &'a Arc<AtomicU64>,
+    pub(super) captured_turn: Option<&'a InflightTurnState>,
+    pub(super) cancel: &'a Arc<AtomicBool>,
     pub(super) turn_delivered: &'a Arc<AtomicBool>,
 }
 
@@ -137,7 +139,12 @@ pub(super) async fn run_pre_emit_guard(
         return PreEmitGuardOutcome::ContinueWatcherLoop;
     }
 
-    if watcher_should_yield_to_active_bridge_turn(
+    if !session_bound_terminal_ack_can_reconcile(
+        context,
+        state,
+        turn_data_start_offset,
+        current_offset,
+    ) && watcher_should_yield_to_active_bridge_turn(
         watcher_provider,
         channel_id,
         tmux_session_name,
@@ -394,4 +401,55 @@ pub(super) async fn run_pre_emit_guard(
     }
 
     PreEmitGuardOutcome::Proceed
+}
+
+// Admission to the existing terminal ACK/retry plan, never permission to publish.
+fn session_bound_terminal_ack_can_reconcile(
+    ctx: &PreEmitGuardContext<'_>,
+    state: &PreEmitGuardState<'_>,
+    start: u64,
+    end: u64,
+) -> bool {
+    use crate::services::discord::inflight::{InflightTurnIdentity, RelayOwnerKind, TurnSource};
+    let Some(bound) = ctx.captured_turn else {
+        return false;
+    };
+    if ctx.watcher_provider != &ProviderKind::Codex
+        || bound.runtime_kind != Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
+        || bound.restart_mode != Some(crate::services::discord::InflightRestartMode::DrainRestart)
+        || bound.readopted_from_inflight
+        || bound.relay_ownership_only
+        || bound.watcher_owns_live_relay
+        || bound.turn_source != TurnSource::ExternalInput
+        || bound.rebind_origin
+        || bound.turn_nonce.is_none()
+        || bound.turn_start_offset != Some(start)
+        || start >= end
+        || !*state.all_data_fully_mirrored_to_session_relay
+        || !state
+            .all_data_session_bound_relay_ack
+            .as_ref()
+            .is_some_and(|ack| ack.turn_start_offset == Some(start))
+    {
+        return false;
+    }
+    let Some(current) = crate::services::discord::inflight::load_inflight_state(
+        ctx.watcher_provider,
+        ctx.channel_id.get(),
+    ) else {
+        return false;
+    };
+    if !InflightTurnIdentity::from_state(bound).matches_state(&current)
+        || current.turn_nonce != bound.turn_nonce
+        || current.output_path != bound.output_path
+        || current.effective_relay_owner_kind() != RelayOwnerKind::SessionBoundRelay
+    {
+        return false;
+    }
+    crate::services::discord::tmux_watcher_registry::WatcherClaimIncarnation::capture_for_source(
+        &ctx.shared.tmux_watchers,
+        ctx.tmux_session_name,
+        std::path::Path::new(ctx.output_path),
+    )
+    .is_some_and(|claim| Arc::ptr_eq(&claim.cancel, ctx.cancel))
 }

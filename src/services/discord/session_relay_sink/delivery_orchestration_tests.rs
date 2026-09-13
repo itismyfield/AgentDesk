@@ -706,3 +706,9 @@ impl crate::services::discord::gateway::TurnGateway for RelayContractFakeGateway
         None
     }
 }
+
+impl SessionBoundDiscordRelaySink {
+    pub(in crate::services::discord) fn enable_delivery_for_test(&self) {
+        SESSION_BOUND_DISCORD_DELIVERY_ENABLED.store(true, Ordering::Release);
+    }
+}

@@ -666,6 +666,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
         let pre_emit_guard_outcome = {
             let pre_emit_guard_context = PreEmitGuardContext {
+                captured_turn: startup_inflight_snapshot.as_ref(), cancel: &cancel,
                 http: &http,
                 shared: &shared,
                 channel_id,
@@ -1098,47 +1099,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 last_observed_generation_mtime_ns =
                     Some(read_generation_file_mtime_ns(&tmux_session_name));
             }
-            // #4158: a LIVE `placeholder_msg_id` here is NOT necessarily the message
-            // that holds the delivered body. When inflight vanished mid-turn the
-            // streaming loop POSTed a FRESH placeholder while the sink delivered the
-            // real answer through a DIFFERENT message and advanced the offset
-            // authority — that fresh placeholder is stale residue and, unless
-            // reconciled, is orphaned (never edited/deleted/finalized). Route it
-            // through the same guarded-cleanup helper the no-response arm uses: it
-            // PRESERVES the placeholder when the delivered anchor IS this message
-            // (#3593 sink-delivered-body case → `Protected`) and DELETES it only when
-            // the delivered anchor is a DIFFERENT message covering the same committed
-            // coordinate space (#4158 residue → `Found`); a body-bearing placeholder
-            // with no positive delivered-elsewhere proof is preserved fail-safe.
-            if let Some(msg_id) = placeholder_msg_id {
-                let outcome = delete_terminal_placeholder_unless_delivered(
-                    &http,
-                    channel_id,
-                    &shared,
-                    &watcher_provider,
-                    &tmux_session_name,
-                    msg_id,
-                    inflight_before_relay.as_ref(),
-                    Some((
-                        turn_data_start_offset,
-                        terminal_event_consumed_offset(current_offset, &all_data),
-                    )),
-                    response_sent_offset,
-                    &last_edit_text,
-                    // #4158: post-commit arm — the placeholder may be the sink's
-                    // PlaceholderEdit target, so require positive `Found` proof to
-                    // delete (see apply_terminal_committed_delete_proof_gate).
-                    true,
-                    "watcher_skip_already_committed_cleanup",
-                )
-                .await;
-                if outcome.is_some_and(|outcome| outcome.is_committed()) {
-                    drop_placeholder_orphan_record(&watcher_provider, &shared, channel_id, msg_id);
-                    placeholder_msg_id = None;
-                    placeholder_from_restored_inflight = false;
-                    last_edit_text.clear();
-                }
-            }
             clear_provider_overload_retry_state(channel_id);
             true
         } else if matches!(
@@ -1402,6 +1362,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         if watcher_direct_fallback_requested && !watcher_direct_fallback_authorized {
             slot_guard.release();
             continue 'watcher_loop;
+        }
+        if relay_ok && (session_bound_relay_owns_terminal_delivery
+            || matches!(watcher_resend_action, Some(WatcherTerminalResendAction::SkipAlreadyCommitted))) {
+            terminal_send::committed_placeholder_cleanup::reconcile_confirmed_preview(
+                terminal_send::committed_placeholder_cleanup::ConfirmedPreviewCleanup {
+                    http: &http, shared: &shared, provider: &watcher_provider,
+                    channel: channel_id, session: &tmux_session_name,
+                    expected_turn: inflight_before_relay.as_ref(),
+                    range: (turn_data_start_offset, terminal_event_consumed_offset(current_offset, &all_data)),
+                    sent_offset: response_sent_offset, placeholder: &mut placeholder_msg_id,
+                    restored: &mut placeholder_from_restored_inflight, edit: &mut last_edit_text,
+                    frozen: &mut watcher_streaming_rollover_frozen_msg_ids,
+                },
+            ).await;
         }
         let relay_suppressed = relay_decision.suppressed;
         let terminal_output_committed = relay_ok || relay_suppressed;

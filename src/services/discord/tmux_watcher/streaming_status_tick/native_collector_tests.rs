@@ -190,6 +190,21 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
             turn_result_relayed: false,
             restored_injected_prompt_message_id: row.injected_prompt_message_id,
         };
+        if cycle {
+            shared.tmux_watchers.insert(
+                fx.channel,
+                crate::services::discord::TmuxWatcherHandle {
+                    tmux_session_name: fx.tmux.clone(),
+                    output_path: fx.output_path.clone(),
+                    paused: ctx.paused.clone(),
+                    resume_offset: Arc::new(Mutex::new(None)),
+                    cancel: ctx.cancel.clone(),
+                    pause_epoch: ctx.pause_epoch.clone(),
+                    turn_delivered: ctx.turn_delivered.clone(),
+                    last_heartbeat_ts_ms: ctx.last_heartbeat_ts_ms.clone(),
+                },
+            );
+        }
         if physical || cycle {
             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
                 &fx.tmux,
@@ -226,6 +241,7 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                 crate::services::discord::session_relay_sink::SessionBoundDiscordRelaySink::new(
                     health,
                 );
+            sink.enable_delivery_for_test();
             sink.test_gateway = Some(Arc::new(
                 crate::services::discord::gateway::DiscordGateway::new(
                     rec.http.clone(),
@@ -355,6 +371,8 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
             assert_eq!(target.turn_start_offset, Some(source_start));
             let guard = run_pre_emit_guard(
                 &PreEmitGuardContext {
+                    captured_turn: turn.startup_inflight_snapshot.as_ref(),
+                    cancel: &ctx.cancel,
                     http: &rec.http,
                     shared: &shared,
                     channel_id: fx.channel,
@@ -394,8 +412,85 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                 },
             )
             .await;
-            assert_eq!(guard, PreEmitGuardOutcome::ContinueWatcherLoop);
-            rec.terminal_gate.notify_one();
+            assert_eq!(guard, PreEmitGuardOutcome::Proceed);
+            let before_relay = load_inflight_state(&fx.provider, fx.channel.get());
+            let context = TerminalRelayPlanContext {
+                http: &rec.http,
+                shared: &shared,
+                channel_id: fx.channel,
+                watcher_provider: &fx.provider,
+                tmux_session_name: &fx.tmux,
+                output_path: &fx.output_path,
+                inflight_before_relay: &before_relay,
+                cached_relay_producer: &cached,
+                prompt_anchor_present_before_relay: false,
+                external_input_lease_before_relay: false,
+                session_bound_relay_turn_fully_mirrored: turn
+                    .session_bound_relay_turn_fully_mirrored,
+                session_bound_relay_turn_first_forwarded_sequence: turn
+                    .session_bound_relay_turn_first_forwarded_sequence,
+                split_trailing_turn_follows: turn.split_trailing_turn_follows,
+                startup_soft_terminal_authority: watcher_soft_terminal_has_turn_authority(
+                    turn.startup_inflight_snapshot.as_ref(),
+                    &fx.tmux,
+                    source_start,
+                    row.turn_nonce.as_deref(),
+                ),
+            };
+            let mut plan_state = TerminalRelayPlanState {
+                all_data_session_bound_relay_ack: &mut ack,
+                monitor_auto_turn_claimed: &mut turn.monitor_auto_turn_claimed,
+                monitor_auto_turn_finished: &mut turn.monitor_auto_turn_finished,
+                monitor_auto_turn_synthetic_msg_id: &mut turn.monitor_auto_turn_synthetic_msg_id,
+                monitor_auto_turn_ledger_generation: &mut turn.monitor_auto_turn_ledger_generation,
+            };
+            let (plan, ()) = tokio::join!(
+                run_terminal_relay_plan(
+                    &context,
+                    TerminalRelayPlanLocals {
+                        current_offset: offset,
+                        data_start_offset: source_start,
+                        all_data: &buffer,
+                        full_response: &turn.full_response,
+                        current_response: &turn.full_response,
+                        response_sent_offset: turn.response_sent_offset,
+                        has_assistant_response: true,
+                        terminal_kind: turn.terminal_kind,
+                        task_notification_kind: turn.task_notification_kind,
+                        assistant_text_seen: turn.assistant_text_seen,
+                        fresh_assistant_text_seen: turn.fresh_assistant_text_seen,
+                        tool_state: &turn.tool_state,
+                        placeholder_msg_id: turn.placeholder_msg_id,
+                        status_panel_msg_id: turn.status_panel_msg_id,
+                    },
+                    &mut plan_state
+                ),
+                async {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    rec.terminal_gate.notify_one();
+                }
+            );
+            let TerminalRelayPlanOutcome::Proceed(plan) = plan else {
+                panic!("terminal plan lost obligation")
+            };
+            assert!(plan.session_bound_relay_owns_terminal_delivery);
+            terminal_send::committed_placeholder_cleanup::reconcile_confirmed_preview(
+                terminal_send::committed_placeholder_cleanup::ConfirmedPreviewCleanup {
+                    http: &rec.http,
+                    shared: &shared,
+                    provider: &fx.provider,
+                    channel: fx.channel,
+                    session: &fx.tmux,
+                    expected_turn: before_relay.as_ref(),
+                    range: (source_start, offset),
+                    sent_offset: turn.response_sent_offset,
+                    placeholder: &mut turn.placeholder_msg_id,
+                    restored: &mut turn.placeholder_from_restored_inflight,
+                    edit: &mut turn.last_edit_text,
+                    frozen: &mut turn.watcher_streaming_rollover_frozen_msg_ids,
+                },
+            )
+            .await;
             tokio::time::timeout(Duration::from_secs(5), async {
                 while target
                     .metrics

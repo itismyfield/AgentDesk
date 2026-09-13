@@ -82,6 +82,7 @@ async fn guard(
 ) -> PreEmitGuardOutcome {
     run_pre_emit_guard(
         &PreEmitGuardContext {
+            captured_turn: None, cancel: &h.cancel,
             http: &Arc::new(serenity::Http::new("fixture-no-network")),
             shared,
             channel_id,
