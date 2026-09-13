@@ -95,6 +95,30 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
             0
         };
         assert!(source_start < source_bytes as u64);
+        let prose_witness = if captured {
+            String::from_utf8_lossy(&data[source_start as usize..])
+                .lines()
+                .find_map(|line| {
+                    let event: serde_json::Value = serde_json::from_str(line).ok()?;
+                    let payload = &event["payload"];
+                    if event["type"] != "response_item"
+                        || payload["type"] != "message"
+                        || payload["role"] != "assistant"
+                    {
+                        return None;
+                    }
+                    payload["content"].as_array()?.iter().find_map(|part| {
+                        let text = part["text"].as_str()?.trim();
+                        (!text.is_empty()).then(|| {
+                        crate::services::discord::formatting::format_for_discord_with_status_panel(
+                            text, &ProviderKind::Codex).trim().chars().take(32).collect::<String>()
+                    })
+                    })
+                })
+                .expect("capture must contain an assistant commentary witness")
+        } else {
+            TRAILING_BODY.to_string()
+        };
         let initial_end = if physical {
             (source_start as usize + 16_384).min(data.len())
         } else {
@@ -223,7 +247,14 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         let stop = async {
             let deadline =
                 tokio::time::Instant::now() + Duration::from_secs(if captured { 15 } else { 1 });
-            while rec.seen("POST").is_empty() && tokio::time::Instant::now() < deadline {
+            while !rec
+                .bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|body| body.contains(&prose_witness))
+                && tokio::time::Instant::now() < deadline
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             cancel.store(true, Ordering::Release);
@@ -268,6 +299,10 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                 !turn.found_result,
                 "HTTP happened before any terminal source event"
             );
+            assert!(
+                !turn.full_response.trim().is_empty(),
+                "collector must decode assistant prose"
+            );
             if !captured {
                 assert!(turn.full_response.contains(TRAILING_BODY));
             }
@@ -294,6 +329,14 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                     "the captured POST must contain assistant prose, not only a status panel"
                 );
             }
+            assert!(
+                rec.bodies
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|body| body.contains(&prose_witness)),
+                "first visible HTTP body must contain the captured assistant commentary witness"
+            );
             assert!(
                 turn.placeholder_msg_id.is_some(),
                 "first Discord POST must succeed"
