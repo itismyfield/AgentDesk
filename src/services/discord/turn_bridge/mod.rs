@@ -104,8 +104,9 @@ pub(in crate::services::discord) use status_panel::{
 // #3805 P2 (PR-C): the ONE generation staleness rule shared by the sink (here)
 // and the tmux WATCHER completion guard, so both paths supersede a stale
 // status edit by the SAME epoch semantics (parity).
+use stream_receiver::capture_bridge_clear_fence;
 pub(super) use stream_receiver::{
-    StreamMessageReceiverAdapter, capture_bridge_clear_fence,
+    StreamMessageReceiverAdapter,
     spawn_stream_message_receiver_adapter, turn_bridge_stream_wait_duration,
 };
 pub(super) use streaming_edit_text::{
