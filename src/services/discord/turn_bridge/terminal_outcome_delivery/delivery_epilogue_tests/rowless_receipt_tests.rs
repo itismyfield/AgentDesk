@@ -775,3 +775,157 @@ fn assert_no_completed_signal(
         );
     }
 }
+
+#[tokio::test]
+async fn exact_receipt_rowless_terminal_custody_empty_cancel_and_ptl_match_normal_body_5521() {
+    for cancel in [true, false] {
+        let mut normal_body = None;
+        for foreign in [false, true] {
+            let driver =
+                TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1).with_body(String::new());
+            let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
+            ctx.cancelled = cancel;
+            ctx.is_prompt_too_long = !cancel;
+            ctx.codex_tui_terminal_range = None;
+            let mut row = state.inflight_state.clone();
+            if foreign {
+                row.turn_nonce = Some("successor".into());
+            }
+            inflight::save_inflight_state(&row).unwrap();
+            let output = run(ctx, state).await;
+            if foreign {
+                assert!(matches!(
+                    output.outcome,
+                    TerminalOutcomeDeliveryOutcome::DeferredToCustody { .. }
+                ));
+                let record = custody_records(&driver).pop().unwrap();
+                assert_eq!(
+                    record["payload"]["full_response"], "",
+                    "guidance must not forge provider source text"
+                );
+                assert_eq!(
+                    record["payload"]["delivery_body"],
+                    normal_body.as_deref().unwrap()
+                );
+            }
+            run_postlude(&driver, output, false, cancel).await;
+            if foreign {
+                assert_eq!(drain_custody(&driver).await.unwrap(), 1);
+            }
+            let body = driver
+                .published_bodies
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .expect("actual terminal body published");
+            if foreign {
+                assert_eq!(body, normal_body.as_deref().unwrap());
+                assert!(custody_records(&driver).is_empty());
+                assert_eq!(
+                    inflight::load_inflight_state_read_only(
+                        &ProviderKind::Codex,
+                        DRIVER_CHANNEL_ID
+                    )
+                    .unwrap()
+                    .turn_nonce,
+                    row.turn_nonce
+                );
+            } else {
+                normal_body = Some(body);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn exact_receipt_rowless_terminal_custody_empty_recovery_stays_inside_source_range_5521() {
+    for (provider, recovered, completed) in [
+        (ProviderKind::Claude, "", true),
+        (ProviderKind::Claude, "A answer", true),
+        (ProviderKind::Codex, "A answer", true),
+        (ProviderKind::Claude, "", false),
+        (ProviderKind::Codex, "", false),
+    ] {
+        let driver =
+            TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1).with_body(String::new());
+        let (mut ctx, mut state, _) = receipt_parts(&driver, provider.clone());
+        let line = if !completed {
+            serde_json::json!({"type":"unknown_record"})
+        } else if provider == ProviderKind::Codex {
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","last_agent_message":recovered}})
+        } else {
+            serde_json::json!({"type":"result","subtype":"success","result":recovered})
+        };
+        let mut bytes = line.to_string().into_bytes();
+        assert!(bytes.len() < 256);
+        bytes.resize(255, b' ');
+        bytes.push(b'\n');
+        bytes.extend_from_slice(b"{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"B must never be attributed to A\"}\n");
+        let path = state.inflight_state.output_path.clone().unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        state.inflight_state.last_offset = 256;
+        ctx.tmux_last_offset = Some(256);
+        if let Some(admitted) = ctx.codex_tui_terminal_range.as_mut() {
+            admitted.source.range.1 = 256;
+        }
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            DRIVER_TMUX_SESSION,
+            TuiRuntimeBinding {
+                runtime_kind: state.inflight_state.runtime_kind.unwrap(),
+                output_path: path,
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("receipt-session".into()),
+                last_offset: 256,
+                relay_last_offset: None,
+            },
+        );
+        let mut successor = state.inflight_state.clone();
+        successor.turn_nonce = Some("successor".into());
+        successor.turn_start_offset = Some(256);
+        inflight::save_inflight_state(&successor).unwrap();
+        let output = run(ctx, state).await;
+        assert!(matches!(
+            output.outcome,
+            TerminalOutcomeDeliveryOutcome::DeferredToCustody { .. }
+        ));
+        run_postlude(&driver, output, false, false).await;
+        if !completed {
+            assert!(drain_custody(&driver).await.is_err());
+            assert_eq!(custody_records(&driver).len(), 1);
+            assert!(driver.published_bodies.lock().unwrap().is_empty());
+            assert_eq!(
+                inflight::load_inflight_state_read_only(&provider, DRIVER_CHANNEL_ID)
+                    .unwrap()
+                    .turn_nonce,
+                successor.turn_nonce
+            );
+            continue;
+        }
+        assert_eq!(drain_custody(&driver).await.unwrap(), 1);
+        let body = driver
+            .published_bodies
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap();
+        if recovered.is_empty() {
+            assert_eq!(
+                body,
+                super::super::empty_response_recovery::empty_response_guidance(false)
+            );
+        } else {
+            assert_eq!(body, recovered);
+        }
+        assert!(!body.contains("B must never"));
+        assert!(custody_records(&driver).is_empty());
+        assert_eq!(
+            inflight::load_inflight_state_read_only(&provider, DRIVER_CHANNEL_ID)
+                .unwrap()
+                .turn_nonce,
+            successor.turn_nonce
+        );
+    }
+}

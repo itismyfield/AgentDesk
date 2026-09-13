@@ -1527,6 +1527,18 @@ fn emit_done(
     }
 }
 
+/// Detached terminal recovery uses the native parser and its existing fallback
+/// text policy. Missing completion/text remains unknown, just as the live
+/// explicit-completion schema-drift guard requires.
+pub(crate) fn recover_captured_rollout_response(bytes: &[u8]) -> Result<String, String> {
+    let mut state = parser::replay_captured_lines(bytes)?;
+    promote_task_complete_fallback_text(&mut state);
+    if state.has_pending_tool_call() || !state.turn_complete_seen || !state.saw_assistant_text {
+        return Err("captured Codex range has no completed assistant response".into());
+    }
+    Ok(state.final_text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

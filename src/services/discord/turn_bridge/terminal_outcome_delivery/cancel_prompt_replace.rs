@@ -173,17 +173,9 @@ pub(super) async fn handle_cancel_prompt_replace(
         stop_active_turn(&provider, &cancel_token, cleanup_policy, &cancel_source).await;
 
         let preserved_restart_mode = cancel_token.restart_mode();
-        let remaining_response =
-            response_portion_after_offset(&full_response, response_sent_offset);
-        let terminal_response = if let Some(restart_mode) = preserved_restart_mode {
-            handoff_interrupted_message(restart_mode, remaining_response)
-        } else if remaining_response.trim().is_empty() {
-            "[Stopped]".to_string()
-        } else {
-            let formatted = banner.format_discord_body(remaining_response);
-            format!("{}\n\n[Stopped]", formatted)
-        };
-        let terminal_response = banner.prefix(response_sent_offset == 0, terminal_response);
+        let terminal_response = cancelled_terminal_response(
+            &full_response, response_sent_offset, preserved_restart_mode, &banner,
+        );
 
         // #3041 P1-2 (site 1 — cancel/stop terminal replace): acquire the
         // shared delivery lease BEFORE delivering the `[Stopped]` body; a B2
@@ -289,11 +281,9 @@ pub(super) async fn handle_cancel_prompt_replace(
         tracing::info!("  [{ts}] ■ Stopped");
         }
         CancelPromptReplaceMessage::PromptTooLong => {
-        let mention = gateway.requester_mention().unwrap_or_default();
-        full_response = super::prompt_too_long_guidance::render_terminal_guidance(&full_response);
-        if !mention.is_empty() {
-            full_response = format!("{mention} {full_response}");
-        }
+        full_response = super::prompt_too_long_guidance::render_for_requester(
+            &full_response, gateway.requester_mention().as_deref(),
+        );
         let display_response = banner.prefix(response_sent_offset == 0, full_response.clone());
         // #3041 P1-2 (site 2 — prompt-too-long terminal replace): same lease
         // routing as site 1 — acquire before replace; B2-skip if held. (codex
@@ -426,4 +416,22 @@ pub(super) async fn settle_cancelled_episode_work(
         return true;
     }
     false
+}
+
+/// Render the existing cancellation/restart terminal body independently of its
+/// transport, so a detached episode can POST it without touching a foreign card.
+pub(super) fn cancelled_terminal_response(
+    full_response: &str, response_sent_offset: usize,
+    restart_mode: Option<crate::services::discord::restart_mode::InflightRestartMode>,
+    banner: &DiscordTurnSessionBanner<'_>,
+) -> String {
+    let remaining_response = response_portion_after_offset(full_response, response_sent_offset);
+    let response = if let Some(restart_mode) = restart_mode {
+        handoff_interrupted_message(restart_mode, remaining_response)
+    } else if remaining_response.trim().is_empty() {
+        "[Stopped]".to_string()
+    } else {
+        format!("{}\n\n[Stopped]", banner.format_discord_body(remaining_response))
+    };
+    banner.prefix(response_sent_offset == 0, response)
 }

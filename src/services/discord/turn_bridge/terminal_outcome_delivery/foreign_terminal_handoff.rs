@@ -13,6 +13,10 @@ pub(super) struct RetrySnapshot {
     local: InflightTurnState,
     admitted: Option<CodexRange>,
     full_response: String,
+    #[serde(default)]
+    delivery_body: Option<String>,
+    #[serde(default)]
+    empty_recovery_notice: Option<String>,
     response_sent_offset: usize,
     channel_id: u64,
     old_anchor: u64,
@@ -35,6 +39,8 @@ pub(super) struct Handoff<'a> {
     pub local: &'a InflightTurnState,
     pub admitted: Option<&'a CodexRange>,
     pub content: &'a str,
+    pub delivery_body: Option<&'a str>,
+    pub empty_recovery_notice: Option<&'a str>,
     pub response_sent_offset: usize,
     pub channel_id: ChannelId,
     pub old_anchor: MessageId,
@@ -63,6 +69,8 @@ pub(super) async fn preserve_or_publish(ctx: Handoff<'_>) -> Outcome {
         local: ctx.local.clone(),
         admitted: ctx.admitted.cloned(),
         full_response: ctx.content.into(),
+        delivery_body: ctx.delivery_body.map(str::to_owned),
+        empty_recovery_notice: ctx.empty_recovery_notice.map(str::to_owned),
         response_sent_offset: ctx.response_sent_offset,
         channel_id: ctx.channel_id.get(),
         old_anchor: ctx.old_anchor.get(),
@@ -168,24 +176,35 @@ pub(super) async fn resume_with_gateway(
     let provider = ProviderKind::from_str(&snapshot.provider).ok_or("unknown custody provider")?;
     let channel = ChannelId::new(snapshot.channel_id);
     let owner_channel = ChannelId::new(snapshot.watcher_owner_channel_id);
-    let decision = || {
-        rowless_receipt::decision(rowless_receipt::ReceiptDecisionInput {
-            provider: &provider,
-            channel_id: channel,
-            current_msg_id: MessageId::new(snapshot.old_anchor),
-            watcher_owner_channel_id: owner_channel,
-            entry_was_rowless: true,
-            codex_tui_terminal_range: snapshot.admitted.as_ref(),
-            tmux_last_offset: snapshot.tmux_last_offset,
-            inflight_state: &snapshot.local,
-            full_response: &snapshot.full_response,
-        })
-    };
-    let content = terminal_delivery_response_after_offset(
-        &snapshot.full_response,
-        snapshot.response_sent_offset,
-        None,
-    );
+    if snapshot.delivery_body.is_none()
+        && snapshot.full_response.trim().is_empty()
+        && let Some(notice) = snapshot.empty_recovery_notice.as_deref()
+    {
+        let recovered =
+            rowless_receipt::recover_empty_body(rowless_receipt::ReceiptDecisionInput {
+                provider: &provider,
+                channel_id: channel,
+                current_msg_id: MessageId::new(snapshot.old_anchor),
+                watcher_owner_channel_id: owner_channel,
+                entry_was_rowless: true,
+                codex_tui_terminal_range: snapshot.admitted.as_ref(),
+                tmux_last_offset: snapshot.tmux_last_offset,
+                inflight_state: &snapshot.local,
+                full_response: &snapshot.full_response,
+            })?;
+        snapshot.delivery_body = Some(terminal_delivery_response_after_offset(
+            &recovered,
+            0,
+            Some(notice),
+        ));
+    }
+    let content = snapshot.delivery_body.clone().unwrap_or_else(|| {
+        terminal_delivery_response_after_offset(
+            &snapshot.full_response,
+            snapshot.response_sent_offset,
+            None,
+        )
+    });
     let chunks = crate::services::discord::formatting::split_message(&content);
     if chunks.is_empty() || content.trim().is_empty() {
         return Err("custody has no independently publishable terminal body".into());
@@ -200,6 +219,19 @@ pub(super) async fn resume_with_gateway(
     {
         return Err("invalid terminal custody transport receipts".into());
     }
+    let decision = || {
+        rowless_receipt::decision(rowless_receipt::ReceiptDecisionInput {
+            provider: &provider,
+            channel_id: channel,
+            current_msg_id: MessageId::new(snapshot.old_anchor),
+            watcher_owner_channel_id: owner_channel,
+            entry_was_rowless: true,
+            codex_tui_terminal_range: snapshot.admitted.as_ref(),
+            tmux_last_offset: snapshot.tmux_last_offset,
+            inflight_state: &snapshot.local,
+            full_response: &snapshot.full_response,
+        })
+    };
     let mut delivered = snapshot.delivery_receipts.len() == chunks.len()
         || decision() == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
     let mut held_lease = None;

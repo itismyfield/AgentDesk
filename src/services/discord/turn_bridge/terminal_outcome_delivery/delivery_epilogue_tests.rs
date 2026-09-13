@@ -330,6 +330,7 @@ struct DriverGateway {
     /// because the two are true at different polls, and conflating them
     /// overstates by exactly one suspension what the drop sweep has witnessed.
     completed_publications: Arc<AtomicUsize>,
+    published_bodies: Arc<Mutex<Vec<String>>>,
     replace: ReplaceBehaviour,
     yields_per_call: usize,
 }
@@ -355,6 +356,8 @@ impl TurnGateway for DriverGateway {
         self.observe(DriverCall::Send);
         let yields = self.yields_per_call;
         let completed = Arc::clone(&self.completed_publications);
+        let bodies = self.published_bodies.clone();
+        let body = _content.to_owned();
         let failed = self.replace == ReplaceBehaviour::FailedPost
             || (self.replace == ReplaceBehaviour::FailSecondPostOnce
                 && self.observations.lock().unwrap().iter().filter(|o| o.call == DriverCall::Send).count() == 2);
@@ -362,6 +365,7 @@ impl TurnGateway for DriverGateway {
             Yields(yields).await;
             if failed { return Err("driver POST failed".into()); }
             let index = completed.fetch_add(1, Ordering::Release);
+            bodies.lock().unwrap().push(body);
             Ok(MessageId::new(DRIVER_FALLBACK_ANCHOR_MSG_ID + index as u64))
         })
     }
@@ -402,15 +406,19 @@ impl TurnGateway for DriverGateway {
         self.observe(DriverCall::Replace);
         let (yields, behaviour) = (self.yields_per_call, self.replace);
         let completed = Arc::clone(&self.completed_publications);
+        let bodies = self.published_bodies.clone();
+        let body = _content.to_owned();
         Box::pin(async move {
             Yields(yields).await;
             match behaviour {
                 ReplaceBehaviour::Edited | ReplaceBehaviour::FailSecondPostOnce => {
                     completed.fetch_add(1, Ordering::Release);
+                    bodies.lock().unwrap().push(body);
                     Ok(ReplaceLongMessageOutcome::EditedOriginal)
                 }
                 ReplaceBehaviour::FallbackAfterEditFailure => {
                     completed.fetch_add(1, Ordering::Release);
+                    bodies.lock().unwrap().push(body);
                     Ok(ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
                         edit_error: "edit 500; fallback POST succeeded".to_string(),
                         replacement_anchor: Some(MessageId::new(DRIVER_FALLBACK_ANCHOR_MSG_ID)),
@@ -483,6 +491,7 @@ struct TerminalDeliveryDriver {
     marker: Arc<AtomicBool>,
     observations: Arc<Mutex<Vec<DriverObservation>>>,
     completed_publications: Arc<AtomicUsize>,
+    published_bodies: Arc<Mutex<Vec<String>>>,
     inflight: InflightTurnState,
     body: String,
     _temp: tempfile::TempDir,
@@ -544,10 +553,12 @@ impl TerminalDeliveryDriver {
 
         let observations = Arc::new(Mutex::new(Vec::new()));
         let completed_publications = Arc::new(AtomicUsize::new(0));
+        let published_bodies = Arc::new(Mutex::new(Vec::new()));
         let gateway: Arc<dyn TurnGateway> = Arc::new(DriverGateway {
             marker: Arc::clone(&marker),
             observations: Arc::clone(&observations),
             completed_publications: Arc::clone(&completed_publications),
+            published_bodies: published_bodies.clone(),
             replace,
             yields_per_call,
         });
@@ -558,6 +569,7 @@ impl TerminalDeliveryDriver {
             marker,
             observations,
             completed_publications,
+            published_bodies,
             inflight,
             body: DRIVER_BODY.to_string(),
             _temp: temp,

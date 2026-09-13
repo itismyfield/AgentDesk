@@ -139,7 +139,7 @@ use self::phase_policy::{
 // `recovery_engine::extract_response_from_output_pub` path stays valid for the
 // turn_bridge / tmux_restart_handoff external callers.
 pub(super) use self::jsonl_extract::{
-    extract_response_from_output_pub, success_result_end_offset_after_offset,
+    extract_response_from_output_pub, extract_response_from_output_range, success_result_end_offset_after_offset,
 };
 // #3479 item-2: re-import the externally-called terminal-watcher helpers so the
 // existing call sites stay byte-identical. The remaining cluster members

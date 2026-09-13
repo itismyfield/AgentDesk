@@ -64,12 +64,59 @@ pub fn extract_response_from_output_pub(output_path: &str, start_offset: u64) ->
         .map(|offset| offset.min(bytes.len()))
         .unwrap_or(bytes.len());
 
+    extract_response_from_jsonl_bytes(&bytes[start..])
+}
+
+/// Recover only the captured episode's bytes; a successor appended after `end`
+/// is outside the caller's authority and must not be attributed to this answer.
+pub(in crate::services::discord) fn extract_response_from_output_range(
+    output_path: &std::path::Path,
+    start: u64,
+    end: u64,
+    native_codex: bool,
+) -> Result<String, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(output_path).map_err(|e| e.to_string())?;
+    if end < start || end > file.metadata().map_err(|e| e.to_string())?.len() {
+        return Err("captured recovery range is outside the source file".into());
+    }
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(end - start)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 != end - start {
+        return Err("captured recovery source changed while reading".into());
+    }
+    if native_codex {
+        return crate::services::codex_tui::rollout_tail::recover_captured_rollout_response(&bytes);
+    }
+    // A malformed or incomplete captured frame cannot prove an empty result.
+    let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+    let mut completed = false;
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        completed |= value.get("type").and_then(|v| v.as_str()) == Some("result")
+            && value.get("subtype").and_then(|v| v.as_str()) == Some("success")
+            && !value
+                .get("is_error")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+    }
+    if !completed {
+        return Err("captured recovery source has no successful terminal result".into());
+    }
+    Ok(extract_response_from_jsonl_bytes(&bytes))
+}
+
+fn extract_response_from_jsonl_bytes(bytes: &[u8]) -> String {
     let mut response = String::new();
     let mut any_tool_used = false;
     let mut has_post_tool_text = false;
     let mut result_text = String::new();
 
-    for line in String::from_utf8_lossy(&bytes[start..]).lines() {
+    for line in String::from_utf8_lossy(bytes).lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;

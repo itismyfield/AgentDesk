@@ -403,3 +403,15 @@ fn compact_json_or_string(value: &Value) -> String {
         .map(ToString::to_string)
         .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
 }
+
+/// Replay a captured range through the same native Codex event parser, without
+/// a tmux actor or a live stream sender. Malformed bytes remain unresolved.
+pub(super) fn replay_captured_lines(bytes: &[u8]) -> Result<RolloutParseState, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+    let mut state = RolloutParseState::default();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let json = serde_json::from_str::<Value>(line).map_err(|e| e.to_string())?;
+        let _ = rollout_messages(&json, &mut state);
+    }
+    Ok(state)
+}

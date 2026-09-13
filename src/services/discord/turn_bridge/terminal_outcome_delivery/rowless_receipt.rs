@@ -104,82 +104,10 @@ fn decision_with_evidence(ctx: &ReceiptDecisionInput<'_>) -> DecisionEvidence {
         return unknown(fallback);
     };
     crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
-        let (source, path) = if let Some(admitted) = ctx.codex_tui_terminal_range.as_ref() {
-            // Re-use the captured terminal range even after its row disappears.
-            // revalidated_source intentionally refuses a missing row for NEW
-            // publication; that refusal does not invalidate a live exact receipt.
-            if !admitted.identity.matches_state(local)
-                || admitted.result != ctx.full_response
-                || !admitted.source_receipt_is_live(authority)
-            {
-                return unknown(fallback);
-            }
-            let Some(path) = admitted.receipt_source_path() else {
-                return unknown(fallback);
-            };
-            (admitted.source.clone(), path)
-        } else {
-            // #5264: a non-admitted CodexTui range remains honest legacy/NoRange.
-            if *ctx.provider == ProviderKind::Codex
-                && local.runtime_kind
-                    == Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
-            {
-                return unknown(fallback);
-            }
-            let Some((start, end)) = local.turn_start_offset.zip(ctx.tmux_last_offset) else {
-                return unknown(fallback);
-            };
-            let Some(binding) = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority) else {
-                return unknown(fallback);
-            };
-            let Some(path) = local
-                .output_path
-                .as_deref()
-                .and_then(|p| std::fs::canonicalize(p).ok())
-            else {
-                return unknown(fallback);
-            };
-            if local.runtime_kind != Some(binding.runtime_kind)
-                || local.session_id.as_deref().filter(|s| !s.is_empty())
-                    != binding.session_id.as_deref().filter(|s| !s.is_empty())
-                || local.session_id.as_deref().is_none_or(str::is_empty)
-                || std::fs::canonicalize(binding.relay_output_path())
-                    .ok()
-                    .as_ref()
-                    != Some(&path)
-                || binding.relay_last_offset() < end
-            {
-                return unknown(fallback);
-            }
-            (
-                dr::ExactJsonlSourceIdentity {
-                    provider: ctx.provider.as_str().to_owned(),
-                    tmux_session_name: tmux.to_owned(),
-                    turn_nonce: local.turn_nonce.clone().unwrap_or_default(),
-                    range: (start, end),
-                    generation_mtime_ns: dr::current_generation_mtime_ns(tmux),
-                    offset_authority_channel_id: ctx.watcher_owner_channel_id.get(),
-                    delivery_channel_id: ctx.channel_id.get(),
-                },
-                path,
-            )
+        let Some((source, _path, eof)) = verified_source_under_authority(&ctx, authority) else {
+            return unknown(fallback);
         };
-        if !source_matches_episode(
-            &source,
-            ctx.provider,
-            local,
-            ctx.watcher_owner_channel_id,
-            ctx.channel_id,
-        ) {
-            return unknown(fallback);
-        }
-        let eof = std::fs::metadata(path)
-            .ok()
-            .filter(|m| m.is_file())
-            .map(|m| m.len());
-        if eof.is_none_or(|eof| source.range.1 > eof) {
-            return unknown(fallback);
-        }
+        let eof = Some(eof);
         // An exact current-source receipt survives advancement of the frontier
         // to a later range/anchor. The frontier is an anchor discovery hint,
         // not a veto over that confirmed transport result.
@@ -243,4 +171,111 @@ pub(in crate::services::discord::turn_bridge) fn source_matches_episode(
         && source.offset_authority_channel_id == owner.get()
         && source.delivery_channel_id == delivery.get()
         && source.generation_mtime_ns == dr::current_generation_mtime_ns(&source.tmux_session_name)
+}
+
+pub(super) fn verified_source_under_authority(
+    ctx: &ReceiptDecisionInput<'_>,
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+) -> Option<(dr::ExactJsonlSourceIdentity, std::path::PathBuf, u64)> {
+    let local = ctx.inflight_state;
+    let tmux = authority.session();
+    let (source, path) = if let Some(admitted) = ctx.codex_tui_terminal_range.as_ref() {
+        // Re-use the captured terminal range even after its row disappears.
+        // revalidated_source intentionally refuses a missing row for NEW
+        // publication; that refusal does not invalidate a live exact receipt.
+        if !admitted.identity.matches_state(local)
+            || admitted.result != ctx.full_response
+            || !admitted.source_receipt_is_live(authority)
+        {
+            return None;
+        }
+        let Some(path) = admitted.receipt_source_path() else {
+            return None;
+        };
+        (admitted.source.clone(), path)
+    } else {
+        // #5264: a non-admitted CodexTui range remains honest legacy/NoRange.
+        if *ctx.provider == ProviderKind::Codex
+            && local.runtime_kind
+                == Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
+        {
+            return None;
+        }
+        let Some((start, end)) = local.turn_start_offset.zip(ctx.tmux_last_offset) else {
+            return None;
+        };
+        let Some(binding) = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority) else {
+            return None;
+        };
+        let Some(path) = local
+            .output_path
+            .as_deref()
+            .and_then(|p| std::fs::canonicalize(p).ok())
+        else {
+            return None;
+        };
+        if local.runtime_kind != Some(binding.runtime_kind)
+            || local.session_id.as_deref().filter(|s| !s.is_empty())
+                != binding.session_id.as_deref().filter(|s| !s.is_empty())
+            || local.session_id.as_deref().is_none_or(str::is_empty)
+            || std::fs::canonicalize(binding.relay_output_path())
+                .ok()
+                .as_ref()
+                != Some(&path)
+            || binding.relay_last_offset() < end
+        {
+            return None;
+        }
+        (
+            dr::ExactJsonlSourceIdentity {
+                provider: ctx.provider.as_str().to_owned(),
+                tmux_session_name: tmux.to_owned(),
+                turn_nonce: local.turn_nonce.clone().unwrap_or_default(),
+                range: (start, end),
+                generation_mtime_ns: dr::current_generation_mtime_ns(tmux),
+                offset_authority_channel_id: ctx.watcher_owner_channel_id.get(),
+                delivery_channel_id: ctx.channel_id.get(),
+            },
+            path,
+        )
+    };
+    if !source_matches_episode(
+        &source,
+        ctx.provider,
+        local,
+        ctx.watcher_owner_channel_id,
+        ctx.channel_id,
+    ) {
+        return None;
+    }
+    let eof = std::fs::metadata(&path)
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| m.len());
+    if eof.is_none_or(|eof| source.range.1 > eof) {
+        return None;
+    }
+    Some((source, path, eof?))
+}
+
+pub(super) fn recover_empty_body(ctx: ReceiptDecisionInput<'_>) -> Result<String, String> {
+    if ctx.inflight_state.output_path.is_none() {
+        return Ok(String::new());
+    }
+    let tmux = ctx
+        .inflight_state
+        .tmux_session_name
+        .as_deref()
+        .ok_or("empty terminal has no captured source session")?;
+    crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
+        let (source, path, _) = verified_source_under_authority(&ctx, authority)
+            .ok_or("empty terminal recovery has no verified captured source range")?;
+        crate::services::discord::recovery_engine::extract_response_from_output_range(
+            &path,
+            source.range.0,
+            source.range.1,
+            ctx.inflight_state.runtime_kind
+                == Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui),
+        )
+    })
 }
