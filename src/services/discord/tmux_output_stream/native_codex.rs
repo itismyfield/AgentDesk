@@ -94,6 +94,7 @@ pub(super) fn process_native_codex_messages(
 ) -> WatcherLineOutcome {
     let mut result = WatcherLineOutcome::default();
     for message in messages {
+        let mut canonical_terminal_response = None;
         let value = match message {
             StreamMessage::Init { session_id, .. } => {
                 state.last_session_id = Some(session_id);
@@ -152,15 +153,18 @@ pub(super) fn process_native_codex_messages(
                 continue;
             }
             StreamMessage::Done { result, session_id } => {
-                // Native fallback can supersede commentary; preserve its exact
-                // canonical body instead of applying the wrapper append policy.
-                *response = result.clone();
+                canonical_terminal_response = Some(result.clone());
                 serde_json::json!({"type": "result", "result": result, "session_id": session_id})
             }
             _ => continue,
         };
         let mut normalized = format!("{value}\n");
         let outcome = process_watcher_lines(&mut normalized, state, response, tools);
+        // Wrapper bookkeeping may append a tool-only multiline result. The
+        // native decoder already assembled the entire canonical response.
+        if let Some(canonical) = canonical_terminal_response {
+            *response = canonical;
+        }
         result.assistant_text_seen |= outcome.assistant_text_seen;
         if outcome.found_result {
             result.found_result = true;

@@ -1045,6 +1045,22 @@ mod tests {
                 "commentary fallback must not duplicate prose"
             );
         }
+        let fallback = "first line\nsecond line";
+        let terminal = serde_json::json!({"type":"event_msg", "payload":{
+            "type":"task_complete", "last_agent_message":fallback
+        }});
+        let mut buffer = format!("{call}{output}{terminal}\n");
+        let mut state = StreamLineState::new();
+        let mut response = String::new();
+        let mut tools = WatcherToolState::new();
+        tools.set_provider(&ProviderKind::Codex);
+        let completed = process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools);
+        assert!(completed.found_result);
+        assert_eq!(
+            response, fallback,
+            "the watcher SendFull body retains multiline native tool fallback exactly once"
+        );
+
         let item_only = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"unconfirmed\"}}\n";
         assert!(!parse_lines(item_only).0.found_result);
         let assistant = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"on it\"}]}}\n";
