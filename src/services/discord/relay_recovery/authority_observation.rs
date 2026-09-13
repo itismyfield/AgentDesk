@@ -73,6 +73,9 @@ use super::super::{SharedData, runtime_store};
 use super::cohort;
 use crate::config::RelayAuthorityMode;
 
+#[path = "authority_observation/delivery_boundary.rs"]
+pub(in crate::services::discord) mod delivery_boundary;
+
 /// Wire format identifier. The promotion script pins it, so a renamed field or a
 /// changed meaning must bump this instead of silently re-interpreting windows
 /// already archived under the old spelling. `v2` adds `observed_at` (E4-5).

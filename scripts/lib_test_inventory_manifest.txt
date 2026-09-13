@@ -6430,6 +6430,7 @@ services::discord::turn_bridge::context_window::tests::done_uses_terminal_result
 services::discord::turn_bridge::context_window::tests::done_uses_terminal_result_when_streamed_response_is_tail_only
 services::discord::turn_bridge::context_window::tests::sentinel_overwrite_clamps_response_sent_offset_within_bounds
 services::discord::turn_bridge::current_message_anchor::tests::authority_or_message_epoch_advance_during_send_aborts_and_deletes_candidate
+services::discord::turn_bridge::current_message_anchor::tests::cleanup_gateway_outcomes_reach_operation_observations
 services::discord::turn_bridge::current_message_anchor::tests::cleared_durable_current_message_stays_absent_until_real_anchor_exists
 services::discord::turn_bridge::finalize_epilogue::tests::disconnected_gateway_watcher_resume_requires_completion_ownership
 services::discord::turn_bridge::finalize_epilogue::tests::dispatch_failure_requeue_front_schedules_deferred_kickoff
