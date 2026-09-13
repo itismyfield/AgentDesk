@@ -474,7 +474,8 @@ fn synthetic_bridge_handoff_fixture(
                     "handoff prompt", Vec::new(), rx, Some(end_rx), &renewed, gateway.clone(), 0,
                 )).await.expect("resumed adapter finishes").expect("the original saved prefix and later terminal remain deliverable");
                 tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
-                assert!(gateway.bodies.lock().unwrap().iter().filter(|sent| sent.contains("첫 프레임")).all(|sent| sent.matches("첫 프레임").count() == 16), "resume must not append the already saved prefix again");
+                let bodies = gateway.bodies.lock().unwrap();
+                assert!(bodies.iter().filter(|sent| sent.contains("첫 프레임")).all(|sent| sent.matches("첫 프레임").count() == 16), "resume must not append the already saved prefix again; observed bodies={bodies:#?}");
             } else {
                 delivered.expect("actual idle adapter terminal publication completes");
             }
