@@ -1780,6 +1780,7 @@ enum ChannelMailboxMsg {
     /// NEWER turn's token or decrement `global_active`. On mismatch this is a
     /// no-op that returns `removed_token = None`, leaving the live turn intact.
     FinishTurnIfMatches {
+        expected_actor: Option<Arc<CancelToken>>,
         preserve_queue: bool,
         expected_user_message_id: MessageId,
         active_started_before: Option<Instant>,
@@ -2920,6 +2921,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     mark_turn_finished_signal_done(channel_id);
                 }
                 ChannelMailboxMsg::FinishTurnIfMatches {
+                    expected_actor,
                     preserve_queue,
                     expected_user_message_id,
                     active_started_before,
@@ -2939,6 +2941,12 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     let matches = state
                         .active_user_message_id
                         .is_some_and(|active| active == expected_user_message_id)
+                        && expected_actor.as_ref().is_none_or(|expected| {
+                            state
+                                .cancel_token
+                                .as_ref()
+                                .is_some_and(|current| Arc::ptr_eq(current, expected))
+                        })
                         && active_started_before.is_none_or(|started_before| {
                             state
                                 .turn_started_instant

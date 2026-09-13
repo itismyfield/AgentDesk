@@ -51,6 +51,7 @@ impl ChannelMailboxHandle {
     ) -> FinishTurnResult {
         self.request(
             |reply| ChannelMailboxMsg::FinishTurnIfMatches {
+                expected_actor: None,
                 expected_user_message_id,
                 active_started_before: Some(active_started_before),
                 turn_nonce_guard: TurnNonceGuard::exact(Some(expected_turn_nonce)),
@@ -78,8 +79,27 @@ impl ChannelMailboxHandle {
         active_started_before: Instant,
         persistence: QueuePersistenceContext,
     ) -> FinishTurnResult {
+        self.finish_turn_if_matches_episode_and_actor_started_before(
+            expected_user_message_id,
+            expected_turn_nonce,
+            active_started_before,
+            None,
+            persistence,
+        )
+        .await
+    }
+
+    pub(crate) async fn finish_turn_if_matches_episode_and_actor_started_before(
+        &self,
+        expected_user_message_id: MessageId,
+        expected_turn_nonce: Option<String>,
+        active_started_before: Instant,
+        expected_actor: Option<Arc<CancelToken>>,
+        persistence: QueuePersistenceContext,
+    ) -> FinishTurnResult {
         self.request(
             |reply| ChannelMailboxMsg::FinishTurnIfMatches {
+                expected_actor,
                 expected_user_message_id,
                 active_started_before: Some(active_started_before),
                 turn_nonce_guard: TurnNonceGuard::exact(expected_turn_nonce),
@@ -110,6 +130,7 @@ impl ChannelMailboxHandle {
     ) -> FinishTurnResult {
         self.request(
             |reply| ChannelMailboxMsg::FinishTurnIfMatches {
+                expected_actor: None,
                 expected_user_message_id,
                 active_started_before: None,
                 turn_nonce_guard: TurnNonceGuard::Ignore,
@@ -143,6 +164,7 @@ impl ChannelMailboxHandle {
     ) -> FinishTurnResult {
         self.request(
             |reply| ChannelMailboxMsg::FinishTurnIfMatches {
+                expected_actor: None,
                 expected_user_message_id,
                 active_started_before: Some(active_started_before),
                 turn_nonce_guard: TurnNonceGuard::Ignore,
@@ -400,6 +422,88 @@ mod tests {
 
     fn persistence(label: &str) -> QueuePersistenceContext {
         QueuePersistenceContext::new(&ProviderKind::Claude, label, None)
+    }
+
+    #[tokio::test]
+    async fn actor_bound_finish_preserves_same_nonce_successor_and_queue() {
+        let tmp = tempfile::tempdir().expect("isolated persistence root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(tmp.path());
+        for (case, nonce) in [(20, Some("same-episode")), (21, None)] {
+            let f = watchdog_owner_successor(case, nonce).await;
+            assert_eq!(f.old.turn_nonce(), f.current.turn_nonce());
+            f.handle
+                .replace_queue(
+                    vec![pending_intervention(52)],
+                    persistence("actor-successor-queue"),
+                )
+                .await;
+            let result = f
+                .handle
+                .finish_turn_if_matches_episode_and_actor_started_before(
+                    MessageId::new(51),
+                    f.old.turn_nonce().map(str::to_owned),
+                    Instant::now(),
+                    Some(f.old.clone()),
+                    persistence("stale-actor-finish"),
+                )
+                .await;
+
+            assert!(result.removed_token.is_none());
+            assert!(result.has_pending);
+            assert!(result.queue_exit_events.is_empty());
+            let state = f.handle.snapshot().await;
+            assert_eq!(state.active_request_owner, Some(UserId::new(51)));
+            assert_eq!(state.active_user_message_id, Some(MessageId::new(51)));
+            assert_eq!(state.active_turn_nonce.as_deref(), f.current.turn_nonce());
+            assert!(Arc::ptr_eq(
+                state.cancel_token.as_ref().unwrap(),
+                &f.current
+            ));
+            assert!(!f.current.cancelled.load(Relaxed));
+            assert_eq!(state.intervention_queue.len(), 1);
+            assert_eq!(state.intervention_queue[0].message_id, MessageId::new(52));
+        }
+    }
+
+    #[tokio::test]
+    async fn actor_bound_finish_releases_original_arc_once_and_preserves_queue() {
+        let tmp = tempfile::tempdir().expect("isolated persistence root");
+        let _root_guard = crate::config::set_agentdesk_root_for_test(tmp.path());
+        for (case, nonce) in [(22, Some("same-episode")), (23, None)] {
+            let f = watchdog_owner_successor(case, nonce).await;
+            f.handle
+                .replace_queue(
+                    vec![pending_intervention(52)],
+                    persistence("actor-owned-queue"),
+                )
+                .await;
+            let cutoff = Instant::now();
+            for expected_removal in [true, false] {
+                let result = f
+                    .handle
+                    .finish_turn_if_matches_episode_and_actor_started_before(
+                        MessageId::new(51),
+                        f.current.turn_nonce().map(str::to_owned),
+                        cutoff,
+                        Some(f.current.clone()),
+                        persistence("original-actor-finish"),
+                    )
+                    .await;
+                assert_eq!(result.removed_token.is_some(), expected_removal);
+                if let Some(removed) = result.removed_token {
+                    assert!(Arc::ptr_eq(&removed, &f.current));
+                }
+                assert!(result.has_pending);
+                assert!(result.queue_exit_events.is_empty());
+                let state = f.handle.snapshot().await;
+                assert!(state.cancel_token.is_none());
+                assert!(state.active_request_owner.is_none());
+                assert!(state.active_user_message_id.is_none());
+                assert!(state.active_turn_nonce.is_none());
+                assert_eq!(state.intervention_queue.len(), 1);
+                assert_eq!(state.intervention_queue[0].message_id, MessageId::new(52));
+            }
+        }
     }
 
     fn pending_intervention(message_id: u64) -> Intervention {

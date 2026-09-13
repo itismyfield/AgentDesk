@@ -123,6 +123,7 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn mailbox_finish_turn_if_matches_episode_started_before_inner(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -131,13 +132,15 @@ async fn mailbox_finish_turn_if_matches_episode_started_before_inner(
     expected_turn_nonce: Option<String>,
     active_started_before: std::time::Instant,
     publish_completion: bool,
+    expected_actor: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
 ) -> FinishTurnResult {
     let result = shared
         .mailbox(channel_id)
-        .finish_turn_if_matches_episode_started_before(
+        .finish_turn_if_matches_episode_and_actor_started_before(
             expected_user_message_id,
             expected_turn_nonce,
             active_started_before,
+            expected_actor,
             queue_persistence_context(shared, provider, channel_id),
         )
         .await;
@@ -172,6 +175,7 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode
         expected_turn_nonce,
         active_started_before,
         true,
+        None,
     )
     .await
 }
@@ -184,6 +188,27 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode
     expected_turn_nonce: Option<String>,
     active_started_before: std::time::Instant,
 ) -> FinishTurnResult {
+    mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+        shared,
+        provider,
+        channel_id,
+        expected_user_message_id,
+        expected_turn_nonce,
+        active_started_before,
+        None,
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_user_message_id: serenity::model::id::MessageId,
+    expected_turn_nonce: Option<String>,
+    active_started_before: std::time::Instant,
+    expected_actor: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
+) -> FinishTurnResult {
     mailbox_finish_turn_if_matches_episode_started_before_inner(
         shared,
         provider,
@@ -192,6 +217,7 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode
         expected_turn_nonce,
         active_started_before,
         false,
+        expected_actor,
     )
     .await
 }
