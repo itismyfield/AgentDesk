@@ -18,6 +18,59 @@ use crate::services::discord::{
 };
 use crate::services::provider::ProviderKind;
 
+/// A restart may retain the old placeholder after the terminal POST receipt
+/// committed but before its inflight mirror. Revalidate the captured episode;
+/// a matching frontier or an inflight anchor alone is not delivery proof.
+pub(super) fn captured_terminal_receipt_exists(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+) -> bool {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    if !matches!(
+        (provider, state.runtime_kind),
+        (ProviderKind::Codex, Some(RuntimeHandoffKind::CodexTui))
+            | (ProviderKind::Claude, Some(RuntimeHandoffKind::ClaudeTui))
+    ) {
+        return false;
+    }
+    let Some(channel_id) = opt_channel_id(state.channel_id) else {
+        return false;
+    };
+    let Some(path) = state.output_path.as_ref() else {
+        return false;
+    };
+    let Some(record) =
+        delivery_record::read_record(provider, state.delivery_record_owner_channel_id())
+    else {
+        return false;
+    };
+    record.confirmed_deliveries.iter().any(|receipt| {
+        let captured = inflight::CodexRange {
+            identity: inflight::InflightTurnIdentity::from_state(state),
+            result: state.full_response.clone(),
+            rollout_path: path.clone(),
+            session_id: state.session_id.clone().unwrap_or_default(),
+            source_file_identity: state.tui_terminal_source_file_identity,
+            source: receipt.source.clone(),
+        };
+        if !matches!(captured.revalidated_source(state), Ok(Some(_))) {
+            return false;
+        }
+        crate::services::tmux_common::with_tmux_source_authority(
+            &captured.source.tmux_session_name,
+            |authority| {
+                captured.source_receipt_is_live(authority)
+                    && delivery_record::confirmed_delivery_receipt_exists(
+                        provider,
+                        channel_id,
+                        receipt.message_id,
+                        &captured.source,
+                    )
+            },
+        )
+    })
+}
+
 struct CapturedRecoveryAnchor {
     expected: inflight::InflightTurnState,
     delivered: Option<(MessageId, String, unix_journal::Disposition)>,

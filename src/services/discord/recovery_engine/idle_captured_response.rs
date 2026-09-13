@@ -262,6 +262,18 @@ where
         .await;
         return true;
     }
+    if terminal_text_idempotency::captured_terminal_receipt_exists(provider, state) {
+        settle_captured_ready_delivery(
+            shared,
+            provider,
+            state,
+            actor,
+            snapshot,
+            RecoveryRelayOutcome::Delivered.into(),
+        )
+        .await;
+        return true;
+    }
     if recovery_ready_without_output_has_captured_response(state) {
         // response_sent_offset covers frozen Discord prefixes, unlike last_offset
         // and last_watcher_relayed_offset, which use source JSONL coordinates.

@@ -97,7 +97,9 @@ fn decision_with_evidence(ctx: &ReceiptDecisionInput<'_>) -> DecisionEvidence {
     } else {
         Continue
     };
-    if own_row && !ctx.entry_was_rowless {
+    // A crash can leave an owned row at its original anchor after the fallback
+    // receipt commits. Missing terminal confirmation must still consult it.
+    if own_row && !ctx.entry_was_rowless && local.terminal_delivery_committed {
         return unknown(Continue);
     }
     let Some(tmux) = local.tmux_session_name.as_deref().filter(|s| !s.is_empty()) else {

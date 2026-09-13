@@ -948,6 +948,7 @@ async fn captured_episode_claim_preserves_actor_witness_and_refuses_mismatched_r
 #[tokio::test(flavor = "current_thread")]
 async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirror() {
     use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::codex_tui::session as codex_session;
     use crate::services::discord::recovery_paths::controller_cutover::{
         deliver_recovery_replace_via_controller, tests::RecoveryFakeGateway,
     };
@@ -955,141 +956,180 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
         formatting::ReplaceLongMessageOutcome, outbound::delivery_record as dr,
     };
     let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    for proof in ["exact", "historical", "frontier_only"] {
-        let mut fixture = Fixture::new(5_073_120);
-        fixture.state.provider = ProviderKind::Codex.as_str().into();
-        fixture.state.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
-        fixture.state.turn_nonce = Some("ready-receipt-episode".into());
-        fixture.state.response_sent_offset = 0;
-        fixture.state.full_response = "the terminal answer already POSTed by A".into();
-        let tmux = fixture.state.tmux_session_name.clone().unwrap();
-        let session = fixture.state.session_id.clone().unwrap();
-        let path = std::fs::canonicalize(fixture.state.output_path.as_ref().unwrap()).unwrap();
-        fixture.state.output_path = Some(path.display().to_string());
-        std::fs::write(
-            crate::services::tmux_common::session_temp_path(&tmux, "generation"),
-            b"ready-receipt",
-        )
-        .unwrap();
-        crate::services::codex_tui::session::write_codex_tui_rollout_marker_with_start_offset(
-            &tmux,
-            &path,
-            Some(&session),
-            Some(0),
-        )
-        .unwrap();
-        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
-            &tmux,
-            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                runtime_kind: RuntimeHandoffKind::CodexTui,
-                output_path: path.display().to_string(),
-                relay_output_path: None,
-                input_fifo_path: None,
-                session_id: Some(session),
-                last_offset: fixture.state.last_offset,
-                relay_last_offset: None,
-            },
-        );
-        fixture.claim().await;
-        let state = fixture.load().unwrap();
-        let channel = ChannelId::new(state.channel_id);
-        let fallback_anchor = 5_073_121;
-        let source = dr::ExactJsonlSourceIdentity {
-            provider: state.provider.clone(),
-            tmux_session_name: tmux.clone(),
-            turn_nonce: state.turn_nonce.clone().unwrap(),
-            range: (0, state.last_offset),
-            generation_mtime_ns: dr::current_generation_mtime_ns(&tmux),
-            offset_authority_channel_id: state.delivery_record_owner_channel_id(),
-            delivery_channel_id: state.channel_id,
-        };
-        match proof {
-            "exact" => dr::record_current_pinned_delivery(&source, fallback_anchor).unwrap(),
-            "historical" => {
-                dr::record_historical_pinned_delivery(&source, fallback_anchor).unwrap()
+    for provider in [ProviderKind::Codex, ProviderKind::Claude] {
+        for proof in [
+            "exact",
+            "historical",
+            "frontier_only",
+            "missing_fd",
+            "replaced_fd",
+        ] {
+            if provider == ProviderKind::Codex && matches!(proof, "missing_fd" | "replaced_fd") {
+                continue;
             }
-            _ => dr::write_delivered_frontier(
-                &ProviderKind::Codex,
-                source.offset_authority_channel_id,
-                &tmux,
-                dr::DeliveredCommit {
-                    range: source.range,
-                    generation_mtime_ns: source.generation_mtime_ns,
-                    attempts: 0,
-                    panel_msg_id: Some(fallback_anchor),
-                    panel_channel_id: Some(state.channel_id),
-                },
+            let runtime_kind = if provider == ProviderKind::Codex {
+                RuntimeHandoffKind::CodexTui
+            } else {
+                RuntimeHandoffKind::ClaudeTui
+            };
+            let mut fixture = Fixture::new(5_073_120);
+            fixture.state.provider = provider.as_str().into();
+            fixture.state.runtime_kind = Some(runtime_kind);
+            fixture.state.turn_nonce = Some("ready-receipt-episode".into());
+            fixture.state.response_sent_offset = 0;
+            fixture.state.full_response = "the terminal answer already POSTed by A".into();
+            let tmux = fixture.state.tmux_session_name.clone().unwrap();
+            if provider == ProviderKind::Claude {
+                fixture.state.session_id = None;
+                let native = concat!(
+                    "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"the terminal answer already POSTed by A\"}]}}\n",
+                    "{\"type\":\"system\",\"subtype\":\"stop_hook_summary\",\"stopReason\":\"end_turn\"}\n",
+                );
+                std::fs::write(fixture.state.output_path.as_ref().unwrap(), native).unwrap();
+                fixture.state.last_offset = native.len() as u64;
+            }
+            let session = fixture.state.session_id.clone();
+            let path = std::fs::canonicalize(fixture.state.output_path.as_ref().unwrap()).unwrap();
+            fixture.state.output_path = Some(path.display().to_string());
+            std::fs::write(
+                crate::services::tmux_common::session_temp_path(&tmux, "generation"),
+                b"ready-receipt",
             )
-            .unwrap(),
+            .unwrap();
+            if provider == ProviderKind::Codex {
+                codex_session::write_codex_tui_rollout_marker_with_start_offset(
+                    &tmux,
+                    &path,
+                    session.as_deref(),
+                    Some(0),
+                )
+                .unwrap();
+            } else {
+                use std::os::unix::fs::MetadataExt;
+                let metadata = std::fs::metadata(&path).unwrap();
+                fixture.state.tui_terminal_source_file_identity =
+                    Some((metadata.dev(), metadata.ino()));
+                if proof == "missing_fd" {
+                    fixture.state.tui_terminal_source_file_identity = None;
+                } else if proof == "replaced_fd" {
+                    let replacement = path.with_extension("replacement");
+                    std::fs::copy(&path, &replacement).unwrap();
+                    std::fs::rename(replacement, &path).unwrap();
+                }
+            }
+            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                &tmux,
+                crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                    runtime_kind,
+                    output_path: path.display().to_string(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: session,
+                    last_offset: fixture.state.last_offset,
+                    relay_last_offset: None,
+                },
+            );
+            fixture.claim().await;
+            let state = fixture.load().unwrap();
+            let channel = ChannelId::new(state.channel_id);
+            let fallback_anchor = 5_073_121;
+            let source = dr::ExactJsonlSourceIdentity {
+                provider: state.provider.clone(),
+                tmux_session_name: tmux.clone(),
+                turn_nonce: state.turn_nonce.clone().unwrap(),
+                range: (0, state.last_offset),
+                generation_mtime_ns: dr::current_generation_mtime_ns(&tmux),
+                offset_authority_channel_id: state.delivery_record_owner_channel_id(),
+                delivery_channel_id: state.channel_id,
+            };
+            match proof {
+                "exact" | "missing_fd" | "replaced_fd" => {
+                    dr::record_current_pinned_delivery(&source, fallback_anchor).unwrap()
+                }
+                "historical" => {
+                    dr::record_historical_pinned_delivery(&source, fallback_anchor).unwrap()
+                }
+                _ => dr::write_delivered_frontier(
+                    &provider,
+                    source.offset_authority_channel_id,
+                    &tmux,
+                    dr::DeliveredCommit {
+                        range: source.range,
+                        generation_mtime_ns: source.generation_mtime_ns,
+                        attempts: 0,
+                        panel_msg_id: Some(fallback_anchor),
+                        panel_channel_id: Some(state.channel_id),
+                    },
+                )
+                .unwrap(),
+            }
+            assert_eq!(
+                dr::confirmed_delivery_receipt_exists(&provider, channel, fallback_anchor, &source),
+                proof != "frontier_only"
+            );
+            assert!(!state.terminal_delivery_committed);
+            assert_ne!(
+                state.current_msg_id, fallback_anchor,
+                "crash retained the failed original anchor"
+            );
+            let gateway = RecoveryFakeGateway::new(
+                ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                    edit_error: "original edit fails again".into(),
+                    replacement_anchor: Some(MessageId::new(fallback_anchor + 1)),
+                },
+                true,
+            );
+            let http = Arc::new(serenity::Http::new("Bot test-token"));
+            let context = RecoveryDeliveryContext::from_state(
+                &fixture.shared,
+                &provider,
+                &state,
+                None,
+                fixture.shared.restart.current_generation,
+            );
+            assert!(
+                fixture
+                    .settle(&state, |text| {
+                        let gateway = &gateway;
+                        let shared = &fixture.shared;
+                        let http = &http;
+                        let context = context.as_ref();
+                        let state = &state;
+                        let provider = &provider;
+                        async move {
+                            deliver_recovery_replace_via_controller(
+                                gateway,
+                                shared,
+                                provider,
+                                http,
+                                channel,
+                                MessageId::new(state.current_msg_id),
+                                &text,
+                                context,
+                            )
+                            .await
+                        }
+                    })
+                    .await
+            );
+            assert_eq!(
+                gateway.replacements.lock().unwrap().len(),
+                usize::from(!matches!(proof, "exact" | "historical")),
+                "{provider:?}/{proof}: only an exact receipt with the original source proof suppresses transport"
+            );
+            assert!(fixture.load().is_none());
+            assert!(
+                mailbox_snapshot(&fixture.shared, channel)
+                    .await
+                    .cancel_token
+                    .is_none()
+            );
+            let mut next = state;
+            next.user_msg_id += 10;
+            next.turn_nonce = Some("next-input".into());
+            assert!(
+                super::super::reregister_active_turn_from_inflight(&fixture.shared, &next).await
+            );
         }
-        assert_eq!(
-            dr::confirmed_delivery_receipt_exists(
-                &ProviderKind::Codex,
-                channel,
-                fallback_anchor,
-                &source
-            ),
-            proof != "frontier_only"
-        );
-        assert!(!state.terminal_delivery_committed);
-        assert_ne!(
-            state.current_msg_id, fallback_anchor,
-            "crash retained the failed original anchor"
-        );
-        let gateway = RecoveryFakeGateway::new(
-            ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
-                edit_error: "original edit fails again".into(),
-                replacement_anchor: Some(MessageId::new(fallback_anchor + 1)),
-            },
-            true,
-        );
-        let http = Arc::new(serenity::Http::new("Bot test-token"));
-        let context = RecoveryDeliveryContext::from_state(
-            &fixture.shared,
-            &ProviderKind::Codex,
-            &state,
-            None,
-            fixture.shared.restart.current_generation,
-        );
-        assert!(
-            fixture
-                .settle(&state, |text| {
-                    let gateway = &gateway;
-                    let shared = &fixture.shared;
-                    let http = &http;
-                    let context = context.as_ref();
-                    let state = &state;
-                    async move {
-                        deliver_recovery_replace_via_controller(
-                            gateway,
-                            shared,
-                            &ProviderKind::Codex,
-                            http,
-                            channel,
-                            MessageId::new(state.current_msg_id),
-                            &text,
-                            context,
-                        )
-                        .await
-                    }
-                })
-                .await
-        );
-        assert_eq!(
-            gateway.replacements.lock().unwrap().len(),
-            usize::from(proof == "frontier_only"),
-            "exact receipt must suppress the duplicate fallback POST, while frontier alone is not receipt proof"
-        );
-        assert!(fixture.load().is_none());
-        assert!(
-            mailbox_snapshot(&fixture.shared, channel)
-                .await
-                .cancel_token
-                .is_none()
-        );
-        let mut next = state;
-        next.user_msg_id += 10;
-        next.turn_nonce = Some("next-input".into());
-        assert!(super::super::reregister_active_turn_from_inflight(&fixture.shared, &next).await);
     }
 }

@@ -258,7 +258,7 @@ assert r['completion_scope_counts'](events) == {}
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_dominates_all_publication_branches_5521() {
     for case in [
-        "short", "long", "fallback", "cancel", "ptl", "empty", "recovery", "headless",
+        "short", "long", "fallback", "cancel", "ptl", "empty", "recovery", "headless", "owned_recovery",
     ] {
         let body = match case {
             "long" => "chunk ".repeat(1_200),
@@ -271,8 +271,18 @@ async fn exact_receipt_rowless_terminal_dominates_all_publication_branches_5521(
             ReplaceBehaviour::Edited
         };
         let driver = TerminalDeliveryDriver::new(replace, 1).with_body(body);
-        let (mut ctx, state, source) = receipt_parts(&driver, ProviderKind::Codex);
-        dr::record_current_pinned_delivery(&source, DRIVER_CURRENT_MSG_ID).unwrap();
+        let (mut ctx, mut state, source) = receipt_parts(&driver, ProviderKind::Codex);
+        if case == "owned_recovery" {
+            ctx.entry_was_rowless = false;
+            state.inflight_state.full_response = state.full_response.clone();
+            inflight::save_inflight_state(&state.inflight_state).unwrap();
+        }
+        let receipt_anchor = if case == "owned_recovery" {
+            DRIVER_FALLBACK_ANCHOR_MSG_ID
+        } else {
+            DRIVER_CURRENT_MSG_ID
+        };
+        dr::record_current_pinned_delivery(&source, receipt_anchor).unwrap();
         ctx.single_message_panel_footer_mode = true;
         ctx.cancelled = case == "cancel";
         ctx.is_prompt_too_long = case == "ptl";
