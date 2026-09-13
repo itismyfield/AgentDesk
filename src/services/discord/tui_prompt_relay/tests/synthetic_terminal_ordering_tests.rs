@@ -52,6 +52,9 @@ fn terminal_ordering_fixture(
                 (serde_json::json!({"type":"response_item", "payload":{"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":body}]}}),
                  serde_json::json!({"type":"event_msg", "payload":{"type":"task_complete", "last_agent_message":body}}))
             } else { (assistant, terminal) };
+            // This native Codex fixture starts after session_meta and observes
+            // no SID; the captured file/generation/actor prove its source.
+            let observed_session = assistant.get("sessionId").and_then(serde_json::Value::as_str);
             std::fs::write(&output, format!("{assistant}\n{terminal}\n")).unwrap();
             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(tmux,
                 crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
@@ -127,10 +130,10 @@ fn terminal_ordering_fixture(
                 assert_eq!(row.turn_nonce, original_row.turn_nonce);
                 assert_eq!(row.current_msg_id, anchor.get(),
                     "capture binds the legitimate anchor before source mutation");
-                assert_eq!(row.session_id.as_deref(), Some("native-ordering-session"));
+                assert_eq!(row.session_id.as_deref(), observed_session);
                 assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux)
-                    .unwrap().session_id.as_deref(), Some("native-ordering-session"),
-                    "the actual source witness connects the original missing session before publication");
+                    .unwrap().session_id.as_deref(), observed_session,
+                    "admission preserves exactly the session identity observed by the reader");
                 if let Some(race) = source_race {
                     assert_eq!(shared.turn_view_reconciler.ops(), pending_view,
                         "admitted Claude keeps its pending view until confirmed publication");
@@ -292,7 +295,7 @@ fn terminal_ordering_fixture(
                     }
                     SourceRace::Session => {
                         let mut binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap();
-                        binding.session_id = Some("native-ordering-session".into());
+                        binding.session_id = observed_session.map(str::to_owned);
                         crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(tmux, binding);
                     }
                     _ => {}
