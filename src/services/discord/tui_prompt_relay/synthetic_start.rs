@@ -185,7 +185,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
     // Capture the actor-owned episode identity after admission. If this call
     // observed an already-active matching synthetic turn, the fresh local token
     // was not admitted; the mailbox snapshot, not that unused token, is the
-    // authority for the nonce persisted below.
+    // authority for the nonce persisted below and the allocation handed to the bridge.
     let active_snapshot = super::super::mailbox_snapshot(shared, channel_id).await;
     if register_deferred_start
         && (active_snapshot.active_user_message_id != Some(anchor_message_id)
@@ -202,14 +202,11 @@ async fn claim_tui_direct_synthetic_turn_prepared(
     let active_turn_nonce = active_snapshot.active_turn_nonce;
     identity.register_episode(active_turn_nonce.as_deref());
 
-    // #3146 Part 1: a TUI-driven turn is now active for this channel (we either
-    // just started it via `mailbox_try_start_turn` or already own the matching
-    // turn). Clear any stale `📦 … idle N분` recap card the same way the
-    // Discord-intake path does (`intake_gate` → `spawn_clear_idle_recap_for_channel`).
+    // #3146: admission succeeded or the matching turn already owns this channel.
+    // Clear the stale idle recap using the Discord-intake lifecycle.
     // Without this, a turn that starts from the tmux TUI (user-typed OR the
     // autonomous self-drive loop) never goes through Discord intake, so the
     // recap card kept showing `idle N분` over a live turn.
-    //
     // codex R2 P2: capture the recap card id THAT EXISTS NOW (the turn just
     // became active) and clear ONLY that captured id (compare-and-clear on the
     // pointer). The idle-recap policy posts at most once per idle period, so a

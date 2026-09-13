@@ -191,6 +191,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn resume_unpublished(
         || row.output_path.as_deref().map(Path::new) != Some(output)
         || row.external_turn_id.as_deref().is_none_or(str::is_empty)
         || row.turn_start_offset.is_none()
+        || row.turn_nonce.as_deref().is_none_or(str::is_empty)
         || CLAUDE_IDLE_RESPONSE_TAILS
             .lock()
             .unwrap_or_else(|error| error.into_inner())
