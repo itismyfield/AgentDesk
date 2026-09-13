@@ -11,9 +11,9 @@ mod cancel_watchdog;
 pub(crate) mod channel_rules;
 mod output_reader;
 mod registry;
-pub use output_reader::poll_output_file_until_result;
 pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 use cancel_watchdog::{current_unix_millis, enforce_watchdog_deadline};
+pub use output_reader::poll_output_file_until_result;
 pub use registry::{
     ProviderCatalogEntry, ProviderCompactionAdapter, ProviderExecutionAdapter,
     ProviderReadinessAdapter, ProviderRegistryEntry, StreamJsonDialectId, derived_counterpart_ids,

@@ -887,8 +887,8 @@ mod stream_tail_guard_tests {
     use crate::services::agent_protocol::StreamMessage;
     use crate::services::provider::{ReadOutputResult, SessionProbe};
     use std::io::Write;
-    use std::sync::mpsc;
     use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
@@ -945,10 +945,16 @@ mod stream_tail_guard_tests {
                 .unwrap_err();
             assert!(failure.error.contains("rotated"), "{failure:?}");
             assert!(failure.source_changed);
-            let recreation = failure.clone().recover_followup(|_| {
-                panic!("source rotation must bypass the Codex/Qwen fallback closure")
-            }).unwrap();
-            assert!(matches!(recreation, crate::services::provider::FollowupResult::RecreateSession { .. }));
+            let recreation = failure
+                .clone()
+                .recover_followup(|_| {
+                    panic!("source rotation must bypass the Codex/Qwen fallback closure")
+                })
+                .unwrap();
+            assert!(matches!(
+                recreation,
+                crate::services::provider::FollowupResult::RecreateSession { .. }
+            ));
             assert_eq!(failure.last_offset, complete.len() as u64);
             let messages: Vec<_> = receiver.try_iter().collect();
             assert!(messages.iter().any(|message| matches!(message, StreamMessage::Text { content } if content == "original")));
@@ -963,18 +969,29 @@ mod stream_tail_guard_tests {
     #[test]
     fn ordinary_read_failure_preserves_followup_watcher_fallback() {
         use crate::services::provider::{FollowupResult, tmux_followup_fallback_after_read_error};
-        for (file_len, ready, expected_done) in [(64, true, true), (128, true, false), (64, false, false)] {
+        for (file_len, ready, expected_done) in
+            [(64, true, true), (128, true, false), (64, false, false)]
+        {
             let failure = ReadOutputFailure::new("Failed to open output file", 64, false);
             let mut fallback_called = false;
-            let result = failure.recover_followup(|failure| {
-                fallback_called = true;
-                let fallback = tmux_followup_fallback_after_read_error(
-                    0, failure.last_offset, Some(file_len), true, ready, true, true,
-                ).expect("ordinary I/O failure retains the live-session fallback");
-                assert_eq!(fallback.last_offset, 64);
-                assert_eq!(fallback.emit_synthetic_done, expected_done);
-                Ok(FollowupResult::Delivered)
-            }).unwrap();
+            let result = failure
+                .recover_followup(|failure| {
+                    fallback_called = true;
+                    let fallback = tmux_followup_fallback_after_read_error(
+                        0,
+                        failure.last_offset,
+                        Some(file_len),
+                        true,
+                        ready,
+                        true,
+                        true,
+                    )
+                    .expect("ordinary I/O failure retains the live-session fallback");
+                    assert_eq!(fallback.last_offset, 64);
+                    assert_eq!(fallback.emit_synthetic_done, expected_done);
+                    Ok(FollowupResult::Delivered)
+                })
+                .unwrap();
             assert!(fallback_called);
             assert_eq!(result, FollowupResult::Delivered);
         }
