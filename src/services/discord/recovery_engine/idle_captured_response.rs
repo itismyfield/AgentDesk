@@ -82,6 +82,18 @@ pub(in crate::services::discord) async fn recover_idle_partial_response_from_rea
     let Some(provider) = row.provider_kind() else {
         return false;
     };
+    // Typed admission saves a canonical path, while the idle caller retains
+    // the runtime binding's spelling. Resolve it before the exact row checks;
+    // the captured FD, range and generation still govern pinned publication.
+    let canonical_output = if row.requires_pinned_terminal_recovery() {
+        let Ok(path) = std::fs::canonicalize(output) else {
+            return false;
+        };
+        Some(path)
+    } else {
+        None
+    };
+    let output = canonical_output.as_deref().unwrap_or(output);
     let Some(source) = SourceAtEof::capture(row, output) else {
         return false;
     };
