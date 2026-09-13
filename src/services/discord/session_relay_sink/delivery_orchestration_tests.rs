@@ -130,6 +130,137 @@ async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
     );
     assert_eq!(gateway.replace_calls.load(Ordering::Acquire), 1);
     crate::services::discord::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
+    native_codex_restart_sink_fixture().await;
+}
+
+async fn native_codex_restart_sink_fixture() {
+    use crate::services::discord::{inflight, mailbox_snapshot, mailbox_try_start_turn};
+    use crate::services::provider::CancelToken;
+    for successor in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        let channel = ChannelId::new(50710031 + u64::from(successor));
+        let binding = super::tests::matched_codex(&channel.get().to_string());
+        let tmux = &binding.expected_session_name;
+        let generation_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
+        std::fs::create_dir_all(std::path::Path::new(&generation_path).parent().unwrap()).unwrap();
+        std::fs::write(&generation_path, "117").unwrap();
+        let generation = dr::current_generation_mtime_ns(tmux);
+        let path = temp.path().join("rollout-restart.jsonl");
+        let prefix = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"original-codex\"}}\n";
+        let body = concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"ADK5071-native\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ADK5071-native\"}]}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"ADK5071-native\"}}\n"
+        );
+        std::fs::write(&path, format!("{prefix}{body}")).unwrap();
+        let start = prefix.len() as u64;
+        let end = std::fs::metadata(&path).unwrap().len();
+        let mut row = inflight_with_identity_offset(
+            channel.get(),
+            tmux,
+            1548524702677471305,
+            "2026-09-13 11:44:19",
+            Some(start),
+        );
+        row.provider = "codex".into();
+        row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
+        row.turn_source = TurnSource::ExternalInput;
+        row.injected_prompt_message_id = Some(row.user_msg_id);
+        row.output_path = Some(path.display().to_string());
+        row.last_offset = start;
+        row.turn_nonce = Some("37157420-570f-43c9-9c65-561a7ee8fddc".into());
+        row.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
+        row.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+        assert_eq!(row.current_msg_id, 0);
+        assert!(row.session_id.is_none());
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let actor = Arc::new(CancelToken::from_persisted_turn_nonce(
+            row.turn_nonce.clone(),
+        ));
+        assert!(
+            mailbox_try_start_turn(
+                &shared,
+                channel,
+                actor.clone(),
+                serenity::UserId::new(1),
+                MessageId::new(row.user_msg_id)
+            )
+            .await
+        );
+        let mut replacement = row.clone();
+        if successor {
+            replacement.user_msg_id += 1;
+            replacement.turn_nonce = Some("successor".into());
+        }
+        inflight::save_inflight_state(&replacement).unwrap();
+        let registry = Arc::new(HealthRegistry::new());
+        registry.register("codex".into(), shared.clone()).await;
+        let gateway = Arc::new(RelayContractFakeGateway::edited());
+        let mut sink = SessionBoundDiscordRelaySink::new(registry);
+        sink.test_gateway = Some(gateway.clone());
+        let source = std::fs::read_to_string(&path).unwrap();
+        let mut unread = source[start as usize..].to_string();
+        let mut parser_state = crate::services::session_backend::StreamLineState::new();
+        let mut response = String::new();
+        let mut tools = crate::services::discord::tmux::WatcherToolState::new();
+        let parsed = crate::services::discord::tmux::process_watcher_lines_for_turn(
+            &mut unread,
+            &mut parser_state,
+            &mut response,
+            &mut tools,
+            Some(start),
+            Some(start),
+        );
+        assert!(parsed.found_result);
+        assert_eq!(response, "ADK5071-native");
+        let mut terminal = terminal_frame_offset(
+            &binding,
+            &source[start as usize..],
+            1,
+            end - unread.len() as u64,
+            row.user_msg_id,
+            &row.started_at,
+            Some(start),
+        );
+        terminal.relay_generation_mtime_ns = Some(generation);
+        let result = sink.deliver(&terminal).await.unwrap();
+        if successor {
+            assert_eq!(result, RelaySinkOutcome::TerminalNotDelivered);
+            assert_eq!(gateway.send_calls.load(Ordering::Acquire), 0);
+            let kept = inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap();
+            assert_eq!(kept.user_msg_id, replacement.user_msg_id);
+            assert_eq!(kept.turn_nonce, replacement.turn_nonce);
+            assert!(
+                dr::read_record(&ProviderKind::Codex, channel.get())
+                    .and_then(|r| r.delivered_frontier)
+                    .is_none()
+            );
+        } else {
+            assert_eq!(result, RelaySinkOutcome::TerminalDelivered);
+            assert_eq!(gateway.send_calls.load(Ordering::Acquire), 1);
+            assert_eq!(
+                gateway.sent_contents.lock().unwrap().as_slice(),
+                &["ADK5071-native"]
+            );
+            let receipt = dr::read_record(&ProviderKind::Codex, channel.get())
+                .unwrap()
+                .delivered_frontier
+                .unwrap();
+            assert_eq!(receipt.range, (start, end));
+            assert_eq!(receipt.generation_mtime_ns, generation);
+            assert_eq!(receipt.panel_msg_id, Some(gateway.sent_message_id.get()));
+        }
+        let current = mailbox_snapshot(&shared, channel).await;
+        if let Some(current) = current.cancel_token {
+            assert!(
+                Arc::ptr_eq(&current, &actor),
+                "sink must never invent a replacement actor"
+            );
+        }
+        assert_eq!(actor.turn_nonce(), row.turn_nonce.as_deref());
+        inflight::clear_inflight_state(&ProviderKind::Codex, channel.get());
+    }
 }
 
 // Kills M11: stale proof must remain distinguishable from Delivered before public folding.
@@ -254,6 +385,7 @@ struct RelayContractFakeGateway {
     sent_message_id: MessageId,
     replace_calls: AtomicU64,
     send_calls: AtomicU64,
+    sent_contents: Mutex<Vec<String>>,
     on_transport: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
@@ -265,6 +397,7 @@ impl RelayContractFakeGateway {
             sent_message_id: MessageId::new(91_001),
             replace_calls: AtomicU64::new(0),
             send_calls: AtomicU64::new(0),
+            sent_contents: Mutex::new(Vec::new()),
             on_transport: None,
         }
     }
@@ -280,10 +413,11 @@ impl crate::services::discord::gateway::TurnGateway for RelayContractFakeGateway
     fn send_message<'a>(
         &'a self,
         _channel_id: ChannelId,
-        _content: &'a str,
+        content: &'a str,
     ) -> crate::services::discord::gateway::GatewayFuture<'a, Result<MessageId, String>> {
         Box::pin(async move {
             self.send_calls.fetch_add(1, Ordering::AcqRel);
+            self.sent_contents.lock().unwrap().push(content.to_string());
             if let Some(on_transport) = &self.on_transport {
                 on_transport();
             }

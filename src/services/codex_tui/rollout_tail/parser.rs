@@ -5,6 +5,37 @@ use crate::services::agent_protocol::StreamMessage;
 
 use super::RelaySuppressionSender;
 
+/// The restart watcher and session relay consume raw rollout records too.
+/// Share the native tail's parser and explicit completion policy without its
+/// polling, prompt observation, or heuristic EOF completion.
+#[derive(Debug, Default)]
+pub(crate) struct RolloutRecordDecoder(RolloutParseState);
+
+impl RolloutRecordDecoder {
+    pub(crate) fn decode(&mut self, record: &Value) -> Option<Vec<StreamMessage>> {
+        if !matches!(
+            record.get("type").and_then(Value::as_str),
+            Some(
+                "session_meta"
+                    | "response_item"
+                    | "event_msg"
+                    | "item.completed"
+                    | "turn.completed"
+            )
+        ) {
+            return None;
+        }
+        let mut messages = decode_rollout_record(record, &mut self.0);
+        if super::explicit_finalize_path(&mut self.0, true).is_some() {
+            messages.push(StreamMessage::Done {
+                result: self.0.final_text.clone(),
+                session_id: self.0.session_id.clone(),
+            });
+        }
+        Some(messages)
+    }
+}
+
 /// Detached terminal recovery uses the native parser and its existing fallback
 /// text policy. Missing completion/text remains unknown, just as the live
 /// explicit-completion schema-drift guard requires.
@@ -96,9 +127,7 @@ fn process_rollout_line(
     };
 
     state.lifecycle_activity = false;
-    let messages = rollout_messages(&json, state);
-    observe_rollout_user_prompt(&json, state);
-    maybe_observe_synthetic_composer_ready(state);
+    let messages = decode_rollout_record(&json, state);
     let emitted = !messages.is_empty();
     for message in messages {
         sender.send(message);
@@ -106,6 +135,16 @@ fn process_rollout_line(
     let activity = emitted || state.lifecycle_activity;
     state.lifecycle_activity = false;
     activity
+}
+
+pub(super) fn decode_rollout_record(
+    json: &Value,
+    state: &mut RolloutParseState,
+) -> Vec<StreamMessage> {
+    let messages = rollout_messages(json, state);
+    observe_rollout_user_prompt(json, state);
+    maybe_observe_synthetic_composer_ready(state);
+    messages
 }
 
 fn rollout_messages(json: &Value, state: &mut RolloutParseState) -> Vec<StreamMessage> {

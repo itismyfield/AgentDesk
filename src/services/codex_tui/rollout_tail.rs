@@ -8,10 +8,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::{CancelToken, ReadOutputResult, cancel_requested};
-pub(crate) use parser::recover_captured_rollout_response;
 use parser::{
     RolloutParseState, process_rollout_line_bytes, task_complete_fallback_supersedes_final_text,
 };
+pub(crate) use parser::{RolloutRecordDecoder, recover_captured_rollout_response};
 // REQ-006: share the single rollout discovery primitive so `session.rs` and
 // `rollout_tail.rs` do not maintain two divergent directory walkers. Tailing
 // semantics are unchanged — callers here still apply their own cwd/session/mtime

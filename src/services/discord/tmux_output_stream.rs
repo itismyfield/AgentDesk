@@ -20,6 +20,7 @@ pub(in crate::services::discord) struct WatcherToolState {
     placeholder_events: Vec<RecentPlaceholderEvent>,
     /// Provider-normalized status events for the status-panel-v2 message.
     status_events: Vec<StatusEvent>,
+    codex_rollout: crate::services::codex_tui::rollout_tail::RolloutRecordDecoder,
 }
 
 impl WatcherToolState {
@@ -34,6 +35,7 @@ impl WatcherToolState {
             prose_diagnostics_recorded: [false; ProviderProseDiagnostic::COUNT],
             placeholder_events: Vec::new(),
             status_events: Vec::new(),
+            codex_rollout: Default::default(),
         }
     }
 
@@ -177,6 +179,10 @@ fn watcher_placeholder_inlines_live_events(
     placeholder_live_events_enabled || (status_panel_v2_enabled && status_panel_msg_id.is_none())
 }
 
+#[path = "tmux_output_stream/native_codex.rs"]
+mod native_codex;
+use native_codex::process_native_codex_messages;
+
 /// Process buffered lines for the tmux watcher.
 /// Extracts text content, tracks tool status, and detects result events.
 /// Returns true if a "result" event was found.
@@ -238,6 +244,18 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
             if pre_turn_line {
                 outcome.pre_turn_bytes_skipped =
                     outcome.pre_turn_bytes_skipped.saturating_add(line_len);
+                continue;
+            }
+            if let Some(messages) = tool_state.codex_rollout.decode(&val) {
+                let native =
+                    process_native_codex_messages(messages, state, full_response, tool_state);
+                outcome.assistant_text_seen |= native.assistant_text_seen;
+                if native.found_result {
+                    outcome.found_result = true;
+                    outcome.terminal_kind = native.terminal_kind;
+                    outcome.terminal_evidence_offset = line_start_offset;
+                    break;
+                }
                 continue;
             }
             if event_type == "user" && watcher_user_event_is_prompt_boundary(&val) {
@@ -972,6 +990,38 @@ mod tests {
         );
         assert!(outcome.terminal_evidence_offset.unwrap() >= turn_start_offset);
         assert!(buffer.is_empty());
+
+        let call = "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"call_id\":\"pending\",\"arguments\":\"{}\"}}\n";
+        let output = "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"pending\",\"output\":\"done\"}}\n";
+        for commentary in [false, true] {
+            let body = if commentary {
+                native.replace(
+                    "\"role\":\"assistant\"",
+                    "\"role\":\"assistant\",\"phase\":\"commentary\"",
+                )
+            } else {
+                native.to_string()
+            };
+            let mut buffer = format!("{call}{body}");
+            let mut state = StreamLineState::new();
+            let mut response = String::new();
+            let mut tools = WatcherToolState::new();
+            let pending = process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools);
+            assert!(
+                !pending.found_result,
+                "task_complete cannot bypass pending tool balance"
+            );
+            buffer.push_str(output);
+            let completed =
+                process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools);
+            assert!(completed.found_result);
+            assert_eq!(
+                response, "ADK5071-native",
+                "commentary fallback must not duplicate prose"
+            );
+        }
+        let item_only = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"unconfirmed\"}}\n";
+        assert!(!parse_lines(item_only).0.found_result);
     }
 
     #[test]

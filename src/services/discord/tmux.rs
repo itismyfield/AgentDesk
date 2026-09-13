@@ -2123,6 +2123,10 @@ mod active_bridge_turn_guard_tests {
     fn session_bound_relay_owner_still_suppresses_watcher_duplicate() {
         with_ownerless_codex_tui_state(|mut state| {
             state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+            state.set_restart_mode(InflightRestartMode::DrainRestart);
+            state.current_msg_id = 0;
+            state.readopted_from_inflight = true;
+            state.terminal_delivery_committed = false;
 
             assert!(watcher_should_yield_to_inflight_state(
                 Some(&state),
