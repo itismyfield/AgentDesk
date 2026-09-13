@@ -1525,6 +1525,7 @@ pub fn poll_output_file_until_result<
     HasFinal,
     EmitSyntheticDone,
     EmitDeferredError,
+    OpenedFile,
 >(
     output_path: &str,
     start_offset: u64,
@@ -1537,6 +1538,7 @@ pub fn poll_output_file_until_result<
     has_final: HasFinal,
     mut emit_synthetic_done: EmitSyntheticDone,
     mut emit_deferred_error: EmitDeferredError,
+    opened_file: OpenedFile,
 ) -> Result<ReadOutputResult, String>
 where
     IsAlive: FnMut() -> bool,
@@ -1546,6 +1548,7 @@ where
     HasFinal: Fn(&State) -> bool,
     EmitSyntheticDone: FnMut(&State) -> bool,
     EmitDeferredError: FnMut(&State),
+    OpenedFile: FnOnce(&std::fs::File),
 {
     use std::io::{Read, Seek, SeekFrom};
     use std::time::{Duration, Instant};
@@ -1583,6 +1586,7 @@ where
 
     let mut file = std::fs::File::open(output_path)
         .map_err(|e| format!("Failed to open output file: {}", e))?;
+    opened_file(&file);
     file.seek(SeekFrom::Start(start_offset))
         .map_err(|e| format!("Failed to seek output file: {}", e))?;
 
@@ -2313,6 +2317,7 @@ mod poll_output_file_tests {
             |_| false,
             |_| true,
             |_| {},
+            |_| {},
         )
         .unwrap();
 
@@ -2350,6 +2355,7 @@ mod poll_output_file_tests {
             },
             |state| state.saw_done,
             |_| true,
+            |_| {},
             |_| {},
         )
         .unwrap();
@@ -2392,6 +2398,7 @@ mod poll_output_file_tests {
             },
             |_| false,
             |_| true,
+            |_| {},
             |_| {},
         )
         .unwrap();

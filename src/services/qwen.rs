@@ -687,6 +687,7 @@ fn qwen_read_output_file_until_result_tracked(
                 });
             }
         },
+        |_| {},
     );
 
     match result {
