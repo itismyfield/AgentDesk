@@ -30,17 +30,15 @@ pub(super) fn seed_recovered_row(
 
 fn collector_case(paused: bool, repeats: usize, name: &str) {
     const CHILD: &str = "AGENTDESK_5833_NATIVE_COLLECTOR_CHILD";
-    let captured = name == "captured_native_collector_first_frame_reaches_http";
+    let captured = name.starts_with("captured_native_collector_");
+    let physical = name == "captured_native_collector_physical_batches_reach_http";
     if std::env::var_os(CHILD).is_none() {
         let qualified = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
         let result = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &qualified, "--nocapture"])
             .args(captured.then_some("--ignored"))
             .env(CHILD, "1")
-            .env(
-                "AGENTDESK_STATUS_INTERVAL_SECS",
-                if captured { "5" } else { "0" },
-            )
+            .env("AGENTDESK_STATUS_INTERVAL_SECS", "0")
             .output()
             .unwrap();
         assert!(
@@ -82,7 +80,12 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
             0
         };
         assert!(source_start < source_bytes as u64);
-        let data = data[source_start as usize..].to_vec();
+        let initial_end = if physical {
+            (source_start as usize + 16_384).min(data.len())
+        } else {
+            data.len()
+        };
+        let data = data[source_start as usize..initial_end].to_vec();
         row.turn_start_offset = Some(source_start);
         row.last_offset = source_start;
         save_inflight_state(&row).unwrap();
@@ -111,6 +114,20 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
             turn_result_relayed: false,
             restored_injected_prompt_message_id: row.injected_prompt_message_id,
         };
+        if physical {
+            crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+                &fx.tmux,
+                crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                    runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+                    output_path: fx.output_path.clone(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: Some("captured-native".into()),
+                    last_offset: source_start,
+                    relay_last_offset: None,
+                },
+            );
+        }
         let file = std::fs::File::open(&fx.output_path).unwrap();
         let source_file = SourceFileIdentity::from_open_file(&file);
         let source_authority = WatcherSourceAuthority {
@@ -138,7 +155,7 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         );
         let registry = Arc::new(RelayProducerRegistry::new());
         registry.register(fx.tmux.clone(), handle.producer());
-        let mut offset = source_bytes as u64;
+        let mut offset = initial_end as u64;
         let mut buffer = String::new();
         let mut buffer_start = source_start;
         let mut decoder = Utf8ChunkDecoder::default();
@@ -273,6 +290,9 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
             );
         }
         handle.shutdown().await;
+        if physical {
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&fx.tmux);
+        }
         std::fs::remove_file(marker).unwrap();
     });
 }
@@ -313,5 +333,15 @@ fn captured_native_collector_first_frame_reaches_http() {
         false,
         0,
         "captured_native_collector_first_frame_reaches_http",
+    );
+}
+
+#[test]
+#[ignore = "requires private immutable source capture; root runs explicitly"]
+fn captured_native_collector_physical_batches_reach_http() {
+    collector_case(
+        false,
+        0,
+        "captured_native_collector_physical_batches_reach_http",
     );
 }
