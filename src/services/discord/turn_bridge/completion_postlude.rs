@@ -456,11 +456,11 @@ pub(super) async fn run_completion_postlude(
         "completed"
     };
     let turn_outcome = turn_analytics::pending_delivery_outcome(
+        turn_outcome,
         completion_guard.completion_signal(),
         preserve_inflight_for_cleanup_retry,
         bridge_skip_holder_owns_inflight,
-    )
-    .unwrap_or(turn_outcome);
+    );
     crate::services::observability::emit_turn_finished_with_dispatch_kind(
         provider.as_str(),
         channel_id.get(),
