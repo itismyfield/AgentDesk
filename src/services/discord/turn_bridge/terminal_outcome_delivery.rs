@@ -50,7 +50,7 @@ mod foreign_terminal_handoff;
 mod prompt_too_long_guidance;
 mod queue_retry_silence;
 mod recovery_retry;
-mod rowless_receipt;
+pub(super) mod rowless_receipt;
 
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
 
@@ -58,7 +58,12 @@ pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
     state: TerminalOutcomeDeliveryState,
 ) -> TerminalOutcomeDeliveryOutput {
-    let receipt_disposition = rowless_receipt::decision(&ctx, &state);
+    let receipt_disposition = rowless_receipt::decision(rowless_receipt::ReceiptDecisionInput {
+        provider: &state.provider, channel_id: ctx.channel_id, current_msg_id: ctx.current_msg_id,
+        watcher_owner_channel_id: ctx.watcher_owner_channel_id, entry_was_rowless: ctx.entry_was_rowless,
+        codex_tui_terminal_range: ctx.codex_tui_terminal_range.as_ref(), tmux_last_offset: ctx.tmux_last_offset,
+        inflight_state: &state.inflight_state, full_response: &state.full_response,
+    });
     let already_receipted = receipt_disposition
         == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
     let may_publish = receipt_disposition == rowless_receipt::TerminalReceiptDisposition::Continue;

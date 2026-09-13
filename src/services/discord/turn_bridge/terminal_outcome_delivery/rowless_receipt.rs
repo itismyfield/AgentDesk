@@ -7,24 +7,35 @@ use crate::services::discord::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum TerminalReceiptDisposition {
+pub(in crate::services::discord::turn_bridge) enum TerminalReceiptDisposition {
     Continue,
     AlreadyDelivered,
     ForeignAnchor,
 }
 
-pub(super) fn decision(
-    ctx: &TerminalOutcomeDeliveryContext,
-    state: &TerminalOutcomeDeliveryState,
+pub(in crate::services::discord::turn_bridge) struct ReceiptDecisionInput<'a> {
+    pub provider: &'a ProviderKind,
+    pub channel_id: ChannelId,
+    pub current_msg_id: MessageId,
+    pub watcher_owner_channel_id: ChannelId,
+    pub entry_was_rowless: bool,
+    pub codex_tui_terminal_range: Option<&'a crate::services::discord::inflight::CodexRange>,
+    pub tmux_last_offset: Option<u64>,
+    pub inflight_state: &'a InflightTurnState,
+    pub full_response: &'a str,
+}
+
+pub(in crate::services::discord::turn_bridge) fn decision(
+    ctx: ReceiptDecisionInput<'_>,
 ) -> TerminalReceiptDisposition {
     use crate::services::discord::relay_recovery::authority_observation::delivery_boundary::{
         TerminalReceiptDecisionRecord, record_terminal_receipt_decision,
     };
-    let (disposition, source, anchor, frontier_already_covers) = decision_with_evidence(ctx, state);
+    let (disposition, source, anchor, frontier_already_covers) = decision_with_evidence(&ctx);
     record_terminal_receipt_decision(TerminalReceiptDecisionRecord {
-        provider: &state.provider,
+        provider: ctx.provider,
         channel_id: ctx.channel_id.get(),
-        turn_id: state.inflight_state.effective_finalizer_turn_id(),
+        turn_id: ctx.inflight_state.effective_finalizer_turn_id(),
         source: source.as_ref(),
         anchor,
         current_message_id: ctx.current_msg_id.get(),
@@ -45,15 +56,12 @@ type DecisionEvidence = (
     Option<bool>,
 );
 
-fn decision_with_evidence(
-    ctx: &TerminalOutcomeDeliveryContext,
-    state: &TerminalOutcomeDeliveryState,
-) -> DecisionEvidence {
+fn decision_with_evidence(ctx: &ReceiptDecisionInput<'_>) -> DecisionEvidence {
     use TerminalReceiptDisposition::*;
     let unknown = |disposition| (disposition, None, None, None);
-    let local = &state.inflight_state;
+    let local = ctx.inflight_state;
     let identity = InflightTurnIdentity::from_state(local);
-    let fresh = load_inflight_state_read_only(&state.provider, local.channel_id);
+    let fresh = load_inflight_state_read_only(ctx.provider, local.channel_id);
     let own_row = fresh
         .as_ref()
         .is_some_and(|row| identity.matches_state(row) && row.turn_nonce == local.turn_nonce);
@@ -79,18 +87,18 @@ fn decision_with_evidence(
             // revalidated_source intentionally refuses a missing row for NEW
             // publication; that refusal does not invalidate a live exact receipt.
             if !admitted.identity.matches_state(local)
-                || admitted.result != state.full_response
+                || admitted.result != ctx.full_response
                 || !admitted.source_receipt_is_live(authority)
             {
                 return unknown(fallback);
             }
-            let Some(path) = admitted.live_source_path() else {
+            let Some(path) = admitted.receipt_source_path() else {
                 return unknown(fallback);
             };
             (admitted.source.clone(), path)
         } else {
             // #5264: a non-admitted CodexTui range remains honest legacy/NoRange.
-            if state.provider == ProviderKind::Codex
+            if *ctx.provider == ProviderKind::Codex
                 && local.runtime_kind
                     == Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
             {
@@ -123,7 +131,7 @@ fn decision_with_evidence(
             }
             (
                 dr::ExactJsonlSourceIdentity {
-                    provider: state.provider.as_str().to_owned(),
+                    provider: ctx.provider.as_str().to_owned(),
                     tmux_session_name: tmux.to_owned(),
                     turn_nonce: local.turn_nonce.clone().unwrap_or_default(),
                     range: (start, end),
@@ -135,7 +143,7 @@ fn decision_with_evidence(
             )
         };
         if !source.is_authoritative()
-            || source.provider != state.provider.as_str()
+            || source.provider != ctx.provider.as_str()
             || source.tmux_session_name != tmux
             || Some(source.turn_nonce.as_str()) != local.turn_nonce.as_deref()
             || Some(source.range.0) != local.turn_start_offset
@@ -156,12 +164,7 @@ fn decision_with_evidence(
         // to a later range/anchor. The frontier is an anchor discovery hint,
         // not a veto over that confirmed transport result.
         let has_receipt = |message_id| {
-            dr::confirmed_delivery_receipt_exists(
-                &state.provider,
-                ctx.channel_id,
-                message_id,
-                &source,
-            )
+            dr::confirmed_delivery_receipt_exists(ctx.provider, ctx.channel_id, message_id, &source)
         };
         if has_receipt(ctx.current_msg_id.get()) {
             // The exact receipt settles this retry before a frontier read.
@@ -169,7 +172,7 @@ fn decision_with_evidence(
             return (AlreadyDelivered, Some(source), None, None);
         }
         let anchor = delivery_frontier_probe::current_generation_delivered_anchor(
-            &state.provider,
+            ctx.provider,
             ctx.watcher_owner_channel_id,
             tmux,
             eof,
@@ -181,7 +184,7 @@ fn decision_with_evidence(
                 && has_receipt(anchor.panel_msg_id)
         });
         let disposition = if frontier_covers
-            || dr::read_record(&state.provider, source.offset_authority_channel_id).is_some_and(
+            || dr::read_record(ctx.provider, source.offset_authority_channel_id).is_some_and(
                 |record| {
                     record.confirmed_deliveries.iter().any(|receipt| {
                         receipt.source == source

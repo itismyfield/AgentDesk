@@ -189,11 +189,27 @@ impl CodexRange {
     }
 
     pub(in crate::services::discord) fn live_source_path(&self) -> Option<PathBuf> {
+        self.source_path(false)
+    }
+
+    pub(in crate::services::discord) fn receipt_source_path(&self) -> Option<PathBuf> {
+        self.source_path(true)
+    }
+
+    fn source_path(&self, receipt: bool) -> Option<PathBuf> {
         let source = &self.source;
         let (path, len) = canonical_regular_file(&self.rollout_path)?;
         let (start, end) = source.range;
-        let tmux = &source.tmux_session_name;
-        (len >= end && marker_matches(tmux, &path, &self.session_id, start)).then_some(path)
+        let marker = crate::services::codex_tui::session::read_codex_tui_rollout_marker(
+            &source.tmux_session_name,
+        )?;
+        let marker_offset = marker.rollout_start_offset?;
+        (len >= end
+            && nonempty(marker.session_id.as_deref()) == Some(self.session_id.as_str())
+            && std::fs::canonicalize(marker.rollout_path).ok().as_deref() == Some(&path)
+            && (marker_offset == start
+                || (receipt && marker_offset > start && marker_offset <= len)))
+            .then_some(path)
     }
 
     pub(in crate::services::discord) fn source_authority_is_live(
@@ -219,7 +235,7 @@ impl CodexRange {
         // this marker/generation/binding tuple cannot change after the check.
         let source = &self.source;
         let tmux = &source.tmux_session_name;
-        let Some(path) = self.live_source_path() else {
+        let Some(path) = self.source_path(receipt) else {
             return false;
         };
         tmux_generation_file_mtime_ns(tmux) == source.generation_mtime_ns
@@ -227,6 +243,8 @@ impl CodexRange {
                 binding.runtime_kind == RuntimeHandoffKind::CodexTui
                     && canonical_regular_file(&binding.output_path).is_some_and(|(bound, _)| bound == path)
                     && nonempty(binding.session_id.as_deref()) == Some(self.session_id.as_str())
+                    && (!receipt || crate::services::codex_tui::session::read_codex_tui_rollout_marker(tmux)
+                        .and_then(|marker| marker.rollout_start_offset).is_some_and(|offset| offset <= binding.last_offset))
                     && (binding.last_offset == source.range.1
                         || (receipt && binding.last_offset > source.range.1))
             })

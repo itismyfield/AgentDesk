@@ -377,10 +377,17 @@ async fn exact_receipt_rowless_terminal_survives_newer_frontier_at_another_ancho
         later.range = (64, 128);
         later.turn_nonce.push_str("-later");
         dr::record_current_pinned_delivery(&later, DRIVER_STALE_PREFIX_MSG_ID).unwrap();
-        let mut binding =
-            tui_prompt_dedupe::runtime_binding_for_tmux_session(DRIVER_TMUX_SESSION).unwrap();
-        binding.last_offset = 128;
-        tui_prompt_dedupe::register_tmux_runtime_binding(DRIVER_TMUX_SESSION, binding);
+        crate::services::codex_tui::session::advance_codex_tui_runtime_binding_and_marker_offset(
+            DRIVER_TMUX_SESSION,
+            std::path::Path::new(path),
+            128,
+        );
+        assert_eq!(
+            crate::services::codex_tui::session::read_codex_tui_rollout_marker(DRIVER_TMUX_SESSION)
+                .unwrap()
+                .rollout_start_offset,
+            Some(128)
+        );
         crate::services::tmux_common::with_tmux_source_authority(
             DRIVER_TMUX_SESSION,
             |authority| {
