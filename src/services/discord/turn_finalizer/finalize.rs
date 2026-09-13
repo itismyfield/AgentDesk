@@ -40,13 +40,8 @@ pub(in crate::services::discord) async fn do_finalize_with_release(
     let operator_release = matches!(event, TerminalEvent::OperatorRelease(_));
     #[cfg(test)]
     super::test_panic_hook::maybe_panic_in_finalize();
-    let expected_actor = match submit_snapshot.and_then(|snapshot| snapshot.recovery_actor.as_ref())
-    {
-        Some(actor) => match actor.upgrade() {
-            Some(actor) => Some(actor),
-            None => return FinalizeOutcome::AlreadyFinalized,
-        },
-        None => None,
+    let Ok(expected_actor) = super::cleanup::captured_recovery_actor(submit_snapshot) else {
+        return FinalizeOutcome::AlreadyFinalized;
     };
     let owned_role_override = super::cleanup::snapshot_role_override(shared, key.channel_id);
     let captured = if let Some(finish) = released {

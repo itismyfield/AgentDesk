@@ -52,7 +52,8 @@ pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
     // unambiguous case (the recovered turn is the single live entry) finalizes
     // it exactly as the inline code did. This reproduces the prior
     // channel-scoped `mailbox_finish_turn` semantics, now ledger-gated.
-    finish_recovered_turn_mailbox_with_snapshot(shared, provider, channel_id, 0, None).await;
+    let _ =
+        finish_recovered_turn_mailbox_with_snapshot(shared, provider, channel_id, 0, None).await;
     let _ = stop_source;
 }
 
@@ -61,21 +62,25 @@ async fn finish_recovered_turn_mailbox_for_captured_state(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
     snapshot: super::turn_finalizer::SyntheticClaimSnapshot,
-) {
+) -> Option<super::turn_finalizer::FinalizeOutcome> {
     // A row recovered without a mailbox actor cannot authorize releasing one
     // admitted later while its Discord request was in flight.
     if snapshot.recovery_actor.is_none() {
-        return;
+        return None;
     }
     if let Some(channel_id) = inflight::opt_channel_id(state.channel_id) {
-        finish_recovered_turn_mailbox_with_snapshot(
-            shared,
-            provider,
-            channel_id,
-            state.effective_finalizer_turn_id(),
-            Some(snapshot),
+        Some(
+            finish_recovered_turn_mailbox_with_snapshot(
+                shared,
+                provider,
+                channel_id,
+                state.effective_finalizer_turn_id(),
+                Some(snapshot),
+            )
+            .await,
         )
-        .await;
+    } else {
+        None
     }
 }
 
@@ -85,8 +90,8 @@ async fn finish_recovered_turn_mailbox_with_snapshot(
     channel_id: ChannelId,
     user_msg_id: u64,
     snapshot: Option<super::turn_finalizer::SyntheticClaimSnapshot>,
-) {
-    let _ = shared
+) -> super::turn_finalizer::FinalizeOutcome {
+    shared
         .turn_finalizer
         .submit_terminal_with_claim_snapshot(
             super::turn_finalizer::TurnKey::new(
@@ -100,7 +105,7 @@ async fn finish_recovered_turn_mailbox_with_snapshot(
             snapshot,
             shared.clone(),
         )
-        .await;
+        .await
 }
 
 #[cfg(unix)]
@@ -202,8 +207,10 @@ where
     let mut snapshot = super::turn_finalizer::SyntheticClaimSnapshot::from_row(state);
     snapshot.recovery_actor = actor.map(Arc::downgrade);
     if recovery_ready_without_output_already_delivered(state) {
-        finish_recovered_turn_mailbox_for_captured_state(shared, provider, state, snapshot).await;
-        inflight::clear_inflight_state_for_reconcile(provider, state);
+        retire_captured_ready_response(shared, provider, state, snapshot, |snapshot| {
+            finish_recovered_turn_mailbox_for_captured_state(shared, provider, state, snapshot)
+        })
+        .await;
         return true;
     }
     if recovery_ready_without_output_has_captured_response(state) {
@@ -261,13 +268,65 @@ async fn settle_captured_ready_delivery(
     {
         return;
     }
-    finish_recovered_turn_mailbox_for_captured_state(shared, provider, &delivered, snapshot).await;
-    inflight::clear_inflight_state_for_captured_episode(
+    let mut committed_snapshot =
+        super::turn_finalizer::SyntheticClaimSnapshot::from_row(&delivered);
+    committed_snapshot.recovery_actor = snapshot.recovery_actor;
+    retire_captured_ready_response(
+        shared,
         provider,
-        state.channel_id,
-        &inflight::InflightTurnIdentity::from_state(&delivered),
-        state.turn_nonce.as_deref(),
-    );
+        &delivered,
+        committed_snapshot,
+        |snapshot| {
+            finish_recovered_turn_mailbox_for_captured_state(shared, provider, &delivered, snapshot)
+        },
+    )
+    .await;
+}
+
+async fn retire_captured_ready_response<F, Fut>(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    committed: &inflight::InflightTurnState,
+    snapshot: super::turn_finalizer::SyntheticClaimSnapshot,
+    finalize: F,
+) where
+    F: FnOnce(super::turn_finalizer::SyntheticClaimSnapshot) -> Fut,
+    Fut: std::future::Future<Output = Option<super::turn_finalizer::FinalizeOutcome>>,
+{
+    use super::turn_finalizer::FinalizeOutcome;
+    let expected_actor = snapshot
+        .recovery_actor
+        .as_ref()
+        .and_then(std::sync::Weak::upgrade);
+    let outcome = finalize(snapshot).await;
+    match outcome {
+        Some(FinalizeOutcome::Deferred) => return,
+        Some(FinalizeOutcome::Finalized {
+            removed_token: Some(removed),
+            ..
+        }) => {
+            if !expected_actor
+                .as_ref()
+                .is_some_and(|expected| Arc::ptr_eq(expected, &removed))
+            {
+                return;
+            }
+        }
+        _ => {
+            // AlreadyFinalized can run a guarded mailbox cleanup. Its ledger
+            // answer alone does not prove that the original actor was released.
+            if super::mailbox_snapshot(shared, ChannelId::new(committed.channel_id))
+                .await
+                .cancel_token
+                .is_some()
+            {
+                return;
+            }
+        }
+    }
+    // Finalization awaited other actors. Compare the committed anchor, nonce,
+    // generation and identity again under the canonical row lock before removal.
+    inflight::clear_inflight_state_for_snapshot(provider, committed);
 }
 
 fn observe_restore_inflight_snapshot(

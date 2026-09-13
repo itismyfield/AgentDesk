@@ -204,6 +204,15 @@ pub(in crate::services::discord) struct SyntheticClaimSnapshot {
     pub(in crate::services::discord) relay_owner_kind: RelayOwnerKind,
 }
 
+pub(super) fn captured_recovery_actor(
+    snapshot: Option<&SyntheticClaimSnapshot>,
+) -> Result<Option<Arc<crate::services::provider::CancelToken>>, ()> {
+    match snapshot.and_then(|snapshot| snapshot.recovery_actor.as_ref()) {
+        Some(actor) => actor.upgrade().map(Some).ok_or(()),
+        None => Ok(None),
+    }
+}
+
 impl SyntheticClaimSnapshot {
     pub(in crate::services::discord) fn from_row(
         row: &crate::services::discord::inflight::InflightTurnState,
@@ -429,17 +438,31 @@ pub(super) async fn already_finalized_active_state(
     event: &TerminalEvent,
     ctx: FinalizeContext,
     shared: &Arc<SharedData>,
+    submit_snapshot: Option<&SyntheticClaimSnapshot>,
 ) {
     if key.user_msg_id == 0 {
         return;
     }
 
+    let Ok(expected_actor) = captured_recovery_actor(submit_snapshot) else {
+        return;
+    };
+    // Recovery owns row retirement with its exact committed snapshot. A ledger
+    // duplicate must not adopt the currently loaded row as cleanup authority.
+    let clear_inflight = expected_actor.is_none();
     let owned_role_override = snapshot_role_override(shared, key.channel_id);
-    let captured =
-        match super::episode::claim_normal_episode(shared, provider, key, true, None).await {
-            Ok(captured) => captured,
-            Err(()) => return,
-        };
+    let captured = match super::episode::claim_normal_episode(
+        shared,
+        provider,
+        key,
+        clear_inflight,
+        expected_actor,
+    )
+    .await
+    {
+        Ok(captured) => captured,
+        Err(()) => return,
+    };
     let finish = if let Some(capture) = captured {
         capture.publish_release(shared, key);
         capture.finish

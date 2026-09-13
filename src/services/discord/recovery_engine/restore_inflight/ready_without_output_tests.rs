@@ -536,41 +536,128 @@ async fn restart_partial_eof_preserves_unproven_actor_and_retries_ownerless_fail
 #[tokio::test(flavor = "current_thread")]
 async fn captured_finalizer_refuses_same_id_legacy_recovery_actor_replacement() {
     let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let mut fixture = Fixture::new(5_071_813);
+    for already_finalized in [false, true] {
+        let mut fixture = Fixture::new(5_071_813 + u64::from(already_finalized));
+        fixture.state.turn_nonce = None;
+        fixture.claim().await;
+        let channel = ChannelId::new(fixture.state.channel_id);
+        let state = fixture.load().expect("A row");
+        let original = mailbox_snapshot(&fixture.shared, channel)
+            .await
+            .cancel_token
+            .expect("original actor");
+        let mut snapshot =
+            super::super::super::turn_finalizer::SyntheticClaimSnapshot::from_row(&state);
+        snapshot.recovery_actor = Some(Arc::downgrade(&original));
+        if already_finalized {
+            let _ = finish_recovered_turn_mailbox_for_captured_state(
+                &fixture.shared,
+                &ProviderKind::Claude,
+                &state,
+                snapshot.clone(),
+            )
+            .await;
+        }
+        let successor = Arc::new(CancelToken::from_persisted_turn_nonce(None));
+        // RecoveryKickoff can replace the token without advancing turn_started_instant.
+        // Only the actual actor comparison can protect this same-ID legacy successor.
+        fixture
+            .shared
+            .mailbox(channel)
+            .recovery_kickoff(
+                successor.clone(),
+                UserId::new(state.request_owner_user_id),
+                Some(MessageId::new(state.effective_finalizer_turn_id())),
+            )
+            .await;
+        let _ = finish_recovered_turn_mailbox_for_captured_state(
+            &fixture.shared,
+            &ProviderKind::Claude,
+            &state,
+            snapshot,
+        )
+        .await;
+        let surviving = mailbox_snapshot(&fixture.shared, channel)
+            .await
+            .cancel_token
+            .expect("replacement survives finalizer");
+        assert!(Arc::ptr_eq(&surviving, &successor));
+        assert!(fixture.load().is_some());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn committed_partial_cas_cannot_clear_successor_inserted_during_finalizer_await() {
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let mut fixture = Fixture::new(5_071_815);
     fixture.state.turn_nonce = None;
     fixture.claim().await;
     let channel = ChannelId::new(fixture.state.channel_id);
-    let state = fixture.load().expect("A row");
     let original = mailbox_snapshot(&fixture.shared, channel)
         .await
         .cancel_token
-        .expect("original actor");
+        .expect("A actor");
+    let mut committed = fixture.load().expect("A row");
+    committed.terminal_delivery_committed = true;
+    committed.response_sent_offset = committed.full_response.len();
+    assert_eq!(
+        inflight::save_inflight_state_if_identity_unchanged(
+            &mut committed,
+            "partial test confirmed transport"
+        ),
+        inflight::GuardedSaveOutcome::Saved
+    );
     let mut snapshot =
-        super::super::super::turn_finalizer::SyntheticClaimSnapshot::from_row(&state);
+        super::super::super::turn_finalizer::SyntheticClaimSnapshot::from_row(&committed);
     snapshot.recovery_actor = Some(Arc::downgrade(&original));
-    let successor = Arc::new(CancelToken::from_persisted_turn_nonce(None));
-    // RecoveryKickoff can replace the token without advancing turn_started_instant.
-    // Only the actual actor comparison can protect this same-ID legacy successor.
-    fixture
-        .shared
-        .mailbox(channel)
-        .recovery_kickoff(
-            successor.clone(),
-            UserId::new(state.request_owner_user_id),
-            Some(MessageId::new(state.effective_finalizer_turn_id())),
-        )
-        .await;
-    finish_recovered_turn_mailbox_for_captured_state(
+    let mut successor = committed.clone();
+    successor.current_msg_id += 1;
+    successor.full_response.push_str(" successor body");
+    successor.terminal_delivery_committed = false;
+    let mut expected = None;
+    retire_captured_ready_response(
         &fixture.shared,
         &ProviderKind::Claude,
-        &state,
+        &committed,
         snapshot,
+        |snapshot| async {
+            let outcome = finish_recovered_turn_mailbox_for_captured_state(
+                &fixture.shared,
+                &ProviderKind::Claude,
+                &committed,
+                snapshot,
+            )
+            .await;
+            assert!(matches!(
+                outcome,
+                Some(
+                    super::super::super::turn_finalizer::FinalizeOutcome::Finalized {
+                        removed_token: Some(_),
+                        ..
+                    }
+                )
+            ));
+            inflight::save_inflight_state(&successor).expect("B row after CAS and finalizer");
+            assert!(
+                super::super::reregister_active_turn_from_inflight(&fixture.shared, &successor)
+                    .await
+            );
+            expected =
+                Some(serde_json::to_value(fixture.load().expect("B row")).expect("B snapshot"));
+            outcome
+        },
     )
     .await;
-    let surviving = mailbox_snapshot(&fixture.shared, channel)
+    assert_eq!(
+        Some(
+            serde_json::to_value(fixture.load().expect("B survives stale row retirement"))
+                .expect("remaining snapshot")
+        ),
+        expected
+    );
+    let actor = mailbox_snapshot(&fixture.shared, channel)
         .await
         .cancel_token
-        .expect("replacement survives finalizer");
-    assert!(Arc::ptr_eq(&surviving, &successor));
-    assert!(fixture.load().is_some());
+        .expect("B actor");
+    assert!(!Arc::ptr_eq(&actor, &original));
 }

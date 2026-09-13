@@ -485,6 +485,7 @@ impl TurnFinalizer {
         if let Some(snapshot) = evidence.claim_snapshot.as_ref() {
             cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider, Some(snapshot));
         }
+        let cleanup_snapshot = evidence.claim_snapshot.clone();
         let (ack, rx) = oneshot::channel();
         if self
             .tx
@@ -508,7 +509,15 @@ impl TurnFinalizer {
             && !(key.episode.is_none() && key.generation != shared.restart.current_generation)
             && !matches!(event, TerminalEvent::OperatorRelease(_))
         {
-            cleanup::already_finalized_active_state(key, &provider, &event, ctx, &shared).await;
+            cleanup::already_finalized_active_state(
+                key,
+                &provider,
+                &event,
+                ctx,
+                &shared,
+                cleanup_snapshot.as_ref(),
+            )
+            .await;
         }
         out
     }
