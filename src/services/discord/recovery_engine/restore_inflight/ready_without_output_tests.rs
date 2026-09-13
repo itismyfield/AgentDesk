@@ -255,12 +255,29 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
     };
     use crate::services::tui_prompt_dedupe as dedupe;
     let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    for typed in [false, true] {
+    for typed_provider in [None, Some(ProviderKind::Claude), Some(ProviderKind::Codex)] {
+        let typed = typed_provider.is_some();
+        let native = typed_provider == Some(ProviderKind::Codex);
+        let provider = typed_provider.unwrap_or(ProviderKind::Claude);
+        let runtime = if native {
+            RuntimeHandoffKind::CodexTui
+        } else {
+            RuntimeHandoffKind::ClaudeTui
+        };
         #[cfg(not(unix))]
         if typed {
             continue;
         }
         let mut fixture = Fixture::new(5_071_805);
+        fixture.state.provider = provider.as_str().into();
+        if native {
+            fixture.state.turn_source = inflight::TurnSource::ExternalInput;
+            fixture.state.request_owner_user_id = 1;
+            fixture.state.injected_prompt_message_id = Some(fixture.state.user_msg_id);
+            fixture.state.external_turn_id = Some("native-retained-original".into());
+            fixture.state.relay_owner_kind = inflight::RelayOwnerKind::None;
+            fixture.state.session_id = None;
+        }
         fixture.state.streaming_rollover_frozen_msg_ids = vec![40];
         fixture.state.current_msg_id = 41;
         // Rollover froze prefix in 40; 41 already shows the beginning of its suffix.
@@ -270,11 +287,19 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
             (MessageId::new(41), "unposted".to_string()),
         ]);
         if typed {
-            fixture.state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+            fixture.state.runtime_kind = Some(runtime);
             fixture.state.turn_nonce = Some("typed-prefix-recovery".into());
             let assistant = serde_json::json!({"type":"assistant", "sessionId":fixture.state.session_id, "message":{"content":[
             {"type":"text", "text":fixture.state.full_response}]}});
             let terminal = serde_json::json!({"type":"result", "session_id":fixture.state.session_id, "subtype":"success", "result":fixture.state.full_response});
+            let (assistant, terminal) = if native {
+                (
+                    serde_json::json!({"type":"response_item", "payload":{"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":fixture.state.full_response}]}}),
+                    serde_json::json!({"type":"event_msg", "payload":{"type":"task_complete", "last_agent_message":fixture.state.full_response}}),
+                )
+            } else {
+                (assistant, terminal)
+            };
             let output = fixture.state.output_path.as_ref().unwrap();
             std::fs::write(output, format!("{assistant}\n{terminal}\n")).unwrap();
             fixture.state.last_offset = std::fs::metadata(output).unwrap().len();
@@ -287,7 +312,7 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
             dedupe::register_tmux_runtime_binding(
                 tmux,
                 dedupe::TuiRuntimeBinding {
-                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    runtime_kind: runtime,
                     output_path: output.clone(),
                     relay_output_path: None,
                     input_fifo_path: None,
@@ -329,6 +354,30 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
                     source_file_ino: metadata.ino(),
                     actor: Arc::downgrade(&original_actor),
                 };
+                let frame = if native {
+                    crate::services::discord::StreamMessage::CodexTuiTerminalDone {
+                        result: raw.clone(),
+                        session_id: fixture.state.session_id.clone(),
+                        rollout_path: std::fs::canonicalize(&output)
+                            .unwrap()
+                            .display()
+                            .to_string(),
+                        tmux_session_name: tmux.clone(),
+                        turn_nonce: fixture.state.turn_nonce.clone().unwrap(),
+                        source_start: 0,
+                        complete_record_end: metadata.len(),
+                        captured_source: Some(
+                            crate::services::agent_protocol::CapturedTuiTerminalSource {
+                                generation_mtime_ns: dr::current_generation_mtime_ns(&tmux),
+                                source_file_dev: metadata.dev(),
+                                source_file_ino: metadata.ino(),
+                                actor: Arc::downgrade(&original_actor),
+                            },
+                        ),
+                    }
+                } else {
+                    frame
+                };
                 let mut baseline = fixture.state.clone();
                 let identity = inflight::InflightTurnIdentity::from_state(&fixture.state);
                 let (_, admitted, _) = fixture
@@ -360,6 +409,68 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
         } else {
             None
         };
+        if native {
+            // The admitted body survives a process loss; later raw turns are not
+            // part of its saved terminal range or its Discord receipt.
+            drop(original_actor);
+            fixture.shared = super::super::make_shared_data_for_tests_with_storage(None);
+            fixture.state = fixture.load().unwrap();
+            let retained = fixture.state.clone();
+            let mut legacy = retained.clone();
+            legacy.tui_terminal_source_file_identity = None;
+            assert!(
+                !legacy.requires_pinned_terminal_recovery(),
+                "legacy Codex generation-only terminals retain their previous path"
+            );
+            let output = std::path::PathBuf::from(retained.output_path.as_ref().unwrap());
+            let next_raw = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"next turn\"}]}}\n";
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&output)
+                .unwrap()
+                .write_all(next_raw.as_bytes())
+                .unwrap();
+            let expected_file = std::fs::read(&output).unwrap();
+            let gateway = RecoveryFakeGateway::new(ReplaceLongMessageOutcome::EditedOriginal, true);
+            let http = Arc::new(serenity::Http::new("Bot test-token"));
+            assert!(super::super::idle_captured_response::recover_idle_partial_response_from_ready_source(
+                &http, &fixture.shared, &retained, &output, &gateway,
+            ).await, "the actual dormant recovery publishes the saved native range after restart and append");
+            let source = source.unwrap();
+            assert!(dr::confirmed_delivery_receipt_exists(
+                &provider, channel, 41, &source
+            ));
+            assert_eq!(
+                dr::read_record(&provider, channel.get())
+                    .unwrap()
+                    .confirmed_deliveries
+                    .len(),
+                1
+            );
+            assert!(fixture.load().is_none());
+            assert_eq!(gateway.replacements.lock().unwrap().len(), 1);
+            assert_eq!(
+                gateway.replacements.lock().unwrap()[0].1,
+                super::super::super::formatting::format_for_discord_with_provider(
+                    "unposted suffix",
+                    &provider
+                )
+            );
+            let mut next = retained.clone();
+            next.user_msg_id += 10;
+            next.turn_nonce = Some("native-next-turn".into());
+            next.full_response = "NEXT_RESPONSE".into();
+            inflight::save_inflight_state(&next).unwrap();
+            let before = fixture.load().unwrap();
+            assert!(!super::super::idle_captured_response::recover_idle_partial_response_from_ready_source(
+                &http, &fixture.shared, &retained, &output, &gateway,
+            ).await, "the old captured source cannot deliver again over a successor");
+            assert_eq!(fixture.load().unwrap().turn_nonce, before.turn_nonce);
+            assert_eq!(gateway.replacements.lock().unwrap().len(), 1);
+            assert_eq!(std::fs::read(&output).unwrap(), expected_file);
+            continue;
+        }
         let gateway = RecoveryFakeGateway::new(ReplaceLongMessageOutcome::EditedOriginal, true)
             .before_replace_returns({
                 let shared = fixture.shared.clone();

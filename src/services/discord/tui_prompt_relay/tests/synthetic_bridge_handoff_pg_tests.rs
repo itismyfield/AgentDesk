@@ -500,7 +500,9 @@ fn synthetic_bridge_handoff_fixture(
             let original_start = capture.row.turn_start_offset.unwrap();
             drop(capture);
             let row = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).unwrap();
-            let resumed = synthetic_start::bridge_handoff::resume_unpublished(&shared, &row, &output).await.unwrap();
+            let resumed = if native_codex { lease.clone() } else {
+                synthetic_start::bridge_handoff::resume_unpublished(&shared, &row, &output).await.unwrap()
+            };
             // Match the production TUI gateway: terminal edits use this same
             // transport; a headless fixture would wait on an unrelated outbox.
             let gateway = Arc::new(S3Gateway { local_delivery: true, ..Default::default() });

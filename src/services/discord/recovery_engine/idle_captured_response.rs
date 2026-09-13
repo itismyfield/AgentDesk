@@ -18,13 +18,16 @@ impl SourceAtEof {
         }
         let file = std::fs::File::open(output).ok()?;
         let metadata = file.metadata().ok()?;
-        if metadata.len() != row.last_offset {
+        if row.requires_pinned_terminal_recovery() {
+            let captured = inflight::CodexRange::from_retained_tui_terminal(row)?;
+            captured.revalidated_source(row).ok()??;
+        } else if metadata.len() != row.last_offset {
             return None;
         }
         Some(Self {
             file: SourceFileIdentity::from_open_file(&file),
             modified: metadata.modified().ok()?,
-            end: metadata.len(),
+            end: row.last_offset,
         })
     }
 }
@@ -105,7 +108,9 @@ pub(in crate::services::discord) async fn recover_idle_partial_response_from_rea
     let Some(start) = row.turn_start_offset.filter(|start| *start < source.end) else {
         return false;
     };
-    if extract_response_from_output(&output.to_string_lossy(), start) != row.full_response {
+    if !row.requires_pinned_terminal_recovery()
+        && extract_response_from_output(&output.to_string_lossy(), start) != row.full_response
+    {
         return false;
     }
     let Some(claim) =

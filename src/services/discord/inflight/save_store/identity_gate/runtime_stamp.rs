@@ -43,10 +43,16 @@ fn binding_matches(tmux: &str, path: &Path, session: &str, offsets: [u64; 2]) ->
 
 impl InflightTurnState {
     pub(in crate::services::discord) fn requires_pinned_terminal_recovery(&self) -> bool {
-        self.provider_kind() == Some(ProviderKind::Claude)
-            && self.runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
-            && (self.tui_terminal_source_file_identity.is_some()
-                || self.tui_terminal_generation_mtime_ns.is_some())
+        match (self.provider_kind(), self.runtime_kind) {
+            (Some(ProviderKind::Claude), Some(RuntimeHandoffKind::ClaudeTui)) => {
+                self.tui_terminal_source_file_identity.is_some()
+                    || self.tui_terminal_generation_mtime_ns.is_some()
+            }
+            (Some(ProviderKind::Codex), Some(RuntimeHandoffKind::CodexTui)) => {
+                self.tui_terminal_source_file_identity.is_some()
+            }
+            _ => false,
+        }
     }
 
     #[allow(dead_code)]
@@ -226,12 +232,10 @@ fn persist_terminal_range(
 impl TuiTerminalRange {
     /// Reconstruct only previously admitted evidence; live validation remains
     /// the existing publisher's responsibility.
-    pub(in crate::services::discord) fn from_retained_claude_terminal(
+    pub(in crate::services::discord) fn from_retained_tui_terminal(
         row: &InflightTurnState,
     ) -> Option<Self> {
-        if row.provider_kind() != Some(ProviderKind::Claude)
-            || row.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
-        {
+        if !row.requires_pinned_terminal_recovery() {
             return None;
         }
         let captured = Self {

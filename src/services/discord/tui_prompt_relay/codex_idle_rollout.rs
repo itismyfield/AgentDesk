@@ -78,6 +78,14 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                 if let Some(inflight) =
                     inflight::load_inflight_state(&ProviderKind::Codex, channel_id.get())
                 {
+                    if inflight.requires_pinned_terminal_recovery() {
+                        if let Some(http) = shared.serenity_http_or_token_fallback() {
+                            super::super::recovery_engine::recover_idle_partial_response(
+                                &http, &shared, &inflight, &rollout_path,
+                            ).await;
+                        }
+                        continue;
+                    }
                     if codex_ownerless_external_input_inflight_needs_rollout_recovery(
                         &inflight,
                         &tmux_session_name,

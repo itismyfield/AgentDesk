@@ -119,10 +119,12 @@ pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
     text: &str,
 ) -> bool {
     use crate::services::discord::{inflight, outbound::delivery_record as dr};
-    let Some(admitted) = inflight::CodexRange::from_retained_claude_terminal(row) else {
+    let Some(admitted) = inflight::CodexRange::from_retained_tui_terminal(row) else {
         return false;
     };
-    let provider = ProviderKind::Claude;
+    let Some(provider) = row.provider_kind() else {
+        return false;
+    };
     let owner = ChannelId::new(admitted.source.offset_authority_channel_id);
     let channel = ChannelId::new(admitted.source.delivery_channel_id);
     let Some(message) = inflight::opt_message_id(row.current_msg_id) else {

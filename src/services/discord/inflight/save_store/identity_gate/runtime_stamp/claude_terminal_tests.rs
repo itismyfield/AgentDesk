@@ -194,7 +194,7 @@ fn claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_pro
                 Some(fixture.generation)
             );
             assert_eq!(
-                TuiTerminalRange::from_retained_claude_terminal(&restored)
+                TuiTerminalRange::from_retained_tui_terminal(&restored)
                     .unwrap()
                     .source,
                 range.source
@@ -202,7 +202,7 @@ fn claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_pro
             let mut missing_generation = restored.clone();
             missing_generation.tui_terminal_generation_mtime_ns = None;
             assert!(missing_generation.requires_pinned_terminal_recovery());
-            assert!(TuiTerminalRange::from_retained_claude_terminal(&missing_generation).is_none());
+            assert!(TuiTerminalRange::from_retained_tui_terminal(&missing_generation).is_none());
             let mut old_row = serde_json::to_value(&restored).unwrap();
             old_row
                 .as_object_mut()

@@ -521,7 +521,10 @@ async fn capture_dormant(
     .try_lock_owned()
     .ok()?;
     if row.turn_source != TurnSource::ExternalInput
-        || row.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+        || (row.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+            && !(!unpublished_only
+                && provider == ProviderKind::Codex
+                && row.requires_pinned_terminal_recovery()))
         || row.user_msg_id == 0
         || row.request_owner_user_id != TUI_DIRECT_SYNTHETIC_OWNER_USER_ID
         || row.injected_prompt_message_id != Some(row.user_msg_id)
