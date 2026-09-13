@@ -15,7 +15,6 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) 
         .unwrap_or_else(|error| error.into_inner());
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
         .block_on(async {
-            let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::DEBUG).try_init();
             let shared = crate::services::discord::make_shared_data_for_tests();
             let provider = ProviderKind::Claude;
             let channel = ChannelId::new(583_310_001);
@@ -44,12 +43,13 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) 
             assert!(synthetic_start::claim_tui_direct_synthetic_turn(
                 &shared, &provider, channel, tmux, "terminal ordering prompt", anchor, &lease,
             ).await.claimed);
-            let capture = synthetic_start::bridge_handoff::capture(
-                &shared, &provider, channel, tmux, &output, &lease,
-            ).await.unwrap();
-            let original_actor = capture.actor.clone();
-            let original_row = capture.row.clone();
-            drop(capture);
+            // Inspect A without acquiring a BridgeClaim: dropping that claim
+            // clears its external-input lease before the real adapter captures it.
+            let original_actor = crate::services::discord::mailbox_snapshot(&shared, channel)
+                .await.cancel_token.expect("synthetic admission retains A");
+            let original_row = crate::services::discord::inflight::load_inflight_state_read_only(
+                &provider, channel.get()).expect("synthetic admission persists A's row");
+            assert_eq!(original_actor.turn_nonce(), original_row.turn_nonce.as_deref());
             let barrier = Arc::new(TerminalBarrier::default());
             let gateway = Arc::new(S3Gateway {
                 local_delivery: true, terminal_barrier: Some(barrier.clone()),
