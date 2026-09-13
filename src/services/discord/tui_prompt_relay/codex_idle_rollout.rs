@@ -525,15 +525,16 @@ fn collect_codex_idle_response(
     tmux_session_name: String,
 ) -> Result<(String, u64), String> {
     let (tx, rx) = mpsc::channel();
-    let read_result = crate::services::codex_tui::rollout_tail::tail_idle_rollout_for_tmux(
-        &rollout_path,
-        start_offset,
-        None,
-        tx,
-        None,
-        || crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name),
-        &tmux_session_name,
-    )?;
+    let read_result =
+        crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset_for_tmux(
+            &rollout_path,
+            start_offset,
+            None,
+            tx,
+            None,
+            || crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_session_name),
+            &tmux_session_name,
+        )?;
 
     let mut streamed = String::new();
     let mut done_result: Option<String> = None;
