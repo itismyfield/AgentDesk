@@ -24,63 +24,6 @@ use unix_journal::{
 };
 
 #[cfg(unix)]
-pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
-    shared: &SharedData,
-    gateway: &dyn TurnGateway,
-    row: &InflightTurnState,
-) -> bool {
-    use super::stream_loop::types::{
-        PinnedTerminalTransport, PreparedBridgeLease, prepare_bridge_lease,
-    };
-    let Some(admitted) = super::super::inflight::CodexRange::from_retained_claude_terminal(row)
-    else {
-        return false;
-    };
-    let provider = ProviderKind::Claude;
-    let owner = ChannelId::new(admitted.source.offset_authority_channel_id);
-    let channel = ChannelId::new(admitted.source.delivery_channel_id);
-    let Some(message) = super::super::inflight::opt_message_id(row.current_msg_id) else {
-        return false;
-    };
-    let acquired = terminal_delivery::bridge_delivery_lease_for_inflight(
-        shared,
-        owner,
-        shared.restart.current_generation,
-        row,
-        Some(admitted.complete_record_end()),
-    );
-    let PreparedBridgeLease::Pinned(pinned) =
-        prepare_bridge_lease(acquired, Some(&admitted), row, shared, &provider, channel)
-    else {
-        return false;
-    };
-    let body =
-        super::super::formatting::format_for_discord_with_provider(&admitted.result, &provider);
-    let long = terminal_delivery::terminal_delivery_should_send_new_chunks(true, &body);
-    let (committed, _, receipt) = PinnedTerminalTransport {
-        source: (shared, gateway, &provider),
-        target: (owner, channel, message),
-        payload: (
-            row.tmux_session_name.as_deref(),
-            &body,
-            admitted.source.range,
-        ),
-        trace: (row.dispatch_id.as_deref(), row.session_key.as_deref(), None),
-    }
-    .deliver(pinned, long)
-    .await;
-    committed
-        && receipt.is_some_and(|anchor| {
-            dr::confirmed_delivery_receipt_exists(
-                &provider,
-                channel,
-                anchor.get(),
-                &admitted.source,
-            )
-        })
-}
-
-#[cfg(unix)]
 #[rustfmt::skip]
 pub(super) fn begin_pinned_terminal(
     shared: &SharedData, provider: &ProviderKind, long: bool,
