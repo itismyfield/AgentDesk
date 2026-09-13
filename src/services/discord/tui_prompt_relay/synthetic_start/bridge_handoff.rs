@@ -95,6 +95,8 @@ pub(in crate::services::discord::tui_prompt_relay) async fn capture(
             .cloned();
         if let Some(witness) = witness
             && let Some(actor) = witness.actor.upgrade()
+            && super::super::super::inflight::load_inflight_state_read_only(provider, channel.get())
+                .is_some_and(|row| witness.episode.matches_state(&row))
         {
             break (serial, witness, actor);
         }
