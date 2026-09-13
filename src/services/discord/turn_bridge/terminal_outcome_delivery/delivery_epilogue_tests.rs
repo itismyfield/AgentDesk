@@ -360,10 +360,19 @@ impl TurnGateway for DriverGateway {
         let body = _content.to_owned();
         let failed = self.replace == ReplaceBehaviour::FailedPost
             || (self.replace == ReplaceBehaviour::FailSecondPostOnce
-                && self.observations.lock().unwrap().iter().filter(|o| o.call == DriverCall::Send).count() == 2);
+                && self
+                    .observations
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|o| o.call == DriverCall::Send)
+                    .count()
+                    == 2);
         Box::pin(async move {
             Yields(yields).await;
-            if failed { return Err("driver POST failed".into()); }
+            if failed {
+                return Err("driver POST failed".into());
+            }
             let index = completed.fetch_add(1, Ordering::Release);
             bodies.lock().unwrap().push(body);
             Ok(MessageId::new(DRIVER_FALLBACK_ANCHOR_MSG_ID + index as u64))
@@ -424,7 +433,9 @@ impl TurnGateway for DriverGateway {
                         replacement_anchor: Some(MessageId::new(DRIVER_FALLBACK_ANCHOR_MSG_ID)),
                     })
                 }
-                ReplaceBehaviour::Failed | ReplaceBehaviour::FailedPost => Err("driver terminal replace failed".to_string()),
+                ReplaceBehaviour::Failed | ReplaceBehaviour::FailedPost => {
+                    Err("driver terminal replace failed".to_string())
+                }
                 ReplaceBehaviour::PanicMidPublish => panic!("{DRIVER_PUBLISH_PANIC}"),
             }
         })
