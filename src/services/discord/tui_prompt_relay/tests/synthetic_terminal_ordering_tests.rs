@@ -192,21 +192,34 @@ fn terminal_ordering_fixture(
             *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK.lock().unwrap() = None;
             if let Some(race) = source_race.filter(|race| *race != SourceRace::Unchanged) {
                 assert!(delivered.is_err(), "{race:?} cannot signal terminal completion");
+                let expected_turn_id = format!("discord:{}:{}", channel.get(), anchor.get());
+                let is_episode_quality = |event: &crate::services::observability::events::StructuredEvent|
+                    event.channel_id == Some(channel.get()) && event.event_type == "agent_quality_event"
+                        && event.payload["source_event_id"].as_str() == Some(expected_turn_id.as_str())
+                        && event.payload["payload"]["turn_id"].as_str() == Some(expected_turn_id.as_str());
+                let is_terminal_quality = |event: &crate::services::observability::events::StructuredEvent|
+                    is_episode_quality(event) && matches!(event.payload["quality_event_type"].as_str(),
+                        Some("turn_error" | "turn_complete"));
                 tokio::time::timeout(Duration::from_secs(5), async {
                     while shared.restart.finalizing_turns.load(std::sync::atomic::Ordering::Acquire) != 0
-                        || !crate::services::observability::events::recent(200).iter().any(|event|
-                            event.channel_id == Some(channel.get()) && event.event_type == "agent_quality_event") {
+                        || !crate::services::observability::events::recent(200).iter().any(&is_terminal_quality) {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                 }).await.expect("unresolved bridge finishes its postlude within a bound");
                 let events = crate::services::observability::events::recent(200);
                 let finished: Vec<_> = events.iter().filter(|event|
-                    event.channel_id == Some(channel.get()) && event.event_type == "turn_finished").collect();
+                    event.channel_id == Some(channel.get()) && event.event_type == "turn_finished"
+                        && event.payload["turn_id"].as_str() == Some(expected_turn_id.as_str())).collect();
                 assert_eq!(finished.len(), 1);
                 let expected_outcome = if race == SourceRace::LiveHolder { "delivery_pending" } else { "delivery_unresolved" };
                 assert_eq!(finished[0].payload["status"], expected_outcome);
-                let quality: Vec<_> = events.iter().filter(|event|
-                    event.channel_id == Some(channel.get()) && event.event_type == "agent_quality_event").collect();
+                // The bridge emits turn_start before its terminal quality event.
+                assert_eq!(events.iter().filter(|event| is_episode_quality(event)
+                    && event.payload["quality_event_type"] == "turn_start").count(), 1);
+                assert_eq!(events.iter().filter(|event| is_episode_quality(event)
+                    && event.payload["quality_event_type"] == "turn_complete").count(), 0,
+                    "unconfirmed delivery never emits a completed quality event");
+                let quality: Vec<_> = events.iter().filter(|event| is_terminal_quality(event)).collect();
                 assert_eq!(quality.len(), 1);
                 assert_eq!(quality[0].payload["quality_event_type"], "turn_error");
                 assert_eq!(quality[0].payload["payload"]["details"]["outcome"], expected_outcome);
