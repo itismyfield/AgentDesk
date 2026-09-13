@@ -185,6 +185,9 @@ pub(super) fn should_ensure_synthetic_claim_marker(
 /// to the submitted turn, closes that guarantee hole.
 #[derive(Clone, Debug)]
 pub(in crate::services::discord) struct SyntheticClaimSnapshot {
+    /// Recovery captures this before transport; compare it in the mailbox actor.
+    pub(in crate::services::discord) recovery_actor:
+        Option<std::sync::Weak<crate::services::provider::CancelToken>>,
     pub(in crate::services::discord) user_msg_id: u64,
     pub(in crate::services::discord) turn_nonce: Option<String>,
     pub(in crate::services::discord) turn_source_external: bool,
@@ -201,12 +204,22 @@ pub(in crate::services::discord) struct SyntheticClaimSnapshot {
     pub(in crate::services::discord) relay_owner_kind: RelayOwnerKind,
 }
 
+pub(super) fn captured_recovery_actor(
+    snapshot: Option<&SyntheticClaimSnapshot>,
+) -> Result<Option<Arc<crate::services::provider::CancelToken>>, ()> {
+    match snapshot.and_then(|snapshot| snapshot.recovery_actor.as_ref()) {
+        Some(actor) => actor.upgrade().map(Some).ok_or(()),
+        None => Ok(None),
+    }
+}
+
 impl SyntheticClaimSnapshot {
     pub(in crate::services::discord) fn from_row(
         row: &crate::services::discord::inflight::InflightTurnState,
     ) -> Self {
         use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
         Self {
+            recovery_actor: None,
             user_msg_id: row.user_msg_id,
             turn_nonce: row.turn_nonce.clone(),
             turn_source_external: row.turn_source == TurnSource::ExternalInput,
@@ -425,13 +438,28 @@ pub(super) async fn already_finalized_active_state(
     event: &TerminalEvent,
     ctx: FinalizeContext,
     shared: &Arc<SharedData>,
+    submit_snapshot: Option<&SyntheticClaimSnapshot>,
 ) {
     if key.user_msg_id == 0 {
         return;
     }
 
+    let Ok(expected_actor) = captured_recovery_actor(submit_snapshot) else {
+        return;
+    };
+    // Recovery owns row retirement with its exact committed snapshot. A ledger
+    // duplicate must not adopt the currently loaded row as cleanup authority.
+    let clear_inflight = expected_actor.is_none();
     let owned_role_override = snapshot_role_override(shared, key.channel_id);
-    let captured = match super::episode::claim_normal_episode(shared, provider, key, true).await {
+    let captured = match super::episode::claim_normal_episode(
+        shared,
+        provider,
+        key,
+        clear_inflight,
+        expected_actor,
+    )
+    .await
+    {
         Ok(captured) => captured,
         Err(()) => return,
     };

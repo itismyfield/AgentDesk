@@ -215,6 +215,7 @@ mod tests {
             observed_at_ms: 0,
             state: PendingStartState::Waiting,
             attempt_count: 0,
+            captured_source: None,
         }
     }
 

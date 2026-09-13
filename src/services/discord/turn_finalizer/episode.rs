@@ -13,6 +13,13 @@ pub(in crate::services::discord) struct CapturedFinish {
 }
 
 impl CapturedFinish {
+    #[cfg(test)]
+    pub(in crate::services::discord) fn snapshot_for_test(
+        &self,
+    ) -> Option<&SyntheticClaimSnapshot> {
+        self.snapshot.as_ref()
+    }
+
     pub(in crate::services::discord) fn publish_release(&self, shared: &SharedData, key: TurnKey) {
         if self.finish.removed_token.is_none() {
             return;
@@ -34,10 +41,12 @@ pub(in crate::services::discord) async fn claim_normal_episode(
     provider: &ProviderKind,
     key: TurnKey,
     clear_inflight: bool,
+    expected_actor: Option<Arc<crate::services::provider::CancelToken>>,
 ) -> Result<Option<CapturedFinish>, ()> {
     if key.episode.is_none() {
         return Ok(None);
     }
+    let captured_actor = expected_actor.as_ref().map(Arc::downgrade);
     let observed_before = std::time::Instant::now();
     let observed = match shared.mailbox_peek(key.channel_id) {
         Some(mailbox) => Some(mailbox.snapshot().await),
@@ -57,13 +66,14 @@ pub(in crate::services::discord) async fn claim_normal_episode(
                 && key.matches_episode_nonce(row.turn_nonce.as_deref())
         });
     let finish = if let Some(active) = observed.as_ref().filter(|s| s.cancel_token.is_some()) {
-        super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_without_completion(
+        super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
             shared,
             provider,
             key.channel_id,
             serenity::model::id::MessageId::new(key.user_msg_id),
             active.active_turn_nonce.clone(),
             observed_before,
+            expected_actor,
         )
         .await
     } else {
@@ -75,6 +85,11 @@ pub(in crate::services::discord) async fn claim_normal_episode(
             persistence_error: None,
         }
     };
+    if captured_actor.is_some() && finish.removed_token.is_none() {
+        // A strict actor miss authorizes neither row cleanup nor finalization
+        // side effects, even when the replacement kept the same ID and nonce.
+        return Err(());
+    }
     // Same-episode ID misses retain the ordinary guarded-miss recovery owner.
     // Only the separately gated reconciler may release that residual anchor.
     // Row cleanup is independently authorized by the captured row identity;
@@ -88,7 +103,11 @@ pub(in crate::services::discord) async fn claim_normal_episode(
         );
     }
     Ok(Some(CapturedFinish {
-        snapshot: row.as_ref().map(SyntheticClaimSnapshot::from_row),
+        snapshot: row.as_ref().map(|row| {
+            let mut snapshot = SyntheticClaimSnapshot::from_row(row);
+            snapshot.recovery_actor = captured_actor;
+            snapshot
+        }),
         finish,
     }))
 }
@@ -483,6 +502,7 @@ impl TurnFinalizer {
         if let Some(snapshot) = evidence.claim_snapshot.as_ref() {
             cleanup::ensure_synthetic_claim_marker_before_clear(key, &provider, Some(snapshot));
         }
+        let cleanup_snapshot = evidence.claim_snapshot.clone();
         let (ack, rx) = oneshot::channel();
         if self
             .tx
@@ -506,7 +526,15 @@ impl TurnFinalizer {
             && !(key.episode.is_none() && key.generation != shared.restart.current_generation)
             && !matches!(event, TerminalEvent::OperatorRelease(_))
         {
-            cleanup::already_finalized_active_state(key, &provider, &event, ctx, &shared).await;
+            cleanup::already_finalized_active_state(
+                key,
+                &provider,
+                &event,
+                ctx,
+                &shared,
+                cleanup_snapshot.as_ref(),
+            )
+            .await;
         }
         out
     }

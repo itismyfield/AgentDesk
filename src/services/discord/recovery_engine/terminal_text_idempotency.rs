@@ -18,6 +18,80 @@ use crate::services::discord::{
 };
 use crate::services::provider::ProviderKind;
 
+/// A restart may retain the old placeholder after the terminal POST receipt
+/// committed but before its inflight mirror. Revalidate the captured episode;
+/// a matching frontier or an inflight anchor alone is not delivery proof.
+pub(super) fn captured_terminal_receipt_exists(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+) -> bool {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    if !matches!(
+        (provider, state.runtime_kind),
+        (ProviderKind::Codex, Some(RuntimeHandoffKind::CodexTui))
+            | (ProviderKind::Claude, Some(RuntimeHandoffKind::ClaudeTui))
+    ) {
+        return false;
+    }
+    let Some(path) = state.output_path.as_ref() else {
+        return false;
+    };
+    let Some(record) =
+        delivery_record::read_record(provider, state.delivery_record_owner_channel_id())
+    else {
+        return false;
+    };
+    record.confirmed_deliveries.iter().any(|receipt| {
+        if receipt.source.provider != provider.as_str() {
+            return false;
+        }
+        let captured = inflight::CodexRange {
+            identity: inflight::InflightTurnIdentity::from_state(state),
+            result: state.full_response.clone(),
+            rollout_path: path.clone(),
+            session_id: state.session_id.clone().unwrap_or_default(),
+            source_file_identity: state.tui_terminal_source_file_identity,
+            source: receipt.source.clone(),
+        };
+        captured.confirmed_receipt_for_captured_row(state, receipt.message_id)
+    })
+}
+
+struct CapturedRecoveryAnchor {
+    expected: inflight::InflightTurnState,
+    delivered: Option<(MessageId, String, unix_journal::Disposition)>,
+}
+
+/// A confirmed fallback whose row mutation still needs the captured actor's approval.
+pub(super) struct PendingRecoveryAnchor {
+    context: RecoveryDeliveryContext,
+    expected: inflight::InflightTurnState,
+    anchor: MessageId,
+    text: String,
+    disposition: unix_journal::Disposition,
+}
+
+impl PendingRecoveryAnchor {
+    pub(super) fn bind_after_actor_check(
+        self,
+        shared: &SharedData,
+        state: &mut inflight::InflightTurnState,
+    ) -> inflight::GuardedSaveOutcome {
+        if !inflight::InflightEpisodePin::from_state(&self.expected).matches_state(state)
+            || self.expected.save_generation != state.save_generation
+        {
+            return inflight::GuardedSaveOutcome::IdentityMismatch;
+        }
+        self.context.record_successful_fresh_send_with_snapshot(
+            shared,
+            self.anchor,
+            &self.text,
+            self.disposition,
+            Some(state),
+        )
+    }
+}
+
 #[derive(Clone)]
 pub(in crate::services::discord) struct RecoveryDeliveryContext {
     provider: ProviderKind,
@@ -28,6 +102,7 @@ pub(in crate::services::discord) struct RecoveryDeliveryContext {
     identity: inflight::InflightTurnIdentity,
     expected_turn_start_offset: Option<u64>,
     expected_current_msg_id: u64,
+    captured_anchor: Option<Arc<std::sync::Mutex<CapturedRecoveryAnchor>>>,
     durable_range: Option<(u64, u64)>,
     /// #4188: current transcript (output_path) byte length, snapshotted from the
     /// inflight state at construction. Bounds the durable frontier so a stale
@@ -88,6 +163,26 @@ pub(in crate::services::discord) enum RecoveryAnchorReuse {
 }
 
 impl RecoveryDeliveryContext {
+    pub(super) fn capture_anchor_updates(mut self, state: &inflight::InflightTurnState) -> Self {
+        self.captured_anchor = Some(Arc::new(std::sync::Mutex::new(CapturedRecoveryAnchor {
+            expected: state.clone(),
+            delivered: None,
+        })));
+        self
+    }
+
+    pub(super) fn pending_anchor_after_delivery(&self) -> Option<PendingRecoveryAnchor> {
+        let captured = self.captured_anchor.as_ref()?.lock().ok()?;
+        let (anchor, text, disposition) = captured.delivered.clone()?;
+        Some(PendingRecoveryAnchor {
+            context: self.clone(),
+            expected: captured.expected.clone(),
+            anchor,
+            text,
+            disposition,
+        })
+    }
+
     pub(in crate::services::discord) fn from_state(
         shared: &SharedData,
         provider: &ProviderKind,
@@ -164,6 +259,7 @@ impl RecoveryDeliveryContext {
             identity: inflight::InflightTurnIdentity::from_state(state),
             expected_turn_start_offset: state.turn_start_offset,
             expected_current_msg_id: state.current_msg_id,
+            captured_anchor: None,
             durable_range,
             current_output_eof: state
                 .output_path
@@ -337,6 +433,25 @@ impl RecoveryDeliveryContext {
         text: &str,
         disposition: unix_journal::Disposition,
     ) {
+        if let Some(captured) = self.captured_anchor.as_ref() {
+            if let Ok(mut captured) = captured.lock() {
+                // The transport await may have replaced only the mailbox actor,
+                // leaving this row byte-for-byte unchanged. Do not bind here.
+                captured.delivered = Some((anchor, text.to_string(), disposition));
+            }
+            return;
+        }
+        self.record_successful_fresh_send_with_snapshot(shared, anchor, text, disposition, None);
+    }
+
+    fn record_successful_fresh_send_with_snapshot(
+        &self,
+        shared: &SharedData,
+        anchor: MessageId,
+        text: &str,
+        disposition: unix_journal::Disposition,
+        captured: Option<&mut inflight::InflightTurnState>,
+    ) -> inflight::GuardedSaveOutcome {
         let mut observation = unix_journal::begin_recovery_terminal(
             shared,
             &self.provider,
@@ -346,18 +461,27 @@ impl RecoveryDeliveryContext {
             self.expected_current_msg_id,
             self.durable_range,
         );
-        let bind = inflight::bind_recovery_anchor_if_matches_identity(
-            &self.provider,
-            self.channel_id.get(),
-            &self.identity,
-            self.expected_turn_start_offset,
-            self.expected_current_msg_id,
-            None,
-            anchor.get(),
-            text.len(),
-            None,
-            None,
-        );
+        let bind = if let Some(captured) = captured {
+            inflight::bind_recovery_anchor_for_snapshot(
+                &self.provider,
+                captured,
+                anchor.get(),
+                text.len(),
+            )
+        } else {
+            inflight::bind_recovery_anchor_if_matches_identity(
+                &self.provider,
+                self.channel_id.get(),
+                &self.identity,
+                self.expected_turn_start_offset,
+                self.expected_current_msg_id,
+                None,
+                anchor.get(),
+                text.len(),
+                None,
+                None,
+            )
+        };
         if matches!(
             bind,
             inflight::GuardedSaveOutcome::Saved | inflight::GuardedSaveOutcome::Missing
@@ -386,6 +510,7 @@ impl RecoveryDeliveryContext {
             Some(anchor),
             unix_journal::Settlement::DeliveryNotRecorded,
         );
+        bind
     }
 
     /// Returns the funnel's own verdict about the durable frontier so the caller

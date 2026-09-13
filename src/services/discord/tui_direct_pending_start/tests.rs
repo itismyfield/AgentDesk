@@ -243,10 +243,20 @@ fn record_roundtrips_through_json() {
         observed_at_ms: 1230,
         state: PendingStartState::Waiting,
         attempt_count: 0,
+        captured_source: None,
     };
     let json = serde_json::to_string(&record).unwrap();
     let back: TuiDirectPendingStart = serde_json::from_str(&json).unwrap();
     assert_eq!(record, back);
+    let mut legacy = serde_json::to_value(&record).unwrap();
+    legacy.as_object_mut().unwrap().remove("captured_source");
+    let legacy: TuiDirectPendingStart = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.captured_source, None);
+    let mut captured = record;
+    captured.captured_source = Some(("original/transcript.jsonl".into(), 417));
+    let restored: TuiDirectPendingStart =
+        serde_json::from_str(&serde_json::to_string(&captured).unwrap()).unwrap();
+    assert_eq!(restored.captured_source, captured.captured_source);
 }
 
 /// #3282 test double for the ABORT-path anchor `⏳` cleanup, following the
@@ -301,6 +311,7 @@ fn record(provider: &str, channel_id: u64, anchor: u64) -> TuiDirectPendingStart
         observed_at_ms: 0,
         state: PendingStartState::Waiting,
         attempt_count: 0,
+        captured_source: None,
     }
 }
 

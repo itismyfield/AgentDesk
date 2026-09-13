@@ -64,7 +64,7 @@ pub(in crate::services::discord) fn is_done_setting_terminal_frame(
     use crate::services::agent_protocol::StreamMessage::*;
     matches!(
         msg,
-        Done { .. } | CodexTuiTerminalDone { .. } | Error { .. }
+        Done { .. } | CodexTuiTerminalDone { .. } | ClaudeTuiTerminalDone { .. } | Error { .. }
     )
 }
 

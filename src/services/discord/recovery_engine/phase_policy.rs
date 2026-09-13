@@ -338,13 +338,17 @@ mod tests {
 pub(super) fn recovery_ready_without_output_already_delivered(
     state: &inflight::InflightTurnState,
 ) -> bool {
-    state.response_sent_offset > 0 || state.last_watcher_relayed_offset.is_some()
+    // A published prefix or consumed JSONL offset cannot acknowledge the tail.
+    recovery_terminal_delivery_already_committed(state)
 }
 
 pub(super) fn recovery_ready_without_output_has_captured_response(
     state: &inflight::InflightTurnState,
 ) -> bool {
-    !state.full_response.trim().is_empty()
+    state
+        .full_response
+        .get(state.response_sent_offset..)
+        .is_some_and(|response| !response.trim().is_empty())
 }
 
 pub(super) fn recovery_terminal_delivery_already_committed(

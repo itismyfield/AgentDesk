@@ -321,9 +321,11 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     "record_pinned_delivery_metadata": {
         "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
     },
-    # The current writes are reached through a function-value binding; 1b pins
-    # that bare reference and 1c will flatten the calls. Direct count is zero.
-    "record_historical_pinned_delivery": {},
+    # terminal_delivery retains its separately pinned function-value binding.
+    # Detached custody records an acknowledged receipt after exact-source checks.
+    "record_historical_pinned_delivery": {
+        "src/services/discord/turn_bridge/terminal_outcome_delivery/foreign_terminal_handoff.rs": 1,
+    },
     "advance_tmux_relay_confirmed_end": {
         "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
         "src/services/discord/turn_bridge/terminal_controller_cutover.rs": 2,

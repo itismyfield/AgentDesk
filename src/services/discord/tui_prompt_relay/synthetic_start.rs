@@ -1,9 +1,10 @@
 use super::*;
 
+pub(super) mod bridge_handoff;
 mod claim;
 mod stale_reclaim;
 pub(in crate::services::discord) use claim::build_tui_direct_synthetic_inflight_state;
-pub(super) use claim::claim_tui_direct_synthetic_turn;
+pub(super) use claim::{claim_tui_direct_synthetic_turn, claim_tui_direct_synthetic_turn_inner};
 
 use stale_reclaim::release_reclaimable_stale_synthetic_mailbox_owner_if_current;
 pub(super) use stale_reclaim::{
@@ -62,10 +63,24 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         prompt_text,
         anchor_message_id,
         lease,
-        register_deferred_start,
+        register_deferred_start: _,
     } = identity;
 
-    let cancel_token = Arc::new(CancelToken::new());
+    let (cancel_token, pg_pin) = match bridge_handoff::prepare_admission(
+        shared,
+        provider,
+        channel_id,
+        anchor_message_id,
+        lease,
+    )
+    .await
+    {
+        Ok(admission) => admission,
+        Err(error) => {
+            tracing::warn!(%error, "synthetic ownership capture failed before admission");
+            return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
+        }
+    };
     super::super::turn_bridge::bind_cancel_token_tmux_runtime(
         provider,
         &cancel_token,
@@ -172,57 +187,43 @@ async fn claim_tui_direct_synthetic_turn_prepared(
                     anchor_message_id = anchor_message_id.get(),
                     "skipping TUI-direct synthetic inflight; mailbox already owns a different turn"
                 );
-                return TuiDirectSyntheticTurnClaim {
-                    relay_owner,
-                    claimed: false,
-                    turn_start_offset: start_offset,
-                };
+                return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
             }
         }
     }
 
+    #[cfg(test)]
+    bridge_handoff::pause_after_admission_for_test(channel_id).await;
+
     // Capture the actor-owned episode identity after admission. If this call
     // observed an already-active matching synthetic turn, the fresh local token
     // was not admitted; the mailbox snapshot, not that unused token, is the
-    // authority for the nonce persisted below.
+    // authority for the nonce persisted below and the allocation handed to the bridge.
     let active_snapshot = super::super::mailbox_snapshot(shared, channel_id).await;
-    if register_deferred_start
-        && (active_snapshot.active_user_message_id != Some(anchor_message_id)
-            || active_snapshot.cancel_token.as_ref().is_none_or(|active| {
-                mailbox_activation_occurred && !Arc::ptr_eq(active, &cancel_token)
-            }))
+    if active_snapshot.active_user_message_id != Some(anchor_message_id)
+        || active_snapshot.cancel_token.as_ref().is_none_or(|active| {
+            (mailbox_activation_occurred || relay_owner == ExternalInputRelayOwner::BridgeAdapter)
+                && !Arc::ptr_eq(active, &cancel_token)
+        })
     {
-        return TuiDirectSyntheticTurnClaim {
-            relay_owner,
-            claimed: false,
-            turn_start_offset: start_offset,
-        };
+        return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
     }
-    let active_turn_nonce = active_snapshot.active_turn_nonce;
+    let admitted_actor = if mailbox_activation_occurred {
+        cancel_token
+    } else {
+        active_snapshot
+            .cancel_token
+            .clone()
+            .expect("checked mailbox actor")
+    };
+    let active_turn_nonce = admitted_actor.turn_nonce().map(str::to_owned);
     identity.register_episode(active_turn_nonce.as_deref());
 
-    // #3146 Part 1: a TUI-driven turn is now active for this channel (we either
-    // just started it via `mailbox_try_start_turn` or already own the matching
-    // turn). Clear any stale `📦 … idle N분` recap card the same way the
-    // Discord-intake path does (`intake_gate` → `spawn_clear_idle_recap_for_channel`).
-    // Without this, a turn that starts from the tmux TUI (user-typed OR the
-    // autonomous self-drive loop) never goes through Discord intake, so the
-    // recap card kept showing `idle N분` over a live turn.
-    //
-    // codex R2 P2: capture the recap card id THAT EXISTS NOW (the turn just
-    // became active) and clear ONLY that captured id (compare-and-clear on the
-    // pointer). The idle-recap policy posts at most once per idle period, so a
-    // delayed clear that deleted a LATER legitimately-posted card would lose it
-    // for the rest of the idle period (NOT self-healing). Binding the clear to
-    // the captured id makes a delayed clear a no-op against any newer card.
+    // #3146/#3148: clear only the captured idle recap and bump its generation
+    // before clearing, so an older asynchronous POST cannot restore stale chrome.
     if let Some(pool) = shared.pg_pool.as_ref().cloned()
         && let Some(http) = shared.serenity_http_or_token_fallback()
     {
-        // #3148: bump the per-channel turn generation BEFORE the clear. This is
-        // the same claim-bump the Discord-intake path does — any idle-recap
-        // POST job whose persist CAS captured the pre-bump generation now fails
-        // to persist its card over this just-claimed TUI turn. The clear then
-        // removes any card the POST already persisted before this claim.
         if let Err(e) = super::super::idle_recap::bump_turn_generation(
             &pool,
             channel_id.get(),
@@ -245,59 +246,37 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         .await;
     }
 
+    // The recap work above can yield to a successor. The original allocation,
+    // never a later same-nonce snapshot, owns this save and its failure cleanup.
+    if !bridge_handoff::actor_is_current(shared, channel_id, anchor_message_id, &admitted_actor)
+        .await
+    {
+        return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
+    }
+
     if let Some(existing) = super::super::inflight::load_inflight_state(provider, channel_id.get())
         && existing.tmux_session_name.as_deref() == Some(tmux_session_name)
         && existing.turn_source == TurnSource::ExternalInput
         && existing.user_msg_id == anchor_message_id.get()
+        && existing.output_path.as_deref().map(Path::new) == output_path.as_deref()
+        && existing.external_turn_id == lease.turn_id
+        && existing.session_key == lease.session_key
+        && bridge_handoff::refresh_actor_matches(
+            &existing,
+            Some(&admitted_actor),
+            mailbox_activation_occurred,
+        )
     {
-        let expected = super::super::inflight::InflightTurnIdentity::from_state(&existing);
-        let mut existing = existing;
-        existing.turn_nonce = active_turn_nonce.clone();
-        existing.set_relay_owner_kind(relay_owner_kind);
-        existing.restamp_external_turn_lease(lease);
-        existing.output_path = output_path
-            .as_deref()
-            .and_then(|path| path.to_str().map(str::to_string));
-        existing.last_offset = start_offset;
-        existing.turn_start_offset = Some(start_offset);
-        // #3099 codex re-review (P2): keep this turn's own injected `⏳` message id
-        // pinned so completion cleanup never reads a later injection's overwrite of
-        // the shared prompt-anchor slot.
-        existing.injected_prompt_message_id = Some(anchor_message_id.get());
-        let outcome =
-            super::super::inflight::save_inflight_state_if_identity_matches_allow_output_restamp(
-                &existing,
-                &expected,
-                "tui_direct_synthetic_refresh",
-            );
-        if !matches!(outcome, super::super::inflight::GuardedSaveOutcome::Saved) {
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel_id = channel_id.get(),
-                tmux_session_name = %tmux_session_name,
-                ?outcome,
-                "skipped TUI-direct synthetic inflight ownership refresh"
-            );
-            if mailbox_activation_occurred {
-                finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
-            }
-            return TuiDirectSyntheticTurnClaim {
-                relay_owner,
-                claimed: false,
-                turn_start_offset: start_offset,
-            };
-        }
-        if mailbox_activation_occurred {
-            super::super::increment_global_active(shared, "tui_direct_synthetic_refresh");
-            shared
-                .turn_start_times
-                .insert(channel_id, std::time::Instant::now());
-        }
-        return TuiDirectSyntheticTurnClaim {
+        return bridge_handoff::refresh_existing(
+            shared,
+            existing,
+            lease,
             relay_owner,
-            claimed: true,
-            turn_start_offset: start_offset,
-        };
+            relay_owner_kind,
+            (Some(&admitted_actor), mailbox_activation_occurred),
+            pg_pin,
+        )
+        .await;
     }
 
     let mut inflight_state = build_tui_direct_synthetic_inflight_state(
@@ -328,13 +307,15 @@ async fn claim_tui_direct_synthetic_turn_prepared(
                 "skipped TUI-direct synthetic inflight because a durable row already exists"
             );
             if mailbox_activation_occurred {
-                finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
+                bridge_handoff::release_unrecorded_actor(
+                    shared,
+                    &inflight_state,
+                    Some(&admitted_actor),
+                    false,
+                )
+                .await;
             }
-            return TuiDirectSyntheticTurnClaim {
-                relay_owner,
-                claimed: false,
-                turn_start_offset: start_offset,
-            };
+            return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
         }
         Err(error) => {
             tracing::warn!(
@@ -345,21 +326,28 @@ async fn claim_tui_direct_synthetic_turn_prepared(
                 "failed to save TUI-direct synthetic inflight"
             );
             if mailbox_activation_occurred {
-                finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
+                bridge_handoff::release_unrecorded_actor(
+                    shared,
+                    &inflight_state,
+                    Some(&admitted_actor),
+                    false,
+                )
+                .await;
             }
-            return TuiDirectSyntheticTurnClaim {
-                relay_owner,
-                claimed: false,
-                turn_start_offset: start_offset,
-            };
+            return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
         }
     }
 
-    if mailbox_activation_occurred {
-        super::super::increment_global_active(shared, "tui_direct_synthetic_save");
-        shared
-            .turn_start_times
-            .insert(channel_id, std::time::Instant::now());
+    if !bridge_handoff::record_admitted(
+        shared,
+        &inflight_state,
+        Some(&admitted_actor),
+        pg_pin,
+        mailbox_activation_occurred,
+    )
+    .await
+    {
+        return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
     }
     tracing::info!(
         provider = %provider.as_str(),
@@ -370,11 +358,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         mailbox_started = started,
         "created TUI-direct synthetic inflight for already-submitted provider turn"
     );
-    TuiDirectSyntheticTurnClaim {
-        relay_owner,
-        claimed: true,
-        turn_start_offset: start_offset,
-    }
+    TuiDirectSyntheticTurnClaim::new(relay_owner, true, start_offset)
 }
 
 #[cfg(test)]
@@ -427,6 +411,72 @@ mod tests {
         state.terminal_delivery_committed = terminal_delivery_committed;
         state.injected_prompt_message_id = Some(user_msg_id.get());
         state
+    }
+
+    #[test]
+    fn admitted_source_witness_advances_only_the_original_allocation() {
+        use inflight::InflightEpisodePin;
+        let mut before = synthetic_state(
+            ChannelId::new(5_071_581),
+            MessageId::new(5_071_582),
+            "witness-5071",
+            false,
+        );
+        before.relay_ownership_only = false;
+        before.session_id = None;
+        before.output_path = Some("/var/tmp/witness-5071.jsonl".into());
+        before.external_turn_id = Some("external-witness-5071".into());
+        let original = Arc::new(CancelToken::new());
+        before.turn_nonce = original.turn_nonce().map(str::to_owned);
+        let before_pin = InflightEpisodePin::from_state(&before);
+        let mut admitted = before.clone();
+        admitted.session_id = Some("native-session-5071".into());
+        admitted.output_path = Some("/private/var/tmp/witness-5071.jsonl".into());
+
+        bridge_handoff::preserve_admitted_source(&before_pin, &admitted, &original);
+        assert!(bridge_handoff::retained_actor(&admitted).unwrap().is_none());
+        assert!(bridge_handoff::record(&before, Some(&original), None));
+        bridge_handoff::preserve_admitted_source(&before_pin, &admitted, &original);
+        assert!(Arc::ptr_eq(
+            &bridge_handoff::retained_actor(&admitted).unwrap().unwrap(),
+            &original
+        ));
+        assert!(matches!(
+            bridge_handoff::original_session_pin(&admitted, Some(&original)),
+            Some(None)
+        ));
+
+        let successor = Arc::new(CancelToken::from_persisted_turn_nonce(
+            before.turn_nonce.clone(),
+        ));
+        let mut next = admitted.clone();
+        next.current_msg_id = 5_071_583;
+        // Even equal nonces cannot let B advance A's current witness.
+        bridge_handoff::preserve_admitted_source(
+            &InflightEpisodePin::from_state(&admitted),
+            &next,
+            &successor,
+        );
+        assert!(Arc::ptr_eq(
+            &bridge_handoff::retained_actor(&admitted).unwrap().unwrap(),
+            &original
+        ));
+        // A also cannot reuse its stale before-pin after admission.
+        bridge_handoff::preserve_admitted_source(&before_pin, &next, &original);
+        assert!(Arc::ptr_eq(
+            &bridge_handoff::retained_actor(&admitted).unwrap().unwrap(),
+            &original
+        ));
+        assert!(bridge_handoff::record(&next, Some(&successor), None));
+        bridge_handoff::preserve_admitted_source(
+            &InflightEpisodePin::from_state(&next),
+            &admitted,
+            &original,
+        );
+        assert!(Arc::ptr_eq(
+            &bridge_handoff::retained_actor(&next).unwrap().unwrap(),
+            &successor
+        ));
     }
 
     async fn seed_synthetic_mailbox_owner(
@@ -517,6 +567,7 @@ mod tests {
             observed_at_ms: 0,
             state: crate::services::discord::tui_direct_pending_start::PendingStartState::Waiting,
             attempt_count: 0,
+            captured_source: None,
         };
         assert!(pending_start_claim_fn()(&shared, &record).await);
         let row = inflight::load_inflight_state(&provider, channel_id.get()).unwrap();
@@ -1741,6 +1792,7 @@ pub(super) fn defer_synthetic_turn_start(
     prompt: &ObservedTuiPrompt,
     anchor_message_id: MessageId,
     lease: &ExternalInputRelayLease,
+    captured_source: Option<(String, u64)>,
 ) {
     let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
     let record = super::super::tui_direct_pending_start::TuiDirectPendingStart {
@@ -1758,6 +1810,7 @@ pub(super) fn defer_synthetic_turn_start(
         observed_at_ms: prompt.observed_at.timestamp_millis().max(0) as u64,
         state: super::super::tui_direct_pending_start::PendingStartState::Waiting,
         attempt_count: 0,
+        captured_source,
     };
     if let Err(error) = super::super::tui_direct_pending_start::persist(&record) {
         tracing::warn!(
@@ -1810,6 +1863,16 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
             };
             let channel_id = ChannelId::new(record.channel_id);
             let anchor_message_id = MessageId::new(record.anchor_message_id);
+            if record.captured_source.is_some()
+                && crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                    provider.as_str(),
+                    &record.tmux_session_name,
+                    record.channel_id,
+                )
+                .is_some_and(|lease| lease.turn_id != record.lease_turn_id)
+            {
+                return false;
+            }
 
             // Rehydrate the external-input lease from the durable record's
             // fields (a restart clears the in-memory lease map). NEVER resubmit
@@ -1836,8 +1899,10 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                 &record.prompt_text,
                 anchor_message_id,
                 &lease,
+                record.captured_source.as_ref(),
             )
-            .await;
+            .await
+            .0;
 
             // #3154 P1-3: adopt the claim's relay_owner into the in-memory lease
             // EXACTLY like the inline (non-deferred) path does (see

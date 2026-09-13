@@ -1,9 +1,4 @@
-//! #4230 S3 completion postlude + inflight epilogue for `turn_bridge::spawn_turn_bridge`.
-//!
-//! Moved from the final post-loop tail of `spawn_turn_bridge`: status-panel
-//! completion, final ADK status, watcher resume, transcript/memory/analytics
-//! persistence, metrics, restart-report cleanup, inflight preserve/clear,
-//! mailbox recovery marker cleanup, and the final queued-turn drain.
+//! Completion projection, bookkeeping, and retry-preserving cleanup for a bridge attempt.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -32,7 +27,7 @@ pub(super) async fn run_completion_postlude(
     let request_owner_name = ctx.request_owner_name;
     let final_session_status = ctx.final_session_status;
     let status_panel_started_at = ctx.status_panel_started_at;
-    let has_queued_turns = ctx.has_queued_turns;
+    let mut has_queued_turns = ctx.has_queued_turns;
     let defer_watcher_resume = ctx.defer_watcher_resume;
     let can_chain_locally = ctx.can_chain_locally;
     let single_message_panel_footer_mode = ctx.single_message_panel_footer_mode;
@@ -86,7 +81,7 @@ pub(super) async fn run_completion_postlude(
     let cancelled = state.cancelled;
     let restart_followup_pending = state.restart_followup_pending;
     let bridge_skip_holder_owns_inflight = state.bridge_skip_holder_owns_inflight;
-    let completion_guard = state.completion_guard;
+    let mut completion_guard = state.completion_guard;
     let mut inflight_guard = state.inflight_guard;
     let mut inflight_state = state.inflight_state;
 
@@ -96,7 +91,8 @@ pub(super) async fn run_completion_postlude(
         &provider,
         &inflight_state,
         &cancel_token,
-    );
+    )
+    .requiring_captured_actor(is_external_input_tui_direct);
     let completion_r0 = ownership.read("completion_r0").await;
     let mut status_panel_completion_committed = true;
     if status_panel_terminal_committed
@@ -190,6 +186,16 @@ pub(super) async fn run_completion_postlude(
             "claude_tui_followup_requeue_after_completion_postlude_projection",
         );
     }
+
+    has_queued_turns = ownership
+        .finalize_synthetic_actor(
+            &shared_owned,
+            &inflight_state,
+            cancelled,
+            terminal_delivery_committed && status_panel_completion_committed,
+            has_queued_turns,
+        )
+        .await;
 
     let completion_r1 = ownership.read("completion_r1").await;
     if completion_r1.permits_channel_effects()
@@ -403,15 +409,9 @@ pub(super) async fn run_completion_postlude(
         push_transcript_event(&mut transcript_events, reminder_transcript_event(reminder));
         recall_feedback_analysis = Some(analyze_recall_feedback_turn(&transcript_events));
     }
-    // #4196: if this turn ends with uncommitted changes in its worktree, stash a
-    // WIP warning (provider-scoped key) so the NEXT turn's intake takes it and
-    // injects it into the model context (turn N+1). Reuses the #3792 detector via
-    // `turn_end_wip_warning_text` — no re-implementation of git status parsing.
-    // Gated on channel ownership (mirrors the feedback stash) so a scheduled or
-    // isolated snapshot turn never nudges the interactive session. A clean
-    // worktree yields `None` here, so nothing is stashed and turn N+1 is
-    // byte-for-byte unchanged. A stash failure only loses the next-turn nudge
-    // (the channel-post backstop still fires), so warn+skip.
+    // #4196: stash an uncommitted-worktree warning for the next intake using
+    // the existing #3792 detector. Only the channel owner may affect the session.
+    // A clean worktree returns None; a failed stash leaves the channel-post backstop.
     if !channel_effects_suppressed
         && let Some(wip_warning) =
             super::super::turn_end_wip_warning::turn_end_wip_warning_text(Some(&inflight_state))
@@ -455,6 +455,12 @@ pub(super) async fn run_completion_postlude(
     } else {
         "completed"
     };
+    let turn_outcome = turn_analytics::pending_delivery_outcome(
+        turn_outcome,
+        completion_guard.completion_signal(),
+        preserve_inflight_for_cleanup_retry,
+        bridge_skip_holder_owns_inflight,
+    );
     crate::services::observability::emit_turn_finished_with_dispatch_kind(
         provider.as_str(),
         channel_id.get(),
@@ -484,6 +490,8 @@ pub(super) async fn run_completion_postlude(
         turn_quality_event_type,
         serde_json::json!({
             "outcome": turn_outcome,
+            "terminal_delivery_committed": terminal_delivery_committed,
+            "preserved_for_retry": preserve_inflight_for_cleanup_retry,
             "duration_ms": turn_duration_ms(turn_start),
             "cancelled": cancelled,
             "recovery_retry": recovery_retry,
@@ -719,7 +727,15 @@ pub(super) async fn run_completion_postlude(
         );
     }
 
-    if cancelled && cancel_token.restart_mode().is_some() {
+    let synthetic_cleanup_owned = ownership
+        .owns_synthetic_cleanup(terminal_delivery_committed)
+        .await;
+    if !synthetic_cleanup_owned {
+        // Durable identity may be unchanged by RecoveryKickoff. Never use the
+        // nonce-only row guard after the captured mailbox allocation changed.
+        inflight_guard.defuse();
+        completion_guard.relinquish_bridge_authority();
+    } else if cancelled && cancel_token.restart_mode().is_some() {
         use crate::services::discord::inflight::{
             GuardedSaveOutcome, patch_restart_full_response_if_identity_unchanged,
             save_inflight_state_if_identity_unchanged,
@@ -854,32 +870,20 @@ pub(super) async fn run_completion_postlude(
                 Some("inflight cleared with undelivered full_response"),
             );
         }
-        // #3161 (codex P1): identity-guard the epilogue inflight-row
-        // removal. The status-panel completion EDIT above is alias-skipped
-        // (`panel_edit_aliases_newer_turn`) when a NEWER turn now owns this
-        // turn's captured panel, but THIS removal was unconditional — so an
-        // OLD turn that correctly skipped its edit would still delete the
-        // on-disk inflight row, which by then belongs to the NEWER owner.
-        // That wipes the newer turn's inflight and leaves its status panel
-        // permanently non-complete. We now route a real (non-zero) this-turn
-        // identity through the guarded clear, which removes the row only when
-        // the on-disk `user_msg_id` still matches THIS turn (atomically under
-        // the inflight sidecar lock — no read-then-clear TOCTOU); a newer
-        // owner yields `UserMsgMismatch` and the row is preserved.
-        //
-        // The id==0 case (TUI-direct / external-input bridge turns that
-        // cannot be identity-guarded) keeps the unconditional clear — the
-        // same over-suppression carve-out the alias predicate uses, so those
-        // turns still clean up their own row. `bridge_epilogue_identity_guards_inflight_clear`
-        // is the pure seam shared with the unit test so the production fork
-        // and the test stay in lockstep.
+        // The receipt settles this captured episode only. User IDs (including
+        // zero) can be reused by a successor, so preserve the full identity and
+        // nonce through the atomic clear. Legacy rows without a source boundary
+        // retain the existing zero-owned compatibility path below.
         let this_turn_user_msg_id = user_msg_id.map(|id| id.get()).unwrap_or(0);
-        if bridge_epilogue_identity_guards_inflight_clear(this_turn_user_msg_id) {
+        if bridge_epilogue_identity_guards_inflight_clear(this_turn_user_msg_id)
+            || inflight_state.turn_start_offset.is_some()
+        {
             use super::super::inflight::GuardedClearOutcome;
-            match super::super::inflight::clear_inflight_state_if_matches(
+            match super::super::inflight::clear_inflight_state_for_captured_episode(
                 &provider,
                 channel_id.get(),
-                this_turn_user_msg_id,
+                &super::super::inflight::InflightTurnIdentity::from_state(&inflight_state),
+                inflight_state.turn_nonce.as_deref(),
             ) {
                 GuardedClearOutcome::Cleared | GuardedClearOutcome::Missing => {}
                 GuardedClearOutcome::UserMsgMismatch => {
@@ -959,6 +963,9 @@ pub(super) async fn run_completion_postlude(
         );
     }
     let completion_r4 = ownership.read("completion_r4").await;
+    if is_external_input_tui_direct && !completion_r4.permits_channel_effects() {
+        completion_guard.relinquish_bridge_authority();
+    }
     if completion_r4.permits_channel_effects() {
         super::super::mailbox_clear_recovery_marker(&shared_owned, channel_id).await;
     }

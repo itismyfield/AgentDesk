@@ -46,9 +46,11 @@ mod delivery_epilogue;
 #[cfg(test)]
 mod delivery_epilogue_tests;
 mod empty_response_recovery;
+mod foreign_terminal_handoff;
 mod prompt_too_long_guidance;
 mod queue_retry_silence;
 mod recovery_retry;
+pub(super) mod rowless_receipt;
 
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
 
@@ -56,6 +58,18 @@ pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
     state: TerminalOutcomeDeliveryState,
 ) -> TerminalOutcomeDeliveryOutput {
+    // The pre-loop gate proved the raw capture before display normalization.
+    // A later source generation cannot undo a confirmed transport receipt.
+    let receipt_disposition = if ctx.preloop_receipt_confirmed {
+        rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered
+    } else {
+        rowless_receipt::decision(rowless_receipt::ReceiptDecisionInput::from_terminal(
+            &ctx, &state,
+        ))
+    };
+    let already_receipted =
+        receipt_disposition == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
+    let may_publish = receipt_disposition == rowless_receipt::TerminalReceiptDisposition::Continue;
     let (channel_id, user_msg_id) = (ctx.channel_id, ctx.user_msg_id);
     let (current_msg_id, status_panel_msg_id) = (ctx.current_msg_id, ctx.status_panel_msg_id);
     let (cancelled, transport_error) = (ctx.cancelled, ctx.transport_error);
@@ -149,9 +163,14 @@ pub(super) async fn run_terminal_outcome_delivery(
     let mut bridge_should_emit_completion = true;
     let inflight_generation = inflight_state.born_generation;
 
-    if !bridge_output_owner
-        .map(|owner| owner.skips_bridge_spinner_cleanup())
-        .unwrap_or(false)
+    if may_publish
+        && !(provider == ProviderKind::Claude
+            && inflight_state.runtime_kind
+                == Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
+            && admitted.is_some())
+        && !bridge_output_owner
+            .map(|owner| owner.skips_bridge_spinner_cleanup())
+            .unwrap_or(false)
         && let Some(user_msg_id) = user_msg_id
     {
         tv_clear(
@@ -164,7 +183,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         .await;
     }
 
-    if recovery_retry {
+    if may_publish && recovery_retry {
         let outcome = handle_recovery_retry(
             RecoveryRetryMessage::SessionDiedDuringRecovery,
             RecoveryRetryContext {
@@ -190,7 +209,97 @@ pub(super) async fn run_terminal_outcome_delivery(
         }
     }
 
-    if cancelled || is_prompt_too_long {
+    let mut terminal_outcome = TerminalOutcomeDeliveryOutcome::Completed;
+    let mut epilogue_response = None;
+    if already_receipted {
+        (terminal_delivery_committed, terminal_body_visible) = (true, true);
+        if cancelled {
+            let cancel_source = cancel_token
+                .cancel_source()
+                .unwrap_or_else(|| tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON.to_string());
+            preserve_inflight_for_cleanup_retry |=
+                cancel_prompt_replace::settle_cancelled_episode_work(
+                    &shared_owned,
+                    dispatch_id.as_deref(),
+                    &cancel_source,
+                    &mut active_background_child_session_ids,
+                )
+                .await;
+        }
+        epilogue_response = Some((full_response.clone(), full_response.clone()));
+    } else if !may_publish {
+        bridge_should_emit_completion = false;
+        let cancel_source = cancel_token
+            .cancel_source()
+            .unwrap_or_else(|| tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON.to_string());
+        if bridge_output_owner.is_some() {
+            if cancelled {
+                preserve_inflight_for_cleanup_retry |=
+                    cancel_prompt_replace::settle_cancelled_episode_work(
+                        &shared_owned,
+                        dispatch_id.as_deref(),
+                        &cancel_source,
+                        &mut active_background_child_session_ids,
+                    )
+                    .await;
+            }
+            // A known watcher/standby actor already owns this answer. Keep the
+            // same owner contract before creating any second publisher.
+            preserve_inflight_for_cleanup_retry = true;
+            terminal_outcome = TerminalOutcomeDeliveryOutcome::DeferredToOwner;
+        } else {
+            let delivery_body = foreign_terminal_handoff::detached_delivery_body(
+                &shared_owned,
+                channel_id,
+                &provider,
+                &inflight_state,
+                &full_response,
+                response_sent_offset,
+                &cancel_token,
+                cancelled,
+                is_prompt_too_long,
+                gateway.as_ref(),
+                terminal_empty_response_notice.as_deref(),
+            );
+            match foreign_terminal_handoff::preserve_or_publish(foreign_terminal_handoff::Handoff {
+                provider: &provider,
+                local: &inflight_state,
+                admitted,
+                content: &full_response,
+                delivery_body: delivery_body.as_deref(),
+                empty_recovery_notice: (!resume_failure_detected
+                    && !recovery_retry
+                    && !claude_tui_followup_busy_readiness_timeout
+                    && full_response.trim().is_empty())
+                .then(|| empty_response_recovery::empty_response_guidance(rx_disconnected)),
+                response_sent_offset,
+                channel_id,
+                old_anchor: current_msg_id,
+                watcher_owner_channel_id,
+                tmux_last_offset,
+                cancelled,
+                cancel_source,
+                children: &active_background_child_session_ids,
+                dispatch_id: dispatch_id.as_deref(),
+                adk_cwd: adk_cwd.as_deref(),
+                should_complete: should_complete_work_dispatch_after_delivery,
+                should_fail: should_fail_dispatch_after_delivery,
+                resume_failure: resume_failure_detected,
+                recovery_retry,
+            })
+            .await
+            {
+                foreign_terminal_handoff::Outcome::Deferred { key } => {
+                    preserve_inflight_for_cleanup_retry = true;
+                    terminal_outcome = TerminalOutcomeDeliveryOutcome::DeferredToCustody { key };
+                }
+                foreign_terminal_handoff::Outcome::Unresolved { error } => {
+                    preserve_inflight_for_cleanup_retry = true;
+                    terminal_outcome = TerminalOutcomeDeliveryOutcome::Unresolved { error };
+                }
+            }
+        }
+    } else if cancelled || is_prompt_too_long {
         let message = if cancelled {
             CancelPromptReplaceMessage::Cancelled
         } else {
@@ -424,7 +533,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                 let mut pinned_handled = false;
                 #[cfg(unix)]
-                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled);
+                stream_loop::types::dispatch_pinned_terminal!(shared_owned gateway provider watcher_owner_channel_id inflight_state pinned_range_end admitted channel_id current_msg_id delivery_response bridge_start dispatch_id adk_session_key turn_id long full_response single_message_panel_footer_mode terminal_delivery_committed terminal_body_visible response_sent_offset completion_footer_terminal_text preserve_inflight_for_cleanup_retry bridge_skip_holder_owns_inflight pinned_handled terminal_outcome);
                 if !pinned_handled && long {
                     let bridge_start = inflight_state.turn_start_offset.unwrap_or(0);
                     let bridge_end = tmux_last_offset.unwrap_or(0);
@@ -759,6 +868,9 @@ pub(super) async fn run_terminal_outcome_delivery(
             }
         }
 
+        epilogue_response = Some((delivery_response, spoken_delivery_response));
+    }
+    if let Some((delivery_response, spoken_delivery_response)) = epilogue_response {
         handle_delivery_epilogue(
             DeliveryEpilogueMessage::PostCommit,
             DeliveryEpilogueContext {
@@ -787,6 +899,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 #[cfg(unix)]
                 bridge_tui_gate_outcome_early,
                 terminal_delivery_committed,
+                already_receipted,
                 terminal_body_visible,
                 preserve_inflight_for_cleanup_retry,
                 should_complete_work_dispatch_after_delivery,
@@ -823,21 +936,27 @@ pub(super) async fn run_terminal_outcome_delivery(
     }
     // Consume, rather than re-sample, the stamp snapshot under the
     // `SettlementCapabilities` contract.
-    intake_settlement::settle_intake_row_at_bridge_exit(
-        &shared_owned,
-        &inflight_state,
-        intake_settlement::classify(
-            terminal_delivery_committed,
-            status_panel_terminal_committed,
-            preserve_inflight_for_cleanup_retry,
-            bridge_skip_holder_owns_inflight,
-            bridge_output_owner.is_some(),
-        ),
-        inflight_state.intake_delivery_capabilities(),
-    )
-    .await;
+    // A failure of both delivery sinks is not a no-body success settlement.
+    if !matches!(
+        terminal_outcome,
+        TerminalOutcomeDeliveryOutcome::Unresolved { .. }
+    ) {
+        intake_settlement::settle_intake_row_at_bridge_exit(
+            &shared_owned,
+            &inflight_state,
+            intake_settlement::classify(
+                terminal_delivery_committed,
+                status_panel_terminal_committed,
+                preserve_inflight_for_cleanup_retry,
+                bridge_skip_holder_owns_inflight,
+                bridge_output_owner.is_some(),
+            ),
+            inflight_state.intake_delivery_capabilities(),
+        )
+        .await;
+    }
     TerminalOutcomeDeliveryOutput {
-        outcome: TerminalOutcomeDeliveryOutcome::Completed,
+        outcome: terminal_outcome,
         shared_owned,
         gateway,
         provider,
@@ -869,4 +988,12 @@ pub(super) async fn run_terminal_outcome_delivery(
         response_sent_offset,
         turn_start,
     }
+}
+
+pub(in crate::services::discord) async fn resume_foreign_terminal_custody(
+    registry: &crate::services::discord::health::HealthRegistry,
+    payload: &mut serde_json::Value,
+    checkpoint: &crate::services::discord::terminal_delivery_custody::CustodyCheckpoint,
+) -> Result<bool, String> {
+    foreign_terminal_handoff::resume(registry, payload, checkpoint).await
 }

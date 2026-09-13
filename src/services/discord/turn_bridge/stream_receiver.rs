@@ -2,6 +2,24 @@
 
 use super::*;
 
+// The non-Clone receiver is the phase witness: capture consumes it before stream processing.
+pub(super) async fn capture_bridge_clear_fence(
+    shared: &SharedData,
+    channel: ChannelId,
+    rx: mpsc::Receiver<StreamMessage>,
+    fence: &tokio::sync::OnceCell<ChannelClearFence>,
+) -> StreamMessageReceiverAdapter {
+    #[cfg(all(test, unix))]
+    let channel = resume_pin_tests::capture_channel(channel);
+    crate::db::session_transcripts::observe_channel_clear_fence_once(
+        fence,
+        shared.pg_pool.as_ref(),
+        &channel.get().to_string(),
+    )
+    .await;
+    spawn_stream_message_receiver_adapter(rx)
+}
+
 pub(in crate::services::discord) struct StreamMessageReceiverAdapter {
     rx: tokio::sync::mpsc::UnboundedReceiver<StreamMessage>,
     stop: Arc<std::sync::atomic::AtomicBool>,

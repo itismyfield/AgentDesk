@@ -25,8 +25,8 @@ mod rebind_adoption;
 
 pub(in crate::services::discord) use self::delivery_rewind::save_inflight_delivery_rewind_if_matches_identity;
 pub(in crate::services::discord) use self::identity_gate::{
-    GuardedSaveOutcome, StreamRelayAuthority, bind_recovery_anchor_if_matches_identity,
-    clear_long_running_placeholder_if_matches_identity,
+    GuardedSaveOutcome, StreamRelayAuthority, bind_recovery_anchor_for_snapshot,
+    bind_recovery_anchor_if_matches_identity, clear_long_running_placeholder_if_matches_identity,
     mark_readopted_from_inflight_if_identity_unchanged,
     patch_bridge_entry_state_if_identity_unchanged,
     patch_bridge_entry_state_tracking_placeholder_clear,

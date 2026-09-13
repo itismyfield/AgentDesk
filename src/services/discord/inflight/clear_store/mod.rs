@@ -15,6 +15,7 @@ mod identity;
 mod reconcile_gate;
 pub(in crate::services::discord) use identity::clear_inflight_state_for_captured_episode;
 
+pub(in crate::services::discord) use self::abandon::request_inflight_abandon_for_captured_episode;
 pub(crate) use self::abandon::{
     request_inflight_abandon_if_matches, request_inflight_abandon_if_matches_zero_owned,
 };
@@ -159,6 +160,25 @@ pub(in crate::services::discord) fn clear_inflight_state_if_matches_identity_gen
         expected_finalizer_turn_id,
         expected_updated_at,
         expected_save_generation,
+    )
+}
+
+/// Clear only the exact captured row, including anchor, nonce and save generation.
+pub(in crate::services::discord) fn clear_inflight_state_for_snapshot(
+    provider: &ProviderKind,
+    snapshot: &InflightTurnState,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    clear_inflight_state_if_matches_identity_generation_and_episode_in_root(
+        &root,
+        provider,
+        snapshot.channel_id,
+        &InflightTurnIdentity::from_state(snapshot),
+        snapshot.effective_finalizer_turn_id(),
+        (&snapshot.updated_at, snapshot.save_generation),
+        Some(&super::InflightEpisodePin::from_state(snapshot)),
     )
 }
 
@@ -506,6 +526,27 @@ pub(super) fn clear_inflight_state_if_matches_identity_generation_in_root(
     expected_updated_at: &str,
     expected_save_generation: u64,
 ) -> GuardedClearOutcome {
+    clear_inflight_state_if_matches_identity_generation_and_episode_in_root(
+        root,
+        provider,
+        channel_id,
+        expected,
+        expected_finalizer_turn_id,
+        (expected_updated_at, expected_save_generation),
+        None,
+    )
+}
+
+fn clear_inflight_state_if_matches_identity_generation_and_episode_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_finalizer_turn_id: u64,
+    expected_generation: (&str, u64),
+    expected_episode: Option<&super::InflightEpisodePin>,
+) -> GuardedClearOutcome {
+    let (expected_updated_at, expected_save_generation) = expected_generation;
     let path = inflight_state_path(root, provider, channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedClearOutcome::IoError;
@@ -522,7 +563,8 @@ pub(super) fn clear_inflight_state_if_matches_identity_generation_in_root(
     if state.rebind_origin {
         return GuardedClearOutcome::RebindOriginSkipped;
     }
-    if expected_finalizer_turn_id == 0
+    if expected_episode.is_some_and(|episode| !episode.matches_state(&state))
+        || expected_finalizer_turn_id == 0
         || !state.matches_finalizer_turn_id(expected_finalizer_turn_id)
         || !expected.matches_state(&state)
         || state.updated_at != expected_updated_at

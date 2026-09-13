@@ -41,6 +41,7 @@ pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) bridge_tui_gate_outcome_early:
         Option<super::super::super::tmux::TuiCompletionGateOutcome>,
     pub(super) terminal_delivery_committed: bool,
+    pub(super) already_receipted: bool,
     pub(super) terminal_body_visible: bool,
     pub(super) preserve_inflight_for_cleanup_retry: bool,
     pub(super) should_complete_work_dispatch_after_delivery: bool,
@@ -125,7 +126,7 @@ pub(super) async fn handle_delivery_epilogue(
                     response_sent_offset,
                 },
             );
-            for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..) {
+            for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..).filter(|_| !ctx.already_receipted) {
                 // #5413/#3607: current_msg_id is the terminal answer and is
                 // already excluded here, so no terminal-anchor guard is
                 // needed — every drained id is a non-terminal streamed prefix.
@@ -184,7 +185,7 @@ pub(super) async fn handle_delivery_epilogue(
             // 0) is never a voice turn — voice turns carry a synthetic,
             // non-zero voice message id — so the voice-handoff completion
             // routing (all keyed on the user message id) does not apply.
-            if let Some(user_msg_id) = user_msg_id {
+            if !ctx.already_receipted && let Some(user_msg_id) = user_msg_id {
                 let pg_pool_for_handoff = shared_owned.pg_pool.as_ref();
                 let in_memory_handoff_agent_id = crate::voice::announce_meta::global_store()
                     .get_handoff(user_msg_id)
@@ -343,36 +344,12 @@ pub(super) async fn handle_delivery_epilogue(
             bridge_should_emit_completion = bridge_gate_outcome.should_emit_completion();
         }
 
-        if should_complete_work_dispatch_after_terminal_delivery(
-            should_complete_work_dispatch_after_delivery,
-            terminal_delivery_committed,
-            preserve_inflight_for_cleanup_retry,
-            resume_failure_detected,
-            recovery_retry,
-            &full_response,
-        ) {
-            complete_work_dispatch_on_turn_end(
-                &shared_owned,
-                dispatch_id.as_deref(),
-                adk_cwd.as_deref(),
-                Some(&full_response),
-            )
-            .await;
-        } else if should_fail_dispatch_after_terminal_delivery(
-            should_fail_dispatch_after_delivery,
-            terminal_delivery_committed,
-            preserve_inflight_for_cleanup_retry,
-        ) {
-            // Transport error — fail the dispatch only after the terminal
-            // error response is deliverable, so auto-queue does not advance
-            // ahead of visible turn completion.
-            fail_dispatch_with_retry(
-                shared_owned.api_port,
-                dispatch_id.as_deref(),
-                &full_response,
-            )
-            .await;
-        }
+        settle_terminal_dispatch(TerminalDispatchSettlement {
+            shared: &shared_owned, dispatch_id: dispatch_id.as_deref(), adk_cwd: adk_cwd.as_deref(),
+            full_response: &full_response, should_complete: should_complete_work_dispatch_after_delivery,
+            should_fail: should_fail_dispatch_after_delivery, committed: terminal_delivery_committed,
+            preserve: preserve_inflight_for_cleanup_retry, resume_failure: resume_failure_detected, recovery_retry,
+        }).await;
 
         // Mark this turn delivered so the watcher will not relay it again when it resumes.
         // #3041 P1-2 (codex P1-c): a B2 Skip set
@@ -389,7 +366,7 @@ pub(super) async fn handle_delivery_epilogue(
             });
         }
 
-        if can_chain_locally
+        if !ctx.already_receipted && can_chain_locally
             && !preserve_inflight_for_cleanup_retry
             && !delivery_response.trim().is_empty()
             && let Some(user_msg_id) = user_msg_id
@@ -425,8 +402,51 @@ pub(super) async fn handle_delivery_epilogue(
     }
 
     *state.response_sent_offset = response_sent_offset;
-    *state.bridge_should_emit_completion = bridge_should_emit_completion;
+    *state.bridge_should_emit_completion = bridge_should_emit_completion && !ctx.already_receipted;
     *state.status_panel_terminal_committed = status_panel_terminal_committed;
 
     DeliveryEpilogueOutcome::Continue
+}
+
+/// The nonvisual dispatch settlement used both after direct delivery and after
+/// a detached episode's durable retry. Publication authority stays at the caller.
+pub(super) struct TerminalDispatchSettlement<'a> {
+    pub shared: &'a Arc<SharedData>,
+    pub dispatch_id: Option<&'a str>,
+    pub adk_cwd: Option<&'a str>,
+    pub full_response: &'a str,
+    pub should_complete: bool,
+    pub should_fail: bool,
+    pub committed: bool,
+    pub preserve: bool,
+    pub resume_failure: bool,
+    pub recovery_retry: bool,
+}
+pub(super) async fn settle_terminal_dispatch(ctx: TerminalDispatchSettlement<'_>) -> bool {
+    if should_complete_work_dispatch_after_terminal_delivery(
+        ctx.should_complete,
+        ctx.committed,
+        ctx.preserve,
+        ctx.resume_failure,
+        ctx.recovery_retry,
+        ctx.full_response,
+    ) {
+        complete_work_dispatch_on_turn_end(
+            ctx.shared,
+            ctx.dispatch_id,
+            ctx.adk_cwd,
+            Some(ctx.full_response),
+        )
+        .await;
+        true
+    } else if should_fail_dispatch_after_terminal_delivery(
+        ctx.should_fail,
+        ctx.committed,
+        ctx.preserve,
+    ) {
+        fail_dispatch_with_retry(ctx.shared.api_port, ctx.dispatch_id, ctx.full_response).await;
+        true
+    } else {
+        false
+    }
 }

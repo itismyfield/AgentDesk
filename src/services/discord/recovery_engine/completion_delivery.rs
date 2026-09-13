@@ -12,6 +12,110 @@ pub(super) fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bo
     relay_ok
 }
 
+pub(super) struct CapturedRecoveryDelivery {
+    pub(super) outcome: RecoveryRelayOutcome,
+    pub(super) pending_anchor: Option<terminal_text_idempotency::PendingRecoveryAnchor>,
+}
+
+/// Only this captured recovery outcome can cross into the mailbox commit command.
+pub(crate) struct CapturedReadyDeliveryCommit {
+    pub(super) shared: Arc<SharedData>,
+    pub(super) state: inflight::InflightTurnState,
+    pub(super) actor: Option<Arc<CancelToken>>,
+    pub(super) delivery: CapturedRecoveryDelivery,
+}
+
+impl CapturedReadyDeliveryCommit {
+    /// The channel actor executes this synchronously, so recovery kickoff cannot
+    /// replace the actor between its comparison, fallback bind and terminal save.
+    pub(crate) fn commit(mut self, current: Option<&Arc<CancelToken>>) -> Option<Self> {
+        if !match (self.actor.as_ref(), current) {
+            (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
+            (None, None) => true,
+            _ => false,
+        } {
+            return None;
+        }
+        if let Some(pending) = self.delivery.pending_anchor.take()
+            && !matches!(
+                pending.bind_after_actor_check(&self.shared, &mut self.state),
+                inflight::GuardedSaveOutcome::Saved
+            )
+        {
+            return None;
+        }
+        if matches!(self.delivery.outcome, RecoveryRelayOutcome::Delivered) {
+            self.state.terminal_delivery_committed = true;
+            self.state.response_sent_offset = self.state.full_response.len();
+        } else {
+            self.state.recovery_relay_attempts =
+                self.state.recovery_relay_attempts.saturating_add(1);
+        }
+        // Row writers still use the existing save-generation CAS. A failed or
+        // uncertain transport persists its retry without releasing the obligation.
+        (matches!(
+            inflight::save_inflight_state_if_identity_unchanged(
+                &mut self.state,
+                "recovery_idle_captured_response",
+            ),
+            inflight::GuardedSaveOutcome::Saved
+        ) && self.state.terminal_delivery_completed())
+        .then_some(self)
+    }
+}
+
+impl From<RecoveryRelayOutcome> for CapturedRecoveryDelivery {
+    fn from(outcome: RecoveryRelayOutcome) -> Self {
+        Self {
+            outcome,
+            pending_anchor: None,
+        }
+    }
+}
+
+pub(super) async fn relay_captured_recovery_terminal_notice(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    text: &str,
+) -> CapturedRecoveryDelivery {
+    let gateway = DiscordGateway::new(http.clone(), shared.clone(), provider.clone(), None);
+    relay_captured_recovery_terminal_notice_with_gateway(
+        http, shared, provider, state, text, &gateway,
+    )
+    .await
+}
+
+pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    text: &str,
+    gateway: &dyn super::super::gateway::TurnGateway,
+) -> CapturedRecoveryDelivery {
+    if state.requires_pinned_terminal_recovery() {
+        #[cfg(unix)]
+        let committed = super::super::turn_bridge::publish_retained_terminal_recovery(
+            shared, gateway, state, text,
+        )
+        .await;
+        #[cfg(not(unix))]
+        let committed = {
+            let _ = gateway;
+            false
+        };
+        return if committed {
+            RecoveryRelayOutcome::Delivered
+        } else {
+            RecoveryRelayOutcome::TransientFailure
+        }
+        .into();
+    }
+    relay_recovery_terminal_notice_with_capture(http, shared, provider, state, text, true).await
+}
+
 pub(super) async fn relay_recovery_terminal_notice(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -19,12 +123,25 @@ pub(super) async fn relay_recovery_terminal_notice(
     state: &super::inflight::InflightTurnState,
     text: &str,
 ) -> RecoveryRelayOutcome {
+    relay_recovery_terminal_notice_with_capture(http, shared, provider, state, text, false)
+        .await
+        .outcome
+}
+
+async fn relay_recovery_terminal_notice_with_capture(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    text: &str,
+    capture_anchor: bool,
+) -> CapturedRecoveryDelivery {
     let Some(channel_id) = super::inflight::opt_channel_id(state.channel_id) else {
         tracing::warn!(
             provider = %provider.as_str(),
             "recovery terminal notice skipped because persisted channel id is zero"
         );
-        return RecoveryRelayOutcome::TransientFailure;
+        return RecoveryRelayOutcome::TransientFailure.into();
     };
     let recovery_context = RecoveryDeliveryContext::from_state(
         shared,
@@ -32,8 +149,15 @@ pub(super) async fn relay_recovery_terminal_notice(
         state,
         None,
         shared.restart.current_generation,
-    );
-    relay_recovered_terminal_text_to_placeholder(
+    )
+    .map(|context| {
+        if capture_anchor {
+            context.capture_anchor_updates(state)
+        } else {
+            context
+        }
+    });
+    let outcome = relay_recovered_terminal_text_to_placeholder(
         http,
         shared,
         channel_id,
@@ -41,7 +165,13 @@ pub(super) async fn relay_recovery_terminal_notice(
         text,
         recovery_context.as_ref(),
     )
-    .await
+    .await;
+    CapturedRecoveryDelivery {
+        outcome,
+        pending_anchor: recovery_context
+            .as_ref()
+            .and_then(RecoveryDeliveryContext::pending_anchor_after_delivery),
+    }
 }
 
 /// Deliver the recovered terminal text to Discord: edit the placeholder in

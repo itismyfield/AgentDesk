@@ -47,7 +47,8 @@ INTAKE_SPEC.loader.exec_module(intake_guard)
 # (`record_recovery_terminal_delivery`), and the funnel body gained its third
 # private caller.
 # #5755 removes the unproven loop_poll_prologue shared-frontier advance.
-TOTAL_CALL_SITES = 47
+# T5 detached custody adds one direct historical pinned receipt write.
+TOTAL_CALL_SITES = 48
 PINNED_SYMBOLS = 29
 ZERO_PINNED = {
     "write_confirmed_delivery",
@@ -56,7 +57,6 @@ ZERO_PINNED = {
     "clear_lease",
     "delete_record",
     "shadow_mirror_same_channel_frontier_with_body",
-    "record_historical_pinned_delivery",
 }
 
 RAW_ATOMIC_MUTATIONS = {

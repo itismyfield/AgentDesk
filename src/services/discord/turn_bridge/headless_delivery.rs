@@ -234,7 +234,7 @@ fn caller_supplied_delivery_bot(delivery_bot: Option<&str>) -> Option<&str> {
 ///    rewrites DM-session rows to;
 /// 3. the notify utility bot, only for a provider outside the provider registry,
 ///    which has no provider-bot alias to post under.
-fn headless_delivery_bot_alias<'a>(
+pub(super) fn headless_delivery_bot_alias<'a>(
     delivery_bot: Option<&'a str>,
     provider: &'a ProviderKind,
 ) -> &'a str {

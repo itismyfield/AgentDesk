@@ -40,20 +40,31 @@ pub(in crate::services::discord) async fn close_next_tracked_background_child(
     status: &str,
     reason: &str,
 ) {
-    let Some(pg_pool) = pg_pool else {
-        return;
+    close_tracked_background_child(pg_pool, child_session_ids, 0, status, reason).await;
+}
+
+async fn close_tracked_background_child(
+    pg_pool: Option<&sqlx::PgPool>,
+    child_session_ids: &mut Vec<i64>,
+    index: usize,
+    status: &str,
+    reason: &str,
+) -> bool {
+    let Some(&child_session_id) = child_session_ids.get(index) else {
+        return true;
     };
-    if child_session_ids.is_empty() {
-        return;
-    }
-    let child_session_id = child_session_ids.remove(0);
+    let Some(pg_pool) = pg_pool else {
+        return false;
+    };
     match close_background_child_pg(pg_pool, child_session_id, status).await {
-        Ok(_) => {}
+        Ok(_) => {
+            child_session_ids.remove(index);
+            true
+        }
         Err(error) => {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            tracing::warn!(
-                "  [{ts}] ⚠ Failed to close background child session {child_session_id} after {reason}: {error}"
-            );
+            tracing::warn!(child_session_id, reason, %error,
+                "preserving background child for terminal cleanup retry");
+            false
         }
     }
 }
@@ -64,8 +75,12 @@ pub(in crate::services::discord) async fn close_all_tracked_background_children(
     status: &str,
     reason: &str,
 ) {
-    while !child_session_ids.is_empty() {
-        close_next_tracked_background_child(pg_pool, child_session_ids, status, reason).await;
+    let mut index = 0;
+    while index < child_session_ids.len() {
+        if !close_tracked_background_child(pg_pool, child_session_ids, index, status, reason).await
+        {
+            index += 1;
+        }
     }
 }
 

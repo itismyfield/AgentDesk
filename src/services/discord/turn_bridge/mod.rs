@@ -28,11 +28,17 @@ mod skill_usage;
 mod stale_resume;
 mod status_panel;
 mod stream_loop;
+#[cfg(test)]
+pub(crate) use stream_loop::types::terminal_prepare_test::{
+    TERMINAL_PREPARE_TEST_HOOK, TerminalPrepareTestHook,
+};
 mod stream_receiver;
 mod stream_tick;
 mod streaming_edit_text;
 mod task_notification_lifecycle;
 mod terminal_controller_cutover;
+#[cfg(unix)]
+pub(in crate::services::discord) use stream_loop::types::publish_retained_terminal_recovery;
 mod terminal_delivery;
 mod terminal_outcome_delivery;
 mod thinking;
@@ -104,6 +110,7 @@ pub(in crate::services::discord) use status_panel::{
 // #3805 P2 (PR-C): the ONE generation staleness rule shared by the sink (here)
 // and the tmux WATCHER completion guard, so both paths supersede a stale
 // status edit by the SAME epoch semantics (parity).
+use stream_receiver::capture_bridge_clear_fence;
 pub(super) use stream_receiver::{
     StreamMessageReceiverAdapter, spawn_stream_message_receiver_adapter,
     turn_bridge_stream_wait_duration,
@@ -217,23 +224,6 @@ pub(super) enum WatcherHandoffClaimOutcome {
 // (#4230 S6) — must live at module scope so both resolve them.
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-// The non-Clone receiver is the phase witness: capture consumes it before stream processing.
-async fn capture_bridge_clear_fence(
-    shared: &SharedData,
-    channel: ChannelId,
-    rx: mpsc::Receiver<StreamMessage>,
-    fence: &tokio::sync::OnceCell<ChannelClearFence>,
-) -> StreamMessageReceiverAdapter {
-    #[cfg(all(test, unix))]
-    let channel = resume_pin_tests::capture_channel(channel);
-    crate::db::session_transcripts::observe_channel_clear_fence_once(
-        fence,
-        shared.pg_pool.as_ref(),
-        &channel.get().to_string(),
-    )
-    .await;
-    spawn_stream_message_receiver_adapter(rx)
-}
 pub(super) fn spawn_turn_bridge(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
@@ -464,10 +454,12 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut status_panel_generation = inflight_state.status_panel_generation;
         inflight_state.long_running_placeholder_active = false;
         let mut resumed_placeholder_clear_applied = false;
+        let mut entry_was_rowless = false;
 
         let anchor_text = super::formatting::build_processing_status_block(SPINNER[0]).to_string();
         if !bridge_entry_persist::establish_bridge_entry_authority(
             bridge_entry_persist::BridgeEntryAuthorityContext {
+                entry_was_rowless: &mut entry_was_rowless,
                 bridge: &mut bridge,
                 shared: shared_owned.as_ref(),
                 bridge_created_placeholder: &mut bridge_created_response_placeholder_msg_id,
@@ -705,6 +697,14 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 return;
             }
         }
+        if is_external_input_tui_direct && rx_disconnected {
+            // The reader never supplied an admitted terminal frame. Preserve
+            // the captured source/row for recovery; a partial stream is not a
+            // successfully published terminal response.
+            completion_guard.relinquish_bridge_authority();
+            inflight_guard.defuse();
+            return;
+        }
         #[rustfmt::skip]
         let (pending_long_running_open_after_state_save, pending_long_running_retarget_after_state_save) = (stream_loop_output.pending_long_running_open_after_state_save, stream_loop_output.pending_long_running_retarget_after_state_save);
 
@@ -722,6 +722,9 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 role_binding: role_binding.clone(),
                 turn_id: turn_id.clone(),
                 current_msg_id,
+                entry_was_rowless,
+                synthetic_actor: is_external_input_tui_direct.then(|| cancel_token.clone()),
+                codex_tui_terminal_range: stream_loop_output.codex_tui_terminal_range.clone(),
                 cancelled,
                 transport_error,
                 tui_error_classification: stream_loop_output.tui_error_classification,
@@ -785,6 +788,8 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             terminal_outcome_delivery::run_terminal_outcome_delivery(
                 terminal_outcome_delivery::TerminalOutcomeDeliveryContext {
                     watcher_delivery_pin: watcher_delivery_pin.clone(),
+                    preloop_receipt_confirmed: post_loop_finalize_output.preloop_receipt_confirmed,
+                    entry_was_rowless,
                     channel_id,
                     user_msg_id,
                     current_msg_id,
@@ -841,8 +846,19 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 },
             )
             .await;
+        terminal_outcome_delivery_output.handoff_completion_authority(&mut completion_guard);
         match terminal_outcome_delivery_output.outcome {
             terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::Completed => {}
+            terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::DeferredToCustody { ref key } => {
+                tracing::info!(event = "rowless_terminal_custody_handoff", channel_id = channel_id.get(), %key,
+                    "detached terminal answer retained by durable custody");
+            }
+            terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::DeferredToOwner => {
+            }
+            terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::Unresolved { ref error } => {
+                tracing::error!(event = "rowless_terminal_delivery_unresolved", channel_id = channel_id.get(), %error,
+                    "terminal delivery remains unconfirmed; retaining any captured retry obligation");
+            }
         }
         let shared_owned = terminal_outcome_delivery_output.shared_owned;
         let gateway = terminal_outcome_delivery_output.gateway;
@@ -966,3 +982,11 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
 
 #[cfg(all(test, unix))]
 mod resume_pin_tests;
+
+pub(in crate::services::discord) async fn resume_foreign_terminal_custody(
+    registry: &super::health::HealthRegistry,
+    payload: &mut serde_json::Value,
+    checkpoint: &crate::services::discord::terminal_delivery_custody::CustodyCheckpoint,
+) -> Result<bool, String> {
+    terminal_outcome_delivery::resume_foreign_terminal_custody(registry, payload, checkpoint).await
+}

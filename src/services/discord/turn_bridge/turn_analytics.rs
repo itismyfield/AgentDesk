@@ -1,6 +1,28 @@
 use super::*;
 use crate::db::turns::PersistTurnOwned;
 
+pub(super) fn pending_delivery_outcome(
+    primary_outcome: &'static str,
+    signal: BridgeCompletionSignal,
+    preserve: bool,
+    held_by_other: bool,
+) -> &'static str {
+    if !matches!(
+        primary_outcome,
+        "completed" | "tmux_handoff" | "watcher_relay" | "standby_relay"
+    ) {
+        return primary_outcome;
+    }
+    match signal {
+        BridgeCompletionSignal::DeferredToCustody | BridgeCompletionSignal::DeferredToOwner => {
+            "delivery_pending"
+        }
+        _ if preserve && held_by_other => "delivery_pending",
+        BridgeCompletionSignal::Unresolved if preserve => "delivery_unresolved",
+        _ => primary_outcome,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit_turn_quality_event(
     provider: &ProviderKind,
@@ -419,5 +441,57 @@ mod discord_turn_id_no_user_message_tests {
             None,
         );
         assert_eq!(turn_id, "discord:4243:99");
+    }
+}
+
+#[cfg(test)]
+mod pending_delivery_outcome_tests {
+    use super::{BridgeCompletionSignal as Signal, pending_delivery_outcome};
+
+    #[test]
+    fn pending_delivery_preserves_primary_failure_causes() {
+        for primary in [
+            "cancelled",
+            "recovery_retry",
+            "prompt_too_long",
+            "transport_error",
+            "empty_response",
+        ] {
+            for (signal, preserve, held_by_other) in [
+                (Signal::Unresolved, true, true), // cancel/stop hit a real lease Skip
+                (Signal::Unresolved, true, false),
+                (Signal::DeferredToCustody, true, false),
+                (Signal::DeferredToOwner, false, true),
+                (Signal::Finalized, false, false),
+            ] {
+                assert_eq!(
+                    pending_delivery_outcome(primary, signal, preserve, held_by_other),
+                    primary
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pending_delivery_replaces_only_neutral_success_labels() {
+        for primary in [
+            "completed",
+            "tmux_handoff",
+            "watcher_relay",
+            "standby_relay",
+        ] {
+            for (signal, preserve, held_by_other, expected) in [
+                (Signal::Unresolved, true, false, "delivery_unresolved"),
+                (Signal::Unresolved, true, true, "delivery_pending"),
+                (Signal::DeferredToCustody, false, false, "delivery_pending"),
+                (Signal::DeferredToOwner, false, false, "delivery_pending"),
+                (Signal::Finalized, false, false, primary),
+            ] {
+                assert_eq!(
+                    pending_delivery_outcome(primary, signal, preserve, held_by_other),
+                    expected
+                );
+            }
+        }
     }
 }

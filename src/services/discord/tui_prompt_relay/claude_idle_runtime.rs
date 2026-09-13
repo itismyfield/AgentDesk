@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use super::super::recovery_engine::recover_idle_partial_response;
 use super::*;
 
 #[cfg(unix)]
@@ -183,9 +185,26 @@ async fn relay_idle_claude_bindings(shared_ref: &Arc<SharedData>) {
             // #3018/#3306/#3656: registry miss ⇒ drop; chokepoint repairs.
             continue;
         };
-        if super::super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
-            .is_some()
+        if let Some(row) =
+            super::super::inflight::load_inflight_state(&ProviderKind::Claude, channel_id.get())
         {
+            let source = Path::new(&binding.output_path);
+            if let Some(lease) =
+                super::synthetic_start::bridge_handoff::resume_unpublished(&shared, &row, source)
+                    .await
+            {
+                spawn_claude_idle_response_tail_once(
+                    shared.clone(),
+                    tmux_session_name.clone(),
+                    channel_id,
+                    source.to_path_buf(),
+                    row.turn_start_offset.unwrap_or(row.last_offset),
+                    row.user_text.clone(),
+                    lease,
+                );
+            } else if let Some(http) = shared.serenity_http_or_token_fallback() {
+                recover_idle_partial_response(&http, &shared, &row, source).await;
+            }
             continue;
         }
 

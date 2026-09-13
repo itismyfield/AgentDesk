@@ -277,6 +277,7 @@ pub(super) fn persist_bridge_entry_inflight_state(
 }
 
 pub(super) struct BridgeEntryAuthorityContext<'a> {
+    pub(super) entry_was_rowless: &'a mut bool,
     pub(super) bridge: &'a mut TurnBridgeContext,
     pub(super) shared: &'a SharedData,
     pub(super) bridge_created_placeholder: &'a mut Option<MessageId>,
@@ -306,6 +307,7 @@ pub(super) async fn establish_bridge_entry_authority(
         outcome,
     );
     let anchor_was_absent = durable_current_msg_id_from_detached(*runtime.current_msg_id) == 0;
+    *ctx.entry_was_rowless = outcome == crate::services::discord::inflight::GuardedSaveOutcome::Missing;
     if !bridge_entry_disposition_continues(
         outcome,
         bridge_entry_rowless_cohort_admits(ctx.bridge.inflight_state.channel_id),

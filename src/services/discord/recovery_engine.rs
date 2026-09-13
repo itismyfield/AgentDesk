@@ -27,6 +27,14 @@ use std::path::Path;
 #[cfg(unix)]
 use std::process::Command;
 
+#[cfg(unix)]
+#[path = "recovery_engine/idle_captured_response.rs"]
+mod idle_captured_response;
+#[cfg(unix)]
+pub(in crate::services::discord) use idle_captured_response::recover_idle_partial_response;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use idle_captured_response::recover_idle_partial_response_from_ready_source;
+
 #[path = "recovery_engine/status_panel.rs"]
 mod recovery_status_panel;
 #[path = "recovery_engine/two_message_panel.rs"]
@@ -97,6 +105,7 @@ mod completion_delivery;
 // leaf module. Entry points are re-exported below so external paths stay stable.
 #[path = "recovery_engine/restore_inflight.rs"]
 mod restore_inflight;
+pub(crate) use completion_delivery::CapturedReadyDeliveryCommit;
 // #4111: behavior-preserving extraction of guarded Codex rollout persist-outcome
 // handling before restart-path watcher spawn into a leaf module.
 #[path = "recovery_engine/restore_persist_outcome.rs"]
@@ -133,7 +142,8 @@ use self::phase_policy::{
 // `recovery_engine::extract_response_from_output_pub` path stays valid for the
 // turn_bridge / tmux_restart_handoff external callers.
 pub(super) use self::jsonl_extract::{
-    extract_response_from_output_pub, success_result_end_offset_after_offset,
+    extract_response_from_output_pub, extract_response_from_output_range,
+    success_result_end_offset_after_offset,
 };
 // #3479 item-2: re-import the externally-called terminal-watcher helpers so the
 // existing call sites stay byte-identical. The remaining cluster members
@@ -182,8 +192,9 @@ pub(in crate::services::discord) use self::runtime::reregister_active_turn_from_
 // not re-exported.
 pub(in crate::services::discord) use self::completion_delivery::relay_recovered_terminal_text_to_placeholder;
 use self::completion_delivery::{
-    RecoveryCompletionOutcome, complete_recovery_visible_turn, relay_recovery_terminal_notice,
-    should_advance_recovery_dispatch_after_relay,
+    CapturedRecoveryDelivery, RecoveryCompletionOutcome, complete_recovery_visible_turn,
+    relay_captured_recovery_terminal_notice, relay_captured_recovery_terminal_notice_with_gateway,
+    relay_recovery_terminal_notice, should_advance_recovery_dispatch_after_relay,
 };
 // `detect_live_tmux_output_path` exists only under `#[cfg(unix)]` in the child;
 // a by-name import of a cfg'd-out item is a hard E0432 on non-unix targets.
