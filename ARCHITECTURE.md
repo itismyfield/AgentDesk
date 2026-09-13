@@ -799,6 +799,8 @@ src/
 │   │   ├── relay_health/
 │   │   │   └── frontier.rs
 │   │   ├── relay_recovery/
+│   │   │   ├── authority_observation/
+│   │   │   │   └── delivery_boundary.rs
 │   │   │   ├── tests/
 │   │   │   │   └── circuit_breaker_apply.rs
 │   │   │   ├── apply.rs
