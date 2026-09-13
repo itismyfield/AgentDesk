@@ -38,6 +38,7 @@ pub(super) type IdleReaderEnd =
 
 #[cfg(unix)]
 struct IdleTerminalSource {
+    provider: ProviderKind,
     transcript_path: String,
     tmux_session_name: String,
     turn_nonce: String,
@@ -435,8 +436,9 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
     .filter(|anchor| anchor.message_id == user_msg_id.get());
     let (tx, rx) = mpsc::channel();
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    let source = if provider == ProviderKind::Claude && reader_end.is_some() {
+    let source = if reader_end.is_some() {
         Some(IdleTerminalSource {
+            provider: provider.clone(),
             transcript_path: std::fs::canonicalize(output_path)
                 .map_err(|error| error.to_string())?
                 .to_string_lossy()
@@ -446,12 +448,12 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
                 .actor
                 .turn_nonce()
                 .filter(|nonce| !nonce.is_empty())
-                .ok_or("missing captured Claude actor nonce")?
+                .ok_or("missing captured TUI actor nonce")?
                 .to_owned(),
             source_start: claim
                 .row
                 .turn_start_offset
-                .ok_or("missing captured Claude source boundary")?,
+                .ok_or("missing captured TUI source boundary")?,
             actor: Arc::downgrade(&claim.actor),
         })
     } else {
@@ -802,27 +804,47 @@ fn forward_idle_stream_into_bridge_with_logging(
                 else {
                     return (
                         text_frames_forwarded,
-                        Err("Claude terminal reader has no opened-file identity".into()),
+                        Err("TUI terminal reader has no opened-file identity".into()),
                     );
                 };
-                StreamMessage::ClaudeTuiTerminalDone {
-                    result,
-                    session_id,
-                    transcript_path: source.transcript_path,
-                    tmux_session_name: source.tmux_session_name,
-                    turn_nonce: source.turn_nonce,
-                    source_start: source.source_start,
-                    complete_record_end: completed.offset,
-                    generation_mtime_ns: completed.generation_mtime_ns,
-                    source_file_dev: dev,
-                    source_file_ino: ino,
-                    actor: source.actor,
+                if source.provider == ProviderKind::Codex {
+                    StreamMessage::CodexTuiTerminalDone {
+                        result,
+                        session_id,
+                        rollout_path: source.transcript_path,
+                        tmux_session_name: source.tmux_session_name,
+                        turn_nonce: source.turn_nonce,
+                        source_start: source.source_start,
+                        complete_record_end: completed.offset,
+                        captured_source: Some(
+                            crate::services::agent_protocol::CapturedTuiTerminalSource {
+                                generation_mtime_ns: completed.generation_mtime_ns,
+                                source_file_dev: dev,
+                                source_file_ino: ino,
+                                actor: source.actor,
+                            },
+                        ),
+                    }
+                } else {
+                    StreamMessage::ClaudeTuiTerminalDone {
+                        result,
+                        session_id,
+                        transcript_path: source.transcript_path,
+                        tmux_session_name: source.tmux_session_name,
+                        turn_nonce: source.turn_nonce,
+                        source_start: source.source_start,
+                        complete_record_end: completed.offset,
+                        generation_mtime_ns: completed.generation_mtime_ns,
+                        source_file_dev: dev,
+                        source_file_ino: ino,
+                        actor: source.actor,
+                    }
                 }
             }
             (Some(_), _, _) => {
                 return (
                     text_frames_forwarded,
-                    Err("Claude terminal source witness missing".into()),
+                    Err("TUI terminal source witness missing".into()),
                 );
             }
             (None, _, done) => done,

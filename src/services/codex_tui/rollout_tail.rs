@@ -74,6 +74,7 @@ const DEFAULT_PANE_BUSY_VETO_CAP_SECS: u64 = 2 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolloutTailOutcome {
+    pub harvest: crate::services::session_backend::ReadHarvestStats,
     pub lines_read: usize,
     pub bytes_read: u64,
     pub final_offset: u64,
@@ -347,6 +348,32 @@ pub fn tail_rollout_file_from_offset_for_tmux(
         cancel_token,
         is_alive,
         Some(pane_busy_probe_for_tmux(tmux_session_name)),
+    )
+}
+
+/// Strict idle reader completion carries the opened descriptor, never a later path stat.
+pub(crate) fn tail_idle_rollout_for_tmux(
+    rollout_path: &Path,
+    start_offset: u64,
+    session_id: Option<String>,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+    tmux_session_name: &str,
+) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
+    let options = RolloutTailOptions {
+        pane_busy_probe: Some(pane_busy_probe_for_tmux(tmux_session_name)),
+        tmux_session_name: Some(tmux_session_name.to_owned()),
+        ..Default::default()
+    };
+    tail_rollout_file_until_assistant_response_with_pane_busy_probe(
+        rollout_path,
+        start_offset,
+        session_id,
+        &sender,
+        cancel_token,
+        is_alive,
+        options,
     )
 }
 
@@ -890,6 +917,12 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
         .map_err(|error| format!("seek Codex rollout {}: {error}", rollout_path.display()))?;
 
     let mut state = RolloutParseState {
+        harvest: crate::services::session_backend::ReadHarvestStats {
+            source_file: Some(
+                crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&file),
+            ),
+            ..Default::default()
+        },
         session_id: initial_session_id,
         tmux_session_name,
         discord_origin_prompt,
@@ -937,7 +970,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                 {
                     emit_done(
                         &sender,
-                        &state,
+                        &mut state,
                         finalize_path,
                         rollout_path,
                         current_offset,
@@ -977,7 +1010,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                         if heuristic_finalize_allowed(&mut state, rollout_path, current_offset) {
                             emit_done(
                                 &sender,
-                                &state,
+                                &mut state,
                                 RolloutFinalizePath::Heuristic,
                                 rollout_path,
                                 current_offset,
@@ -1082,7 +1115,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                     let result = if state.saw_assistant_text {
                         emit_done(
                             &sender,
-                            &state,
+                            &mut state,
                             RolloutFinalizePath::Heuristic,
                             rollout_path,
                             current_offset,
@@ -1244,6 +1277,7 @@ fn try_process_complete_partial_line(
 /// this change.
 fn outcome(state: &RolloutParseState, source_start: u64) -> RolloutTailOutcome {
     RolloutTailOutcome {
+        harvest: state.harvest,
         lines_read: state.lines_read,
         bytes_read: state.bytes_read,
         final_offset: source_start.saturating_add(state.bytes_read),
@@ -1466,7 +1500,7 @@ fn heuristic_finalize_allowed(
 
 fn emit_done(
     sender: &RelaySuppressionSender<'_>,
-    state: &RolloutParseState,
+    state: &mut RolloutParseState,
     finalize_path: RolloutFinalizePath,
     rollout_path: &Path,
     offset: u64,
@@ -1474,6 +1508,11 @@ fn emit_done(
 ) {
     let (source_start, turn_nonce, terminal_range_eligible) = terminal_range;
     let complete_record_end = source_start.saturating_add(state.bytes_read);
+    state.harvest.decoded_terminal = finalize_path != RolloutFinalizePath::Heuristic
+        && offset == complete_record_end
+        && !state.has_pending_tool_call()
+        && !state.dropped_assistant_content
+        && state.turn_complete_seen;
     tracing::info!(
         rollout_path = %rollout_path.display(),
         offset,
@@ -1515,6 +1554,7 @@ fn emit_done(
             turn_nonce: turn_nonce.to_string(),
             source_start,
             complete_record_end,
+            captured_source: None,
         });
     } else {
         sender.send(StreamMessage::Done {
@@ -1551,10 +1591,10 @@ mod tests {
             ..RolloutParseState::default()
         };
         state.record(9);
-        let emit = |path, offset, nonce| {
+        let mut emit = |path, offset, nonce| {
             emit_done(
                 &sender,
-                &state,
+                &mut state,
                 path,
                 Path::new("/tmp/raw.jsonl"),
                 offset,

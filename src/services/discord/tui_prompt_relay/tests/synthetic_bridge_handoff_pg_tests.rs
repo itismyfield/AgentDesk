@@ -48,7 +48,21 @@ pub(super) fn spawn_handoff_reader(
     let path = path.to_str().unwrap().to_owned();
     let cancel = Arc::new(CancelToken::new());
     let reader_cancel = cancel.clone();
+    let tmux = tmux.to_owned();
     let thread = std::thread::spawn(move || {
+        if crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux)
+            .is_some_and(|binding| binding.runtime_kind == RuntimeHandoffKind::CodexTui)
+        {
+            let _ = end.send(codex_idle_rollout::read_codex_idle_completion(
+                Path::new(&path),
+                start,
+                tx,
+                Some(reader_cancel),
+                || true,
+                &tmux,
+            ));
+            return;
+        }
         let result = crate::services::session_backend::read_output_file_until_result_with_harvest(
             &path,
             start,
@@ -92,7 +106,7 @@ fn synthetic_bridge_handoff_fixture(
     postgres_race: bool,
     admission_race: bool,
     prefix_read_error: bool,
-    native_compaction: bool,
+    native_tail: Option<ProviderKind>,
 ) {
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
@@ -115,7 +129,10 @@ fn synthetic_bridge_handoff_fixture(
                 Arc::get_mut(&mut shared).unwrap().pg_pool =
                     Some(database.connect_and_migrate().await);
             }
-            let provider = ProviderKind::Claude;
+            let native_compaction = native_tail == Some(ProviderKind::Claude);
+            let native_codex = native_tail == Some(ProviderKind::Codex);
+            let provider = native_tail.clone().unwrap_or(ProviderKind::Claude);
+            let runtime = if native_codex { RuntimeHandoffKind::CodexTui } else { RuntimeHandoffKind::ClaudeTui };
             let channel = ChannelId::new(583_300_001);
             let anchor = MessageId::new(583_300_002);
             let tmux = "synthetic-bridge-handoff-5833";
@@ -124,6 +141,9 @@ fn synthetic_bridge_handoff_fixture(
             let output = temp.path().join("transcript.jsonl");
             let body = "첫 프레임 배달과 실행 중 owner 유지 ".repeat(16);
             let mut assistant = serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text", "text":body}]}});
+            if native_codex {
+                assistant = serde_json::json!({"type":"response_item", "payload":{"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":body}]}});
+            }
             if native_compaction { assistant["sessionId"] = "native-auto-session".into(); }
             let previous = if failed_save { "" } else { "{\"type\":\"user\",\"message\":{\"content\":\"previous turn\"}}\n" };
             let source_start = previous.len() as u64;
@@ -131,7 +151,7 @@ fn synthetic_bridge_handoff_fixture(
             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
                 tmux,
                 crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    runtime_kind: runtime,
                     output_path: output.to_str().unwrap().to_owned(),
                     relay_output_path: None,
                     input_fifo_path: None,
@@ -148,7 +168,7 @@ fn synthetic_bridge_handoff_fixture(
                 tmux,
             ));
             lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
-            lease.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+            lease.runtime_kind = Some(runtime);
             let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
                 provider.as_str(),
                 tmux,
@@ -518,6 +538,14 @@ fn synthetic_bridge_handoff_fixture(
                 crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get())
                     .is_some()
             );
+            if native_codex {
+                let incomplete_end = std::fs::metadata(&output).unwrap().len();
+                assert!(!crate::services::discord::session_relay_sink::idle_range_is_committed(
+                    &shared, &provider, channel.get(), tmux,
+                    Some((original_start, incomplete_end)),
+                    Some(crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux)),
+                ), "streaming an incomplete native response is not a delivery receipt");
+            }
             if prefix_read_error {
                 use std::io::Write;
                 let error = serde_json::json!({"type":"result", "subtype":"error_during_execution", "is_error":true, "errors":["DEFERRED_READER_FAILURE"]});
@@ -556,7 +584,9 @@ fn synthetic_bridge_handoff_fixture(
             }
             // The captured native trace has no terminal hook. Use the existing
             // adapter's stop_hook_summary endpoint explicitly, not as trace proof.
-            let terminal = if native_compaction {
+            let terminal = if native_codex {
+                serde_json::json!({"type":"event_msg", "payload":{"type":"task_complete", "last_agent_message":body}})
+            } else if native_compaction {
                 serde_json::json!({"type":"system", "subtype":"stop_hook_summary", "sessionId":"native-auto-session"})
             } else {
                 serde_json::json!({"type":"result", "subtype":"success", "result":body})
@@ -618,6 +648,13 @@ fn synthetic_bridge_handoff_fixture(
                 }), "one response preserves the prefix and post-compaction continuation");
             }
             let source_end = std::fs::metadata(&output).unwrap().len();
+            if native_codex {
+                let generation = crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux);
+                assert!(crate::services::discord::session_relay_sink::idle_range_is_committed(
+                    &shared, &provider, channel.get(), tmux,
+                    Some((original_start, source_end)), Some(generation),
+                ), "the canonical native adapter receipt acknowledges the retained generic idle range");
+            }
             let record = crate::services::discord::outbound::delivery_record::read_record(
                 &provider, channel.get(),
             ).expect("actual adapter leaves durable delivery evidence before owner release");
@@ -659,7 +696,7 @@ fn synthetic_bridge_handoff_fixture(
 #[test]
 fn synthetic_bridge_handoff_delivers_first_frame_and_releases_original_actor() {
     synthetic_bridge_handoff_fixture(
-        false, false, false, false, None, false, false, None, false, false, false, false,
+        false, false, false, false, None, false, false, None, false, false, false, None,
     );
 }
 
@@ -667,7 +704,7 @@ fn synthetic_bridge_handoff_delivers_first_frame_and_releases_original_actor() {
 #[test]
 fn synthetic_bridge_handoff_waits_for_later_claim_save_then_delivers() {
     synthetic_bridge_handoff_fixture(
-        true, false, false, false, None, false, false, None, false, false, false, false,
+        true, false, false, false, None, false, false, None, false, false, false, None,
     );
 }
 
@@ -675,7 +712,7 @@ fn synthetic_bridge_handoff_waits_for_later_claim_save_then_delivers() {
 #[test]
 fn synthetic_bridge_handoff_rejects_same_nonce_different_actor() {
     synthetic_bridge_handoff_fixture(
-        false, true, false, false, None, false, false, None, false, false, false, false,
+        false, true, false, false, None, false, false, None, false, false, false, None,
     );
 }
 
@@ -683,7 +720,7 @@ fn synthetic_bridge_handoff_rejects_same_nonce_different_actor() {
 #[test]
 fn synthetic_bridge_handoff_rejects_different_source_without_row_mutation() {
     synthetic_bridge_handoff_fixture(
-        false, false, true, false, None, false, false, None, false, false, false, false,
+        false, false, true, false, None, false, false, None, false, false, false, None,
     );
 }
 
@@ -691,7 +728,7 @@ fn synthetic_bridge_handoff_rejects_different_source_without_row_mutation() {
 #[test]
 fn synthetic_bridge_handoff_upserts_missing_postgres_session_before_first_frame() {
     synthetic_bridge_handoff_fixture(
-        false, false, false, true, None, false, false, None, false, false, false, false,
+        false, false, false, true, None, false, false, None, false, false, false, None,
     );
 }
 
@@ -710,7 +747,7 @@ fn synthetic_bridge_handoff_retries_unpublished_row_after_adapter_drops() {
         false,
         false,
         false,
-        false,
+        None,
     );
 }
 
@@ -729,7 +766,7 @@ fn synthetic_bridge_handoff_restarts_from_persisted_source_after_mailbox_loss() 
         false,
         false,
         false,
-        false,
+        None,
     );
 }
 
@@ -737,7 +774,7 @@ fn synthetic_bridge_handoff_restarts_from_persisted_source_after_mailbox_loss() 
 #[test]
 fn synthetic_bridge_handoff_failed_inline_save_retries_original_bytes() {
     synthetic_bridge_handoff_fixture(
-        false, false, false, false, None, true, false, None, false, false, false, false,
+        false, false, false, false, None, true, false, None, false, false, false, None,
     );
 }
 
@@ -745,7 +782,7 @@ fn synthetic_bridge_handoff_failed_inline_save_retries_original_bytes() {
 #[test]
 fn synthetic_bridge_handoff_retry_preserves_original_source_and_cursor() {
     synthetic_bridge_handoff_fixture(
-        false, false, false, false, None, false, true, None, false, false, false, false,
+        false, false, false, false, None, false, true, None, false, false, false, None,
     );
 }
 
@@ -764,7 +801,7 @@ fn synthetic_bridge_handoff_reader_error_retains_obligation_then_delivers() {
         false,
         false,
         false,
-        false,
+        None,
     );
     synthetic_bridge_handoff_fixture(
         false,
@@ -778,7 +815,7 @@ fn synthetic_bridge_handoff_reader_error_retains_obligation_then_delivers() {
         false,
         false,
         false,
-        false,
+        None,
     );
 }
 
@@ -797,7 +834,7 @@ fn synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episod
         false,
         false,
         false,
-        false,
+        None,
     );
 }
 
@@ -805,7 +842,7 @@ fn synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episod
 #[test]
 fn synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session() {
     synthetic_bridge_handoff_fixture(
-        false, false, false, true, None, false, false, None, true, false, false, false,
+        false, false, false, true, None, false, false, None, true, false, false, None,
     );
 }
 
@@ -813,7 +850,7 @@ fn synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session() {
 #[test]
 fn synthetic_bridge_handoff_inline_admission_rejects_replacement_actor() {
     synthetic_bridge_handoff_fixture(
-        false, false, false, false, None, false, false, None, false, true, false, false,
+        false, false, false, false, None, false, false, None, false, true, false, None,
     );
 }
 
@@ -821,14 +858,27 @@ fn synthetic_bridge_handoff_inline_admission_rejects_replacement_actor() {
 #[test]
 fn synthetic_bridge_handoff_prefix_then_read_error_retains_original_obligation() {
     synthetic_bridge_handoff_fixture(
-        false, false, false, false, None, false, false, None, false, false, true, false,
+        false, false, false, false, None, false, false, None, false, false, true, None,
     );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_native_auto_compaction_preserves_delivery_and_actor() {
-    synthetic_bridge_handoff_fixture(
-        false, false, false, false, None, false, false, None, false, false, false, true,
-    );
+    for provider in [ProviderKind::Claude, ProviderKind::Codex] {
+        synthetic_bridge_handoff_fixture(
+            false,
+            false,
+            false,
+            false,
+            None,
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+            Some(provider),
+        );
+    }
 }

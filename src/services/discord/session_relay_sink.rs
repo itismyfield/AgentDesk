@@ -33,6 +33,8 @@ mod delivery_commit;
 mod delivery_frontier;
 mod delivery_outcome_classify;
 mod idle_jsonl;
+#[cfg(test)]
+pub(in crate::services::discord) use idle_jsonl::idle_range_is_committed;
 pub(in crate::services::discord) mod journal;
 mod short_controller;
 // #3960: orphaned `SessionBoundRelay` TUI-direct reclaim (producer-liveness TOCTOU).

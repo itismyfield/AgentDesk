@@ -328,7 +328,7 @@ pub(super) fn idle_jsonl_suppressed_range_action(
     }
 }
 
-pub(super) fn idle_range_is_committed(
+pub(in crate::services::discord) fn idle_range_is_committed(
     shared: &SharedData,
     provider: &ProviderKind,
     channel_id: u64,

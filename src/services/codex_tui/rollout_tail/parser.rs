@@ -84,6 +84,7 @@ pub(super) fn task_complete_fallback_supersedes_final_text(
 
 #[derive(Debug, Default)]
 pub(super) struct RolloutParseState {
+    pub(super) harvest: crate::services::session_backend::ReadHarvestStats,
     pub(super) session_id: Option<String>,
     pub(super) final_text: String,
     pub(super) saw_assistant_text: bool,
