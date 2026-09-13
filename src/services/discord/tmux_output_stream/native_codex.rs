@@ -2,6 +2,7 @@
 //! watcher's existing normalized-event path. Raw byte offsets stay in the
 //! outer reader; normalized render bytes never become source coordinates.
 use super::*;
+use crate::services::agent_protocol::StreamMessage;
 
 pub(super) fn process_native_codex_messages(
     messages: Vec<StreamMessage>,

@@ -183,7 +183,7 @@ async fn native_codex_restart_sink_fixture() {
                 &shared,
                 channel,
                 actor.clone(),
-                serenity::UserId::new(1),
+                serenity::model::id::UserId::new(1),
                 MessageId::new(row.user_msg_id)
             )
             .await
