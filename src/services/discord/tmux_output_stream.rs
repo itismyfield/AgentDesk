@@ -988,7 +988,10 @@ mod tests {
             response, "ADK5071-native",
             "native duplicate envelopes relay once"
         );
-        assert!(outcome.terminal_evidence_offset.unwrap() >= turn_start_offset);
+        assert_eq!(
+            outcome.terminal_evidence_offset,
+            Some(turn_start_offset + native.rfind("{\"type\":\"event_msg\"").unwrap() as u64)
+        );
         assert!(buffer.is_empty());
 
         let call = "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"call_id\":\"pending\",\"arguments\":\"{}\"}}\n";
@@ -1022,6 +1025,30 @@ mod tests {
         }
         let item_only = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"unconfirmed\"}}\n";
         assert!(!parse_lines(item_only).0.found_result);
+        let assistant = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"on it\"}]}}\n";
+        let mut buffer = format!("{assistant}{item_only}{call}");
+        let mut state = StreamLineState::new();
+        let mut response = String::new();
+        let mut tools = WatcherToolState::new();
+        let midturn = process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools);
+        assert!(
+            !midturn.found_result,
+            "item completion is not turn completion"
+        );
+        assert!(
+            buffer.is_empty(),
+            "the subsequent tool call must be consumed"
+        );
+        buffer.push_str("{\"type\":\"turn.completed\"}\n");
+        assert!(
+            !process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools).found_result,
+            "turn.completed cannot bypass the subsequent pending tool"
+        );
+        buffer.push_str(output);
+        assert!(
+            process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools).found_result
+        );
+        assert_eq!(response, "on it");
     }
 
     #[test]

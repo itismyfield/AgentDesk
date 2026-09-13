@@ -26,7 +26,10 @@ impl RolloutRecordDecoder {
             return None;
         }
         let mut messages = decode_rollout_record(record, &mut self.0);
-        if super::explicit_finalize_path(&mut self.0, true).is_some() {
+        // An agent-message item can finish before the next tool call starts.
+        // Only a turn completion witness authorizes this streaming consumer;
+        // pending tools may defer that witnessed completion until their output.
+        if self.0.turn_complete_seen && super::explicit_finalize_path(&mut self.0, true).is_some() {
             messages.push(StreamMessage::Done {
                 result: self.0.final_text.clone(),
                 session_id: self.0.session_id.clone(),

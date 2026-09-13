@@ -130,6 +130,7 @@ async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
     );
     assert_eq!(gateway.replace_calls.load(Ordering::Acquire), 1);
     crate::services::discord::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
+    drop(_root);
     native_codex_restart_sink_fixture().await;
 }
 
@@ -214,11 +215,15 @@ async fn native_codex_restart_sink_fixture() {
         );
         assert!(parsed.found_result);
         assert_eq!(response, "ADK5071-native");
+        let terminal_start = parsed.terminal_evidence_offset.unwrap();
+        let terminal_len = source[terminal_start as usize..].find('\n').unwrap() + 1;
+        let parsed_end = terminal_start + terminal_len as u64;
+        assert_eq!(parsed_end, end - unread.len() as u64);
         let mut terminal = terminal_frame_offset(
             &binding,
             &source[start as usize..],
             1,
-            end - unread.len() as u64,
+            parsed_end,
             row.user_msg_id,
             &row.started_at,
             Some(start),
