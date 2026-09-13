@@ -3485,8 +3485,8 @@ fn idle_stream_strips_leading_chrome_from_first_text_only() {
 #[cfg(unix)]
 #[test]
 fn idle_stream_content_classifier_ignores_pure_control_and_empty_done() {
-    // Empty / control-only frames are NOT content: a turn yielding only
-    // these takes the no-card empty path (preserving today's behavior).
+    // Empty / control-only frames are not prose. An empty Done still enters
+    // terminal admission so recovery guidance requires an exact receipt.
     assert!(!idle_stream_message_is_content(
         &StreamMessage::OutputOffset { offset: 10 }
     ));
@@ -3512,9 +3512,8 @@ fn idle_stream_content_classifier_ignores_pure_control_and_empty_done() {
         stderr: String::new(),
         exit_code: None,
     }));
-    // #3256 parity: a Text/Done body that is ONLY leading TUI chrome must NOT
-    // count as content — otherwise a "No response requested." turn would now
-    // spawn a placeholder card the old path never produced.
+    // Leading TUI chrome alone is not assistant prose; Done remains a separate
+    // terminal boundary regardless of this content classification.
     assert!(!idle_stream_message_is_content(&StreamMessage::Text {
         content: "No response requested.".to_string(),
     }));
