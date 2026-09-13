@@ -190,7 +190,7 @@ use self::completion_delivery::{
 #[cfg(unix)]
 use self::restore_inflight::detect_live_tmux_output_path;
 pub(in crate::services::discord) use self::restore_inflight::{
-    finish_recovered_turn_mailbox, restore_inflight_turns,
+    finish_recovered_turn_mailbox, finish_recovered_turn_mailbox_for_state, restore_inflight_turns,
 };
 use self::restore_persist_outcome::{RestorePersistOutcome, restore_codex_rollout_output_path};
 pub(super) use self::runtime::reregister_active_turn_from_inflight;

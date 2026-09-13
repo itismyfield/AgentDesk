@@ -52,17 +52,51 @@ pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
     // unambiguous case (the recovered turn is the single live entry) finalizes
     // it exactly as the inline code did. This reproduces the prior
     // channel-scoped `mailbox_finish_turn` semantics, now ledger-gated.
+    finish_recovered_turn_mailbox_with_snapshot(shared, provider, channel_id, 0, None).await;
+    let _ = stop_source;
+}
+
+pub(in crate::services::discord) async fn finish_recovered_turn_mailbox_for_state(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+) {
+    if let Some(channel_id) = inflight::opt_channel_id(state.channel_id) {
+        finish_recovered_turn_mailbox_with_snapshot(
+            shared,
+            provider,
+            channel_id,
+            state.effective_finalizer_turn_id(),
+            Some(super::turn_finalizer::SyntheticClaimSnapshot::from_row(
+                state,
+            )),
+        )
+        .await;
+    }
+}
+
+async fn finish_recovered_turn_mailbox_with_snapshot(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    user_msg_id: u64,
+    snapshot: Option<super::turn_finalizer::SyntheticClaimSnapshot>,
+) {
     let _ = shared
         .turn_finalizer
-        .submit_terminal(
-            super::turn_finalizer::TurnKey::new(channel_id, 0, shared.restart.current_generation),
+        .submit_terminal_with_claim_snapshot(
+            super::turn_finalizer::TurnKey::new(
+                channel_id,
+                user_msg_id,
+                shared.restart.current_generation,
+            ),
             provider.clone(),
             super::turn_finalizer::TerminalEvent::Complete,
             super::turn_finalizer::FinalizeContext::monitor(),
+            snapshot,
             shared.clone(),
         )
         .await;
-    let _ = stop_source;
 }
 
 #[cfg(unix)]
@@ -112,6 +146,54 @@ pub(super) fn detect_live_tmux_output_path(
     };
     let candidates = parse_lsof_output_candidates(&stdout);
     detect_rebind_output_path_from_candidates(fallback_path, candidates)
+}
+
+// The restore scan has already established source EOF and a post-work ready pane.
+// Keep the relay injectable at this existing decision boundary so tests exercise
+// mailbox and durable-row disposition together with a terminal transport result.
+async fn settle_ready_without_output<F, Fut>(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    relay: F,
+) -> bool
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = RecoveryRelayOutcome>,
+{
+    if state.restart_mode.is_some() || state.rebind_origin {
+        return false;
+    }
+    if recovery_ready_without_output_already_delivered(state) {
+        finish_recovered_turn_mailbox_for_state(shared, provider, state).await;
+        inflight::clear_inflight_state_for_reconcile(provider, state);
+        return true;
+    }
+    if recovery_ready_without_output_has_captured_response(state) {
+        // response_sent_offset covers frozen Discord prefixes, unlike last_offset
+        // and last_watcher_relayed_offset, which use source JSONL coordinates.
+        let response = &state.full_response[state.response_sent_offset..];
+        let final_text = super::formatting::format_for_discord_with_provider(response, provider);
+        let outcome = relay(final_text).await;
+        dispose_recovery_relay_outcome(
+            shared,
+            provider,
+            state,
+            outcome,
+            true,
+            "recovery_ready_without_output",
+            "ready_without_output",
+            &state.full_response,
+            false,
+        )
+        .await;
+        return true;
+    }
+    tracing::warn!(
+        channel_id = state.channel_id,
+        "recovery: ready source at EOF has no terminal receipt or recoverable response suffix; preserving for watcher reattach"
+    );
+    false
 }
 
 fn observe_restore_inflight_snapshot(
@@ -1491,59 +1573,16 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             recovery_phase_after_output_scan(false, tmux_ready_without_new_output),
             RecoveryPhase::Done
         ) {
-            let ts = chrono::Local::now().format("%H:%M:%S");
-            // #2770: ready/idle is not terminal delivery evidence. If recovery
-            // has neither captured text nor a recorded relay commit, preserve
-            // the inflight so the pane-alive reattach path below can own it.
-            if recovery_ready_without_output_already_delivered(&state) {
-                tracing::info!(
-                    "  [{ts}] ✓ clearing inflight turn for channel {}: tmux is ready for input and terminal delivery was already recorded after offset {}",
-                    state.channel_id,
-                    state.last_offset
-                );
-                finish_recovered_turn_mailbox(
-                    shared,
-                    provider,
-                    channel_id,
-                    "recovery_ready_without_output_already_delivered",
-                )
-                .await;
-                super::inflight::clear_inflight_state_for_reconcile(provider, &state);
+            if settle_ready_without_output(shared, provider, &state, |final_text| {
+                let state = &state;
+                async move {
+                    relay_recovery_terminal_notice(http, shared, provider, state, &final_text).await
+                }
+            })
+            .await
+            {
                 continue;
             }
-            if recovery_ready_without_output_has_captured_response(&state) {
-                tracing::info!(
-                    "  [{ts}] ✓ clearing inflight turn for channel {}: tmux is ready for input and captured output is idle after offset {}",
-                    state.channel_id,
-                    state.last_offset
-                );
-                let final_text = super::formatting::format_for_discord_with_provider(
-                    &state.full_response,
-                    provider,
-                );
-                let outcome =
-                    relay_recovery_terminal_notice(http, shared, provider, &state, &final_text)
-                        .await;
-                // #3293: tmux_alive=true — budget force-clear forbidden here
-                // (pane-alive invariant); only a permanent verdict clears.
-                dispose_recovery_relay_outcome(
-                    shared,
-                    provider,
-                    &state,
-                    outcome,
-                    true,
-                    "recovery_ready_without_output",
-                    "ready_without_output",
-                    &state.full_response,
-                    false,
-                )
-                .await;
-                continue;
-            }
-            tracing::warn!(
-                "  [{ts}] ⚠ recovery: deferring ready-without-output completion for channel {} because no captured assistant response or terminal delivery evidence exists",
-                state.channel_id
-            );
         }
 
         let can_recover = tmux_session_name
@@ -2406,7 +2445,7 @@ mod tests {
             .expect("captured logs are utf8")
     }
 
-    fn recovery_state(provider: ProviderKind, channel_id: u64) -> InflightTurnState {
+    pub(super) fn recovery_state(provider: ProviderKind, channel_id: u64) -> InflightTurnState {
         InflightTurnState::new(
             provider,
             channel_id,
@@ -2521,7 +2560,7 @@ mod tests {
             production
                 .matches("clear_inflight_state_for_reconcile(provider, &state)")
                 .count(),
-            9
+            8
         );
         assert_eq!(
             production
@@ -2753,3 +2792,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "restore_inflight/ready_without_output_tests.rs"]
+mod ready_without_output_tests;
