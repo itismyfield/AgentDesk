@@ -165,7 +165,8 @@ async fn settle_ready_without_output<F, Fut>(
 ) -> bool
 where
     F: FnOnce(String) -> Fut,
-    Fut: std::future::Future<Output = RecoveryRelayOutcome>,
+    Fut: std::future::Future,
+    Fut::Output: Into<CapturedRecoveryDelivery>,
 {
     settle_ready_without_output_for_actor(shared, provider, state, None, relay).await
 }
@@ -179,7 +180,8 @@ pub(super) async fn settle_ready_without_output_for_actor<F, Fut>(
 ) -> bool
 where
     F: FnOnce(String) -> Fut,
-    Fut: std::future::Future<Output = RecoveryRelayOutcome>,
+    Fut: std::future::Future,
+    Fut::Output: Into<CapturedRecoveryDelivery>,
 {
     if state.restart_mode.is_some() || state.rebind_origin {
         return false;
@@ -218,11 +220,19 @@ where
         // and last_watcher_relayed_offset, which use source JSONL coordinates.
         let response = &state.full_response[state.response_sent_offset..];
         let final_text = super::formatting::format_for_discord_with_provider(response, provider);
-        let outcome = relay(final_text).await;
+        let delivery = relay(final_text).await.into();
         // A captured partial answer remains a delivery obligation even after a
         // permanent channel error. Reuse the same nonce/save-generation CAS as
         // the idle drain; legacy force-clear/budget identity is too broad here.
-        settle_captured_ready_delivery(shared, provider, state, actor, snapshot, outcome).await;
+        settle_captured_ready_delivery(
+            shared,
+            provider,
+            delivery.anchor_state.as_ref().unwrap_or(state),
+            actor,
+            snapshot,
+            delivery.outcome,
+        )
+        .await;
         return true;
     }
     tracing::warn!(
@@ -1709,7 +1719,14 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             if settle_ready_without_output(shared, provider, &state, |final_text| {
                 let state = &state;
                 async move {
-                    relay_recovery_terminal_notice(http, shared, provider, state, &final_text).await
+                    relay_captured_recovery_terminal_notice(
+                        http,
+                        shared,
+                        provider,
+                        state,
+                        &final_text,
+                    )
+                    .await
                 }
             })
             .await

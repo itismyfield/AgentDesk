@@ -160,9 +160,9 @@ pub(super) use self::save_store::{
     save_inflight_state_create_new, save_inflight_state_if_absent,
 };
 pub(in crate::services::discord) use self::save_store::{
-    GuardedSaveOutcome, StreamRelayAuthority, bind_recovery_anchor_if_matches_identity,
-    clear_long_running_placeholder_if_matches_identity, identity_gate::runtime_stamp::CodexRange,
-    mark_readopted_from_inflight_if_identity_unchanged,
+    GuardedSaveOutcome, StreamRelayAuthority, bind_recovery_anchor_for_snapshot,
+    bind_recovery_anchor_if_matches_identity, clear_long_running_placeholder_if_matches_identity,
+    identity_gate::runtime_stamp::CodexRange, mark_readopted_from_inflight_if_identity_unchanged,
     patch_bridge_entry_state_if_identity_unchanged,
     patch_bridge_entry_state_tracking_placeholder_clear,
     patch_restart_full_response_if_identity_unchanged, patch_restart_mode_if_matches_identity,

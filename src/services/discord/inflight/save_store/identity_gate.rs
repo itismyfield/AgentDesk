@@ -471,6 +471,57 @@ pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
     expected_relay_authority: Option<StreamRelayAuthority>,
     refresh_on_saved: Option<&mut InflightTurnState>,
 ) -> GuardedSaveOutcome {
+    bind_recovery_anchor_if_matches_snapshot(
+        provider,
+        channel_id,
+        expected,
+        expected_turn_start_offset,
+        expected_current_msg_id,
+        expected_current_msg_len,
+        anchor_msg_id,
+        anchor_text_len,
+        expected_relay_authority,
+        refresh_on_saved,
+        None,
+    )
+}
+
+pub(in crate::services::discord) fn bind_recovery_anchor_for_snapshot(
+    provider: &ProviderKind,
+    state: &mut InflightTurnState,
+    anchor_msg_id: u64,
+    anchor_text_len: usize,
+) -> GuardedSaveOutcome {
+    let expected = state.clone();
+    bind_recovery_anchor_if_matches_snapshot(
+        provider,
+        expected.channel_id,
+        &InflightTurnIdentity::from_state(&expected),
+        expected.turn_start_offset,
+        expected.current_msg_id,
+        Some(expected.current_msg_len),
+        anchor_msg_id,
+        anchor_text_len,
+        None,
+        Some(state),
+        Some(&expected),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_recovery_anchor_if_matches_snapshot(
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: &InflightTurnIdentity,
+    expected_turn_start_offset: Option<u64>,
+    expected_current_msg_id: u64,
+    expected_current_msg_len: Option<usize>,
+    anchor_msg_id: u64,
+    anchor_text_len: usize,
+    expected_relay_authority: Option<StreamRelayAuthority>,
+    refresh_on_saved: Option<&mut InflightTurnState>,
+    captured: Option<&InflightTurnState>,
+) -> GuardedSaveOutcome {
     let Some(root) = inflight_runtime_root() else {
         return GuardedSaveOutcome::IoError;
     };
@@ -496,7 +547,12 @@ pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
     let Ok(mut on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
         return GuardedSaveOutcome::IdentityMismatch;
     };
-    if on_disk.restart_mode.is_some()
+    if captured.is_some_and(|state| {
+        !crate::services::discord::inflight::InflightEpisodePin::from_state(state)
+            .matches_state(&on_disk)
+            || state.save_generation != on_disk.save_generation
+            || state.updated_at != on_disk.updated_at
+    }) || on_disk.restart_mode.is_some()
         || on_disk.rebind_origin
         || !identity_matches_with_offset_guard(expected, expected_turn_start_offset, &on_disk)
         || expected_relay_authority

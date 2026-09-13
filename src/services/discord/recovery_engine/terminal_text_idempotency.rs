@@ -18,6 +18,11 @@ use crate::services::discord::{
 };
 use crate::services::provider::ProviderKind;
 
+struct CapturedRecoveryAnchor {
+    expected: inflight::InflightTurnState,
+    saved: Option<inflight::InflightTurnState>,
+}
+
 #[derive(Clone)]
 pub(in crate::services::discord) struct RecoveryDeliveryContext {
     provider: ProviderKind,
@@ -28,6 +33,7 @@ pub(in crate::services::discord) struct RecoveryDeliveryContext {
     identity: inflight::InflightTurnIdentity,
     expected_turn_start_offset: Option<u64>,
     expected_current_msg_id: u64,
+    captured_anchor: Option<Arc<std::sync::Mutex<CapturedRecoveryAnchor>>>,
     durable_range: Option<(u64, u64)>,
     /// #4188: current transcript (output_path) byte length, snapshotted from the
     /// inflight state at construction. Bounds the durable frontier so a stale
@@ -88,6 +94,18 @@ pub(in crate::services::discord) enum RecoveryAnchorReuse {
 }
 
 impl RecoveryDeliveryContext {
+    pub(super) fn capture_anchor_updates(mut self, state: &inflight::InflightTurnState) -> Self {
+        self.captured_anchor = Some(Arc::new(std::sync::Mutex::new(CapturedRecoveryAnchor {
+            expected: state.clone(),
+            saved: None,
+        })));
+        self
+    }
+
+    pub(super) fn captured_anchor_after_delivery(&self) -> Option<inflight::InflightTurnState> {
+        self.captured_anchor.as_ref()?.lock().ok()?.saved.clone()
+    }
+
     pub(in crate::services::discord) fn from_state(
         shared: &SharedData,
         provider: &ProviderKind,
@@ -164,6 +182,7 @@ impl RecoveryDeliveryContext {
             identity: inflight::InflightTurnIdentity::from_state(state),
             expected_turn_start_offset: state.turn_start_offset,
             expected_current_msg_id: state.current_msg_id,
+            captured_anchor: None,
             durable_range,
             current_output_eof: state
                 .output_path
@@ -346,18 +365,37 @@ impl RecoveryDeliveryContext {
             self.expected_current_msg_id,
             self.durable_range,
         );
-        let bind = inflight::bind_recovery_anchor_if_matches_identity(
-            &self.provider,
-            self.channel_id.get(),
-            &self.identity,
-            self.expected_turn_start_offset,
-            self.expected_current_msg_id,
-            None,
-            anchor.get(),
-            text.len(),
-            None,
-            None,
-        );
+        let bind = if let Some(captured) = self.captured_anchor.as_ref() {
+            let Ok(mut captured) = captured.lock() else {
+                return;
+            };
+            let mut refreshed = captured.expected.clone();
+            let outcome = inflight::bind_recovery_anchor_for_snapshot(
+                &self.provider,
+                &mut refreshed,
+                anchor.get(),
+                text.len(),
+            );
+            if matches!(outcome, inflight::GuardedSaveOutcome::Saved) {
+                // This is the exact state returned while our own bind held the
+                // row lock, never a reload that could adopt a successor's write.
+                captured.saved = Some(refreshed);
+            }
+            outcome
+        } else {
+            inflight::bind_recovery_anchor_if_matches_identity(
+                &self.provider,
+                self.channel_id.get(),
+                &self.identity,
+                self.expected_turn_start_offset,
+                self.expected_current_msg_id,
+                None,
+                anchor.get(),
+                text.len(),
+                None,
+                None,
+            )
+        };
         if matches!(
             bind,
             inflight::GuardedSaveOutcome::Saved | inflight::GuardedSaveOutcome::Missing

@@ -12,6 +12,30 @@ pub(super) fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bo
     relay_ok
 }
 
+pub(super) struct CapturedRecoveryDelivery {
+    pub(super) outcome: RecoveryRelayOutcome,
+    pub(super) anchor_state: Option<super::inflight::InflightTurnState>,
+}
+
+impl From<RecoveryRelayOutcome> for CapturedRecoveryDelivery {
+    fn from(outcome: RecoveryRelayOutcome) -> Self {
+        Self {
+            outcome,
+            anchor_state: None,
+        }
+    }
+}
+
+pub(super) async fn relay_captured_recovery_terminal_notice(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    text: &str,
+) -> CapturedRecoveryDelivery {
+    relay_recovery_terminal_notice_with_capture(http, shared, provider, state, text, true).await
+}
+
 pub(super) async fn relay_recovery_terminal_notice(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -19,12 +43,25 @@ pub(super) async fn relay_recovery_terminal_notice(
     state: &super::inflight::InflightTurnState,
     text: &str,
 ) -> RecoveryRelayOutcome {
+    relay_recovery_terminal_notice_with_capture(http, shared, provider, state, text, false)
+        .await
+        .outcome
+}
+
+async fn relay_recovery_terminal_notice_with_capture(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    text: &str,
+    capture_anchor: bool,
+) -> CapturedRecoveryDelivery {
     let Some(channel_id) = super::inflight::opt_channel_id(state.channel_id) else {
         tracing::warn!(
             provider = %provider.as_str(),
             "recovery terminal notice skipped because persisted channel id is zero"
         );
-        return RecoveryRelayOutcome::TransientFailure;
+        return RecoveryRelayOutcome::TransientFailure.into();
     };
     let recovery_context = RecoveryDeliveryContext::from_state(
         shared,
@@ -32,8 +69,15 @@ pub(super) async fn relay_recovery_terminal_notice(
         state,
         None,
         shared.restart.current_generation,
-    );
-    relay_recovered_terminal_text_to_placeholder(
+    )
+    .map(|context| {
+        if capture_anchor {
+            context.capture_anchor_updates(state)
+        } else {
+            context
+        }
+    });
+    let outcome = relay_recovered_terminal_text_to_placeholder(
         http,
         shared,
         channel_id,
@@ -41,7 +85,13 @@ pub(super) async fn relay_recovery_terminal_notice(
         text,
         recovery_context.as_ref(),
     )
-    .await
+    .await;
+    CapturedRecoveryDelivery {
+        outcome,
+        anchor_state: recovery_context
+            .as_ref()
+            .and_then(RecoveryDeliveryContext::captured_anchor_after_delivery),
+    }
 }
 
 /// Deliver the recovered terminal text to Discord: edit the placeholder in

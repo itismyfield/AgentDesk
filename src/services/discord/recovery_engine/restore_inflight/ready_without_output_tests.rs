@@ -499,9 +499,14 @@ async fn restart_partial_eof_preserves_unproven_actor_and_retries_ownerless_fail
     fixture.claim().await;
     let state = fixture.load().expect("legacy row");
     assert!(
-        !settle_ready_without_output(&fixture.shared, &ProviderKind::Claude, &state, |_| async {
-            panic!("existing same-ID/NoneNonce actor cannot be adopted without an Arc witness")
-        })
+        !settle_ready_without_output(
+            &fixture.shared,
+            &ProviderKind::Claude,
+            &state,
+            |_| -> std::future::Ready<RecoveryRelayOutcome> {
+                panic!("existing same-ID/NoneNonce actor cannot be adopted without an Arc witness")
+            }
+        )
         .await
     );
     let channel = ChannelId::new(state.channel_id);
@@ -660,4 +665,136 @@ async fn committed_partial_cas_cannot_clear_successor_inserted_during_finalizer_
         .cancel_token
         .expect("B actor");
     assert!(!Arc::ptr_eq(&actor, &original));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn partial_eof_actual_fallback_uses_own_anchor_snapshot_and_refuses_foreign_writes() {
+    use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+    use crate::services::discord::recovery_paths::controller_cutover::{
+        deliver_recovery_replace_via_controller, tests::RecoveryFakeGateway,
+    };
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    for successor_stage in 0..3 {
+        let mut fixture = Fixture::new(5_072_820 + successor_stage);
+        fixture.state.turn_nonce = None;
+        fixture.claim().await;
+        let state = fixture.load().expect("captured A");
+        let channel = ChannelId::new(state.channel_id);
+        let actor = mailbox_snapshot(&fixture.shared, channel)
+            .await
+            .cancel_token
+            .expect("A actor");
+        let context = RecoveryDeliveryContext::from_state(
+            &fixture.shared,
+            &ProviderKind::Claude,
+            &state,
+            None,
+            fixture.shared.restart.current_generation,
+        )
+        .expect("context")
+        .capture_anchor_updates(&state);
+        let gateway = RecoveryFakeGateway::new(
+            ReplaceLongMessageOutcome::SentFallbackAfterEditFailure {
+                edit_error: "404 stale anchor".to_string(),
+                replacement_anchor: Some(MessageId::new(5_072_920 + successor_stage)),
+            },
+            true,
+        );
+        let http = Arc::new(serenity::Http::new("Bot test-token"));
+        let mut expected_successor = None;
+        assert!(
+            settle_ready_without_output_for_actor(
+                &fixture.shared,
+                &ProviderKind::Claude,
+                &state,
+                Some(&actor),
+                |text| {
+                    let fixture = &fixture;
+                    let gateway = &gateway;
+                    let http = &http;
+                    let state = &state;
+                    let context = &context;
+                    let expected_successor = &mut expected_successor;
+                    async move {
+                        if successor_stage == 1 {
+                            let mut successor = fixture.load().expect("before transport");
+                            successor.full_response.push_str(" B before bind");
+                            inflight::save_inflight_state(&successor)
+                                .expect("foreign write before own anchor bind");
+                            *expected_successor = Some(
+                                serde_json::to_value(fixture.load().expect("B"))
+                                    .expect("B snapshot"),
+                            );
+                        }
+                        let outcome = deliver_recovery_replace_via_controller(
+                            gateway,
+                            &fixture.shared,
+                            &ProviderKind::Claude,
+                            http,
+                            channel,
+                            MessageId::new(state.current_msg_id),
+                            &text,
+                            Some(context),
+                        )
+                        .await;
+                        assert!(matches!(outcome, RecoveryRelayOutcome::Delivered));
+                        let anchor_state = context.captured_anchor_after_delivery();
+                        if successor_stage == 1 {
+                            assert!(
+                                anchor_state.is_none(),
+                                "own anchor cannot bind a changed row"
+                            );
+                        } else {
+                            let own = anchor_state
+                                .as_ref()
+                                .expect("snapshot returned by own locked bind");
+                            assert!(own.save_generation > state.save_generation);
+                            assert_eq!(own.current_msg_id, 5_072_920 + successor_stage);
+                        }
+                        if successor_stage == 2 {
+                            let mut successor = fixture.load().expect("after own bind");
+                            successor.full_response.push_str(" B after bind");
+                            inflight::save_inflight_state(&successor)
+                                .expect("foreign write after own bind");
+                            *expected_successor = Some(
+                                serde_json::to_value(fixture.load().expect("B"))
+                                    .expect("B snapshot"),
+                            );
+                        }
+                        CapturedRecoveryDelivery {
+                            outcome,
+                            anchor_state,
+                        }
+                    }
+                }
+            )
+            .await
+        );
+        assert_eq!(
+            gateway.replacements.lock().expect("transport calls").len(),
+            1
+        );
+        if successor_stage == 0 {
+            assert!(
+                fixture.load().is_none(),
+                "own fallback bind must not strand delivered A"
+            );
+            assert!(
+                mailbox_snapshot(&fixture.shared, channel)
+                    .await
+                    .cancel_token
+                    .is_none()
+            );
+        } else {
+            assert_eq!(
+                Some(serde_json::to_value(fixture.load().expect("B survives")).expect("remaining")),
+                expected_successor
+            );
+            let surviving = mailbox_snapshot(&fixture.shared, channel)
+                .await
+                .cancel_token
+                .expect("active actor remains");
+            assert!(Arc::ptr_eq(&surviving, &actor));
+        }
+    }
 }

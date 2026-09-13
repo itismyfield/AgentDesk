@@ -113,13 +113,13 @@ pub(in crate::services::discord) async fn recover_idle_partial_response(
             let provider = &provider;
             let source = &source;
             async move {
-                let outcome =
-                    relay_recovery_terminal_notice(http, shared, provider, state, &text).await;
-                if SourceAtEof::capture(state, output).as_ref() == Some(source) {
-                    outcome
-                } else {
-                    RecoveryRelayOutcome::TransientFailure
+                let mut outcome =
+                    relay_captured_recovery_terminal_notice(http, shared, provider, state, &text)
+                        .await;
+                if SourceAtEof::capture(state, output).as_ref() != Some(source) {
+                    outcome.outcome = RecoveryRelayOutcome::TransientFailure;
                 }
+                outcome
             }
         },
     )
