@@ -1056,11 +1056,11 @@ async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_succe
                 !poll_at_most(&mut delivery, 1),
                 "fixture must suspend inside the actual gateway"
             );
-            if !driver.replace_observations().is_empty() {
+            if !driver.publish_entries().is_empty() {
                 break;
             }
         }
-        assert_eq!(driver.replace_observations().len(), 1);
+        assert_eq!(driver.publish_entries().len(), 1);
         let successor = if replace_actor {
             let actor = Arc::new(
                 crate::services::provider::CancelToken::from_persisted_turn_nonce(
