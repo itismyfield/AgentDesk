@@ -277,11 +277,24 @@ fn terminal_ordering_fixture(
                 assert!(crate::services::tui_prompt_dedupe::external_input_relay_lease(
                     provider.as_str(), tmux, channel.get()).is_none(), "the original bridge lease was retired");
                 let http = Arc::new(serenity::Http::new("Bot test-token"));
-                assert!(tokio::time::timeout(Duration::from_secs(5),
+                let recovered = tokio::time::timeout(Duration::from_secs(5),
                     crate::services::discord::recovery_engine::recover_idle_partial_response_from_ready_source(
                         &http, &shared, &retained, &output, gateway.as_ref(),
-                    )).await.expect("dormant recovery is bounded"),
-                    "the actual dormant recovery renews custody and settles the original exact source");
+                    )).await.unwrap_or_else(|_| panic!("{race:?} dormant recovery exceeds its bound"));
+                if !recovered {
+                    let current = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+                    let extracted = crate::services::discord::recovery_engine::extract_response_from_output_pub(
+                        &output.to_string_lossy(), retained.turn_start_offset.unwrap());
+                    panic!("{race:?} dormant recovery did not settle the original exact source: \
+                        same_actor={}, cancelled={}, relay_in_flight={}, range={:?}..{}, file_end={}, \
+                        body_bytes={}/{}, body_matches={}, generation={:?}/{}",
+                        current.cancel_token.as_ref().is_some_and(|actor| Arc::ptr_eq(actor, &original_actor)),
+                        original_actor.cancelled.load(std::sync::atomic::Ordering::Acquire),
+                        shared.relay_emission_in_flight(channel), retained.turn_start_offset, retained.last_offset,
+                        std::fs::metadata(&output).unwrap().len(), retained.full_response.len(), extracted.len(),
+                        retained.full_response == extracted, retained.tui_terminal_generation_mtime_ns,
+                        crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux));
+                }
             }
             let replacement = if replace_after_delivery {
                 delivered.as_ref().expect("A completed before the duplicate-finalizer race");
