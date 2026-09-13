@@ -27,6 +27,12 @@ use std::path::Path;
 #[cfg(unix)]
 use std::process::Command;
 
+#[cfg(unix)]
+#[path = "recovery_engine/idle_captured_response.rs"]
+mod idle_captured_response;
+#[cfg(unix)]
+pub(in crate::services::discord) use idle_captured_response::recover_idle_partial_response;
+
 #[path = "recovery_engine/status_panel.rs"]
 mod recovery_status_panel;
 #[path = "recovery_engine/two_message_panel.rs"]

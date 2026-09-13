@@ -148,9 +148,6 @@ pub(super) fn detect_live_tmux_output_path(
     detect_rebind_output_path_from_candidates(fallback_path, candidates)
 }
 
-// The restore scan has already established source EOF and a post-work ready pane.
-// Keep the relay injectable at this existing decision boundary so tests exercise
-// mailbox and durable-row disposition together with a terminal transport result.
 async fn settle_ready_without_output<F, Fut>(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -161,8 +158,38 @@ where
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = RecoveryRelayOutcome>,
 {
+    settle_ready_without_output_for_actor(shared, provider, state, None, relay).await
+}
+
+pub(super) async fn settle_ready_without_output_for_actor<F, Fut>(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    actor: Option<&Arc<CancelToken>>,
+    relay: F,
+) -> bool
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = RecoveryRelayOutcome>,
+{
     if state.restart_mode.is_some() || state.rebind_origin {
         return false;
+    }
+    if let Some(actor) = actor {
+        let owner = super::mailbox_snapshot(shared, ChannelId::new(state.channel_id)).await;
+        let current = inflight::load_inflight_state(provider, state.channel_id);
+        if crate::services::provider::cancel_requested(Some(actor))
+            || !owner
+                .cancel_token
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, actor))
+            || current.as_ref().is_none_or(|current| {
+                !inflight::InflightEpisodePin::from_state(state).matches_state(current)
+                    || current.save_generation != state.save_generation
+            })
+        {
+            return false;
+        }
     }
     if recovery_ready_without_output_already_delivered(state) {
         finish_recovered_turn_mailbox_for_state(shared, provider, state).await;
@@ -175,6 +202,10 @@ where
         let response = &state.full_response[state.response_sent_offset..];
         let final_text = super::formatting::format_for_discord_with_provider(response, provider);
         let outcome = relay(final_text).await;
+        if let Some(actor) = actor {
+            settle_captured_ready_delivery(shared, provider, state, actor, outcome).await;
+            return true;
+        }
         dispose_recovery_relay_outcome(
             shared,
             provider,
@@ -194,6 +225,50 @@ where
         "recovery: ready source at EOF has no terminal receipt or recoverable response suffix; preserving for watcher reattach"
     );
     false
+}
+
+async fn settle_captured_ready_delivery(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+    actor: &Arc<CancelToken>,
+    outcome: RecoveryRelayOutcome,
+) {
+    let channel = ChannelId::new(state.channel_id);
+    let owner = super::mailbox_snapshot(shared, channel).await;
+    if !owner
+        .cancel_token
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, actor))
+    {
+        return;
+    }
+    let mut delivered = state.clone();
+    if matches!(outcome, RecoveryRelayOutcome::Delivered) {
+        delivered.terminal_delivery_committed = true;
+        delivered.response_sent_offset = delivered.full_response.len();
+    } else {
+        delivered.recovery_relay_attempts = delivered.recovery_relay_attempts.saturating_add(1);
+    }
+    // Strict save-generation CAS refuses same-turn progress as well as successor
+    // actors. A failed delivery never clears an active process's obligation.
+    if !matches!(
+        inflight::save_inflight_state_if_identity_unchanged(
+            &mut delivered,
+            "recovery_idle_captured_response",
+        ),
+        inflight::GuardedSaveOutcome::Saved
+    ) || !delivered.terminal_delivery_completed()
+    {
+        return;
+    }
+    finish_recovered_turn_mailbox_for_state(shared, provider, &delivered).await;
+    inflight::clear_inflight_state_for_captured_episode(
+        provider,
+        state.channel_id,
+        &inflight::InflightTurnIdentity::from_state(&delivered),
+        state.turn_nonce.as_deref(),
+    );
 }
 
 fn observe_restore_inflight_snapshot(

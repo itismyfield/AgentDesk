@@ -301,3 +301,111 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
     );
     assert!(fixture.load().is_none());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn captured_live_partial_eof_preserves_failures_then_commits_and_clears_current_generation() {
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    crate::services::discord::runtime_store::set_process_generation_for_tests(Some(5_071_900));
+    let mut fixture = Fixture::new(5_071_806);
+    fixture.state.born_generation = 5_071_900;
+    fixture.claim().await;
+    let channel = ChannelId::new(fixture.state.channel_id);
+    let actor = mailbox_snapshot(&fixture.shared, channel)
+        .await
+        .cancel_token
+        .expect("captured actor");
+    for outcome in [
+        RecoveryRelayOutcome::TransientFailure,
+        RecoveryRelayOutcome::PermanentFailure,
+        RecoveryRelayOutcome::Delivered,
+    ] {
+        let state = fixture.load().expect("live obligation");
+        assert!(
+            settle_ready_without_output_for_actor(
+                &fixture.shared,
+                &ProviderKind::Claude,
+                &state,
+                Some(&actor),
+                |_| std::future::ready(outcome),
+            )
+            .await
+        );
+        if !matches!(outcome, RecoveryRelayOutcome::Delivered) {
+            let retained = fixture
+                .load()
+                .expect("failed transport must preserve current row");
+            assert!(!retained.terminal_delivery_completed());
+            assert_eq!(retained.full_response, state.full_response);
+            assert_eq!(
+                retained.recovery_relay_attempts,
+                state.recovery_relay_attempts + 1
+            );
+        }
+    }
+    assert!(
+        fixture.load().is_none(),
+        "captured live completion must not use reconcile's current-generation veto"
+    );
+    assert!(
+        mailbox_snapshot(&fixture.shared, channel)
+            .await
+            .cancel_token
+            .is_none()
+    );
+    crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn captured_partial_eof_never_commits_new_same_turn_progress_or_replacement_actor() {
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    for replace_actor in [false, true] {
+        let fixture = Fixture::new(5_071_807);
+        fixture.claim().await;
+        let channel = ChannelId::new(fixture.state.channel_id);
+        let state = fixture.load().expect("captured row");
+        let actor = mailbox_snapshot(&fixture.shared, channel)
+            .await
+            .cancel_token
+            .expect("captured actor");
+        assert!(
+            settle_ready_without_output_for_actor(
+                &fixture.shared,
+                &ProviderKind::Claude,
+                &state,
+                Some(&actor),
+                |_| async {
+                    let mut updated = state.clone();
+                    updated.full_response.push_str(" newly arrived output");
+                    if replace_actor {
+                        mailbox_finish_turn(&fixture.shared, &ProviderKind::Claude, channel).await;
+                        updated.user_msg_id += 10;
+                        updated.turn_nonce = Some("replacement-actor".to_string());
+                    }
+                    inflight::save_inflight_state(&updated).expect("concurrent durable update");
+                    if replace_actor {
+                        assert!(
+                            super::super::reregister_active_turn_from_inflight(
+                                &fixture.shared,
+                                &updated
+                            )
+                            .await
+                        );
+                    }
+                    RecoveryRelayOutcome::Delivered
+                },
+            )
+            .await
+        );
+        let remaining = fixture
+            .load()
+            .expect("progress after capture remains an obligation");
+        assert!(remaining.full_response.ends_with(" newly arrived output"));
+        assert!(!remaining.terminal_delivery_completed());
+        assert!(
+            mailbox_snapshot(&fixture.shared, channel)
+                .await
+                .cancel_token
+                .is_some()
+        );
+    }
+}

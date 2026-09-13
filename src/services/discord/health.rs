@@ -41,6 +41,7 @@ mod rebind_request;
 mod recovery;
 mod redaction;
 mod relay_auto_heal;
+pub(in crate::services::discord) use relay_auto_heal::relay_recovery_retry_delay_secs;
 mod relay_dead_reattach;
 mod relay_progress;
 mod runtime_resolve;
