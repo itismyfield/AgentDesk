@@ -242,44 +242,19 @@ async fn settle_captured_ready_delivery(
     snapshot: super::turn_finalizer::SyntheticClaimSnapshot,
     delivery: CapturedRecoveryDelivery,
 ) {
-    let channel = ChannelId::new(state.channel_id);
-    let owner = super::mailbox_snapshot(shared, channel).await;
-    if !match (actor, owner.cancel_token.as_ref()) {
-        (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
-        (None, None) => true,
-        _ => false,
-    } {
+    let Some(committed) = shared
+        .mailbox(ChannelId::new(state.channel_id))
+        .commit_captured_ready_delivery(CapturedReadyDeliveryCommit {
+            shared: shared.clone(),
+            state: state.clone(),
+            actor: actor.cloned(),
+            delivery,
+        })
+        .await
+    else {
         return;
-    }
-    let mut delivered = state.clone();
-    if let Some(pending) = delivery.pending_anchor {
-        // Only the actor observed after transport may authorize its fallback's
-        // anchor mutation. The writer then rechecks the exact row under lock.
-        if !matches!(
-            pending.bind_after_actor_check(shared, &mut delivered),
-            inflight::GuardedSaveOutcome::Saved
-        ) {
-            return;
-        }
-    }
-    if matches!(delivery.outcome, RecoveryRelayOutcome::Delivered) {
-        delivered.terminal_delivery_committed = true;
-        delivered.response_sent_offset = delivered.full_response.len();
-    } else {
-        delivered.recovery_relay_attempts = delivered.recovery_relay_attempts.saturating_add(1);
-    }
-    // Strict save-generation CAS refuses same-turn progress as well as successor
-    // actors. A failed delivery never clears an active process's obligation.
-    if !matches!(
-        inflight::save_inflight_state_if_identity_unchanged(
-            &mut delivered,
-            "recovery_idle_captured_response",
-        ),
-        inflight::GuardedSaveOutcome::Saved
-    ) || !delivered.terminal_delivery_completed()
-    {
-        return;
-    }
+    };
+    let delivered = committed.state;
     let mut committed_snapshot =
         super::turn_finalizer::SyntheticClaimSnapshot::from_row(&delivered);
     committed_snapshot.recovery_actor = snapshot.recovery_actor;

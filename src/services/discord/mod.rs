@@ -183,13 +183,13 @@ pub(in crate::services::discord) use delivery_lease_cell::{
     DELIVERY_LEASE_DEADLINE_MS, DELIVERY_LEASE_HEARTBEAT_MS, DeliveryLeaseCell,
     DeliveryLeaseHeartbeat, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
 };
-pub(crate) use meeting_orchestrator as meeting;
 #[allow(unused_imports)]
 pub(in crate::services) use relay_coord::TmuxRelayCoord;
 pub(in crate::services::discord) use {
     delivery_lease_key::DeliveryLeaseKey,
     relay_health::{RelayFrontierMutationGuard, RelayFrontierToken},
 };
+pub(crate) use {meeting_orchestrator as meeting, recovery_engine::CapturedReadyDeliveryCommit};
 // #3479 item-2: re-export the catch-up subsystem entry points referenced
 // outside the extracted cluster (`maybe_schedule_catch_up_retry_after_queue_drain`
 // here in mod.rs and `catch_up_missed_messages` in runtime_bootstrap recovery).

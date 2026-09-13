@@ -3,6 +3,7 @@ use std::time::Instant;
 use poise::serenity_prelude::MessageId;
 
 use super::*;
+use crate::services::discord::CapturedReadyDeliveryCommit;
 
 #[derive(Clone, Debug)]
 pub(super) enum TurnNonceGuard {
@@ -27,6 +28,21 @@ pub(super) fn turn_nonce_guard_matches(
 }
 
 impl ChannelMailboxHandle {
+    pub(crate) async fn commit_captured_ready_delivery(
+        &self,
+        commit: CapturedReadyDeliveryCommit,
+    ) -> Option<CapturedReadyDeliveryCommit> {
+        self.request(
+            |reply| ChannelMailboxMsg::CommitCapturedReadyDelivery {
+                commit: Box::new(commit),
+                reply,
+            },
+            None,
+        )
+        .await
+        .map(|committed| *committed)
+    }
+
     pub(crate) async fn take_timeout_override(
         &self,
         expected_token: Arc<CancelToken>,
@@ -249,6 +265,29 @@ pub(super) fn reset_watchdog_extension_state(state: &mut ChannelMailboxState) {
     state.watchdog_deadline_override = None;
     state.watchdog_extension_count = 0;
     state.watchdog_extension_total_secs = 0;
+}
+
+impl ChannelMailboxState {
+    pub(super) fn snapshot(&self) -> ChannelMailboxSnapshot {
+        ChannelMailboxSnapshot {
+            cancel_token: self.cancel_token.clone(),
+            active_request_owner: self.active_request_owner,
+            active_user_message_id: self.active_user_message_id,
+            active_turn_nonce: self.active_turn_nonce.clone(),
+            active_turn_kind: self.active_turn_kind,
+            intervention_queue: self.intervention_queue.clone(),
+            pending_user_dispatch: self.pending_user_dispatch,
+            pending_user_dispatch_source_ids: self.pending_user_dispatch_source_ids.clone(),
+            pending_user_dispatch_since: self.pending_user_dispatch_since,
+            pending_user_dispatch_lease_held_by_caller: self
+                .pending_user_dispatch_lease
+                .as_ref()
+                .is_some_and(|lease| Arc::strong_count(lease) > 1),
+            recently_valve_cleared_dispatch: self.recently_valve_cleared_dispatch,
+            recovery_started_at: self.recovery_started_at,
+            turn_started_at: self.turn_started_at,
+        }
+    }
 }
 
 #[cfg(test)]

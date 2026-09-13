@@ -17,6 +17,53 @@ pub(super) struct CapturedRecoveryDelivery {
     pub(super) pending_anchor: Option<terminal_text_idempotency::PendingRecoveryAnchor>,
 }
 
+/// Only this captured recovery outcome can cross into the mailbox commit command.
+pub(crate) struct CapturedReadyDeliveryCommit {
+    pub(super) shared: Arc<SharedData>,
+    pub(super) state: inflight::InflightTurnState,
+    pub(super) actor: Option<Arc<CancelToken>>,
+    pub(super) delivery: CapturedRecoveryDelivery,
+}
+
+impl CapturedReadyDeliveryCommit {
+    /// The channel actor executes this synchronously, so recovery kickoff cannot
+    /// replace the actor between its comparison, fallback bind and terminal save.
+    pub(crate) fn commit(mut self, current: Option<&Arc<CancelToken>>) -> Option<Self> {
+        if !match (self.actor.as_ref(), current) {
+            (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
+            (None, None) => true,
+            _ => false,
+        } {
+            return None;
+        }
+        if let Some(pending) = self.delivery.pending_anchor.take()
+            && !matches!(
+                pending.bind_after_actor_check(&self.shared, &mut self.state),
+                inflight::GuardedSaveOutcome::Saved
+            )
+        {
+            return None;
+        }
+        if matches!(self.delivery.outcome, RecoveryRelayOutcome::Delivered) {
+            self.state.terminal_delivery_committed = true;
+            self.state.response_sent_offset = self.state.full_response.len();
+        } else {
+            self.state.recovery_relay_attempts =
+                self.state.recovery_relay_attempts.saturating_add(1);
+        }
+        // Row writers still use the existing save-generation CAS. A failed or
+        // uncertain transport persists its retry without releasing the obligation.
+        (matches!(
+            inflight::save_inflight_state_if_identity_unchanged(
+                &mut self.state,
+                "recovery_idle_captured_response",
+            ),
+            inflight::GuardedSaveOutcome::Saved
+        ) && self.state.terminal_delivery_completed())
+        .then_some(self)
+    }
+}
+
 impl From<RecoveryRelayOutcome> for CapturedRecoveryDelivery {
     fn from(outcome: RecoveryRelayOutcome) -> Self {
         Self {

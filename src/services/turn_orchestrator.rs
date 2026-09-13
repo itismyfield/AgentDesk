@@ -1644,8 +1644,14 @@ impl ChannelMailboxRegistry {
 //      queue RESTITUTION (`RequeueFront`/`ReplaceQueue`/hydrate, which
 //      re-persist already-accepted work to disk for a successor actor to
 //      hydrate — refusing those would drop user messages).
+//  (c) CommitCapturedReadyDelivery refuses closed actors in its own arm;
+//      replay on a successor would discard the captured actor's authority.
 // New arms must be classified here and (if start-like) gated there.
 enum ChannelMailboxMsg {
+    CommitCapturedReadyDelivery {
+        commit: Box<crate::services::discord::CapturedReadyDeliveryCommit>,
+        reply: oneshot::Sender<Option<Box<crate::services::discord::CapturedReadyDeliveryCommit>>>,
+    },
     Snapshot {
         reply: oneshot::Sender<ChannelMailboxSnapshot>,
     },
@@ -2219,27 +2225,14 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                 continue;
             };
             match msg {
+                ChannelMailboxMsg::CommitCapturedReadyDelivery { commit, reply } => {
+                    let committed = (!state.closed)
+                        .then(|| commit.commit(state.cancel_token.as_ref()))
+                        .flatten();
+                    let _ = reply.send(committed.map(Box::new));
+                }
                 ChannelMailboxMsg::Snapshot { reply } => {
-                    let _ = reply.send(ChannelMailboxSnapshot {
-                        cancel_token: state.cancel_token.clone(),
-                        active_request_owner: state.active_request_owner,
-                        active_user_message_id: state.active_user_message_id,
-                        active_turn_nonce: state.active_turn_nonce.clone(),
-                        active_turn_kind: state.active_turn_kind,
-                        intervention_queue: state.intervention_queue.clone(),
-                        pending_user_dispatch: state.pending_user_dispatch,
-                        pending_user_dispatch_source_ids: state
-                            .pending_user_dispatch_source_ids
-                            .clone(),
-                        pending_user_dispatch_since: state.pending_user_dispatch_since,
-                        pending_user_dispatch_lease_held_by_caller: state
-                            .pending_user_dispatch_lease
-                            .as_ref()
-                            .is_some_and(|lease| Arc::strong_count(lease) > 1),
-                        recently_valve_cleared_dispatch: state.recently_valve_cleared_dispatch,
-                        recovery_started_at: state.recovery_started_at,
-                        turn_started_at: state.turn_started_at,
-                    });
+                    let _ = reply.send(state.snapshot());
                 }
                 ChannelMailboxMsg::HasActiveTurn { reply } => {
                     let _ = reply.send(state.cancel_token.is_some());

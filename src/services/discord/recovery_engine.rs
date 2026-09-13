@@ -103,6 +103,7 @@ mod completion_delivery;
 // leaf module. Entry points are re-exported below so external paths stay stable.
 #[path = "recovery_engine/restore_inflight.rs"]
 mod restore_inflight;
+pub(crate) use completion_delivery::CapturedReadyDeliveryCommit;
 // #4111: behavior-preserving extraction of guarded Codex rollout persist-outcome
 // handling before restart-path watcher spawn into a leaf module.
 #[path = "recovery_engine/restore_persist_outcome.rs"]
