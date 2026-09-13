@@ -42,6 +42,13 @@ fn binding_matches(tmux: &str, path: &Path, session: &str, offsets: [u64; 2]) ->
 }
 
 impl InflightTurnState {
+    pub(in crate::services::discord) fn requires_pinned_terminal_recovery(&self) -> bool {
+        self.provider_kind() == Some(ProviderKind::Claude)
+            && self.runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
+            && (self.tui_terminal_source_file_identity.is_some()
+                || self.tui_terminal_generation_mtime_ns.is_some())
+    }
+
     #[allow(dead_code)]
     pub(in crate::services::discord) fn admit_codex_tui_terminal_frame(
         &mut self,
@@ -181,6 +188,7 @@ fn persist_terminal_range(
     fresh.full_response = result.to_string();
     fresh.last_offset = range.1;
     fresh.tui_terminal_source_file_identity = source_file_identity;
+    fresh.tui_terminal_generation_mtime_ns = Some(generation);
     let persisted = persist_under_lock_with_snapshot(
         root,
         path,
@@ -193,6 +201,7 @@ fn persist_terminal_range(
     local.output_path.clone_from(&persisted.output_path);
     local.session_id.clone_from(&persisted.session_id);
     local.tui_terminal_source_file_identity = persisted.tui_terminal_source_file_identity;
+    local.tui_terminal_generation_mtime_ns = persisted.tui_terminal_generation_mtime_ns;
     local.last_offset = persisted.last_offset;
     local.save_generation = persisted.save_generation;
     Ok(TuiTerminalRange {
@@ -214,6 +223,35 @@ fn persist_terminal_range(
 }
 
 impl TuiTerminalRange {
+    /// Reconstruct only previously admitted evidence; live validation remains
+    /// the existing publisher's responsibility.
+    pub(in crate::services::discord) fn from_retained_claude_terminal(
+        row: &InflightTurnState,
+    ) -> Option<Self> {
+        if row.provider_kind() != Some(ProviderKind::Claude)
+            || row.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
+        {
+            return None;
+        }
+        let captured = Self {
+            identity: InflightTurnIdentity::from_state(row),
+            result: row.full_response.clone(),
+            rollout_path: row.output_path.clone()?,
+            session_id: row.session_id.clone().unwrap_or_default(),
+            source_file_identity: Some(row.tui_terminal_source_file_identity?),
+            source: ExactJsonlSourceIdentity {
+                provider: row.provider.clone(),
+                tmux_session_name: row.tmux_session_name.clone()?,
+                turn_nonce: row.turn_nonce.clone()?,
+                range: (row.turn_start_offset?, row.last_offset),
+                generation_mtime_ns: row.tui_terminal_generation_mtime_ns?,
+                offset_authority_channel_id: row.delivery_record_owner_channel_id(),
+                delivery_channel_id: row.channel_id,
+            },
+        };
+        captured.source.is_authoritative().then_some(captured)
+    }
+
     pub(in crate::services::discord) fn complete_record_end(&self) -> u64 {
         self.source.range.1
     }

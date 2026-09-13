@@ -80,6 +80,38 @@ pub(super) async fn relay_captured_recovery_terminal_notice(
     state: &super::inflight::InflightTurnState,
     text: &str,
 ) -> CapturedRecoveryDelivery {
+    let gateway = DiscordGateway::new(http.clone(), shared.clone(), provider.clone(), None);
+    relay_captured_recovery_terminal_notice_with_gateway(
+        http, shared, provider, state, text, &gateway,
+    )
+    .await
+}
+
+pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    state: &super::inflight::InflightTurnState,
+    text: &str,
+    gateway: &dyn super::super::gateway::TurnGateway,
+) -> CapturedRecoveryDelivery {
+    if state.requires_pinned_terminal_recovery() {
+        #[cfg(unix)]
+        let committed =
+            super::super::turn_bridge::publish_retained_terminal_recovery(shared, gateway, state)
+                .await;
+        #[cfg(not(unix))]
+        let committed = {
+            let _ = gateway;
+            false
+        };
+        return if committed {
+            RecoveryRelayOutcome::Delivered
+        } else {
+            RecoveryRelayOutcome::TransientFailure
+        }
+        .into();
+    }
     relay_recovery_terminal_notice_with_capture(http, shared, provider, state, text, true).await
 }
 

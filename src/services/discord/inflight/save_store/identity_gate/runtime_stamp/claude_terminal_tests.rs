@@ -167,11 +167,29 @@ fn claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_pro
                 Some(fixture.file),
                 "restart retains the actual opened FD captured before terminal publication"
             );
+            assert_eq!(
+                restored.tui_terminal_generation_mtime_ns,
+                Some(fixture.generation)
+            );
+            assert_eq!(
+                TuiTerminalRange::from_retained_claude_terminal(&restored)
+                    .unwrap()
+                    .source,
+                range.source
+            );
+            let mut missing_generation = restored.clone();
+            missing_generation.tui_terminal_generation_mtime_ns = None;
+            assert!(missing_generation.requires_pinned_terminal_recovery());
+            assert!(TuiTerminalRange::from_retained_claude_terminal(&missing_generation).is_none());
             let mut old_row = serde_json::to_value(&restored).unwrap();
             old_row
                 .as_object_mut()
                 .unwrap()
                 .remove("tui_terminal_source_file_identity");
+            old_row
+                .as_object_mut()
+                .unwrap()
+                .remove("tui_terminal_generation_mtime_ns");
             assert!(
                 serde_json::from_value::<InflightTurnState>(old_row)
                     .unwrap()

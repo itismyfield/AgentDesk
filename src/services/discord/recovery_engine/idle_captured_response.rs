@@ -66,6 +66,22 @@ pub(in crate::services::discord) async fn recover_idle_partial_response(
     {
         return false;
     }
+    let gateway = DiscordGateway::new(http.clone(), shared.clone(), provider, None);
+    recover_idle_partial_response_from_ready_source(http, shared, row, output, &gateway).await
+}
+
+/// The caller has already observed a ready pane. Keep the source, dormant
+/// claim and delivery settlement identical for production and gateway fixtures.
+pub(super) async fn recover_idle_partial_response_from_ready_source(
+    http: &Arc<serenity::Http>,
+    shared: &Arc<SharedData>,
+    row: &inflight::InflightTurnState,
+    output: &Path,
+    gateway: &dyn super::super::gateway::TurnGateway,
+) -> bool {
+    let Some(provider) = row.provider_kind() else {
+        return false;
+    };
     let Some(source) = SourceAtEof::capture(row, output) else {
         return false;
     };
@@ -86,31 +102,43 @@ pub(in crate::services::discord) async fn recover_idle_partial_response(
         return false;
     }
     let state = &claim.row;
-    let context = RecoveryDeliveryContext::from_state(
-        shared,
-        &provider,
-        state,
-        None,
-        shared.restart.current_generation,
-    );
-    let Some(context) = context else { return false };
-    let Some(response) = state
-        .full_response
-        .get(state.response_sent_offset..)
-        .filter(|body| !body.trim().is_empty())
-    else {
-        return false;
-    };
-    let Some(_lease) = context.try_acquire_fresh_send_lease(shared, response) else {
-        return false;
+    // Typed terminals use the existing pinned range lease inside their
+    // publisher. Taking a second markerless lease here would block that lease.
+    let _lease = if state.requires_pinned_terminal_recovery() {
+        None
+    } else {
+        let Some(context) = RecoveryDeliveryContext::from_state(
+            shared,
+            &provider,
+            state,
+            None,
+            shared.restart.current_generation,
+        ) else {
+            return false;
+        };
+        let Some(response) = state
+            .full_response
+            .get(state.response_sent_offset..)
+            .filter(|body| !body.trim().is_empty())
+        else {
+            return false;
+        };
+        let Some(lease) = context.try_acquire_fresh_send_lease(shared, response) else {
+            return false;
+        };
+        Some(lease)
     };
     settle_ready_without_output_for_actor(shared, &provider, state, Some(&claim.actor), |text| {
         let provider = &provider;
         let source = &source;
         async move {
-            let mut outcome =
-                relay_captured_recovery_terminal_notice(http, shared, provider, state, &text).await;
-            if SourceAtEof::capture(state, output).as_ref() != Some(source) {
+            let mut outcome = relay_captured_recovery_terminal_notice_with_gateway(
+                http, shared, provider, state, &text, gateway,
+            )
+            .await;
+            let confirmed_typed = state.requires_pinned_terminal_recovery()
+                && matches!(outcome.outcome, RecoveryRelayOutcome::Delivered);
+            if !confirmed_typed && SourceAtEof::capture(state, output).as_ref() != Some(source) {
                 outcome.outcome = RecoveryRelayOutcome::TransientFailure;
             }
             outcome

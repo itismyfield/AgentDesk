@@ -37,6 +37,8 @@ mod stream_tick;
 mod streaming_edit_text;
 mod task_notification_lifecycle;
 mod terminal_controller_cutover;
+#[cfg(unix)]
+pub(in crate::services::discord) use terminal_controller_cutover::publish_retained_terminal_recovery;
 mod terminal_delivery;
 mod terminal_outcome_delivery;
 mod thinking;

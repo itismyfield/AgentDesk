@@ -248,6 +248,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Original opened terminal FD (dev, ino); recovery must not synthesize this from a pathname.
     #[serde(default)]
     pub tui_terminal_source_file_identity: Option<(u64, u64)>,
+    /// Generation captured by typed terminal admission; never inferred during retry.
+    #[serde(default)]
+    pub tui_terminal_generation_mtime_ns: Option<i64>,
     #[serde(default)]
     pub current_tool_line: Option<String>,
     #[serde(default)]
@@ -1071,6 +1074,7 @@ impl InflightTurnState {
             response_sent_offset: 0,
             terminal_delivery_committed: false,
             tui_terminal_source_file_identity: None,
+            tui_terminal_generation_mtime_ns: None,
             current_tool_line: None,
             last_tool_name: None,
             last_tool_summary: None,

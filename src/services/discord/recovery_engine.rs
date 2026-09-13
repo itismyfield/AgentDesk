@@ -32,6 +32,8 @@ use std::process::Command;
 mod idle_captured_response;
 #[cfg(unix)]
 pub(in crate::services::discord) use idle_captured_response::recover_idle_partial_response;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use idle_captured_response::recover_idle_partial_response_from_ready_source;
 
 #[path = "recovery_engine/status_panel.rs"]
 mod recovery_status_panel;
@@ -190,7 +192,8 @@ pub(in crate::services::discord) use self::runtime::reregister_active_turn_from_
 pub(in crate::services::discord) use self::completion_delivery::relay_recovered_terminal_text_to_placeholder;
 use self::completion_delivery::{
     CapturedRecoveryDelivery, RecoveryCompletionOutcome, complete_recovery_visible_turn,
-    relay_captured_recovery_terminal_notice, relay_recovery_terminal_notice,
+    relay_captured_recovery_terminal_notice, relay_captured_recovery_terminal_notice_with_gateway,
+    relay_recovery_terminal_notice,
     should_advance_recovery_dispatch_after_relay,
 };
 // `detect_live_tmux_output_path` exists only under `#[cfg(unix)]` in the child;
