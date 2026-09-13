@@ -3166,7 +3166,7 @@ fn s3t2_delivery_failure_never_cancels_successor_or_commits_cursor() {
         let commit = if source.contains("advance_claude_tmux_runtime_binding_offset(") {
             "if let Ok(Some(final_offset)) = delivery_result {"
         } else {
-            "tui_idle_tail_stream_should_commit_runtime_binding_offset("
+            "Ok(Some(final_offset)) => {\n            advance_codex_tui_runtime_binding_and_marker_offset("
         };
         assert!(
             source.contains(commit),
