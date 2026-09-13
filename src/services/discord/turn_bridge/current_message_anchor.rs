@@ -183,6 +183,7 @@ mod tests {
         marker: AuthorityMarker,
         candidate: MessageId,
         deleted: Mutex<Vec<u64>>,
+        delete_fails: bool,
     }
 
     impl TurnGateway for MarkerDuringSendGateway {
@@ -245,7 +246,13 @@ mod tests {
                 .lock()
                 .expect("deleted lock")
                 .push(message_id.get());
-            Box::pin(async { Ok(()) })
+            Box::pin(async {
+                if self.delete_fails {
+                    Err("fixture delete failure".to_string())
+                } else {
+                    Ok(())
+                }
+            })
         }
 
         fn replace_message_with_outcome<'a>(
@@ -324,6 +331,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_gateway_outcomes_reach_operation_observations() {
+        const CHILD: &str = "ADK_5071_CLEANUP_OBSERVATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let exact = format!(
+                "{}::cleanup_gateway_outcomes_reach_operation_observations",
+                module_path!().split_once("::").unwrap().1
+            );
+            // Config install has no uninstall. Change it only in this one-test
+            // child, as bridge_entry_persist's deployed-dial tests already do.
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &exact, "--nocapture"])
+                .env(CHILD, "1")
+                .env("AGENTDESK_ROOT_DIR", root.path())
+                .output()
+                .unwrap();
+            assert!(child.status.success(), "{child:?}");
+            assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed; 0 failed"));
+            return;
+        }
+        let mut config = crate::config::Config::default();
+        config.runtime.relay_authority_mode = crate::config::RelayAuthorityMode::Enforce;
+        config.runtime.relay_authority_cohort_percent = 100;
+        crate::config_live_reload::install(config);
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(50_710_003);
+        for delete_fails in [false, true] {
+            let candidate = MessageId::new(100 + u64::from(delete_fails));
+            let gateway = MarkerDuringSendGateway {
+                provider: provider.clone(),
+                channel_id: channel_id.get(),
+                marker: AuthorityMarker::Restart,
+                candidate,
+                deleted: Mutex::default(),
+                delete_fails,
+            };
+            cleanup_unbound_bridge_anchor(&gateway, &provider, "fixture", channel_id, candidate)
+                .await;
+            assert_eq!(*gateway.deleted.lock().unwrap(), vec![candidate.get()]);
+        }
+        let root = std::path::PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR").unwrap());
+        let file = std::fs::read_dir(root.join("relay_authority"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(&file)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        for (record, failed) in records.iter().zip([false, true]) {
+            assert_eq!(record["unbound_anchor_left"], failed);
+            assert_eq!(record["recovery_enqueue_attempted"], failed);
+            assert!(record["recovery_enqueued"].is_null());
+            assert_eq!(record["current_message_id"], 100 + u64::from(failed));
+            assert_eq!(record["site"], "completion_unbound_anchor_cleanup");
+            assert_eq!(record["provider"], "codex");
+            assert_eq!(record["channel_id"], channel_id.get());
+            assert!(record.get("turn_id").is_none());
+        }
+        // Read the actual Rust serializer output with the production Python
+        // reader, including malformed neighbors, without touching an archive.
+        let checked = std::process::Command::new("python3").args(["-B", "-c", r#"
+import pathlib, runpy, sys
+r = runpy.run_path(sys.argv[1]); directory = pathlib.Path(sys.argv[2]) / 'relay_authority'
+path = next(directory.glob('*.jsonl'))
+with path.open('a') as stream: stream.write('invalid json\n{}\n')
+events, _, by_file = r['load_events'](directory)
+assert len(events) == 2 and not any(map(r['is_axis_a_event'], events))
+assert r['completion_scope_counts'](events) == {}
+integrity = r['all_file_integrity'](by_file)
+assert integrity['lines'] == 2 and integrity['unparseable'] == 1 and integrity['schema_mismatch'] == 1
+metric = r['delivery_boundary_counts'](events)['unbound_anchor_left']
+assert (metric['true'], metric['false'], metric['unknown'], metric['recovery_unknown']) == (1, 1, 0, 1)
+"#]).arg(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/relay_authority_rollout_report.py"))
+            .arg(&root).output().unwrap();
+        assert!(checked.status.success(), "{checked:?}");
+    }
+
+    #[tokio::test]
     async fn authority_or_message_epoch_advance_during_send_aborts_and_deletes_candidate() {
         let _lock = crate::config::shared_test_env_lock()
             .lock()
@@ -373,6 +463,7 @@ mod tests {
                 marker,
                 candidate,
                 deleted: Mutex::new(Vec::new()),
+                delete_fails: false,
             };
             let mut detached = detached_current_msg_id_from_durable(0);
             let mut bridge_candidate = None;
