@@ -193,7 +193,7 @@ async fn committed_eof_skips_transport_but_unknown_or_restart_rows_remain_owned(
         }
         assert_eq!(
             fixture
-                .settle(&fixture.state, |_| async {
+                .settle(&fixture.state, async |_| -> RecoveryRelayOutcome {
                     panic!("committed, ambiguous, or separately owned rows must not POST")
                 },)
                 .await,
