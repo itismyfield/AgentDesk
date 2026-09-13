@@ -2,7 +2,10 @@
 
 #[cfg(test)]
 use super::read_fault;
-use super::{CancelToken, ReadOutputResult, cancel_requested};
+use super::{
+    CancelToken, ReadOutputResult, ReadyForInputIdleState, ReadyForInputIdleTracker,
+    cancel_requested,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub fn poll_output_file_until_result<
