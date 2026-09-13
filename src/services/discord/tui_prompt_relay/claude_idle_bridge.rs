@@ -2,6 +2,50 @@ use super::super::turn_bridge::BridgeCompletionSignal;
 use super::*;
 
 #[cfg(unix)]
+#[derive(Clone, Copy)]
+pub(super) struct IdleReaderCompletion {
+    pub(super) offset: u64,
+    pub(super) decoded_terminal: bool,
+    pub(super) source_file: Option<crate::services::cluster::stream_relay::SourceFileIdentity>,
+    pub(super) generation_mtime_ns: i64,
+}
+
+#[cfg(unix)]
+impl IdleReaderCompletion {
+    pub(super) fn from_harvest(
+        result: ReadOutputResult,
+        stats: crate::services::session_backend::ReadHarvestStats,
+        generation_mtime_ns: i64,
+    ) -> Self {
+        let (offset, decoded_terminal) = match result {
+            ReadOutputResult::Completed { offset } => (offset, stats.decoded_terminal),
+            ReadOutputResult::Cancelled { offset } | ReadOutputResult::SessionDied { offset } => {
+                (offset, false)
+            }
+        };
+        Self {
+            offset,
+            decoded_terminal,
+            source_file: stats.source_file,
+            generation_mtime_ns,
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(super) type IdleReaderEnd =
+    tokio::sync::oneshot::Receiver<Result<IdleReaderCompletion, String>>;
+
+#[cfg(unix)]
+struct IdleTerminalSource {
+    transcript_path: String,
+    tmux_session_name: String,
+    turn_nonce: String,
+    source_start: u64,
+    actor: std::sync::Weak<CancelToken>,
+}
+
+#[cfg(unix)]
 #[derive(Clone)]
 struct IdleStreamFrameLogContext {
     provider: String,
@@ -287,7 +331,7 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
     prompt_text: &str,
     prefix: Vec<StreamMessage>,
     reader_rx: mpsc::Receiver<StreamMessage>,
-    reader_end: Option<tokio::sync::oneshot::Receiver<Result<(u64, bool), String>>>,
+    reader_end: Option<IdleReaderEnd>,
     lease: &ExternalInputRelayLease,
 ) -> Result<Option<u64>, String> {
     let _lease_guard = TuiDirectExternalInputLeaseGuard::new(
@@ -353,7 +397,7 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
     prompt_text: &str,
     prefix: Vec<StreamMessage>,
     reader_rx: mpsc::Receiver<StreamMessage>,
-    reader_end: Option<tokio::sync::oneshot::Receiver<Result<(u64, bool), String>>>,
+    reader_end: Option<IdleReaderEnd>,
     lease: &ExternalInputRelayLease,
     gateway: Arc<dyn super::super::gateway::TurnGateway>,
     context_compact_percent: u64,
@@ -380,6 +424,28 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
     .filter(|anchor| anchor.message_id == user_msg_id.get());
     let (tx, rx) = mpsc::channel();
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let source = if provider == ProviderKind::Claude && reader_end.is_some() {
+        Some(IdleTerminalSource {
+            transcript_path: std::fs::canonicalize(output_path)
+                .map_err(|error| error.to_string())?
+                .to_string_lossy()
+                .into_owned(),
+            tmux_session_name: tmux_session_name.to_owned(),
+            turn_nonce: claim
+                .actor
+                .turn_nonce()
+                .filter(|nonce| !nonce.is_empty())
+                .ok_or("missing captured Claude actor nonce")?
+                .to_owned(),
+            source_start: claim
+                .row
+                .turn_start_offset
+                .ok_or("missing captured Claude source boundary")?,
+            actor: Arc::downgrade(&claim.actor),
+        })
+    } else {
+        None
+    };
     let inflight_state = claim.row.clone();
     let bridge = TurnBridgeContext {
         provider: provider.clone(),
@@ -447,6 +513,7 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
             reader_rx,
             tx,
             reader_end,
+            source,
             Some(frame_log_context),
         )
     });
@@ -584,7 +651,7 @@ pub(super) fn forward_idle_stream_into_bridge(
     reader_rx: mpsc::Receiver<StreamMessage>,
     tx: mpsc::Sender<StreamMessage>,
 ) -> usize {
-    forward_idle_stream_into_bridge_with_logging(prefix, reader_rx, tx, None, None).0
+    forward_idle_stream_into_bridge_with_logging(prefix, reader_rx, tx, None, None, None).0
 }
 
 #[cfg(unix)]
@@ -592,7 +659,8 @@ fn forward_idle_stream_into_bridge_with_logging(
     prefix: Vec<StreamMessage>,
     reader_rx: mpsc::Receiver<StreamMessage>,
     tx: mpsc::Sender<StreamMessage>,
-    reader_end: Option<tokio::sync::oneshot::Receiver<Result<(u64, bool), String>>>,
+    reader_end: Option<IdleReaderEnd>,
+    source: Option<IdleTerminalSource>,
     log_context: Option<IdleStreamFrameLogContext>,
 ) -> (usize, Result<Option<u64>, String>) {
     let mut first_text_seen = false;
@@ -682,20 +750,66 @@ fn forward_idle_stream_into_bridge_with_logging(
             );
         }
     }
-    let source_offset = match reader_end {
+    let completed = match reader_end {
         Some(end) => match end.blocking_recv() {
-            Ok(Ok((offset, true))) => Ok(Some(offset)),
-            Ok(Ok((_, false))) => Err("idle source reader ended without a decoded terminal".into()),
+            Ok(Ok(completed)) if completed.decoded_terminal => Ok(Some(completed)),
+            Ok(Ok(_)) => Err("idle source reader ended without a decoded terminal".into()),
             Ok(Err(error)) => Err(error),
             Err(error) => Err(format!("idle source reader lost its completion: {error}")),
         },
         None => Ok(None),
     };
-    if source_offset.is_ok() && !done_forwarded {
-        let _ = tx.send(terminal.unwrap_or(StreamMessage::Done {
+    let source_offset = completed
+        .as_ref()
+        .map(|done| done.map(|done| done.offset))
+        .map_err(Clone::clone);
+    if let Ok(completed) = completed
+        && !done_forwarded
+    {
+        let done = terminal.unwrap_or(StreamMessage::Done {
             result: String::new(),
             session_id: None,
-        }));
+        });
+        let message = match (completed, source, done) {
+            (Some(completed), Some(source), StreamMessage::Done { result, session_id }) => {
+                let Some(crate::services::cluster::stream_relay::SourceFileIdentity::Unix {
+                    dev,
+                    ino,
+                }) = completed.source_file
+                else {
+                    return (
+                        text_frames_forwarded,
+                        Err("Claude terminal reader has no opened-file identity".into()),
+                    );
+                };
+                StreamMessage::ClaudeTuiTerminalDone {
+                    result,
+                    session_id,
+                    transcript_path: source.transcript_path,
+                    tmux_session_name: source.tmux_session_name,
+                    turn_nonce: source.turn_nonce,
+                    source_start: source.source_start,
+                    complete_record_end: completed.offset,
+                    generation_mtime_ns: completed.generation_mtime_ns,
+                    source_file_dev: dev,
+                    source_file_ino: ino,
+                    actor: source.actor,
+                }
+            }
+            (Some(_), _, _) => {
+                return (
+                    text_frames_forwarded,
+                    Err("Claude terminal source witness missing".into()),
+                );
+            }
+            (None, _, done) => done,
+        };
+        if tx.send(message).is_err() {
+            return (
+                text_frames_forwarded,
+                Err("idle bridge receiver closed before terminal".into()),
+            );
+        }
     }
     (text_frames_forwarded, source_offset)
 }

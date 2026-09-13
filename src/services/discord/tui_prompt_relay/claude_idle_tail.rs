@@ -346,7 +346,10 @@ pub(super) async fn run_claude_idle_response_tail(
     // the leading frames until the first content frame arrives so that a turn
     // without treating a reader failure or a synthesized idle Done as delivery.
     let (reader_tx, reader_rx) = mpsc::channel::<StreamMessage>();
-    let (offset_tx, offset_rx) = tokio::sync::oneshot::channel::<Result<(u64, bool), String>>();
+    let (offset_tx, offset_rx) =
+        tokio::sync::oneshot::channel::<Result<claude_idle_bridge::IdleReaderCompletion, String>>();
+    let generation_mtime_ns =
+        super::super::turn_bridge::tmux_generation_file_mtime_ns(&tmux_session_name);
     let transcript_for_reader = transcript_path.clone();
     let tmux_for_reader = tmux_session_name.clone();
     std::thread::Builder::new()
@@ -367,10 +370,12 @@ pub(super) async fn run_claude_idle_response_tail(
                     ),
                 );
             let offset_result = read_result
-                .map(|(result, stats)| match result {
-                    ReadOutputResult::Completed { offset } => (offset, stats.decoded_terminal),
-                    ReadOutputResult::Cancelled { offset }
-                    | ReadOutputResult::SessionDied { offset } => (offset, false),
+                .map(|(result, stats)| {
+                    claude_idle_bridge::IdleReaderCompletion::from_harvest(
+                        result,
+                        stats,
+                        generation_mtime_ns,
+                    )
                 })
                 .map_err(|error| error.error);
             let _ = offset_tx.send(offset_result);
@@ -417,7 +422,8 @@ pub(super) async fn run_claude_idle_response_tail(
         let _ = tokio::task::spawn_blocking(move || while reader_rx.recv().is_ok() {}).await;
         // Only an actual source terminal can settle an empty episode. Unknown
         // reads keep its durable row and original cursor for the existing idle retry.
-        if let Ok(Ok((final_offset, true))) = offset_rx.await
+        if let Ok(Ok(completed)) = offset_rx.await
+            && completed.decoded_terminal
             && let Some((row, actor)) = captured
             && synthetic_start::bridge_handoff::finish_empty_tail_episode(&shared, &row, actor)
                 .await
@@ -425,7 +431,7 @@ pub(super) async fn run_claude_idle_response_tail(
             advance_claude_tmux_runtime_binding_offset(
                 &tmux_session_name,
                 &transcript_path,
-                final_offset,
+                completed.offset,
             );
         }
         return;

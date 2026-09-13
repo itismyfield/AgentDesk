@@ -2,17 +2,17 @@ use super::*;
 
 #[cfg(unix)]
 pub(super) fn spawn_handoff_reader(
-    path: &Path, start: u64, tx: mpsc::Sender<StreamMessage>,
-    end: tokio::sync::oneshot::Sender<Result<(u64, bool), String>>,
+    path: &Path, start: u64, tmux: &str, tx: mpsc::Sender<StreamMessage>,
+    end: tokio::sync::oneshot::Sender<Result<claude_idle_bridge::IdleReaderCompletion, String>>,
 ) -> std::thread::JoinHandle<()> {
+    let generation = crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux);
     let path = path.to_str().unwrap().to_owned();
     std::thread::spawn(move || {
         let result = crate::services::session_backend::read_output_file_until_result_with_harvest(
             &path, start, tx, None, crate::services::provider::SessionProbe::process(|| true),
         );
-        let _ = end.send(result.map(|(result, stats)| match result {
-            ReadOutputResult::Completed { offset } => (offset, stats.decoded_terminal),
-            ReadOutputResult::SessionDied { offset } | ReadOutputResult::Cancelled { offset } => (offset, false),
+        let _ = end.send(result.map(|(result, stats)| {
+            claude_idle_bridge::IdleReaderCompletion::from_harvest(result, stats, generation)
         }).map_err(|error| error.error));
     })
 }
@@ -56,6 +56,8 @@ fn synthetic_bridge_handoff_fixture(
             let channel = ChannelId::new(583_300_001);
             let anchor = MessageId::new(583_300_002);
             let tmux = "synthetic-bridge-handoff-5833";
+            let generation_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
+            std::fs::write(&generation_path, b"1").unwrap();
             let output = temp.path().join("transcript.jsonl");
             let body = "첫 프레임 배달과 실행 중 owner 유지 ".repeat(16);
             let assistant = serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text", "text":body}]}});
@@ -107,8 +109,8 @@ fn synthetic_bridge_handoff_fixture(
                     resume.notify_one();
                     successor
                 };
-                let (claim, successor) = tokio::join!(attempt, replace);
-                assert!(!claim.0.claimed, "inline admission cannot adopt its same-nonce successor");
+                let ((claim, _), successor) = tokio::join!(attempt, replace);
+                assert!(!claim.claimed, "inline admission cannot adopt its same-nonce successor");
                 assert!(crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).is_none());
                 assert!(Arc::ptr_eq(&crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.unwrap(), &successor));
                 return;
@@ -377,7 +379,7 @@ fn synthetic_bridge_handoff_fixture(
                 &shared, provider.clone(), channel, tmux, &output, original_start,
                 "handoff prompt", Vec::new(), rx, Some(end_rx), &resumed, gateway.clone(), 0,
             );
-            let reader = spawn_handoff_reader(&output, original_start, tx, end_tx);
+            let reader = spawn_handoff_reader(&output, original_start, tmux, tx, end_tx);
             let observe = async {
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !gateway
@@ -435,7 +437,7 @@ fn synthetic_bridge_handoff_fixture(
                 std::fs::OpenOptions::new().append(true).open(&output).unwrap().write_all(format!("{terminal}\n").as_bytes()).unwrap();
                 let (tx, rx) = mpsc::channel();
                 let (end_tx, end_rx) = tokio::sync::oneshot::channel();
-                let reader = spawn_handoff_reader(&output, retained.last_offset, tx, end_tx);
+                let reader = spawn_handoff_reader(&output, retained.last_offset, tmux, tx, end_tx);
                 tokio::time::timeout(Duration::from_secs(5), claude_idle_bridge::stream_tui_idle_response_with_gateway(
                     &shared, provider.clone(), channel, tmux, &output, retained.last_offset,
                     "handoff prompt", Vec::new(), rx, Some(end_rx), &renewed, gateway.clone(), 0,
