@@ -201,7 +201,7 @@ fn synthetic_bridge_handoff_fixture(
                 drop(capture);
                 if restart {
                     crate::services::discord::inflight::mark_all_inflight_states_restart_mode(
-                        &provider, crate::services::discord::inflight::InflightRestartMode::DrainRestart,
+                        &provider, crate::services::discord::InflightRestartMode::DrainRestart,
                     );
                     let next_generation = shared.restart.current_generation + 1;
                     shared = crate::services::discord::make_shared_data_for_tests();
