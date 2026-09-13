@@ -3,14 +3,15 @@
 Source issue: #5464 (#5071 T5). Related: #5874 (cohort-width publication),
 #5883 (observation-sink retention), #5902 (entry-gate cutover).
 
-Last refreshed: 2026-09-12
+Last refreshed: 2026-09-14
 
-> **No sign-off has been recorded. Every owner slot in [Sign-Off](#sign-off) is
-> blank and marked `사용자 비준 필요`; the stage question in
-> [Which Stage Governs](#which-stage-governs--undefined) is likewise unresolved.**
-> This runbook documents the procedure and the evidence. It is not itself an
-> acceptance, and it does not authorise a dial move today. Every coordinate below
-> is pinned to `main` @ `26687f6264`.
+> **[Stage 2](#governing-stage--stage-2-approved-acceptance-remains-pending) is
+> selected; live acceptance, R6 sign-off and rollback GO remain unsigned.**
+> Acceptance owner and rollback reviewer slots in [Sign-Off](#sign-off) remain
+> blank and marked `사용자 비준 필요`. Deployment and bounded real tests are
+> approved; this runbook does not itself establish successful acceptance or
+> authorise a dial move. Historical source coordinates below remain pinned to
+> `main` @ `26687f6264`; the governing-stage section records the later decision.
 
 ## Scope
 
@@ -316,8 +317,8 @@ explicitly rather than assuming the file is authoritative.
 
 - Author: #5464 (#5071 T5) R6, 2026-09-12 — procedure and evidence documented;
   no acceptance and no GO recorded.
-- Acceptance stage (1 or 2): **blank — `사용자 비준 필요`** (see
-  [Which Stage Governs](#which-stage-governs--undefined)).
+- Acceptance stage: **Stage 2 approved — 7 days / 500 turns** (see
+  [Governing Stage](#governing-stage--stage-2-approved-acceptance-remains-pending)).
 - Acceptance owner: **blank — `사용자 비준 필요`**.
 - Rollback GO reviewer: **blank — `사용자 비준 필요`**.
 
