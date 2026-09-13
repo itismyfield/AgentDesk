@@ -73,6 +73,9 @@ pub(super) async fn preserve_or_publish(ctx: Handoff<'_>) -> Outcome {
                 return Outcome::Deferred { outbox_id: id };
             }
             Ok(outbox::OutboxEnqueueOutcome::Cancelled) => "unexpected outbox cancellation".into(),
+            Ok(outbox::OutboxEnqueueOutcome::NoRow) => {
+                "outbox did not retain a delivery obligation".to_string()
+            }
             Err(error) => error.to_string(),
         }
     } else {
