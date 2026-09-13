@@ -150,13 +150,20 @@ async fn committed_eof_skips_transport_but_unknown_or_restart_rows_remain_owned(
             0 => fixture.state.terminal_delivery_committed = true,
             1 => fixture.state.response_sent_offset = fixture.state.full_response.len(),
             2 => fixture.state.response_sent_offset = usize::MAX,
-            3 => fixture.state.full_response.clear(),
+            3 => {
+                fixture.state.full_response.clear();
+                fixture.state.response_sent_offset = 0;
+            }
             4 => fixture
                 .state
                 .set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart),
             _ => fixture.state.rebind_origin = true,
         }
-        fixture.persist();
+        // The canonical writer rejects invalid offsets; keep the valid durable
+        // row while testing an invalid local recovery snapshot in case 2.
+        if case != 2 {
+            fixture.persist();
+        }
         assert_eq!(
             settle_ready_without_output(
                 &fixture.shared,
