@@ -49,6 +49,7 @@ mod empty_response_recovery;
 mod prompt_too_long_guidance;
 mod queue_retry_silence;
 mod recovery_retry;
+mod rowless_receipt;
 
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
 
@@ -56,6 +57,10 @@ pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
     state: TerminalOutcomeDeliveryState,
 ) -> TerminalOutcomeDeliveryOutput {
+    let receipt_disposition = rowless_receipt::decision(&ctx, &state);
+    let already_receipted = receipt_disposition
+        == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
+    let may_publish = receipt_disposition == rowless_receipt::TerminalReceiptDisposition::Continue;
     let (channel_id, user_msg_id) = (ctx.channel_id, ctx.user_msg_id);
     let (current_msg_id, status_panel_msg_id) = (ctx.current_msg_id, ctx.status_panel_msg_id);
     let (cancelled, transport_error) = (ctx.cancelled, ctx.transport_error);
@@ -149,7 +154,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let mut bridge_should_emit_completion = true;
     let inflight_generation = inflight_state.born_generation;
 
-    if !bridge_output_owner
+    if may_publish && !bridge_output_owner
         .map(|owner| owner.skips_bridge_spinner_cleanup())
         .unwrap_or(false)
         && let Some(user_msg_id) = user_msg_id
@@ -164,7 +169,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         .await;
     }
 
-    if recovery_retry {
+    if may_publish && recovery_retry {
         let outcome = handle_recovery_retry(
             RecoveryRetryMessage::SessionDiedDuringRecovery,
             RecoveryRetryContext {
@@ -190,7 +195,17 @@ pub(super) async fn run_terminal_outcome_delivery(
         }
     }
 
-    if cancelled || is_prompt_too_long {
+    let mut epilogue_response = None;
+    if already_receipted {
+        (terminal_delivery_committed, terminal_body_visible) = (true, true);
+        epilogue_response = Some((full_response.clone(), full_response.clone()));
+    } else if !may_publish {
+        preserve_inflight_for_cleanup_retry = true;
+        // The row belongs to the successor. Retain source recovery without
+        // overwriting that row with this actor's detached snapshot.
+        bridge_skip_holder_owns_inflight = true;
+        bridge_should_emit_completion = false;
+    } else if cancelled || is_prompt_too_long {
         let message = if cancelled {
             CancelPromptReplaceMessage::Cancelled
         } else {
@@ -759,6 +774,9 @@ pub(super) async fn run_terminal_outcome_delivery(
             }
         }
 
+        epilogue_response = Some((delivery_response, spoken_delivery_response));
+    }
+    if let Some((delivery_response, spoken_delivery_response)) = epilogue_response {
         handle_delivery_epilogue(
             DeliveryEpilogueMessage::PostCommit,
             DeliveryEpilogueContext {
@@ -787,6 +805,7 @@ pub(super) async fn run_terminal_outcome_delivery(
                 #[cfg(unix)]
                 bridge_tui_gate_outcome_early,
                 terminal_delivery_committed,
+                already_receipted,
                 terminal_body_visible,
                 preserve_inflight_for_cleanup_retry,
                 should_complete_work_dispatch_after_delivery,

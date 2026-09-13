@@ -464,10 +464,12 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let mut status_panel_generation = inflight_state.status_panel_generation;
         inflight_state.long_running_placeholder_active = false;
         let mut resumed_placeholder_clear_applied = false;
+        let mut entry_was_rowless = false;
 
         let anchor_text = super::formatting::build_processing_status_block(SPINNER[0]).to_string();
         if !bridge_entry_persist::establish_bridge_entry_authority(
             bridge_entry_persist::BridgeEntryAuthorityContext {
+                entry_was_rowless: &mut entry_was_rowless,
                 bridge: &mut bridge,
                 shared: shared_owned.as_ref(),
                 bridge_created_placeholder: &mut bridge_created_response_placeholder_msg_id,
@@ -785,6 +787,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             terminal_outcome_delivery::run_terminal_outcome_delivery(
                 terminal_outcome_delivery::TerminalOutcomeDeliveryContext {
                     watcher_delivery_pin: watcher_delivery_pin.clone(),
+                    entry_was_rowless,
                     channel_id,
                     user_msg_id,
                     current_msg_id,

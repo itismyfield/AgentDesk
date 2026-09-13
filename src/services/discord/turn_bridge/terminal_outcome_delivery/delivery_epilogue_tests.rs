@@ -17,6 +17,9 @@ use std::{
 use crate::services::discord::{formatting::ReplaceLongMessageOutcome, gateway::GatewayFuture};
 use tracing_subscriber::fmt::MakeWriter;
 
+#[cfg(unix)]
+mod rowless_receipt_tests;
+
 #[derive(Clone)]
 struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
 
@@ -209,6 +212,7 @@ async fn terminal_delivery_epilogue_routes_identity_mismatch_to_warn() {
                 crate::services::discord::tmux::TuiCompletionGateOutcome::NotGated,
             ),
             terminal_delivery_committed: true,
+            already_receipted: false,
             terminal_body_visible: true,
             preserve_inflight_for_cleanup_retry: false,
             should_complete_work_dispatch_after_delivery: false,
@@ -599,6 +603,7 @@ impl TerminalDeliveryDriver {
         let channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
         (
             TerminalOutcomeDeliveryContext {
+                entry_was_rowless: false,
                 watcher_delivery_pin: self
                     .shared
                     .tmux_watchers

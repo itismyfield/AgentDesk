@@ -41,6 +41,7 @@ pub(super) struct DeliveryEpilogueContext<'a> {
     pub(super) bridge_tui_gate_outcome_early:
         Option<super::super::super::tmux::TuiCompletionGateOutcome>,
     pub(super) terminal_delivery_committed: bool,
+    pub(super) already_receipted: bool,
     pub(super) terminal_body_visible: bool,
     pub(super) preserve_inflight_for_cleanup_retry: bool,
     pub(super) should_complete_work_dispatch_after_delivery: bool,
@@ -125,7 +126,7 @@ pub(super) async fn handle_delivery_epilogue(
                     response_sent_offset,
                 },
             );
-            for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..) {
+            for frozen_msg_id in terminal_full_replay_cleanup_msg_ids.drain(..).filter(|_| !ctx.already_receipted) {
                 // #5413/#3607: current_msg_id is the terminal answer and is
                 // already excluded here, so no terminal-anchor guard is
                 // needed — every drained id is a non-terminal streamed prefix.
@@ -184,7 +185,7 @@ pub(super) async fn handle_delivery_epilogue(
             // 0) is never a voice turn — voice turns carry a synthetic,
             // non-zero voice message id — so the voice-handoff completion
             // routing (all keyed on the user message id) does not apply.
-            if let Some(user_msg_id) = user_msg_id {
+            if !ctx.already_receipted && let Some(user_msg_id) = user_msg_id {
                 let pg_pool_for_handoff = shared_owned.pg_pool.as_ref();
                 let in_memory_handoff_agent_id = crate::voice::announce_meta::global_store()
                     .get_handoff(user_msg_id)
@@ -389,7 +390,7 @@ pub(super) async fn handle_delivery_epilogue(
             });
         }
 
-        if can_chain_locally
+        if !ctx.already_receipted && can_chain_locally
             && !preserve_inflight_for_cleanup_retry
             && !delivery_response.trim().is_empty()
             && let Some(user_msg_id) = user_msg_id
@@ -425,7 +426,7 @@ pub(super) async fn handle_delivery_epilogue(
     }
 
     *state.response_sent_offset = response_sent_offset;
-    *state.bridge_should_emit_completion = bridge_should_emit_completion;
+    *state.bridge_should_emit_completion = bridge_should_emit_completion && !ctx.already_receipted;
     *state.status_panel_terminal_committed = status_panel_terminal_committed;
 
     DeliveryEpilogueOutcome::Continue
