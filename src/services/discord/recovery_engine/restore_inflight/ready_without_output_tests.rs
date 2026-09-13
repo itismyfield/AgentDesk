@@ -409,6 +409,7 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
         } else {
             None
         };
+        #[cfg(unix)]
         if native {
             // The admitted body survives a process loss; later raw turns are not
             // part of its saved terminal range or its Discord receipt.
