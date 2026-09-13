@@ -38,7 +38,10 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
             .args(["--exact", &qualified, "--nocapture"])
             .args(captured.then_some("--ignored"))
             .env(CHILD, "1")
-            .env("AGENTDESK_STATUS_INTERVAL_SECS", "0")
+            .env(
+                "AGENTDESK_STATUS_INTERVAL_SECS",
+                if captured { "5" } else { "0" },
+            )
             .output()
             .unwrap();
         assert!(
@@ -51,6 +54,18 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
     let (_lock, root) = isolate_root();
     capture_warns(async {
         let (mut fx, mut row) = seed_recovered_row(root.root.path(), 5834);
+        let _pane = captured.then(|| {
+            fx.tmux = format!(
+                "AgentDesk-codex-5833-test-{}",
+                uuid::Uuid::new_v4().simple()
+            );
+            row.tmux_session_name = Some(fx.tmux.clone());
+            let created =
+                crate::services::platform::tmux::create_session(&fx.tmux, None, "sleep 60")
+                    .expect("create isolated liveness-only pane");
+            assert!(created.status.success());
+            OwnedCapturePane(fx.tmux.clone())
+        });
         let marker = crate::services::tmux_common::session_temp_path(&fx.tmux, "generation");
         std::fs::write(&marker, b"1").unwrap();
         let generated = (0..repeats).map(|index| format!(
@@ -217,12 +232,15 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         if captured {
             if let CollectOutcome::Fallthrough(turn) = &outcome {
                 eprintln!(
-                    "captured collector source_bytes={source_bytes} source_start={source_start} body_bytes={} body_units={} terminal={} posts={}",
+                    "captured collector source_bytes={source_bytes} source_start={source_start} body_bytes={} body_units={} terminal={} pane_dead={} posts={}",
                     turn.full_response.len(),
                     crate::services::discord::formatting::discord_message_units(
                         &turn.full_response
                     ),
                     turn.found_result,
+                    turn.active_read_state
+                        .as_ref()
+                        .is_some_and(|state| state.tmux_death_observed),
                     rec.seen("POST").len()
                 );
             } else {
@@ -344,4 +362,14 @@ fn captured_native_collector_physical_batches_reach_http() {
         0,
         "captured_native_collector_physical_batches_reach_http",
     );
+}
+
+struct OwnedCapturePane(String);
+impl Drop for OwnedCapturePane {
+    fn drop(&mut self) {
+        crate::services::platform::tmux::kill_session(
+            &self.0,
+            "5833 private collector fixture cleanup",
+        );
+    }
 }
