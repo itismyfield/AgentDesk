@@ -929,3 +929,68 @@ async fn exact_receipt_rowless_terminal_custody_empty_recovery_stays_inside_sour
         );
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exact_receipt_rowless_terminal_consumes_captured_claude_source_without_session_5521() {
+    use std::os::unix::fs::MetadataExt;
+    for valid_file_identity in [true, false] {
+        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+        let (mut ctx, mut state, source) = receipt_parts(&driver, ProviderKind::Claude);
+        state.inflight_state.session_id = None;
+        std::fs::remove_file(crate::services::tmux_common::session_temp_path(
+            DRIVER_TMUX_SESSION,
+            crate::services::tmux_common::CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT,
+        ))
+        .unwrap();
+        let path = state.inflight_state.output_path.clone().unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        tui_prompt_dedupe::register_tmux_runtime_binding(
+            DRIVER_TMUX_SESSION,
+            TuiRuntimeBinding {
+                runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                output_path: path.clone(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: None,
+                last_offset: 64,
+                relay_last_offset: None,
+            },
+        );
+        // The alias retains the captured provider, FD identity and nullable
+        // session; no Codex marker or invented session grants Claude authority.
+        ctx.codex_tui_terminal_range = Some(serde_json::from_value(serde_json::json!({
+            "identity": InflightTurnIdentity::from_state(&state.inflight_state),
+            "result": state.full_response,
+            "rollout_path": path,
+            "session_id": "",
+            "source": source,
+            "source_file_identity": [metadata.dev(), metadata.ino() + u64::from(!valid_file_identity)],
+        })).unwrap());
+        let mut successor = state.inflight_state.clone();
+        successor.turn_nonce = Some("claude-successor".into());
+        successor.turn_start_offset = Some(64);
+        inflight::save_inflight_state(&successor).unwrap();
+        dr::record_current_pinned_delivery(&source, DRIVER_CURRENT_MSG_ID).unwrap();
+        ctx.single_message_panel_footer_mode = true;
+        let output = run(ctx, state).await;
+        assert_eq!(output.terminal_delivery_committed, valid_file_identity);
+        if !valid_file_identity {
+            assert!(matches!(
+                output.outcome,
+                TerminalOutcomeDeliveryOutcome::DeferredToCustody { .. }
+            ));
+        }
+        run_postlude(&driver, output, true, false).await;
+        assert!(driver.observations().is_empty());
+        assert_eq!(
+            custody_records(&driver).len(),
+            usize::from(!valid_file_identity)
+        );
+        let fresh =
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, DRIVER_CHANNEL_ID)
+                .unwrap();
+        assert_eq!(fresh.turn_nonce, successor.turn_nonce);
+        assert!(!fresh.terminal_delivery_committed);
+    }
+}
