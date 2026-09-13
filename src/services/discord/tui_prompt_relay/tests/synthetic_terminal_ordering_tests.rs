@@ -85,7 +85,8 @@ fn terminal_ordering_fixture(
                 channel_id: channel.get(), ..Default::default()
             }));
             *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK.lock().unwrap() = prepare.clone();
-            let row_path = crate::services::discord::inflight::inflight_state_path(temp.path(), &provider, channel.get());
+            let row_path = crate::services::discord::inflight::inflight_state_path(
+                &crate::services::discord::inflight::inflight_runtime_root().unwrap(), &provider, channel.get());
             let lock_path = row_path.with_extension("json.lock");
             let holder_key = crate::services::discord::DeliveryLeaseKey::from_inflight_state_for_site(
                 channel, shared.restart.current_generation, &original_row, "bridge");
@@ -153,8 +154,14 @@ fn terminal_ordering_fixture(
                             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(tmux, binding);
                         }
                         SourceRace::RevalidationIo => {
-                            std::fs::rename(&lock_path, lock_path.with_extension("saved")).unwrap();
+                            match std::fs::rename(&lock_path, lock_path.with_extension("saved")) {
+                                Ok(()) => {}
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(error) => panic!("cannot preserve revalidation lock: {error}"),
+                            }
                             std::fs::create_dir(&lock_path).unwrap();
+                            assert!(crate::services::discord::inflight::lock_inflight_state_path(&row_path).is_err(),
+                                "directory collision must fail the actual revalidation lock open");
                         }
                         SourceRace::PinGeneration => {
                             let generation_path = generation_path.clone();
@@ -230,10 +237,6 @@ fn terminal_ordering_fixture(
                 assert!(crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get())
                     .is_none_or(|record| record.confirmed_deliveries.is_empty()), "no exact receipt before transport");
                 assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap().last_offset, 0);
-                if race == SourceRace::RevalidationIo {
-                    std::fs::remove_dir(&lock_path).unwrap();
-                    std::fs::rename(lock_path.with_extension("saved"), &lock_path).unwrap();
-                }
                 let retained = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get())
                     .expect("source loss retains the original durable delivery obligation");
                 assert_eq!(retained.turn_nonce, original_row.turn_nonce);
@@ -256,6 +259,12 @@ fn terminal_ordering_fixture(
                     assert!(cell.try_acquire(holder_key.clone(), holder, 0, retained.last_offset,
                         crate::services::discord::lease_now_ms() + 30_000), "failed preparation releases its own lease");
                     assert!(cell.release(holder, holder_key.clone(), 0, retained.last_offset));
+                }
+                if race == SourceRace::RevalidationIo {
+                    std::fs::remove_dir(&lock_path).unwrap();
+                    if lock_path.with_extension("saved").exists() {
+                        std::fs::rename(lock_path.with_extension("saved"), &lock_path).unwrap();
+                    }
                 }
                 if replace_actor { return; }
                 match race {
