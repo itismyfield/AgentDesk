@@ -50,15 +50,14 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         let (fx, row) = seed_recovered_row(root.root.path(), 5834);
         let marker = crate::services::tmux_common::session_temp_path(&fx.tmux, "generation");
         std::fs::write(&marker, b"1").unwrap();
-        let data = format!(
+        let data = (0..repeats).map(|index| format!(
             "{}\n",
             serde_json::json!({"type":"response_item", "payload": {
-                "type":"message", "role":"assistant", "phase":"commentary",
-                "content":[{"type":"output_text", "text":TRAILING_BODY}]
+                "id":format!("commentary-{index}"), "type":"message", "role":"assistant",
+                "phase":"commentary", "channel":"commentary",
+                "content":[{"type":"output_text", "text":format!("{index}: {TRAILING_BODY}")}]
             }})
-        )
-        .repeat(repeats)
-        .into_bytes();
+        )).collect::<String>().into_bytes();
         std::fs::write(&fx.output_path, &data).unwrap();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let rec = recorder(fx.channel, true).await;
@@ -188,6 +187,27 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                 "HTTP happened before any terminal source event"
             );
             assert!(turn.full_response.contains(TRAILING_BODY));
+            if repeats > 1 {
+                assert!(
+                    crate::services::discord::formatting::discord_message_units(
+                        &turn.full_response
+                    ) > 2000,
+                    "long replay fixture must decode to more than one Discord message"
+                );
+                assert!(
+                    turn.full_response
+                        .contains(&format!("{}: {TRAILING_BODY}", repeats - 1)),
+                    "collector must decode the final unique commentary record"
+                );
+            }
+            assert!(
+                rec.bodies
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|body| body.contains(TRAILING_BODY)),
+                "the captured POST must contain assistant prose, not only a status panel"
+            );
             assert!(
                 turn.placeholder_msg_id.is_some(),
                 "first Discord POST must succeed"
