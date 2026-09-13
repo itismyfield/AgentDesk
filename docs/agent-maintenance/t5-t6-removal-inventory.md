@@ -187,6 +187,21 @@ T6 착수 시 **이 구간부터 다시 대사한다.**
 
 ---
 
+## 현재 승인·수용 경계 (2026-09-14)
+
+[현재 정본 체크포인트](https://github.com/itismyfield/AgentDesk/issues/5464#issuecomment-5650847622)에
+따라 사용자는 배포와 bounded 실검증을 승인했고 권고 **Stage 2: 7일·500턴**을 채택했다.
+과거 runbook의 governing stage UNDEFINED/사용자 비준 대기는 이 결정으로 대체됐다.
+9월 12일 328턴·7일 측정은 당시 기록으로 유지하며 최신 바이너리 수용 증거로 승격하지 않는다.
+양 노드 main `f41b2dc2c9` 배포 후 reader ingress는 회복했으나 실제 첫 Discord frame과
+owner-state 검증은 **FAIL**이다. [#5833 원인 추적의 실제 실패 증거](https://github.com/itismyfield/AgentDesk/issues/5833#issuecomment-5655132183)를
+기준으로 소스 수리가 진행 중이다. 아래 #5917 OPEN·CI 미완료 서술은 해당 소스 대사 당시의
+역사적 상태이며, 현재 배포 상태는 이 문단과 정본 체크포인트를 따른다.
+
+이 승인은 R6 서명·rollback 종료·campaign budget 면제·live acceptance PASS가 아니다.
+현재 문서 갱신의 T6 삭제는 **0건**이며 예약 절감치는 실제 철거 credit으로 세지 않는다.
+원래 source/actor·identity·lease·receipt·ledger 보호와 기존 예산 귀속 미해결 항목은 유지한다.
+
 ## §12-2 추가 — #5917 A/C 최종 소스 대응 (2026-09-13, 수용 대기)
 
 이 절은 main `fe5d192ebf729c6f822600cdfdec228ef1b504ea` 대비 통합 소스

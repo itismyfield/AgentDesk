@@ -138,18 +138,23 @@ six PASS, `promotion_ready: True`, rc 0 (328 turns / 7 days, `new_stricter` 0,
 coverage 0.81 / 0.83, `line_integrity` 0.0). Stage 2 — `turn_samples` 328 < 500
 FAIL, `promotion_ready: False`, rc 1.
 
-### Which Stage Governs — UNDEFINED
+### Governing Stage — Stage 2 approved; acceptance remains pending
 
-`--stage` selects the turn-sample floor and **defaults to 1**
-(`relay_authority_rollout_report.py:144,762`). Which stage T5 acceptance is
-judged at is **not defined anywhere in the repository**, and the two answers
-disagree on the live archive: stage 1 passes 6/6, stage 2 fails on
-`turn_samples` alone. Nothing else differs between them.
+The user approved deployment and bounded real tests and adopted the recommended
+**Stage 2: at least 7 days and 500 distinct turns**. This supersedes the earlier
+undefined-stage/operator-ratification note. The CLI still defaults `--stage` to 1;
+acceptance reporting must explicitly select `--stage 2`.
 
-**`사용자 비준 필요` — the operator picks the stage, and this runbook must not.**
-Record the choice and its rationale at sign-off. Choosing stage 2 means the
-acceptance waits for ~172 more distinct turns at the current fingerprint; a dial
-move before then restarts the segment and the count.
+The September 12 measurement above remains a historical 328-turn / 7-day snapshot,
+not current live acceptance. Stage 2 adoption does not sign R6, close rollback,
+waive the campaign budget, or establish source identity or successful delivery.
+The [current canonical checkpoint](https://github.com/itismyfield/AgentDesk/issues/5464#issuecomment-5650847622)
+records the approval and remaining gates. Both nodes deployed main `f41b2dc2c9`;
+reader ingress recovered, but the actual first Discord frame and owner-state
+acceptance **failed**, as recorded in the
+[primary failure evidence](https://github.com/itismyfield/AgentDesk/issues/5833#issuecomment-5655132183).
+A source repair remains in progress. Deployment permission and accumulated
+historical observations do not turn this failed live check into a pass.
 
 ## Rollback
 
