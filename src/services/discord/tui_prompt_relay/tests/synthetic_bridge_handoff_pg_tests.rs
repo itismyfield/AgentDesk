@@ -30,6 +30,7 @@ fn synthetic_bridge_handoff_fixture(
     postgres_race: bool,
     admission_race: bool,
     prefix_read_error: bool,
+    native_compaction: bool,
 ) {
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
@@ -60,7 +61,8 @@ fn synthetic_bridge_handoff_fixture(
             std::fs::write(&generation_path, b"1").unwrap();
             let output = temp.path().join("transcript.jsonl");
             let body = "첫 프레임 배달과 실행 중 owner 유지 ".repeat(16);
-            let assistant = serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text", "text":body}]}});
+            let mut assistant = serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text", "text":body}]}});
+            if native_compaction { assistant["sessionId"] = "native-auto-session".into(); }
             let previous = if failed_save { "" } else { "{\"type\":\"user\",\"message\":{\"content\":\"previous turn\"}}\n" };
             let source_start = previous.len() as u64;
             std::fs::write(&output, format!("{previous}{assistant}\n")).unwrap();
@@ -411,7 +413,36 @@ fn synthetic_bridge_handoff_fixture(
                 return;
             }
             use std::io::Write;
-            let terminal = serde_json::json!({"type":"result", "subtype":"success", "result":body});
+            if native_compaction {
+                // Native Claude trace 2026-09-05, session 62cf3723, lines 276-277:
+                // compact_boundary(trigger=auto) then isCompactSummary, followed
+                // by same-session assistant output. Bodies/IDs are synthetic;
+                // append the observed shape without inventing file truncation.
+                let boundary = serde_json::json!({"type":"system", "subtype":"compact_boundary", "sessionId":"native-auto-session", "uuid":"compact-boundary", "parentUuid":null, "compactMetadata":{"trigger":"auto"}});
+                let summary = serde_json::json!({"type":"user", "sessionId":"native-auto-session", "parentUuid":"compact-boundary", "uuid":"compact-summary", "isCompactSummary":true, "isVisibleInTranscriptOnly":true, "message":{"role":"user", "content":"PRIVATE_COMPACT_SUMMARY"}});
+                let continuation = serde_json::json!({"type":"assistant", "sessionId":"native-auto-session", "parentUuid":"compact-summary", "message":{"content":[{"type":"text", "text":"NATIVE_COMPACT_CONTINUATION"}], "stop_reason":"end_turn"}});
+                std::fs::OpenOptions::new().append(true).open(&output).unwrap()
+                    .write_all(format!("{boundary}\n{summary}\n{continuation}\n").as_bytes()).unwrap();
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !gateway.bodies.lock().unwrap().iter().any(|sent| sent.contains("NATIVE_COMPACT_CONTINUATION")) {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                }).await.expect("continuation is delivered before the adapter terminal");
+                assert!(Arc::ptr_eq(
+                    &crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.unwrap(),
+                    &original_actor,
+                ), "native compact metadata and assistant end_turn do not release the actor");
+                let active = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).unwrap();
+                assert_eq!(active.turn_start_offset, Some(original_start));
+                assert!(!active.terminal_delivery_committed);
+            }
+            // The captured native trace has no terminal hook. Use the existing
+            // adapter's stop_hook_summary endpoint explicitly, not as trace proof.
+            let terminal = if native_compaction {
+                serde_json::json!({"type":"system", "subtype":"stop_hook_summary", "sessionId":"native-auto-session"})
+            } else {
+                serde_json::json!({"type":"result", "subtype":"success", "result":body})
+            };
             std::fs::OpenOptions::new().append(true).open(&output).unwrap()
                 .write_all(format!("{terminal}\n").as_bytes()).unwrap();
             tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
@@ -446,6 +477,15 @@ fn synthetic_bridge_handoff_fixture(
                 assert!(gateway.bodies.lock().unwrap().iter().filter(|sent| sent.contains("첫 프레임")).all(|sent| sent.matches("첫 프레임").count() == 16), "resume must not append the already saved prefix again");
             } else {
                 delivered.expect("actual idle adapter terminal publication completes");
+            }
+            if native_compaction {
+                let bodies = gateway.bodies.lock().unwrap();
+                assert!(bodies.iter().all(|sent| !sent.contains("PRIVATE_COMPACT_SUMMARY")));
+                assert!(bodies.iter().any(|sent| {
+                    sent.contains(&format!("{body}NATIVE_COMPACT_CONTINUATION"))
+                        && sent.matches("NATIVE_COMPACT_CONTINUATION").count() == 1
+                        && sent.matches("첫 프레임").count() == 16
+                }), "one response preserves the prefix and post-compaction continuation");
             }
             let source_end = std::fs::metadata(&output).unwrap().len();
             let record = crate::services::discord::outbound::delivery_record::read_record(
@@ -488,31 +528,31 @@ fn synthetic_bridge_handoff_fixture(
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_delivers_first_frame_and_releases_original_actor() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, false, false);
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, false, false, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_waits_for_later_claim_save_then_delivers() {
-    synthetic_bridge_handoff_fixture(true, false, false, false, None, false, false, None, false, false, false);
+    synthetic_bridge_handoff_fixture(true, false, false, false, None, false, false, None, false, false, false, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_same_nonce_different_actor() {
-    synthetic_bridge_handoff_fixture(false, true, false, false, None, false, false, None, false, false, false);
+    synthetic_bridge_handoff_fixture(false, true, false, false, None, false, false, None, false, false, false, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_different_source_without_row_mutation() {
-    synthetic_bridge_handoff_fixture(false, false, true, false, None, false, false, None, false, false, false);
+    synthetic_bridge_handoff_fixture(false, false, true, false, None, false, false, None, false, false, false, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_upserts_missing_postgres_session_before_first_frame() {
-    synthetic_bridge_handoff_fixture(false, false, false, true, None, false, false, None, false, false, false);
+    synthetic_bridge_handoff_fixture(false, false, false, true, None, false, false, None, false, false, false, false);
 }
 
 #[cfg(unix)]
@@ -527,6 +567,7 @@ fn synthetic_bridge_handoff_retries_unpublished_row_after_adapter_drops() {
         false,
         false,
         None,
+        false,
         false,
         false,
         false,
@@ -548,19 +589,20 @@ fn synthetic_bridge_handoff_restarts_from_persisted_source_after_mailbox_loss() 
         false,
         false,
         false,
+        false,
     );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_failed_inline_save_retries_original_bytes() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, true, false, None, false, false, false);
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, true, false, None, false, false, false, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_retry_preserves_original_source_and_cursor() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, true, None, false, false, false);
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, true, None, false, false, false, false);
 }
 
 #[cfg(unix)]
@@ -575,6 +617,7 @@ fn synthetic_bridge_handoff_reader_error_retains_obligation_then_delivers() {
         false,
         false,
         Some(false),
+        false,
         false,
         false,
         false,
@@ -596,23 +639,30 @@ fn synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episod
         false,
         false,
         false,
+        false,
     );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session() {
-    synthetic_bridge_handoff_fixture(false, false, false, true, None, false, false, None, true, false, false);
+    synthetic_bridge_handoff_fixture(false, false, false, true, None, false, false, None, true, false, false, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_inline_admission_rejects_replacement_actor() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, true, false);
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, true, false, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_prefix_then_read_error_retains_original_obligation() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, false, true);
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, false, true, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn synthetic_bridge_handoff_native_auto_compaction_preserves_delivery_and_actor() {
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, false, false, true);
 }
