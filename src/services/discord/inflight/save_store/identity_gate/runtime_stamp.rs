@@ -158,32 +158,24 @@ fn admit_codex_terminal_range_in_root(
     persist_terminal_range(
         root,
         &path,
-        local,
-        baseline,
+        (local, baseline),
         fresh,
-        result,
-        canonical,
-        session,
-        generation,
-        (start, end),
-        None,
+        (result, canonical, session),
+        ((start, end), generation, None),
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn persist_terminal_range(
     root: &Path,
     path: &Path,
-    local: &mut InflightTurnState,
-    baseline: &mut InflightTurnState,
+    states: (&mut InflightTurnState, &mut InflightTurnState),
     mut fresh: InflightTurnState,
-    result: &str,
-    canonical: PathBuf,
-    session: &str,
-    generation: i64,
-    range: (u64, u64),
-    source_file_identity: Option<(u64, u64)>,
+    frame: (&str, PathBuf, &str),
+    source: ((u64, u64), i64, Option<(u64, u64)>),
 ) -> Result<TuiTerminalRange, GuardedSaveOutcome> {
+    let (local, baseline) = states;
+    let (result, canonical, session) = frame;
+    let (range, generation, source_file_identity) = source;
     let canonical = canonical.display().to_string();
     fresh.output_path = Some(canonical.clone());
     fresh.full_response = result.to_string();
@@ -1121,14 +1113,15 @@ impl InflightTurnState {
     /// Claude requires the actual reader's complete-record end, file descriptor
     /// identity and original actor. Invalid typed evidence never degrades to an
     /// unpinned successful Done. Codex retains its established admission rules.
-    #[allow(clippy::too_many_arguments)]
     pub(in crate::services::discord) async fn admit_tui_terminal_frame(
         &mut self,
         baseline: &mut InflightTurnState,
         expected: &InflightTurnIdentity,
         can_chain_locally: bool,
-        shared: &crate::services::discord::SharedData,
-        bridge_actor: &std::sync::Arc<crate::services::provider::CancelToken>,
+        actor_authority: (
+            &crate::services::discord::SharedData,
+            &std::sync::Arc<crate::services::provider::CancelToken>,
+        ),
         observed_response: &str,
         message: StreamMessage,
     ) -> Result<(StreamMessage, Option<TuiTerminalRange>, bool), GuardedSaveOutcome> {
@@ -1153,6 +1146,7 @@ impl InflightTurnState {
                 message,
             ));
         };
+        let (shared, bridge_actor) = actor_authority;
         let result = if result.trim().is_empty() {
             observed_response.to_owned()
         } else {
@@ -1238,15 +1232,14 @@ impl InflightTurnState {
         let range = persist_terminal_range(
             &root,
             &path,
-            self,
-            baseline,
+            (self, baseline),
             fresh,
-            &result,
-            canonical,
-            &session,
-            generation_mtime_ns,
-            (source_start, complete_record_end),
-            Some((source_file_dev, source_file_ino)),
+            (&result, canonical, &session),
+            (
+                (source_start, complete_record_end),
+                generation_mtime_ns,
+                Some((source_file_dev, source_file_ino)),
+            ),
         )?;
         Ok((
             StreamMessage::Done { result, session_id },

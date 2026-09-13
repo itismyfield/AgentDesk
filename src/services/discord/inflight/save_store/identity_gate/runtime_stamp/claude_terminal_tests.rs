@@ -119,8 +119,7 @@ impl Fixture {
                 &mut self.baseline,
                 &self.expected,
                 true,
-                &self.shared,
-                &self.actor,
+                (&self.shared, &self.actor),
                 "answer",
                 frame,
             )

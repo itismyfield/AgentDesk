@@ -305,7 +305,7 @@ pub(super) async fn run_stream_loop(
                         break 'outer;
                     }
                     #[rustfmt::skip]
-                    let (msg, admission, was_codex_terminal) = match inflight_state.admit_tui_terminal_frame(&mut persisted_inflight_baseline, &stream_tick_expected_identity, gateway.can_chain_locally(), shared_owned.as_ref(), &cancel_token, &full_response, msg).await {
+                    let (msg, admission, was_codex_terminal) = match inflight_state.admit_tui_terminal_frame(&mut persisted_inflight_baseline, &stream_tick_expected_identity, gateway.can_chain_locally(), (shared_owned.as_ref(), cancel_token), &full_response, msg).await {
                         Ok(admitted) => admitted,
                         Err(_) => { loop_outcome = StreamLoopOutcome::AuthorityLost; break 'outer; }
                     };
