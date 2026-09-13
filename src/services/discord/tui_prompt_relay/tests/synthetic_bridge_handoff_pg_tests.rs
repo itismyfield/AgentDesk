@@ -98,7 +98,22 @@ fn synthetic_bridge_handoff_fixture(
                     advanced.last_offset = std::fs::metadata(&output).unwrap().len();
                     advanced.relay_last_offset = Some(advanced.last_offset);
                     crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(tmux, advanced);
+                    // Exhaust the real claim worker while atomic persistence
+                    // still fails, then exercise the production startup restore.
+                    tokio::time::pause();
+                    tokio::task::yield_now().await;
+                    for _ in 0..(pending::PENDING_START_MAX_CLAIM_ATTEMPTS + 2) {
+                        tokio::time::advance(pending::PENDING_START_BACKSTOP + pending::PENDING_START_CLAIM_RETRY_BACKOFF).await;
+                        tokio::task::yield_now().await;
+                    }
+                    assert!(pending::pending_synthetic_start_abandoned(provider.as_str(), channel.get()));
+                    let retained = pending::load_all().into_iter().find(|record| record.channel_id == channel.get()).unwrap();
+                    assert_eq!(retained.captured_source, record.captured_source);
+                    assert!(retained.attempt_count >= pending::PENDING_START_MAX_CLAIM_ATTEMPTS);
+                    tokio::time::resume();
+                    pending::reset_present_for_tests();
                     std::fs::remove_dir(&inflight_path).unwrap();
+                    synthetic_start::restore_pending_starts(&shared, &provider);
                     tokio::time::timeout(Duration::from_secs(5), async {
                         while pending::load_all().iter().any(|record| record.channel_id == channel.get())
                             || CLAUDE_IDLE_RESPONSE_TAILS.lock().unwrap().contains(tmux)
