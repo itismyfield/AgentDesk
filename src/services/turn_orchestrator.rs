@@ -39,7 +39,7 @@ use dispatch_reservation::{
 };
 use episode_identity::{
     TurnNonceGuard, matching_cancel_token, persist_queue_or_restore,
-    reset_watchdog_extension_state, take_watchdog_override_if_current, turn_nonce_guard_matches,
+    reset_watchdog_extension_state, take_watchdog_override_if_current,
 };
 use front_requeue::requeue_intervention_front;
 pub(crate) use overflow::SoftInterventionProbe;
@@ -1780,6 +1780,7 @@ enum ChannelMailboxMsg {
     /// NEWER turn's token or decrement `global_active`. On mismatch this is a
     /// no-op that returns `removed_token = None`, leaving the live turn intact.
     FinishTurnIfMatches {
+        expected_actor: Option<Arc<CancelToken>>,
         preserve_queue: bool,
         expected_user_message_id: MessageId,
         active_started_before: Option<Instant>,
@@ -2920,6 +2921,7 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     mark_turn_finished_signal_done(channel_id);
                 }
                 ChannelMailboxMsg::FinishTurnIfMatches {
+                    expected_actor,
                     preserve_queue,
                     expected_user_message_id,
                     active_started_before,
@@ -2936,18 +2938,13 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     // mirrors `mailbox_finish_turn`'s idempotent second-call
                     // shape, so the finalizer's `removed_token.is_some()` gate
                     // skips the counter decrement and trailing release.
-                    let matches = state
-                        .active_user_message_id
-                        .is_some_and(|active| active == expected_user_message_id)
-                        && active_started_before.is_none_or(|started_before| {
-                            state
-                                .turn_started_instant
-                                .is_some_and(|started_at| started_at < started_before)
-                        })
-                        && turn_nonce_guard_matches(
-                            &turn_nonce_guard,
-                            state.active_turn_nonce.as_deref(),
-                        );
+                    let matches = episode_identity::finish_turn_identity_matches(
+                        &state,
+                        expected_user_message_id,
+                        &expected_actor,
+                        active_started_before,
+                        &turn_nonce_guard,
+                    );
                     if matches {
                         state.last_persistence = Some(persistence.clone());
                         let finished_user_message_id = state.active_user_message_id;
