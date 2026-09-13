@@ -119,24 +119,40 @@ pub(super) fn decision(
         if eof.is_none_or(|eof| source.range.1 > eof) {
             return fallback;
         }
-        let Some(anchor) = delivery_frontier_probe::current_generation_delivered_anchor(
+        // An exact current-source receipt survives advancement of the frontier
+        // to a later range/anchor. The frontier is an anchor discovery hint,
+        // not a veto over that confirmed transport result.
+        let has_receipt = |message_id| {
+            dr::confirmed_delivery_receipt_exists(
+                &state.provider,
+                ctx.channel_id,
+                message_id,
+                &source,
+            )
+        };
+        if has_receipt(ctx.current_msg_id.get()) {
+            return AlreadyDelivered;
+        }
+        let anchor = delivery_frontier_probe::current_generation_delivered_anchor(
             &state.provider,
             ctx.watcher_owner_channel_id,
             tmux,
             eof,
-        ) else {
-            return fallback;
-        };
-        if anchor.range.0 <= source.range.0
-            && anchor.range.1 >= source.range.1
-            && anchor.panel_channel_id == ctx.channel_id.get()
-            && dr::confirmed_delivery_receipt_exists(
-                &state.provider,
-                ctx.channel_id,
-                anchor.panel_msg_id,
-                &source,
-            )
-        {
+        );
+        if anchor.is_some_and(|anchor| {
+            anchor.range.0 <= source.range.0
+                && anchor.range.1 >= source.range.1
+                && anchor.panel_channel_id == ctx.channel_id.get()
+                && has_receipt(anchor.panel_msg_id)
+        }) || dr::read_record(&state.provider, source.offset_authority_channel_id).is_some_and(
+            |record| {
+                record.confirmed_deliveries.iter().any(|receipt| {
+                    receipt.source == source
+                        && receipt.delivery_channel_id == ctx.channel_id.get()
+                        && has_receipt(receipt.message_id)
+                })
+            },
+        ) {
             // Both same-anchor retries and a receipt on another anchor are
             // settled without touching either Discord message.
             AlreadyDelivered

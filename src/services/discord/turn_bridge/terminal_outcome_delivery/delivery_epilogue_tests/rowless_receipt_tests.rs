@@ -234,3 +234,104 @@ async fn exact_receipt_rowless_terminal_uncovered_or_stale_still_publishes_5521(
         );
     }
 }
+
+#[tokio::test]
+async fn exact_receipt_rowless_terminal_survives_newer_frontier_at_another_anchor_5521() {
+    for delivered_anchor in [DRIVER_CURRENT_MSG_ID, DRIVER_FALLBACK_ANCHOR_MSG_ID] {
+        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+        let (ctx, state, source) = receipt_parts(&driver, ProviderKind::Codex);
+        dr::record_current_pinned_delivery(&source, delivered_anchor).unwrap();
+        // The original exact receipt stays in the same-generation bounded
+        // record after another range becomes the latest frontier.
+        let path = state.inflight_state.output_path.as_ref().unwrap();
+        std::fs::write(path, [b'x'; 128]).unwrap();
+        let mut later = source.clone();
+        later.range = (64, 128);
+        later.turn_nonce.push_str("-later");
+        dr::record_current_pinned_delivery(&later, DRIVER_STALE_PREFIX_MSG_ID).unwrap();
+        let output = run(ctx, state).await;
+        assert!(output.terminal_delivery_committed);
+        assert!(driver.observations().is_empty());
+    }
+}
+
+// Re-use the actual terminal driver's output as the postlude input. Only the
+// unrelated transcript/accounting inputs are neutral; projection and inflight
+// settlement run through the production caller.
+#[rustfmt::skip]
+async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDeliveryOutput, footer: bool) {
+    use super::super::super::{completion_postlude as postlude, guards};
+    let channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
+    let (_, rx) = std::sync::mpsc::channel();
+    let fence = tokio::sync::OnceCell::new();
+    let _ = super::super::super::capture_bridge_clear_fence(&driver.shared, channel_id, rx, &fence).await;
+    let completion_guard = guards::CompletionGuard::for_completion_test(driver.shared.clone(), channel_id, DRIVER_USER_MSG_ID);
+    let inflight_guard = guards::InflightCleanupGuard::for_completion_test(&output.inflight_state, driver.shared.token_hash.clone());
+    let ctx = postlude::CompletionPostludeContext {
+        shared_owned: output.shared_owned, gateway: output.gateway, channel_id,
+        provider: output.provider, cancel_token: output.cancel_token,
+        user_msg_id: Some(MessageId::new(DRIVER_USER_MSG_ID)), turn_id: output.turn_id,
+        request_owner_name: String::new(), final_session_status: "idle", status_panel_started_at: 0,
+        has_queued_turns: false, defer_watcher_resume: true, can_chain_locally: true,
+        single_message_panel_footer_mode: footer, is_external_input_tui_direct: false,
+        context_window_tokens: 0, context_compact_percent: 0,
+        clear_fence: fence.into_inner().unwrap(), turn_start: output.turn_start,
+    };
+    let state = postlude::CompletionPostludeState {
+        watcher_delivery_pin: driver.parts().0.watcher_delivery_pin,
+        full_response: output.full_response, user_text_owned: output.user_text_owned,
+        role_binding: None, adk_session_key: None, adk_session_name: None, adk_session_info: None,
+        adk_cwd: None, dispatch_id: None, dispatch_kind: None, new_session_id: None,
+        new_raw_provider_session_id: None,
+        status_panel_terminal_committed: output.status_panel_terminal_committed,
+        bridge_should_emit_completion: output.bridge_should_emit_completion,
+        current_msg_id: MessageId::new(DRIVER_CURRENT_MSG_ID),
+        status_panel_msg_id: Some(MessageId::new(DRIVER_CURRENT_MSG_ID)),
+        last_status_panel_text: "working".into(),
+        completion_footer_terminal_text: output.completion_footer_terminal_text,
+        busy_requeue_outcome: output.busy_requeue_outcome, spin_idx: 0, status_panel_generation: 0,
+        preserve_inflight_for_cleanup_retry: output.preserve_inflight_for_cleanup_retry,
+        tmux_last_offset: Some(64), watcher_owner_channel_id: channel_id,
+        bridge_relay_delegated_to_watcher: false, is_prompt_too_long: false,
+        resume_failure_detected: false, recovery_retry: false, rx_disconnected: false,
+        tmux_handed_off: false, bridge_output_owner: None,
+        terminal_delivery_committed: output.terminal_delivery_committed,
+        terminal_session_reset_required: false, transcript_events: Vec::new(),
+        accumulated_input_tokens: 0, accumulated_cache_create_tokens: 0,
+        accumulated_cache_read_tokens: 0, accumulated_output_tokens: 0,
+        accumulated_memory_input_tokens: 0, accumulated_memory_output_tokens: 0,
+        transport_error: false, api_friction_reports: Vec::new(), cancelled: false,
+        restart_followup_pending: None,
+        bridge_skip_holder_owns_inflight: output.bridge_skip_holder_owns_inflight,
+        completion_guard, inflight_guard, inflight_state: output.inflight_state,
+    };
+    tokio::time::timeout(DRIVER_TIMEOUT, postlude::run_completion_postlude(ctx, state)).await.unwrap();
+}
+
+#[tokio::test]
+async fn exact_receipt_rowless_terminal_runs_postlude_without_footer_or_status_mutation_5521() {
+    for footer in [false, true] {
+        let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+        Arc::get_mut(&mut driver.shared)
+            .unwrap()
+            .ui
+            .status_panel_v2_enabled = true;
+        let _mailbox = driver.shared.mailbox(ChannelId::new(DRIVER_CHANNEL_ID));
+        let (mut ctx, state, source) = receipt_parts(&driver, ProviderKind::Codex);
+        ctx.entry_was_rowless = true;
+        ctx.single_message_panel_footer_mode = footer;
+        inflight::save_inflight_state(&state.inflight_state).unwrap();
+        dr::record_current_pinned_delivery(&source, DRIVER_CURRENT_MSG_ID).unwrap();
+        let output = run(ctx, state).await;
+        run_postlude(&driver, output, footer).await;
+        assert!(
+            driver.observations().is_empty(),
+            "footer={footer}: terminal and postlude perform zero gateway mutations"
+        );
+        assert!(
+            inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID)
+                .is_none(),
+            "receipt settles and clears this actor's own row"
+        );
+    }
+}

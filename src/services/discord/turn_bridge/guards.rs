@@ -107,6 +107,16 @@ pub(super) struct InflightCleanupGuard {
 }
 
 impl InflightCleanupGuard {
+    #[cfg(test)]
+    pub(super) fn for_completion_test(state: &InflightTurnState, token_hash: String) -> Self {
+        Self {
+            provider: state.provider_kind(),
+            channel_id: state.channel_id,
+            user_msg_id: state.user_msg_id,
+            token_hash,
+        }
+    }
+
     /// Disarms abnormal-exit cleanup after the caller explicitly handled or
     /// deliberately preserved the durable row.
     pub(super) fn defuse(&mut self) {
