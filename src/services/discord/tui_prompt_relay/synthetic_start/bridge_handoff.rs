@@ -105,17 +105,16 @@ pub(super) async fn prepare_admission(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn refresh_existing(
     shared: &Arc<SharedData>,
     mut row: InflightTurnState,
     lease: &ExternalInputRelayLease,
     relay_owner: ExternalInputRelayOwner,
     owner_kind: RelayOwnerKind,
-    actor: Option<&Arc<CancelToken>>,
-    freshly_admitted: bool,
+    admission: (Option<&Arc<CancelToken>>, bool),
     pg_pin: Option<HookSessionActorPin>,
 ) -> TuiDirectSyntheticTurnClaim {
+    let (actor, freshly_admitted) = admission;
     use super::super::super::inflight;
     let pg_pin = original_session_pin(&row, actor).unwrap_or(pg_pin);
     let expected = inflight::InflightTurnIdentity::from_state(&row);

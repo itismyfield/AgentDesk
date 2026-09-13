@@ -273,8 +273,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
             lease,
             relay_owner,
             relay_owner_kind,
-            Some(&admitted_actor),
-            mailbox_activation_occurred,
+            (Some(&admitted_actor), mailbox_activation_occurred),
             pg_pin,
         )
         .await;

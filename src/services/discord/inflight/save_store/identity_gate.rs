@@ -474,15 +474,11 @@ pub(in crate::services::discord) fn bind_recovery_anchor_if_matches_identity(
     bind_recovery_anchor_if_matches_snapshot(
         provider,
         channel_id,
-        expected,
-        expected_turn_start_offset,
-        expected_current_msg_id,
-        expected_current_msg_len,
-        anchor_msg_id,
-        anchor_text_len,
+        (expected, expected_turn_start_offset, None),
+        (expected_current_msg_id, expected_current_msg_len),
+        (anchor_msg_id, anchor_text_len),
         expected_relay_authority,
         refresh_on_saved,
-        None,
     )
 }
 
@@ -496,32 +492,34 @@ pub(in crate::services::discord) fn bind_recovery_anchor_for_snapshot(
     bind_recovery_anchor_if_matches_snapshot(
         provider,
         expected.channel_id,
-        &InflightTurnIdentity::from_state(&expected),
-        expected.turn_start_offset,
-        expected.current_msg_id,
-        Some(expected.current_msg_len),
-        anchor_msg_id,
-        anchor_text_len,
+        (
+            &InflightTurnIdentity::from_state(&expected),
+            expected.turn_start_offset,
+            Some(&expected),
+        ),
+        (expected.current_msg_id, Some(expected.current_msg_len)),
+        (anchor_msg_id, anchor_text_len),
         None,
         Some(state),
-        Some(&expected),
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn bind_recovery_anchor_if_matches_snapshot(
     provider: &ProviderKind,
     channel_id: u64,
-    expected: &InflightTurnIdentity,
-    expected_turn_start_offset: Option<u64>,
-    expected_current_msg_id: u64,
-    expected_current_msg_len: Option<usize>,
-    anchor_msg_id: u64,
-    anchor_text_len: usize,
+    identity: (
+        &InflightTurnIdentity,
+        Option<u64>,
+        Option<&InflightTurnState>,
+    ),
+    expected_message: (u64, Option<usize>),
+    anchor: (u64, usize),
     expected_relay_authority: Option<StreamRelayAuthority>,
     refresh_on_saved: Option<&mut InflightTurnState>,
-    captured: Option<&InflightTurnState>,
 ) -> GuardedSaveOutcome {
+    let (expected, expected_turn_start_offset, captured) = identity;
+    let (expected_current_msg_id, expected_current_msg_len) = expected_message;
+    let (anchor_msg_id, anchor_text_len) = anchor;
     let Some(root) = inflight_runtime_root() else {
         return GuardedSaveOutcome::IoError;
     };

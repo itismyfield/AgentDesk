@@ -327,8 +327,12 @@ fn synthetic_bridge_handoff_fixture(
                     let (end_tx, end_rx) = tokio::sync::oneshot::channel();
                     let reader = spawn_handoff_reader(&output, source_start, tmux, tx, end_tx);
                     let result = tokio::time::timeout(Duration::from_secs(5), claude_idle_bridge::stream_tui_idle_response_with_gateway(
-                        &shared, provider.clone(), channel, tmux, &output, source_start,
-                        "handoff prompt", Vec::new(), rx, Some(end_rx), &lease, gateway.clone(), 0,
+                        &shared, provider.clone(), channel,
+                        claude_idle_bridge::IdleBridgeSource {
+                            tmux_session_name: tmux, output_path: &output, start_offset: source_start,
+                            prompt_text: "handoff prompt", lease: &lease,
+                        },
+                        (Vec::new(), rx, Some(end_rx)), gateway.clone(), 0,
                     )).await.expect("empty/error reader settles within the reader bound");
                     tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
                     if empty_case == EmptyTailCase::DeferredError {
@@ -453,8 +457,12 @@ fn synthetic_bridge_handoff_fixture(
             let (tx, rx) = mpsc::channel();
             let (end_tx, end_rx) = tokio::sync::oneshot::channel();
             let delivery = claude_idle_bridge::stream_tui_idle_response_with_gateway(
-                &shared, provider.clone(), channel, tmux, &output, original_start,
-                "handoff prompt", Vec::new(), rx, Some(end_rx), &resumed, gateway.clone(), 0,
+                &shared, provider.clone(), channel,
+                claude_idle_bridge::IdleBridgeSource {
+                    tmux_session_name: tmux, output_path: &output, start_offset: original_start,
+                    prompt_text: "handoff prompt", lease: &resumed,
+                },
+                (Vec::new(), rx, Some(end_rx)), gateway.clone(), 0,
             );
             let reader = spawn_handoff_reader(&output, original_start, tmux, tx, end_tx);
             let observe = async {
@@ -553,8 +561,12 @@ fn synthetic_bridge_handoff_fixture(
                 let (end_tx, end_rx) = tokio::sync::oneshot::channel();
                 let reader = spawn_handoff_reader(&output, retained.last_offset, tmux, tx, end_tx);
                 tokio::time::timeout(Duration::from_secs(5), claude_idle_bridge::stream_tui_idle_response_with_gateway(
-                    &shared, provider.clone(), channel, tmux, &output, retained.last_offset,
-                    "handoff prompt", Vec::new(), rx, Some(end_rx), &renewed, gateway.clone(), 0,
+                    &shared, provider.clone(), channel,
+                    claude_idle_bridge::IdleBridgeSource {
+                        tmux_session_name: tmux, output_path: &output, start_offset: retained.last_offset,
+                        prompt_text: "handoff prompt", lease: &renewed,
+                    },
+                    (Vec::new(), rx, Some(end_rx)), gateway.clone(), 0,
                 )).await.expect("resumed adapter finishes").expect("the original saved prefix and later terminal remain deliverable");
                 tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
                 let bodies = gateway.bodies.lock().unwrap();

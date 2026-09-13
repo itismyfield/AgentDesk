@@ -177,8 +177,7 @@ pub(in crate::services::discord) fn clear_inflight_state_for_snapshot(
         snapshot.channel_id,
         &InflightTurnIdentity::from_state(snapshot),
         snapshot.effective_finalizer_turn_id(),
-        &snapshot.updated_at,
-        snapshot.save_generation,
+        (&snapshot.updated_at, snapshot.save_generation),
         Some(&super::InflightEpisodePin::from_state(snapshot)),
     )
 }
@@ -533,23 +532,21 @@ pub(super) fn clear_inflight_state_if_matches_identity_generation_in_root(
         channel_id,
         expected,
         expected_finalizer_turn_id,
-        expected_updated_at,
-        expected_save_generation,
+        (expected_updated_at, expected_save_generation),
         None,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn clear_inflight_state_if_matches_identity_generation_and_episode_in_root(
     root: &std::path::Path,
     provider: &ProviderKind,
     channel_id: u64,
     expected: &InflightTurnIdentity,
     expected_finalizer_turn_id: u64,
-    expected_updated_at: &str,
-    expected_save_generation: u64,
+    expected_generation: (&str, u64),
     expected_episode: Option<&super::InflightEpisodePin>,
 ) -> GuardedClearOutcome {
+    let (expected_updated_at, expected_save_generation) = expected_generation;
     let path = inflight_state_path(root, provider, channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedClearOutcome::IoError;

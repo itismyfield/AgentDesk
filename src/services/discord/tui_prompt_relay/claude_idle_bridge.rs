@@ -368,14 +368,14 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
         shared,
         provider,
         channel_id,
-        tmux_session_name,
-        output_path,
-        start_offset,
-        prompt_text,
-        prefix,
-        reader_rx,
-        reader_end,
-        lease,
+        IdleBridgeSource {
+            tmux_session_name,
+            output_path,
+            start_offset,
+            prompt_text,
+            lease,
+        },
+        (prefix, reader_rx, reader_end),
         gateway,
         context_compact_percent,
     )
@@ -383,22 +383,36 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
 }
 
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
+pub(super) struct IdleBridgeSource<'a> {
+    pub(super) tmux_session_name: &'a str,
+    pub(super) output_path: &'a Path,
+    pub(super) start_offset: u64,
+    pub(super) prompt_text: &'a str,
+    pub(super) lease: &'a ExternalInputRelayLease,
+}
+
+#[cfg(unix)]
 pub(super) async fn stream_tui_idle_response_with_gateway(
     shared: &Arc<SharedData>,
     provider: ProviderKind,
     channel_id: ChannelId,
-    tmux_session_name: &str,
-    output_path: &Path,
-    start_offset: u64,
-    prompt_text: &str,
-    prefix: Vec<StreamMessage>,
-    reader_rx: mpsc::Receiver<StreamMessage>,
-    reader_end: Option<IdleReaderEnd>,
-    lease: &ExternalInputRelayLease,
+    source: IdleBridgeSource<'_>,
+    reader: (
+        Vec<StreamMessage>,
+        mpsc::Receiver<StreamMessage>,
+        Option<IdleReaderEnd>,
+    ),
     gateway: Arc<dyn super::super::gateway::TurnGateway>,
     context_compact_percent: u64,
 ) -> Result<Option<u64>, String> {
+    let IdleBridgeSource {
+        tmux_session_name,
+        output_path,
+        start_offset,
+        prompt_text,
+        lease,
+    } = source;
+    let (prefix, reader_rx, reader_end) = reader;
     let claim = super::synthetic_start::bridge_handoff::capture(
         shared,
         &provider,
