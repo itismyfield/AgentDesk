@@ -1250,4 +1250,5 @@ impl InflightTurnState {
 }
 
 #[cfg(all(test, unix))]
+#[path = "runtime_stamp/claude_terminal_tests.rs"]
 mod claude_terminal_tests;
