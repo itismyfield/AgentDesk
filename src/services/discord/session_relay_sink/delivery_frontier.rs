@@ -74,7 +74,7 @@ pub(super) fn capture_sink_delivery_authority(
     }
 }
 
-fn current_inflight_matches(
+pub(super) fn current_inflight_matches(
     provider: &ProviderKind,
     channel_id: u64,
     session_name: &str,

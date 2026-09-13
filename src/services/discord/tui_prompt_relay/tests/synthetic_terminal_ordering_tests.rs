@@ -23,6 +23,7 @@ fn terminal_ordering_fixture(
     replace_after_delivery: bool,
     empty_terminal: bool,
     source_race: Option<SourceRace>,
+    provider: ProviderKind,
 ) {
     let _telemetry = crate::services::observability::test_runtime_lock();
     crate::services::observability::reset_for_tests();
@@ -34,7 +35,7 @@ fn terminal_ordering_fixture(
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
         .block_on(async {
             let shared = crate::services::discord::make_shared_data_for_tests();
-            let provider = ProviderKind::Claude;
+            let runtime = if provider == ProviderKind::Codex { RuntimeHandoffKind::CodexTui } else { RuntimeHandoffKind::ClaudeTui };
             let channel = ChannelId::new(583_310_001);
             let anchor = MessageId::new(if source_race.is_some() { 583_310_002_000_000 } else { 583_310_002 });
             let tmux = "synthetic-terminal-ordering-5833";
@@ -47,10 +48,17 @@ fn terminal_ordering_fixture(
             };
             let assistant = serde_json::json!({"type":"assistant", "sessionId":"native-ordering-session", "message":{"content":[{"type":"text", "text":body}]}});
             let terminal = serde_json::json!({"type":"result", "session_id":"native-ordering-session", "subtype":"success", "result":body});
-            std::fs::write(&output, format!("{assistant}\n{terminal}\n")).unwrap();
+            let (assistant, terminal) = if provider == ProviderKind::Codex {
+                (serde_json::json!({"type":"response_item", "payload":{"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":body}]}}),
+                 serde_json::json!({"type":"event_msg", "payload":{"type":"task_complete", "last_agent_message":body}}))
+            } else { (assistant, terminal) };
+            let header = if provider == ProviderKind::Codex {
+                format!("{}\n", serde_json::json!({"type":"session_meta", "payload":{"id":"native-ordering-session"}}))
+            } else { String::new() };
+            std::fs::write(&output, format!("{header}{assistant}\n{terminal}\n")).unwrap();
             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(tmux,
                 crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    runtime_kind: runtime,
                     output_path: output.to_str().unwrap().into(),
                     relay_output_path: None, input_fifo_path: None,
                     session_id: None, last_offset: 0, relay_last_offset: None,
@@ -58,7 +66,7 @@ fn terminal_ordering_fixture(
             let mut lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
             lease.turn_id = Some("external-5833-terminal-ordering".into());
             lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
-            lease.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+            lease.runtime_kind = Some(runtime);
             let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
                 provider.as_str(), tmux, lease);
             assert!(synthetic_start::claim_tui_direct_synthetic_turn(
@@ -125,10 +133,10 @@ fn terminal_ordering_fixture(
                 assert_eq!(row.session_id.as_deref(), Some("native-ordering-session"));
                 assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux)
                     .unwrap().session_id.as_deref(), Some("native-ordering-session"),
-                    "the actual source witness connects the original missing session before publication");
+                    "the reader learns the source session before publication");
                 if let Some(race) = source_race {
                     assert_eq!(shared.turn_view_reconciler.ops(), pending_view,
-                        "admitted Claude keeps its pending view until confirmed publication");
+                        "captured TUI terminal keeps its pending view until confirmed publication");
                     use std::os::unix::fs::MetadataExt;
                     let metadata = std::fs::metadata(&output).unwrap();
                     assert_eq!(row.tui_terminal_source_file_identity, Some((metadata.dev(), metadata.ino())),
@@ -199,6 +207,15 @@ fn terminal_ordering_fixture(
             *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK.lock().unwrap() = None;
             if let Some(race) = source_race.filter(|race| *race != SourceRace::Unchanged) {
                 assert!(delivered.is_err(), "{race:?} cannot signal terminal completion");
+                if provider == ProviderKind::Codex {
+                    // Exercise the actual outer-tail settlement helper after the
+                    // bridge preserves its admitted source on failure.
+                    for reader_failed in [false, true] {
+                        codex_idle_rollout::finish_failed_codex_idle_reader(
+                            &shared, channel, tmux, &lease, reader_failed,
+                        ).await;
+                    }
+                }
                 let expected_turn_id = format!("discord:{}:{}", channel.get(), anchor.get());
                 let is_episode_quality = |event: &crate::services::observability::events::StructuredEvent|
                     event.channel_id == Some(channel.get()) && event.event_type == "agent_quality_event"
@@ -372,19 +389,19 @@ fn terminal_ordering_fixture(
 
 #[test]
 fn synthetic_terminal_gateway_retains_original_actor_until_publication() {
-    terminal_ordering_fixture(false, false, false, None);
-    terminal_ordering_fixture(false, false, true, None);
+    terminal_ordering_fixture(false, false, false, None, ProviderKind::Claude);
+    terminal_ordering_fixture(false, false, true, None, ProviderKind::Claude);
 }
 
 #[test]
 fn synthetic_terminal_gateway_preserves_same_nonce_recovery_actor() {
-    terminal_ordering_fixture(true, false, false, None);
-    terminal_ordering_fixture(true, false, true, None);
+    terminal_ordering_fixture(true, false, false, None, ProviderKind::Claude);
+    terminal_ordering_fixture(true, false, true, None, ProviderKind::Claude);
 }
 
 #[test]
 fn synthetic_terminal_duplicate_finalizer_preserves_same_nonce_recovery_actor() {
-    terminal_ordering_fixture(false, true, false, None);
+    terminal_ordering_fixture(false, true, false, None, ProviderKind::Claude);
 }
 
 #[test]
@@ -398,7 +415,14 @@ fn synthetic_terminal_gateway_rejects_lost_admitted_source() {
         SourceRace::PinGeneration,
         SourceRace::LiveHolder,
     ] {
-        terminal_ordering_fixture(false, false, false, Some(race));
+        terminal_ordering_fixture(false, false, false, Some(race), ProviderKind::Claude);
+    }
+    for race in [
+        SourceRace::FileIdentity,
+        SourceRace::RevalidationIo,
+        SourceRace::PinGeneration,
+    ] {
+        terminal_ordering_fixture(false, false, false, Some(race), ProviderKind::Codex);
     }
 }
 
@@ -409,6 +433,6 @@ fn synthetic_terminal_gateway_source_loss_preserves_same_nonce_successor() {
         SourceRace::FileIdentity,
         SourceRace::Session,
     ] {
-        terminal_ordering_fixture(true, false, false, Some(race));
+        terminal_ordering_fixture(true, false, false, Some(race), ProviderKind::Claude);
     }
 }

@@ -16,7 +16,7 @@ pub(super) fn matched(channel_id: &str) -> MatchedChannel {
     }
 }
 
-fn matched_codex(channel_id: &str) -> MatchedChannel {
+pub(super) fn matched_codex(channel_id: &str) -> MatchedChannel {
     let session = ProviderKind::Codex.build_tmux_session_name(channel_id);
     MatchedChannel {
         channel_id: channel_id.to_string(),

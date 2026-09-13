@@ -119,10 +119,12 @@ pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
     text: &str,
 ) -> bool {
     use crate::services::discord::{inflight, outbound::delivery_record as dr};
-    let Some(admitted) = inflight::CodexRange::from_retained_claude_terminal(row) else {
+    let Some(admitted) = inflight::CodexRange::from_retained_tui_terminal(row) else {
         return false;
     };
-    let provider = ProviderKind::Claude;
+    let Some(provider) = row.provider_kind() else {
+        return false;
+    };
     let owner = ChannelId::new(admitted.source.offset_authority_channel_id);
     let channel = ChannelId::new(admitted.source.delivery_channel_id);
     let Some(message) = inflight::opt_message_id(row.current_msg_id) else {
@@ -206,11 +208,13 @@ pub(in crate::services::discord::turn_bridge) fn prepare_bridge_lease(
     if matches!(acquire, Skip) {
         return PreparedBridgeLease::Legacy(acquire);
     }
-    // A positively admitted Claude terminal may publish only with its exact
-    // source. Losing that proof does not restore legacy publication authority.
+    // Captured terminals cannot regain legacy authority after source loss.
+    #[cfg(unix)]
+    let requires_source =
+        matches!(provider, ProviderKind::Claude) || admitted.source_file_identity.is_some();
     #[cfg(unix)]
     let unavailable = || {
-        if matches!(provider, ProviderKind::Claude) {
+        if requires_source {
             PreparedBridgeLease::Unresolved
         } else {
             PreparedBridgeLease::Legacy(NoRange)
@@ -222,13 +226,11 @@ pub(in crate::services::discord::turn_bridge) fn prepare_bridge_lease(
     match admitted.revalidated_source(inflight) {
         // #5264: Codex I/O failure keeps the real acquire result; inventing a
         // Skip here would claim another holder owns a lease we just released.
-        Err(()) if !matches!(provider, ProviderKind::Claude) => {
-            PreparedBridgeLease::Legacy(acquire)
-        }
+        Err(()) if !requires_source => PreparedBridgeLease::Legacy(acquire),
         Err(()) | Ok(None) => unavailable(),
         Ok(Some(source)) => match acquire {
-            // Pin consumes the lease, including on failure. Only Codex retains
-            // legacy retry permission after that release; Claude needs its proof.
+            // Pin consumes the lease, including on failure. Only uncaptured Codex retains
+            // legacy retry permission after that release.
             Held(lease) => {
                 #[cfg(test)]
                 if let Some(hook) = terminal_prepare_test::for_channel(delivery_channel) {
@@ -272,7 +274,7 @@ macro_rules! dispatch_pinned_terminal {
                 $crate::services::discord::turn_bridge::stream_loop::types::PreparedBridgeLease::Unresolved => {
                     $preserve = true;
                     $outcome = $crate::services::discord::turn_bridge::terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::Unresolved {
-                        error: "admitted Claude terminal lost its verified source or delivery lease".into(),
+                        error: "admitted terminal lost its verified source or delivery lease".into(),
                     };
                     $handled = true;
                 }

@@ -8,10 +8,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::provider::{CancelToken, ReadOutputResult, cancel_requested};
-pub(crate) use parser::recover_captured_rollout_response;
 use parser::{
-    RolloutParseState, process_rollout_line_bytes, task_complete_fallback_supersedes_final_text,
+    RolloutParseState, emit_done, process_rollout_line_bytes,
+    task_complete_fallback_supersedes_final_text,
 };
+pub(crate) use parser::{RolloutRecordDecoder, recover_captured_rollout_response};
 // REQ-006: share the single rollout discovery primitive so `session.rs` and
 // `rollout_tail.rs` do not maintain two divergent directory walkers. Tailing
 // semantics are unchanged — callers here still apply their own cwd/session/mtime
@@ -74,6 +75,7 @@ const DEFAULT_PANE_BUSY_VETO_CAP_SECS: u64 = 2 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolloutTailOutcome {
+    pub harvest: crate::services::session_backend::ReadHarvestStats,
     pub lines_read: usize,
     pub bytes_read: u64,
     pub final_offset: u64,
@@ -347,6 +349,32 @@ pub fn tail_rollout_file_from_offset_for_tmux(
         cancel_token,
         is_alive,
         Some(pane_busy_probe_for_tmux(tmux_session_name)),
+    )
+}
+
+/// Strict idle reader completion carries the opened descriptor, never a later path stat.
+pub(crate) fn tail_idle_rollout_for_tmux(
+    rollout_path: &Path,
+    start_offset: u64,
+    session_id: Option<String>,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+    tmux_session_name: &str,
+) -> Result<(ReadOutputResult, RolloutTailOutcome), String> {
+    let options = RolloutTailOptions {
+        pane_busy_probe: Some(pane_busy_probe_for_tmux(tmux_session_name)),
+        tmux_session_name: Some(tmux_session_name.to_owned()),
+        ..Default::default()
+    };
+    tail_rollout_file_until_assistant_response_with_pane_busy_probe(
+        rollout_path,
+        start_offset,
+        session_id,
+        &sender,
+        cancel_token,
+        is_alive,
+        options,
     )
 }
 
@@ -890,6 +918,12 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
         .map_err(|error| format!("seek Codex rollout {}: {error}", rollout_path.display()))?;
 
     let mut state = RolloutParseState {
+        harvest: crate::services::session_backend::ReadHarvestStats {
+            source_file: Some(
+                crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&file),
+            ),
+            ..Default::default()
+        },
         session_id: initial_session_id,
         tmux_session_name,
         discord_origin_prompt,
@@ -937,7 +971,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                 {
                     emit_done(
                         &sender,
-                        &state,
+                        &mut state,
                         finalize_path,
                         rollout_path,
                         current_offset,
@@ -977,7 +1011,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                         if heuristic_finalize_allowed(&mut state, rollout_path, current_offset) {
                             emit_done(
                                 &sender,
-                                &state,
+                                &mut state,
                                 RolloutFinalizePath::Heuristic,
                                 rollout_path,
                                 current_offset,
@@ -1082,7 +1116,7 @@ fn tail_rollout_file_until_assistant_response_with_pane_busy_probe(
                     let result = if state.saw_assistant_text {
                         emit_done(
                             &sender,
-                            &state,
+                            &mut state,
                             RolloutFinalizePath::Heuristic,
                             rollout_path,
                             current_offset,
@@ -1244,6 +1278,7 @@ fn try_process_complete_partial_line(
 /// this change.
 fn outcome(state: &RolloutParseState, source_start: u64) -> RolloutTailOutcome {
     RolloutTailOutcome {
+        harvest: state.harvest,
         lines_read: state.lines_read,
         bytes_read: state.bytes_read,
         final_offset: source_start.saturating_add(state.bytes_read),
@@ -1464,66 +1499,6 @@ fn heuristic_finalize_allowed(
     false
 }
 
-fn emit_done(
-    sender: &RelaySuppressionSender<'_>,
-    state: &RolloutParseState,
-    finalize_path: RolloutFinalizePath,
-    rollout_path: &Path,
-    offset: u64,
-    terminal_range: (u64, Option<&str>, bool),
-) {
-    let (source_start, turn_nonce, terminal_range_eligible) = terminal_range;
-    let complete_record_end = source_start.saturating_add(state.bytes_read);
-    tracing::info!(
-        rollout_path = %rollout_path.display(),
-        offset,
-        finalize_path = finalize_path.as_str(),
-        session_id = state.session_id.as_deref(),
-        lines_read = state.lines_read,
-        bytes_read = state.bytes_read,
-        source_start,
-        complete_record_end,
-        saw_assistant_text = state.saw_assistant_text,
-        hook_completion_seen = state.hook_completion_seen,
-        composer_ready_seen = state.composer_ready_seen,
-        final_text_len = state.final_text.len(),
-        task_complete_fallback_len = state
-            .task_complete_fallback_text
-            .as_deref()
-            .map(str::len)
-            .unwrap_or(0),
-        "codex rollout tail emitting Done"
-    );
-    let identity = state
-        .tmux_session_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .zip(turn_nonce.map(str::trim).filter(|value| !value.is_empty()));
-    if terminal_range_eligible
-        && finalize_path != RolloutFinalizePath::Heuristic
-        && offset == complete_record_end
-        && state.saw_assistant_text
-        && complete_record_end > source_start
-        && let Some((tmux_session_name, turn_nonce)) = identity
-    {
-        sender.send(StreamMessage::CodexTuiTerminalDone {
-            result: state.final_text.clone(),
-            session_id: state.session_id.clone(),
-            rollout_path: rollout_path.display().to_string(),
-            tmux_session_name: tmux_session_name.to_string(),
-            turn_nonce: turn_nonce.to_string(),
-            source_start,
-            complete_record_end,
-        });
-    } else {
-        sender.send(StreamMessage::Done {
-            result: state.final_text.clone(),
-            session_id: state.session_id.clone(),
-        });
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1551,10 +1526,10 @@ mod tests {
             ..RolloutParseState::default()
         };
         state.record(9);
-        let emit = |path, offset, nonce| {
+        let mut emit = |path, offset, nonce| {
             emit_done(
                 &sender,
-                &state,
+                &mut state,
                 path,
                 Path::new("/tmp/raw.jsonl"),
                 offset,

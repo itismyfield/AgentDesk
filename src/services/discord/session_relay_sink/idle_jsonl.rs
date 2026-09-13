@@ -328,6 +328,41 @@ pub(super) fn idle_jsonl_suppressed_range_action(
     }
 }
 
+pub(in crate::services::discord) fn idle_range_is_committed(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: u64,
+    session_name: &str,
+    range: Option<(u64, u64)>,
+    generation: Option<i64>,
+) -> bool {
+    use super::dr;
+    let Some((_, end)) = range else {
+        return false;
+    };
+    let Some(frame_generation) = generation else {
+        return false;
+    };
+    let current_generation = dr::current_generation_mtime_ns(session_name);
+    let current_eof = idle_jsonl_current_eof(provider, session_name);
+    if frame_generation == 0 || current_generation != frame_generation || current_eof.is_none() {
+        return false;
+    }
+    dr::effective_committed_offset(
+        shared,
+        provider,
+        ChannelId::new(channel_id),
+        session_name,
+        current_eof,
+    )
+    .max(dr::delivered_frontier_end_current_generation(
+        provider,
+        ChannelId::new(channel_id),
+        session_name,
+        current_eof,
+    )) >= end
+}
+
 /// Pure decision for the idle relay's intentional classification drops and
 /// current-generation committed-frontier dedup. Temporary grace suppression is
 /// handled separately by [`idle_jsonl_suppressed_range_action`].

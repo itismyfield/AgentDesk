@@ -2123,6 +2123,10 @@ mod active_bridge_turn_guard_tests {
     fn session_bound_relay_owner_still_suppresses_watcher_duplicate() {
         with_ownerless_codex_tui_state(|mut state| {
             state.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
+            state.set_restart_mode(InflightRestartMode::DrainRestart);
+            state.current_msg_id = 0;
+            state.readopted_from_inflight = true;
+            state.terminal_delivery_committed = false;
 
             assert!(watcher_should_yield_to_inflight_state(
                 Some(&state),
@@ -2463,7 +2467,7 @@ pub(super) use self::tmux_watcher::{
     tmux_output_watcher, tmux_output_watcher_with_restore,
 };
 #[path = "tmux_output_stream.rs"]
-mod tmux_output_stream;
+pub(super) mod tmux_output_stream;
 pub(in crate::services::discord) use self::tmux_output_stream::{
     WatcherToolState, build_watcher_placeholder_status_block, flush_placeholder_live_events,
     force_next_watcher_status_update, process_watcher_lines, process_watcher_lines_for_turn,

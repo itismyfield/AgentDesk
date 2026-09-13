@@ -3,18 +3,75 @@ use std::collections::HashSet;
 
 use crate::services::agent_protocol::StreamMessage;
 
-use super::RelaySuppressionSender;
+use super::{RelaySuppressionSender, RolloutFinalizePath};
+use std::path::Path;
+
+/// The restart watcher and session relay consume raw rollout records too.
+/// Share the native tail's parser and explicit completion policy without its
+/// polling, prompt observation, or heuristic EOF completion.
+#[derive(Debug, Default)]
+pub(crate) struct RolloutRecordDecoder(RolloutParseState);
+
+impl RolloutRecordDecoder {
+    pub(crate) fn is_native_record(record: &Value) -> bool {
+        matches!(
+            record.get("type").and_then(Value::as_str),
+            Some(
+                "session_meta"
+                    | "response_item"
+                    | "event_msg"
+                    | "item.completed"
+                    | "turn.completed"
+            )
+        )
+    }
+
+    pub(crate) fn from_reader(reader: impl std::io::BufRead) -> Result<Self, String> {
+        replay_captured_reader(reader).map(Self)
+    }
+
+    pub(crate) fn response(&self) -> &str {
+        &self.0.final_text
+    }
+
+    pub(crate) fn completed_response(mut self) -> Result<String, String> {
+        super::promote_task_complete_fallback_text(&mut self.0);
+        if self.0.has_pending_tool_call()
+            || !self.0.turn_complete_seen
+            || !self.0.saw_assistant_text
+            || self.0.dropped_assistant_content
+        {
+            return Err("captured Codex range has no completed assistant response".into());
+        }
+        Ok(self.0.final_text)
+    }
+
+    pub(crate) fn decode(&mut self, record: &Value) -> Option<Vec<StreamMessage>> {
+        if !Self::is_native_record(record) {
+            return None;
+        }
+        let mut messages = decode_rollout_record(record, &mut self.0);
+        // An agent-message item can finish before the next tool call starts.
+        // Only a turn completion witness authorizes this streaming consumer;
+        // pending tools may defer that witnessed completion until their output.
+        if self.0.turn_complete_seen
+            && !self.0.dropped_assistant_content
+            && super::explicit_finalize_path(&mut self.0, true).is_some()
+        {
+            messages.push(StreamMessage::Done {
+                result: self.0.final_text.clone(),
+                session_id: self.0.session_id.clone(),
+            });
+        }
+        Some(messages)
+    }
+}
 
 /// Detached terminal recovery uses the native parser and its existing fallback
 /// text policy. Missing completion/text remains unknown, just as the live
 /// explicit-completion schema-drift guard requires.
 pub(crate) fn recover_captured_rollout_response(bytes: &[u8]) -> Result<String, String> {
-    let mut state = replay_captured_lines(bytes)?;
-    super::promote_task_complete_fallback_text(&mut state);
-    if state.has_pending_tool_call() || !state.turn_complete_seen || !state.saw_assistant_text {
-        return Err("captured Codex range has no completed assistant response".into());
-    }
-    Ok(state.final_text)
+    RolloutRecordDecoder::from_reader(bytes)?.completed_response()
 }
 
 pub(super) fn task_complete_fallback_supersedes_final_text(
@@ -28,9 +85,11 @@ pub(super) fn task_complete_fallback_supersedes_final_text(
 
 #[derive(Debug, Default)]
 pub(super) struct RolloutParseState {
+    pub(super) harvest: crate::services::session_backend::ReadHarvestStats,
     pub(super) session_id: Option<String>,
     pub(super) final_text: String,
     pub(super) saw_assistant_text: bool,
+    pub(super) dropped_assistant_content: bool,
     pub(super) lines_read: usize,
     pub(super) bytes_read: u64,
     pub(super) pending_tool_calls: HashSet<String>,
@@ -96,9 +155,7 @@ fn process_rollout_line(
     };
 
     state.lifecycle_activity = false;
-    let messages = rollout_messages(&json, state);
-    observe_rollout_user_prompt(&json, state);
-    maybe_observe_synthetic_composer_ready(state);
+    let messages = decode_rollout_record(&json, state);
     let emitted = !messages.is_empty();
     for message in messages {
         sender.send(message);
@@ -106,6 +163,16 @@ fn process_rollout_line(
     let activity = emitted || state.lifecycle_activity;
     state.lifecycle_activity = false;
     activity
+}
+
+pub(super) fn decode_rollout_record(
+    json: &Value,
+    state: &mut RolloutParseState,
+) -> Vec<StreamMessage> {
+    let messages = rollout_messages(json, state);
+    observe_rollout_user_prompt(json, state);
+    maybe_observe_synthetic_composer_ready(state);
+    messages
 }
 
 fn rollout_messages(json: &Value, state: &mut RolloutParseState) -> Vec<StreamMessage> {
@@ -244,8 +311,9 @@ fn response_message_items(payload: &Value, state: &mut RolloutParseState) -> Vec
     content
         .iter()
         .filter_map(|item| {
-            let item_type = item.get("type").and_then(Value::as_str)?;
-            if item_type != "output_text" && item_type != "text" {
+            let item_type = item.get("type").and_then(Value::as_str);
+            if !matches!(item_type, Some("output_text" | "text")) {
+                state.dropped_assistant_content = true;
                 return None;
             }
             let text = item.get("text").and_then(Value::as_str)?.to_string();
@@ -428,11 +496,84 @@ fn compact_json_or_string(value: &Value) -> String {
 /// Replay a captured range through the same native Codex event parser, without
 /// a tmux actor or a live stream sender. Malformed bytes remain unresolved.
 pub(super) fn replay_captured_lines(bytes: &[u8]) -> Result<RolloutParseState, String> {
-    let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+    replay_captured_reader(bytes)
+}
+
+fn replay_captured_reader(reader: impl std::io::BufRead) -> Result<RolloutParseState, String> {
     let mut state = RolloutParseState::default();
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let json = serde_json::from_str::<Value>(line).map_err(|e| e.to_string())?;
+    for line in reader.lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let json = serde_json::from_str::<Value>(&line).map_err(|e| e.to_string())?;
         let _ = rollout_messages(&json, &mut state);
     }
     Ok(state)
+}
+
+pub(super) fn emit_done(
+    sender: &RelaySuppressionSender<'_>,
+    state: &mut RolloutParseState,
+    finalize_path: RolloutFinalizePath,
+    rollout_path: &Path,
+    offset: u64,
+    terminal_range: (u64, Option<&str>, bool),
+) {
+    let (source_start, turn_nonce, terminal_range_eligible) = terminal_range;
+    let complete_record_end = source_start.saturating_add(state.bytes_read);
+    state.harvest.decoded_terminal = finalize_path != RolloutFinalizePath::Heuristic
+        && offset == complete_record_end
+        && !state.has_pending_tool_call()
+        && !state.dropped_assistant_content
+        && state.turn_complete_seen;
+    tracing::info!(
+        rollout_path = %rollout_path.display(),
+        offset,
+        finalize_path = finalize_path.as_str(),
+        session_id = state.session_id.as_deref(),
+        lines_read = state.lines_read,
+        bytes_read = state.bytes_read,
+        source_start,
+        complete_record_end,
+        saw_assistant_text = state.saw_assistant_text,
+        hook_completion_seen = state.hook_completion_seen,
+        composer_ready_seen = state.composer_ready_seen,
+        final_text_len = state.final_text.len(),
+        task_complete_fallback_len = state
+            .task_complete_fallback_text
+            .as_deref()
+            .map(str::len)
+            .unwrap_or(0),
+        "codex rollout tail emitting Done"
+    );
+    let identity = state
+        .tmux_session_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .zip(turn_nonce.map(str::trim).filter(|value| !value.is_empty()));
+    if terminal_range_eligible
+        && finalize_path != RolloutFinalizePath::Heuristic
+        && offset == complete_record_end
+        && state.saw_assistant_text
+        && complete_record_end > source_start
+        && let Some((tmux_session_name, turn_nonce)) = identity
+    {
+        sender.send(StreamMessage::CodexTuiTerminalDone {
+            result: state.final_text.clone(),
+            session_id: state.session_id.clone(),
+            rollout_path: rollout_path.display().to_string(),
+            tmux_session_name: tmux_session_name.to_string(),
+            turn_nonce: turn_nonce.to_string(),
+            source_start,
+            complete_record_end,
+            captured_source: None,
+        });
+    } else {
+        sender.send(StreamMessage::Done {
+            result: state.final_text.clone(),
+            session_id: state.session_id.clone(),
+        });
+    }
 }

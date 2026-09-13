@@ -20,6 +20,8 @@ pub(in crate::services::discord) struct WatcherToolState {
     placeholder_events: Vec<RecentPlaceholderEvent>,
     /// Provider-normalized status events for the status-panel-v2 message.
     status_events: Vec<StatusEvent>,
+    codex_rollout: crate::services::codex_tui::rollout_tail::RolloutRecordDecoder,
+    native_codex_enabled: bool,
 }
 
 impl WatcherToolState {
@@ -34,7 +36,22 @@ impl WatcherToolState {
             prose_diagnostics_recorded: [false; ProviderProseDiagnostic::COUNT],
             placeholder_events: Vec::new(),
             status_events: Vec::new(),
+            codex_rollout: Default::default(),
+            native_codex_enabled: false,
         }
+    }
+
+    pub(in crate::services::discord) fn set_provider(&mut self, provider: &ProviderKind) {
+        self.native_codex_enabled = *provider == ProviderKind::Codex;
+    }
+
+    pub(in crate::services::discord) fn restore_native_codex(
+        &mut self,
+        decoder: crate::services::codex_tui::rollout_tail::RolloutRecordDecoder,
+        response: &mut String,
+    ) {
+        *response = decoder.response().to_string();
+        self.codex_rollout = decoder;
     }
 
     fn record_placeholder_events_from_json(&mut self, value: &serde_json::Value) {
@@ -177,6 +194,13 @@ fn watcher_placeholder_inlines_live_events(
     placeholder_live_events_enabled || (status_panel_v2_enabled && status_panel_msg_id.is_none())
 }
 
+#[path = "tmux_output_stream/native_codex.rs"]
+mod native_codex;
+use native_codex::process_native_codex_messages;
+pub(in crate::services::discord) use native_codex::{
+    is_native_codex_payload, read_native_codex_state, watcher_source_witness,
+};
+
 /// Process buffered lines for the tmux watcher.
 /// Extracts text content, tracks tool status, and detects result events.
 /// Returns true if a "result" event was found.
@@ -238,6 +262,20 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
             if pre_turn_line {
                 outcome.pre_turn_bytes_skipped =
                     outcome.pre_turn_bytes_skipped.saturating_add(line_len);
+                continue;
+            }
+            if tool_state.native_codex_enabled
+                && let Some(messages) = tool_state.codex_rollout.decode(&val)
+            {
+                let native =
+                    process_native_codex_messages(messages, state, full_response, tool_state);
+                outcome.assistant_text_seen |= native.assistant_text_seen;
+                if native.found_result {
+                    outcome.found_result = true;
+                    outcome.terminal_kind = native.terminal_kind;
+                    outcome.terminal_evidence_offset = line_start_offset;
+                    break;
+                }
                 continue;
             }
             if event_type == "user" && watcher_user_event_is_prompt_boundary(&val) {
@@ -937,6 +975,129 @@ mod tests {
         assert_eq!(outcome.pre_turn_bytes_skipped, turn_start_offset as usize);
         assert_eq!(full_response, "new reply");
         assert!(buffer.is_empty());
+
+        // Restart attaches directly to a native Codex rollout, with the saved
+        // raw byte cursor and no wrapper JSONL. Both native duplicate envelopes
+        // describe one assistant message; only the task_complete ends the turn.
+        let native = concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"ADK5071-native\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ADK5071-native\"}]}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"ADK5071-native\"}}\n",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-restart.jsonl");
+        std::fs::write(&path, format!("{prior_assistant}{prior_stop}{native}")).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut buffer = raw[turn_start_offset as usize..].to_owned();
+        let mut state = StreamLineState::new();
+        let mut response = String::new();
+        let mut tools = WatcherToolState::new();
+        tools.set_provider(&ProviderKind::Codex);
+        let outcome = process_watcher_lines_for_turn(
+            &mut buffer,
+            &mut state,
+            &mut response,
+            &mut tools,
+            Some(turn_start_offset),
+            Some(turn_start_offset),
+        );
+        assert!(
+            outcome.found_result,
+            "native completion must reach the restored watcher"
+        );
+        assert_eq!(
+            response, "ADK5071-native",
+            "native duplicate envelopes relay once"
+        );
+        assert_eq!(
+            outcome.terminal_evidence_offset,
+            Some(turn_start_offset + native.rfind("{\"type\":\"event_msg\"").unwrap() as u64)
+        );
+        assert!(buffer.is_empty());
+
+        let call = "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"call_id\":\"pending\",\"arguments\":\"{}\"}}\n";
+        let output = "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"pending\",\"output\":\"done\"}}\n";
+        for commentary in [false, true] {
+            let body = if commentary {
+                native.replace(
+                    "\"role\":\"assistant\"",
+                    "\"role\":\"assistant\",\"phase\":\"commentary\"",
+                )
+            } else {
+                native.to_string()
+            };
+            let mut buffer = format!("{call}{body}");
+            let mut state = StreamLineState::new();
+            let mut response = String::new();
+            let mut tools = WatcherToolState::new();
+            tools.set_provider(&ProviderKind::Codex);
+            let pending = process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools);
+            assert!(
+                !pending.found_result,
+                "task_complete cannot bypass pending tool balance"
+            );
+            buffer.push_str(output);
+            let completed =
+                process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools);
+            assert!(completed.found_result);
+            assert_eq!(
+                response, "ADK5071-native",
+                "commentary fallback must not duplicate prose"
+            );
+        }
+        let fallback = "first line\nsecond line";
+        let terminal = serde_json::json!({"type":"event_msg", "payload":{
+            "type":"task_complete", "last_agent_message":fallback
+        }});
+        let mut buffer = format!("{call}{output}{terminal}\n");
+        let mut state = StreamLineState::new();
+        let mut response = String::new();
+        let mut tools = WatcherToolState::new();
+        tools.set_provider(&ProviderKind::Codex);
+        let completed = process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools);
+        assert!(completed.found_result);
+        assert_eq!(
+            response, fallback,
+            "the watcher SendFull body retains multiline native tool fallback exactly once"
+        );
+
+        let item_only = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"unconfirmed\"}}\n";
+        assert!(!parse_lines(item_only).0.found_result);
+        let assistant = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"on it\"}]}}\n";
+        let mut buffer = format!("{assistant}{item_only}{call}");
+        let mut state = StreamLineState::new();
+        let mut response = String::new();
+        let mut tools = WatcherToolState::new();
+        tools.set_provider(&ProviderKind::Codex);
+        let midturn = process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools);
+        assert!(
+            !midturn.found_result,
+            "item completion is not turn completion"
+        );
+        assert!(
+            buffer.is_empty(),
+            "the subsequent tool call must be consumed"
+        );
+        buffer.push_str("{\"type\":\"turn.completed\"}\n");
+        assert!(
+            !process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools).found_result,
+            "turn.completed cannot bypass the subsequent pending tool"
+        );
+        buffer.push_str(output);
+        assert!(
+            process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools).found_result
+        );
+        assert_eq!(response, "on it");
+        let unknown = assistant.replace("output_text", "future_text");
+        let mut buffer = format!("{assistant}{unknown}{{\"type\":\"turn.completed\"}}\n");
+        let mut state = StreamLineState::new();
+        let mut response = String::new();
+        let mut tools = WatcherToolState::new();
+        tools.set_provider(&ProviderKind::Codex);
+        assert!(
+            !process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools).found_result,
+            "unknown final content cannot turn earlier commentary into a complete answer"
+        );
     }
 
     #[test]

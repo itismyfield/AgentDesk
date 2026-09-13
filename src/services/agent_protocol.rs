@@ -146,6 +146,15 @@ pub enum RuntimeHandoff {
     },
 }
 
+/// Source captured by a native reader before an idle bridge claims its actor.
+#[derive(Debug, Clone)]
+pub struct CapturedTuiTerminalSource {
+    pub generation_mtime_ns: i64,
+    pub source_file_dev: u64,
+    pub source_file_ino: u64,
+    pub actor: std::sync::Weak<crate::services::provider::CancelToken>,
+}
+
 #[derive(Debug, Clone)]
 pub enum StreamMessage {
     /// Initialization - contains session_id
@@ -210,6 +219,7 @@ pub enum StreamMessage {
         turn_nonce: String,
         source_start: u64,
         complete_record_end: u64,
+        captured_source: Option<CapturedTuiTerminalSource>,
     },
     /// Claude terminal read from the captured file descriptor and actor.
     ClaudeTuiTerminalDone {

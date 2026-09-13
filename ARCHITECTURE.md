@@ -983,6 +983,7 @@ src/
 │   │   │   ├── monitor_auto_turn_inflight_tests.rs
 │   │   │   └── task_notification_kind_restart_roundtrip_tests.rs
 │   │   ├── tmux_output_stream/
+│   │   │   ├── native_codex.rs
 │   │   │   └── provider_output_guard_tests.rs
 │   │   ├── tmux_placeholder_suppression/
 │   │   │   ├── evidence.rs

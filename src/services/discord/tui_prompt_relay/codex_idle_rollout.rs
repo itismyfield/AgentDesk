@@ -78,6 +78,14 @@ pub(super) fn spawn_codex_idle_rollout_relay(shared: Arc<SharedData>) {
                 if let Some(inflight) =
                     inflight::load_inflight_state(&ProviderKind::Codex, channel_id.get())
                 {
+                    if inflight.requires_pinned_terminal_recovery() {
+                        if let Some(http) = shared.serenity_http_or_token_fallback() {
+                            super::super::recovery_engine::recover_idle_partial_response(
+                                &http, &shared, &inflight, &rollout_path,
+                            ).await;
+                        }
+                        continue;
+                    }
                     if codex_ownerless_external_input_inflight_needs_rollout_recovery(
                         &inflight,
                         &tmux_session_name,
@@ -396,31 +404,24 @@ async fn run_codex_idle_response_tail(
         &lease,
     );
     let (reader_tx, reader_rx) = mpsc::channel::<StreamMessage>();
-    let (offset_tx, offset_rx) = tokio::sync::oneshot::channel::<Result<u64, String>>();
+    let (offset_tx, offset_rx) =
+        tokio::sync::oneshot::channel::<Result<claude_idle_bridge::IdleReaderCompletion, String>>();
+    let reader_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let failed_for_reader = reader_failed.clone();
     let rollout_for_reader = rollout_path.clone();
     let tmux_for_reader = tmux_session_name.clone();
     std::thread::Builder::new()
         .name("codex_idle_response_tail_reader".to_string())
         .spawn(move || {
-            let read_result =
-                crate::services::codex_tui::rollout_tail::tail_rollout_file_from_offset_for_tmux(
-                    &rollout_for_reader,
-                    start_offset,
-                    None,
-                    reader_tx,
-                    None,
-                    || {
-                        crate::services::tmux_diagnostics::tmux_session_has_live_pane(
-                            &tmux_for_reader,
-                        )
-                    },
-                    &tmux_for_reader,
-                )
-                .map(|result| match result {
-                    ReadOutputResult::Completed { offset }
-                    | ReadOutputResult::Cancelled { offset }
-                    | ReadOutputResult::SessionDied { offset } => offset,
-                });
+            let read_result = read_codex_idle_completion(
+                &rollout_for_reader,
+                start_offset,
+                reader_tx,
+                None,
+                || crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_for_reader),
+                &tmux_for_reader,
+            );
+            failed_for_reader.store(read_result.is_err(), Ordering::Release);
             let _ = offset_tx.send(read_result);
         })
         .expect("spawn codex idle response tail reader thread");
@@ -468,13 +469,8 @@ async fn run_codex_idle_response_tail(
 
     if !has_content {
         let _ = tokio::task::spawn_blocking(move || while reader_rx.recv().is_ok() {}).await;
-        if let Ok(Ok(final_offset)) = offset_rx.await {
-            advance_codex_tui_runtime_binding_and_marker_offset(
-                &tmux_session_name,
-                &rollout_path,
-                final_offset,
-            );
-        }
+        // A read cursor without delivered terminal evidence cannot consume the range.
+        let _ = offset_rx.await;
         finish_tui_direct_synthetic_turn_if_current(
             &shared,
             &ProviderKind::Codex,
@@ -496,39 +492,34 @@ async fn run_codex_idle_response_tail(
         &prompt_text,
         prefix,
         reader_rx,
-        None,
+        Some(offset_rx),
         &lease,
     )
     .await;
     if delivery_result.is_err() {
         tracing::warn!(error = ?delivery_result, "Codex TUI-direct delivery failed; preserving successor and cursor");
     }
-    match offset_rx.await {
-        Ok(Ok(final_offset))
-            if tui_idle_tail_stream_should_commit_runtime_binding_offset(
-                delivery_result.is_ok(),
-            ) =>
-        {
+    match delivery_result {
+        Ok(Some(final_offset)) => {
             advance_codex_tui_runtime_binding_and_marker_offset(
                 &tmux_session_name,
                 &rollout_path,
                 final_offset,
             );
         }
-        Ok(Err(error)) => {
+        Err(error) => {
             tracing::warn!(
                 tmux_session_name = %tmux_session_name,
                 rollout_path = %rollout_path.display(),
                 error = %error,
                 "codex idle rollout response tail failed"
             );
-            finish_tui_direct_synthetic_turn_if_current(
+            finish_failed_codex_idle_reader(
                 &shared,
-                &ProviderKind::Codex,
                 channel_id,
                 &tmux_session_name,
-                lease.session_key.as_deref(),
-                "codex_tui_direct_tail_failed",
+                &lease,
+                reader_failed.load(Ordering::Acquire),
             )
             .await;
         }
@@ -591,4 +582,59 @@ fn collect_codex_idle_response(
     };
     let response = compose_tui_idle_response(done_result, error_result, streamed, sideband);
     Ok((response, offset))
+}
+
+#[cfg(unix)]
+pub(super) fn read_codex_idle_completion(
+    path: &Path,
+    start: u64,
+    tx: mpsc::Sender<StreamMessage>,
+    cancel: Option<Arc<CancelToken>>,
+    is_alive: impl FnMut() -> bool,
+    tmux: &str,
+) -> Result<claude_idle_bridge::IdleReaderCompletion, String> {
+    let generation = crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux);
+    let binding = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux)
+        .filter(|binding| {
+            binding.runtime_kind == RuntimeHandoffKind::CodexTui
+                && Path::new(&binding.output_path) == path
+        })
+        .ok_or("native idle source binding changed")?;
+    crate::services::codex_tui::rollout_tail::tail_idle_rollout_for_tmux(
+        path,
+        start,
+        binding.session_id,
+        tx,
+        cancel,
+        is_alive,
+        tmux,
+    )
+    .map(|(result, outcome)| {
+        claude_idle_bridge::IdleReaderCompletion::from_harvest(result, outcome.harvest, generation)
+    })
+}
+
+#[cfg(unix)]
+pub(super) async fn finish_failed_codex_idle_reader(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    tmux: &str,
+    lease: &ExternalInputRelayLease,
+    reader_failed: bool,
+) {
+    if !reader_failed
+        || inflight::load_inflight_state_read_only(&ProviderKind::Codex, channel.get())
+            .is_some_and(|row| row.requires_pinned_terminal_recovery())
+    {
+        return;
+    }
+    finish_tui_direct_synthetic_turn_if_current(
+        shared,
+        &ProviderKind::Codex,
+        channel,
+        tmux,
+        lease.session_key.as_deref(),
+        "codex_tui_direct_tail_failed",
+    )
+    .await;
 }

@@ -43,6 +43,21 @@ impl Default for SessionRelayParser {
 }
 
 impl SessionRelayParser {
+    pub(super) fn ingest_verified_native_terminal(
+        &mut self,
+        frame: &StreamFrame,
+        response: &str,
+    ) -> Vec<SessionRelayDelivery> {
+        self.buffer.clear();
+        self.reset_turn();
+        let mut terminal = frame.clone();
+        terminal.payload = format!(
+            "{}\n",
+            serde_json::json!({"type": "result", "result": response})
+        );
+        self.ingest_frame(&terminal)
+    }
+
     pub(in crate::services::discord) fn ingest_frame(
         &mut self,
         frame: &StreamFrame,
@@ -77,6 +92,7 @@ impl SessionRelayParser {
         };
 
         let mut deliveries = Vec::new();
+        self.tool_state.set_provider(&frame.binding.provider);
         loop {
             let buffer_len_before = self.buffer.len();
             let response_before = self.full_response.clone();
@@ -108,6 +124,19 @@ impl SessionRelayParser {
             }
             if !outcome.found_result {
                 break;
+            }
+            // A restarted native parser may lack tool calls before its cursor.
+            // Only the producer's completed-turn fence (or ordered idle range)
+            // can authorize native delivery; the sink replays that source range.
+            if frame.terminal_consumed_end.is_none()
+                && frame.relay_range.is_none()
+                && super::super::tmux::tmux_output_stream::is_native_codex_payload(
+                    &frame.binding.provider,
+                    &frame.payload,
+                )
+            {
+                self.reset_turn();
+                continue;
             }
 
             let task_kind_allows_delivery = task_notification_context::allows_delivery(

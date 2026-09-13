@@ -33,6 +33,8 @@ mod delivery_commit;
 mod delivery_frontier;
 mod delivery_outcome_classify;
 mod idle_jsonl;
+#[cfg(test)]
+pub(in crate::services::discord) use idle_jsonl::idle_range_is_committed;
 pub(in crate::services::discord) mod journal;
 mod short_controller;
 // #3960: orphaned `SessionBoundRelay` TUI-direct reclaim (producer-liveness TOCTOU).
@@ -519,17 +521,6 @@ impl SessionBoundDiscordRelaySink {
         }
     }
 
-    fn ingest_frame(&self, frame: &StreamFrame) -> Vec<SessionRelayDelivery> {
-        self.frames_total.fetch_add(1, Ordering::AcqRel);
-        let Ok(mut sessions) = self.by_session.lock() else {
-            return Vec::new();
-        };
-        sessions
-            .entry(frame.session_name.clone())
-            .or_default()
-            .ingest_frame(frame)
-    }
-
     /// Commit a confirmed idle/catch-up delivery in the frame's ordered JSONL
     /// coordinate space. The wrapper generation and current EOF are rechecked
     /// after transport before either durable or in-memory authority advances.
@@ -595,31 +586,14 @@ impl SessionBoundDiscordRelaySink {
         session_name: &str,
         delivery: &SessionRelayDelivery,
     ) -> bool {
-        let Some((_, end)) = delivery.relay_range else {
-            return false;
-        };
-        let Some(frame_generation) = delivery.relay_generation_mtime_ns else {
-            return false;
-        };
-        let current_generation = dr::current_generation_mtime_ns(session_name);
-        let current_eof = idle_jsonl_current_eof(provider, session_name);
-        if frame_generation == 0 || current_generation != frame_generation || current_eof.is_none()
-        {
-            return false;
-        }
-        dr::effective_committed_offset(
+        idle_jsonl::idle_range_is_committed(
             shared,
             provider,
-            ChannelId::new(channel_id),
+            channel_id,
             session_name,
-            current_eof,
+            delivery.relay_range,
+            delivery.relay_generation_mtime_ns,
         )
-        .max(dr::delivered_frontier_end_current_generation(
-            provider,
-            ChannelId::new(channel_id),
-            session_name,
-            current_eof,
-        )) >= end
     }
 
     fn advance_after_confirmed_post(

@@ -2315,18 +2315,20 @@ mod tests {
                     offset_authority_channel_id: CH,
                     delivery_channel_id: CH,
                 };
-                let range = |source| CodexRange {
-                    source_file_identity: None,
-                    identity: InflightTurnIdentity {
-                        user_msg_id: 1,
-                        started_at: "now".into(),
-                        tmux_session_name: Some(tmux.into()),
-                        turn_start_offset: Some(0),
-                    },
-                    result: "answer".into(),
-                    rollout_path: rollout.display().to_string(),
-                    session_id: "raw-session".into(),
-                    source,
+                let range = |source| {
+                    CodexRange::new(
+                        InflightTurnIdentity {
+                            user_msg_id: 1,
+                            started_at: "now".into(),
+                            tmux_session_name: Some(tmux.into()),
+                            turn_start_offset: Some(0),
+                        },
+                        "answer".into(),
+                        rollout.display().to_string(),
+                        "raw-session".into(),
+                        source,
+                        None,
+                    )
                 };
                 let invalid_shared = make_shared_data_for_tests();
                 let mutations: [fn(&mut ExactJsonlSourceIdentity); 6] = [
