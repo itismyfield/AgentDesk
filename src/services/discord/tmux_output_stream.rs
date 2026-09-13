@@ -937,6 +937,41 @@ mod tests {
         assert_eq!(outcome.pre_turn_bytes_skipped, turn_start_offset as usize);
         assert_eq!(full_response, "new reply");
         assert!(buffer.is_empty());
+
+        // Restart attaches directly to a native Codex rollout, with the saved
+        // raw byte cursor and no wrapper JSONL. Both native duplicate envelopes
+        // describe one assistant message; only the task_complete ends the turn.
+        let native = concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"ADK5071-native\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ADK5071-native\"}]}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"ADK5071-native\"}}\n",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-restart.jsonl");
+        std::fs::write(&path, format!("{prior_assistant}{prior_stop}{native}")).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut buffer = raw[turn_start_offset as usize..].to_owned();
+        let mut state = StreamLineState::new();
+        let mut response = String::new();
+        let mut tools = WatcherToolState::new();
+        let outcome = process_watcher_lines_for_turn(
+            &mut buffer,
+            &mut state,
+            &mut response,
+            &mut tools,
+            Some(turn_start_offset),
+            Some(turn_start_offset),
+        );
+        assert!(
+            outcome.found_result,
+            "native completion must reach the restored watcher"
+        );
+        assert_eq!(
+            response, "ADK5071-native",
+            "native duplicate envelopes relay once"
+        );
+        assert!(outcome.terminal_evidence_offset.unwrap() >= turn_start_offset);
+        assert!(buffer.is_empty());
     }
 
     #[test]
