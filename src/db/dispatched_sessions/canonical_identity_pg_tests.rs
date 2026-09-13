@@ -1,6 +1,7 @@
 use super::{
-    CanonicalSessionIdentity, HookSessionUpsertError, SessionIdentityConflictKind,
-    SessionIdentityKind, upsert_hook_session_with_identity_pg,
+    CanonicalSessionIdentity, HookSessionActorPin, HookSessionUpsertError,
+    SessionIdentityConflictKind, SessionIdentityKind, capture_hook_session_actor_pin_pg,
+    upsert_hook_session_with_actor_pin_pg, upsert_hook_session_with_identity_pg,
 };
 use crate::db::dispatched_sessions::{
     HookSessionUpsert, clear_session_id_by_key_pg, delete_session_by_key_pg,
@@ -93,6 +94,228 @@ fn identity<'a>(channel_id: &'a str) -> CanonicalSessionIdentity<'a> {
         discord_token_hash: "discord_0123456789abcdef",
         channel_id,
     }
+}
+
+async fn actor_pin_session_snapshot(pool: &sqlx::PgPool, key: &str) -> serde_json::Value {
+    sqlx::query_scalar("SELECT to_jsonb(s) FROM sessions s WHERE session_key = $1")
+        .bind(key)
+        .fetch_one(pool)
+        .await
+        .expect("snapshot every session column")
+}
+
+#[tokio::test]
+async fn canonical_identity_actor_pin_missing_insert_and_retry_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let key = "claude/actor-pin-missing";
+    let pin = capture_hook_session_actor_pin_pg(&pool, key).await.unwrap();
+    assert_eq!(pin, HookSessionActorPin::Missing);
+    assert!(!pin.active_for_other_actor(Some("actor-a")));
+    for nonce in [None, Some(" \t")] {
+        let mut invalid = params(key, "101");
+        invalid.turn_start_nonce = nonce;
+        assert_eq!(
+            upsert_hook_session_with_actor_pin_pg(&pool, invalid, &pin)
+                .await
+                .unwrap_err()
+                .conflict_kind(),
+            Some(SessionIdentityConflictKind::OwnershipMismatch),
+        );
+        assert_eq!(
+            capture_hook_session_actor_pin_pg(&pool, key).await.unwrap(),
+            pin
+        );
+    }
+    let mut actor = params(key, "101");
+    actor.status = "turn_active";
+    actor.turn_start_nonce = Some("actor-a");
+    let committed = upsert_hook_session_with_actor_pin_pg(&pool, actor, &pin)
+        .await
+        .unwrap();
+    assert!(!committed.active_for_other_actor(Some("actor-a")));
+    assert!(committed.active_for_other_actor(Some("actor-b")));
+    assert!(committed.active_for_other_actor(None));
+    assert_eq!(
+        committed,
+        capture_hook_session_actor_pin_pg(&pool, key).await.unwrap()
+    );
+    let row = actor_pin_session_snapshot(&pool, key).await;
+    assert_eq!(row["status"], "turn_active");
+    assert_eq!(row["active_turn_nonce"], "actor-a");
+    assert!(row["dispatched_origin_turn_nonce"].is_null());
+    let mut retry = params(key, "101");
+    retry.status = "turn_active";
+    retry.turn_start_nonce = Some("actor-a");
+    assert_eq!(
+        upsert_hook_session_with_actor_pin_pg(&pool, retry, &committed)
+            .await
+            .unwrap(),
+        committed,
+    );
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_actor_pin_nullable_and_prior_nonce_alias_update_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let key = "claude/actor-pin-primary";
+    let alias = "claude/actor-pin-alias";
+    for previous in [None, Some("finished-actor")] {
+        let mut seed = params(key, "102");
+        seed.turn_start_nonce = previous;
+        upsert_hook_session_with_identity_pg(&pool, seed, Some(identity("102")))
+            .await
+            .unwrap();
+        upsert_hook_session_with_identity_pg(&pool, params(alias, "102"), Some(identity("102")))
+            .await
+            .unwrap();
+        if previous.is_none() {
+            sqlx::query("UPDATE sessions SET status = NULL WHERE session_key = $1")
+                .bind(key)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let before = actor_pin_session_snapshot(&pool, key).await;
+        let pin = capture_hook_session_actor_pin_pg(&pool, alias)
+            .await
+            .unwrap();
+        assert_eq!(
+            pin,
+            capture_hook_session_actor_pin_pg(&pool, key).await.unwrap()
+        );
+        assert!(
+            matches!(&pin, HookSessionActorPin::Existing { active_turn_nonce, .. }
+            if active_turn_nonce.as_deref() == previous)
+        );
+        assert_eq!(
+            actor_pin_session_snapshot(&pool, key).await,
+            before,
+            "capture is read-only"
+        );
+        let mut actor = params(alias, "102");
+        actor.status = "turn_active";
+        actor.turn_start_nonce = Some("actor-a");
+        let committed = upsert_hook_session_with_actor_pin_pg(&pool, actor, &pin)
+            .await
+            .unwrap();
+        assert_eq!(
+            committed,
+            capture_hook_session_actor_pin_pg(&pool, key).await.unwrap()
+        );
+        let after = actor_pin_session_snapshot(&pool, key).await;
+        assert_eq!(after["id"], before["id"]);
+        assert_eq!(after["session_key"], key);
+        assert_eq!(after["active_turn_nonce"], "actor-a");
+        assert_eq!(after["status"], "turn_active");
+    }
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_actor_pin_rejects_successor_nonce_and_row_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let key = "claude/actor-pin-successor";
+    let mut predecessor = params(key, "103");
+    predecessor.turn_start_nonce = Some("observed-actor");
+    upsert_hook_session_with_identity_pg(&pool, predecessor, None)
+        .await
+        .unwrap();
+    let pin = capture_hook_session_actor_pin_pg(&pool, key).await.unwrap();
+    // A status-only race also rejects; a successor's later idle state is no bypass.
+    for (status, nonce) in [
+        ("turn_active", "observed-actor"),
+        ("turn_active", "actor-b"),
+        ("idle", "actor-b"),
+    ] {
+        let mut successor = params(key, "103");
+        successor.status = status;
+        successor.turn_start_nonce = Some(nonce);
+        successor.dispatched_origin = true;
+        successor.model = Some("successor-model");
+        upsert_hook_session_with_identity_pg(&pool, successor, None)
+            .await
+            .unwrap();
+        let before = actor_pin_session_snapshot(&pool, key).await;
+        assert_eq!(before["active_turn_nonce"], nonce);
+        assert_eq!(before["dispatched_origin_turn_nonce"], nonce);
+        let mut stale_actor = params(key, "103");
+        stale_actor.status = "turn_active";
+        stale_actor.turn_start_nonce = Some("actor-a");
+        assert_eq!(
+            upsert_hook_session_with_actor_pin_pg(&pool, stale_actor, &pin)
+                .await
+                .unwrap_err()
+                .conflict_kind(),
+            Some(SessionIdentityConflictKind::OwnershipMismatch)
+        );
+        assert_eq!(actor_pin_session_snapshot(&pool, key).await, before);
+    }
+    sqlx::query("DELETE FROM sessions WHERE session_key = $1")
+        .bind(key)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut replacement = params(key, "103");
+    replacement.turn_start_nonce = Some("observed-actor");
+    upsert_hook_session_with_identity_pg(&pool, replacement, None)
+        .await
+        .unwrap();
+    let before = actor_pin_session_snapshot(&pool, key).await;
+    let mut stale_actor = params(key, "103");
+    stale_actor.turn_start_nonce = Some("actor-a");
+    assert_eq!(
+        upsert_hook_session_with_actor_pin_pg(&pool, stale_actor, &pin)
+            .await
+            .unwrap_err()
+            .conflict_kind(),
+        Some(SessionIdentityConflictKind::OwnershipMismatch)
+    );
+    assert_eq!(
+        actor_pin_session_snapshot(&pool, key).await,
+        before,
+        "same nonce on a replacement row is foreign"
+    );
+    test_db.drop().await;
+}
+
+#[tokio::test]
+async fn canonical_identity_actor_pin_missing_rejects_intervening_insert_pg() {
+    let Some(test_db) = CanonicalIdentityPgDatabase::create().await else {
+        return;
+    };
+    let pool = test_db.migrate().await;
+    let key = "claude/actor-pin-insert-race";
+    let pin = capture_hook_session_actor_pin_pg(&pool, key).await.unwrap();
+    assert_eq!(pin, HookSessionActorPin::Missing);
+    let mut successor = params(key, "104");
+    successor.status = "turn_active";
+    successor.turn_start_nonce = Some("actor-b");
+    successor.dispatched_origin = true;
+    upsert_hook_session_with_identity_pg(&pool, successor, None)
+        .await
+        .unwrap();
+    let before = actor_pin_session_snapshot(&pool, key).await;
+    let mut stale_actor = params(key, "104");
+    stale_actor.turn_start_nonce = Some("actor-a");
+    assert_eq!(
+        upsert_hook_session_with_actor_pin_pg(&pool, stale_actor, &pin)
+            .await
+            .unwrap_err()
+            .conflict_kind(),
+        Some(SessionIdentityConflictKind::OwnershipMismatch)
+    );
+    assert_eq!(actor_pin_session_snapshot(&pool, key).await, before);
+    test_db.drop().await;
 }
 
 #[tokio::test]

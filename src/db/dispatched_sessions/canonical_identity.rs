@@ -89,6 +89,75 @@ pub(crate) struct HookSessionUpsertOutcome {
     pub(crate) session_key: String,
 }
 
+/// Durable actor state observed before admitting a new mailbox actor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HookSessionActorPin {
+    Missing,
+    Existing {
+        id: i64,
+        active_turn_nonce: Option<String>,
+        status: Option<String>,
+    },
+}
+
+impl HookSessionActorPin {
+    pub(crate) fn active_for_other_actor(&self, actor_nonce: Option<&str>) -> bool {
+        matches!(self, Self::Existing { active_turn_nonce, status, .. }
+            if status.as_deref().is_some_and(|status| status.eq_ignore_ascii_case("turn_active"))
+                && active_turn_nonce.as_deref().zip(actor_nonce)
+                    .is_none_or(|(owner, actor)| owner != actor || actor.trim().is_empty()))
+    }
+}
+
+pub(crate) async fn capture_hook_session_actor_pin_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> Result<HookSessionActorPin, HookSessionUpsertError> {
+    let mut tx = pool.begin().await.map_err(database_error)?;
+    let pin = match resolve_session_id_for_mutation_pg(&mut tx, session_key).await? {
+        Some(id) => {
+            let (active_turn_nonce, status) =
+                sqlx::query_as("SELECT active_turn_nonce, status FROM sessions WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(database_error)?;
+            HookSessionActorPin::Existing {
+                id,
+                active_turn_nonce,
+                status,
+            }
+        }
+        None => HookSessionActorPin::Missing,
+    };
+    tx.commit().await.map_err(database_error)?;
+    Ok(pin)
+}
+
+pub(crate) async fn upsert_hook_session_with_actor_pin_pg(
+    pool: &PgPool,
+    params: HookSessionUpsert<'_>,
+    pin: &HookSessionActorPin,
+) -> Result<HookSessionActorPin, HookSessionUpsertError> {
+    if params
+        .turn_start_nonce
+        .is_none_or(|nonce| nonce.trim().is_empty())
+    {
+        return Err(conflict(
+            SessionIdentityConflictKind::OwnershipMismatch,
+            "guarded hook session upsert requires a nonempty actor nonce",
+        ));
+    }
+    let active_turn_nonce = params.turn_start_nonce.map(str::to_owned);
+    let status = Some(params.status.to_owned());
+    let (_, id) = upsert_hook_session_pg(pool, params, None, Some(pin)).await?;
+    Ok(HookSessionActorPin::Existing {
+        id,
+        active_turn_nonce,
+        status,
+    })
+}
+
 #[derive(Clone, Debug)]
 struct SessionEvidence {
     id: i64,
@@ -104,6 +173,17 @@ pub(crate) async fn upsert_hook_session_with_identity_pg(
     params: HookSessionUpsert<'_>,
     identity: Option<CanonicalSessionIdentity<'_>>,
 ) -> Result<HookSessionUpsertOutcome, HookSessionUpsertError> {
+    upsert_hook_session_pg(pool, params, identity, None)
+        .await
+        .map(|(outcome, _)| outcome)
+}
+
+async fn upsert_hook_session_pg(
+    pool: &PgPool,
+    params: HookSessionUpsert<'_>,
+    identity: Option<CanonicalSessionIdentity<'_>>,
+    actor_pin: Option<&HookSessionActorPin>,
+) -> Result<(HookSessionUpsertOutcome, i64), HookSessionUpsertError> {
     let mut tx = pool.begin().await.map_err(database_error)?;
 
     acquire_locator_lock(&mut tx, params.session_key).await?;
@@ -127,15 +207,35 @@ pub(crate) async fn upsert_hook_session_with_identity_pg(
     };
 
     let target = resolve_evidence(exact, alias, canonical, promotion)?;
+    let expected_actor = match (actor_pin, target.as_ref()) {
+        (None, _) | (Some(HookSessionActorPin::Missing), None) => None,
+        (
+            Some(HookSessionActorPin::Existing {
+                id,
+                active_turn_nonce,
+                status,
+            }),
+            Some(target),
+        ) if *id == target.id => Some((status.as_deref(), active_turn_nonce.as_deref())),
+        _ => {
+            return Err(conflict(
+                SessionIdentityConflictKind::OwnershipMismatch,
+                "hook session actor row changed after observation",
+            ));
+        }
+    };
     let outcome = match target {
         Some(target) => {
             validate_target_identity(&target, params.provider, params.channel_id, identity)?;
-            update_target(&mut tx, target.id, &params, identity).await?;
+            update_target(&mut tx, target.id, &params, identity, expected_actor).await?;
             preserve_alias(&mut tx, params.session_key, target.id).await?;
-            HookSessionUpsertOutcome {
-                inserted: false,
-                session_key: target.session_key,
-            }
+            (
+                HookSessionUpsertOutcome {
+                    inserted: false,
+                    session_key: target.session_key,
+                },
+                target.id,
+            )
         }
         None => insert_target(&mut tx, &params, identity).await?,
     };
@@ -579,8 +679,9 @@ async fn update_target(
     session_id: i64,
     params: &HookSessionUpsert<'_>,
     identity: Option<CanonicalSessionIdentity<'_>>,
+    expected_actor: Option<(Option<&str>, Option<&str>)>,
 ) -> Result<(), HookSessionUpsertError> {
-    sqlx::query(
+    let updated = sqlx::query(
         "UPDATE sessions SET
             status = $2,
             instance_id = COALESCE(NULLIF(BTRIM($3), ''), instance_id),
@@ -614,7 +715,8 @@ async fn update_target(
               ELSE NULL
             END,
             last_heartbeat = NOW()
-         WHERE id = $1",
+         WHERE id = $1 AND (NOT $19 OR (
+             active_turn_nonce IS NOT DISTINCT FROM $20 AND status IS NOT DISTINCT FROM $21))",
     )
     .bind(session_id)
     .bind(params.status)
@@ -634,9 +736,18 @@ async fn update_target(
     .bind(params.raw_provider_session_id)
     .bind(params.turn_start_nonce)
     .bind(params.dispatched_origin)
+    .bind(expected_actor.is_some())
+    .bind(expected_actor.and_then(|(_, nonce)| nonce))
+    .bind(expected_actor.and_then(|(status, _)| status))
     .execute(&mut **tx)
     .await
     .map_err(database_error)?;
+    if expected_actor.is_some() && updated.rows_affected() != 1 {
+        return Err(conflict(
+            SessionIdentityConflictKind::OwnershipMismatch,
+            "hook session actor state changed after observation",
+        ));
+    }
     Ok(())
 }
 
@@ -644,7 +755,7 @@ async fn insert_target(
     tx: &mut Transaction<'_, Postgres>,
     params: &HookSessionUpsert<'_>,
     identity: Option<CanonicalSessionIdentity<'_>>,
-) -> Result<HookSessionUpsertOutcome, HookSessionUpsertError> {
+) -> Result<(HookSessionUpsertOutcome, i64), HookSessionUpsertError> {
     let inserted = sqlx::query_scalar::<_, i64>(
         "INSERT INTO sessions (
             session_key, instance_id, agent_id, provider, status, session_info,
@@ -685,10 +796,13 @@ async fn insert_target(
     .map_err(classify_write_error)?;
 
     preserve_alias(tx, params.session_key, inserted).await?;
-    Ok(HookSessionUpsertOutcome {
-        inserted: true,
-        session_key: params.session_key.to_string(),
-    })
+    Ok((
+        HookSessionUpsertOutcome {
+            inserted: true,
+            session_key: params.session_key.to_string(),
+        },
+        inserted,
+    ))
 }
 
 fn conflict(

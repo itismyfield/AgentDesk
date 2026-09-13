@@ -130,28 +130,21 @@ async fn mailbox_finish_turn_if_matches_episode_started_before_inner(
     expected_user_message_id: serenity::model::id::MessageId,
     expected_turn_nonce: Option<String>,
     active_started_before: std::time::Instant,
-    publish_completion: bool,
+    expected_actor: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
 ) -> FinishTurnResult {
     let result = shared
         .mailbox(channel_id)
-        .finish_turn_if_matches_episode_started_before(
+        .finish_turn_if_matches_episode_and_actor_started_before(
             expected_user_message_id,
             expected_turn_nonce,
             active_started_before,
+            expected_actor,
             queue_persistence_context(shared, provider, channel_id),
         )
         .await;
     apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
     if result.removed_token.is_some() {
         shared.mailboxes.recovery_done(channel_id).mark_done();
-    }
-    if publish_completion {
-        turn_completion_events::publish_mailbox_release_completion_event(
-            shared,
-            channel_id,
-            Some(expected_user_message_id.get()),
-            &result,
-        );
     }
     result
 }
@@ -164,16 +157,23 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode
     expected_turn_nonce: Option<String>,
     active_started_before: std::time::Instant,
 ) -> FinishTurnResult {
-    mailbox_finish_turn_if_matches_episode_started_before_inner(
+    let result = mailbox_finish_turn_if_matches_episode_started_before_inner(
         shared,
         provider,
         channel_id,
         expected_user_message_id,
         expected_turn_nonce,
         active_started_before,
-        true,
+        None,
     )
-    .await
+    .await;
+    turn_completion_events::publish_mailbox_release_completion_event(
+        shared,
+        channel_id,
+        Some(expected_user_message_id.get()),
+        &result,
+    );
+    result
 }
 
 pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode_started_before_without_completion(
@@ -184,6 +184,27 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode
     expected_turn_nonce: Option<String>,
     active_started_before: std::time::Instant,
 ) -> FinishTurnResult {
+    mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+        shared,
+        provider,
+        channel_id,
+        expected_user_message_id,
+        expected_turn_nonce,
+        active_started_before,
+        None,
+    )
+    .await
+}
+
+pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel_id: ChannelId,
+    expected_user_message_id: serenity::model::id::MessageId,
+    expected_turn_nonce: Option<String>,
+    active_started_before: std::time::Instant,
+    expected_actor: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
+) -> FinishTurnResult {
     mailbox_finish_turn_if_matches_episode_started_before_inner(
         shared,
         provider,
@@ -191,7 +212,7 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode
         expected_user_message_id,
         expected_turn_nonce,
         active_started_before,
-        false,
+        expected_actor,
     )
     .await
 }
