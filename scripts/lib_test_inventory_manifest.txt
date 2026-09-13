@@ -4123,6 +4123,7 @@ services::discord::recovery_engine::crash_resume_guard::tests::resume_required_n
 services::discord::recovery_engine::crash_resume_guard::tests::session_bound_relay_turn_is_not_a_black_hole_risk
 services::discord::recovery_engine::crash_resume_guard::tests::synthetic_owner_turn_is_not_a_real_user_black_hole
 services::discord::recovery_engine::crash_resume_guard::tests::watcher_owned_turn_is_not_a_black_hole_risk
+services::discord::recovery_engine::idle_captured_response::tests::idle_partial_source_stamp_refuses_append_and_replacement
 services::discord::recovery_engine::manual_rebind::adoption::tests::claude_tui_adopted_transcript_rebind_forces_eof_when_saved_output_missing
 services::discord::recovery_engine::manual_rebind::adoption::tests::claude_tui_adopted_transcript_rebind_starts_existing_inflight_at_eof
 services::discord::recovery_engine::manual_rebind::adoption::tests::claude_tui_rebind_reregister_requires_transcript_output_path
@@ -4225,6 +4226,8 @@ services::discord::recovery_engine::recovery_two_message_panel::tests::replaceme
 services::discord::recovery_engine::recovery_two_message_panel::tests::replacement_owner_survives_recovery_send_race
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_reanchors_stranded_panel_and_persists_new_epoch
 services::discord::recovery_engine::recovery_two_message_panel::tests::restart_recreates_missing_panel_without_duplicate_old_delete
+services::discord::recovery_engine::restore_inflight::ready_without_output_tests::captured_live_partial_eof_preserves_failures_then_commits_and_clears_current_generation
+services::discord::recovery_engine::restore_inflight::ready_without_output_tests::captured_partial_eof_never_commits_new_same_turn_progress_or_replacement_actor
 services::discord::recovery_engine::restore_inflight::ready_without_output_tests::committed_eof_skips_transport_but_unknown_or_restart_rows_remain_owned
 services::discord::recovery_engine::restore_inflight::ready_without_output_tests::delivered_partial_eof_cannot_finish_or_clear_successor_during_transport
 services::discord::recovery_engine::restore_inflight::ready_without_output_tests::partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_current_anchor
