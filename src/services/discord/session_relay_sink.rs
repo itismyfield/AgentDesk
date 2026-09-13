@@ -584,31 +584,14 @@ impl SessionBoundDiscordRelaySink {
         session_name: &str,
         delivery: &SessionRelayDelivery,
     ) -> bool {
-        let Some((_, end)) = delivery.relay_range else {
-            return false;
-        };
-        let Some(frame_generation) = delivery.relay_generation_mtime_ns else {
-            return false;
-        };
-        let current_generation = dr::current_generation_mtime_ns(session_name);
-        let current_eof = idle_jsonl_current_eof(provider, session_name);
-        if frame_generation == 0 || current_generation != frame_generation || current_eof.is_none()
-        {
-            return false;
-        }
-        dr::effective_committed_offset(
+        idle_jsonl::idle_range_is_committed(
             shared,
             provider,
-            ChannelId::new(channel_id),
+            channel_id,
             session_name,
-            current_eof,
+            delivery.relay_range,
+            delivery.relay_generation_mtime_ns,
         )
-        .max(dr::delivered_frontier_end_current_generation(
-            provider,
-            ChannelId::new(channel_id),
-            session_name,
-            current_eof,
-        )) >= end
     }
 
     fn advance_after_confirmed_post(

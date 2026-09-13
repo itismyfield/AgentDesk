@@ -113,6 +113,7 @@ async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
     );
     let mut terminal = terminal_frame_offset(&binding, payload, 1, 256, 701, started_at, Some(0));
     terminal.relay_generation_mtime_ns = Some(generation);
+    std::fs::write(&binding.expected_rollout_path, format!("{payload: <256}")).unwrap();
 
     let outcome = sink.deliver(&terminal).await.expect("persisted delivery");
 
@@ -129,6 +130,17 @@ async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
         "anchor-drop: legacy replace must retain the formatter tail anchor"
     );
     assert_eq!(gateway.replace_calls.load(Ordering::Acquire), 1);
+    let mut normalized_idle = terminal.clone();
+    normalized_idle.relay_range = Some((0, 256));
+    assert_eq!(
+        sink.deliver(&normalized_idle).await.unwrap(),
+        RelaySinkOutcome::TerminalDelivered
+    );
+    assert_eq!(
+        gateway.replace_calls.load(Ordering::Acquire),
+        1,
+        "normalized idle receipt replay remains deduplicated"
+    );
     crate::services::discord::inflight::clear_inflight_state(&ProviderKind::Claude, channel_id);
     drop(_root);
     native_codex_restart_sink_fixture().await;
@@ -297,6 +309,61 @@ async fn native_codex_restart_sink_fixture() {
         );
         terminal.relay_generation_mtime_ns = Some(generation);
         terminal.relay_source_stamp = Some(stamp);
+        let next_turn = concat!(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"next prompt\"}]}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"second turn\"}]}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"second turn\"}}\n",
+        );
+        std::fs::write(&path, format!("{source}{next_turn}")).unwrap();
+        let mut native_idle = terminal.clone();
+        native_idle.payload = format!("{}{next_turn}", &source[start as usize..]);
+        let idle_end = start + native_idle.payload.len() as u64;
+        native_idle.terminal_consumed_end = None;
+        native_idle.relay_range = Some((start, idle_end));
+        assert_eq!(
+            sink.deliver(&native_idle).await.unwrap(),
+            RelaySinkOutcome::TerminalNotDelivered
+        );
+        let committed = dr::effective_committed_offset(
+            &shared,
+            &ProviderKind::Codex,
+            channel,
+            tmux,
+            Some(idle_end),
+        );
+        assert_eq!(
+            committed, 0,
+            "a two-turn idle range cannot advance past either turn"
+        );
+        assert!(
+            dr::read_record(&ProviderKind::Codex, channel.get())
+                .and_then(|r| r.delivered_frontier)
+                .is_none()
+        );
+        assert_eq!(gateway.send_calls.load(Ordering::Acquire), 0);
+        let retained = inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).unwrap();
+        assert_eq!(
+            (retained.last_offset, retained.turn_nonce),
+            (replacement.last_offset, replacement.turn_nonce.clone())
+        );
+        assert_eq!(
+            crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux)
+                .unwrap()
+                .last_offset,
+            cursor
+        );
+        assert_eq!(
+            super::idle_relay_range_action(
+                native_idle.payload.as_bytes(),
+                start,
+                idle_end,
+                committed,
+                true,
+                false,
+                true
+            ),
+            super::IdleRelayRangeAction::SendPendingSuffixFrom(start)
+        );
         let mut stale_parser = super::turn_parser::SessionRelayParser::default();
         let mut unfenced = terminal.clone();
         unfenced.payload = body[..body.rfind("{\"type\":\"response_item\"").unwrap()].into();
@@ -367,6 +434,30 @@ async fn native_codex_restart_sink_fixture() {
             assert_eq!(receipt.range, (start, end));
             assert_eq!(receipt.generation_mtime_ns, generation);
             assert_eq!(receipt.panel_msg_id, Some(gateway.sent_message_id.get()));
+            let mut covered_idle = native_idle.clone();
+            covered_idle.relay_range = Some((start, end));
+            covered_idle.payload = source[start as usize..].into();
+            assert_eq!(
+                sink.deliver(&covered_idle).await.unwrap(),
+                RelaySinkOutcome::TerminalDelivered
+            );
+            assert_eq!(
+                sink.deliver(&native_idle).await.unwrap(),
+                RelaySinkOutcome::TerminalNotDelivered
+            );
+            assert_eq!(gateway.send_calls.load(Ordering::Acquire), 1);
+            assert_eq!(
+                super::idle_relay_range_action(
+                    native_idle.payload.as_bytes(),
+                    start,
+                    idle_end,
+                    end,
+                    true,
+                    false,
+                    true
+                ),
+                super::IdleRelayRangeAction::SendPendingSuffixFrom(end)
+            );
         }
         let current = mailbox_snapshot(&shared, channel).await;
         if let Some(current) = current.cancel_token {

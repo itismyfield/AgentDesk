@@ -85,6 +85,33 @@ impl SessionBoundDiscordRelaySink {
 #[async_trait]
 impl RelaySink for SessionBoundDiscordRelaySink {
     async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
+        if frame.relay_range.is_some()
+            && (super::super::tmux::is_native_codex_payload(
+                &frame.binding.provider,
+                &frame.payload,
+            ) || super::idle_jsonl_relay_source_for_matched(&frame.binding)
+                .allow_continued_session_without_init)
+        {
+            if let Ok(channel) = frame.binding.channel_id.parse::<u64>()
+                && let Some(shared) = self
+                    .health_registry
+                    .shared_for_provider(&frame.binding.provider)
+                    .await
+                && super::idle_jsonl::idle_range_is_committed(
+                    &shared,
+                    &frame.binding.provider,
+                    channel,
+                    &frame.session_name,
+                    frame.relay_range,
+                    frame.relay_generation_mtime_ns,
+                )
+            {
+                return Ok(RelaySinkOutcome::TerminalDelivered);
+            }
+            // Native turn boundaries belong to codex_idle_rollout. Retain this
+            // physical range until that owner commits; it can contain two turns.
+            return Ok(RelaySinkOutcome::TerminalNotDelivered);
+        }
         let native_response = recover_native_frame_response(frame)?;
         // #3041 P1-3 R5 (codex — REVERT R4 fence-gating of the outcome): a result-bearing
         // delivery reports Delivered/NotDelivered REGARDLESS of a fence on this frame
