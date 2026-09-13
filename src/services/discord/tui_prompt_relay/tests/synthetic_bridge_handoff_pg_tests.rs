@@ -106,6 +106,12 @@ fn synthetic_bridge_handoff_fixture(
                         .await
                     );
                 }
+                if foreign_actor {
+                    let retry = crate::services::discord::tui_prompt_relay::synthetic_start::claim_tui_direct_synthetic_turn(
+                        &shared, &provider, channel, tmux, "handoff prompt", anchor, &lease,
+                    ).await;
+                    assert!(!retry.claimed, "claim refresh cannot replace the retained original allocation witness");
+                }
                 let before =
                     crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get())
                         .unwrap();
@@ -145,6 +151,9 @@ fn synthetic_bridge_handoff_fixture(
                 // episode must remain recoverable through the same idle retry entry.
                 drop(capture);
                 if restart {
+                    crate::services::discord::inflight::mark_all_inflight_states_restart_mode(
+                        &provider, crate::services::discord::inflight::InflightRestartMode::DrainRestart,
+                    );
                     let next_generation = shared.restart.current_generation + 1;
                     shared = crate::services::discord::make_shared_data_for_tests();
                     Arc::get_mut(&mut shared).unwrap().restart.current_generation = next_generation;
@@ -167,7 +176,7 @@ fn synthetic_bridge_handoff_fixture(
             ));
             if let Some(pool) = shared.pg_pool.as_ref() {
                 let persisted: (String, Option<String>, Option<String>) = sqlx::query_as(
-                "SELECT status, channel_id, turn_start_nonce FROM sessions WHERE session_key = $1"
+                "SELECT status, channel_id, active_turn_nonce FROM sessions WHERE session_key = $1"
             ).bind(lease.session_key.as_deref().unwrap()).fetch_one(pool).await.unwrap();
                 assert_eq!(persisted.0, "turn_active");
                 assert_eq!(
@@ -187,7 +196,7 @@ fn synthetic_bridge_handoff_fixture(
                 user_text_owned: "handoff prompt".into(),
                 request_owner_name: "TUI direct".into(),
                 role_binding: None,
-                adk_session_key: None,
+                adk_session_key: lease.session_key.clone(),
                 adk_session_name: Some(tmux.into()),
                 adk_session_info: None,
                 adk_cwd: None,

@@ -173,11 +173,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
                     anchor_message_id = anchor_message_id.get(),
                     "skipping TUI-direct synthetic inflight; mailbox already owns a different turn"
                 );
-                return TuiDirectSyntheticTurnClaim {
-                    relay_owner,
-                    claimed: false,
-                    turn_start_offset: start_offset,
-                };
+                return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
             }
         }
     }
@@ -193,11 +189,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
                 mailbox_activation_occurred && !Arc::ptr_eq(active, &cancel_token)
             }))
     {
-        return TuiDirectSyntheticTurnClaim {
-            relay_owner,
-            claimed: false,
-            turn_start_offset: start_offset,
-        };
+        return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
     }
     let active_turn_nonce = active_snapshot.active_turn_nonce;
     identity.register_episode(active_turn_nonce.as_deref());
@@ -247,6 +239,11 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         && existing.tmux_session_name.as_deref() == Some(tmux_session_name)
         && existing.turn_source == TurnSource::ExternalInput
         && existing.user_msg_id == anchor_message_id.get()
+        && bridge_handoff::refresh_actor_matches(
+            &existing,
+            active_snapshot.cancel_token.as_ref(),
+            mailbox_activation_occurred,
+        )
     {
         let expected = super::super::inflight::InflightTurnIdentity::from_state(&existing);
         let mut existing = existing;
@@ -279,11 +276,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
             if mailbox_activation_occurred {
                 finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
             }
-            return TuiDirectSyntheticTurnClaim {
-                relay_owner,
-                claimed: false,
-                turn_start_offset: start_offset,
-            };
+            return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
         }
         if mailbox_activation_occurred {
             super::super::increment_global_active(shared, "tui_direct_synthetic_refresh");
@@ -292,11 +285,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
                 .insert(channel_id, std::time::Instant::now());
         }
         bridge_handoff::record(&existing, active_snapshot.cancel_token.as_ref());
-        return TuiDirectSyntheticTurnClaim {
-            relay_owner,
-            claimed: true,
-            turn_start_offset: start_offset,
-        };
+        return TuiDirectSyntheticTurnClaim::new(relay_owner, true, start_offset);
     }
 
     let mut inflight_state = build_tui_direct_synthetic_inflight_state(
@@ -329,11 +318,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
             if mailbox_activation_occurred {
                 finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
             }
-            return TuiDirectSyntheticTurnClaim {
-                relay_owner,
-                claimed: false,
-                turn_start_offset: start_offset,
-            };
+            return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
         }
         Err(error) => {
             tracing::warn!(
@@ -346,11 +331,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
             if mailbox_activation_occurred {
                 finish_tui_direct_synthetic_pre_save_failure(shared, provider, channel_id).await;
             }
-            return TuiDirectSyntheticTurnClaim {
-                relay_owner,
-                claimed: false,
-                turn_start_offset: start_offset,
-            };
+            return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
         }
     }
 
@@ -370,11 +351,7 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         mailbox_started = started,
         "created TUI-direct synthetic inflight for already-submitted provider turn"
     );
-    TuiDirectSyntheticTurnClaim {
-        relay_owner,
-        claimed: true,
-        turn_start_offset: start_offset,
-    }
+    TuiDirectSyntheticTurnClaim::new(relay_owner, true, start_offset)
 }
 
 #[cfg(test)]

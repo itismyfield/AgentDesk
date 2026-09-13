@@ -132,6 +132,20 @@ pub(super) async fn claim_tui_direct_synthetic_turn_inner<const DEFERRED: bool>(
     .await
 }
 
+impl TuiDirectSyntheticTurnClaim {
+    pub(super) fn new(
+        relay_owner: ExternalInputRelayOwner,
+        claimed: bool,
+        turn_start_offset: u64,
+    ) -> Self {
+        Self {
+            relay_owner,
+            claimed,
+            turn_start_offset,
+        }
+    }
+}
+
 impl SyntheticClaimIdentity<'_> {
     pub(super) fn register_episode(&self, active_turn_nonce: Option<&str>) {
         if self.register_deferred_start {

@@ -1,6 +1,6 @@
 //! Transport the admitted synthetic actor allocation, not just its nonce.
 use super::*;
-use crate::services::discord::inflight::{InflightEpisodePin, InflightTurnIdentity};
+use crate::services::discord::inflight::{GuardedSaveOutcome, InflightEpisodePin};
 
 #[derive(Clone)]
 struct Witness {
@@ -10,6 +10,25 @@ struct Witness {
 
 static CLAIMS: LazyLock<Mutex<std::collections::HashMap<(String, u64), Witness>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+pub(super) fn refresh_actor_matches(
+    row: &InflightTurnState,
+    actor: Option<&Arc<CancelToken>>,
+    freshly_admitted: bool,
+) -> bool {
+    if row.effective_relay_owner_kind() != RelayOwnerKind::None {
+        return true;
+    }
+    let Some(actor) = actor else { return false };
+    let claims = CLAIMS.lock().unwrap_or_else(|error| error.into_inner());
+    match claims
+        .get(&(row.provider.clone(), row.channel_id))
+        .and_then(|witness| witness.actor.upgrade().map(|saved| (witness, saved)))
+    {
+        Some((witness, saved)) => witness.episode.matches_state(row) && Arc::ptr_eq(&saved, actor),
+        None => freshly_admitted,
+    }
+}
 
 pub(super) fn record(row: &InflightTurnState, actor: Option<&Arc<CancelToken>>) {
     let Some(actor) = actor else { return };
@@ -21,6 +40,18 @@ pub(super) fn record(row: &InflightTurnState, actor: Option<&Arc<CancelToken>>) 
     }
     let mut claims = CLAIMS.lock().unwrap_or_else(|error| error.into_inner());
     claims.retain(|_, witness| witness.actor.strong_count() > 0);
+    if claims
+        .get(&(row.provider.clone(), row.channel_id))
+        .is_some_and(|witness| {
+            witness.episode.matches_state(row)
+                && witness
+                    .actor
+                    .upgrade()
+                    .is_some_and(|saved| !Arc::ptr_eq(&saved, actor))
+        })
+    {
+        return;
+    }
     claims.insert(
         (row.provider.clone(), row.channel_id),
         Witness {
@@ -50,7 +81,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn capture(
     let key = (provider.as_str().to_owned(), channel.get());
     let deadline = tokio::time::Instant::now()
         + super::super::super::tui_direct_pending_start::PENDING_START_BACKSTOP;
-    let (serial, witness) = loop {
+    let (serial, witness, actor) = loop {
         let serial = super::super::super::tui_direct_pending_start::channel_lock(
             provider.as_str(),
             channel.get(),
@@ -62,8 +93,10 @@ pub(in crate::services::discord::tui_prompt_relay) async fn capture(
             .unwrap_or_else(|error| error.into_inner())
             .get(&key)
             .cloned();
-        if let Some(witness) = witness {
-            break (serial, witness);
+        if let Some(witness) = witness
+            && let Some(actor) = witness.actor.upgrade()
+        {
+            break (serial, witness, actor);
         }
         drop(serial);
         if tokio::time::Instant::now() >= deadline {
@@ -71,7 +104,6 @@ pub(in crate::services::discord::tui_prompt_relay) async fn capture(
         }
         tokio::time::sleep(super::super::super::tui_direct_pending_start::PENDING_START_POLL).await;
     };
-    let actor = witness.actor.upgrade().ok_or_else(failure)?;
     let snapshot = super::super::super::mailbox_snapshot(shared, channel).await;
     if snapshot
         .cancel_token
@@ -108,7 +140,6 @@ pub(in crate::services::discord::tui_prompt_relay) async fn capture(
     {
         return Err(failure());
     }
-    let identity = InflightTurnIdentity::from_state(&row);
     drop(locked);
     if let (Some(pool), Some(session_key)) = (shared.pg_pool.as_ref(), row.session_key.as_deref()) {
         crate::db::dispatched_sessions::upsert_hook_session_pg(
@@ -142,17 +173,22 @@ pub(in crate::services::discord::tui_prompt_relay) async fn capture(
     {
         return Err(failure());
     }
-    if row.current_msg_id == 0 {
-        row.current_msg_id = row.user_msg_id;
-    }
-    let saved = super::super::super::inflight::adopt_and_lock_inflight_episode(
-        &row,
-        &identity,
+    let mut saved = super::super::super::inflight::lock_inflight_episode(
+        provider,
+        channel.get(),
         &witness.episode,
-        row.turn_start_offset,
-        None,
     )
     .map_err(|_| failure())?;
+    if saved.state().restart_mode.is_some()
+        && saved.mark_readopted_under_guard() != GuardedSaveOutcome::Saved
+    {
+        return Err(failure());
+    }
+    if saved.state().current_msg_id == 0
+        && saved.bind_synthetic_anchor_under_guard() != GuardedSaveOutcome::Saved
+    {
+        return Err(failure());
+    }
     row = saved.state().clone();
     drop(saved);
     record(&row, Some(&actor));
