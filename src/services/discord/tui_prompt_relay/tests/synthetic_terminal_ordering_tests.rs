@@ -90,8 +90,12 @@ fn terminal_ordering_fixture(
                 &output, 0, tmux, tx, reader_end_tx,
             );
             let delivery = claude_idle_bridge::stream_tui_idle_response_with_gateway(
-                &shared, provider.clone(), channel, tmux, &output, 0,
-                "terminal ordering prompt", Vec::new(), rx, Some(reader_end_rx), &lease, gateway.clone(), 0,
+                &shared, provider.clone(), channel,
+                claude_idle_bridge::IdleBridgeSource {
+                    tmux_session_name: tmux, output_path: &output, start_offset: 0,
+                    prompt_text: "terminal ordering prompt", lease: &lease,
+                },
+                (Vec::new(), rx, Some(reader_end_rx)), gateway.clone(), 0,
             );
             let observe = async {
                 let entered = if let Some(prepare) = prepare.as_ref() { &prepare.entered } else { &barrier.entered };
@@ -104,6 +108,8 @@ fn terminal_ordering_fixture(
                 let row = crate::services::discord::inflight::load_inflight_state_read_only(
                     &provider, channel.get()).expect("terminal transport retains its delivery obligation");
                 assert_eq!(row.turn_nonce, original_row.turn_nonce);
+                assert_eq!(row.current_msg_id, anchor.get(),
+                    "capture binds the legitimate anchor before source mutation");
                 assert_eq!(row.session_id.as_deref(), Some("native-ordering-session"));
                 assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux)
                     .unwrap().session_id.as_deref(), Some("native-ordering-session"),
@@ -158,13 +164,13 @@ fn terminal_ordering_fixture(
                     let swapped = crate::services::discord::mailbox_snapshot(&shared, channel).await;
                     assert!(swapped.cancel_token.as_ref().is_some_and(|active| Arc::ptr_eq(active, &actor)));
                     assert_eq!(swapped.active_turn_nonce, before.active_turn_nonce);
-                    Some((actor, row))
+                    Some((actor, row.clone()))
                 } else { None };
                 if let Some(prepare) = prepare.as_ref() { prepare.release.notify_one(); }
                 else { barrier.release.notify_one(); }
-                replacement
+                (replacement, row)
             };
-            let (delivered, replacement) = tokio::join!(
+            let (delivered, (replacement, admitted_row)) = tokio::join!(
                 tokio::time::timeout(Duration::from_secs(5), delivery), observe);
             let delivered = delivered.expect("terminal transport must settle");
             tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
@@ -182,8 +188,13 @@ fn terminal_ordering_fixture(
                 let retained = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get())
                     .expect("source loss retains the original durable delivery obligation");
                 assert_eq!(retained.turn_nonce, original_row.turn_nonce);
-                assert_eq!(retained.current_msg_id, original_row.current_msg_id);
-                assert_eq!(retained.full_response, body);
+                assert_eq!(retained.current_msg_id, admitted_row.current_msg_id);
+                assert_eq!(retained.full_response, admitted_row.full_response);
+                assert_eq!(retained.turn_start_offset, admitted_row.turn_start_offset);
+                assert_eq!(retained.last_offset, admitted_row.last_offset);
+                assert_eq!(retained.output_path, admitted_row.output_path);
+                assert_eq!(retained.session_id, admitted_row.session_id);
+                assert_eq!(retained.tui_terminal_source_file_identity, admitted_row.tui_terminal_source_file_identity);
                 assert!(!retained.terminal_delivery_committed);
                 let actor = replacement.as_ref().map(|(actor, _)| actor).unwrap_or(&original_actor);
                 assert!(crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token
@@ -217,8 +228,12 @@ fn terminal_ordering_fixture(
                 let (end_tx, end_rx) = tokio::sync::oneshot::channel();
                 let reader = super::synthetic_bridge_handoff_pg_tests::spawn_handoff_reader(&output, 0, tmux, tx, end_tx);
                 tokio::time::timeout(Duration::from_secs(5), claude_idle_bridge::stream_tui_idle_response_with_gateway(
-                    &shared, provider.clone(), channel, tmux, &output, 0, "terminal ordering prompt", Vec::new(),
-                    rx, Some(end_rx), &lease, gateway.clone(), 0,
+                    &shared, provider.clone(), channel,
+                    claude_idle_bridge::IdleBridgeSource {
+                        tmux_session_name: tmux, output_path: &output, start_offset: 0,
+                        prompt_text: "terminal ordering prompt", lease: &lease,
+                    },
+                    (Vec::new(), rx, Some(end_rx)), gateway.clone(), 0,
                 )).await.expect("retry is bounded").expect("restored original source resumes the retained obligation");
                 tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
             }
