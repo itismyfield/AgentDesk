@@ -34,6 +34,7 @@ shape.
 from __future__ import annotations
 
 import importlib.util
+import copy
 import json
 import sys
 import tempfile
@@ -889,10 +890,9 @@ class RolloutReportTest(unittest.TestCase):
             turns(210, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))
         )
         self.assertIsNone(summary["rowless_no_range_share"])
-        self.assertEqual(
-            sorted(summary["target_segment"]["unmeasured_fields"]),
-            sorted(report.UNMEASURED_UNTIL_S7A),
-        )
+        for metric in summary["target_segment"]["delivery_boundary_outcomes"].values():
+            self.assertEqual(metric["status"], "unknown")
+            self.assertIsNone(metric["share"])
 
 
 class RowlessRangeReportTest(unittest.TestCase):
@@ -1007,8 +1007,174 @@ class RowlessRangeReportTest(unittest.TestCase):
         self.assertEqual(measured["rowless_no_range_share"], 1.0)
         self.assertEqual(measured["criteria"], baseline["criteria"])
         self.assertEqual(measured["promotion_ready"], baseline["promotion_ready"])
-        self.assertEqual(measured["target_segment"]["unmeasured_fields"],
-                         baseline["target_segment"]["unmeasured_fields"])
+        self.assertEqual(measured["target_segment"]["delivery_boundary_outcomes"],
+                         baseline["target_segment"]["delivery_boundary_outcomes"])
+
+
+class DeliveryBoundaryReportTest(unittest.TestCase):
+    @staticmethod
+    def operation(metric, value, turn=1, observed=BASE):
+        item = event(site=report.BOUNDARY_METRICS[metric], turn=turn, observed=observed,
+                     publish_reason="operation_result")
+        item.pop("axis_a")
+        item.update(current_message_id=100 + turn, **{metric: value})
+        if metric == "frontier_already_covers":
+            item.update(source={"provider": "codex", "tmux_session_name": "session",
+                                "turn_nonce": "nonce", "range": [10, 20],
+                                "generation_mtime_ns": 123,
+                                "offset_authority_channel_id": 1, "delivery_channel_id": item["channel_id"]},
+                        anchor={"channel_id": item["channel_id"], "message_id": 101, "range": [10, 20]},
+                        disposition="already_delivered" if value else "continue")
+        else:
+            item.pop("turn_id")  # Cleanup has operation context, no invented turn.
+            item.update(recovery_enqueue_attempted=value, recovery_enqueued=None)
+        return item
+
+    def test_operation_outcomes_preserve_unknown_recovery_and_missing_metrics(self):
+        terminal, cleanup = report.BOUNDARY_METRICS
+        rows = [self.operation(metric, value, turn=i + 1)
+                for metric in (terminal, cleanup) for i, value in enumerate((True, False, None))]
+        result = report.delivery_boundary_counts(rows)
+        for metric in (terminal, cleanup):
+            self.assertEqual([result[metric][key] for key in ("true", "false", "unknown")], [1, 1, 1])
+            self.assertIsNone(result[metric]["share"])
+        self.assertEqual(result[cleanup]["recovery_attempted"], 1)
+        self.assertEqual(result[cleanup]["recovery_unknown"], 1)
+        rows[0].pop(terminal)
+        self.assertEqual(report.delivery_boundary_counts(rows)[terminal]["unknown"], 2)
+        for metric in (terminal, cleanup):
+            for value in (False, True):
+                for reason in (None, "loop_exit"):
+                    with self.subTest(metric=metric, value=value, reason=reason):
+                        item = self.operation(metric, value)
+                        if reason is None:
+                            item.pop("publish_reason")
+                        else:
+                            item["publish_reason"] = reason
+                        result = RolloutReportTest().run_report([
+                            event(site="bridge_entry", turn=1, observed=BASE), item
+                        ])["target_segment"]["delivery_boundary_outcomes"][metric]
+                        self.assertEqual([result[key] for key in ("true", "false", "unknown")], [0, 0, 1])
+                        self.assertIsNone(result["share"])
+
+    def test_cleanup_invalid_identity_and_outcomes_stay_unknown_in_reader(self):
+        metric = "unbound_anchor_left"
+        changes = ({"current_message_id": 0}, {"turn_id": 17}, {"observed_at": "invalid"},
+                   {"source": {}}, {"anchor": {}}, {"disposition": "continue"},
+                   {"provider": "not-a-provider"}, {"recovery_enqueue_attempted": False},
+                   {"recovery_enqueue_attempted": 1}, {"recovery_enqueued": "true"},
+                   {"recovery_enqueued": True}, {"recovery_enqueued": False},
+                   {"recovery_enqueue_attempted": False, "recovery_enqueued": True})
+        for change in changes:
+            with self.subTest(change=change):
+                item = {**self.operation(metric, True), **change}
+                result = RolloutReportTest().run_report([event(site="bridge_entry", turn=1, observed=BASE), item])["target_segment"]["delivery_boundary_outcomes"][metric]
+                self.assertEqual(result["unknown"], 1)
+                self.assertIsNone(result["share"])
+                self.assertEqual(result["recovery_attempted"], 0)
+        item = {**self.operation(metric, False), "recovery_enqueued": True}
+        self.assertEqual(report.delivery_boundary_counts([item])[metric]["unknown"], 1)
+
+    def test_unknown_matching_provider_is_not_authoritative_frontier(self):
+        metric = "frontier_already_covers"
+        item = self.operation(metric, True)
+        item["provider"] = item["source"]["provider"] = "not-a-provider"
+        result = RolloutReportTest().run_report([event(site="bridge_entry", turn=1, observed=BASE), item])["target_segment"]["delivery_boundary_outcomes"][metric]
+        self.assertEqual(result["unknown"], 1)
+        self.assertIsNone(result["share"])
+
+    def test_duplicate_and_conflicting_operation_records_are_not_extra_successes(self):
+        metric = "frontier_already_covers"
+        item = self.operation(metric, True)
+        duplicate = report.delivery_boundary_counts([item, dict(item)])[metric]
+        self.assertEqual(duplicate["true"], 1)
+        conflicting = report.delivery_boundary_counts([item, {**item, metric: False}])[metric]
+        self.assertEqual(conflicting["true"], 0)
+        self.assertEqual(conflicting["conflicting_operations"], 1)
+        self.assertIsNone(conflicting["share"])
+
+    def test_missing_exact_source_or_generation_cannot_create_a_measured_zero(self):
+        metric = "frontier_already_covers"
+        for source in (None, {}, {"range": [10, 10]}, {"range": [20, 10]},
+                       {"range": [10, 20], "generation_mtime_ns": 0}):
+            item = self.operation(metric, False)
+            item["source"] = source
+            result = report.delivery_boundary_counts([item])[metric]
+            self.assertEqual(result["unknown"], 1)
+            self.assertEqual(result["false"], 0)
+        item = self.operation(metric, True)
+        item["anchor"] = {}
+        self.assertEqual(report.delivery_boundary_counts([item])[metric]["unknown"], 1)
+
+    def test_malformed_or_conflicting_frontier_evidence_is_unknown_through_reader(self):
+        metric = "frontier_already_covers"
+        broken = [(("anchor",), None), (("anchor",), {}),
+                  (("anchor", "range"), [10, 10]), (("anchor", "range"), [20, 10]),
+                  (("anchor", "channel_id"), True), (("anchor", "message_id"), "101"),
+                  (("source", "provider"), "claude"), (("source", "turn_nonce"), 7),
+                  (("source", "tmux_session_name"), ["session"]),
+                  (("source", "offset_authority_channel_id"), "1"),
+                  (("source", "delivery_channel_id"), 2),
+                  (("source", "delivery_channel_id"), True),
+                  (("source", "generation_mtime_ns"), True),
+                  (("source", "range"), [False, 20]),
+                  (("source", "range"), [10, 2**64]),
+                  (("turn_id",), None), (("current_message_id",), True),
+                  (("disposition",), "unknown"), (("observed_at",), "invalid")]
+        for value in (False, True):
+            cases = broken + ([(("anchor", "range"), [0, 5]),
+                               (("anchor", "channel_id"), 2),
+                               (("disposition",), "continue")] if value else [])
+            for path, replacement in cases:
+                with self.subTest(value=value, path=path, replacement=replacement):
+                    item = copy.deepcopy(self.operation(metric, value))
+                    target = item
+                    for field in path[:-1]:
+                        target = target[field]
+                    target[path[-1]] = replacement
+                    summary = RolloutReportTest().run_report([
+                        event(site="bridge_entry", turn=1, observed=BASE), item])
+                    result = summary["target_segment"]["delivery_boundary_outcomes"][metric]
+                    self.assertEqual([result[key] for key in ("true", "false", "unknown")], [0, 0, 1])
+                    self.assertEqual(result["status"], "unknown")
+                    self.assertIsNone(result["share"])
+
+    def test_historical_receipt_and_foreign_frontier_can_be_measured_false(self):
+        metric = "frontier_already_covers"
+        for disposition in ("continue", "already_delivered", "foreign_anchor"):
+            item = self.operation(metric, False)
+            item["disposition"] = disposition
+            item["anchor"].update(channel_id=123, range=[20, 30])
+            result = report.delivery_boundary_counts([item])[metric]
+            self.assertEqual((result["false"], result["unknown"]), (1, 0))
+            self.assertEqual(result["status"], "measured")
+
+    def test_actual_post_loop_operations_do_not_change_stage_or_range_criteria(self):
+        rows = turns(210, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))
+        baseline = RolloutReportTest().run_report(rows)
+        latest = max(report.event_time(row) for row in rows)
+        operations = [self.operation(metric, True, observed=latest + timedelta(seconds=1))
+                      for metric in report.BOUNDARY_METRICS]
+        measured = RolloutReportTest().run_report(rows + operations)
+        for key in ("criteria", "promotion_ready", "rowless_no_range_share"):
+            self.assertEqual(measured[key], baseline[key])
+        for key in ("turn_samples", "completion_scopes", "sites"):
+            self.assertEqual(measured["target_segment"][key], baseline["target_segment"][key])
+        for metric in measured["target_segment"]["delivery_boundary_outcomes"].values():
+            self.assertEqual(metric["true"], 1)
+
+    def test_old_segment_and_unattributable_operations_stay_out_of_measured_counts(self):
+        metric = "frontier_already_covers"
+        item = self.operation(metric, True)
+        item["channel_id"] = []
+        self.assertEqual(report.delivery_boundary_counts([item])[metric]["unknown"], 1)
+        rows = [event(site="bridge_entry", turn=turn, observed=BASE + timedelta(hours=turn),
+                      fingerprint=fingerprint)
+                for turn, fingerprint in enumerate((FINGERPRINT, "legacy", FINGERPRINT))]
+        rows.append(self.operation(metric, True))
+        result = RolloutReportTest().run_report(rows)["target_segment"]["delivery_boundary_outcomes"][metric]
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["records"], 0)
 
 
 if __name__ == "__main__":
