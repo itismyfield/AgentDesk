@@ -308,3 +308,92 @@ async fn foreign_terminal_custody_checkpoint_write_failure_is_explicit() {
         serde_json::json!([91])
     );
 }
+
+#[tokio::test]
+async fn foreign_terminal_custody_valid_json_corruption_is_not_acknowledged() {
+    for corrupt_receipt in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let original = payload();
+        persist_at(temp.path(), "episode-A", &original)
+            .await
+            .unwrap();
+        let path = record_path(temp.path(), "episode-A");
+        let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if corrupt_receipt {
+            record["payload"]["delivery_receipts"] = serde_json::json!([991]);
+        } else {
+            record["payload"]["inflight"]["full_response"] = "corrupted response".into();
+        }
+        // Keep both digest fields and valid JSON intact while changing the
+        // body or receipt. Neither reseeding nor drain may acknowledge it.
+        let corrupted = serde_json::to_string(&record).unwrap();
+        fs::write(&path, &corrupted).unwrap();
+        assert!(
+            persist_at(temp.path(), "episode-A", &original)
+                .await
+                .is_err()
+        );
+        assert!(
+            drain_with(temp.path(), |_, _| async {
+                panic!("corrupt payload must never reach the terminal adapter")
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), corrupted);
+    }
+}
+
+#[tokio::test]
+async fn foreign_terminal_custody_aborted_attempt_deactivates_escaped_handle() {
+    use std::time::Duration;
+    for panic_callback in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        persist_at(&root, "episode-A", &payload()).await.unwrap();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let mut entered = Some(entered);
+        let attempt_root = root.clone();
+        let attempt = tokio::spawn(async move {
+            drain_with(&attempt_root, move |mut value, checkpoint| {
+                let entered = entered.take().unwrap();
+                async move {
+                    value["delivery_receipts"] = serde_json::json!([91]);
+                    checkpoint.persist(&value).unwrap();
+                    assert!(entered.send(checkpoint.clone()).is_ok());
+                    if panic_callback {
+                        panic!("callback panic after checkpoint escaped");
+                    }
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                }
+            })
+            .await
+        });
+        let escaped = tokio::time::timeout(Duration::from_secs(2), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        if !panic_callback {
+            attempt.abort();
+        }
+        let error = attempt.await.unwrap_err();
+        assert_eq!(error.is_panic(), panic_callback);
+        assert_eq!(error.is_cancelled(), !panic_callback);
+        assert!(escaped.persist(&payload()).is_err());
+        // Keep the escaped Arc alive while a fresh drain acquires the same
+        // actual file lock, proving that cancellation did not strand it.
+        let retried = tokio::time::timeout(
+            Duration::from_secs(2),
+            drain_with(&root, |value, _| async {
+                assert_eq!(value["delivery_receipts"], serde_json::json!([91]));
+                (value, Ok(true))
+            }),
+        )
+        .await
+        .expect("aborted attempt retained the file lock")
+        .unwrap();
+        assert_eq!(retried, 1);
+        assert!(escaped.persist(&payload()).is_err());
+    }
+}

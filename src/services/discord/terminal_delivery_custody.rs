@@ -28,7 +28,26 @@ struct Record {
     version: u8,
     key: String,
     seed_sha256: String,
+    payload_sha256: String,
     payload: Value,
+}
+
+fn payload_sha256(payload: &Value) -> String {
+    format!("{:x}", Sha256::digest(payload.to_string().as_bytes()))
+}
+
+impl Record {
+    fn valid(&self) -> bool {
+        self.version == 1
+            && !self.key.trim().is_empty()
+            && self.seed_sha256.len() == 64
+            && self
+                .seed_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && self.payload.is_object()
+            && self.payload_sha256 == payload_sha256(&self.payload)
+    }
 }
 
 struct CheckpointState {
@@ -45,7 +64,24 @@ pub(in crate::services::discord) struct CustodyCheckpoint {
     state: Mutex<CheckpointState>,
 }
 
+/// This guard belongs to the attempt future, independently of any callback
+/// clones. Dropping that future must release custody even if a clone escapes.
+struct CustodyAttempt(Arc<CustodyCheckpoint>);
+
+impl Drop for CustodyAttempt {
+    fn drop(&mut self) {
+        self.0.deactivate();
+    }
+}
+
 impl CustodyCheckpoint {
+    fn deactivate(&self) {
+        // Poison must not prevent releasing the operating-system lock during
+        // unwinding. Further writes still reject the poisoned state.
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        drop(state.lock.take());
+    }
+
     fn verify_current(&self, state: &CheckpointState) -> Result<(), String> {
         if state.lock.is_none() {
             return Err("terminal custody checkpoint is no longer active".into());
@@ -66,6 +102,7 @@ impl CustodyCheckpoint {
                 version: state.record.version,
                 key: state.record.key.clone(),
                 seed_sha256: state.record.seed_sha256.clone(),
+                payload_sha256: payload_sha256(payload),
                 payload: payload.clone(),
             };
             let encoded = serde_json::to_string(&updated).map_err(|error| error.to_string())?;
@@ -85,20 +122,15 @@ impl CustodyCheckpoint {
 
     fn finish(&self, payload: &Value, result: Result<bool, String>) -> Result<bool, String> {
         let mut state = self.state.lock().map_err(|error| error.to_string())?;
-        let outcome = (|| {
-            if matches!(result, Ok(true)) {
-                self.verify_current(&state)?;
-                fs::remove_file(&self.path).map_err(|error| error.to_string())?;
-                runtime_store::fsync_parent_dir(&self.path).map_err(|error| error.to_string())?;
-                Ok(true)
-            } else {
-                self.persist_locked(&mut state, payload)?;
-                result
-            }
-        })();
-        // An escaped handle cannot mutate custody after this attempt ends.
-        drop(state.lock.take());
-        outcome
+        if matches!(result, Ok(true)) {
+            self.verify_current(&state)?;
+            fs::remove_file(&self.path).map_err(|error| error.to_string())?;
+            runtime_store::fsync_parent_dir(&self.path).map_err(|error| error.to_string())?;
+            Ok(true)
+        } else {
+            self.persist_locked(&mut state, payload)?;
+            result
+        }
     }
 }
 
@@ -138,20 +170,21 @@ async fn persist_at(root: &Path, key: &str, payload: &Value) -> Result<(), Strin
     // lock_record_path creates the directory. Also persist its entry in the
     // runtime root before acknowledging the first record in that directory.
     runtime_store::fsync_parent_dir(root).map_err(|error| error.to_string())?;
+    let initial_digest = payload_sha256(payload);
     let record = Record {
         version: 1,
         key: key.into(),
-        seed_sha256: format!("{:x}", Sha256::digest(payload.to_string().as_bytes())),
+        seed_sha256: initial_digest.clone(),
+        payload_sha256: initial_digest,
         payload: payload.clone(),
     };
     match fs::read_to_string(&path) {
         Ok(existing) => {
             let existing: Record =
                 serde_json::from_str(&existing).map_err(|error| error.to_string())?;
-            if existing.version != record.version
+            if !existing.valid()
                 || existing.key != record.key
                 || existing.seed_sha256 != record.seed_sha256
-                || !existing.payload.is_object()
             {
                 return Err(
                     "terminal custody episode payload conflicts with retained record".into(),
@@ -235,17 +268,10 @@ where
             Err(error) => return Err(error.to_string()),
         };
         let record: Record = serde_json::from_str(&encoded).map_err(|error| error.to_string())?;
-        if record.version != 1
-            || record_path(root, &record.key) != path
-            || record.seed_sha256.len() != 64
-            || !record
-                .seed_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
-            || !record.payload.is_object()
-        {
+        if !record.valid() || record_path(root, &record.key) != path {
             return Err(
-                "terminal custody version, identity or payload is invalid; record preserved".into(),
+                "terminal custody version, identity or payload digest is invalid; record preserved"
+                    .into(),
             );
         }
         let payload = record.payload.clone();
@@ -257,6 +283,7 @@ where
                 lock: Some(record_lock),
             }),
         });
+        let _attempt = CustodyAttempt(checkpoint.clone());
         let (payload, result) = resume(payload, checkpoint.clone()).await;
         if checkpoint.finish(&payload, result)? {
             settled += 1;
