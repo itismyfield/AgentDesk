@@ -6223,6 +6223,7 @@ fn synthetic_bridge_handoff_fixture(
     foreign_actor: bool,
     wrong_source: bool,
     postgres: bool,
+    recovery: Option<bool>,
 ) {
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
@@ -6249,7 +6250,9 @@ fn synthetic_bridge_handoff_fixture(
             let anchor = MessageId::new(583_300_002);
             let tmux = "synthetic-bridge-handoff-5833";
             let output = temp.path().join("transcript.jsonl");
-            std::fs::write(&output, "original undelivered source bytes").unwrap();
+            let body = "첫 프레임 배달과 실행 중 owner 유지 ".repeat(16);
+            let assistant = serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text", "text":body}]}});
+            std::fs::write(&output, format!("{assistant}\n")).unwrap();
             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
                 tmux,
                 crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
@@ -6353,7 +6356,18 @@ fn synthetic_bridge_handoff_fixture(
                 &shared, &provider, channel, tmux, &output, &lease,
             );
             let ((), capture) = tokio::join!(claim, capture);
-            let capture = capture.expect("same admitted provider execution reaches bridge");
+            let mut capture = capture.expect("same admitted provider execution reaches bridge");
+            if let Some(restart) = recovery {
+                // Drop the admitted adapter before it can post a frame; the durable
+                // episode must remain recoverable through the same idle retry entry.
+                drop(capture);
+                if restart { shared = super::super::make_shared_data_for_tests(); }
+                let row = super::super::inflight::load_inflight_state_read_only(&provider, channel.get()).unwrap();
+                let lease = super::synthetic_start::bridge_handoff::resume_unpublished(&shared, &row, &output).await
+                    .expect("persisted original source obtains a valid delivery actor");
+                capture = super::synthetic_start::bridge_handoff::capture(&shared, &provider, channel, tmux, &output, &lease)
+                    .await.expect("resumed actor enters the actual bridge");
+            }
             assert_eq!(
                 capture.row.current_msg_id,
                 anchor.get(),
@@ -6378,7 +6392,6 @@ fn synthetic_bridge_handoff_fixture(
             let gateway = Arc::new(S3Gateway::default());
             let (tx, rx) = mpsc::channel();
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-            let body = "첫 프레임 배달과 실행 중 owner 유지 ".repeat(16);
             let bridge = TurnBridgeContext {
                 provider: provider.clone(),
                 gateway: gateway.clone(),
@@ -6414,10 +6427,14 @@ fn synthetic_bridge_handoff_fixture(
                 bridge,
                 None,
             );
-            tx.send(StreamMessage::Text {
-                content: body.clone(),
-            })
-            .unwrap();
+            let reader_path = output.to_str().unwrap().to_owned();
+            let original_start = capture.row.turn_start_offset.unwrap();
+            let reader = std::thread::spawn(move || {
+                crate::services::session_backend::read_output_file_until_result(
+                    &reader_path, original_start, tx, None,
+                    crate::services::provider::SessionProbe::process(|| true),
+                )
+            });
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !gateway
                     .bodies
@@ -6440,13 +6457,11 @@ fn synthetic_bridge_handoff_fixture(
                 super::super::inflight::load_inflight_state_read_only(&provider, channel.get())
                     .is_some()
             );
-            tx.send(StreamMessage::OutputOffset { offset: 32 }).unwrap();
-            tx.send(StreamMessage::Done {
-                result: body,
-                session_id: None,
-            })
-            .unwrap();
-            drop(tx);
+            use std::io::Write;
+            let terminal = serde_json::json!({"type":"result", "subtype":"success", "result":body});
+            std::fs::OpenOptions::new().append(true).open(&output).unwrap()
+                .write_all(format!("{terminal}\n").as_bytes()).unwrap();
+            tokio::task::spawn_blocking(move || reader.join().unwrap().unwrap()).await.unwrap();
             assert_eq!(
                 tokio::time::timeout(Duration::from_secs(5), done_rx)
                     .await
@@ -6484,29 +6499,41 @@ fn synthetic_bridge_handoff_fixture(
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_delivers_first_frame_and_releases_original_actor() {
-    synthetic_bridge_handoff_fixture(false, false, false, false);
+    synthetic_bridge_handoff_fixture(false, false, false, false, None);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_waits_for_later_claim_save_then_delivers() {
-    synthetic_bridge_handoff_fixture(true, false, false, false);
+    synthetic_bridge_handoff_fixture(true, false, false, false, None);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_same_nonce_different_actor() {
-    synthetic_bridge_handoff_fixture(false, true, false, false);
+    synthetic_bridge_handoff_fixture(false, true, false, false, None);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_different_source_without_row_mutation() {
-    synthetic_bridge_handoff_fixture(false, false, true, false);
+    synthetic_bridge_handoff_fixture(false, false, true, false, None);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_upserts_missing_postgres_session_before_first_frame() {
-    synthetic_bridge_handoff_fixture(false, false, false, true);
+    synthetic_bridge_handoff_fixture(false, false, false, true, None);
+}
+
+#[cfg(unix)]
+#[test]
+fn synthetic_bridge_handoff_retries_unpublished_row_after_adapter_drops() {
+    synthetic_bridge_handoff_fixture(false, false, false, false, Some(false));
+}
+
+#[cfg(unix)]
+#[test]
+fn synthetic_bridge_handoff_restarts_from_persisted_source_after_mailbox_loss() {
+    synthetic_bridge_handoff_fixture(false, false, false, false, Some(true));
 }
