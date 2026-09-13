@@ -177,3 +177,96 @@ async fn exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_55
     pool.close().await;
     db.drop().await;
 }
+
+#[tokio::test]
+async fn exact_receipt_custody_retains_failed_child_ids_until_pg_close_5521() {
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "receipt_child_retry",
+        "custody preserves failed child closure identities",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    Arc::get_mut(&mut driver.shared).unwrap().pg_pool = Some(pool.clone());
+    sqlx::query("INSERT INTO sessions (session_key, provider, status) VALUES ('child-retry-parent', 'codex', 'turn_active')").execute(&pool).await.unwrap();
+    let mut children = Vec::new();
+    for _ in 0..2 {
+        children.push(
+            crate::db::session_observability::insert_background_child_pg(
+                &pool,
+                &crate::db::session_observability::BackgroundChildSpawn {
+                    parent_session_key: "child-retry-parent".into(),
+                    provider: Some("codex".into()),
+                    tool_name: "Task".into(),
+                    tool_input: "{}".into(),
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        );
+    }
+    let failed_child = children[0];
+    sqlx::query(&format!("CREATE FUNCTION fail_child_close() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id = {failed_child} AND NEW.closed_at IS NOT NULL THEN RAISE EXCEPTION 'fixture child close unavailable'; END IF; RETURN NEW; END $$"))
+        .execute(&pool).await.unwrap();
+    sqlx::query("CREATE TRIGGER fail_child_close BEFORE UPDATE ON sessions FOR EACH ROW EXECUTE FUNCTION fail_child_close()")
+        .execute(&pool).await.unwrap();
+    let (mut ctx, mut state, _) = receipt_parts(&driver, ProviderKind::Codex);
+    ctx.cancelled = true;
+    ctx.codex_tui_terminal_range = None;
+    state.active_background_child_session_ids = children.clone();
+    let mut successor = state.inflight_state.clone();
+    successor.turn_nonce = Some("successor-B".into());
+    inflight::save_inflight_state(&successor).unwrap();
+    let output = run(ctx, state).await;
+    assert!(matches!(
+        output.outcome,
+        TerminalOutcomeDeliveryOutcome::DeferredToCustody { .. }
+    ));
+    for _ in 0..2 {
+        assert_eq!(drain_custody(&driver).await.unwrap(), 0);
+        let records = custody_records(&driver);
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0]["payload"]["children"],
+            serde_json::json!([failed_child])
+        );
+        assert_eq!(
+            driver.completed_publications(),
+            1,
+            "child retry never republishes acknowledged transport"
+        );
+    }
+    let closed: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM sessions WHERE id = ANY($1) AND closed_at IS NOT NULL")
+            .bind(&children)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        closed,
+        vec![children[1]],
+        "only confirmed PG closure releases a child ID"
+    );
+    sqlx::query("DROP TRIGGER fail_child_close ON sessions")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(drain_custody(&driver).await.unwrap(), 1);
+    assert!(custody_records(&driver).is_empty());
+    assert_eq!(driver.completed_publications(), 1);
+    let status: String = sqlx::query_scalar("SELECT status FROM sessions WHERE id = $1")
+        .bind(failed_child)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "aborted");
+    assert_eq!(
+        inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID)
+            .unwrap()
+            .turn_nonce,
+        successor.turn_nonce
+    );
+    pool.close().await;
+    db.drop().await;
+}

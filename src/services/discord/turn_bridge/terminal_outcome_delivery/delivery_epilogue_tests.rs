@@ -621,6 +621,7 @@ impl TerminalDeliveryDriver {
         let channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
         (
             TerminalOutcomeDeliveryContext {
+                preloop_receipt_confirmed: false,
                 entry_was_rowless: false,
                 watcher_delivery_pin: self
                     .shared

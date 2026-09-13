@@ -86,7 +86,7 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, 
                     let swapped = crate::services::discord::mailbox_snapshot(&shared, channel).await;
                     assert!(swapped.cancel_token.as_ref().is_some_and(|active| Arc::ptr_eq(active, &actor)));
                     assert_eq!(swapped.active_turn_nonce, before.active_turn_nonce);
-                    Some(actor)
+                    Some((actor, row))
                 } else { None };
                 barrier.release.notify_one();
                 replacement
@@ -106,16 +106,17 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, 
                     serenity::UserId::new(TUI_DIRECT_SYNTHETIC_OWNER_USER_ID), Some(anchor),
                 ).await;
                 crate::services::discord::inflight::save_inflight_state(&original_row).unwrap();
-                Some(actor)
+                Some((actor, original_row.clone()))
             } else { replacement };
             let after = crate::services::discord::mailbox_snapshot(&shared, channel).await;
-            if let Some(replacement) = replacement {
+            if let Some((replacement, replacement_row)) = replacement {
                 assert!(after.cancel_token.as_ref().is_some_and(|active| Arc::ptr_eq(active, &replacement)),
                     "same-nonce RecoveryKickoff actor survives A's terminal and postlude");
                 assert!(!replacement.cancelled.load(std::sync::atomic::Ordering::Acquire));
                 let row = crate::services::discord::inflight::load_inflight_state_read_only(
                     &provider, channel.get()).expect("same-episode successor's row survives");
-                assert_eq!(row.current_msg_id, original_row.current_msg_id);
+                assert_eq!(row.current_msg_id, replacement_row.current_msg_id,
+                    "A must not change the anchor held when B acquired the mailbox");
                 assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap().last_offset, 0,
                     "replaced actor never advances the original source cursor");
                 // Re-submit the exact old actor after its first submission path

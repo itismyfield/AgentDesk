@@ -18,9 +18,14 @@ pub(super) struct CompletionGuard {
     shared: Arc<SharedData>,
     turn_key: super::super::turn_finalizer::TurnKey,
     publish_completed_on_drop: bool,
+    completion_signal: BridgeCompletionSignal,
 }
 
 impl CompletionGuard {
+    pub(super) fn note_completion_signal(&mut self, signal: BridgeCompletionSignal) {
+        self.completion_signal = signal;
+    }
+
     pub(super) fn note_terminal_projection_settled(&self, allow_queue: bool) {
         self.turn_finalizer.note_terminal_projection_settled(
             self.turn_key,
@@ -42,7 +47,7 @@ impl CompletionGuard {
     /// would stop the relay that just became authoritative for the same turn.
     pub(super) fn relinquish_bridge_authority(&mut self) {
         if let Some(tx) = self.tx.take() {
-            let _ = tx.send(BridgeCompletionSignal::Finalized);
+            let _ = tx.send(self.completion_signal);
         }
         self.publish_completed_on_drop = false;
     }
@@ -65,6 +70,7 @@ impl CompletionGuard {
             ),
             shared,
             publish_completed_on_drop: true,
+            completion_signal: BridgeCompletionSignal::Unresolved,
         }
     }
 }
@@ -72,9 +78,11 @@ impl CompletionGuard {
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
         if let Some(tx) = self.tx.take() {
-            let _ = tx.send(BridgeCompletionSignal::Finalized);
+            let _ = tx.send(self.completion_signal);
         }
-        if self.publish_completed_on_drop {
+        if self.publish_completed_on_drop
+            && self.completion_signal == BridgeCompletionSignal::Finalized
+        {
             let _ = self
                 .broadcaster
                 .send(super::super::inflight::InflightSignal::Completed {
@@ -166,6 +174,7 @@ pub(super) fn make_bridge_guards(
         shared: shared_owned.clone(),
         turn_key: key,
         publish_completed_on_drop: true,
+        completion_signal: BridgeCompletionSignal::Unresolved,
     };
     let inflight_guard = InflightCleanupGuard {
         provider: Some(provider.clone()),
@@ -181,7 +190,7 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "current_thread")]
-    async fn completion_guard_drop_signals_finalized_and_publishes_completed() {
+    async fn completion_guard_drop_requires_confirmed_terminal_before_completed() {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let mut signals = shared.inflight_signals.subscribe();
         let (tx, mut rx) = tokio::sync::oneshot::channel();
@@ -190,7 +199,15 @@ mod tests {
         guard.tx = Some(tx);
 
         drop(guard);
+        assert_eq!(rx.try_recv(), Ok(BridgeCompletionSignal::Unresolved));
+        assert!(signals.try_recv().is_err());
 
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let mut guard =
+            CompletionGuard::for_completion_test(shared, ChannelId::new(58_330_201), 201);
+        guard.tx = Some(tx);
+        guard.note_completion_signal(BridgeCompletionSignal::Finalized);
+        drop(guard);
         assert_eq!(rx.try_recv(), Ok(BridgeCompletionSignal::Finalized));
         assert!(matches!(
             signals.try_recv(),
@@ -202,7 +219,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn completion_guard_relinquish_signals_finalized_without_completed() {
+    async fn completion_guard_relinquish_preserves_delivery_disposition_without_completed() {
         let shared = crate::services::discord::make_shared_data_for_tests();
         let mut signals = shared.inflight_signals.subscribe();
         let (tx, mut rx) = tokio::sync::oneshot::channel();
@@ -210,10 +227,11 @@ mod tests {
             CompletionGuard::for_completion_test(shared.clone(), ChannelId::new(58_330_202), 202);
         guard.tx = Some(tx);
 
+        guard.note_completion_signal(BridgeCompletionSignal::DeferredToCustody);
         guard.relinquish_bridge_authority();
 
         assert!(guard.tx.is_none());
-        assert_eq!(rx.try_recv(), Ok(BridgeCompletionSignal::Finalized));
+        assert_eq!(rx.try_recv(), Ok(BridgeCompletionSignal::DeferredToCustody));
         assert!(matches!(
             signals.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)

@@ -798,6 +798,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
             terminal_outcome_delivery::run_terminal_outcome_delivery(
                 terminal_outcome_delivery::TerminalOutcomeDeliveryContext {
                     watcher_delivery_pin: watcher_delivery_pin.clone(),
+                    preloop_receipt_confirmed: post_loop_finalize_output.preloop_receipt_confirmed,
                     entry_was_rowless,
                     channel_id,
                     user_msg_id,

@@ -44,8 +44,16 @@ async fn open_card(
 }
 
 async fn run_from_postloop(
+    ctx: TerminalOutcomeDeliveryContext,
+    state: TerminalOutcomeDeliveryState,
+) -> TerminalOutcomeDeliveryOutput {
+    run_from_postloop_with_source_advance(ctx, state, false).await
+}
+
+async fn run_from_postloop_with_source_advance(
     mut ctx: TerminalOutcomeDeliveryContext,
     mut state: TerminalOutcomeDeliveryState,
+    advance_source: bool,
 ) -> TerminalOutcomeDeliveryOutput {
     let output = run_post_loop_finalize(
         PostLoopFinalizeContext {
@@ -53,7 +61,7 @@ async fn run_from_postloop(
             gateway: state.gateway.clone(),
             channel_id: ctx.channel_id,
             provider: state.provider.clone(),
-            adk_session_key: None,
+            adk_session_key: state.adk_session_key.clone(),
             adk_session_name: None,
             adk_session_info: None,
             adk_cwd: None,
@@ -97,6 +105,16 @@ async fn run_from_postloop(
         },
     )
     .await;
+    if advance_source {
+        let generation =
+            crate::services::tmux_common::session_temp_path(DRIVER_TMUX_SESSION, "generation");
+        filetime::set_file_mtime(
+            &generation,
+            filetime::FileTime::from_unix_time(1_700_552_101, 1),
+        )
+        .unwrap();
+    }
+    ctx.preloop_receipt_confirmed = output.preloop_receipt_confirmed;
     state.full_response = output.full_response;
     state.active_background_child_session_ids = output.active_background_child_session_ids;
     state.pending_long_running_open_after_state_save =
@@ -300,4 +318,63 @@ async fn preloop_preserves_foreign_same_anchor_card_with_or_without_old_receipt_
             "preloop must retain the successor controller incarnation"
         );
     }
+}
+
+#[test]
+fn receipted_postloop_preserves_raw_proof_and_session_status_5521() {
+    const CHILD: &str = "ADK_5521_RECEIPT_STATUS_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Match the existing completion span fixture: API context is global,
+        // so exercise the local webhook in a fresh process only.
+        let root = tempfile::tempdir().unwrap();
+        let name = format!(
+            "{}::receipted_postloop_preserves_raw_proof_and_session_status_5521",
+            module_path!().split_once("::").unwrap().1
+        );
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--nocapture"])
+            .env(CHILD, "1")
+            .env("AGENTDESK_ROOT_DIR", root.path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        let captured = calls.clone();
+        let app = axum::Router::new().route("/api/dispatched-sessions/webhook", axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let captured = captured.clone();
+            async move { captured.lock().unwrap().push(body); axum::Json(serde_json::json!({})) }
+        }));
+        let listener = tokio::net::TcpListener::bind((crate::config::loopback().as_str(), 0)).await.unwrap();
+        crate::services::discord::internal_api::init(listener.local_addr().unwrap().port(), None);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for advance in [false, true] {
+            let raw = format!("{DRIVER_BODY}\nAPI_FRICTION: {{\"endpoint\":\"/fixture\",\"friction_type\":\"missing_field\",\"summary\":\"fixture report\"}}");
+            let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1).with_body(raw);
+            let (ctx, mut state, source) = receipt_parts(&driver, ProviderKind::Codex);
+            state.adk_session_key = Some("receipt-episode-A".into());
+            let mut successor = state.inflight_state.clone();
+            successor.turn_nonce = Some("successor-B".into());
+            inflight::save_inflight_state(&successor).unwrap();
+            let before = serde_json::to_value(inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID).unwrap()).unwrap();
+            dr::record_current_pinned_delivery(&source, ctx.current_msg_id.get()).unwrap();
+            let output = tokio::time::timeout(DRIVER_TIMEOUT, run_from_postloop_with_source_advance(ctx, state, advance)).await.unwrap();
+            assert!(output.terminal_delivery_committed);
+            assert!(!output.full_response.contains("API_FRICTION:"));
+            assert_eq!(output.api_friction_reports.len(), 1);
+            assert!(driver.observations().is_empty(), "raw exact receipt survives normalization and generation advancement");
+            assert!(custody_records(&driver).is_empty());
+            assert!(calls.lock().unwrap().is_empty(), "episode A must never write TURN_ACTIVE after its receipt or clobber B");
+            assert_eq!(serde_json::to_value(inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID).unwrap()).unwrap(), before);
+        }
+        server.abort();
+    });
 }

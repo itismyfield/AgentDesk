@@ -841,12 +841,14 @@ async fn exact_receipt_rowless_terminal_custody_empty_cancel_and_ptl_match_norma
 
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_custody_empty_recovery_stays_inside_source_range_5521() {
-    for (provider, recovered, completed) in [
-        (ProviderKind::Claude, "", true),
-        (ProviderKind::Claude, "A answer", true),
-        (ProviderKind::Codex, "A answer", true),
-        (ProviderKind::Claude, "", false),
-        (ProviderKind::Codex, "", false),
+    for (provider, recovered, completed, native_claude) in [
+        (ProviderKind::Claude, "", true, false),
+        (ProviderKind::Claude, "A answer", true, false),
+        (ProviderKind::Claude, "", true, true),
+        (ProviderKind::Claude, "A answer", true, true),
+        (ProviderKind::Codex, "A answer", true, false),
+        (ProviderKind::Claude, "", false, false),
+        (ProviderKind::Codex, "", false, false),
     ] {
         let driver =
             TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1).with_body(String::new());
@@ -858,7 +860,13 @@ async fn exact_receipt_rowless_terminal_custody_empty_recovery_stays_inside_sour
         } else {
             serde_json::json!({"type":"result","subtype":"success","result":recovered})
         };
-        let mut bytes = line.to_string().into_bytes();
+        let mut bytes = if native_claude {
+            state.adk_session_key = None;
+            state.inflight_state.session_id = None;
+            let assistant = serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":recovered}]}});
+            let terminal = serde_json::json!({"type":"system","subtype":"stop_hook_summary"});
+            format!("{assistant}\n{terminal}").into_bytes()
+        } else { line.to_string().into_bytes() };
         assert!(bytes.len() < 256);
         bytes.resize(255, b' ');
         bytes.push(b'\n');
@@ -877,7 +885,7 @@ async fn exact_receipt_rowless_terminal_custody_empty_recovery_stays_inside_sour
                 output_path: path,
                 relay_output_path: None,
                 input_fifo_path: None,
-                session_id: Some("receipt-session".into()),
+                session_id: (!native_claude).then(|| "receipt-session".into()),
                 last_offset: 256,
                 relay_last_offset: None,
             },

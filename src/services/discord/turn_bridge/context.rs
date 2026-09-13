@@ -1,12 +1,16 @@
 use super::*;
 
 /// Bridge lifecycle notification, not proof of durable terminal delivery.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::services::discord) enum BridgeCompletionSignal {
-    /// The bridge held durable authority and reached its finalize/relinquish
-    /// path (including guard drop). Delivery evidence still comes from the
-    /// durable row, never from this signal.
+    /// Terminal transport was confirmed. The consumer still checks the durable row.
     Finalized,
+    /// Terminal delivery remains with a persisted custody obligation.
+    DeferredToCustody,
+    /// Another relay owns the pending terminal delivery.
+    DeferredToOwner,
+    /// No confirmed delivery or successful custody handoff was established.
+    Unresolved,
     /// Pre-authority abort: no stream frame consumed and no finalizer registered.
     EntryAborted,
 }

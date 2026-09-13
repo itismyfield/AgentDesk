@@ -67,6 +67,7 @@ pub(super) struct PostLoopFinalizeState {
 }
 
 pub(super) struct PostLoopFinalizeOutput {
+    pub(super) preloop_receipt_confirmed: bool,
     pub(super) full_response: String,
     pub(super) active_background_child_session_ids: Vec<i64>,
     pub(super) pending_long_running_open_after_state_save: PendingLongRunningOpenAfterStateSave,
@@ -430,31 +431,33 @@ pub(super) async fn run_post_loop_finalize(
     // Keep the session visibly active while Discord terminal delivery and
     // status-panel finalization are still pending. Publishing idle here lets
     // observers race ahead of the final response/status edit.
-    post_adk_session_status(
-        adk_session_key.as_deref(),
-        adk_session_name.as_deref(),
-        Some(provider.as_str()),
-        TURN_ACTIVE,
-        &provider,
-        adk_session_info.as_deref(),
-        persisted_context_tokens(
-            accumulated_input_tokens,
-            accumulated_cache_create_tokens,
-            accumulated_cache_read_tokens,
-            accumulated_output_tokens,
-        ),
-        adk_cwd.as_deref(),
-        dispatch_id.as_deref(),
-        adk_session_name
-            .as_deref()
-            .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name),
-        Some(channel_id),
-        role_binding
-            .as_ref()
-            .map(|binding| binding.role_id.as_str()),
-        shared_owned.api_port,
-    )
-    .await;
+    if receipt_disposition == TerminalReceiptDisposition::Continue {
+        post_adk_session_status(
+            adk_session_key.as_deref(),
+            adk_session_name.as_deref(),
+            Some(provider.as_str()),
+            TURN_ACTIVE,
+            &provider,
+            adk_session_info.as_deref(),
+            persisted_context_tokens(
+                accumulated_input_tokens,
+                accumulated_cache_create_tokens,
+                accumulated_cache_read_tokens,
+                accumulated_output_tokens,
+            ),
+            adk_cwd.as_deref(),
+            dispatch_id.as_deref(),
+            adk_session_name
+                .as_deref()
+                .and_then(crate::services::discord::adk_session::parse_thread_channel_id_from_name),
+            Some(channel_id),
+            role_binding
+                .as_ref()
+                .map(|binding| binding.role_id.as_str()),
+            shared_owned.api_port,
+        )
+        .await;
+    }
 
     let can_chain_locally = gateway.can_chain_locally();
     // Mark this turn as finalizing — deferred restart must wait until we finish
@@ -723,6 +726,8 @@ pub(super) async fn run_post_loop_finalize(
     );
 
     PostLoopFinalizeOutput {
+        preloop_receipt_confirmed: receipt_disposition
+            == TerminalReceiptDisposition::AlreadyDelivered,
         full_response,
         active_background_child_session_ids,
         pending_long_running_open_after_state_save,

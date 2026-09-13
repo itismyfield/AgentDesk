@@ -2,6 +2,7 @@ use super::*;
 use crate::services::{agent_protocol::RuntimeHandoffKind, discord::inflight::CodexRange};
 
 pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryContext {
+    pub(in crate::services::discord::turn_bridge) preloop_receipt_confirmed: bool,
     pub(in crate::services::discord::turn_bridge) entry_was_rowless: bool,
     pub(in crate::services::discord::turn_bridge) watcher_delivery_pin:
         Option<WatcherClaimIncarnation>,
@@ -237,6 +238,22 @@ impl TerminalOutcomeDeliveryOutput {
         &self,
         guard: &mut super::super::guards::CompletionGuard,
     ) {
+        use super::super::context::BridgeCompletionSignal;
+        guard.note_completion_signal(match &self.outcome {
+            TerminalOutcomeDeliveryOutcome::Completed if self.terminal_delivery_committed => {
+                BridgeCompletionSignal::Finalized
+            }
+            TerminalOutcomeDeliveryOutcome::Completed
+            | TerminalOutcomeDeliveryOutcome::Unresolved { .. } => {
+                BridgeCompletionSignal::Unresolved
+            }
+            TerminalOutcomeDeliveryOutcome::DeferredToCustody { .. } => {
+                BridgeCompletionSignal::DeferredToCustody
+            }
+            TerminalOutcomeDeliveryOutcome::DeferredToOwner => {
+                BridgeCompletionSignal::DeferredToOwner
+            }
+        });
         if !matches!(self.outcome, TerminalOutcomeDeliveryOutcome::Completed) {
             guard.relinquish_bridge_authority();
         }

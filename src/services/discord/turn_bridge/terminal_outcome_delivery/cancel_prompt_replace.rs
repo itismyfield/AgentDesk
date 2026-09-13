@@ -415,7 +415,7 @@ pub(super) async fn settle_cancelled_episode_work(
             "preserving inflight for cancelled episode cleanup retry");
         return true;
     }
-    false
+    !children.is_empty()
 }
 
 /// Render the existing cancellation/restart terminal body independently of its

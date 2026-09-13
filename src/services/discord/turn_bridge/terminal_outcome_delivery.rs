@@ -58,9 +58,15 @@ pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
     state: TerminalOutcomeDeliveryState,
 ) -> TerminalOutcomeDeliveryOutput {
-    let receipt_disposition = rowless_receipt::decision(
-        rowless_receipt::ReceiptDecisionInput::from_terminal(&ctx, &state),
-    );
+    // The pre-loop gate proved the raw capture before display normalization.
+    // A later source generation cannot undo a confirmed transport receipt.
+    let receipt_disposition = if ctx.preloop_receipt_confirmed {
+        rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered
+    } else {
+        rowless_receipt::decision(rowless_receipt::ReceiptDecisionInput::from_terminal(
+            &ctx, &state,
+        ))
+    };
     let already_receipted =
         receipt_disposition == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
     let may_publish = receipt_disposition == rowless_receipt::TerminalReceiptDisposition::Continue;
