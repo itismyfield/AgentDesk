@@ -171,6 +171,20 @@
       "derivation": "#5881's final merge report at 49e44d44b869e597efac1075104bf99b953afe9b measured this existing module as 15 passed, including the real ledger/lease reader, Unknown frontier, Committed-vs-Leased, and the five exact-episode vetoes. That prior report motivates the floor; this candidate must independently enumerate and execute it in CI. Candidacy is not an exact terminal receipt or live end-to-end delivery guarantee."
     },
     {
+      "name": "t5-native-recovered-preview-terminal",
+      "boundary": "T5",
+      "status": "active",
+      "module": "services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests",
+      "command": [
+        "cargo",
+        "test",
+        "--lib",
+        "services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal"
+      ],
+      "minimum": 1,
+      "derivation": "Bounded #5071 joined native collector regression prefix: recovered preview delivery, exact terminal receipt and visible-copy ownership. The floor includes recovered_native_preview_terminal_has_one_visible_copy; opposite controls share the same prefix. CI must enumerate and execute the tests; this registration does not claim local Cargo or live acceptance."
+    },
+    {
       "name": "t5-structural-signal-authority-teardown",
       "boundary": "T5",
       "status": "gap",

@@ -107,6 +107,7 @@ class ManifestContract(unittest.TestCase):
             "t5-s7a-no-anchor-no-visible-mutation",
             "t5-s7a-detached-rowless-state-preserved",
             "t5-c1-rowless-terminal-ledger-and-lease",
+            "t5-native-recovered-preview-terminal",
             "relay-e2e-local-model-queue-wake",
         ])
         self.assertEqual({gap["boundary"] for gap in gaps}, {"T2", "T3", "T5"})
@@ -131,15 +132,15 @@ class ManifestContract(unittest.TestCase):
                 with self.assertRaisesRegex(contract.ManifestError, "must exactly match"):
                     contract.validate_workflow_contract(root, lanes, True)
 
-    def test_s7a_and_c1_witnesses_cannot_be_omitted_or_narrowed(self) -> None:
+    def test_s7a_c1_and_native_witnesses_cannot_be_omitted_or_narrowed(self) -> None:
         lanes, gaps = contract.load_active_lanes(
             REPO_ROOT / "scripts" / "relay_authority_contract_targets.json",
             REPO_ROOT,
         )
         selected = [lane for lane in lanes
-                    if lane.name.startswith(("t5-s7a-", "t5-c1-"))]
-        self.assertEqual(len(selected), 5)
-        self.assertEqual([lane.minimum for lane in selected], [1, 1, 1, 1, 15])
+                    if lane.name.startswith(("t5-s7a-", "t5-c1-", "t5-native-"))]
+        self.assertEqual(len(selected), 6)
+        self.assertEqual([lane.minimum for lane in selected], [1, 1, 1, 1, 15, 1])
         self.assertIn("t5-structural-signal-authority-teardown",
                       {gap["name"] for gap in gaps})
         job = contract.load_relay_authority_job(REPO_ROOT)
