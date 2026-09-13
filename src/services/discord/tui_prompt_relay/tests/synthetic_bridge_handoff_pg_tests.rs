@@ -498,6 +498,7 @@ fn synthetic_bridge_handoff_fixture(
             }
             let original_actor = capture.actor.clone();
             let original_start = capture.row.turn_start_offset.unwrap();
+            if native_codex { assert_eq!(original_start, source_start, "native reader must start before the actual assistant record"); }
             drop(capture);
             let row = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).unwrap();
             let resumed = if native_codex { lease.clone() } else {
@@ -508,15 +509,31 @@ fn synthetic_bridge_handoff_fixture(
             let gateway = Arc::new(S3Gateway { local_delivery: true, ..Default::default() });
             let (tx, rx) = mpsc::channel();
             let (end_tx, end_rx) = tokio::sync::oneshot::channel();
-            let delivery = claude_idle_bridge::stream_tui_idle_response_with_gateway(
+            let reader = spawn_handoff_reader(&output, original_start, tmux, tx, end_tx);
+            let (rx, first) = tokio::task::spawn_blocking(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut prefix = Vec::new();
+                loop {
+                    let first = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                        .expect("canonical source reader must emit the opening content frame");
+                    let content = idle_stream_message_is_content(&first);
+                    prefix.push(first);
+                    if content { break; }
+                }
+                (rx, prefix)
+            }).await.unwrap();
+            let delivery = async {
+            let delivered = claude_idle_bridge::stream_tui_idle_response_with_gateway(
                 &shared, provider.clone(), channel,
                 claude_idle_bridge::IdleBridgeSource {
                     tmux_session_name: tmux, output_path: &output, start_offset: original_start,
                     prompt_text: "handoff prompt", lease: &resumed,
                 },
-                (Vec::new(), rx, Some(end_rx)), gateway.clone(), 0,
-            );
-            let reader = spawn_handoff_reader(&output, original_start, tmux, tx, end_tx);
+                (first, rx, Some(end_rx)), gateway.clone(), 0,
+            ).await;
+            assert!(delivered.is_ok(), "actual adapter failed before convergence: {delivered:?}");
+            delivered
+            };
             let observe = async {
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !gateway

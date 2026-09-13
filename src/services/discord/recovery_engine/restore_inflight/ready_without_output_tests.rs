@@ -431,6 +431,21 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
                 .unwrap()
                 .write_all(next_raw.as_bytes())
                 .unwrap();
+            let tmux = retained.tmux_session_name.as_deref().unwrap();
+            dedupe::clear_tmux_runtime_binding(tmux);
+            let rebuilt = crate::services::discord::tui_prompt_relay::rehydration::codex_tui_rehydrated_binding_from_rollout_path(
+                tmux, &output, retained.session_id.clone(),
+            ).unwrap();
+            assert!(
+                rebuilt.last_offset > retained.last_offset,
+                "startup observes EOF including the next turn"
+            );
+            dedupe::register_rehydrated_tmux_runtime_binding(
+                provider.as_str(),
+                tmux,
+                channel.get(),
+                rebuilt,
+            );
             let expected_file = std::fs::read(&output).unwrap();
             let gateway = RecoveryFakeGateway::new(ReplaceLongMessageOutcome::EditedOriginal, true);
             let http = Arc::new(serenity::Http::new("Bot test-token"));
@@ -461,6 +476,7 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
             next.user_msg_id += 10;
             next.turn_nonce = Some("native-next-turn".into());
             next.full_response = "NEXT_RESPONSE".into();
+            next.response_sent_offset = 0;
             inflight::save_inflight_state(&next).unwrap();
             let before = fixture.load().unwrap();
             assert!(!super::super::idle_captured_response::recover_idle_partial_response_from_ready_source(

@@ -170,77 +170,98 @@ fn claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_pro
         .build()
         .unwrap()
         .block_on(async {
-            let mut fixture = Fixture::new(temp.path(), 1, ProviderKind::Claude).await;
-            let mut frame = fixture.frame();
-            // A parsed terminal may omit result while the same reader streamed the body.
-            if let StreamMessage::ClaudeTuiTerminalDone { result, .. } = &mut frame {
-                result.clear();
+            for provider in [ProviderKind::Claude, ProviderKind::Codex] {
+                let mut fixture = Fixture::new(temp.path(), 1, provider.clone()).await;
+                let mut frame = fixture.frame();
+                // A parsed terminal may omit result while the same reader streamed the body.
+                if let StreamMessage::ClaudeTuiTerminalDone { result, .. } = &mut frame {
+                    result.clear();
+                }
+                let (done, range, terminal) = fixture.admit(frame).await.unwrap();
+                assert!(terminal);
+                assert!(matches!(done, StreamMessage::Done { result, .. } if result == "answer"));
+                let range = range.unwrap();
+                assert_eq!(range.source.provider, provider.as_str());
+                assert_eq!(range.source.range, (0, fixture.end));
+                assert_eq!(range.source_file_identity, Some(fixture.file));
+                let restored: InflightTurnState =
+                    serde_json::from_slice(&fixture.durable()).unwrap();
+                assert_eq!(
+                    restored.tui_terminal_source_file_identity,
+                    Some(fixture.file),
+                    "restart retains the actual opened FD captured before terminal publication"
+                );
+                assert_eq!(
+                    restored.tui_terminal_generation_mtime_ns,
+                    Some(fixture.generation)
+                );
+                assert_eq!(
+                    TuiTerminalRange::from_retained_tui_terminal(&restored)
+                        .unwrap()
+                        .source,
+                    range.source
+                );
+                let mut missing_generation = restored.clone();
+                missing_generation.tui_terminal_generation_mtime_ns = None;
+                assert!(missing_generation.requires_pinned_terminal_recovery());
+                assert!(
+                    TuiTerminalRange::from_retained_tui_terminal(&missing_generation).is_none()
+                );
+                let mut old_row = serde_json::to_value(&restored).unwrap();
+                old_row
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("tui_terminal_source_file_identity");
+                old_row
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("tui_terminal_generation_mtime_ns");
+                assert!(
+                    serde_json::from_value::<InflightTurnState>(old_row)
+                        .unwrap()
+                        .tui_terminal_source_file_identity
+                        .is_none(),
+                    "old rows carry no inferred FD proof"
+                );
+                assert!(range.revalidated_source(&fixture.local).unwrap().is_some());
+                crate::services::tmux_common::with_tmux_source_authority(
+                    &fixture.tmux,
+                    |authority| {
+                        assert!(range.source_authority_is_live(authority));
+                        assert!(range.source_receipt_is_live(authority));
+                    },
+                );
+                let mut binding = dedupe::runtime_binding_for_tmux_session(&fixture.tmux).unwrap();
+                binding.last_offset = fixture.end + 10;
+                dedupe::register_tmux_runtime_binding(&fixture.tmux, binding);
+                crate::services::tmux_common::with_tmux_source_authority(
+                    &fixture.tmux,
+                    |authority| {
+                        assert!(
+                            !range.source_authority_is_live(authority),
+                            "live native admission cannot publish after cursor advance"
+                        );
+                        assert!(range.source_receipt_is_live(authority));
+                        let retained =
+                            TuiTerminalRange::from_retained_tui_terminal(&restored).unwrap();
+                        assert_eq!(
+                            retained.source_authority_is_live(authority),
+                            provider == ProviderKind::Codex,
+                            "only captured Codex recovery tolerates the startup observer cursor"
+                        );
+                    },
+                );
+                // Reusing the pathname in the same generation cannot lend its identity
+                // to the old file descriptor, either for publication or receipt lookup.
+                std::fs::rename(
+                    &fixture.transcript,
+                    fixture.transcript.with_extension("old"),
+                )
+                .unwrap();
+                std::fs::write(&fixture.transcript, vec![b'x'; fixture.end as usize]).unwrap();
+                assert!(range.receipt_source_path().is_none());
+                assert!(range.revalidated_source(&fixture.local).unwrap().is_none());
             }
-            let (done, range, terminal) = fixture.admit(frame).await.unwrap();
-            assert!(terminal);
-            assert!(matches!(done, StreamMessage::Done { result, .. } if result == "answer"));
-            let range = range.unwrap();
-            assert_eq!(range.source.provider, "claude");
-            assert_eq!(range.source.range, (0, fixture.end));
-            assert_eq!(range.source_file_identity, Some(fixture.file));
-            let restored: InflightTurnState = serde_json::from_slice(&fixture.durable()).unwrap();
-            assert_eq!(
-                restored.tui_terminal_source_file_identity,
-                Some(fixture.file),
-                "restart retains the actual opened FD captured before terminal publication"
-            );
-            assert_eq!(
-                restored.tui_terminal_generation_mtime_ns,
-                Some(fixture.generation)
-            );
-            assert_eq!(
-                TuiTerminalRange::from_retained_tui_terminal(&restored)
-                    .unwrap()
-                    .source,
-                range.source
-            );
-            let mut missing_generation = restored.clone();
-            missing_generation.tui_terminal_generation_mtime_ns = None;
-            assert!(missing_generation.requires_pinned_terminal_recovery());
-            assert!(TuiTerminalRange::from_retained_tui_terminal(&missing_generation).is_none());
-            let mut old_row = serde_json::to_value(&restored).unwrap();
-            old_row
-                .as_object_mut()
-                .unwrap()
-                .remove("tui_terminal_source_file_identity");
-            old_row
-                .as_object_mut()
-                .unwrap()
-                .remove("tui_terminal_generation_mtime_ns");
-            assert!(
-                serde_json::from_value::<InflightTurnState>(old_row)
-                    .unwrap()
-                    .tui_terminal_source_file_identity
-                    .is_none(),
-                "old rows carry no inferred FD proof"
-            );
-            assert!(range.revalidated_source(&fixture.local).unwrap().is_some());
-            crate::services::tmux_common::with_tmux_source_authority(&fixture.tmux, |authority| {
-                assert!(range.source_authority_is_live(authority));
-                assert!(range.source_receipt_is_live(authority));
-            });
-            let mut binding = dedupe::runtime_binding_for_tmux_session(&fixture.tmux).unwrap();
-            binding.last_offset = fixture.end + 10;
-            dedupe::register_tmux_runtime_binding(&fixture.tmux, binding);
-            crate::services::tmux_common::with_tmux_source_authority(&fixture.tmux, |authority| {
-                assert!(!range.source_authority_is_live(authority));
-                assert!(range.source_receipt_is_live(authority));
-            });
-            // Reusing the pathname in the same generation cannot lend its identity
-            // to the old file descriptor, either for publication or receipt lookup.
-            std::fs::rename(
-                &fixture.transcript,
-                fixture.transcript.with_extension("old"),
-            )
-            .unwrap();
-            std::fs::write(&fixture.transcript, vec![b'x'; fixture.end as usize]).unwrap();
-            assert!(range.receipt_source_path().is_none());
-            assert!(range.revalidated_source(&fixture.local).unwrap().is_none());
         });
 }
 

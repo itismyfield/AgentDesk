@@ -12,6 +12,10 @@ pub(in crate::services::discord) struct TuiTerminalRange {
     pub(in crate::services::discord) source: ExactJsonlSourceIdentity,
     #[serde(default)]
     pub(in crate::services::discord) source_file_identity: Option<(u64, u64)>,
+    // Only reconstruction from the durable captured Codex row grants this;
+    // serialized frames and live admissions cannot widen cursor authority.
+    #[serde(skip)]
+    retained_codex_terminal: bool,
 }
 pub(in crate::services::discord) type CodexRange = TuiTerminalRange;
 
@@ -212,6 +216,7 @@ fn persist_terminal_range(
     local.last_offset = persisted.last_offset;
     local.save_generation = persisted.save_generation;
     Ok(TuiTerminalRange {
+        retained_codex_terminal: false,
         identity: InflightTurnIdentity::from_state(&persisted),
         result: result.to_string(),
         rollout_path: canonical,
@@ -239,6 +244,7 @@ impl TuiTerminalRange {
             return None;
         }
         let captured = Self {
+            retained_codex_terminal: row.provider_kind() == Some(ProviderKind::Codex),
             identity: InflightTurnIdentity::from_state(row),
             result: row.full_response.clone(),
             rollout_path: row.output_path.clone()?,
@@ -322,7 +328,7 @@ impl TuiTerminalRange {
         if self.source_file_identity.is_some() {
             return tmux_generation_file_mtime_ns(tmux) == source.generation_mtime_ns
                 && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
-                    .is_some_and(|binding| captured_binding_matches(&binding, &path, &self.session_id, source.range, receipt, if source.provider == ProviderKind::Codex.as_str() { RuntimeHandoffKind::CodexTui } else { RuntimeHandoffKind::ClaudeTui }));
+                    .is_some_and(|binding| captured_binding_matches(&binding, &path, &self.session_id, source.range, receipt || self.retained_codex_terminal, if source.provider == ProviderKind::Codex.as_str() { RuntimeHandoffKind::CodexTui } else { RuntimeHandoffKind::ClaudeTui }));
         }
         tmux_generation_file_mtime_ns(tmux) == source.generation_mtime_ns
             && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority).is_some_and(|binding| {
@@ -418,7 +424,7 @@ impl TuiTerminalRange {
                             &canonical,
                             &self.session_id,
                             (start, end),
-                            false,
+                            self.retained_codex_terminal,
                             fresh.runtime_kind.unwrap(),
                         )
                     })
