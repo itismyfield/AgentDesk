@@ -443,6 +443,8 @@ fn synthetic_bridge_handoff_fixture(
                 return;
             }
             let (original_actor, original_start) = if native_codex {
+                // Poll the claim future to establish the inflight row and actor.
+                claim.take().unwrap().await;
                 // Production enters the bridge once. A diagnostic capture/drop
                 // would clear the armed original external-input lease.
                 drop(claim);
