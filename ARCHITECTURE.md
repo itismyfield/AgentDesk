@@ -508,6 +508,8 @@ src/
 │   │   ├── session_routing.rs
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
+│   ├── codex/
+│   │   └── followup_reader.rs
 │   ├── codex_tmux_wrapper/
 │   │   └── input.rs
 │   ├── codex_tui/
@@ -1483,6 +1485,7 @@ src/
 │   │   ├── cancel_token_cleanup.rs
 │   │   ├── cancel_watchdog.rs
 │   │   ├── channel_rules.rs
+│   │   ├── output_reader.rs
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   └── registry.rs
 │   ├── provider_cli/
@@ -1500,6 +1503,7 @@ src/
 │   │   ├── snapshot.rs
 │   │   └── upgrade.rs
 │   ├── qwen/
+│   │   ├── followup_reader.rs
 │   │   ├── fresh_session.rs
 │   │   └── session_lifecycle.rs
 │   ├── review_decision/
