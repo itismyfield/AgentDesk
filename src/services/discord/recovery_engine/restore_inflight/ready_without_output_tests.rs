@@ -890,9 +890,10 @@ async fn captured_episode_claim_preserves_actor_witness_and_refuses_mismatched_r
         } else {
             let captured = result.ok().flatten().expect("original actor claimed");
             let witness = captured
-                .snapshot
+                .snapshot_for_test()
                 .expect("captured row")
                 .recovery_actor
+                .as_ref()
                 .expect("original actor witness")
                 .upgrade()
                 .expect("original still held");

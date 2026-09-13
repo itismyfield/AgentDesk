@@ -13,6 +13,13 @@ pub(in crate::services::discord) struct CapturedFinish {
 }
 
 impl CapturedFinish {
+    #[cfg(test)]
+    pub(in crate::services::discord) fn snapshot_for_test(
+        &self,
+    ) -> Option<&SyntheticClaimSnapshot> {
+        self.snapshot.as_ref()
+    }
+
     pub(in crate::services::discord) fn publish_release(&self, shared: &SharedData, key: TurnKey) {
         if self.finish.removed_token.is_none() {
             return;
