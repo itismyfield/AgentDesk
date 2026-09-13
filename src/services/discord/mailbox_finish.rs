@@ -123,7 +123,6 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn mailbox_finish_turn_if_matches_episode_started_before_inner(
     shared: &SharedData,
     provider: &ProviderKind,
@@ -131,7 +130,6 @@ async fn mailbox_finish_turn_if_matches_episode_started_before_inner(
     expected_user_message_id: serenity::model::id::MessageId,
     expected_turn_nonce: Option<String>,
     active_started_before: std::time::Instant,
-    publish_completion: bool,
     expected_actor: Option<std::sync::Arc<crate::services::provider::CancelToken>>,
 ) -> FinishTurnResult {
     let result = shared
@@ -148,14 +146,6 @@ async fn mailbox_finish_turn_if_matches_episode_started_before_inner(
     if result.removed_token.is_some() {
         shared.mailboxes.recovery_done(channel_id).mark_done();
     }
-    if publish_completion {
-        turn_completion_events::publish_mailbox_release_completion_event(
-            shared,
-            channel_id,
-            Some(expected_user_message_id.get()),
-            &result,
-        );
-    }
     result
 }
 
@@ -167,17 +157,23 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode
     expected_turn_nonce: Option<String>,
     active_started_before: std::time::Instant,
 ) -> FinishTurnResult {
-    mailbox_finish_turn_if_matches_episode_started_before_inner(
+    let result = mailbox_finish_turn_if_matches_episode_started_before_inner(
         shared,
         provider,
         channel_id,
         expected_user_message_id,
         expected_turn_nonce,
         active_started_before,
-        true,
         None,
     )
-    .await
+    .await;
+    turn_completion_events::publish_mailbox_release_completion_event(
+        shared,
+        channel_id,
+        Some(expected_user_message_id.get()),
+        &result,
+    );
+    result
 }
 
 pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode_started_before_without_completion(
@@ -216,7 +212,6 @@ pub(in crate::services::discord) async fn mailbox_finish_turn_if_matches_episode
         expected_user_message_id,
         expected_turn_nonce,
         active_started_before,
-        false,
         expected_actor,
     )
     .await
