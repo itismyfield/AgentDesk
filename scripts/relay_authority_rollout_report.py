@@ -123,8 +123,10 @@ subset and unresolved population shown separately. A completed pair proves only
 that a rowless bridge reached loop exit and recorded a range shape, NOT delivery
 of its body. Whole turns lost before publication are still unobservable here.
 
-``frontier_already_covers`` and ``unbound_anchor_left`` remain unmeasured S7a
-fields. No durable read, new runtime writer, or promotion criterion is added.
+``frontier_already_covers`` and ``unbound_anchor_left`` count terminal decisions
+and unbound-candidate cleanup outcomes. These operation samples are separate
+from bridge turns and never change promotion criteria. Missing or conflicting
+evidence remains unknown; cleanup enqueue attempts are not recovery receipts.
 
 Usage::
 
@@ -176,8 +178,10 @@ SOURCE_FILE_KEY = "_source_file"
 # Per-file line tally keys. `unusable` is derived from the three failure counters.
 INTEGRITY_COUNTERS = ("lines", "unparseable", "schema_mismatch", "undatable")
 COMPLETION_LINES = "_completion_lines"
-# Design §4.3/§5.3 fields the S2 emitter cannot produce; re-assigned to S7a.
-UNMEASURED_UNTIL_S7A = ("frontier_already_covers", "unbound_anchor_left")
+BOUNDARY_METRICS = {
+    "frontier_already_covers": "completion_terminal_receipt",
+    "unbound_anchor_left": "completion_unbound_anchor_cleanup",
+}
 
 
 def default_root() -> Path:
@@ -380,8 +384,78 @@ def completion_scope_counts(events: list[dict]) -> dict:
             f"{event.get('site')}:{event.get('scope')}:{event.get('scope_reason')}"
             for event in events
             if str(event.get("site") or "").startswith("completion_")
+            and event.get("site") not in BOUNDARY_METRICS.values()
         )
     )
+
+
+def delivery_boundary_counts(events: list[dict]) -> dict:
+    """Outcomes of observed operations, not estimates for unobserved turns."""
+    result = {}
+    for metric, site in BOUNDARY_METRICS.items():
+        groups, counts = {}, Counter()
+        for event in events:
+            if event.get("site") != site:
+                continue
+            counts["records"] += 1
+            fields = ("host", "process_generation", "provider", "channel_id",
+                      "observed_at", "current_message_id")
+            if not (all(isinstance(event.get(field), str) and event[field]
+                        for field in ("host", "provider", "observed_at"))
+                    and all(type(event.get(field)) is int and event[field] > 0
+                            for field in ("process_generation", "channel_id"))
+                    and type(event.get("current_message_id")) is int
+                    and event["current_message_id"] >= 0
+                    and (event.get("turn_id") is None or type(event["turn_id"]) is int)):
+                counts["unknown"] += 1
+                continue
+            key = tuple(event[field] for field in fields) + (event.get("turn_id"),)
+            payload = {field: event.get(field) for field in
+                       (metric, "source", "anchor", "disposition",
+                        "recovery_enqueue_attempted", "recovery_enqueued")}
+            groups.setdefault(key, {})[json.dumps(payload, sort_keys=True)] = payload
+        for versions in groups.values():
+            if len(versions) != 1:
+                counts["conflicting_operations"] += 1
+                counts["unknown"] += 1
+                continue
+            payload = next(iter(versions.values()))
+            value = payload[metric]
+            if metric == "frontier_already_covers" and type(value) is bool:
+                source = payload["source"]
+                source_range = source.get("range") if isinstance(source, dict) else None
+                # Require the decision's exact source evidence, never infer it
+                # from a loop-exit range or a terminal latch.
+                if not (isinstance(source_range, list) and len(source_range) == 2
+                        and all(type(offset) is int for offset in source_range)
+                        and source_range[0] >= 0 and source_range[1] > source_range[0]
+                        and type(source.get("generation_mtime_ns")) is int
+                        and source["generation_mtime_ns"] != 0
+                        and all(source.get(field) for field in
+                                ("provider", "tmux_session_name", "turn_nonce",
+                                 "offset_authority_channel_id", "delivery_channel_id"))
+                        and (value is False or (
+                            isinstance(payload["anchor"], dict)
+                            and all(type(payload["anchor"].get(field)) is int
+                                    and payload["anchor"][field] > 0
+                                    for field in ("channel_id", "message_id"))))):
+                    value = None
+            counts["true" if value is True else "false" if value is False else "unknown"] += 1
+            if metric == "unbound_anchor_left" and payload["recovery_enqueue_attempted"] is True:
+                counts["recovery_attempted"] += 1
+                counts["recovery_unknown"] += payload["recovery_enqueued"] is not True
+        known = counts["true"] + counts["false"]
+        result[metric] = {
+            "basis": "observed_operations_only",
+            **{key: counts[key] for key in
+               ("records", "true", "false", "unknown", "conflicting_operations")},
+            "status": "measured" if known and not counts["unknown"] else "unknown",
+            "share": counts["true"] / known if known and not counts["unknown"] else None,
+        }
+        if metric == "unbound_anchor_left":
+            result[metric].update({key: counts[key] for key in
+                                   ("recovery_attempted", "recovery_unknown")})
+    return result
 
 
 def segment_events(events: list[dict]) -> list[dict]:
@@ -464,7 +538,6 @@ def tally(events: list[dict]) -> dict:
     rowless_turns: set[tuple] = set()
     range_shapes = Counter()
     stream = Counter()
-    unmeasured = Counter()
     # Provenance is a property of the publication, so it is counted per turn: all
     # three of a turn's site records are written by one call and carry one value.
     # A record without the field is `unattributed` rather than assumed — there are
@@ -493,10 +566,6 @@ def tally(events: list[dict]) -> dict:
                 stream[field] += int(axis_a.get(field) or 0)
         elif site == "loop_exit":
             range_shapes[axis_a.get("lease_range_shape")] += 1
-            # S7a fields. Absent until that slice lands; counted, never inferred.
-            for field in UNMEASURED_UNTIL_S7A:
-                if field not in axis_a:
-                    unmeasured[field] += 1
 
     reasons = Counter(reason_of_turn.values())
     published = sum(reasons.values())
@@ -508,7 +577,6 @@ def tally(events: list[dict]) -> dict:
         "rowless_continuation_turns": len(rowless_turns),
         "stream_gate": dict(stream),
         "lease_range_shapes": dict(range_shapes),
-        "unmeasured_fields": dict(unmeasured),
         "publish_reasons": dict(reasons),
         # Displayed, never gated (see the module docstring). This is the share of
         # the window that reached the log only because a successor turn arrived.
@@ -714,7 +782,7 @@ def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
     target = segments[-1] if segments else None
     target_counts = tally(target["events"]) if target else tally([])
     target_fingerprint = target["cohort_fingerprint"] if target else None
-    target_counts["completion_scopes"] = completion_scope_counts(
+    target_operations = [
         event
         for event in events
         if target
@@ -722,7 +790,15 @@ def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
         and datetime.fromisoformat(target["first_observed"])
         <= event_time(event)
         <= datetime.fromisoformat(target["last_observed"])
-    )
+    ]
+    target_counts["completion_scopes"] = completion_scope_counts(target_operations)
+    # The newest terminal decision follows its loop exit. Its operation time must
+    # not be clipped to the last lifecycle record (nor extend the stage window).
+    target_counts["delivery_boundary_outcomes"] = delivery_boundary_counts([
+        event for event in events if target
+        and str(event.get("cohort_fingerprint")) == target_fingerprint
+        and datetime.fromisoformat(target["first_observed"]) <= event_time(event)
+    ])
     integrity = scoped_integrity(target, by_file)
     criteria = criteria_for(target_counts, stage, integrity)
     rowless = rowless_range_measurement(target["events"] if target else [])
@@ -790,6 +866,8 @@ def render(summary: dict, warnings: list[str]) -> str:
             f"  stream gate totals : {target['stream_gate']}",
             f"  lease range shapes : {target['lease_range_shapes']}",
             f"  completion scopes  : {target['completion_scopes']}",
+            f"  delivery boundaries: {target['delivery_boundary_outcomes']} "
+            "(observed operations only, NOT gated; unobserved outcomes unknown)",
             f"  published by       : {target['publish_reasons']}",
             f"  evicted share      : {target['evicted_publication_share']} "
             "(displayed, NOT gated — the share that needed a successor to be"
@@ -814,8 +892,6 @@ def render(summary: dict, warnings: list[str]) -> str:
             f" whole input {summary['line_integrity_all_files']}",
         ]
     )
-    if target["unmeasured_fields"]:
-        lines.append(f"  unmeasured (S7a)   : {target['unmeasured_fields']}")
     lines.append("")
     lines.append("  criteria:")
     for name, item in summary["criteria"].items():

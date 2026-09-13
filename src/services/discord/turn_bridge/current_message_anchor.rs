@@ -40,11 +40,11 @@ pub(super) async fn cleanup_unbound_bridge_anchor<G: TurnGateway + ?Sized>(
     channel_id: ChannelId,
     message_id: MessageId,
 ) {
-    if gateway
+    let delete_failed = gateway
         .delete_message(channel_id, message_id)
         .await
-        .is_err()
-    {
+        .is_err();
+    if delete_failed {
         crate::services::discord::status_panel_orphan_store::enqueue(
             provider,
             token_hash,
@@ -52,6 +52,9 @@ pub(super) async fn cleanup_unbound_bridge_anchor<G: TurnGateway + ?Sized>(
             message_id.get(),
         );
     }
+    super::super::relay_recovery::authority_observation::delivery_boundary::record_unbound_anchor_cleanup(
+        provider, channel_id.get(), message_id.get(), delete_failed,
+    );
 }
 
 /// Sends an absent response anchor, then adopts it only after a guarded durable
