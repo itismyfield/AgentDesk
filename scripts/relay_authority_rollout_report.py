@@ -458,6 +458,9 @@ def delivery_boundary_counts(events: list[dict]) -> dict:
             if not (all(isinstance(event.get(field), str) and event[field]
                         for field in ("host", "provider", "observed_at"))
                     and all(_uint(event.get(field)) for field in ("process_generation", "channel_id"))
+                    # An operation timestamp must stand on its own; publication time
+                    # may locate malformed records, but cannot validate evidence.
+                    and event_time({"observed_at": event.get("observed_at")}) is not None
                     and _uint(event.get("current_message_id"), zero=True)
                     and (event.get("turn_id") is None or type(event["turn_id"]) is int)):
                 counts["unknown"] += 1
