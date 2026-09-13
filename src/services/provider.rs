@@ -11,7 +11,7 @@ mod cancel_watchdog;
 pub(crate) mod channel_rules;
 mod output_reader;
 mod registry;
-pub use output_reader::poll_output_file_until_result;
+pub use output_reader::{fold_read_output_result, poll_output_file_until_result};
 #[cfg(test)]
 pub(crate) mod read_fault;
 pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
@@ -1486,19 +1486,6 @@ impl ReadyForInputIdleTracker {
     fn reset(&mut self) {
         self.first_ready_at = None;
         self.consecutive_ready_probes = 0;
-    }
-}
-
-pub fn fold_read_output_result<T>(
-    read_result: ReadOutputResult,
-    on_ready: impl FnOnce(u64) -> T,
-    on_session_died: impl FnOnce(u64) -> T,
-) -> T {
-    match read_result {
-        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
-            on_ready(offset)
-        }
-        ReadOutputResult::SessionDied { offset } => on_session_died(offset),
     }
 }
 
