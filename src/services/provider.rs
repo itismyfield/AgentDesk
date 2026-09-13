@@ -1610,21 +1610,29 @@ where
         let read_result = file.read(&mut buf);
         match read_result {
             Ok(0) => {
+                if crate::services::tmux_common::rotation_target_was_swapped(
+                    &file,
+                    std::path::Path::new(output_path),
+                )
+                .map_err(|error| format!("Failed to verify output file identity: {error}"))?
+                {
+                    return Err("Output file rotated before a terminal result".into());
+                }
                 no_data_count += 1;
                 if no_data_count % 25 == 0 {
-                    if !is_alive() {
-                        let file_len = std::fs::metadata(output_path)
-                            .map(|meta| meta.len())
-                            .unwrap_or(current_offset);
+                    let alive = is_alive();
+                    // Growth belongs to the descriptor being read, never a replacement path.
+                    let file_len = file
+                        .metadata()
+                        .map(|meta| meta.len())
+                        .unwrap_or(current_offset);
+                    if !alive {
                         if file_len > current_offset {
                             continue;
                         }
                         break;
                     }
 
-                    let file_len = std::fs::metadata(output_path)
-                        .map(|meta| meta.len())
-                        .unwrap_or(current_offset);
                     let has_new_bytes = file_len > current_offset;
                     let output_ever_grew = current_offset > start_offset;
                     if !has_new_bytes
