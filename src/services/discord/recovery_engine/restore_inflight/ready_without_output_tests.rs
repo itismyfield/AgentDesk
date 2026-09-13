@@ -313,7 +313,7 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
                 let metadata = file.metadata().unwrap();
                 let tmux = fixture.state.tmux_session_name.clone().unwrap();
                 let raw = fixture.state.full_response.clone();
-                let frame = crate::services::provider::StreamMessage::ClaudeTuiTerminalDone {
+                let frame = crate::services::discord::StreamMessage::ClaudeTuiTerminalDone {
                     result: raw.clone(),
                     session_id: fixture.state.session_id.clone(),
                     transcript_path: std::fs::canonicalize(&output)
