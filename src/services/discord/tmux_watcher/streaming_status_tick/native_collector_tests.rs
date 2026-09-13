@@ -52,7 +52,7 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
     }
     let (_lock, root) = isolate_root();
     capture_warns(async {
-        let (fx, row) = seed_recovered_row(root.root.path(), 5834);
+        let (mut fx, mut row) = seed_recovered_row(root.root.path(), 5834);
         let marker = crate::services::tmux_common::session_temp_path(&fx.tmux, "generation");
         std::fs::write(&marker, b"1").unwrap();
         let generated = (0..repeats).map(|index| format!(
@@ -73,6 +73,20 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         };
         let source_bytes = data.len();
         std::fs::write(&fx.output_path, &data).unwrap();
+        let source_start = if captured {
+            std::env::var("AGENTDESK_5833_CAPTURED_START")
+                .expect("manual diagnostic requires the original absolute start offset")
+                .parse::<u64>()
+                .unwrap()
+        } else {
+            0
+        };
+        assert!(source_start < source_bytes as u64);
+        let data = data[source_start as usize..].to_vec();
+        row.turn_start_offset = Some(source_start);
+        row.last_offset = source_start;
+        save_inflight_state(&row).unwrap();
+        fx.identity = InflightTurnIdentity::from_state(&row);
         let shared = crate::services::discord::make_shared_data_for_tests();
         let rec = recorder(fx.channel, true).await;
         let cancel = Arc::new(AtomicBool::new(false));
@@ -124,9 +138,9 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         );
         let registry = Arc::new(RelayProducerRegistry::new());
         registry.register(fx.tmux.clone(), handle.producer());
-        let mut offset = data.len() as u64;
+        let mut offset = source_bytes as u64;
         let mut buffer = String::new();
-        let mut buffer_start = 0;
+        let mut buffer_start = source_start;
         let mut decoder = Utf8ChunkDecoder::default();
         let mut pending = None;
         let mut restored = None;
@@ -165,7 +179,7 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
             &ctx,
             TurnStreamCollectorIo {
                 data,
-                data_start_offset: 0,
+                data_start_offset: source_start,
                 epoch_snapshot: 0,
                 source_authority,
             },
@@ -186,7 +200,7 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         if captured {
             if let CollectOutcome::Fallthrough(turn) = &outcome {
                 eprintln!(
-                    "captured collector source_bytes={source_bytes} body_bytes={} body_units={} terminal={} posts={}",
+                    "captured collector source_bytes={source_bytes} source_start={source_start} body_bytes={} body_units={} terminal={} posts={}",
                     turn.full_response.len(),
                     crate::services::discord::formatting::discord_message_units(
                         &turn.full_response
