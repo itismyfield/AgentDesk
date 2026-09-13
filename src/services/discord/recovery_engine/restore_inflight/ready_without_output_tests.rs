@@ -218,3 +218,79 @@ async fn delivered_partial_eof_cannot_finish_or_clear_successor_during_transport
         Some(MessageId::new(successor.user_msg_id))
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_current_anchor() {
+    use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+    use crate::services::discord::recovery_paths::controller_cutover::{
+        deliver_recovery_replace_via_controller, tests::RecoveryFakeGateway,
+    };
+    let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let mut fixture = Fixture::new(5_071_805);
+    fixture.state.streaming_rollover_frozen_msg_ids = vec![40];
+    fixture.state.current_msg_id = 41;
+    // Rollover froze prefix in 40; 41 already shows the beginning of its suffix.
+    // A normal streaming edit does not advance response_sent_offset.
+    let mut messages = std::collections::BTreeMap::from([
+        (MessageId::new(40), "published prefix".to_string()),
+        (MessageId::new(41), "unposted".to_string()),
+    ]);
+    fixture.claim().await;
+    let gateway = RecoveryFakeGateway::new(ReplaceLongMessageOutcome::EditedOriginal, true);
+    let http = Arc::new(serenity::Http::new("Bot test-token"));
+    let channel = ChannelId::new(fixture.state.channel_id);
+    let context = RecoveryDeliveryContext::from_state(
+        &fixture.shared,
+        &ProviderKind::Claude,
+        &fixture.state,
+        None,
+        fixture.shared.restart.current_generation,
+    );
+    assert!(
+        settle_ready_without_output(
+            &fixture.shared,
+            &ProviderKind::Claude,
+            &fixture.state,
+            |text| {
+                let gateway = &gateway;
+                let shared = &fixture.shared;
+                let http = &http;
+                let context = context.as_ref();
+                async move {
+                    deliver_recovery_replace_via_controller(
+                        gateway,
+                        shared,
+                        &ProviderKind::Claude,
+                        http,
+                        channel,
+                        MessageId::new(41),
+                        &text,
+                        context,
+                    )
+                    .await
+                }
+            },
+        )
+        .await
+    );
+    let replacements = gateway
+        .replacements
+        .lock()
+        .expect("actual controller transport calls");
+    assert_eq!(replacements.len(), 1);
+    for (message, body) in replacements.iter() {
+        messages.insert(*message, body.clone());
+    }
+    assert_eq!(
+        messages.get(&MessageId::new(40)).unwrap(),
+        "published prefix"
+    );
+    assert_eq!(
+        messages.get(&MessageId::new(41)).unwrap(),
+        &super::super::super::formatting::format_for_discord_with_provider(
+            "unposted suffix",
+            &ProviderKind::Claude,
+        )
+    );
+    assert!(fixture.load().is_none());
+}

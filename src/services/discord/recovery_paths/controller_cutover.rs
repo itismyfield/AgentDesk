@@ -281,7 +281,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::services::discord) mod tests {
     use super::*;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
@@ -329,20 +329,25 @@ mod tests {
     // transport); the non-terminal `Active` lifecycle makes `post_send_finalize`
     // a no-op, so no edit/delete fires. `delete_message` records calls so a #2757
     // regression (fallback delete) is caught; every other method `panic!`s.
-    struct RecoveryFakeGateway {
+    pub(in crate::services::discord) struct RecoveryFakeGateway {
         outcome: ReplaceLongMessageOutcome,
         ok: bool,
         replace_calls: AtomicUsize,
         delete_calls: AtomicUsize,
+        pub(in crate::services::discord) replacements: std::sync::Mutex<Vec<(MessageId, String)>>,
     }
 
     impl RecoveryFakeGateway {
-        fn new(outcome: ReplaceLongMessageOutcome, ok: bool) -> Self {
+        pub(in crate::services::discord) fn new(
+            outcome: ReplaceLongMessageOutcome,
+            ok: bool,
+        ) -> Self {
             Self {
                 outcome,
                 ok,
                 replace_calls: AtomicUsize::new(0),
                 delete_calls: AtomicUsize::new(0),
+                replacements: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -351,12 +356,16 @@ mod tests {
         fn replace_message_with_outcome<'a>(
             &'a self,
             _c: ChannelId,
-            _m: MessageId,
-            _content: &'a str,
+            message: MessageId,
+            content: &'a str,
         ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
             Box::pin(async move {
                 self.replace_calls.fetch_add(1, Ordering::SeqCst);
                 if self.ok {
+                    self.replacements
+                        .lock()
+                        .expect("record replacements")
+                        .push((message, content.to_string()));
                     Ok(self.outcome.clone())
                 } else {
                     Err("fake transport failure".to_string())
