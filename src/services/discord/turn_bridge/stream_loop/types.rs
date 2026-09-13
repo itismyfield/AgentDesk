@@ -56,9 +56,13 @@ impl PinnedTerminalTransport<'_> {
             let result = gateway
                 .replace_message_with_outcome(channel, msg, body)
                 .await;
-            let edited = matches!(&result, Ok(Replace::EditedOriginal));
-            let fallback = matches!(&result, Ok(Replace::SentFallbackAfterEditFailure { .. }));
-            (edited.then_some(msg), result.is_err(), fallback)
+            match result {
+                Ok(Replace::EditedOriginal) => (Some(msg), false, false),
+                Ok(Replace::SentFallbackAfterEditFailure {
+                    replacement_anchor, ..
+                }) => (replacement_anchor, false, true),
+                result => (None, result.is_err(), false),
+            }
         };
         let committed = if let Some(message_id) = message_id {
             let result = match pinned.commit_after_send(shared, message_id.get()) {
@@ -207,7 +211,10 @@ macro_rules! dispatch_pinned_terminal {
                     } else {
                         let outcome = if did_commit {
                             $crate::services::discord::outbound::turn_output_controller::DeliveryOutcome::Delivered {
-                                committed_to: $end.unwrap_or(0), replace_kind: None, new_chunks: None,
+                                committed_to: $end.unwrap_or(0),
+                                replace_kind: fallback.then(|| $crate::services::discord::outbound::turn_output_controller::ReplaceDeliveryKind::FreshFallbackAfterEditFailure {
+                                    edit_error: "fallback after edit failure".into(), replacement_anchor: anchor,
+                                }), new_chunks: None,
                             }
                         } else {
                             $crate::services::discord::outbound::turn_output_controller::DeliveryOutcome::Unknown { fell_back: fallback }

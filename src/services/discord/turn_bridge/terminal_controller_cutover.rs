@@ -814,30 +814,11 @@ pub(super) async fn apply_bridge_short_replace_controller(
 }
 
 /// Maps site-5 outcomes onto footer, retry, sent-offset, and holder cleanup state.
-/// Reproduces the legacy site-5 mapping (mod.rs 6160-6245) EXACTLY:
-/// - `Delivered` (EditedOriginal): committed → `terminal_delivery_committed = true;
-///   terminal_body_visible = true;` footer if footer-mode; `Succeeded` cleanup;
-///   the outer epilogue (mod.rs:6293) bumps `response_sent_offset` — the
-///   controller already advanced `confirmed_end`. We also bump
-///   `inflight_response_sent_offset` here so the in-struct mirror matches legacy
-///   (mod.rs:6295 sets `inflight_state.response_sent_offset` on the committed path).
-/// - `Unknown { fell_back: true }` (SentFallbackAfterEditFailure):
-///   `preserve_inflight_for_cleanup_retry = true;` AND the dual-offset bump
-///   `inflight_response_sent_offset = full_response_len` (mod.rs:6241); record
-///   `failed(..)` cleanup; NO `confirmed_end` advance (released Unknown without
-///   commit); NO completion_footer.
-/// - `Unknown { fell_back: false }` (Partial / Err):
-///   `preserve_inflight_for_cleanup_retry = true;` record `failed(detail)` cleanup;
-///   NO `response_sent_offset` bump (distinguishes from the fell_back arm).
-/// - `Transient` (lost acquire / B2-skip): `preserve_inflight_for_cleanup_retry =
-///   true; bridge_skip_holder_owns_inflight = true;` no transport, no cleanup
-///   record (the legacy B2-skip arm at mod.rs:6145 records none).
-/// - `NotDelivered` (advance refused — not normally reachable: site-5's advance is
-///   unconditional on a committed replace): conservative
-///   `preserve_inflight_for_cleanup_retry = true` (no commit), record failed
-///   cleanup. Documented as the defensive default.
-/// - `Skipped` (empty body — excluded by the cutover gate; unreachable in prod):
-///   `preserve_inflight_for_cleanup_retry = true`.
+/// Delivered commits visibility and offset. Only an edited original can receive
+/// the footer; an exact pinned fallback retains its failed-placeholder cleanup.
+/// Legacy Unknown fallback preserves retry state and bumps the inflight offset;
+/// other failures preserve without advancing. Transient also preserves holder
+/// ownership, preventing this bridge from rewriting another holder's row.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_bridge_short_replace_outcome(
     outcome: toc::DeliveryOutcome,
@@ -856,14 +837,20 @@ pub(super) fn apply_bridge_short_replace_outcome(
 ) {
     use super::super::placeholder_cleanup::PlaceholderCleanupOutcome;
     match outcome {
-        // Legacy EditedOriginal committed arm (mod.rs:6226-6232): the original was
-        // edited in place → mark committed/visible, register the footer target in
-        // footer-mode, record the `Succeeded` cleanup + emit committed=true. The
-        // controller already advanced `confirmed_end`.
-        toc::DeliveryOutcome::Delivered { .. } => {
+        // Exact pinned fallback receipts prove delivery without proving an edit.
+        toc::DeliveryOutcome::Delivered { replace_kind, .. } => {
+            let cleanup = match replace_kind {
+                Some(toc::ReplaceDeliveryKind::FreshFallbackAfterEditFailure {
+                    edit_error,
+                    ..
+                }) => PlaceholderCleanupOutcome::failed(edit_error),
+                _ => PlaceholderCleanupOutcome::Succeeded,
+            };
             *locals.terminal_delivery_committed = true;
             *locals.terminal_body_visible = true;
-            if single_message_panel_footer_mode {
+            if single_message_panel_footer_mode
+                && matches!(cleanup, PlaceholderCleanupOutcome::Succeeded)
+            {
                 *locals.completion_footer_terminal_text = Some(relay_text.to_string());
             }
             // mod.rs:6293-6295: the committed epilogue sets response_sent_offset to
@@ -875,7 +862,7 @@ pub(super) fn apply_bridge_short_replace_outcome(
                 channel_id,
                 msg_id,
                 tmux_session_name,
-                PlaceholderCleanupOutcome::Succeeded,
+                cleanup,
                 true,
                 dispatch_id,
                 session_key,
@@ -1705,6 +1692,119 @@ mod tests {
                 assert!(committed && !fallback); assert_eq!(gw.replace_calls.load(Ordering::SeqCst), 1); assert_pinned_barrier(&source, MSG, owner.get(), "answer"); assert!(matches!(shared.delivery_lease(owner).read(), LeaseSnapshot::Unleased)); }
             let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, root._temp.path(), ch(), 3); let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, false);
             assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, false).await.0); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased)); let broken = runtime_root_guard(); std::fs::create_dir_all(broken._temp.path().join("runtime")).unwrap(); std::fs::write(broken._temp.path().join("runtime/discord_delivery_records"), b"blocked").unwrap(); let shared = make_shared_data_for_tests(); let (pin, source) = pinned(&shared, broken._temp.path(), ch(), 6); let gw = gateway(ReplaceLongMessageOutcome::EditedOriginal, true); assert!(!pinned_transport(shared.as_ref(), &gw, &provider, ch()).deliver(pin, false).await.0); assert_eq!((gw.replace_calls.load(Ordering::SeqCst), shared.committed_relay_offset(ch())), (1, 64)); assert!(dr::read_record(&provider, CH).is_none()); assert!(!dr::historical_pinned_delivery_exists(&source, MSG)); assert!(matches!(shared.delivery_lease(ch()).read(), LeaseSnapshot::Unleased));
+        }
+
+        // Drive the production gateway through an edit rejection and fallback POST.
+        // A fabricated Replace outcome would miss the transport-to-anchor boundary.
+        #[cfg(unix)]
+        #[tokio::test(flavor = "current_thread")]
+        async fn pinned_short_fallback_exact_receipt_5071() {
+            let _lock = crate::config::shared_test_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            crate::services::tui_prompt_dedupe::reset_state_for_tests();
+            for (post_ok, replace_source) in [(true, false), (false, false), (true, true)] {
+                let root = runtime_root_guard();
+                let shared = make_shared_data_for_tests();
+                let provider = ProviderKind::Codex;
+                let (pin, source) = pinned(&shared, root._temp.path(), owner_ch(), 5_071);
+                let edits = Arc::new(AtomicUsize::new(0));
+                let posts = Arc::new(AtomicUsize::new(0));
+                let edit_count = edits.clone();
+                let _edit =
+                    crate::services::discord::formatting::chunk_transport_test_hook::install(
+                        Box::new(move |channel, message, body| {
+                            assert_eq!(
+                                (channel, message, body),
+                                (ch(), MessageId::new(MSG), "answer")
+                            );
+                            edit_count.fetch_add(1, Ordering::SeqCst);
+                            Some(Err("edit rejected".into()))
+                        }),
+                    );
+                let post_count = posts.clone();
+                let replacement = flip(source.clone());
+                let _post =
+                    crate::services::discord::formatting::rollback_transport_test_hook::install(
+                        Box::new(move |channel, body, _, _, _| {
+                            assert_eq!((channel, body), (ch(), "answer"));
+                            post_count.fetch_add(1, Ordering::SeqCst);
+                            if replace_source {
+                                replacement();
+                            }
+                            Some(if post_ok {
+                                Ok((channel, MessageId::new(9_071)))
+                            } else {
+                                Err("POST rejected".into())
+                            })
+                        }),
+                        Box::new(|_, _| Some(Ok(()))),
+                    );
+                let gateway = crate::services::discord::gateway::DiscordGateway::new(
+                    Arc::new(serenity::all::Http::new("test-token")),
+                    shared.clone(),
+                    provider.clone(),
+                    None,
+                );
+                let outcome = pinned_transport(shared.as_ref(), &gateway, &provider, owner_ch())
+                    .deliver(pin, false)
+                    .await;
+                assert_eq!(
+                    outcome,
+                    (post_ok, post_ok, post_ok.then_some(MessageId::new(9_071)))
+                );
+                assert_eq!(
+                    (edits.load(Ordering::SeqCst), posts.load(Ordering::SeqCst)),
+                    (1, 1)
+                );
+                assert_eq!(
+                    dr::confirmed_delivery_receipt_exists(&provider, ch(), 9_071, &source),
+                    post_ok
+                );
+                assert!(!dr::confirmed_delivery_receipt_exists(
+                    &provider,
+                    ch(),
+                    MSG,
+                    &source
+                ));
+                assert!(matches!(
+                    shared.delivery_lease(owner_ch()).read(),
+                    LeaseSnapshot::Unleased
+                ));
+                if post_ok {
+                    let locals = apply(
+                        toc::DeliveryOutcome::Delivered {
+                            committed_to: 64,
+                            replace_kind: Some(
+                                toc::ReplaceDeliveryKind::FreshFallbackAfterEditFailure {
+                                    edit_error: "edit rejected".into(),
+                                    replacement_anchor: outcome.2,
+                                },
+                            ),
+                            new_chunks: None,
+                        },
+                        true,
+                        "answer".len(),
+                    );
+                    assert!(locals.committed && locals.visible && !locals.preserve);
+                    assert_eq!(locals.inflight_offset, "answer".len());
+                    assert!(
+                        locals.footer.is_none(),
+                        "a fallback must not footer-edit the failed original"
+                    );
+                }
+                if replace_source {
+                    assert_pinned_barrier(&source, 9_071, 5_071, "answer");
+                } else {
+                    assert_eq!(
+                        shared.committed_relay_offset(owner_ch()),
+                        if post_ok { 64 } else { 0 }
+                    );
+                }
+            }
         }
 
         #[cfg(unix)]

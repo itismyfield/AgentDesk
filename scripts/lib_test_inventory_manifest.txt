@@ -6754,6 +6754,7 @@ services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::bridge_terminal_lease_range_pins_cutover
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::pinned_codex_long_chunks_generation_flip_5264
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::pinned_codex_short_replace_generation_flip_5264
+services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::pinned_short_fallback_exact_receipt_5071
 services::discord::turn_bridge::terminal_controller_cutover::tests::bridge_short_replace_controller::prepare_bridge_lease_decision_table_5264
 services::discord::turn_bridge::terminal_controller_cutover::tests::controller_bridge_acquire_sites_mint_fresh_attempts
 services::discord::turn_bridge::terminal_delivery::relay_state_contract_refs::contract_symbols_exist
