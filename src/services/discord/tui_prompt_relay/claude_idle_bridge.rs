@@ -83,7 +83,7 @@ fn log_idle_stream_text_decision(
 /// or a transport error. A bare terminal `Done` with an empty result (the
 /// synthetic completion frame the reader emits at turn end) or pure control /
 /// offset frames are NOT content; if the whole turn yields only those, the
-/// idle tail takes the no-card empty path (preserving today's behavior).
+/// idle tail still admits an empty terminal to deliver recovery guidance.
 #[cfg(unix)]
 pub(super) fn idle_stream_message_is_content(message: &StreamMessage) -> bool {
     match message {
@@ -109,8 +109,7 @@ pub(super) fn idle_stream_message_is_content(message: &StreamMessage) -> bool {
 }
 
 /// #3256: the stream-through path commits the runtime-binding offset whenever
-/// the single bridge turn delivered successfully. (The empty-response branch
-/// commits independently before finishing the synthetic turn.)
+/// the single bridge turn delivered successfully, including empty-response guidance.
 #[cfg(unix)]
 pub(super) fn tui_idle_tail_stream_should_commit_runtime_binding_offset(
     discord_delivery_succeeded: bool,
@@ -622,6 +621,13 @@ pub(super) async fn finish_idle_bridge_completion(
                 reason = ?aborted, "TUI-direct bridge entry aborted before authority");
             Err("TUI-direct bridge entry aborted before authority".to_string())
         }
+        Ok(Ok(
+            signal @ (BridgeCompletionSignal::DeferredToCustody
+            | BridgeCompletionSignal::DeferredToOwner
+            | BridgeCompletionSignal::Unresolved),
+        )) => Err(format!(
+            "TUI-direct bridge delivery remains pending: {signal:?}"
+        )),
         Err(_) => Err(format!(
             "TUI-direct bridge adapter timed out waiting for completion for provider {}",
             provider.as_str()
@@ -725,13 +731,18 @@ fn forward_idle_stream_into_bridge_with_logging(
         true
     };
 
-    // Source readers can synthesize Done after inactivity. Keep at most one
+    // Source readers can synthesize Done or defer Error until shutdown. Keep one
     // terminal frame until their positive decoder evidence arrives; prose still
     // flows immediately. A failed reader closes the bridge without claiming Done.
     let strict_terminal = reader_end.is_some();
     let mut terminal = None;
     for message in prefix.into_iter().chain(reader_rx) {
-        if strict_terminal && (terminal.is_some() || matches!(message, StreamMessage::Done { .. }))
+        if strict_terminal
+            && (terminal.is_some()
+                || matches!(
+                    message,
+                    StreamMessage::Done { .. } | StreamMessage::Error { .. }
+                ))
         {
             if terminal.is_none() {
                 terminal = Some(message);

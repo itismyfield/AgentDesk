@@ -1,21 +1,53 @@
 use super::*;
 
+pub(super) struct HandoffReader {
+    thread: Option<std::thread::JoinHandle<()>>,
+    cancel: Arc<CancelToken>,
+}
+
+impl HandoffReader {
+    pub(super) fn join(mut self) -> std::thread::Result<()> {
+        let thread = self.thread.take().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !thread.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let timed_out = !thread.is_finished();
+        self.cancel.cancelled.store(true, std::sync::atomic::Ordering::Release);
+        thread.join()?;
+        if timed_out { Err(Box::new("reader did not stop at its terminal")) } else { Ok(()) }
+    }
+}
+
+impl Drop for HandoffReader {
+    fn drop(&mut self) {
+        self.cancel.cancelled.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+    }
+}
+
 #[cfg(unix)]
 pub(super) fn spawn_handoff_reader(
     path: &Path, start: u64, tmux: &str, tx: mpsc::Sender<StreamMessage>,
     end: tokio::sync::oneshot::Sender<Result<claude_idle_bridge::IdleReaderCompletion, String>>,
-) -> std::thread::JoinHandle<()> {
+) -> HandoffReader {
     let generation = crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux);
     let path = path.to_str().unwrap().to_owned();
-    std::thread::spawn(move || {
+    let cancel = Arc::new(CancelToken::new());
+    let reader_cancel = cancel.clone();
+    let thread = std::thread::spawn(move || {
         let result = crate::services::session_backend::read_output_file_until_result_with_harvest(
-            &path, start, tx, None, crate::services::provider::SessionProbe::process(|| true),
+            &path, start, tx, Some(reader_cancel), crate::services::provider::SessionProbe::process(|| true),
         );
         let _ = end.send(result.map(|(result, stats)| {
             claude_idle_bridge::IdleReaderCompletion::from_harvest(result, stats, generation)
         }).map_err(|error| error.error));
-    })
+    });
+    HandoffReader { thread: Some(thread), cancel }
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum EmptyTailCase { DecodedTerminal, MissingSource, DeferredError }
 
 #[cfg(unix)]
 fn synthetic_bridge_handoff_fixture(
@@ -26,7 +58,7 @@ fn synthetic_bridge_handoff_fixture(
     recovery: Option<bool>,
     failed_save: bool,
     source_retry: bool,
-    empty_tail: Option<bool>,
+    empty_tail: Option<EmptyTailCase>,
     postgres_race: bool,
     admission_race: bool,
     prefix_read_error: bool,
@@ -275,23 +307,66 @@ fn synthetic_bridge_handoff_fixture(
                 );
                 return;
             }
-            if let Some(decoded_terminal) = empty_tail {
+            if let Some(empty_case) = empty_tail {
+                let decoded_terminal = empty_case == EmptyTailCase::DecodedTerminal;
                 claim.take().unwrap().await;
                 let before = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).unwrap();
                 let actor = crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.unwrap();
                 if decoded_terminal {
                     std::fs::write(&output, format!("{previous}{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"\"}}\n")).unwrap();
+                } else if empty_case == EmptyTailCase::DeferredError {
+                    let error = serde_json::json!({"type":"result", "subtype":"error_during_execution", "is_error":true, "errors":["DEFERRED_READER_FAILURE"]});
+                    std::fs::write(&output, format!("{previous}{error}\n")).unwrap();
                 } else { std::fs::remove_file(&output).unwrap(); }
+                if decoded_terminal || empty_case == EmptyTailCase::DeferredError {
+                    let _fault = (empty_case == EmptyTailCase::DeferredError).then(|| {
+                        crate::services::provider::read_fault::after_offset(&output, std::fs::metadata(&output).unwrap().len())
+                    });
+                    let gateway = Arc::new(S3Gateway { local_delivery: true, ..Default::default() });
+                    let (tx, rx) = mpsc::channel();
+                    let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+                    let reader = spawn_handoff_reader(&output, source_start, tmux, tx, end_tx);
+                    let result = tokio::time::timeout(Duration::from_secs(5), claude_idle_bridge::stream_tui_idle_response_with_gateway(
+                        &shared, provider.clone(), channel, tmux, &output, source_start,
+                        "handoff prompt", Vec::new(), rx, Some(end_rx), &lease, gateway.clone(), 0,
+                    )).await.expect("empty/error reader settles within the reader bound");
+                    tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
+                    if empty_case == EmptyTailCase::DeferredError {
+                        assert!(result.is_err(), "a deferred error cannot become a terminal error card");
+                        assert!(gateway.bodies.lock().unwrap().iter().all(|body| !body.contains("DEFERRED_READER_FAILURE")));
+                        let after = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).unwrap();
+                        assert_eq!(after.turn_nonce, before.turn_nonce);
+                        assert_eq!(after.turn_start_offset, before.turn_start_offset);
+                        assert!(!after.terminal_delivery_committed);
+                        assert!(after.full_response.is_empty());
+                        assert!(Arc::ptr_eq(&actor, &crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.unwrap()));
+                        assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap().last_offset, source_start);
+                        assert!(std::fs::read_to_string(&output).unwrap().contains("DEFERRED_READER_FAILURE"));
+                        return;
+                    }
+                    let offset = result.expect("empty terminal guidance is delivered").unwrap();
+                    assert_eq!(offset, std::fs::metadata(&output).unwrap().len());
+                    assert!(gateway.bodies.lock().unwrap().iter().any(|sent| !sent.trim().is_empty()),
+                        "empty terminal must publish recovery guidance, never a zero-byte success");
+                    let record = crate::services::discord::outbound::delivery_record::read_record(&provider, channel.get()).unwrap();
+                    assert!(record.confirmed_deliveries.iter().any(|receipt| {
+                        receipt.source.turn_nonce == actor.turn_nonce().unwrap()
+                            && receipt.source.range == (source_start, offset)
+                            && receipt.source.tmux_session_name == tmux
+                            && receipt.delivery_channel_id == channel.get()
+                            && receipt.message_id == anchor.get()
+                    }), "empty guidance has the exact original source/anchor receipt");
+                    assert!(crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).is_none());
+                    assert!(crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.is_none());
+                    assert!(crate::services::discord::mailbox_try_start_turn(
+                        &shared, channel, Arc::new(CancelToken::new()), serenity::UserId::new(583_300_003), MessageId::new(583_300_004),
+                    ).await, "receipted empty guidance releases the next input");
+                    return;
+                }
                 tokio::time::timeout(Duration::from_secs(5), claude_idle_tail::run_claude_idle_response_tail(
                     shared.clone(), tmux.into(), channel, output.clone(), source_start,
                     "handoff prompt".into(), lease.clone(),
                 )).await.expect("real reader exits without a busy wait");
-                if decoded_terminal {
-                    assert!(crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).is_none());
-                    assert!(crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.is_none());
-                    assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap().last_offset, std::fs::metadata(&output).unwrap().len());
-                    return;
-                }
                 let after = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).unwrap();
                 assert_eq!(serde_json::to_value(&before).unwrap(), serde_json::to_value(&after).unwrap());
                 assert!(Arc::ptr_eq(&actor, &crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.unwrap()));
@@ -406,6 +481,10 @@ fn synthetic_bridge_handoff_fixture(
                     .is_some()
             );
             if prefix_read_error {
+                use std::io::Write;
+                let error = serde_json::json!({"type":"result", "subtype":"error_during_execution", "is_error":true, "errors":["DEFERRED_READER_FAILURE"]});
+                std::fs::OpenOptions::new().append(true).open(&output).unwrap()
+                    .write_all(format!("{error}\n").as_bytes()).unwrap();
                 let _fault = crate::services::provider::read_fault::after_offset(
                     &output, std::fs::metadata(&output).unwrap().len(),
                 );
@@ -423,7 +502,8 @@ fn synthetic_bridge_handoff_fixture(
                 let continuation = serde_json::json!({"type":"assistant", "sessionId":"native-auto-session", "parentUuid":"compact-summary", "message":{"content":[{"type":"text", "text":"NATIVE_COMPACT_CONTINUATION"}], "stop_reason":"end_turn"}});
                 std::fs::OpenOptions::new().append(true).open(&output).unwrap()
                     .write_all(format!("{boundary}\n{summary}\n{continuation}\n").as_bytes()).unwrap();
-                tokio::time::timeout(Duration::from_secs(3), async {
+                let edit_bound = crate::services::discord::status_update_interval() + Duration::from_secs(2);
+                tokio::time::timeout(edit_bound, async {
                     while !gateway.bodies.lock().unwrap().iter().any(|sent| sent.contains("NATIVE_COMPACT_CONTINUATION")) {
                         tokio::time::sleep(Duration::from_millis(25)).await;
                     }
@@ -447,7 +527,10 @@ fn synthetic_bridge_handoff_fixture(
                 .write_all(format!("{terminal}\n").as_bytes()).unwrap();
             tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
             };
-            let (delivered, ()) = tokio::join!(tokio::time::timeout(Duration::from_secs(5), delivery), observe);
+            let delivery_bound = Duration::from_secs(5) + if native_compaction {
+                crate::services::discord::status_update_interval()
+            } else { Duration::ZERO };
+            let (delivered, ()) = tokio::join!(tokio::time::timeout(delivery_bound, delivery), observe);
             let delivered = delivered.expect("actual adapter must finish within the original test bound");
             if prefix_read_error {
                 assert!(delivered.is_err(), "a prefix followed by reader failure is not a terminal");
@@ -621,12 +704,13 @@ fn synthetic_bridge_handoff_reader_error_retains_obligation_then_delivers() {
         None,
         false,
         false,
-        Some(false),
+        Some(EmptyTailCase::MissingSource),
         false,
         false,
         false,
         false,
     );
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, Some(EmptyTailCase::DeferredError), false, false, false, false);
 }
 
 #[cfg(unix)]
@@ -640,7 +724,7 @@ fn synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episod
         None,
         false,
         false,
-        Some(true),
+        Some(EmptyTailCase::DecodedTerminal),
         false,
         false,
         false,

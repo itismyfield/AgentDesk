@@ -321,15 +321,6 @@ pub(super) async fn run_claude_idle_response_tail(
         &lease,
     );
 
-    let captured = synthetic_start::bridge_handoff::capture_empty_tail_episode(
-        &shared,
-        channel_id,
-        &transcript_path,
-        start_offset,
-        &lease,
-    )
-    .await;
-
     // #3256: STREAM the operator's external-input prose THROUGH a single bridge
     // turn instead of pre-collecting the whole response and posting it as one
     // batched `[Text{full}, Done]` at turn end. The transcript reader
@@ -384,28 +375,26 @@ pub(super) async fn run_claude_idle_response_tail(
 
     // Buffer leading frames on the blocking pool until the first content frame
     // (or the reader closes). `prefix` carries the frames already pulled,
-    // `has_content` tells us whether the bridge should run, and we hand the live
+    // `has_boundary` includes an empty Done: its recovery guidance must use the
+    // same source admission and terminal receipt as prose. We hand the live
     // `reader_rx` back to drain the remainder into the bridge.
     let buffered = tokio::task::spawn_blocking(move || {
         let mut prefix: Vec<StreamMessage> = Vec::new();
-        let mut has_content = false;
+        let mut has_boundary = false;
         while let Ok(message) = reader_rx.recv() {
             let is_content = idle_stream_message_is_content(&message);
             let is_terminal = matches!(message, StreamMessage::Done { .. });
             prefix.push(message);
-            if is_content {
-                has_content = true;
-                break;
-            }
-            if is_terminal {
+            if is_content || is_terminal {
+                has_boundary = true;
                 break;
             }
         }
-        (prefix, has_content, reader_rx)
+        (prefix, has_boundary, reader_rx)
     })
     .await;
 
-    let (prefix, has_content, reader_rx) = match buffered {
+    let (prefix, has_boundary, reader_rx) = match buffered {
         Ok(buffered) => buffered,
         Err(error) => {
             tracing::warn!(
@@ -418,22 +407,10 @@ pub(super) async fn run_claude_idle_response_tail(
         }
     };
 
-    if !has_content {
+    if !has_boundary {
         let _ = tokio::task::spawn_blocking(move || while reader_rx.recv().is_ok() {}).await;
-        // Only an actual source terminal can settle an empty episode. Unknown
-        // reads keep its durable row and original cursor for the existing idle retry.
-        if let Ok(Ok(completed)) = offset_rx.await
-            && completed.decoded_terminal
-            && let Some((row, actor)) = captured
-            && synthetic_start::bridge_handoff::finish_empty_tail_episode(&shared, &row, actor)
-                .await
-        {
-            advance_claude_tmux_runtime_binding_offset(
-                &tmux_session_name,
-                &transcript_path,
-                completed.offset,
-            );
-        }
+        // Reader failure without a terminal keeps the original durable obligation.
+        let _ = offset_rx.await;
         return;
     }
 

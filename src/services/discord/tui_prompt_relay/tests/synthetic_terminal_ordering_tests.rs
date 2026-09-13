@@ -7,7 +7,7 @@ pub(super) struct TerminalBarrier {
     pub(super) release: tokio::sync::Notify,
 }
 
-fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) {
+fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool, empty_terminal: bool) {
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
     let _dedupe = crate::services::tui_prompt_dedupe::TEST_LOCK
@@ -23,7 +23,9 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) 
             let generation_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
             std::fs::write(&generation_path, b"1").unwrap();
             let output = temp.path().join("transcript.jsonl");
-            let body = "synthetic terminal publication keeps its original actor ".repeat(12);
+            let body = if empty_terminal { String::new() } else {
+                "synthetic terminal publication keeps its original actor ".repeat(12)
+            };
             let assistant = serde_json::json!({"type":"assistant", "message":{"content":[{"type":"text", "text":body}]}});
             let terminal = serde_json::json!({"type":"result", "subtype":"success", "result":body});
             std::fs::write(&output, format!("{assistant}\n{terminal}\n")).unwrap();
@@ -114,6 +116,8 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) 
                 let row = crate::services::discord::inflight::load_inflight_state_read_only(
                     &provider, channel.get()).expect("same-episode successor's row survives");
                 assert_eq!(row.current_msg_id, original_row.current_msg_id);
+                assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap().last_offset, 0,
+                    "replaced actor never advances the original source cursor");
                 // Re-submit the exact old actor after its first submission path
                 // has completed. Duplicate cleanup must retain the actor guard.
                 let mut snapshot = crate::services::discord::turn_finalizer::SyntheticClaimSnapshot::from_row(&original_row);
@@ -135,7 +139,7 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) 
             } else {
                 delivered.expect("original synthetic delivery completes");
                 assert!(after.cancel_token.is_none(), "A releases only after successful publication");
-                assert!(gateway.bodies.lock().unwrap().iter().any(|sent| sent.contains(&body)));
+                assert!(gateway.bodies.lock().unwrap().iter().any(|sent| !sent.trim().is_empty() && sent.contains(&body)));
                 let next = Arc::new(CancelToken::new());
                 assert!(crate::services::discord::mailbox_try_start_turn(
                     &shared, channel, next, serenity::UserId::new(583_310_003), MessageId::new(583_310_004),
@@ -146,15 +150,17 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) 
 
 #[test]
 fn synthetic_terminal_gateway_retains_original_actor_until_publication() {
-    terminal_ordering_fixture(false, false);
+    terminal_ordering_fixture(false, false, false);
+    terminal_ordering_fixture(false, false, true);
 }
 
 #[test]
 fn synthetic_terminal_gateway_preserves_same_nonce_recovery_actor() {
-    terminal_ordering_fixture(true, false);
+    terminal_ordering_fixture(true, false, false);
+    terminal_ordering_fixture(true, false, true);
 }
 
 #[test]
 fn synthetic_terminal_duplicate_finalizer_preserves_same_nonce_recovery_actor() {
-    terminal_ordering_fixture(false, true);
+    terminal_ordering_fixture(false, true, false);
 }
