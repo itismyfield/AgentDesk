@@ -1757,7 +1757,7 @@ const ROTATION_STAGING_SUFFIX: &str = ".tmp";
 /// buy is everything an unsynchronised neighbour does by accident, which is the
 /// case that actually happens.
 #[cfg(unix)]
-fn rotation_target_was_swapped(file: &File, path: &Path) -> std::io::Result<bool> {
+pub(crate) fn rotation_target_was_swapped(file: &File, path: &Path) -> std::io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
 
     let opened = file.metadata()?;
@@ -1769,7 +1769,7 @@ fn rotation_target_was_swapped(file: &File, path: &Path) -> std::io::Result<bool
 }
 
 #[cfg(not(unix))]
-fn rotation_target_was_swapped(_file: &File, _path: &Path) -> std::io::Result<bool> {
+pub(crate) fn rotation_target_was_swapped(_file: &File, _path: &Path) -> std::io::Result<bool> {
     Ok(false)
 }
 

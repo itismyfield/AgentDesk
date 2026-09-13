@@ -877,6 +877,69 @@ mod stream_tail_guard_tests {
     use std::thread;
     use std::time::Duration;
 
+    #[cfg(unix)]
+    #[test]
+    fn larger_path_rotation_returns_recoverable_failure_without_foreign_terminal() {
+        for alive in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let output_path = dir.path().join("stream.jsonl");
+            let complete = concat!(
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"original"}]}}"#,
+                "\n",
+            );
+            std::fs::write(&output_path, format!("{complete}{{\"type\":")).unwrap();
+            let cancel = Arc::new(crate::services::provider::CancelToken::new());
+            let reader_cancel = cancel.clone();
+            let (sender, receiver) = mpsc::channel();
+            let (finished_sender, finished) = mpsc::channel();
+            let reader_path = output_path.to_string_lossy().into_owned();
+            let reader = thread::spawn(move || {
+                let result = read_output_file_until_result_tracked(
+                    &reader_path,
+                    0,
+                    sender,
+                    Some(reader_cancel),
+                    SessionProbe::new(move || alive, || true),
+                );
+                finished_sender.send(result).unwrap();
+            });
+            // An emitted offset proves the actual reader has opened and read the old FD.
+            let first = receiver.recv_timeout(Duration::from_secs(3));
+            if first.is_ok() {
+                std::fs::rename(&output_path, output_path.with_extension("captured")).unwrap();
+                std::fs::write(
+                    &output_path,
+                    format!(
+                        "{}\n{}\n{}",
+                        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"foreign"}]}}"#,
+                        r#"{"type":"result","subtype":"success","result":"foreign terminal"}"#,
+                        " ".repeat(1024),
+                    ),
+                )
+                .unwrap();
+            }
+            let result = finished.recv_timeout(Duration::from_secs(3));
+            // A regressed reader must fail this test without leaking a polling thread.
+            cancel.cancelled.store(true, Ordering::Relaxed);
+            reader.join().unwrap();
+            assert!(
+                matches!(first, Ok(StreamMessage::OutputOffset { offset }) if offset == complete.len() as u64)
+            );
+            let failure = result
+                .expect("rotation must return without cancellation")
+                .unwrap_err();
+            assert!(failure.error.contains("rotated"), "{failure:?}");
+            assert_eq!(failure.last_offset, complete.len() as u64);
+            let messages: Vec<_> = receiver.try_iter().collect();
+            assert!(messages.iter().any(|message| matches!(message, StreamMessage::Text { content } if content == "original")));
+            assert!(!messages.iter().any(|message| matches!(
+                message,
+                StreamMessage::Done { .. } | StreamMessage::Error { .. }
+            )));
+            assert!(!messages.iter().any(|message| matches!(message, StreamMessage::Text { content } if content.contains("foreign"))));
+        }
+    }
+
     #[test]
     fn read_output_file_until_result_buffers_split_jsonl_line() {
         let dir = tempfile::tempdir().unwrap();
