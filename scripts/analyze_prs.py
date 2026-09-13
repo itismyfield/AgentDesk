@@ -145,6 +145,17 @@ def has_scratch_file_cleanup_ack(body):
         ],
     )
 
+def has_docs_only_verification_ack(body):
+    if re.search(r"(?im)^[ \t]*[-*][ \t]*\[[xX]\][ \t]*\*\*docs-only verification:\*\*", body):
+        return True
+    return has_non_empty_body_field(
+        body,
+        [
+            "docs-only verification",
+            "docs only verification",
+        ],
+    )
+
 def has_overlap_reference(body):
     pr_ref = re.compile(r"(?i)(?:#[0-9]+|github\.com/[^/\s]+/[^/\s]+/pull/[0-9]+)")
     overlap_context = re.compile(r"(?i)\b(?:overlaps?|overlapping|duplicates?|supersed(?:e|ed|es|ing)?|replaces?|same scope)\b")
@@ -292,6 +303,9 @@ def main():
             print("  [!] MISSING SCRATCH FILE CLEANUP CHECK: PR body lacks a completed scratch file cleanup acknowledgement.")
         if not has_pr_size_ack(body):
             print("  [!] MISSING PR SIZE CHECK: PR body lacks a completed PR size acknowledgement.")
+        if "docs-only" in normalized_body or "docs only" in normalized_body:
+            if not has_docs_only_verification_ack(body):
+                print("  [!] MISSING DOCS-ONLY VERIFICATION CHECK: PR body claims docs-only but lacks a completed docs-only verification acknowledgement.")
         if not has_non_empty_body_field(body, ["verification commands and results", "verification"]):
             print("  [!] MISSING VERIFICATION: PR body lacks the required 'verification' commands and results.")
         if not has_non_empty_body_field(
