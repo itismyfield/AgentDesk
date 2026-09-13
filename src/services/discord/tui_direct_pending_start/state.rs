@@ -84,6 +84,10 @@ pub(in crate::services::discord) struct TuiDirectPendingStart {
     pub state: PendingStartState,
     #[serde(default)]
     pub attempt_count: u32,
+    /// Source captured by an inline claim that failed before its durable save.
+    /// Older deferred records still resolve the post-drain cursor at claim time.
+    #[serde(default)]
+    pub captured_source: Option<(String, u64)>,
 }
 
 impl TuiDirectPendingStart {

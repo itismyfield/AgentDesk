@@ -37,8 +37,10 @@ pub(in crate::services::discord::tui_prompt_relay) async fn claim_tui_direct_syn
         prompt_text,
         anchor_message_id,
         lease,
+        None,
     )
     .await
+    .0
 }
 
 pub(super) async fn claim_tui_direct_synthetic_turn_inner<const DEFERRED: bool>(
@@ -49,7 +51,8 @@ pub(super) async fn claim_tui_direct_synthetic_turn_inner<const DEFERRED: bool>(
     prompt_text: &str,
     anchor_message_id: MessageId,
     lease: &ExternalInputRelayLease,
-) -> TuiDirectSyntheticTurnClaim {
+    captured_source: Option<&(String, u64)>,
+) -> (TuiDirectSyntheticTurnClaim, Option<(String, u64)>) {
     let binding =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
     let binding =
@@ -76,8 +79,25 @@ pub(super) async fn claim_tui_direct_synthetic_turn_inner<const DEFERRED: bool>(
         );
     #[cfg(not(unix))]
     let committed_relay_offset: Option<u64> = None;
-    let start_offset =
-        synthetic_start_offset_carry_forward(relay_last_offset, committed_relay_offset);
+    let start_offset = match captured_source {
+        Some((path, offset)) => {
+            if output_path.as_deref() != Some(Path::new(path))
+                || std::fs::metadata(path).map_or(true, |metadata| *offset > metadata.len())
+                || lease.turn_id.as_deref().is_none_or(str::is_empty)
+            {
+                return (
+                    TuiDirectSyntheticTurnClaim {
+                        relay_owner: lease.relay_owner,
+                        claimed: false,
+                        turn_start_offset: *offset,
+                    },
+                    None,
+                );
+            }
+            *offset
+        }
+        None => synthetic_start_offset_carry_forward(relay_last_offset, committed_relay_offset),
+    };
     if start_offset > relay_last_offset {
         tracing::info!(
             provider = %provider.as_str(),
@@ -113,7 +133,11 @@ pub(super) async fn claim_tui_direct_synthetic_turn_inner<const DEFERRED: bool>(
         _ => RelayOwnerKind::None,
     };
 
-    claim_tui_direct_synthetic_turn_prepared(SyntheticClaimPreparation {
+    let source = output_path
+        .as_ref()
+        .and_then(|path| path.to_str())
+        .map(|path| (path.to_owned(), start_offset));
+    let claim = claim_tui_direct_synthetic_turn_prepared(SyntheticClaimPreparation {
         identity: SyntheticClaimIdentity {
             shared,
             provider,
@@ -129,7 +153,8 @@ pub(super) async fn claim_tui_direct_synthetic_turn_inner<const DEFERRED: bool>(
         relay_owner,
         relay_owner_kind,
     })
-    .await
+    .await;
+    (claim, source)
 }
 
 impl TuiDirectSyntheticTurnClaim {

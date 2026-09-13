@@ -250,6 +250,7 @@ fn abort_cleanup_records_marker_and_keeps_hourglass() {
         observed_at_ms: 0,
         state: super::super::tui_direct_pending_start::PendingStartState::Waiting,
         attempt_count: 0,
+        captured_source: None,
     };
     let cleanup = pending_start_abort_cleanup_fn();
     let rt = tokio::runtime::Builder::new_current_thread()

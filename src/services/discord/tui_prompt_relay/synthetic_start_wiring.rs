@@ -349,6 +349,7 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                 prompt,
                 anchor_message_id,
                 &*lease,
+                None,
             );
             tracing::info!(
                 provider = %prompt.provider,
@@ -363,17 +364,36 @@ pub(super) async fn wire_tui_direct_synthetic_turn_start(
                 channel_id.get(),
             );
             let _inline_claim_guard = lock.lock().await;
-            let claim = super::synthetic_start::claim_tui_direct_synthetic_turn(
-                shared,
-                &provider,
-                channel_id,
-                &prompt.tmux_session_name,
-                &prompt.prompt,
-                anchor_message_id,
-                &*lease,
-            )
-            .await;
-            if !claim.claimed {
+            let (claim, source) =
+                super::synthetic_start::claim_tui_direct_synthetic_turn_inner::<false>(
+                    shared,
+                    &provider,
+                    channel_id,
+                    &prompt.tmux_session_name,
+                    &prompt.prompt,
+                    anchor_message_id,
+                    &*lease,
+                    None,
+                )
+                .await;
+            if !claim.claimed
+                && source.is_some()
+                && lease.turn_id.as_deref().is_some_and(|id| !id.is_empty())
+                && claim.relay_owner == ExternalInputRelayOwner::BridgeAdapter
+            {
+                // The provider already accepted this input. Preserve the original
+                // bytes and anchor in the existing bounded claim/restart worker.
+                deferred_synthetic_start = true;
+                super::synthetic_start::defer_synthetic_turn_start(
+                    shared,
+                    &provider,
+                    channel_id,
+                    prompt,
+                    anchor_message_id,
+                    &*lease,
+                    source,
+                );
+            } else if !claim.claimed {
                 delete_failed_synthetic_owned_placeholder(
                     shared,
                     &provider,

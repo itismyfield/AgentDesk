@@ -243,6 +243,7 @@ fn record_roundtrips_through_json() {
         observed_at_ms: 1230,
         state: PendingStartState::Waiting,
         attempt_count: 0,
+        captured_source: None,
     };
     let json = serde_json::to_string(&record).unwrap();
     let back: TuiDirectPendingStart = serde_json::from_str(&json).unwrap();
@@ -301,6 +302,7 @@ fn record(provider: &str, channel_id: u64, anchor: u64) -> TuiDirectPendingStart
         observed_at_ms: 0,
         state: PendingStartState::Waiting,
         attempt_count: 0,
+        captured_source: None,
     }
 }
 

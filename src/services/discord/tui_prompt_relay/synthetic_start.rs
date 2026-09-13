@@ -4,7 +4,7 @@ pub(super) mod bridge_handoff;
 mod claim;
 mod stale_reclaim;
 pub(in crate::services::discord) use claim::build_tui_direct_synthetic_inflight_state;
-pub(super) use claim::claim_tui_direct_synthetic_turn;
+pub(super) use claim::{claim_tui_direct_synthetic_turn, claim_tui_direct_synthetic_turn_inner};
 
 use stale_reclaim::release_reclaimable_stale_synthetic_mailbox_owner_if_current;
 pub(super) use stale_reclaim::{
@@ -494,6 +494,7 @@ mod tests {
             observed_at_ms: 0,
             state: crate::services::discord::tui_direct_pending_start::PendingStartState::Waiting,
             attempt_count: 0,
+            captured_source: None,
         };
         assert!(pending_start_claim_fn()(&shared, &record).await);
         let row = inflight::load_inflight_state(&provider, channel_id.get()).unwrap();
@@ -1718,6 +1719,7 @@ pub(super) fn defer_synthetic_turn_start(
     prompt: &ObservedTuiPrompt,
     anchor_message_id: MessageId,
     lease: &ExternalInputRelayLease,
+    captured_source: Option<(String, u64)>,
 ) {
     let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
     let record = super::super::tui_direct_pending_start::TuiDirectPendingStart {
@@ -1735,6 +1737,7 @@ pub(super) fn defer_synthetic_turn_start(
         observed_at_ms: prompt.observed_at.timestamp_millis().max(0) as u64,
         state: super::super::tui_direct_pending_start::PendingStartState::Waiting,
         attempt_count: 0,
+        captured_source,
     };
     if let Err(error) = super::super::tui_direct_pending_start::persist(&record) {
         tracing::warn!(
@@ -1787,6 +1790,16 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
             };
             let channel_id = ChannelId::new(record.channel_id);
             let anchor_message_id = MessageId::new(record.anchor_message_id);
+            if record.captured_source.is_some()
+                && crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                    provider.as_str(),
+                    &record.tmux_session_name,
+                    record.channel_id,
+                )
+                .is_some_and(|lease| lease.turn_id != record.lease_turn_id)
+            {
+                return false;
+            }
 
             // Rehydrate the external-input lease from the durable record's
             // fields (a restart clears the in-memory lease map). NEVER resubmit
@@ -1813,8 +1826,10 @@ pub(super) fn pending_start_claim_fn() -> super::super::tui_direct_pending_start
                 &record.prompt_text,
                 anchor_message_id,
                 &lease,
+                record.captured_source.as_ref(),
             )
-            .await;
+            .await
+            .0;
 
             // #3154 P1-3: adopt the claim's relay_owner into the in-memory lease
             // EXACTLY like the inline (non-deferred) path does (see

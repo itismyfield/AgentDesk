@@ -7,6 +7,7 @@ fn synthetic_bridge_handoff_fixture(
     wrong_source: bool,
     postgres: bool,
     recovery: Option<bool>,
+    failed_save: bool,
 ) {
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
@@ -63,6 +64,48 @@ fn synthetic_bridge_handoff_fixture(
                 lease,
             );
             let claim = async {
+                if failed_save {
+                    use crate::services::discord::{inflight, tui_direct_pending_start as pending};
+                    let inflight_path = inflight::inflight_state_path(
+                        &inflight::inflight_runtime_root().unwrap(), &provider, channel.get());
+                    // An existing directory makes the actual guarded atomic save fail.
+                    std::fs::create_dir_all(&inflight_path).unwrap();
+                    let observed = ObservedTuiPrompt {
+                        provider: provider.as_str().into(), tmux_session_name: tmux.into(),
+                        prompt: "handoff prompt".into(), observed_at: chrono::Utc::now(),
+                    };
+                    let mut inline_lease = lease.clone();
+                    assert!(synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
+                        &shared, provider.as_str(), channel, &observed, anchor, true,
+                        &relay_observed_prompt_injected_prompt_decision(&observed.prompt),
+                        &mut inline_lease,
+                    ).await, "failed inline save must hand its retry to the pending worker");
+                    assert!(inflight::load_inflight_state_read_only(&provider, channel.get()).is_none());
+                    let record = pending::load_all().into_iter().find(|record| record.channel_id == channel.get()).unwrap();
+                    assert_eq!(record.anchor_message_id, anchor.get());
+                    assert_eq!(record.captured_source, Some((output.to_str().unwrap().into(), 0)));
+                    // A later observer consumed cursor is not delivery evidence. The
+                    // retry must still publish the original bytes below this cursor.
+                    let mut advanced = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap();
+                    advanced.last_offset = std::fs::metadata(&output).unwrap().len();
+                    advanced.relay_last_offset = Some(advanced.last_offset);
+                    crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(tmux, advanced);
+                    std::fs::remove_dir(&inflight_path).unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while pending::load_all().iter().any(|record| record.channel_id == channel.get())
+                            || CLAUDE_IDLE_RESPONSE_TAILS.lock().unwrap().contains(tmux)
+                        {
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
+                    }).await.expect("existing pending worker must save the original source");
+                    let row = inflight::load_inflight_state_read_only(&provider, channel.get()).unwrap();
+                    assert_eq!(row.turn_start_offset, Some(0));
+                    // The detached HTTP adapter has no real HTTP in this fixture;
+                    // route its saved obligation into the gateway adapter below.
+                    crate::services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::resume_unpublished(&shared, &row, &output)
+                        .await.expect("pending retry leaves a resumable original episode");
+                    return;
+                }
                 if delayed_save {
                     tokio::time::sleep(Duration::from_millis(150)).await;
                 }
@@ -144,7 +187,13 @@ fn synthetic_bridge_handoff_fixture(
             let capture = crate::services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::capture(
                 &shared, &provider, channel, tmux, &output, &lease,
             );
-            let ((), capture) = tokio::join!(claim, capture);
+            let capture = if failed_save {
+                claim.await;
+                capture.await
+            } else {
+                let ((), capture) = tokio::join!(claim, capture);
+                capture
+            };
             let mut capture = capture.expect("same admitted provider execution reaches bridge");
             if let Some(restart) = recovery {
                 // Drop the admitted adapter before it can post a frame; the durable
@@ -295,41 +344,47 @@ fn synthetic_bridge_handoff_fixture(
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_delivers_first_frame_and_releases_original_actor() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None);
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_waits_for_later_claim_save_then_delivers() {
-    synthetic_bridge_handoff_fixture(true, false, false, false, None);
+    synthetic_bridge_handoff_fixture(true, false, false, false, None, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_same_nonce_different_actor() {
-    synthetic_bridge_handoff_fixture(false, true, false, false, None);
+    synthetic_bridge_handoff_fixture(false, true, false, false, None, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_different_source_without_row_mutation() {
-    synthetic_bridge_handoff_fixture(false, false, true, false, None);
+    synthetic_bridge_handoff_fixture(false, false, true, false, None, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_upserts_missing_postgres_session_before_first_frame() {
-    synthetic_bridge_handoff_fixture(false, false, false, true, None);
+    synthetic_bridge_handoff_fixture(false, false, false, true, None, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_retries_unpublished_row_after_adapter_drops() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, Some(false));
+    synthetic_bridge_handoff_fixture(false, false, false, false, Some(false), false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_restarts_from_persisted_source_after_mailbox_loss() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, Some(true));
+    synthetic_bridge_handoff_fixture(false, false, false, false, Some(true), false);
+}
+
+#[cfg(unix)]
+#[test]
+fn synthetic_bridge_handoff_failed_inline_save_retries_original_bytes() {
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, true);
 }
