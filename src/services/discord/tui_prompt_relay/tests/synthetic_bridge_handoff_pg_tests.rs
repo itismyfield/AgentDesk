@@ -442,6 +442,15 @@ fn synthetic_bridge_handoff_fixture(
                 assert!(crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).is_some());
                 return;
             }
+            let (original_actor, original_start) = if native_codex {
+                // Production enters the bridge once. A diagnostic capture/drop
+                // would clear the armed original external-input lease.
+                drop(claim);
+                let row = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).unwrap();
+                let actor = crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.unwrap();
+                assert_eq!(row.turn_start_offset, Some(source_start));
+                (actor, source_start)
+            } else {
             let capture = crate::services::discord::tui_prompt_relay::synthetic_start::bridge_handoff::capture(
                 &shared, &provider, channel, tmux, &output, &lease,
             );
@@ -498,8 +507,9 @@ fn synthetic_bridge_handoff_fixture(
             }
             let original_actor = capture.actor.clone();
             let original_start = capture.row.turn_start_offset.unwrap();
-            if native_codex { assert_eq!(original_start, source_start, "native reader must start before the actual assistant record"); }
             drop(capture);
+                (original_actor, original_start)
+            };
             let row = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).unwrap();
             let resumed = if native_codex { lease.clone() } else {
                 synthetic_start::bridge_handoff::resume_unpublished(&shared, &row, &output).await.unwrap()

@@ -23,6 +23,7 @@ fn terminal_ordering_fixture(
     replace_after_delivery: bool,
     empty_terminal: bool,
     source_race: Option<SourceRace>,
+    provider: ProviderKind,
 ) {
     let _telemetry = crate::services::observability::test_runtime_lock();
     crate::services::observability::reset_for_tests();
@@ -34,7 +35,7 @@ fn terminal_ordering_fixture(
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
         .block_on(async {
             let shared = crate::services::discord::make_shared_data_for_tests();
-            let provider = ProviderKind::Claude;
+            let runtime = if provider == ProviderKind::Codex { RuntimeHandoffKind::CodexTui } else { RuntimeHandoffKind::ClaudeTui };
             let channel = ChannelId::new(583_310_001);
             let anchor = MessageId::new(if source_race.is_some() { 583_310_002_000_000 } else { 583_310_002 });
             let tmux = "synthetic-terminal-ordering-5833";
@@ -47,10 +48,14 @@ fn terminal_ordering_fixture(
             };
             let assistant = serde_json::json!({"type":"assistant", "sessionId":"native-ordering-session", "message":{"content":[{"type":"text", "text":body}]}});
             let terminal = serde_json::json!({"type":"result", "session_id":"native-ordering-session", "subtype":"success", "result":body});
+            let (assistant, terminal) = if provider == ProviderKind::Codex {
+                (serde_json::json!({"type":"response_item", "payload":{"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":body}]}}),
+                 serde_json::json!({"type":"event_msg", "payload":{"type":"task_complete", "last_agent_message":body}}))
+            } else { (assistant, terminal) };
             std::fs::write(&output, format!("{assistant}\n{terminal}\n")).unwrap();
             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(tmux,
                 crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
-                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    runtime_kind: runtime,
                     output_path: output.to_str().unwrap().into(),
                     relay_output_path: None, input_fifo_path: None,
                     session_id: None, last_offset: 0, relay_last_offset: None,
@@ -58,7 +63,7 @@ fn terminal_ordering_fixture(
             let mut lease = ExternalInputRelayLease::unassigned(Some(channel.get()));
             lease.turn_id = Some("external-5833-terminal-ordering".into());
             lease.relay_owner = ExternalInputRelayOwner::BridgeAdapter;
-            lease.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+            lease.runtime_kind = Some(runtime);
             let lease = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(
                 provider.as_str(), tmux, lease);
             assert!(synthetic_start::claim_tui_direct_synthetic_turn(
@@ -372,19 +377,19 @@ fn terminal_ordering_fixture(
 
 #[test]
 fn synthetic_terminal_gateway_retains_original_actor_until_publication() {
-    terminal_ordering_fixture(false, false, false, None);
-    terminal_ordering_fixture(false, false, true, None);
+    terminal_ordering_fixture(false, false, false, None, ProviderKind::Claude);
+    terminal_ordering_fixture(false, false, true, None, ProviderKind::Claude);
 }
 
 #[test]
 fn synthetic_terminal_gateway_preserves_same_nonce_recovery_actor() {
-    terminal_ordering_fixture(true, false, false, None);
-    terminal_ordering_fixture(true, false, true, None);
+    terminal_ordering_fixture(true, false, false, None, ProviderKind::Claude);
+    terminal_ordering_fixture(true, false, true, None, ProviderKind::Claude);
 }
 
 #[test]
 fn synthetic_terminal_duplicate_finalizer_preserves_same_nonce_recovery_actor() {
-    terminal_ordering_fixture(false, true, false, None);
+    terminal_ordering_fixture(false, true, false, None, ProviderKind::Claude);
 }
 
 #[test]
@@ -398,7 +403,14 @@ fn synthetic_terminal_gateway_rejects_lost_admitted_source() {
         SourceRace::PinGeneration,
         SourceRace::LiveHolder,
     ] {
-        terminal_ordering_fixture(false, false, false, Some(race));
+        terminal_ordering_fixture(false, false, false, Some(race), ProviderKind::Claude);
+    }
+    for race in [
+        SourceRace::FileIdentity,
+        SourceRace::RevalidationIo,
+        SourceRace::PinGeneration,
+    ] {
+        terminal_ordering_fixture(false, false, false, Some(race), ProviderKind::Codex);
     }
 }
 
@@ -409,6 +421,6 @@ fn synthetic_terminal_gateway_source_loss_preserves_same_nonce_successor() {
         SourceRace::FileIdentity,
         SourceRace::Session,
     ] {
-        terminal_ordering_fixture(true, false, false, Some(race));
+        terminal_ordering_fixture(true, false, false, Some(race), ProviderKind::Claude);
     }
 }
