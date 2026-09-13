@@ -466,7 +466,8 @@ mod tests {
                 continue;
             }
             if (source.contains(&spawn) || source.contains(&pinned))
-                && !source.contains("fn spawn_turn_bridge(")
+                && !source.contains(&format!("fn {spawn}"))
+                && !source.contains(&format!("fn {pinned}"))
             {
                 callers.push(
                     path.strip_prefix(&source_root)
