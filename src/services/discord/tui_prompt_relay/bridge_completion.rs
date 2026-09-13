@@ -86,8 +86,17 @@ mod tests {
 
     #[test]
     fn tui_direct_bridge_completion_rejects_uncommitted_matching_inflight() {
+        use crate::services::discord::gateway::HeadlessGateway;
+        use crate::services::discord::turn_bridge::BridgeCompletionSignal;
+        use crate::services::tui_prompt_dedupe::{prompt_anchor_for_response, record_prompt_anchor};
+
         let temp = tempfile::tempdir().expect("temp runtime root");
         let _root = crate::config::set_agentdesk_root_for_test(temp.path());
+        // Match s3_completion_fixture's environment -> dedupe lock order. Keep
+        // both guards across block_on so other tests cannot reset this anchor.
+        let _dedupe_guard = crate::services::tui_prompt_dedupe::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let provider = ProviderKind::Codex;
         let channel_id = ChannelId::new(88_001);
@@ -148,6 +157,72 @@ mod tests {
             .is_none(),
             "committed terminal delivery must not be reported as placeholder-only failure"
         );
+
+        // #5898: Finalized plus OUR uncommitted row must preserve the anchor.
+        // Call the real completion adapter with real on-disk state and the
+        // prompt-anchor store; a predicate-only check cannot catch X6 (clear
+        // the anchor before the delivery check). No Discord transport is used.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("completion fixture runtime");
+        let tmux = "AgentDesk-codex-test";
+        let root = super::super::super::inflight::inflight_runtime_root()
+            .expect("test inflight root");
+        let path =
+            super::super::super::inflight::inflight_state_path(&root, &provider, channel_id.get());
+        let delivered = "fallback already delivered";
+        for streamed in [false, true] {
+            for (label, body, sent, terminal_committed, accepted) in [
+                ("empty uncommitted", "", 0, false, false),
+                (
+                    "partly delivered UTF-8",
+                    "배달된 접두사\n미배달 본문",
+                    "배달된 접두사\n".len(),
+                    false,
+                    false,
+                ),
+                ("fallback delivered", delivered, delivered.len(), false, true),
+                ("committed fallback", delivered, delivered.len(), true, true),
+                ("committed empty", "", 0, true, true),
+            ] {
+                let mut row = state.clone();
+                row.full_response = body.to_string();
+                row.response_sent_offset = sent;
+                row.terminal_delivery_committed = terminal_committed;
+                super::super::super::inflight::save_inflight_state(&row)
+                    .expect("save matching inflight");
+                let before = std::fs::read(&path).expect("read seeded inflight");
+                record_prompt_anchor(provider.as_str(), tmux, channel_id.get(), user_msg_id.get());
+                let anchor = prompt_anchor_for_response(provider.as_str(), tmux, channel_id.get())
+                    .expect("premise: a real prompt anchor exists before completion");
+                let result = runtime.block_on(
+                    super::super::claude_idle_bridge::finish_idle_bridge_completion(
+                        Ok(Ok(BridgeCompletionSignal::Finalized)),
+                        &HeadlessGateway,
+                        &provider,
+                        (channel_id, user_msg_id, current_msg_id),
+                        None,
+                        (tmux, &lease, Some(anchor)),
+                        streamed,
+                    ),
+                );
+                assert_eq!(result.is_ok(), accepted, "{label}, streamed={streamed}");
+                if let Err(error) = result {
+                    assert!(error.contains("without committed terminal delivery"));
+                }
+                assert_eq!(
+                    prompt_anchor_for_response(provider.as_str(), tmux, channel_id.get()),
+                    if accepted { None } else { Some(anchor) },
+                    "{label}: clear only after delivery validation; streamed={streamed}"
+                );
+                assert_eq!(
+                    std::fs::read(&path).expect("read inflight after completion"),
+                    before,
+                    "{label}: completion must not mutate the durable delivery evidence"
+                );
+            }
+        }
     }
 
     /// #5464 S2 — `:9`'s ABSENT row is NO EVIDENCE, not failure.
