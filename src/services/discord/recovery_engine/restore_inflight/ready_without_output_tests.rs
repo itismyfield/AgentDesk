@@ -54,7 +54,8 @@ impl Fixture {
     async fn settle<F, Fut>(&self, state: &inflight::InflightTurnState, relay: F) -> bool
     where
         F: FnOnce(String) -> Fut,
-        Fut: std::future::Future<Output = RecoveryRelayOutcome>,
+        Fut: std::future::Future,
+        Fut::Output: Into<CapturedRecoveryDelivery>,
     {
         let owner = mailbox_snapshot(&self.shared, ChannelId::new(state.channel_id)).await;
         let mut captured = state.clone();
@@ -1113,7 +1114,8 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
                 &state,
                 None,
                 fixture.shared.restart.current_generation,
-            );
+            )
+            .map(|context| context.capture_anchor_updates(&state));
             assert!(
                 fixture
                     .settle(&state, |text| {
@@ -1124,7 +1126,7 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
                         let state = &state;
                         let provider = &provider;
                         async move {
-                            deliver_recovery_replace_via_controller(
+                            let outcome = deliver_recovery_replace_via_controller(
                                 gateway,
                                 shared,
                                 provider,
@@ -1134,7 +1136,13 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
                                 &text,
                                 context,
                             )
-                            .await
+                            .await;
+                            CapturedRecoveryDelivery {
+                                outcome,
+                                pending_anchor: context.and_then(
+                                    RecoveryDeliveryContext::pending_anchor_after_delivery,
+                                ),
+                            }
                         }
                     })
                     .await
@@ -1151,12 +1159,23 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
                     "consuming a receipt must not recreate publication authority"
                 );
             }
-            assert!(fixture.load().is_none());
+            let remaining = fixture.load();
+            assert!(
+                remaining.is_none(),
+                "{provider:?}/{case}: row remains after delivery: {:?}",
+                remaining.as_ref().map(|row| (
+                    row.current_msg_id,
+                    row.save_generation,
+                    row.terminal_delivery_committed,
+                    row.response_sent_offset
+                ))
+            );
             assert!(
                 mailbox_snapshot(&fixture.shared, channel)
                     .await
                     .cancel_token
-                    .is_none()
+                    .is_none(),
+                "{provider:?}/{case}: original actor remains after delivery"
             );
             let mut next = state;
             next.user_msg_id += 10;
