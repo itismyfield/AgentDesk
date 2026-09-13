@@ -97,9 +97,10 @@ pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
 ) -> CapturedRecoveryDelivery {
     if state.requires_pinned_terminal_recovery() {
         #[cfg(unix)]
-        let committed =
-            super::super::turn_bridge::publish_retained_terminal_recovery(shared, gateway, state)
-                .await;
+        let committed = super::super::turn_bridge::publish_retained_terminal_recovery(
+            shared, gateway, state, text,
+        )
+        .await;
         #[cfg(not(unix))]
         let committed = {
             let _ = gateway;

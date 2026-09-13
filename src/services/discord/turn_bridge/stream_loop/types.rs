@@ -116,8 +116,9 @@ pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
     shared: &SharedData,
     gateway: &dyn TurnGateway,
     row: &InflightTurnState,
+    text: &str,
 ) -> bool {
-    use crate::services::discord::{formatting, inflight, outbound::delivery_record as dr};
+    use crate::services::discord::{inflight, outbound::delivery_record as dr};
     let Some(admitted) = inflight::CodexRange::from_retained_claude_terminal(row) else {
         return false;
     };
@@ -139,14 +140,15 @@ pub(in crate::services::discord) async fn publish_retained_terminal_recovery(
     else {
         return false;
     };
-    let body = formatting::format_for_discord_with_provider(&admitted.result, &provider);
-    let long = terminal_delivery::terminal_delivery_should_send_new_chunks(true, &body);
+    // The source proof covers the full admitted body; recovery has already
+    // formatted only the suffix not represented by frozen Discord prefixes.
+    let long = terminal_delivery::terminal_delivery_should_send_new_chunks(true, text);
     let (committed, _, receipt) = PinnedTerminalTransport {
         source: (shared, gateway, &provider),
         target: (owner, channel, message),
         payload: (
             row.tmux_session_name.as_deref(),
-            &body,
+            text,
             admitted.source.range,
         ),
         trace: (row.dispatch_id.as_deref(), row.session_key.as_deref(), None),
