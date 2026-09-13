@@ -475,7 +475,11 @@ fn synthetic_bridge_handoff_fixture(
                 )).await.expect("resumed adapter finishes").expect("the original saved prefix and later terminal remain deliverable");
                 tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
                 let bodies = gateway.bodies.lock().unwrap();
-                assert!(bodies.iter().filter(|sent| sent.contains("첫 프레임")).all(|sent| sent.matches("첫 프레임").count() == 16), "resume must not append the already saved prefix again; observed bodies={bodies:#?}");
+                // Legacy streaming status quotes the last response line; count
+                // the completed publication, whose footer has been removed.
+                let terminal_body = bodies.last().expect("resumed terminal publication");
+                assert!(terminal_body.contains(body.trim()), "terminal must retain the complete saved Unicode body: {terminal_body:?}");
+                assert_eq!(terminal_body.matches("첫 프레임").count(), 16, "resume must not append the already saved prefix again; observed bodies={bodies:#?}");
             } else {
                 delivered.expect("actual idle adapter terminal publication completes");
             }
