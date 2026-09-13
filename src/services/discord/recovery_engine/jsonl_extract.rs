@@ -94,17 +94,16 @@ pub(in crate::services::discord) fn extract_response_from_output_range(
     }
     // A malformed or incomplete captured frame cannot prove an empty result.
     let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
-    let mut completed = false;
+    let mut state = crate::services::session_backend::StreamLineState::new();
+    let (sender, receiver) = std::sync::mpsc::channel();
     for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
-        completed |= value.get("type").and_then(|v| v.as_str()) == Some("result")
-            && value.get("subtype").and_then(|v| v.as_str()) == Some("success")
-            && !value
-                .get("is_error")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+        serde_json::from_str::<serde_json::Value>(line).map_err(|e| e.to_string())?;
+        // Share the live reader's terminal semantics, including native Claude
+        // stop_hook_summary with no session ID. Drain metadata after each line.
+        crate::services::session_backend::process_stream_line(line, &sender, &mut state);
+        receiver.try_iter().for_each(drop);
     }
-    if !completed {
+    if state.final_result.is_none() || state.stdout_error.is_some() {
         return Err("captured recovery source has no successful terminal result".into());
     }
     Ok(extract_response_from_jsonl_bytes(&bytes))
@@ -181,4 +180,66 @@ fn extract_response_from_jsonl_bytes(bytes: &[u8]) -> String {
         }
     }
     response
+}
+
+#[cfg(test)]
+mod captured_claude_recovery_tests {
+    use super::extract_response_from_output_range;
+    use std::io::Write;
+
+    fn recover(captured: &str) -> Result<String, String> {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        // Neither a predecessor nor a successor may prove completion or supply
+        // text for the exact captured range, even when both are successful.
+        let foreign =
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"foreign answer\"}\n";
+        write!(file, "{foreign}{captured}{foreign}").unwrap();
+        extract_response_from_output_range(
+            file.path(),
+            foreign.len() as u64,
+            (foreign.len() + captured.len()) as u64,
+            false,
+        )
+    }
+
+    #[test]
+    fn bounded_claude_recovery_accepts_native_stop_hook_with_nullable_session_5071() {
+        for session in [serde_json::Value::Null, serde_json::json!("native-session")] {
+            for body in ["", "captured answer"] {
+                let assistant = serde_json::json!({
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": body}]}
+                });
+                let terminal = serde_json::json!({
+                    "type": "system", "subtype": "stop_hook_summary", "session_id": session
+                });
+                let captured = format!("{assistant}\n{terminal}\n");
+                assert_eq!(recover(&captured).unwrap(), body);
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_claude_recovery_keeps_normalized_result_and_tool_precedence_5071() {
+        let captured = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"stale narration\"},{\"type\":\"tool_use\",\"name\":\"Read\"}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"final answer\"}\n"
+        );
+        assert_eq!(recover(captured).unwrap(), "final answer");
+    }
+
+    #[test]
+    fn bounded_claude_recovery_rejects_unproven_or_malformed_captured_terminal_5071() {
+        for captured in [
+            "",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"unfinished\"}]}}\n",
+            "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
+            "{\"type\":\"unknown_record\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true}\n",
+            "{\"type\":\"system\",\"subtype\":\"stop_hook_summary\"}\n{malformed\n",
+            "{\"type\":\"system\",\"subtype\":\"stop_hook_summary\"}\n{\"type\":\"result\",\"is_error\":true}\n",
+        ] {
+            assert!(recover(captured).is_err(), "captured: {captured}");
+        }
+    }
 }
