@@ -287,13 +287,14 @@ fn terminal_ordering_fixture(
                         &output.to_string_lossy(), retained.turn_start_offset.unwrap());
                     panic!("{race:?} dormant recovery did not settle the original exact source: \
                         same_actor={}, cancelled={}, relay_in_flight={}, range={:?}..{}, file_end={}, \
-                        body_bytes={}/{}, body_matches={}, generation={:?}/{}",
+                        body_bytes={}/{}, body_matches={}, generation={:?}/{}, row_path={:?}, caller_path={:?}",
                         current.cancel_token.as_ref().is_some_and(|actor| Arc::ptr_eq(actor, &original_actor)),
                         original_actor.cancelled.load(std::sync::atomic::Ordering::Acquire),
                         shared.relay_emission_in_flight(channel), retained.turn_start_offset, retained.last_offset,
                         std::fs::metadata(&output).unwrap().len(), retained.full_response.len(), extracted.len(),
                         retained.full_response == extracted, retained.tui_terminal_generation_mtime_ns,
-                        crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux));
+                        crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux),
+                        retained.output_path, output);
                 }
             }
             let replacement = if replace_after_delivery {
