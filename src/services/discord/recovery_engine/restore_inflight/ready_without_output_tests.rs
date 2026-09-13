@@ -421,7 +421,7 @@ async fn captured_partial_eof_never_commits_new_same_turn_progress_or_replacemen
 #[tokio::test(flavor = "current_thread")]
 async fn captured_partial_eof_all_outcomes_preserve_legacy_and_nonce_only_successors() {
     let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    for legacy in [true, false] {
+    for (legacy, replace_actor) in [(true, true), (true, false), (false, true), (false, false)] {
         for outcome in [
             RecoveryRelayOutcome::Delivered,
             RecoveryRelayOutcome::PermanentFailure,
@@ -438,23 +438,38 @@ async fn captured_partial_eof_all_outcomes_preserve_legacy_and_nonce_only_succes
             } else {
                 successor.turn_nonce = Some("successor-B".to_string());
             }
+            let mut expected_durable = None;
             assert!(
                 fixture
                     .settle(&state, |_| async {
-                        mailbox_finish_turn(&fixture.shared, &ProviderKind::Claude, channel).await;
+                        if replace_actor {
+                            mailbox_finish_turn(&fixture.shared, &ProviderKind::Claude, channel)
+                                .await;
+                        }
                         inflight::save_inflight_state(&successor).expect("successor");
-                        assert!(
-                            super::super::reregister_active_turn_from_inflight(
-                                &fixture.shared,
-                                &successor
-                            )
-                            .await
+                        if replace_actor {
+                            assert!(
+                                super::super::reregister_active_turn_from_inflight(
+                                    &fixture.shared,
+                                    &successor
+                                )
+                                .await
+                            );
+                        }
+                        expected_durable = Some(
+                            serde_json::to_value(fixture.load().expect("persisted B"))
+                                .expect("B snapshot"),
                         );
                         outcome
                     })
                     .await
             );
             let surviving = fixture.load().expect("successor survives every outcome");
+            assert_eq!(
+                Some(serde_json::to_value(&surviving).expect("remaining snapshot")),
+                expected_durable,
+                "stale A cannot change even B retry budget or save generation"
+            );
             assert_eq!(surviving.turn_nonce, successor.turn_nonce);
             assert_eq!(surviving.turn_start_offset, successor.turn_start_offset);
             assert_eq!(
