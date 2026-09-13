@@ -242,6 +242,7 @@ jobs:
               - 'src/services/discord/tmux_watcher/**'
               - 'src/services/discord/terminal_delivery_custody.rs'
               - 'src/services/discord/terminal_delivery_custody/**'
+              - 'src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery.rs'
               - 'src/services/discord/turn_bridge/terminal_outcome_delivery/**'
               - 'src/services/discord/turn_bridge/headless_delivery.rs'

@@ -53,15 +53,18 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) 
                 ..Default::default()
             });
             let (tx, rx) = mpsc::channel();
+            let (reader_end_tx, reader_end_rx) = tokio::sync::oneshot::channel();
             let reader_path = output.to_str().unwrap().to_owned();
             let reader = std::thread::spawn(move || {
-                crate::services::session_backend::read_output_file_until_result(
+                let result = crate::services::session_backend::read_output_file_until_result(
                     &reader_path, 0, tx, None,
-                    crate::services::provider::SessionProbe::process(|| true))
+                    crate::services::provider::SessionProbe::process(|| true));
+                let _ = reader_end_tx.send(result.clone());
+                result
             });
             let delivery = claude_idle_bridge::stream_tui_idle_response_with_gateway(
                 &shared, provider.clone(), channel, tmux, &output, 0,
-                "terminal ordering prompt", Vec::new(), rx, &lease, gateway.clone(), 0,
+                "terminal ordering prompt", Vec::new(), rx, Some(reader_end_rx), &lease, gateway.clone(), 0,
             );
             let observe = async {
                 tokio::time::timeout(Duration::from_secs(5), barrier.entered.notified())
