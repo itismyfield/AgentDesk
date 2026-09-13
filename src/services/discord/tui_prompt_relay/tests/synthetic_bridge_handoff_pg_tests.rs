@@ -1,7 +1,7 @@
 use super::*;
 
 #[cfg(unix)]
-fn spawn_handoff_reader(
+pub(super) fn spawn_handoff_reader(
     path: &Path, start: u64, tx: mpsc::Sender<StreamMessage>,
     end: tokio::sync::oneshot::Sender<Result<(u64, bool), String>>,
 ) -> std::thread::JoinHandle<()> {
@@ -94,7 +94,7 @@ fn synthetic_bridge_handoff_fixture(
                 *synthetic_start::bridge_handoff::ADMISSION_PAUSE.lock().unwrap() =
                     Some((channel.get(), entered.clone(), resume.clone()));
                 let attempt = synthetic_start::claim_tui_direct_synthetic_turn_inner::<false>(
-                    &shared, &provider, channel, tmux, "handoff prompt", anchor, &lease,
+                    &shared, &provider, channel, tmux, "handoff prompt", anchor, &lease, None,
                 );
                 let replace = async {
                     entered.notified().await;
@@ -108,7 +108,7 @@ fn synthetic_bridge_handoff_fixture(
                     successor
                 };
                 let (claim, successor) = tokio::join!(attempt, replace);
-                assert!(!claim.claimed, "inline admission cannot adopt its same-nonce successor");
+                assert!(!claim.0.claimed, "inline admission cannot adopt its same-nonce successor");
                 assert!(crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).is_none());
                 assert!(Arc::ptr_eq(&crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.unwrap(), &successor));
                 return;

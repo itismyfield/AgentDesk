@@ -54,14 +54,9 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) 
             });
             let (tx, rx) = mpsc::channel();
             let (reader_end_tx, reader_end_rx) = tokio::sync::oneshot::channel();
-            let reader_path = output.to_str().unwrap().to_owned();
-            let reader = std::thread::spawn(move || {
-                let result = crate::services::session_backend::read_output_file_until_result(
-                    &reader_path, 0, tx, None,
-                    crate::services::provider::SessionProbe::process(|| true));
-                let _ = reader_end_tx.send(result.clone());
-                result
-            });
+            let reader = super::synthetic_bridge_handoff_pg_tests::spawn_handoff_reader(
+                &output, 0, tx, reader_end_tx,
+            );
             let delivery = claude_idle_bridge::stream_tui_idle_response_with_gateway(
                 &shared, provider.clone(), channel, tmux, &output, 0,
                 "terminal ordering prompt", Vec::new(), rx, Some(reader_end_rx), &lease, gateway.clone(), 0,
@@ -94,7 +89,7 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) 
             let (delivered, replacement) = tokio::join!(
                 tokio::time::timeout(Duration::from_secs(5), delivery), observe);
             let delivered = delivered.expect("terminal transport must settle");
-            tokio::task::spawn_blocking(move || reader.join().unwrap().unwrap()).await.unwrap();
+            tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
             let replacement = if replace_after_delivery {
                 delivered.as_ref().expect("A completed before the duplicate-finalizer race");
                 let after_a = crate::services::discord::mailbox_snapshot(&shared, channel).await;
