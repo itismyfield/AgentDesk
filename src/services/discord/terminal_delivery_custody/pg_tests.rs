@@ -64,4 +64,6 @@ async fn foreign_terminal_custody_pg_failure_restart_and_exact_dedupe() {
     let successor: (String, Option<i64>) = sqlx::query_as("SELECT status, active_turn_delivery_outbox_id FROM sessions WHERE session_key='foreign-successor-B'")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(successor, ("turn_active".into(), Some(991)));
+    pool.close().await;
+    database.drop().await;
 }
