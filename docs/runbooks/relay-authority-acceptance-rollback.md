@@ -166,8 +166,15 @@ Original terminal, exact receipt, natural release and the next normal input
 remain **PENDING**. Strong-capture diagnostic `67ffac10068e0cf174608c2af644ebce46da91c2`
 completed five tests with zero ignored at September 14 03:58:52 KST, covering
 source witness, actual UI and Enforce/100. Those diagnostic results are not a
-live-cycle pass; the joined preview-to-terminal diagnostic is still awaiting
-execution. Stage 2 approval and the R6, A2 and T6 pending boundaries are unchanged.
+live-cycle pass. The joined preview-to-terminal diagnostic at
+`02c33a9975be7697b2380c03d02e9cc6425479ec` reproduced a bounded duplicate at
+September 14 04:12:47.683586 KST (September 13 19:12:47.683586 UTC): exact
+sequence, range, generation and anchor receipt checks passed, then visible
+commentary was **2 rather than 1** (`native_collector_tests.rs:430`). A minimal
+repair is in progress. Original streaming remains confirmed; this diagnostic
+neither retracts that observation nor proves the natural terminal/release/next-input
+cycle. Failure/opposite-path checks and that natural cycle remain pending.
+Stage 2 approval and the R6, A2 and T6 pending boundaries are unchanged.
 
 ## Rollback
 

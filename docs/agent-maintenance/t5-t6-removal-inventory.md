@@ -206,7 +206,13 @@ watcher의 `tmux_alive_relay_dead`·`last_relay_offset=0` 표시는 이 실제 �
 원래 terminal·exact receipt·자연 release·다음 normal input은 **PENDING**이다.
 strong capture `67ffac10068e0cf174608c2af644ebce46da91c2` 진단은 9월 14일 03:58:52 KST
 source witness·actual UI·Enforce/100 조건에서 **5 PASS·0 ignored**였지만 live cycle 증거가 아니다.
-joined preview→terminal 진단은 실행 대기다. Stage 2 승인과 R6·A2·T6 미완료는 유지한다.
+joined preview→terminal 진단 `02c33a9975be7697b2380c03d02e9cc6425479ec`은
+9월 14일 04:12:47.683586 KST(9월 13일 19:12:47.683586 UTC)에 bounded 중복을 **재현**했다.
+exact sequence·range·generation·anchor receipt 검사는 통과했으나
+`native_collector_tests.rs:430`에서 visible commentary **실제 2회/기대 1회**로 RED였다.
+최소 수리가 진행 중이며 원래 streaming 확인은 유지한다. failure/opposite 경로 검증과
+자연 terminal·release·next-input cycle은 계속 대기다. 이 진단은 cleanup·배포·추가 production
+결함을 입증하지 않는다. Stage 2 승인과 R6·A2·T6 미완료는 유지한다.
 아래 #5917 OPEN·CI 미완료 서술은 해당 소스 대사 당시의 역사적 상태이며,
 현재 상태는 이 문단과 정본 체크포인트를 따른다.
 
