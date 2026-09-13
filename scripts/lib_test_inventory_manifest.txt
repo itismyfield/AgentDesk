@@ -6166,6 +6166,7 @@ services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row_is_reclaimable_skips_foreign_session
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::orphan_row_is_reclaimable_skips_fresh_row
 services::discord::tui_prompt_relay::synthetic_orphan_reclaim::tests::pending_start_reclaim_orphan_fn_uses_real_ordering_for_session_bound_orphan
+services::discord::tui_prompt_relay::synthetic_start::tests::admitted_source_witness_advances_only_the_original_allocation
 services::discord::tui_prompt_relay::synthetic_start::tests::aged_rowless_synthetic_owner_reclaims_and_finalizes_ledger
 services::discord::tui_prompt_relay::synthetic_start::tests::claim_adopting_existing_mailbox_does_not_increment_global_active
 services::discord::tui_prompt_relay::synthetic_start::tests::finalized_reclaim_of_readopted_real_owner_does_not_suppress_completion_footer
