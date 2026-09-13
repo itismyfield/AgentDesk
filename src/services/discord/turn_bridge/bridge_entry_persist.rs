@@ -3,6 +3,37 @@
 use super::context::BridgeCompletionSignal;
 use super::*;
 
+pub(in crate::services::discord) fn spawn_turn_bridge(
+    shared_owned: Arc<SharedData>,
+    cancel_token: Arc<CancelToken>,
+    rx: mpsc::Receiver<StreamMessage>,
+    bridge: TurnBridgeContext,
+) {
+    spawn_turn_bridge_with_pin(shared_owned, cancel_token, rx, bridge, None);
+}
+
+pub(super) async fn voice_progress_playback_channel(
+    shared_owned: &SharedData,
+    bridge: &TurnBridgeContext,
+    turn_id: &str,
+) -> Option<ChannelId> {
+    if bridge.inflight_state.source == crate::dispatch::Source::Voice {
+        resolve_voice_turn_link_for_playback(
+            shared_owned.pg_pool.as_ref(),
+            bridge.dispatch_id.as_deref(),
+            bridge.user_msg_id,
+            Some(turn_id),
+        )
+        .await
+        .and_then(|link| {
+            (link.background_channel_id == bridge.channel_id.get())
+                .then(|| ChannelId::new(link.voice_channel_id))
+        })
+    } else {
+        None
+    }
+}
+
 pub(super) struct BridgeEntryRuntimeState<'a> {
     pub(super) inflight_state: &'a mut InflightTurnState,
     pub(super) full_response: &'a mut String,

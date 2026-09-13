@@ -102,7 +102,7 @@ use self::relay_ownership::external_input_relay_owner_for_watchers;
 #[cfg(unix)]
 use self::relay_ownership::resolved_codex_idle_relay_binding;
 use self::relay_ownership::{
-    TuiDirectExternalInputLeaseGuard, TuiDirectObservedLeaseEarlyReturnGuard,
+    RelayEmissionKind, TuiDirectExternalInputLeaseGuard, TuiDirectObservedLeaseEarlyReturnGuard,
     bridge_adapter_owns_external_turn, claim_should_adopt_relay_owner,
     clear_external_input_bridge_lease_if_current, clear_observed_external_turn_lease_if_current,
     deferred_claim_requires_bridge_tail_relayer, external_input_relay_binding,
@@ -772,12 +772,6 @@ fn owner_channel_for_prompt(
         &prompt.tmux_session_name,
         RelayEmissionKind::ObservedPrompt,
     )
-}
-
-#[derive(Clone, Copy)]
-enum RelayEmissionKind {
-    Poll,
-    ObservedPrompt,
 }
 
 /// Resolve the owner channel for a tmux session.

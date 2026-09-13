@@ -224,14 +224,7 @@ pub(super) enum WatcherHandoffClaimOutcome {
 // (#4230 S6) — must live at module scope so both resolve them.
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const LIVE_LONG_RUN_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-pub(super) fn spawn_turn_bridge(
-    shared_owned: Arc<SharedData>,
-    cancel_token: Arc<CancelToken>,
-    rx: mpsc::Receiver<StreamMessage>,
-    bridge: TurnBridgeContext,
-) {
-    spawn_turn_bridge_with_pin(shared_owned, cancel_token, rx, bridge, None);
-}
+pub(super) use bridge_entry_persist::spawn_turn_bridge;
 pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
     shared_owned: Arc<SharedData>,
     cancel_token: Arc<CancelToken>,
@@ -285,21 +278,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let context_window_tokens = bridge.context_window_tokens;
         let context_compact_percent = bridge.context_compact_percent;
         let voice_progress_playback_channel_id =
-            if bridge.inflight_state.source == crate::dispatch::Source::Voice {
-                resolve_voice_turn_link_for_playback(
-                    shared_owned.pg_pool.as_ref(),
-                    dispatch_id.as_deref(),
-                    user_msg_id,
-                    Some(&turn_id),
-                )
-                .await
-                .and_then(|link| {
-                    (link.background_channel_id == channel_id.get())
-                        .then(|| ChannelId::new(link.voice_channel_id))
-                })
-            } else {
-                None
-            };
+            bridge_entry_persist::voice_progress_playback_channel(&shared_owned, &bridge, &turn_id).await;
         let mut full_response = bridge.full_response.clone();
         let mut terminal_empty_response_notice: Option<String> = None;
         let mut last_edit_text = String::new();
@@ -983,10 +962,4 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
 #[cfg(all(test, unix))]
 mod resume_pin_tests;
 
-pub(in crate::services::discord) async fn resume_foreign_terminal_custody(
-    registry: &super::health::HealthRegistry,
-    payload: &mut serde_json::Value,
-    checkpoint: &crate::services::discord::terminal_delivery_custody::CustodyCheckpoint,
-) -> Result<bool, String> {
-    terminal_outcome_delivery::resume_foreign_terminal_custody(registry, payload, checkpoint).await
-}
+pub(in crate::services::discord) use terminal_outcome_delivery::resume_foreign_terminal_custody;
