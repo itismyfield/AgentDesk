@@ -39,7 +39,7 @@ use dispatch_reservation::{
 };
 use episode_identity::{
     TurnNonceGuard, matching_cancel_token, persist_queue_or_restore,
-    reset_watchdog_extension_state, take_watchdog_override_if_current, turn_nonce_guard_matches,
+    reset_watchdog_extension_state, take_watchdog_override_if_current,
 };
 use front_requeue::requeue_intervention_front;
 pub(crate) use overflow::SoftInterventionProbe;
