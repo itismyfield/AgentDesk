@@ -437,6 +437,7 @@ jobs:
               - 'src/services/discord/runtime_bootstrap/**'
               - 'src/services/discord/runtime_store.rs'
               - 'src/services/discord/settings/**'
+              - 'src/services/discord/terminal_delivery_custody/tests.rs'
               - 'src/services/discord/terminal_ui_obligation.rs'
               - 'src/services/discord/tmux_watcher_registry.rs'
               - 'src/services/discord/tmux_watcher_registry/**'
