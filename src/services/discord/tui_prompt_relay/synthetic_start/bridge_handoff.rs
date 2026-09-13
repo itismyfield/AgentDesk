@@ -209,6 +209,34 @@ pub(in crate::services::discord::tui_prompt_relay) async fn resume_unpublished(
     row: &InflightTurnState,
     output: &Path,
 ) -> Option<ExternalInputRelayLease> {
+    let claim = capture_dormant(shared, row, output, true).await?;
+    Some(claim.lease.clone())
+}
+
+pub(in crate::services::discord) struct DormantSyntheticClaim {
+    pub(in crate::services::discord) row: InflightTurnState,
+    pub(in crate::services::discord) actor: Arc<CancelToken>,
+    lease: ExternalInputRelayLease,
+    _lease: Option<TuiDirectExternalInputLeaseGuard>,
+    _serial: tokio::sync::OwnedMutexGuard<()>,
+}
+
+#[cfg(unix)]
+pub(in crate::services::discord) async fn capture_dormant_partial(
+    shared: &Arc<SharedData>,
+    row: &InflightTurnState,
+    output: &Path,
+) -> Option<DormantSyntheticClaim> {
+    capture_dormant(shared, row, output, false).await
+}
+
+#[cfg(unix)]
+async fn capture_dormant(
+    shared: &Arc<SharedData>,
+    row: &InflightTurnState,
+    output: &Path,
+    unpublished_only: bool,
+) -> Option<DormantSyntheticClaim> {
     let provider = row.provider_kind()?;
     let channel = ChannelId::new(row.channel_id);
     let tmux = row.tmux_session_name.as_deref()?;
@@ -226,6 +254,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn resume_unpublished(
         || row.effective_relay_owner_kind() != RelayOwnerKind::None
         || row.output_path.as_deref().map(Path::new) != Some(output)
         || row.external_turn_id.as_deref().is_none_or(str::is_empty)
+        || row.rebind_origin
         || row.turn_start_offset.is_none()
         || row.turn_nonce.as_deref().is_none_or(str::is_empty)
         || CLAUDE_IDLE_RESPONSE_TAILS
@@ -244,10 +273,11 @@ pub(in crate::services::discord::tui_prompt_relay) async fn resume_unpublished(
         tmux,
         row.channel_id,
     );
-    if live_lease
-        .as_ref()
-        .is_some_and(|lease| lease.turn_id != row.external_turn_id)
-    {
+    if live_lease.as_ref().is_some_and(|lease| {
+        lease.turn_id != row.external_turn_id
+            || lease.session_key != row.session_key
+            || lease.relay_owner != ExternalInputRelayOwner::BridgeAdapter
+    }) {
         return None;
     }
     let pin = InflightEpisodePin::from_state(row);
@@ -255,11 +285,14 @@ pub(in crate::services::discord::tui_prompt_relay) async fn resume_unpublished(
         super::super::super::inflight::lock_inflight_episode(&provider, row.channel_id, &pin)
             .ok()?;
     let current = locked.state();
-    if current.response_sent_offset != 0
-        || !current.full_response.is_empty()
-        || current.last_watcher_relayed_offset.is_some()
-        || current.terminal_delivery_committed
-    {
+    let resumable_body = if unpublished_only {
+        current.response_sent_offset == 0
+            && current.full_response.is_empty()
+            && current.last_watcher_relayed_offset.is_none()
+    } else {
+        current.response_sent_offset < current.full_response.len()
+    };
+    if !resumable_body || current.terminal_delivery_committed {
         return None;
     }
     let snapshot = super::super::super::mailbox_snapshot(shared, channel).await;
@@ -301,6 +334,7 @@ pub(in crate::services::discord::tui_prompt_relay) async fn resume_unpublished(
         actor
     };
     record(locked.state(), Some(&actor));
+    let current = locked.state().clone();
     drop(locked);
     let mut lease = ExternalInputRelayLease::unassigned(Some(row.channel_id));
     lease.turn_id = row.external_turn_id.clone();
@@ -312,6 +346,12 @@ pub(in crate::services::discord::tui_prompt_relay) async fn resume_unpublished(
         tmux,
         lease,
     );
-    drop(serial);
-    Some(lease)
+    Some(DormantSyntheticClaim {
+        row: current,
+        actor,
+        _lease: (!unpublished_only)
+            .then(|| TuiDirectExternalInputLeaseGuard::new(provider, tmux, channel, &lease)),
+        lease,
+        _serial: serial,
+    })
 }

@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use super::super::recovery_engine::recover_idle_partial_response;
 use super::*;
 
 #[cfg(unix)]
@@ -200,6 +202,8 @@ async fn relay_idle_claude_bindings(shared_ref: &Arc<SharedData>) {
                     row.user_text.clone(),
                     lease,
                 );
+            } else if let Some(http) = shared.serenity_http_or_token_fallback() {
+                recover_idle_partial_response(&http, &shared, &row, source).await;
             }
             continue;
         }
