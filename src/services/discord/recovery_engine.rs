@@ -142,7 +142,8 @@ use self::phase_policy::{
 // `recovery_engine::extract_response_from_output_pub` path stays valid for the
 // turn_bridge / tmux_restart_handoff external callers.
 pub(super) use self::jsonl_extract::{
-    extract_response_from_output_pub, extract_response_from_output_range, success_result_end_offset_after_offset,
+    extract_response_from_output_pub, extract_response_from_output_range,
+    success_result_end_offset_after_offset,
 };
 // #3479 item-2: re-import the externally-called terminal-watcher helpers so the
 // existing call sites stay byte-identical. The remaining cluster members
@@ -193,8 +194,7 @@ pub(in crate::services::discord) use self::completion_delivery::relay_recovered_
 use self::completion_delivery::{
     CapturedRecoveryDelivery, RecoveryCompletionOutcome, complete_recovery_visible_turn,
     relay_captured_recovery_terminal_notice, relay_captured_recovery_terminal_notice_with_gateway,
-    relay_recovery_terminal_notice,
-    should_advance_recovery_dispatch_after_relay,
+    relay_recovery_terminal_notice, should_advance_recovery_dispatch_after_relay,
 };
 // `detect_live_tmux_output_path` exists only under `#[cfg(unix)]` in the child;
 // a by-name import of a cfg'd-out item is a hard E0432 on non-unix targets.

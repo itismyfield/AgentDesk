@@ -112,8 +112,8 @@ pub(in crate::services::discord) use status_panel::{
 // status edit by the SAME epoch semantics (parity).
 use stream_receiver::capture_bridge_clear_fence;
 pub(super) use stream_receiver::{
-    StreamMessageReceiverAdapter,
-    spawn_stream_message_receiver_adapter, turn_bridge_stream_wait_duration,
+    StreamMessageReceiverAdapter, spawn_stream_message_receiver_adapter,
+    turn_bridge_stream_wait_duration,
 };
 pub(super) use streaming_edit_text::{
     CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE, bridge_claude_tui_followup_requeue_prompt_error,

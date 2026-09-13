@@ -13,22 +13,35 @@ impl HandoffReader {
             std::thread::sleep(Duration::from_millis(10));
         }
         let timed_out = !thread.is_finished();
-        self.cancel.cancelled.store(true, std::sync::atomic::Ordering::Release);
+        self.cancel
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
         thread.join()?;
-        if timed_out { Err(Box::new("reader did not stop at its terminal")) } else { Ok(()) }
+        if timed_out {
+            Err(Box::new("reader did not stop at its terminal"))
+        } else {
+            Ok(())
+        }
     }
 }
 
 impl Drop for HandoffReader {
     fn drop(&mut self) {
-        self.cancel.cancelled.store(true, std::sync::atomic::Ordering::Release);
-        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+        self.cancel
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
 #[cfg(unix)]
 pub(super) fn spawn_handoff_reader(
-    path: &Path, start: u64, tmux: &str, tx: mpsc::Sender<StreamMessage>,
+    path: &Path,
+    start: u64,
+    tmux: &str,
+    tx: mpsc::Sender<StreamMessage>,
     end: tokio::sync::oneshot::Sender<Result<claude_idle_bridge::IdleReaderCompletion, String>>,
 ) -> HandoffReader {
     let generation = crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux);
@@ -37,17 +50,34 @@ pub(super) fn spawn_handoff_reader(
     let reader_cancel = cancel.clone();
     let thread = std::thread::spawn(move || {
         let result = crate::services::session_backend::read_output_file_until_result_with_harvest(
-            &path, start, tx, Some(reader_cancel), crate::services::provider::SessionProbe::process(|| true),
+            &path,
+            start,
+            tx,
+            Some(reader_cancel),
+            crate::services::provider::SessionProbe::process(|| true),
         );
-        let _ = end.send(result.map(|(result, stats)| {
-            claude_idle_bridge::IdleReaderCompletion::from_harvest(result, stats, generation)
-        }).map_err(|error| error.error));
+        let _ = end.send(
+            result
+                .map(|(result, stats)| {
+                    claude_idle_bridge::IdleReaderCompletion::from_harvest(
+                        result, stats, generation,
+                    )
+                })
+                .map_err(|error| error.error),
+        );
     });
-    HandoffReader { thread: Some(thread), cancel }
+    HandoffReader {
+        thread: Some(thread),
+        cancel,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum EmptyTailCase { DecodedTerminal, MissingSource, DeferredError }
+enum EmptyTailCase {
+    DecodedTerminal,
+    MissingSource,
+    DeferredError,
+}
 
 #[cfg(unix)]
 fn synthetic_bridge_handoff_fixture(
@@ -628,31 +658,41 @@ fn synthetic_bridge_handoff_fixture(
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_delivers_first_frame_and_releases_original_actor() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, false, false, false);
+    synthetic_bridge_handoff_fixture(
+        false, false, false, false, None, false, false, None, false, false, false, false,
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_waits_for_later_claim_save_then_delivers() {
-    synthetic_bridge_handoff_fixture(true, false, false, false, None, false, false, None, false, false, false, false);
+    synthetic_bridge_handoff_fixture(
+        true, false, false, false, None, false, false, None, false, false, false, false,
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_same_nonce_different_actor() {
-    synthetic_bridge_handoff_fixture(false, true, false, false, None, false, false, None, false, false, false, false);
+    synthetic_bridge_handoff_fixture(
+        false, true, false, false, None, false, false, None, false, false, false, false,
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_different_source_without_row_mutation() {
-    synthetic_bridge_handoff_fixture(false, false, true, false, None, false, false, None, false, false, false, false);
+    synthetic_bridge_handoff_fixture(
+        false, false, true, false, None, false, false, None, false, false, false, false,
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_upserts_missing_postgres_session_before_first_frame() {
-    synthetic_bridge_handoff_fixture(false, false, false, true, None, false, false, None, false, false, false, false);
+    synthetic_bridge_handoff_fixture(
+        false, false, false, true, None, false, false, None, false, false, false, false,
+    );
 }
 
 #[cfg(unix)]
@@ -696,13 +736,17 @@ fn synthetic_bridge_handoff_restarts_from_persisted_source_after_mailbox_loss() 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_failed_inline_save_retries_original_bytes() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, true, false, None, false, false, false, false);
+    synthetic_bridge_handoff_fixture(
+        false, false, false, false, None, true, false, None, false, false, false, false,
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_retry_preserves_original_source_and_cursor() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, true, None, false, false, false, false);
+    synthetic_bridge_handoff_fixture(
+        false, false, false, false, None, false, true, None, false, false, false, false,
+    );
 }
 
 #[cfg(unix)]
@@ -722,7 +766,20 @@ fn synthetic_bridge_handoff_reader_error_retains_obligation_then_delivers() {
         false,
         false,
     );
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, Some(EmptyTailCase::DeferredError), false, false, false, false);
+    synthetic_bridge_handoff_fixture(
+        false,
+        false,
+        false,
+        false,
+        None,
+        false,
+        false,
+        Some(EmptyTailCase::DeferredError),
+        false,
+        false,
+        false,
+        false,
+    );
 }
 
 #[cfg(unix)]
@@ -747,23 +804,31 @@ fn synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episod
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session() {
-    synthetic_bridge_handoff_fixture(false, false, false, true, None, false, false, None, true, false, false, false);
+    synthetic_bridge_handoff_fixture(
+        false, false, false, true, None, false, false, None, true, false, false, false,
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_inline_admission_rejects_replacement_actor() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, true, false, false);
+    synthetic_bridge_handoff_fixture(
+        false, false, false, false, None, false, false, None, false, true, false, false,
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_prefix_then_read_error_retains_original_obligation() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, false, true, false);
+    synthetic_bridge_handoff_fixture(
+        false, false, false, false, None, false, false, None, false, false, true, false,
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_native_auto_compaction_preserves_delivery_and_actor() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, false, false, true);
+    synthetic_bridge_handoff_fixture(
+        false, false, false, false, None, false, false, None, false, false, false, true,
+    );
 }
