@@ -211,6 +211,20 @@ pub enum StreamMessage {
         source_start: u64,
         complete_record_end: u64,
     },
+    /// Claude terminal read from the captured file descriptor and actor.
+    ClaudeTuiTerminalDone {
+        result: String,
+        session_id: Option<String>,
+        transcript_path: String,
+        tmux_session_name: String,
+        turn_nonce: String,
+        source_start: u64,
+        complete_record_end: u64,
+        generation_mtime_ns: i64,
+        source_file_dev: u64,
+        source_file_ino: u64,
+        actor: std::sync::Weak<crate::services::provider::CancelToken>,
+    },
     /// Error
     Error {
         message: String,

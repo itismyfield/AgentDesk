@@ -2316,6 +2316,7 @@ mod tests {
                     delivery_channel_id: CH,
                 };
                 let range = |source| CodexRange {
+                    source_file_identity: None,
                     identity: InflightTurnIdentity {
                         user_msg_id: 1,
                         started_at: "now".into(),

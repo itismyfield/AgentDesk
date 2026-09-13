@@ -1207,6 +1207,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     StreamMessage::Done { result, session_id }
                     | StreamMessage::CodexTuiTerminalDone {
                         result, session_id, ..
+                    }
+                    | StreamMessage::ClaudeTuiTerminalDone {
+                        result, session_id, ..
                     } => {
                         let result_preview: String = result.chars().take(100).collect();
                         debug_log(&format!(

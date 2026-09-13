@@ -78,6 +78,7 @@ fn receipt_parts(
     ctx.tmux_last_offset = Some(64);
     if provider == ProviderKind::Codex {
         ctx.codex_tui_terminal_range = Some(CodexRange {
+            source_file_identity: None,
             identity: InflightTurnIdentity::from_state(local),
             result: state.full_response.clone(),
             rollout_path: rollout.display().to_string(),

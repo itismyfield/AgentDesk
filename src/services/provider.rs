@@ -2356,11 +2356,22 @@ mod poll_output_file_tests {
             |state| state.saw_done,
             |_| true,
             |_| {},
-            |_| {},
+            |file| {
+                assert_eq!(
+                    file.metadata().unwrap().len(),
+                    (previous.len() + "DONE\n".len()) as u64
+                );
+                // The reader must keep the descriptor it reported even when
+                // another producer replaces the pathname before the first read.
+                std::fs::rename(&output_path, output_path.with_extension("captured")).unwrap();
+                std::fs::write(&output_path, "FOREIGN\n").unwrap();
+            },
         )
         .unwrap();
 
-        let file_len = std::fs::metadata(&output_path).unwrap().len();
+        let file_len = std::fs::metadata(output_path.with_extension("captured"))
+            .unwrap()
+            .len();
         assert_eq!(result, ReadOutputResult::Completed { offset: file_len });
         assert_eq!(state.lines, vec!["DONE".to_string()]);
         assert_eq!(offsets, vec![start_offset, file_len]);
