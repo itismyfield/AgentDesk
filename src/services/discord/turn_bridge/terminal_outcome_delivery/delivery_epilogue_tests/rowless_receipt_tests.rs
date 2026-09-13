@@ -532,6 +532,7 @@ async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDe
     let fence = tokio::sync::OnceCell::new();
     let _ = super::super::super::capture_bridge_clear_fence(&driver.shared, channel_id, rx, &fence).await;
     let user_id = output.inflight_state.user_msg_id;
+    let is_external_input_tui_direct = output.inflight_state.turn_source == inflight::TurnSource::ExternalInput;
     let mut completion_guard = guards::CompletionGuard::for_completion_test(driver.shared.clone(), channel_id, user_id);
     output.handoff_completion_authority(&mut completion_guard);
     let inflight_guard = guards::InflightCleanupGuard::for_completion_test(&output.inflight_state, driver.shared.token_hash.clone());
@@ -541,7 +542,7 @@ async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDe
         user_msg_id: (user_id != 0).then(|| MessageId::new(user_id)), turn_id: output.turn_id,
         request_owner_name: String::new(), final_session_status: "idle", status_panel_started_at: 0,
         has_queued_turns: false, defer_watcher_resume: true, can_chain_locally: true,
-        single_message_panel_footer_mode: footer, is_external_input_tui_direct: false,
+        single_message_panel_footer_mode: footer, is_external_input_tui_direct,
         context_window_tokens: 0, context_compact_percent: 0,
         clear_fence: fence.into_inner().unwrap(), turn_start: output.turn_start,
     };
@@ -866,7 +867,9 @@ async fn exact_receipt_rowless_terminal_custody_empty_recovery_stays_inside_sour
             let assistant = serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":recovered}]}});
             let terminal = serde_json::json!({"type":"system","subtype":"stop_hook_summary"});
             format!("{assistant}\n{terminal}").into_bytes()
-        } else { line.to_string().into_bytes() };
+        } else {
+            line.to_string().into_bytes()
+        };
         assert!(bytes.len() < 256);
         bytes.resize(255, b' ');
         bytes.push(b'\n');
@@ -1001,5 +1004,129 @@ async fn exact_receipt_rowless_terminal_consumes_captured_claude_source_without_
                 .unwrap();
         assert_eq!(fresh.turn_nonce, successor.turn_nonce);
         assert!(!fresh.terminal_delivery_committed);
+    }
+}
+
+#[tokio::test]
+async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_successor_5521() {
+    use crate::services::discord::turn_finalizer::{CompletionAdmissionPlan, TurnKey};
+    for replace_actor in [false, true] {
+        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::FallbackAfterEditFailure, 2);
+        let (mut ctx, mut state, source) = receipt_parts(&driver, ProviderKind::Codex);
+        let channel = ctx.channel_id;
+        state.inflight_state.turn_source = inflight::TurnSource::ExternalInput;
+        state.cancel_token = Arc::new(
+            crate::services::provider::CancelToken::from_persisted_turn_nonce(
+                state.inflight_state.turn_nonce.clone(),
+            ),
+        );
+        let original_actor = state.cancel_token.clone();
+        let original = state.inflight_state.clone();
+        inflight::save_inflight_state(&original).unwrap();
+        ctx.entry_was_rowless = true;
+        crate::services::discord::mailbox_recovery_kickoff(
+            &driver.shared,
+            channel,
+            original_actor.clone(),
+            serenity::UserId::new(DRIVER_USER_MSG_ID),
+            Some(ctx.current_msg_id),
+        )
+        .await;
+        let key = TurnKey::new(
+            channel,
+            original.effective_finalizer_turn_id(),
+            driver.shared.restart.current_generation,
+        )
+        .with_episode_nonce(original.turn_nonce.as_deref());
+        // This driver starts at terminal delivery; adapter admission ordering is
+        // covered by synthetic_terminal_ordering_tests at the actual reader.
+        driver
+            .shared
+            .turn_finalizer
+            .register_start_with_completion_admission(
+                key,
+                ProviderKind::Codex,
+                original.effective_relay_owner_kind(),
+                CompletionAdmissionPlan::Immediate,
+                &driver.shared,
+            );
+        let mut delivery = Box::pin(run_terminal_outcome_delivery(ctx, state));
+        for _ in 0..20 {
+            assert!(
+                !poll_at_most(&mut delivery, 1),
+                "fixture must suspend inside the actual gateway"
+            );
+            if !driver.replace_observations().is_empty() {
+                break;
+            }
+        }
+        assert_eq!(driver.replace_observations().len(), 1);
+        let successor = if replace_actor {
+            let actor = Arc::new(
+                crate::services::provider::CancelToken::from_persisted_turn_nonce(
+                    original.turn_nonce.clone(),
+                ),
+            );
+            crate::services::discord::mailbox_recovery_kickoff(
+                &driver.shared,
+                channel,
+                actor.clone(),
+                serenity::UserId::new(DRIVER_USER_MSG_ID),
+                Some(MessageId::new(DRIVER_CURRENT_MSG_ID)),
+            )
+            .await;
+            Some(actor)
+        } else {
+            None
+        };
+        let output = tokio::time::timeout(DRIVER_TIMEOUT, delivery)
+            .await
+            .unwrap();
+        assert!(output.terminal_delivery_committed);
+        assert!(!output.preserve_inflight_for_cleanup_retry);
+        assert!(
+            output.completion_footer_terminal_text.is_none(),
+            "failed original anchor must not get a completion footer"
+        );
+        assert!(dr::confirmed_delivery_receipt_exists(
+            &ProviderKind::Codex,
+            channel,
+            DRIVER_FALLBACK_ANCHOR_MSG_ID,
+            &source
+        ));
+        assert_eq!(driver.completed_publications(), 1);
+        run_postlude(&driver, output, false, false).await;
+        let after = crate::services::discord::mailbox_snapshot(&driver.shared, channel).await;
+        if let Some(successor) = successor {
+            assert!(
+                after
+                    .cancel_token
+                    .as_ref()
+                    .is_some_and(|actor| Arc::ptr_eq(actor, &successor))
+            );
+            assert!(!successor.cancelled.load(Ordering::Acquire));
+            let row =
+                inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID)
+                    .unwrap();
+            assert_eq!(row.current_msg_id, original.current_msg_id);
+            assert_eq!(row.turn_nonce, original.turn_nonce);
+        } else {
+            assert!(
+                after.cancel_token.is_none(),
+                "confirmed fallback releases the original actor"
+            );
+            let next = Arc::new(crate::services::provider::CancelToken::new());
+            assert!(
+                crate::services::discord::mailbox_try_start_turn(
+                    &driver.shared,
+                    channel,
+                    next,
+                    serenity::UserId::new(DRIVER_USER_MSG_ID),
+                    MessageId::new(DRIVER_USER_MSG_ID + 1)
+                )
+                .await
+            );
+        }
+        assert_eq!(driver.completed_publications(), 1);
     }
 }
