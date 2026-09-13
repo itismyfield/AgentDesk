@@ -1044,7 +1044,7 @@ class DeliveryBoundaryReportTest(unittest.TestCase):
 
     def test_cleanup_invalid_identity_and_outcomes_stay_unknown_in_reader(self):
         metric = "unbound_anchor_left"
-        changes = ({"current_message_id": 0}, {"turn_id": 17},
+        changes = ({"current_message_id": 0}, {"turn_id": 17}, {"observed_at": "invalid"},
                    {"source": {}}, {"anchor": {}}, {"disposition": "continue"},
                    {"provider": "not-a-provider"}, {"recovery_enqueue_attempted": False},
                    {"recovery_enqueue_attempted": 1}, {"recovery_enqueued": "true"},
@@ -1105,7 +1105,7 @@ class DeliveryBoundaryReportTest(unittest.TestCase):
                   (("source", "range"), [False, 20]),
                   (("source", "range"), [10, 2**64]),
                   (("turn_id",), None), (("current_message_id",), True),
-                  (("disposition",), "unknown")]
+                  (("disposition",), "unknown"), (("observed_at",), "invalid")]
         for value in (False, True):
             cases = broken + ([(("anchor", "range"), [0, 5]),
                                (("anchor", "channel_id"), 2),
