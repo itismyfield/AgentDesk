@@ -98,6 +98,93 @@ async fn run(
 }
 
 #[tokio::test]
+async fn exact_receipt_terminal_decision_records_only_evaluated_frontier_5521() {
+    const CHILD: &str = "ADK_5071_TERMINAL_OBSERVATION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let exact = format!(
+            "{}::exact_receipt_terminal_decision_records_only_evaluated_frontier_5521",
+            module_path!().split_once("::").unwrap().1
+        );
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &exact, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(child.status.success(), "{child:?}");
+        assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed; 0 failed"));
+        return;
+    }
+    // install has no uninstall: this dial exists only in the isolated child.
+    let mut config = crate::config::Config::default();
+    config.runtime.relay_authority_mode = crate::config::RelayAuthorityMode::Enforce;
+    config.runtime.relay_authority_cohort_percent = 100;
+    crate::config_live_reload::install(config);
+    for case in ["current_receipt", "frontier", "uncovered", "no_range"] {
+        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+        let (mut ctx, state, mut source) = receipt_parts(&driver, ProviderKind::Codex);
+        let settled = matches!(case, "current_receipt" | "frontier");
+        if case == "no_range" {
+            ctx.codex_tui_terminal_range = None;
+        } else {
+            if case == "uncovered" {
+                source.range.1 -= 1;
+            }
+            let anchor = if case == "frontier" {
+                DRIVER_FALLBACK_ANCHOR_MSG_ID
+            } else {
+                DRIVER_CURRENT_MSG_ID
+            };
+            dr::record_current_pinned_delivery(&source, anchor).unwrap();
+        }
+        let output = run(ctx, state).await;
+        assert!(output.terminal_delivery_committed, "{case}");
+        assert_eq!(driver.completed_publications() == 0, settled, "{case}");
+        let file = std::fs::read_dir(driver._temp.path().join("relay_authority"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(file)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| event["site"] == "completion_terminal_receipt")
+            .collect();
+        assert_eq!(records.len(), 1, "{case}: one actual decision");
+        let record = &records[0];
+        let expected = match case {
+            "frontier" => Some(true),
+            "uncovered" => Some(false),
+            _ => None,
+        };
+        assert_eq!(
+            record["frontier_already_covers"].as_bool(),
+            expected,
+            "{case}"
+        );
+        assert_eq!(
+            record["disposition"],
+            if settled {
+                "already_delivered"
+            } else {
+                "continue"
+            }
+        );
+        if case == "no_range" {
+            assert!(record["source"].is_null());
+        } else {
+            assert_eq!(record["source"]["range"], serde_json::json!([0, 64]));
+            assert_eq!(
+                record["source"]["generation_mtime_ns"],
+                source.generation_mtime_ns
+            );
+        }
+        assert_eq!(record["anchor"].is_null(), expected.is_none());
+    }
+}
+
+#[tokio::test]
 async fn exact_receipt_rowless_terminal_dominates_all_publication_branches_5521() {
     for case in [
         "short", "long", "fallback", "cancel", "ptl", "empty", "recovery", "headless",

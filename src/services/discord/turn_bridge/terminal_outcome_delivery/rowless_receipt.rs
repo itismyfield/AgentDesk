@@ -17,7 +17,40 @@ pub(super) fn decision(
     ctx: &TerminalOutcomeDeliveryContext,
     state: &TerminalOutcomeDeliveryState,
 ) -> TerminalReceiptDisposition {
+    use crate::services::discord::relay_recovery::authority_observation::delivery_boundary::{
+        TerminalReceiptDecisionRecord, record_terminal_receipt_decision,
+    };
+    let (disposition, source, anchor, frontier_already_covers) = decision_with_evidence(ctx, state);
+    record_terminal_receipt_decision(TerminalReceiptDecisionRecord {
+        provider: &state.provider,
+        channel_id: ctx.channel_id.get(),
+        turn_id: state.inflight_state.effective_finalizer_turn_id(),
+        source: source.as_ref(),
+        anchor,
+        current_message_id: ctx.current_msg_id.get(),
+        frontier_already_covers,
+        disposition: match disposition {
+            TerminalReceiptDisposition::Continue => "continue",
+            TerminalReceiptDisposition::AlreadyDelivered => "already_delivered",
+            TerminalReceiptDisposition::ForeignAnchor => "foreign_anchor",
+        },
+    });
+    disposition
+}
+
+type DecisionEvidence = (
+    TerminalReceiptDisposition,
+    Option<dr::ExactJsonlSourceIdentity>,
+    Option<delivery_frontier_probe::CurrentGenerationAnchor>,
+    Option<bool>,
+);
+
+fn decision_with_evidence(
+    ctx: &TerminalOutcomeDeliveryContext,
+    state: &TerminalOutcomeDeliveryState,
+) -> DecisionEvidence {
     use TerminalReceiptDisposition::*;
+    let unknown = |disposition| (disposition, None, None, None);
     let local = &state.inflight_state;
     let identity = InflightTurnIdentity::from_state(local);
     let fresh = load_inflight_state_read_only(&state.provider, local.channel_id);
@@ -35,10 +68,10 @@ pub(super) fn decision(
         Continue
     };
     if own_row && !ctx.entry_was_rowless {
-        return Continue;
+        return unknown(Continue);
     }
     let Some(tmux) = local.tmux_session_name.as_deref().filter(|s| !s.is_empty()) else {
-        return fallback;
+        return unknown(fallback);
     };
     crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
         let (source, path) = if let Some(admitted) = ctx.codex_tui_terminal_range.as_ref() {
@@ -49,10 +82,10 @@ pub(super) fn decision(
                 || admitted.result != state.full_response
                 || !admitted.source_authority_is_live(authority)
             {
-                return fallback;
+                return unknown(fallback);
             }
             let Some(path) = admitted.live_source_path() else {
-                return fallback;
+                return unknown(fallback);
             };
             (admitted.source.clone(), path)
         } else {
@@ -61,20 +94,20 @@ pub(super) fn decision(
                 && local.runtime_kind
                     == Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
             {
-                return fallback;
+                return unknown(fallback);
             }
             let Some((start, end)) = local.turn_start_offset.zip(ctx.tmux_last_offset) else {
-                return fallback;
+                return unknown(fallback);
             };
             let Some(binding) = crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(authority) else {
-                return fallback;
+                return unknown(fallback);
             };
             let Some(path) = local
                 .output_path
                 .as_deref()
                 .and_then(|p| std::fs::canonicalize(p).ok())
             else {
-                return fallback;
+                return unknown(fallback);
             };
             if local.runtime_kind != Some(binding.runtime_kind)
                 || local.session_id.as_deref().filter(|s| !s.is_empty())
@@ -86,7 +119,7 @@ pub(super) fn decision(
                     != Some(&path)
                 || binding.relay_last_offset() < end
             {
-                return fallback;
+                return unknown(fallback);
             }
             (
                 dr::ExactJsonlSourceIdentity {
@@ -110,14 +143,14 @@ pub(super) fn decision(
             || source.delivery_channel_id != ctx.channel_id.get()
             || source.generation_mtime_ns != dr::current_generation_mtime_ns(tmux)
         {
-            return fallback;
+            return unknown(fallback);
         }
         let eof = std::fs::metadata(path)
             .ok()
             .filter(|m| m.is_file())
             .map(|m| m.len());
         if eof.is_none_or(|eof| source.range.1 > eof) {
-            return fallback;
+            return unknown(fallback);
         }
         // An exact current-source receipt survives advancement of the frontier
         // to a later range/anchor. The frontier is an anchor discovery hint,
@@ -131,7 +164,9 @@ pub(super) fn decision(
             )
         };
         if has_receipt(ctx.current_msg_id.get()) {
-            return AlreadyDelivered;
+            // The exact receipt settles this retry before a frontier read.
+            // Preserve that unmeasured frontier instead of synthesizing true.
+            return (AlreadyDelivered, Some(source), None, None);
         }
         let anchor = delivery_frontier_probe::current_generation_delivered_anchor(
             &state.provider,
@@ -139,25 +174,33 @@ pub(super) fn decision(
             tmux,
             eof,
         );
-        if anchor.is_some_and(|anchor| {
+        let frontier_covers = anchor.is_some_and(|anchor| {
             anchor.range.0 <= source.range.0
                 && anchor.range.1 >= source.range.1
                 && anchor.panel_channel_id == ctx.channel_id.get()
                 && has_receipt(anchor.panel_msg_id)
-        }) || dr::read_record(&state.provider, source.offset_authority_channel_id).is_some_and(
-            |record| {
-                record.confirmed_deliveries.iter().any(|receipt| {
-                    receipt.source == source
-                        && receipt.delivery_channel_id == ctx.channel_id.get()
-                        && has_receipt(receipt.message_id)
-                })
-            },
-        ) {
+        });
+        let disposition = if frontier_covers
+            || dr::read_record(&state.provider, source.offset_authority_channel_id).is_some_and(
+                |record| {
+                    record.confirmed_deliveries.iter().any(|receipt| {
+                        receipt.source == source
+                            && receipt.delivery_channel_id == ctx.channel_id.get()
+                            && has_receipt(receipt.message_id)
+                    })
+                },
+            ) {
             // Both same-anchor retries and a receipt on another anchor are
             // settled without touching either Discord message.
             AlreadyDelivered
         } else {
             fallback
-        }
+        };
+        (
+            disposition,
+            Some(source),
+            anchor,
+            anchor.map(|_| frontier_covers),
+        )
     })
 }

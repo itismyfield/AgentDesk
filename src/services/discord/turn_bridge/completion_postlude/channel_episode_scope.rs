@@ -11,12 +11,10 @@
 //! `Idle` read still has a read-to-effect race and cannot distinguish “no successor”
 //! from “a successor already finished.” A nonce-fallback `Mine` proves an episode,
 //! not one rehydration attempt, so duplicate actors for the same nonce can both pass.
-//! TUI-direct first creates a synthetic mailbox claim but its bridge mints a separate
-//! token. After synthetic release it reads `Idle` when no successor exists and
-//! `Foreign` when a successor is active, not normally `Unprovable`. A foreign read
-//! can suppress the final status write and leave the namespaced TUI session stuck
-//! `TURN_ACTIVE`; this round makes that residue unconditionally visible rather than
-//! transporting the synthetic claim witness into the bridge.
+//! TUI-direct carries its synthetic claim's token allocation into the bridge,
+//! preserving the same-actor witness while the mailbox remains owned. After
+//! release it reads `Idle` without a successor and `Foreign` with an active
+//! successor. These later reads still guard each channel-scoped effect group.
 
 use std::sync::Arc;
 
@@ -361,9 +359,9 @@ mod tests {
     }
 
     /// Source pin for design L-4. This fixes the complete production caller set and
-    /// its token-registration contract. TUI-direct bridges intentionally mint a token
-    /// distinct from their preceding synthetic claim, yielding Idle after release or
-    /// Foreign when a successor has claimed the retained mailbox handle.
+    /// its token-registration contract. TUI-direct bridges retain their synthetic
+    /// claim's token, yielding Idle after release or Foreign when a successor has
+    /// claimed the retained mailbox handle.
     #[test]
     fn bridge_entry_sites_pin_mailbox_token_registration_contract() {
         let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
