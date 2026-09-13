@@ -27,7 +27,8 @@ use std::path::Path;
 #[cfg(unix)]
 use std::process::Command;
 
-#[cfg(unix)]
+// Settlement is shared with restart recovery on every platform; only the
+// pane/source capture entry points inside this module require Unix.
 #[path = "recovery_engine/idle_captured_response.rs"]
 mod idle_captured_response;
 #[cfg(unix)]

@@ -1,6 +1,8 @@
 use super::*;
+#[cfg(unix)]
 use crate::services::cluster::stream_relay::SourceFileIdentity;
 
+#[cfg(unix)]
 #[derive(PartialEq, Eq)]
 struct SourceAtEof {
     file: SourceFileIdentity,
@@ -8,6 +10,7 @@ struct SourceAtEof {
     end: u64,
 }
 
+#[cfg(unix)]
 impl SourceAtEof {
     fn capture(row: &inflight::InflightTurnState, output: &Path) -> Option<Self> {
         if row.output_path.as_deref().map(Path::new) != Some(output) {
@@ -26,6 +29,7 @@ impl SourceAtEof {
     }
 }
 
+#[cfg(unix)]
 pub(in crate::services::discord) async fn recover_idle_partial_response(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -72,6 +76,7 @@ pub(in crate::services::discord) async fn recover_idle_partial_response(
 
 /// The caller has already observed a ready pane. Keep the source, dormant
 /// claim and delivery settlement identical for production and gateway fixtures.
+#[cfg(unix)]
 pub(in crate::services::discord) async fn recover_idle_partial_response_from_ready_source(
     http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
@@ -159,7 +164,7 @@ pub(in crate::services::discord) async fn recover_idle_partial_response_from_rea
     .await
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     #[test]
