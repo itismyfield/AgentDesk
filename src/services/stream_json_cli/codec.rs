@@ -145,16 +145,24 @@ impl StreamJsonCodec for AgyCodec {
         if trimmed.is_empty() {
             return Ok(Vec::new());
         }
-        let json: Value = serde_json::from_str(trimmed)
+        let envelope: Value = serde_json::from_str(trimmed)
             .map_err(|error| format!("malformed AGY StreamJson line: {error}"))?;
-        let event = json
+        let event = envelope
             .get("event")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        // AGY 1.2.x wraps payloads under the event name. Older versions emit
+        // fields at the top level. Never mix terminal fields across the two.
+        let json = match envelope.get(event) {
+            Some(payload) if payload.is_object() => payload,
+            Some(_) => return Err(format!("AGY {event} payload must be an object")),
+            None => &envelope,
+        };
         match event {
             "init" => {
                 let id = json
                     .get("conversation_id")
+                    .or_else(|| envelope.get("conversation_id"))
                     .and_then(Value::as_str)
                     .ok_or_else(|| "AGY init missing conversation_id".to_string())?;
                 self.session_id = Some(id.to_string());
@@ -165,7 +173,7 @@ impl StreamJsonCodec for AgyCodec {
             }
             "step_update" => {
                 let step_type = json.get("step_type").and_then(Value::as_str).unwrap_or("");
-                self.remember_step_error(&json, step_type);
+                self.remember_step_error(json, step_type);
                 let mut out = Vec::new();
                 if step_type == "agent_response" {
                     if let Some(delta) = json.get("text_delta").and_then(Value::as_str) {
@@ -179,7 +187,11 @@ impl StreamJsonCodec for AgyCodec {
                     }
                 }
                 if let Some(step_index) = json.get("step_index").and_then(Value::as_i64) {
-                    let status = json.get("status").and_then(Value::as_str).unwrap_or("");
+                    let status = json
+                        .get("status")
+                        .or_else(|| json.get("state"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
                     if status.eq_ignore_ascii_case("DONE")
                         || status.eq_ignore_ascii_case("terminal")
                     {
@@ -205,7 +217,7 @@ impl StreamJsonCodec for AgyCodec {
                 self.session_id = id.clone();
                 let status = json.get("status").and_then(Value::as_str).unwrap_or("");
                 if !status.eq_ignore_ascii_case("SUCCESS") {
-                    self.terminal = Some(Err(json_error_detail(&json)
+                    self.terminal = Some(Err(json_error_detail(json)
                         .or_else(|| self.last_step_error.clone())
                         .unwrap_or_else(|| {
                             if status.is_empty() {
@@ -480,6 +492,80 @@ mod tests {
         assert!(result.is_empty(), "terminal success waits for process exit");
         assert!(matches!(codec.finish(Some(0), "").unwrap().as_slice(),
             [StreamMessage::Done { result, .. }] if result == "hello"));
+    }
+
+    #[test]
+    fn agy_codec_nested_stream_emits_text_and_finishes_once() {
+        let mut codec = AgyCodec::new();
+        let init = codec.push_stdout_line(
+            r#"{"event":"init","conversation_id":"01234567-89ab-cdef-0123-456789abcdef","init":{}}"#,
+        ).unwrap();
+        assert!(matches!(init.as_slice(), [StreamMessage::Init { .. }]));
+        let text = codec.push_stdout_line(
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"hello","step_index":1,"state":"DONE"}}"#,
+        ).unwrap();
+        assert!(matches!(text.as_slice(), [StreamMessage::Text { content }] if content == "hello"));
+        assert!(codec.usage_steps.contains(&1));
+        let result = codec.push_stdout_line(
+            r#"{"event":"result","result":{"status":"SUCCESS","conversation_id":"01234567-89ab-cdef-0123-456789abcdef","response":"hello"}}"#,
+        ).unwrap();
+        assert!(result.is_empty());
+        assert!(matches!(codec.finish(Some(0), "").unwrap().as_slice(),
+            [StreamMessage::Done { result, .. }] if result == "hello"));
+        assert!(codec.finish(Some(0), "").unwrap().is_empty());
+    }
+
+    #[test]
+    fn agy_codec_nested_result_without_deltas_and_failure_guards() {
+        for (status, response, exit_code, succeeds) in [
+            ("SUCCESS", "hello", 0, true),
+            ("SUCCESS", "", 0, false),
+            ("SUCCESS", "hello", 1, false),
+            ("FAILED", "hello", 0, false),
+            ("", "hello", 0, false),
+        ] {
+            let mut codec = AgyCodec::new();
+            let line = serde_json::json!({"event":"result", "result": {
+                "conversation_id":"01234567-89ab-cdef-0123-456789abcdef",
+                "status":status, "response":response
+            }})
+            .to_string();
+            codec.push_stdout_line(&line).unwrap();
+            let messages = codec.finish(Some(exit_code), "").unwrap();
+            assert_eq!(
+                matches!(messages.as_slice(), [StreamMessage::Done { .. }]),
+                succeeds
+            );
+            assert_eq!(
+                matches!(messages.as_slice(), [StreamMessage::Error { .. }]),
+                !succeeds
+            );
+        }
+    }
+
+    #[test]
+    fn agy_codec_nested_errors_and_identity_are_preserved() {
+        let mut codec = AgyCodec::new();
+        codec.push_stdout_line(
+            r#"{"event":"init","init":{"conversation_id":"01234567-89ab-cdef-0123-456789abcdef"}}"#,
+        ).unwrap();
+        assert!(codec.push_stdout_line(
+            r#"{"event":"result","result":{"conversation_id":"different","status":"SUCCESS","response":"hello"}}"#,
+        ).unwrap_err().contains("mismatch"));
+        codec.push_stdout_line(
+            r#"{"event":"step_update","step_update":{"step_type":"run_command","state":"ERROR","message":"command permission denied"}}"#,
+        ).unwrap();
+        codec
+            .push_stdout_line(r#"{"event":"result","result":{"status":"SUCCESS","response":""}}"#)
+            .unwrap();
+        assert!(matches!(codec.finish(Some(0), "").unwrap().as_slice(),
+            [StreamMessage::Error { message, .. }] if message.contains("permission was denied")));
+        let mut codec = AgyCodec::new();
+        assert!(
+            codec
+                .push_stdout_line(r#"{"event":"result","result":null,"status":"SUCCESS"}"#)
+                .is_err()
+        );
     }
 
     #[test]
