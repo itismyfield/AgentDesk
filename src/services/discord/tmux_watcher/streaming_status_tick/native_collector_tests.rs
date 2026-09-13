@@ -30,12 +30,17 @@ pub(super) fn seed_recovered_row(
 
 fn collector_case(paused: bool, repeats: usize, name: &str) {
     const CHILD: &str = "AGENTDESK_5833_NATIVE_COLLECTOR_CHILD";
+    let captured = name == "captured_native_collector_first_frame_reaches_http";
     if std::env::var_os(CHILD).is_none() {
         let qualified = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
         let result = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &qualified, "--nocapture"])
+            .args(captured.then_some("--ignored"))
             .env(CHILD, "1")
-            .env("AGENTDESK_STATUS_INTERVAL_SECS", "0")
+            .env(
+                "AGENTDESK_STATUS_INTERVAL_SECS",
+                if captured { "5" } else { "0" },
+            )
             .output()
             .unwrap();
         assert!(
@@ -50,7 +55,7 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         let (fx, row) = seed_recovered_row(root.root.path(), 5834);
         let marker = crate::services::tmux_common::session_temp_path(&fx.tmux, "generation");
         std::fs::write(&marker, b"1").unwrap();
-        let data = (0..repeats).map(|index| format!(
+        let generated = (0..repeats).map(|index| format!(
             "{}\n",
             serde_json::json!({"type":"response_item", "payload": {
                 "id":format!("commentary-{index}"), "type":"message", "role":"assistant",
@@ -58,6 +63,15 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                 "content":[{"type":"output_text", "text":format!("{index}: {TRAILING_BODY}")}]
             }})
         )).collect::<String>().into_bytes();
+        let data = if captured {
+            let path = std::env::var("AGENTDESK_5833_CAPTURED_SOURCE")
+                .expect("manual diagnostic requires an immutable private source copy");
+            assert!(std::fs::metadata(&path).unwrap().len() <= 64 * 1024 * 1024);
+            std::fs::read(path).unwrap()
+        } else {
+            generated
+        };
+        let source_bytes = data.len();
         std::fs::write(&fx.output_path, &data).unwrap();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let rec = recorder(fx.channel, true).await;
@@ -161,18 +175,37 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
             &mut render,
         );
         let stop = async {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+            let deadline =
+                tokio::time::Instant::now() + Duration::from_secs(if captured { 15 } else { 1 });
             while rec.seen("POST").is_empty() && tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             cancel.store(true, Ordering::Release);
         };
         let (outcome, ()) = tokio::join!(run, stop);
-        assert_eq!(
-            handle.metrics().snapshot().frames_received,
-            1,
-            "both states feed the passive relay"
-        );
+        if captured {
+            if let CollectOutcome::Fallthrough(turn) = &outcome {
+                eprintln!(
+                    "captured collector source_bytes={source_bytes} body_bytes={} body_units={} terminal={} posts={}",
+                    turn.full_response.len(),
+                    crate::services::discord::formatting::discord_message_units(
+                        &turn.full_response
+                    ),
+                    turn.found_result,
+                    rec.seen("POST").len()
+                );
+            } else {
+                eprintln!(
+                    "captured collector continued before streaming; source_bytes={source_bytes}"
+                );
+            }
+        } else {
+            assert_eq!(
+                handle.metrics().snapshot().frames_received,
+                1,
+                "both states feed the passive relay"
+            );
+        }
         assert_eq!(
             rec.seen("POST").is_empty(),
             paused,
@@ -186,7 +219,9 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                 !turn.found_result,
                 "HTTP happened before any terminal source event"
             );
-            assert!(turn.full_response.contains(TRAILING_BODY));
+            if !captured {
+                assert!(turn.full_response.contains(TRAILING_BODY));
+            }
             if repeats > 1 {
                 assert!(
                     crate::services::discord::formatting::discord_message_units(
@@ -200,14 +235,16 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                     "collector must decode the final unique commentary record"
                 );
             }
-            assert!(
-                rec.bodies
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|body| body.contains(TRAILING_BODY)),
-                "the captured POST must contain assistant prose, not only a status panel"
-            );
+            if !captured {
+                assert!(
+                    rec.bodies
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|body| body.contains(TRAILING_BODY)),
+                    "the captured POST must contain assistant prose, not only a status panel"
+                );
+            }
             assert!(
                 turn.placeholder_msg_id.is_some(),
                 "first Discord POST must succeed"
@@ -250,5 +287,17 @@ fn recovered_native_collector_long_commentary_first_post_is_bounded() {
         false,
         200,
         "recovered_native_collector_long_commentary_first_post_is_bounded",
+    );
+}
+
+/// Root supplies a private immutable copy of the original turn range. Never
+/// commit the capture; reduce any failure to synthetic records before shipping.
+#[test]
+#[ignore = "requires private immutable source capture; root runs explicitly"]
+fn captured_native_collector_first_frame_reaches_http() {
+    collector_case(
+        false,
+        0,
+        "captured_native_collector_first_frame_reaches_http",
     );
 }
