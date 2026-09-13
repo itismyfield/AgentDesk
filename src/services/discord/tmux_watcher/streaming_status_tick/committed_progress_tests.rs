@@ -197,7 +197,7 @@ async fn recorder(channel: ChannelId, delete_ok: bool) -> Recorder {
             }
             if let Some(content) = payload["content"].as_str() {
                 bodies.lock().unwrap().push(content.to_owned());
-                if content.chars().count() > 2000 {
+                if content.encode_utf16().count() > 2000 {
                     return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
                         "code": 50035, "message": "Invalid Form Body",
                         "errors": {"content": {"_errors": [{"code": "BASE_TYPE_MAX_LENGTH",

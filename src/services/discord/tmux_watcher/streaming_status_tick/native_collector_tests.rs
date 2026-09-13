@@ -95,10 +95,10 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
             0
         };
         assert!(source_start < source_bytes as u64);
-        let prose_witness = if captured {
+        let prose_witnesses = if captured {
             String::from_utf8_lossy(&data[source_start as usize..])
                 .lines()
-                .find_map(|line| {
+                .filter_map(|line| {
                     let event: serde_json::Value = serde_json::from_str(line).ok()?;
                     let payload = &event["payload"];
                     if event["type"] != "response_item"
@@ -109,16 +109,22 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                     }
                     payload["content"].as_array()?.iter().find_map(|part| {
                         let text = part["text"].as_str()?.trim();
-                        (!text.is_empty()).then(|| {
-                        crate::services::discord::formatting::format_for_discord_with_status_panel(
-                            text, &ProviderKind::Codex).trim().chars().take(32).collect::<String>()
-                    })
+                        (text.chars().count() >= 16).then(|| {
+                            let formatted = crate::services::discord::formatting::format_for_discord_with_status_panel(
+                                text, &ProviderKind::Codex);
+                            (formatted.trim().chars().take(32).collect::<String>(),
+                                text.chars().take(32).collect::<String>())
+                        })
                     })
                 })
-                .expect("capture must contain an assistant commentary witness")
+                .collect::<Vec<_>>()
         } else {
-            TRAILING_BODY.to_string()
+            vec![(TRAILING_BODY.to_string(), TRAILING_BODY.to_string())]
         };
+        assert!(
+            !prose_witnesses.is_empty(),
+            "capture needs nontrivial assistant prose"
+        );
         let initial_end = if physical {
             (source_start as usize + 16_384).min(data.len())
         } else {
@@ -247,13 +253,11 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         let stop = async {
             let deadline =
                 tokio::time::Instant::now() + Duration::from_secs(if captured { 15 } else { 1 });
-            while !rec
-                .bodies
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|body| body.contains(&prose_witness))
-                && tokio::time::Instant::now() < deadline
+            while !rec.bodies.lock().unwrap().iter().any(|body| {
+                prose_witnesses
+                    .iter()
+                    .any(|(formatted, _)| body.contains(formatted))
+            }) && tokio::time::Instant::now() < deadline
             {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -330,11 +334,10 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                 );
             }
             assert!(
-                rec.bodies
-                    .lock()
-                    .unwrap()
+                rec.bodies.lock().unwrap().iter().any(|body| prose_witnesses
                     .iter()
-                    .any(|body| body.contains(&prose_witness)),
+                    .any(|(formatted, raw)| body.contains(formatted)
+                        && turn.full_response.contains(raw))),
                 "first visible HTTP body must contain the captured assistant commentary witness"
             );
             assert!(
@@ -346,7 +349,7 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                     .lock()
                     .unwrap()
                     .iter()
-                    .all(|body| body.chars().count() <= 2000),
+                    .all(|body| body.encode_utf16().count() <= 2000),
                 "native replay must split before its first HTTP publication"
             );
         }
