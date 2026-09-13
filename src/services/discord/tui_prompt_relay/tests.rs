@@ -3855,22 +3855,33 @@ async fn s5833_r2_synthetic_refresh_preserves_existing_episode_key() {
     let channel = ChannelId::new(5_833_201);
     let anchor = MessageId::new(5_833_301);
     let tmux = "AgentDesk-5833-refresh";
-    let mut stale = build_tui_direct_synthetic_inflight_state(
-        ProviderKind::Claude,
+    let original_lease = s1_lease_5833(Some("stale-turn"));
+    // Real deferred admission creates the original actor witness and Pending
+    // finalizer obligation; a hand-built orphan row cannot prove their survival.
+    let (initial, _) = synthetic_start::claim_tui_direct_synthetic_turn_inner::<true>(
+        &shared,
+        &ProviderKind::Claude,
         channel,
-        anchor,
-        None,
-        "prompt",
         tmux,
+        "prompt",
+        anchor,
+        &original_lease,
         None,
-        0,
-        &s1_lease_5833(Some("stale-turn")),
-        RelayOwnerKind::None,
-    );
-    // Marker proves that refresh preserved the old row rather than recreating it.
-    stale.any_tool_used = true;
-    inflight::save_inflight_state(&stale).unwrap();
+    )
+    .await;
+    assert!(initial.claimed);
+    let original_actor = super::super::mailbox_snapshot(&shared, channel)
+        .await
+        .cancel_token
+        .expect("original admitted actor");
     let stale = inflight::load_inflight_state(&ProviderKind::Claude, channel.get()).unwrap();
+    assert_eq!(stale.turn_nonce.as_deref(), original_actor.turn_nonce());
+    assert!(
+        shared
+            .turn_finalizer
+            .has_live_watcher_pending(channel, shared.restart.current_generation)
+            .await
+    );
     let lease = s1_lease_5833(Some("current-turn"));
     let claim = synthetic_start::claim_tui_direct_synthetic_turn(
         &shared,
@@ -3887,20 +3898,26 @@ async fn s5833_r2_synthetic_refresh_preserves_existing_episode_key() {
         "a different external turn cannot appropriate the old source"
     );
     let preserved = inflight::load_inflight_state(&ProviderKind::Claude, channel.get()).unwrap();
-    assert_eq!(preserved.external_turn_id, stale.external_turn_id);
-    assert_eq!(preserved.turn_nonce, stale.turn_nonce);
-    assert_eq!(preserved.save_generation, stale.save_generation);
-    assert!(preserved.any_tool_used);
+    assert_eq!(
+        serde_json::to_value(&preserved).unwrap(),
+        serde_json::to_value(&stale).unwrap()
+    );
+    let survivor = super::super::mailbox_snapshot(&shared, channel).await;
+    assert!(Arc::ptr_eq(
+        survivor.cancel_token.as_ref().unwrap(),
+        &original_actor
+    ));
+    assert!(!original_actor.cancelled.load(Ordering::Relaxed));
     assert!(
-        super::super::mailbox_snapshot(&shared, channel)
+        shared
+            .turn_finalizer
+            .has_live_watcher_pending(channel, shared.restart.current_generation)
             .await
-            .cancel_token
-            .is_none()
     );
 
-    // Refresh remains available to the original episode, including its marker
-    // and source progress. Refusing the changed lease must not strand this row.
-    let lease = s1_lease_5833(Some("stale-turn"));
+    // The original allocation can still refresh after the foreign lease was
+    // refused; reissuing a new actor for an orphan row would fail these checks.
+    let lease = original_lease;
     let claim = synthetic_start::claim_tui_direct_synthetic_turn(
         &shared,
         &ProviderKind::Claude,
@@ -3916,7 +3933,19 @@ async fn s5833_r2_synthetic_refresh_preserves_existing_episode_key() {
     assert_eq!(durable.external_turn_id, lease.turn_id);
     assert_eq!(durable.session_key, lease.session_key);
     assert_eq!(durable.runtime_kind, lease.runtime_kind);
-    assert!(durable.any_tool_used);
+    let refreshed = super::super::mailbox_snapshot(&shared, channel).await;
+    assert!(Arc::ptr_eq(
+        refreshed.cancel_token.as_ref().unwrap(),
+        &original_actor
+    ));
+    assert!(!original_actor.cancelled.load(Ordering::Relaxed));
+    assert_eq!(durable.turn_nonce, stale.turn_nonce);
+    assert!(
+        shared
+            .turn_finalizer
+            .has_live_watcher_pending(channel, shared.restart.current_generation)
+            .await
+    );
     assert_eq!(durable.turn_start_offset, stale.turn_start_offset);
     assert_eq!(durable.last_offset, stale.last_offset);
 }
