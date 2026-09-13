@@ -54,19 +54,25 @@ pub(super) mod rowless_receipt;
 
 use crate::services::discord::session_banner::DiscordTurnSessionBanner;
 
+const TERMINAL_DELIVERY_LOG_TARGET: &str = module_path!();
+
 pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
-    state: TerminalOutcomeDeliveryState,
+    mut state: TerminalOutcomeDeliveryState,
 ) -> TerminalOutcomeDeliveryOutput {
-    // The pre-loop gate proved the raw capture before display normalization.
-    // A later source generation cannot undo a confirmed transport receipt.
-    let receipt_disposition = if ctx.preloop_receipt_confirmed {
-        rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered
-    } else {
-        rowless_receipt::decision(rowless_receipt::ReceiptDecisionInput::from_terminal(
-            &ctx, &state,
-        ))
-    };
+    let claude_tui_followup_busy_readiness_timeout =
+        bridge_claude_tui_followup_busy_readiness_timeout(
+            &state.provider,
+            state.inflight_state.runtime_kind,
+            ctx.tui_error_classification,
+        );
+    let (receipt_disposition, mut preserve_inflight_for_cleanup_retry, mut terminal_outcome) =
+        foreign_terminal_handoff::prepare_receipt_disposition(
+            &ctx,
+            &mut state,
+            claude_tui_followup_busy_readiness_timeout,
+        )
+        .await;
     let already_receipted =
         receipt_disposition == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
     let may_publish = receipt_disposition == rowless_receipt::TerminalReceiptDisposition::Continue;
@@ -75,10 +81,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let (cancelled, transport_error) = (ctx.cancelled, ctx.transport_error);
     let (recovery_retry, rx_disconnected) = (ctx.recovery_retry, ctx.rx_disconnected);
     let tmux_last_offset = ctx.tmux_last_offset;
-    let codex_tui_terminal_range = ctx.codex_tui_terminal_range;
     let watcher_owner_channel_id = ctx.watcher_owner_channel_id;
-    let watcher_handoff_claim_outcome = ctx.watcher_handoff_claim_outcome;
-    let bridge_created_response_placeholder_msg_id = ctx.bridge_created_response_placeholder_msg_id;
     let bridge_relay_delegated_to_watcher = ctx.bridge_relay_delegated_to_watcher;
     let bridge_output_owner = ctx.bridge_output_owner;
     let should_complete_work_dispatch_after_delivery =
@@ -90,12 +93,6 @@ pub(super) async fn run_terminal_outcome_delivery(
     let claude_tui_followup_pre_submit_requeue_candidate =
         ctx.claude_tui_followup_pre_submit_requeue_candidate;
     let tui_error_classification = ctx.tui_error_classification;
-    let claude_tui_followup_busy_readiness_timeout =
-        bridge_claude_tui_followup_busy_readiness_timeout(
-            &state.provider,
-            state.inflight_state.runtime_kind,
-            tui_error_classification,
-        );
     let had_prior_session_id_at_turn_start = ctx.had_prior_session_id_at_turn_start;
     let session_handshake_seen = ctx.session_handshake_seen;
     let turn_start = ctx.turn_start;
@@ -119,7 +116,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         state.pending_long_running_retarget_after_state_save;
     let mut long_running_placeholder_active = state.long_running_placeholder_active;
     let mut inflight_state = state.inflight_state;
-    let admitted = codex_tui_terminal_range.as_ref();
+    let admitted = ctx.codex_tui_terminal_range.as_ref();
     let mut api_friction_reports = state.api_friction_reports;
     let review_dispatch_warning = state.review_dispatch_warning;
     let last_edit_text = state.last_edit_text;
@@ -128,7 +125,6 @@ pub(super) async fn run_terminal_outcome_delivery(
     let mut resume_failure_detected = state.resume_failure_detected;
     let mut response_sent_offset = state.response_sent_offset;
 
-    let mut preserve_inflight_for_cleanup_retry = false;
     // #3041 P1-2 (codex P1-2 R3): set ONLY on a delivery-lease `Skip`, where
     // the live HOLDER (the watcher) — a different actor sharing the same
     // per-channel `DeliveryLeaseCell` — owns this turn's delivery AND its
@@ -209,96 +205,12 @@ pub(super) async fn run_terminal_outcome_delivery(
         }
     }
 
-    let mut terminal_outcome = TerminalOutcomeDeliveryOutcome::Completed;
     let mut epilogue_response = None;
     if already_receipted {
         (terminal_delivery_committed, terminal_body_visible) = (true, true);
-        if cancelled {
-            let cancel_source = cancel_token
-                .cancel_source()
-                .unwrap_or_else(|| tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON.to_string());
-            preserve_inflight_for_cleanup_retry |=
-                cancel_prompt_replace::settle_cancelled_episode_work(
-                    &shared_owned,
-                    dispatch_id.as_deref(),
-                    &cancel_source,
-                    &mut active_background_child_session_ids,
-                )
-                .await;
-        }
         epilogue_response = Some((full_response.clone(), full_response.clone()));
     } else if !may_publish {
         bridge_should_emit_completion = false;
-        let cancel_source = cancel_token
-            .cancel_source()
-            .unwrap_or_else(|| tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON.to_string());
-        if bridge_output_owner.is_some() {
-            if cancelled {
-                preserve_inflight_for_cleanup_retry |=
-                    cancel_prompt_replace::settle_cancelled_episode_work(
-                        &shared_owned,
-                        dispatch_id.as_deref(),
-                        &cancel_source,
-                        &mut active_background_child_session_ids,
-                    )
-                    .await;
-            }
-            // A known watcher/standby actor already owns this answer. Keep the
-            // same owner contract before creating any second publisher.
-            preserve_inflight_for_cleanup_retry = true;
-            terminal_outcome = TerminalOutcomeDeliveryOutcome::DeferredToOwner;
-        } else {
-            let delivery_body = foreign_terminal_handoff::detached_delivery_body(
-                &shared_owned,
-                channel_id,
-                &provider,
-                &inflight_state,
-                &full_response,
-                response_sent_offset,
-                &cancel_token,
-                cancelled,
-                is_prompt_too_long,
-                gateway.as_ref(),
-                terminal_empty_response_notice.as_deref(),
-            );
-            match foreign_terminal_handoff::preserve_or_publish(foreign_terminal_handoff::Handoff {
-                provider: &provider,
-                local: &inflight_state,
-                admitted,
-                content: &full_response,
-                delivery_body: delivery_body.as_deref(),
-                empty_recovery_notice: (!resume_failure_detected
-                    && !recovery_retry
-                    && !claude_tui_followup_busy_readiness_timeout
-                    && full_response.trim().is_empty())
-                .then(|| empty_response_recovery::empty_response_guidance(rx_disconnected)),
-                response_sent_offset,
-                channel_id,
-                old_anchor: current_msg_id,
-                watcher_owner_channel_id,
-                tmux_last_offset,
-                cancelled,
-                cancel_source,
-                children: &active_background_child_session_ids,
-                dispatch_id: dispatch_id.as_deref(),
-                adk_cwd: adk_cwd.as_deref(),
-                should_complete: should_complete_work_dispatch_after_delivery,
-                should_fail: should_fail_dispatch_after_delivery,
-                resume_failure: resume_failure_detected,
-                recovery_retry,
-            })
-            .await
-            {
-                foreign_terminal_handoff::Outcome::Deferred { key } => {
-                    preserve_inflight_for_cleanup_retry = true;
-                    terminal_outcome = TerminalOutcomeDeliveryOutcome::DeferredToCustody { key };
-                }
-                foreign_terminal_handoff::Outcome::Unresolved { error } => {
-                    preserve_inflight_for_cleanup_retry = true;
-                    terminal_outcome = TerminalOutcomeDeliveryOutcome::Unresolved { error };
-                }
-            }
-        }
     } else if cancelled || is_prompt_too_long {
         let message = if cancelled {
             CancelPromptReplaceMessage::Cancelled
@@ -342,40 +254,15 @@ pub(super) async fn run_terminal_outcome_delivery(
             CancelPromptReplaceOutcome::Continue => {}
         }
     } else if let Some(owner) = bridge_output_owner {
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        match owner {
-            BridgeOutputOwner::WatcherRelay => {
-                tracing::info!(
-                    "  [{ts}] 👁 tmux watcher owns assistant relay; bridge skipped direct response delivery (channel {})",
-                    channel_id
-                );
-                if should_delete_bridge_created_watcher_orphan_response(
-                    shared_owned.ui.status_panel_v2_enabled,
-                    watcher_handoff_claim_outcome,
-                    bridge_created_response_placeholder_msg_id,
-                    current_msg_id,
-                ) {
-                    // #3607: terminal-anchor guard + durable delete
-                    // observability live in the sibling so the hot file only
-                    // dispatches. The guard skips deleting a committed
-                    // terminal anchor (the accident this fixes); a genuine
-                    // non-terminal orphan is deleted, recorded, and retried.
-                    cleanup_or_preserve_watcher_orphan_spinner(
-                        shared_owned.clone(),
-                        &provider,
-                        gateway.clone(),
-                        channel_id,
-                        current_msg_id,
-                        &inflight_state,
-                    )
-                    .await;
-                }
-            }
-            BridgeOutputOwner::StandbyRelay => tracing::info!(
-                "  [{ts}] 👁 standby relay owns assistant relay; bridge skipped direct response delivery (channel {})",
-                channel_id
-            ),
-        }
+        foreign_terminal_handoff::handle_known_owner(
+            owner,
+            &ctx,
+            &shared_owned,
+            &gateway,
+            &provider,
+            &inflight_state,
+        )
+        .await;
     } else {
         queue_retry_silence::apply(
             claude_tui_followup_pre_submit_requeue_candidate,

@@ -6,6 +6,149 @@ use crate::services::discord::{
     outbound::{self, delivery_record as dr},
 };
 
+/// Settle a receipt or preserve detached output before any publish-only phase.
+pub(super) async fn prepare_receipt_disposition(
+    ctx: &TerminalOutcomeDeliveryContext,
+    state: &mut TerminalOutcomeDeliveryState,
+    busy_readiness_timeout: bool,
+) -> (
+    rowless_receipt::TerminalReceiptDisposition,
+    bool,
+    TerminalOutcomeDeliveryOutcome,
+) {
+    // The pre-loop gate proved the raw capture before display normalization.
+    // A later source generation cannot undo a confirmed transport receipt.
+    let receipt_disposition = if ctx.preloop_receipt_confirmed {
+        rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered
+    } else {
+        rowless_receipt::decision(rowless_receipt::ReceiptDecisionInput::from_terminal(
+            ctx, state,
+        ))
+    };
+    let mut preserve = false;
+    let mut outcome = TerminalOutcomeDeliveryOutcome::Completed;
+    if receipt_disposition != rowless_receipt::TerminalReceiptDisposition::Continue
+        && (receipt_disposition != rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered
+            || ctx.cancelled)
+    {
+        let cancel_source = state
+            .cancel_token
+            .cancel_source()
+            .unwrap_or_else(|| tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON.to_string());
+        if ctx.cancelled
+            && (ctx.bridge_output_owner.is_some()
+                || receipt_disposition
+                    == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered)
+        {
+            preserve |= cancel_prompt_replace::settle_cancelled_episode_work(
+                &state.shared_owned,
+                state.dispatch_id.as_deref(),
+                &cancel_source,
+                &mut state.active_background_child_session_ids,
+            )
+            .await;
+        }
+        if receipt_disposition == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered {
+            return (receipt_disposition, preserve, outcome);
+        }
+        preserve = true;
+        if ctx.bridge_output_owner.is_some() {
+            outcome = TerminalOutcomeDeliveryOutcome::DeferredToOwner;
+        } else {
+            let delivery_body = detached_delivery_body(
+                &state.shared_owned,
+                ctx.channel_id,
+                &state.provider,
+                &state.inflight_state,
+                &state.full_response,
+                state.response_sent_offset,
+                &state.cancel_token,
+                ctx.cancelled,
+                ctx.is_prompt_too_long,
+                state.gateway.as_ref(),
+                state.terminal_empty_response_notice.as_deref(),
+            );
+            outcome = match preserve_or_publish(Handoff {
+                provider: &state.provider,
+                local: &state.inflight_state,
+                admitted: ctx.codex_tui_terminal_range.as_ref(),
+                content: &state.full_response,
+                delivery_body: delivery_body.as_deref(),
+                empty_recovery_notice: (!state.resume_failure_detected
+                    && !ctx.recovery_retry
+                    && !busy_readiness_timeout
+                    && state.full_response.trim().is_empty())
+                .then(|| empty_response_recovery::empty_response_guidance(ctx.rx_disconnected)),
+                response_sent_offset: state.response_sent_offset,
+                channel_id: ctx.channel_id,
+                old_anchor: ctx.current_msg_id,
+                watcher_owner_channel_id: ctx.watcher_owner_channel_id,
+                tmux_last_offset: ctx.tmux_last_offset,
+                cancelled: ctx.cancelled,
+                cancel_source,
+                children: &state.active_background_child_session_ids,
+                dispatch_id: state.dispatch_id.as_deref(),
+                adk_cwd: state.adk_cwd.as_deref(),
+                should_complete: ctx.should_complete_work_dispatch_after_delivery,
+                should_fail: ctx.should_fail_dispatch_after_delivery,
+                resume_failure: state.resume_failure_detected,
+                recovery_retry: ctx.recovery_retry,
+            })
+            .await
+            {
+                Outcome::Deferred { key } => {
+                    TerminalOutcomeDeliveryOutcome::DeferredToCustody { key }
+                }
+                Outcome::Unresolved { error } => {
+                    TerminalOutcomeDeliveryOutcome::Unresolved { error }
+                }
+            };
+        }
+    }
+    (receipt_disposition, preserve, outcome)
+}
+
+pub(super) async fn handle_known_owner(
+    owner: BridgeOutputOwner,
+    ctx: &TerminalOutcomeDeliveryContext,
+    shared_owned: &Arc<SharedData>,
+    gateway: &Arc<dyn TurnGateway>,
+    provider: &ProviderKind,
+    inflight_state: &InflightTurnState,
+) {
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    match owner {
+        BridgeOutputOwner::WatcherRelay => {
+            tracing::info!(target: TERMINAL_DELIVERY_LOG_TARGET,
+                "  [{ts}] 👁 tmux watcher owns assistant relay; bridge skipped direct response delivery (channel {})",
+                ctx.channel_id
+            );
+            if should_delete_bridge_created_watcher_orphan_response(
+                shared_owned.ui.status_panel_v2_enabled,
+                ctx.watcher_handoff_claim_outcome,
+                ctx.bridge_created_response_placeholder_msg_id,
+                ctx.current_msg_id,
+            ) {
+                // #3607: preserve committed terminal anchors; delete, record,
+                // and retry only genuine non-terminal orphan spinners.
+                cleanup_or_preserve_watcher_orphan_spinner(
+                    shared_owned.clone(),
+                    provider,
+                    gateway.clone(),
+                    ctx.channel_id,
+                    ctx.current_msg_id,
+                    inflight_state,
+                )
+                .await;
+            }
+        }
+        BridgeOutputOwner::StandbyRelay => tracing::info!(target: TERMINAL_DELIVERY_LOG_TARGET,
+            "  [{ts}] 👁 standby relay owns assistant relay; bridge skipped direct response delivery (channel {})",
+            ctx.channel_id
+        ),
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct RetrySnapshot {
     version: u8,
@@ -310,7 +453,7 @@ pub(super) async fn resume_with_gateway(
             // acknowledged prefix before another await, while the SAME source
             // lease and custody file lock remain held across the whole loop.
             for chunk in chunks.iter().skip(snapshot.delivery_receipts.len()) {
-                let id = gateway.send_message(channel, chunk).await?;
+                let id = TurnGateway::send_message(gateway, channel, chunk).await?;
                 if super::super::headless_delivery::is_synthetic_headless_message_id(id) {
                     return Err("terminal POST returned no real Discord receipt".into());
                 }
