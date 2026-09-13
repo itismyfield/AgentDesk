@@ -6884,6 +6884,8 @@ services::discord::turn_bridge::turn_analytics::discord_turn_id_no_user_message_
 services::discord::turn_bridge::turn_analytics::discord_turn_id_no_user_message_tests::none_user_msg_id_and_no_session_uses_recovery_marker
 services::discord::turn_bridge::turn_analytics::discord_turn_id_no_user_message_tests::none_user_msg_id_falls_back_to_session_plus_per_turn_offset
 services::discord::turn_bridge::turn_analytics::discord_turn_id_no_user_message_tests::some_user_msg_id_keeps_legacy_message_keyed_form
+services::discord::turn_bridge::turn_analytics::pending_delivery_outcome_tests::pending_delivery_preserves_primary_failure_causes
+services::discord::turn_bridge::turn_analytics::pending_delivery_outcome_tests::pending_delivery_replaces_only_neutral_success_labels
 services::discord::turn_bridge::two_message_panel::tests::create_failure_clears_dirty_and_leaves_answer_and_generation
 services::discord::turn_bridge::two_message_panel::tests::create_on_new_turn_retires_prior_singleton_panel
 services::discord::turn_bridge::two_message_panel::tests::create_puts_panel_below_answer_and_opens_generation_epoch
