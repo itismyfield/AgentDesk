@@ -1048,11 +1048,12 @@ class DeliveryBoundaryReportTest(unittest.TestCase):
                    {"source": {}}, {"anchor": {}}, {"disposition": "continue"},
                    {"provider": "not-a-provider"}, {"recovery_enqueue_attempted": False},
                    {"recovery_enqueue_attempted": 1}, {"recovery_enqueued": "true"},
+                   {"recovery_enqueued": True}, {"recovery_enqueued": False},
                    {"recovery_enqueue_attempted": False, "recovery_enqueued": True})
         for change in changes:
             with self.subTest(change=change):
                 item = {**self.operation(metric, True), **change}
-                result = RolloutReportTest().run_report([item])["target_segment"]["delivery_boundary_outcomes"][metric]
+                result = RolloutReportTest().run_report([event(site="bridge_entry", turn=1, observed=BASE), item])["target_segment"]["delivery_boundary_outcomes"][metric]
                 self.assertEqual(result["unknown"], 1)
                 self.assertIsNone(result["share"])
                 self.assertEqual(result["recovery_attempted"], 0)
@@ -1063,7 +1064,7 @@ class DeliveryBoundaryReportTest(unittest.TestCase):
         metric = "frontier_already_covers"
         item = self.operation(metric, True)
         item["provider"] = item["source"]["provider"] = "not-a-provider"
-        result = RolloutReportTest().run_report([item])["target_segment"]["delivery_boundary_outcomes"][metric]
+        result = RolloutReportTest().run_report([event(site="bridge_entry", turn=1, observed=BASE), item])["target_segment"]["delivery_boundary_outcomes"][metric]
         self.assertEqual(result["unknown"], 1)
         self.assertIsNone(result["share"])
 

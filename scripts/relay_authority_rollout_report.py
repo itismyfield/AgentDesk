@@ -411,8 +411,8 @@ def _consistent_cleanup_evidence(event: dict, payload: dict) -> bool:
             and event.get("turn_id") is None
             and all(payload[field] is None for field in ("source", "anchor", "disposition"))
             and type(value) is bool and attempted is value
-            and (enqueued is None or type(enqueued) is bool)
-            and (enqueued is not True or attempted is True))
+            # The current enqueue API returns unit; neither bool is a receipt.
+            and enqueued is None)
 
 
 def _consistent_frontier_evidence(event: dict, payload: dict) -> bool:
