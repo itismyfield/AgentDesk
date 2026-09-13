@@ -370,6 +370,18 @@ fn synthetic_bridge_handoff_fixture(
             };
             let (delivered, ()) = tokio::join!(tokio::time::timeout(Duration::from_secs(5), delivery), observe);
             delivered.expect("actual adapter must finish within the original test bound").expect("actual idle adapter terminal publication completes");
+            let source_end = std::fs::metadata(&output).unwrap().len();
+            let record = crate::services::discord::outbound::delivery_record::read_record(
+                &provider, channel.get(),
+            ).expect("actual adapter leaves durable delivery evidence before owner release");
+            assert!(record.confirmed_deliveries.iter().any(|receipt| {
+                receipt.source.provider == provider.as_str()
+                    && receipt.source.tmux_session_name == tmux
+                    && receipt.source.turn_nonce == original_actor.turn_nonce().unwrap()
+                    && receipt.source.range == (original_start, source_end)
+                    && receipt.delivery_channel_id == channel.get()
+                    && receipt.message_id == anchor.get()
+            }), "terminal receipt covers exactly the original JSONL episode on its own anchor");
             assert!(
                 crate::services::discord::mailbox_snapshot(&shared, channel)
                     .await
