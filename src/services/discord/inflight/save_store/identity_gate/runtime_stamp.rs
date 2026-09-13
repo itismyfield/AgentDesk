@@ -200,6 +200,21 @@ impl CodexRange {
         &self,
         authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     ) -> bool {
+        self.source_binding_matches(authority, false)
+    }
+    /// Cursor progress preserves an old exact receipt; new publication still
+    /// requires the captured end to be the current binding cursor.
+    pub(in crate::services::discord) fn source_receipt_is_live(
+        &self,
+        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    ) -> bool {
+        self.source_binding_matches(authority, true)
+    }
+    fn source_binding_matches(
+        &self,
+        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+        receipt: bool,
+    ) -> bool {
         // The caller holds `authority` through Current advance + receipt, so
         // this marker/generation/binding tuple cannot change after the check.
         let source = &self.source;
@@ -212,7 +227,8 @@ impl CodexRange {
                 binding.runtime_kind == RuntimeHandoffKind::CodexTui
                     && canonical_regular_file(&binding.output_path).is_some_and(|(bound, _)| bound == path)
                     && nonempty(binding.session_id.as_deref()) == Some(self.session_id.as_str())
-                    && binding.last_offset == source.range.1
+                    && (binding.last_offset == source.range.1
+                        || (receipt && binding.last_offset > source.range.1))
             })
     }
     pub(in crate::services::discord) fn revalidated_source(

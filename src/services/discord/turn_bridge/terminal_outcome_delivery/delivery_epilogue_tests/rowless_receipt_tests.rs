@@ -300,7 +300,7 @@ async fn exact_receipt_rowless_terminal_uncovered_or_stale_still_publishes_5521(
         let (mut ctx, state, mut receipt) = receipt_parts(&driver, ProviderKind::Codex);
         match case {
             "uncovered" => receipt.range.1 -= 1,
-            "stale" => receipt.generation_mtime_ns -= 1,
+
             "nonce" => receipt.turn_nonce.push_str("-other"),
             "no_range" => ctx.codex_tui_terminal_range = None,
             "empty_range" => ctx.codex_tui_terminal_range.as_mut().unwrap().source.range = (0, 0),
@@ -309,6 +309,15 @@ async fn exact_receipt_rowless_terminal_uncovered_or_stale_still_publishes_5521(
         }
         if case != "no_receipt" {
             dr::record_current_pinned_delivery(&receipt, DRIVER_CURRENT_MSG_ID).unwrap();
+        }
+        if case == "stale" {
+            let generation =
+                crate::services::tmux_common::session_temp_path(DRIVER_TMUX_SESSION, "generation");
+            filetime::set_file_mtime(
+                generation,
+                filetime::FileTime::from_unix_time(1_700_552_200, 1),
+            )
+            .unwrap();
         }
         let output = run(ctx, state).await;
         assert!(
@@ -336,8 +345,24 @@ async fn exact_receipt_rowless_terminal_survives_newer_frontier_at_another_ancho
         later.range = (64, 128);
         later.turn_nonce.push_str("-later");
         dr::record_current_pinned_delivery(&later, DRIVER_STALE_PREFIX_MSG_ID).unwrap();
+        let mut binding =
+            tui_prompt_dedupe::runtime_binding_for_tmux_session(DRIVER_TMUX_SESSION).unwrap();
+        binding.last_offset = 128;
+        tui_prompt_dedupe::register_tmux_runtime_binding(DRIVER_TMUX_SESSION, binding);
+        crate::services::tmux_common::with_tmux_source_authority(
+            DRIVER_TMUX_SESSION,
+            |authority| {
+                let admitted = ctx.codex_tui_terminal_range.as_ref().unwrap();
+                assert!(
+                    !admitted.source_authority_is_live(authority),
+                    "new publication still needs its exact cursor"
+                );
+                assert!(admitted.source_receipt_is_live(authority));
+            },
+        );
         let output = run(ctx, state).await;
         assert!(output.terminal_delivery_committed);
+        run_postlude(&driver, output, false, false).await;
         assert!(driver.observations().is_empty());
     }
 }
@@ -346,18 +371,19 @@ async fn exact_receipt_rowless_terminal_survives_newer_frontier_at_another_ancho
 // unrelated transcript/accounting inputs are neutral; projection and inflight
 // settlement run through the production caller.
 #[rustfmt::skip]
-async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDeliveryOutput, footer: bool) {
+async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDeliveryOutput, footer: bool, cancelled: bool) {
     use super::super::super::{completion_postlude as postlude, guards};
     let channel_id = ChannelId::new(DRIVER_CHANNEL_ID);
     let (_, rx) = std::sync::mpsc::channel();
     let fence = tokio::sync::OnceCell::new();
     let _ = super::super::super::capture_bridge_clear_fence(&driver.shared, channel_id, rx, &fence).await;
-    let completion_guard = guards::CompletionGuard::for_completion_test(driver.shared.clone(), channel_id, DRIVER_USER_MSG_ID);
+    let user_id = output.inflight_state.user_msg_id;
+    let completion_guard = guards::CompletionGuard::for_completion_test(driver.shared.clone(), channel_id, user_id);
     let inflight_guard = guards::InflightCleanupGuard::for_completion_test(&output.inflight_state, driver.shared.token_hash.clone());
     let ctx = postlude::CompletionPostludeContext {
         shared_owned: output.shared_owned, gateway: output.gateway, channel_id,
         provider: output.provider, cancel_token: output.cancel_token,
-        user_msg_id: Some(MessageId::new(DRIVER_USER_MSG_ID)), turn_id: output.turn_id,
+        user_msg_id: (user_id != 0).then(|| MessageId::new(user_id)), turn_id: output.turn_id,
         request_owner_name: String::new(), final_session_status: "idle", status_panel_started_at: 0,
         has_queued_turns: false, defer_watcher_resume: true, can_chain_locally: true,
         single_message_panel_footer_mode: footer, is_external_input_tui_direct: false,
@@ -387,7 +413,7 @@ async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDe
         accumulated_input_tokens: 0, accumulated_cache_create_tokens: 0,
         accumulated_cache_read_tokens: 0, accumulated_output_tokens: 0,
         accumulated_memory_input_tokens: 0, accumulated_memory_output_tokens: 0,
-        transport_error: false, api_friction_reports: Vec::new(), cancelled: false,
+        transport_error: false, api_friction_reports: Vec::new(), cancelled,
         restart_followup_pending: None,
         bridge_skip_holder_owns_inflight: output.bridge_skip_holder_owns_inflight,
         completion_guard, inflight_guard, inflight_state: output.inflight_state,
@@ -410,7 +436,7 @@ async fn exact_receipt_rowless_terminal_runs_postlude_without_footer_or_status_m
         inflight::save_inflight_state(&state.inflight_state).unwrap();
         dr::record_current_pinned_delivery(&source, DRIVER_CURRENT_MSG_ID).unwrap();
         let output = run(ctx, state).await;
-        run_postlude(&driver, output, footer).await;
+        run_postlude(&driver, output, footer, false).await;
         assert!(
             driver.observations().is_empty(),
             "footer={footer}: terminal and postlude perform zero gateway mutations"
@@ -421,4 +447,88 @@ async fn exact_receipt_rowless_terminal_runs_postlude_without_footer_or_status_m
             "receipt settles and clears this actor's own row"
         );
     }
+}
+
+#[tokio::test]
+async fn exact_receipt_rowless_terminal_postlude_preserves_same_user_and_zero_id_successor_5521() {
+    for user_id in [DRIVER_USER_MSG_ID, 0] {
+        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+        let (mut ctx, mut state, source) = receipt_parts(&driver, ProviderKind::Codex);
+        state.inflight_state.user_msg_id = user_id;
+        ctx.user_msg_id = (user_id != 0).then(|| MessageId::new(user_id));
+        ctx.codex_tui_terminal_range.as_mut().unwrap().identity =
+            InflightTurnIdentity::from_state(&state.inflight_state);
+        let mut successor = state.inflight_state.clone();
+        successor.turn_nonce = Some("same-user-successor".into());
+        successor.turn_start_offset = Some(64);
+        inflight::save_inflight_state(&successor).unwrap();
+        dr::record_current_pinned_delivery(&source, DRIVER_CURRENT_MSG_ID).unwrap();
+        let output = run(ctx, state).await;
+        assert!(output.terminal_delivery_committed);
+        run_postlude(&driver, output, false, false).await;
+        let fresh =
+            inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID)
+                .unwrap();
+        assert_eq!(fresh.turn_nonce, successor.turn_nonce);
+        assert_eq!(fresh.turn_start_offset, successor.turn_start_offset);
+        assert!(!fresh.terminal_delivery_committed);
+        assert!(driver.observations().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn exact_receipt_rowless_terminal_cancellation_settles_work_before_postlude_5521() {
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "receipt_cancel",
+        "rowless receipt cancellation",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    Arc::get_mut(&mut driver.shared).unwrap().pg_pool = Some(pool.clone());
+    let dispatch_id = "receipt-cancel-5521";
+    crate::dispatch::test_support::seed_pg_dispatch(&pool, dispatch_id, "receipt cancellation")
+        .await;
+    sqlx::query("INSERT INTO sessions (session_key, provider, status) VALUES ('receipt-parent', 'codex', 'turn_active')").execute(&pool).await.unwrap();
+    let child = crate::db::session_observability::insert_background_child_pg(
+        &pool,
+        &crate::db::session_observability::BackgroundChildSpawn {
+            parent_session_key: "receipt-parent".into(),
+            provider: Some("codex".into()),
+            tool_name: "Task".into(),
+            tool_input: "{}".into(),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (mut ctx, mut state, source) = receipt_parts(&driver, ProviderKind::Codex);
+    ctx.cancelled = true;
+    ctx.entry_was_rowless = true;
+    state.dispatch_id = Some(dispatch_id.into());
+    state.active_background_child_session_ids.push(child);
+    inflight::save_inflight_state(&state.inflight_state).unwrap();
+    dr::record_current_pinned_delivery(&source, DRIVER_CURRENT_MSG_ID).unwrap();
+    let output = run(ctx, state).await;
+    assert!(output.active_background_child_session_ids.is_empty());
+    assert!(!output.preserve_inflight_for_cleanup_retry);
+    run_postlude(&driver, output, false, true).await;
+    let status: String = sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id=$1")
+        .bind(dispatch_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled");
+    let child_status: String = sqlx::query_scalar("SELECT status FROM sessions WHERE id=$1")
+        .bind(child)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(child_status, "aborted");
+    assert!(
+        inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID).is_none()
+    );
+    assert!(driver.observations().is_empty());
+    pool.close().await;
+    db.drop().await;
 }

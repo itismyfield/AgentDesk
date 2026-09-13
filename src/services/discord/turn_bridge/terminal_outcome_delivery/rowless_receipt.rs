@@ -80,7 +80,7 @@ fn decision_with_evidence(
             // publication; that refusal does not invalidate a live exact receipt.
             if !admitted.identity.matches_state(local)
                 || admitted.result != state.full_response
-                || !admitted.source_authority_is_live(authority)
+                || !admitted.source_receipt_is_live(authority)
             {
                 return unknown(fallback);
             }

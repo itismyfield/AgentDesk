@@ -198,6 +198,14 @@ pub(super) async fn run_terminal_outcome_delivery(
     let mut epilogue_response = None;
     if already_receipted {
         (terminal_delivery_committed, terminal_body_visible) = (true, true);
+        if cancelled {
+            let cancel_source = cancel_token.cancel_source().unwrap_or_else(||
+                tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON.to_string());
+            preserve_inflight_for_cleanup_retry |= cancel_prompt_replace::settle_cancelled_episode_work(
+                &shared_owned, dispatch_id.as_deref(), &cancel_source,
+                &mut active_background_child_session_ids,
+            ).await;
+        }
         epilogue_response = Some((full_response.clone(), full_response.clone()));
     } else if !may_publish {
         preserve_inflight_for_cleanup_retry = true;

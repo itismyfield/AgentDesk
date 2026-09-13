@@ -90,13 +90,12 @@ pub(super) async fn handle_cancel_prompt_replace(
 
     match message {
         CancelPromptReplaceMessage::Cancelled => {
-        close_all_tracked_background_children(
-            shared_owned.pg_pool.as_ref(),
+        let cancel_source = cancel_token.cancel_source().unwrap_or_else(||
+            tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON.to_string());
+        preserve_inflight_for_cleanup_retry |= settle_cancelled_episode_work(
+            &shared_owned, dispatch_id.as_deref(), &cancel_source,
             &mut active_background_child_session_ids,
-            "aborted",
-            "cancel cleanup",
-        )
-        .await;
+        ).await;
         if pending_long_running_open_after_state_save.take().is_some() {
             inflight_state.long_running_placeholder_active = false;
             let _ = crate::services::discord::inflight::save_inflight_state_if_identity_unchanged(
@@ -171,50 +170,7 @@ pub(super) async fn handle_cancel_prompt_replace(
             Some(restart_mode) => TmuxCleanupPolicy::PreserveSessionAndInflight { restart_mode },
             None => TmuxCleanupPolicy::PreserveSession,
         };
-        // #3169 (death #3): the `None`-cancel_source fallback uses the
-        // shared `ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON` sentinel so the
-        // tmux_runtime SIGINT guard recognises this anonymous internal
-        // teardown and suppresses claude's session-killing teardown SIGINT.
-        let cancel_source = cancel_token
-            .cancel_source()
-            .unwrap_or_else(|| tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON.to_string());
         stop_active_turn(&provider, &cancel_token, cleanup_policy, &cancel_source).await;
-
-        if let Some(dispatch_id) = dispatch_id.as_deref() {
-            if let Some(pg_pool) = shared_owned.pg_pool.as_ref() {
-                if let Err(error) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
-                    pg_pool,
-                    dispatch_id,
-                    Some(cancel_source.as_str()),
-                )
-                .await
-                {
-                    // #2044 F8: when the PG cancel fails, the
-                    // dispatch row stays in its previous (possibly
-                    // "running") state while our local cleanup
-                    // proceeds. Without setting
-                    // `preserve_inflight_for_cleanup_retry`, the
-                    // inflight file would also be deleted, so a
-                    // subsequent dispatch_followup could re-use
-                    // the dispatch id thinking the turn is still
-                    // healthy — producing a dispatch-state ↔
-                    // inflight-state inconsistency. Set the retry
-                    // flag so the next cleanup pass re-attempts
-                    // the cancel, and emit a structured tracing
-                    // event so ops can alarm on
-                    // `dispatch_cancel_pg_failed`.
-                    tracing::warn!(
-                        event = "dispatch_cancel_pg_failed",
-                        dispatch_id = %dispatch_id,
-                        channel_id = channel_id.get(),
-                        cancel_source = %cancel_source,
-                        error = %error,
-                        "[turn_bridge] failed to cancel dispatch in postgres; preserving inflight for cleanup retry",
-                    );
-                    preserve_inflight_for_cleanup_retry = true;
-                }
-            }
-        }
 
         let preserved_restart_mode = cancel_token.restart_mode();
         let remaining_response =
@@ -444,4 +400,30 @@ pub(super) async fn handle_cancel_prompt_replace(
     *state.status_panel_terminal_committed = status_panel_terminal_committed;
 
     CancelPromptReplaceOutcome::Continue
+}
+
+/// A delivery receipt settles transport, not cancellation of this episode's work.
+pub(super) async fn settle_cancelled_episode_work(
+    shared: &Arc<SharedData>,
+    dispatch_id: Option<&str>,
+    cancel_source: &str,
+    children: &mut Vec<i64>,
+) -> bool {
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return dispatch_id.is_some() || !children.is_empty();
+    };
+    close_all_tracked_background_children(Some(pool), children, "aborted", "cancel cleanup").await;
+    if let Some(dispatch_id) = dispatch_id
+        && let Err(error) = crate::dispatch::cancel_dispatch_and_reset_auto_queue_on_pg(
+            pool,
+            dispatch_id,
+            Some(cancel_source),
+        )
+        .await
+    {
+        tracing::warn!(event = "dispatch_cancel_pg_failed", dispatch_id, cancel_source, %error,
+            "preserving inflight for cancelled episode cleanup retry");
+        return true;
+    }
+    false
 }

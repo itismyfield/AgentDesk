@@ -854,32 +854,20 @@ pub(super) async fn run_completion_postlude(
                 Some("inflight cleared with undelivered full_response"),
             );
         }
-        // #3161 (codex P1): identity-guard the epilogue inflight-row
-        // removal. The status-panel completion EDIT above is alias-skipped
-        // (`panel_edit_aliases_newer_turn`) when a NEWER turn now owns this
-        // turn's captured panel, but THIS removal was unconditional — so an
-        // OLD turn that correctly skipped its edit would still delete the
-        // on-disk inflight row, which by then belongs to the NEWER owner.
-        // That wipes the newer turn's inflight and leaves its status panel
-        // permanently non-complete. We now route a real (non-zero) this-turn
-        // identity through the guarded clear, which removes the row only when
-        // the on-disk `user_msg_id` still matches THIS turn (atomically under
-        // the inflight sidecar lock — no read-then-clear TOCTOU); a newer
-        // owner yields `UserMsgMismatch` and the row is preserved.
-        //
-        // The id==0 case (TUI-direct / external-input bridge turns that
-        // cannot be identity-guarded) keeps the unconditional clear — the
-        // same over-suppression carve-out the alias predicate uses, so those
-        // turns still clean up their own row. `bridge_epilogue_identity_guards_inflight_clear`
-        // is the pure seam shared with the unit test so the production fork
-        // and the test stay in lockstep.
+        // The receipt settles this captured episode only. User IDs (including
+        // zero) can be reused by a successor, so preserve the full identity and
+        // nonce through the atomic clear. Legacy rows without a source boundary
+        // retain the existing zero-owned compatibility path below.
         let this_turn_user_msg_id = user_msg_id.map(|id| id.get()).unwrap_or(0);
-        if bridge_epilogue_identity_guards_inflight_clear(this_turn_user_msg_id) {
+        if bridge_epilogue_identity_guards_inflight_clear(this_turn_user_msg_id)
+            || inflight_state.turn_start_offset.is_some()
+        {
             use super::super::inflight::GuardedClearOutcome;
-            match super::super::inflight::clear_inflight_state_if_matches(
+            match super::super::inflight::clear_inflight_state_for_captured_episode(
                 &provider,
                 channel_id.get(),
-                this_turn_user_msg_id,
+                &super::super::inflight::InflightTurnIdentity::from_state(&inflight_state),
+                inflight_state.turn_nonce.as_deref(),
             ) {
                 GuardedClearOutcome::Cleared | GuardedClearOutcome::Missing => {}
                 GuardedClearOutcome::UserMsgMismatch => {
