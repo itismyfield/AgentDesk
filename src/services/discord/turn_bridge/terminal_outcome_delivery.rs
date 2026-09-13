@@ -160,10 +160,7 @@ pub(super) async fn run_terminal_outcome_delivery(
     let inflight_generation = inflight_state.born_generation;
 
     if may_publish
-        && !(provider == ProviderKind::Claude
-            && inflight_state.runtime_kind
-                == Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
-            && admitted.is_some())
+        && !(admitted.is_some() && inflight_state.requires_pinned_terminal_recovery())
         && !bridge_output_owner
             .map(|owner| owner.skips_bridge_spinner_cleanup())
             .unwrap_or(false)

@@ -136,7 +136,7 @@ fn terminal_ordering_fixture(
                     "the reader learns the source session before publication");
                 if let Some(race) = source_race {
                     assert_eq!(shared.turn_view_reconciler.ops(), pending_view,
-                        "admitted Claude keeps its pending view until confirmed publication");
+                        "captured TUI terminal keeps its pending view until confirmed publication");
                     use std::os::unix::fs::MetadataExt;
                     let metadata = std::fs::metadata(&output).unwrap();
                     assert_eq!(row.tui_terminal_source_file_identity, Some((metadata.dev(), metadata.ino())),
