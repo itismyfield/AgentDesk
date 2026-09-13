@@ -22,7 +22,7 @@ fn synthetic_bridge_handoff_fixture(
         .build()
         .unwrap()
         .block_on(async {
-            if postgres { let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::DEBUG).try_init(); }
+            if postgres { let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::INFO).try_init(); }
             let database = if postgres {
                 Some(crate::db::auto_queue::test_support::TestPostgresDb::create().await)
             } else {
@@ -254,7 +254,7 @@ fn synthetic_bridge_handoff_fixture(
             if postgres_race {
                 claim.take().unwrap().await;
                 let pool = shared.pg_pool.as_ref().unwrap();
-                sqlx::query("INSERT INTO sessions(session_key,provider,status,channel_id,active_turn_nonce,dispatched_origin,dispatched_origin_turn_nonce) VALUES($1,'claude','turn_active',$2,'successor-b',TRUE,'successor-b')")
+                sqlx::query("INSERT INTO sessions(session_key,provider,status,channel_id,active_turn_nonce,dispatched_origin_turn_nonce) VALUES($1,'claude','turn_active',$2,'successor-b','successor-b')")
                     .bind(lease.session_key.as_deref().unwrap()).bind(channel.get().to_string()).execute(pool).await.unwrap();
                 let before: (serde_json::Value,) = sqlx::query_as("SELECT to_jsonb(sessions) FROM sessions WHERE session_key=$1")
                     .bind(lease.session_key.as_deref().unwrap()).fetch_one(pool).await.unwrap();
@@ -324,7 +324,9 @@ fn synthetic_bridge_handoff_fixture(
             drop(capture);
             let row = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).unwrap();
             let resumed = synthetic_start::bridge_handoff::resume_unpublished(&shared, &row, &output).await.unwrap();
-            let gateway = Arc::new(S3Gateway::default());
+            // Match the production TUI gateway: terminal edits use this same
+            // transport; a headless fixture would wait on an unrelated outbox.
+            let gateway = Arc::new(S3Gateway { local_delivery: true, ..Default::default() });
             let (tx, rx) = mpsc::channel();
             let delivery = claude_idle_bridge::stream_tui_idle_response_with_gateway(
                 &shared, provider.clone(), channel, tmux, &output, original_start,

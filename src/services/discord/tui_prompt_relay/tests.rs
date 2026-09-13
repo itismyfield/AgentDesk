@@ -2807,6 +2807,7 @@ fn task_notification_repeat_lease_clear_preserves_newer_turn() {
 #[cfg(unix)]
 #[derive(Default)]
 struct S3Gateway {
+    local_delivery: bool,
     bodies: std::sync::Mutex<Vec<String>>,
     deleted: std::sync::Mutex<Vec<MessageId>>,
 }
@@ -2915,7 +2916,7 @@ impl TurnGateway for S3Gateway {
     }
 
     fn can_chain_locally(&self) -> bool {
-        false
+        self.local_delivery
     }
 
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
