@@ -247,39 +247,157 @@ async fn delivered_partial_eof_cannot_finish_or_clear_successor_during_transport
 
 #[tokio::test(flavor = "current_thread")]
 async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_current_anchor() {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
+    use crate::services::discord::outbound::delivery_record as dr;
     use crate::services::discord::recovery_paths::controller_cutover::{
         deliver_recovery_replace_via_controller, tests::RecoveryFakeGateway,
     };
+    use crate::services::tui_prompt_dedupe as dedupe;
     let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let mut fixture = Fixture::new(5_071_805);
-    fixture.state.streaming_rollover_frozen_msg_ids = vec![40];
-    fixture.state.current_msg_id = 41;
-    // Rollover froze prefix in 40; 41 already shows the beginning of its suffix.
-    // A normal streaming edit does not advance response_sent_offset.
-    let mut messages = std::collections::BTreeMap::from([
-        (MessageId::new(40), "published prefix".to_string()),
-        (MessageId::new(41), "unposted".to_string()),
-    ]);
-    fixture.claim().await;
-    let gateway = RecoveryFakeGateway::new(ReplaceLongMessageOutcome::EditedOriginal, true);
-    let http = Arc::new(serenity::Http::new("Bot test-token"));
-    let channel = ChannelId::new(fixture.state.channel_id);
-    let context = RecoveryDeliveryContext::from_state(
-        &fixture.shared,
-        &ProviderKind::Claude,
-        &fixture.state,
-        None,
-        fixture.shared.restart.current_generation,
-    );
-    assert!(
-        fixture
+    for typed in [false, true] {
+        #[cfg(not(unix))]
+        if typed {
+            continue;
+        }
+        let mut fixture = Fixture::new(5_071_805);
+        fixture.state.streaming_rollover_frozen_msg_ids = vec![40];
+        fixture.state.current_msg_id = 41;
+        // Rollover froze prefix in 40; 41 already shows the beginning of its suffix.
+        // A normal streaming edit does not advance response_sent_offset.
+        let mut messages = std::collections::BTreeMap::from([
+            (MessageId::new(40), "published prefix".to_string()),
+            (MessageId::new(41), "unposted".to_string()),
+        ]);
+        if typed {
+            fixture.state.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+            fixture.state.turn_nonce = Some("typed-prefix-recovery".into());
+            let assistant = serde_json::json!({"type":"assistant", "sessionId":fixture.state.session_id, "message":{"content":[
+            {"type":"text", "text":fixture.state.full_response}]}});
+            let terminal = serde_json::json!({"type":"result", "session_id":fixture.state.session_id, "subtype":"success", "result":fixture.state.full_response});
+            let output = fixture.state.output_path.as_ref().unwrap();
+            std::fs::write(output, format!("{assistant}\n{terminal}\n")).unwrap();
+            fixture.state.last_offset = std::fs::metadata(output).unwrap().len();
+            let tmux = fixture.state.tmux_session_name.as_ref().unwrap();
+            std::fs::write(
+                crate::services::tmux_common::session_temp_path(tmux, "generation"),
+                b"typed-prefix",
+            )
+            .unwrap();
+            dedupe::register_tmux_runtime_binding(
+                tmux,
+                dedupe::TuiRuntimeBinding {
+                    runtime_kind: RuntimeHandoffKind::ClaudeTui,
+                    output_path: output.clone(),
+                    relay_output_path: None,
+                    input_fifo_path: None,
+                    session_id: fixture.state.session_id.clone(),
+                    last_offset: 0,
+                    relay_last_offset: None,
+                },
+            );
+        }
+        fixture.claim().await;
+        fixture.state = fixture.load().unwrap();
+        let channel = ChannelId::new(fixture.state.channel_id);
+        let original_actor = mailbox_snapshot(&fixture.shared, channel)
+            .await
+            .cancel_token
+            .unwrap();
+        let source: Option<dr::ExactJsonlSourceIdentity> = if typed {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let output = fixture.state.output_path.clone().unwrap();
+                let file = std::fs::File::open(&output).unwrap();
+                let metadata = file.metadata().unwrap();
+                let tmux = fixture.state.tmux_session_name.clone().unwrap();
+                let raw = fixture.state.full_response.clone();
+                let frame = crate::services::provider::StreamMessage::ClaudeTuiTerminalDone {
+                    result: raw.clone(),
+                    session_id: fixture.state.session_id.clone(),
+                    transcript_path: std::fs::canonicalize(&output)
+                        .unwrap()
+                        .display()
+                        .to_string(),
+                    tmux_session_name: tmux.clone(),
+                    turn_nonce: fixture.state.turn_nonce.clone().unwrap(),
+                    source_start: 0,
+                    complete_record_end: metadata.len(),
+                    generation_mtime_ns: dr::current_generation_mtime_ns(&tmux),
+                    source_file_dev: metadata.dev(),
+                    source_file_ino: metadata.ino(),
+                    actor: Arc::downgrade(&original_actor),
+                };
+                let mut baseline = fixture.state.clone();
+                let identity = inflight::InflightTurnIdentity::from_state(&fixture.state);
+                let (_, admitted, _) = fixture
+                    .state
+                    .admit_tui_terminal_frame(
+                        &mut baseline,
+                        &identity,
+                        true,
+                        (&fixture.shared, &original_actor),
+                        &raw,
+                        frame,
+                    )
+                    .await
+                    .expect("the real retained source admits with a nonzero sent prefix");
+                let admitted = admitted.expect("typed source range");
+                assert_eq!(admitted.result, raw);
+                assert_eq!(admitted.source.range, (0, metadata.len()));
+                assert_eq!(
+                    fixture.load().unwrap().response_sent_offset,
+                    "published prefix\n".len()
+                );
+                assert!(fixture.state.requires_pinned_terminal_recovery());
+                Some(admitted.source)
+            }
+            #[cfg(not(unix))]
+            {
+                unreachable!()
+            }
+        } else {
+            None
+        };
+        let gateway = RecoveryFakeGateway::new(ReplaceLongMessageOutcome::EditedOriginal, true)
+            .before_replace_returns({
+                let shared = fixture.shared.clone();
+                let actor = original_actor.clone();
+                move || {
+                    Box::pin(async move {
+                        assert!(
+                            mailbox_snapshot(&shared, channel)
+                                .await
+                                .cancel_token
+                                .as_ref()
+                                .is_some_and(|current| Arc::ptr_eq(current, &actor)),
+                            "the original actor owns the turn during actual gateway transport"
+                        );
+                    })
+                }
+            });
+        let http = Arc::new(serenity::Http::new("Bot test-token"));
+        let context = RecoveryDeliveryContext::from_state(
+            &fixture.shared,
+            &ProviderKind::Claude,
+            &fixture.state,
+            None,
+            fixture.shared.restart.current_generation,
+        );
+        let settled = fixture
             .settle(&fixture.state, |text| {
                 let gateway = &gateway;
                 let shared = &fixture.shared;
                 let http = &http;
                 let context = context.as_ref();
+                let state = &fixture.state;
                 async move {
+                    if typed {
+                        return super::super::completion_delivery::relay_captured_recovery_terminal_notice_with_gateway(
+                            http, shared, &ProviderKind::Claude, state, &text, gateway,
+                        ).await;
+                    }
                     deliver_recovery_replace_via_controller(
                         gateway,
                         shared,
@@ -290,31 +408,62 @@ async fn partial_eof_actual_controller_preserves_frozen_prefix_and_streamed_curr
                         &text,
                         context,
                     )
-                    .await
+                    .await.into()
                 }
             },)
-            .await
-    );
-    let replacements = gateway
-        .replacements
-        .lock()
-        .expect("actual controller transport calls");
-    assert_eq!(replacements.len(), 1);
-    for (message, body) in replacements.iter() {
-        messages.insert(*message, body.clone());
-    }
-    assert_eq!(
-        messages.get(&MessageId::new(40)).unwrap(),
-        "published prefix"
-    );
-    assert_eq!(
-        messages.get(&MessageId::new(41)).unwrap(),
-        &super::super::super::formatting::format_for_discord_with_provider(
-            "unposted suffix",
+            .await;
+        assert!(
+            settled,
+            "typed={typed}: captured recovery settles the original actor"
+        );
+        let replacements = gateway
+            .replacements
+            .lock()
+            .expect("actual controller transport calls")
+            .clone();
+        let expected = super::super::super::formatting::format_for_discord_with_provider(
+            &fixture.state.full_response[fixture.state.response_sent_offset..],
             &ProviderKind::Claude,
-        )
-    );
-    assert!(fixture.load().is_none());
+        );
+        assert_eq!(
+            replacements,
+            vec![(MessageId::new(41), expected)],
+            "typed={typed}: gateway receives exactly the undelivered suffix"
+        );
+        for (message, body) in replacements.iter() {
+            messages.insert(*message, body.clone());
+        }
+        assert_eq!(
+            messages.get(&MessageId::new(40)).unwrap(),
+            "published prefix"
+        );
+        assert_eq!(
+            messages.get(&MessageId::new(41)).unwrap(),
+            &super::super::super::formatting::format_for_discord_with_provider(
+                "unposted suffix",
+                &ProviderKind::Claude,
+            )
+        );
+        if let Some(source) = source {
+            let record = dr::read_record(&ProviderKind::Claude, channel.get()).unwrap();
+            assert_eq!(record.confirmed_deliveries.len(), 1);
+            assert!(
+                dr::confirmed_delivery_receipt_exists(&ProviderKind::Claude, channel, 41, &source),
+                "the suffix publication confirms the original whole-source range"
+            );
+        }
+        assert!(fixture.load().is_none());
+        assert!(
+            mailbox_snapshot(&fixture.shared, channel)
+                .await
+                .cancel_token
+                .is_none()
+        );
+        let mut next = fixture.state.clone();
+        next.user_msg_id += 10;
+        next.turn_nonce = Some("next-prefix-input".into());
+        assert!(super::super::reregister_active_turn_from_inflight(&fixture.shared, &next).await);
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
