@@ -829,7 +829,7 @@ mod tests {
         let caller = normalize_ws(include_str!("mod.rs"));
         let helper = normalize_ws(include_str!("bridge_entry_persist.rs"));
         let spawn = caller
-            .find("pub(super) fn spawn_turn_bridge")
+            .find("pub(in crate::services::discord) fn spawn_turn_bridge_with_pin")
             .expect("production bridge entry remains present");
         let authority = caller[spawn..]
             .find("if !bridge_entry_persist::establish_bridge_entry_authority")
