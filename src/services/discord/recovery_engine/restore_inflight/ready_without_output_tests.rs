@@ -958,13 +958,20 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
     };
     let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
     for provider in [ProviderKind::Codex, ProviderKind::Claude] {
-        for proof in [
+        for case in [
             "exact",
             "historical",
             "frontier_only",
             "missing_fd",
             "replaced_fd",
+            "cold_exact",
+            "cold_historical",
+            "cold_frontier_only",
+            "cold_missing_fd",
+            "cold_replaced_fd",
         ] {
+            let cold_start = case.starts_with("cold_");
+            let proof = case.strip_prefix("cold_").unwrap_or(case);
             if provider == ProviderKind::Codex && matches!(proof, "missing_fd" | "replaced_fd") {
                 continue;
             }
@@ -1068,6 +1075,13 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
                 dr::confirmed_delivery_receipt_exists(&provider, channel, fallback_anchor, &source),
                 proof != "frontier_only"
             );
+            if cold_start {
+                assert!(crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&tmux));
+                assert!(
+                    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux)
+                        .is_none()
+                );
+            }
             assert!(!state.terminal_delivery_committed);
             assert_ne!(
                 state.current_msg_id, fallback_anchor,
@@ -1116,8 +1130,15 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
             assert_eq!(
                 gateway.replacements.lock().unwrap().len(),
                 usize::from(!matches!(proof, "exact" | "historical")),
-                "{provider:?}/{proof}: only an exact receipt with the original source proof suppresses transport"
+                "{provider:?}/{case}: only an exact receipt with the original source proof suppresses transport"
             );
+            if cold_start {
+                assert!(
+                    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux)
+                        .is_none(),
+                    "consuming a receipt must not recreate publication authority"
+                );
+            }
             assert!(fixture.load().is_none());
             assert!(
                 mailbox_snapshot(&fixture.shared, channel)
