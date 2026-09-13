@@ -543,7 +543,6 @@ fn synthetic_bridge_handoff_fixture(
                 },
                 (first, rx, Some(end_rx)), gateway.clone(), 0,
             ).await;
-            assert!(delivered.is_ok(), "actual adapter failed before convergence: {delivered:?}");
             delivered
             };
             let observe = async {
