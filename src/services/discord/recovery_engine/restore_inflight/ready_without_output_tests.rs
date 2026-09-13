@@ -164,16 +164,19 @@ async fn watcher_offset_at_eof_preserves_unsent_body_on_failed_delivery_then_ret
 async fn committed_eof_skips_transport_but_unknown_or_restart_rows_remain_owned() {
     let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
     for case in 0..6 {
-        let mut fixture = Fixture::new(5_071_803);
+        let mut fixture = Fixture::new(5_072_803 + case);
+        // Empty recovery starts empty; a published prefix cannot be rewound
+        // to zero under the same durable turn identity.
+        if case == 3 {
+            fixture.state.full_response.clear();
+            fixture.state.response_sent_offset = 0;
+        }
         fixture.claim().await;
         match case {
             0 => fixture.state.terminal_delivery_committed = true,
             1 => fixture.state.response_sent_offset = fixture.state.full_response.len(),
             2 => fixture.state.response_sent_offset = usize::MAX,
-            3 => {
-                fixture.state.full_response.clear();
-                fixture.state.response_sent_offset = 0;
-            }
+            3 => {}
             4 => fixture
                 .state
                 .set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart),
