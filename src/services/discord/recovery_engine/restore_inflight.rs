@@ -224,15 +224,7 @@ where
         // A captured partial answer remains a delivery obligation even after a
         // permanent channel error. Reuse the same nonce/save-generation CAS as
         // the idle drain; legacy force-clear/budget identity is too broad here.
-        settle_captured_ready_delivery(
-            shared,
-            provider,
-            delivery.anchor_state.as_ref().unwrap_or(state),
-            actor,
-            snapshot,
-            delivery.outcome,
-        )
-        .await;
+        settle_captured_ready_delivery(shared, provider, state, actor, snapshot, delivery).await;
         return true;
     }
     tracing::warn!(
@@ -248,7 +240,7 @@ async fn settle_captured_ready_delivery(
     state: &inflight::InflightTurnState,
     actor: Option<&Arc<CancelToken>>,
     snapshot: super::turn_finalizer::SyntheticClaimSnapshot,
-    outcome: RecoveryRelayOutcome,
+    delivery: CapturedRecoveryDelivery,
 ) {
     let channel = ChannelId::new(state.channel_id);
     let owner = super::mailbox_snapshot(shared, channel).await;
@@ -260,7 +252,17 @@ async fn settle_captured_ready_delivery(
         return;
     }
     let mut delivered = state.clone();
-    if matches!(outcome, RecoveryRelayOutcome::Delivered) {
+    if let Some(pending) = delivery.pending_anchor {
+        // Only the actor observed after transport may authorize its fallback's
+        // anchor mutation. The writer then rechecks the exact row under lock.
+        if !matches!(
+            pending.bind_after_actor_check(shared, &mut delivered),
+            inflight::GuardedSaveOutcome::Saved
+        ) {
+            return;
+        }
+    }
+    if matches!(delivery.outcome, RecoveryRelayOutcome::Delivered) {
         delivered.terminal_delivery_committed = true;
         delivered.response_sent_offset = delivered.full_response.len();
     } else {

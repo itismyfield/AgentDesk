@@ -674,7 +674,7 @@ async fn partial_eof_actual_fallback_uses_own_anchor_snapshot_and_refuses_foreig
         deliver_recovery_replace_via_controller, tests::RecoveryFakeGateway,
     };
     let _guard = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    for successor_stage in 0..3 {
+    for successor_stage in 0..4 {
         let mut fixture = Fixture::new(5_072_820 + successor_stage);
         fixture.state.turn_nonce = None;
         fixture.claim().await;
@@ -700,8 +700,34 @@ async fn partial_eof_actual_fallback_uses_own_anchor_snapshot_and_refuses_foreig
             },
             true,
         );
+        let replacement_actor = Arc::new(CancelToken::from_persisted_turn_nonce(None));
+        let gateway = if successor_stage == 3 {
+            let shared = fixture.shared.clone();
+            let replacement = replacement_actor.clone();
+            let user = MessageId::new(state.effective_finalizer_turn_id());
+            let owner = UserId::new(state.request_owner_user_id);
+            gateway.before_replace_returns(move || {
+                Box::pin(async move {
+                    // Only the in-memory actor changes during the transport await.
+                    // The durable row, including save generation, remains untouched.
+                    shared
+                        .mailbox(channel)
+                        .recovery_kickoff(replacement, owner, Some(user))
+                        .await;
+                })
+            })
+        } else {
+            gateway
+        };
+        let row_path = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().expect("runtime root"),
+            &ProviderKind::Claude,
+            state.channel_id,
+        );
+        let original_bytes = std::fs::read(&row_path).expect("original durable bytes");
         let http = Arc::new(serenity::Http::new("Bot test-token"));
-        let mut expected_successor = None;
+        let mut expected_successor =
+            (successor_stage == 3).then(|| serde_json::to_value(&state).expect("unchanged row"));
         assert!(
             settle_ready_without_output_for_actor(
                 &fixture.shared,
@@ -738,24 +764,21 @@ async fn partial_eof_actual_fallback_uses_own_anchor_snapshot_and_refuses_foreig
                         )
                         .await;
                         assert!(matches!(outcome, RecoveryRelayOutcome::Delivered));
-                        let anchor_state = context.captured_anchor_after_delivery();
-                        if successor_stage == 1 {
-                            assert!(
-                                anchor_state.is_none(),
-                                "own anchor cannot bind a changed row"
-                            );
-                        } else {
-                            let own = anchor_state
-                                .as_ref()
-                                .expect("snapshot returned by own locked bind");
-                            assert!(own.save_generation > state.save_generation);
-                            assert_eq!(own.current_msg_id, 5_072_920 + successor_stage);
+                        let pending_anchor = context.pending_anchor_after_delivery();
+                        assert!(
+                            pending_anchor.is_some(),
+                            "confirmed fallback waits for actor-validated binding"
+                        );
+                        let current = fixture.load().expect("row untouched by transport callback");
+                        assert_eq!(current.current_msg_id, state.current_msg_id);
+                        if successor_stage != 1 {
+                            assert_eq!(current.save_generation, state.save_generation);
                         }
                         if successor_stage == 2 {
-                            let mut successor = fixture.load().expect("after own bind");
-                            successor.full_response.push_str(" B after bind");
+                            let mut successor = fixture.load().expect("after confirmed fallback");
+                            successor.full_response.push_str(" B after receipt");
                             inflight::save_inflight_state(&successor)
-                                .expect("foreign write after own bind");
+                                .expect("foreign write before actor-validated bind");
                             *expected_successor = Some(
                                 serde_json::to_value(fixture.load().expect("B"))
                                     .expect("B snapshot"),
@@ -763,7 +786,7 @@ async fn partial_eof_actual_fallback_uses_own_anchor_snapshot_and_refuses_foreig
                         }
                         CapturedRecoveryDelivery {
                             outcome,
-                            anchor_state,
+                            pending_anchor,
                         }
                     }
                 }
@@ -794,7 +817,16 @@ async fn partial_eof_actual_fallback_uses_own_anchor_snapshot_and_refuses_foreig
                 .await
                 .cancel_token
                 .expect("active actor remains");
-            assert!(Arc::ptr_eq(&surviving, &actor));
+            if successor_stage == 3 {
+                assert!(Arc::ptr_eq(&surviving, &replacement_actor));
+                assert_eq!(
+                    std::fs::read(&row_path).expect("surviving bytes"),
+                    original_bytes,
+                    "actor-only handoff must not bind the old fallback anchor into B's adopted row"
+                );
+            } else {
+                assert!(Arc::ptr_eq(&surviving, &actor));
+            }
         }
     }
 }

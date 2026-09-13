@@ -335,6 +335,8 @@ pub(in crate::services::discord) mod tests {
         replace_calls: AtomicUsize,
         delete_calls: AtomicUsize,
         pub(in crate::services::discord) replacements: std::sync::Mutex<Vec<(MessageId, String)>>,
+        replace_hook:
+            std::sync::Mutex<Option<Box<dyn FnOnce() -> GatewayFuture<'static, ()> + Send>>>,
     }
 
     impl RecoveryFakeGateway {
@@ -348,7 +350,18 @@ pub(in crate::services::discord) mod tests {
                 replace_calls: AtomicUsize::new(0),
                 delete_calls: AtomicUsize::new(0),
                 replacements: std::sync::Mutex::new(Vec::new()),
+                replace_hook: std::sync::Mutex::new(None),
             }
+        }
+    }
+
+    impl RecoveryFakeGateway {
+        pub(in crate::services::discord) fn before_replace_returns(
+            self,
+            hook: impl FnOnce() -> GatewayFuture<'static, ()> + Send + 'static,
+        ) -> Self {
+            *self.replace_hook.lock().expect("replace hook") = Some(Box::new(hook));
+            self
         }
     }
 
@@ -361,6 +374,10 @@ pub(in crate::services::discord) mod tests {
         ) -> GatewayFuture<'a, Result<ReplaceLongMessageOutcome, String>> {
             Box::pin(async move {
                 self.replace_calls.fetch_add(1, Ordering::SeqCst);
+                let hook = self.replace_hook.lock().expect("replace hook").take();
+                if let Some(hook) = hook {
+                    hook().await;
+                }
                 if self.ok {
                     self.replacements
                         .lock()

@@ -14,14 +14,14 @@ pub(super) fn should_advance_recovery_dispatch_after_relay(relay_ok: bool) -> bo
 
 pub(super) struct CapturedRecoveryDelivery {
     pub(super) outcome: RecoveryRelayOutcome,
-    pub(super) anchor_state: Option<super::inflight::InflightTurnState>,
+    pub(super) pending_anchor: Option<terminal_text_idempotency::PendingRecoveryAnchor>,
 }
 
 impl From<RecoveryRelayOutcome> for CapturedRecoveryDelivery {
     fn from(outcome: RecoveryRelayOutcome) -> Self {
         Self {
             outcome,
-            anchor_state: None,
+            pending_anchor: None,
         }
     }
 }
@@ -88,9 +88,9 @@ async fn relay_recovery_terminal_notice_with_capture(
     .await;
     CapturedRecoveryDelivery {
         outcome,
-        anchor_state: recovery_context
+        pending_anchor: recovery_context
             .as_ref()
-            .and_then(RecoveryDeliveryContext::captured_anchor_after_delivery),
+            .and_then(RecoveryDeliveryContext::pending_anchor_after_delivery),
     }
 }
 
