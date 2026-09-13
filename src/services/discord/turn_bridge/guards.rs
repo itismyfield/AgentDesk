@@ -94,15 +94,13 @@ impl Drop for CompletionGuard {
 // plain unconditional `clear_inflight_state` here is identity-blind and
 // can delete a row this turn does NOT own — e.g. a NEWER turn already
 // re-wrote the channel's inflight after this turn released the mailbox.
-// The guard now carries THIS turn's `user_msg_id` and routes the
-// abnormal-path clear through the identity-aware guarded clears, so it
-// only removes the row when the on-disk identity still matches THIS
-// turn (non-zero) or is a genuine zero-id-owned row (zero). A newer
-// owner yields `UserMsgMismatch` and is preserved.
+// Capture the complete episode at admission. A matching user id (including 0)
+// is insufficient: retries and successor actors can share it. A changed pin
+// preserves the durable row for its current owner or existing recovery.
 pub(super) struct InflightCleanupGuard {
     pub(super) provider: Option<ProviderKind>,
     channel_id: u64,
-    user_msg_id: u64,
+    episode: super::super::inflight::InflightEpisodePin,
     token_hash: String,
 }
 
@@ -112,7 +110,7 @@ impl InflightCleanupGuard {
         Self {
             provider: state.provider_kind(),
             channel_id: state.channel_id,
-            user_msg_id: state.user_msg_id,
+            episode: super::super::inflight::InflightEpisodePin::from_state(state),
             token_hash,
         }
     }
@@ -129,7 +127,6 @@ struct BridgeGuardAuthority {
     channel_id: ChannelId,
     finalizer_turn_id: u64,
     relay_owner: RelayOwnerKind,
-    cleanup_user_msg_id: u64,
 }
 
 fn bridge_guard_authority(authoritative_state: &InflightTurnState) -> BridgeGuardAuthority {
@@ -137,7 +134,6 @@ fn bridge_guard_authority(authoritative_state: &InflightTurnState) -> BridgeGuar
         channel_id: ChannelId::new(authoritative_state.channel_id),
         finalizer_turn_id: authoritative_state.effective_finalizer_turn_id(),
         relay_owner: authoritative_state.effective_relay_owner_kind(),
-        cleanup_user_msg_id: authoritative_state.user_msg_id,
     }
 }
 
@@ -174,7 +170,7 @@ pub(super) fn make_bridge_guards(
     let inflight_guard = InflightCleanupGuard {
         provider: Some(provider.clone()),
         channel_id: authority.channel_id.get(),
-        user_msg_id: authority.cleanup_user_msg_id,
+        episode: super::super::inflight::InflightEpisodePin::from_state(authoritative_state),
         token_hash: shared_owned.token_hash.clone(),
     };
     (completion_guard, inflight_guard)
@@ -255,7 +251,6 @@ mod tests {
                 channel_id: ChannelId::new(42_590_701),
                 finalizer_turn_id: 77_071,
                 relay_owner: RelayOwnerKind::Watcher,
-                cleanup_user_msg_id: 0,
             }
         );
     }
@@ -298,20 +293,12 @@ impl Drop for InflightCleanupGuard {
             // clear, but it durably records the placeholder for the
             // placeholder sweeper to finalize to "중단됨" BEFORE deleting
             // the row (which still frees the channel immediately).
-            if self.user_msg_id != 0 {
-                super::super::inflight::request_inflight_abandon_if_matches(
-                    provider,
-                    self.channel_id,
-                    self.user_msg_id,
-                    &self.token_hash,
-                );
-            } else {
-                super::super::inflight::request_inflight_abandon_if_matches_zero_owned(
-                    provider,
-                    self.channel_id,
-                    &self.token_hash,
-                );
-            }
+            super::super::inflight::request_inflight_abandon_for_captured_episode(
+                provider,
+                self.channel_id,
+                &self.episode,
+                &self.token_hash,
+            );
         }
     }
 }

@@ -31,6 +31,8 @@ pub(super) struct PostLoopFinalizeContext {
     pub(super) role_binding: Option<RoleBinding>,
     pub(super) turn_id: String,
     pub(super) current_msg_id: MessageId,
+    pub(super) entry_was_rowless: bool,
+    pub(super) codex_tui_terminal_range: Option<super::super::inflight::CodexRange>,
     pub(super) cancelled: bool,
     pub(super) transport_error: bool,
     pub(super) tui_error_classification: TuiErrorClassification,
@@ -132,6 +134,30 @@ pub(super) async fn run_post_loop_finalize(
     let mut prev_tool_status = state.prev_tool_status;
     let mut inflight_state = state.inflight_state;
     let mut api_friction_reports = state.api_friction_reports;
+
+    // The terminal receipt gate runs again after this phase, but a live
+    // controller can PATCH here first. Use the same captured source evidence
+    // before consuming its local handle. A receipt does not authorize removing
+    // a successor's same-key controller, so leave shared controller slots alone.
+    use super::terminal_outcome_delivery::rowless_receipt::{
+        ReceiptDecisionInput, TerminalReceiptDisposition, decision,
+    };
+    let receipt_disposition = decision(ReceiptDecisionInput {
+        provider: &provider,
+        channel_id,
+        current_msg_id,
+        watcher_owner_channel_id,
+        entry_was_rowless: ctx.entry_was_rowless,
+        codex_tui_terminal_range: ctx.codex_tui_terminal_range.as_ref(),
+        tmux_last_offset,
+        inflight_state: &inflight_state,
+        full_response: &full_response,
+    });
+    if receipt_disposition != TerminalReceiptDisposition::Continue {
+        pending_long_running_open_after_state_save.take();
+        pending_long_running_retarget_after_state_save.take();
+        long_running_placeholder_active.take();
+    }
 
     // codex round-9 P3 on PR #1308: drain any active long-running
     // placeholder on stream-error / receive-disconnect exits too. The

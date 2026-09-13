@@ -196,6 +196,7 @@ pub(crate) use self::clear_store::{
 };
 pub(in crate::services::discord) use self::clear_store::{
     ReconcileClearOutcome, archive_inflight_state_if_matches_identity_generation,
+    request_inflight_abandon_for_captured_episode,
     clear_inflight_state_for_captured_episode, clear_inflight_state_for_reconcile,
     clear_inflight_state_for_snapshot, clear_inflight_state_if_matches_identity,
     clear_inflight_state_if_matches_identity_after_delivery,

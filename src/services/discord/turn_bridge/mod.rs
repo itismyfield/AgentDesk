@@ -724,6 +724,8 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 role_binding: role_binding.clone(),
                 turn_id: turn_id.clone(),
                 current_msg_id,
+                entry_was_rowless,
+                codex_tui_terminal_range: stream_loop_output.codex_tui_terminal_range.clone(),
                 cancelled,
                 transport_error,
                 tui_error_classification: stream_loop_output.tui_error_classification,

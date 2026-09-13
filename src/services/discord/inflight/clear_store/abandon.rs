@@ -1,6 +1,6 @@
 use super::super::{
-    InflightTurnState, inflight_runtime_root, inflight_state_path, lock_inflight_state_path,
-    log_inflight_remove, parse_inflight_state_content,
+    InflightEpisodePin, InflightTurnState, inflight_runtime_root, inflight_state_path,
+    lock_inflight_state_path, log_inflight_remove, parse_inflight_state_content,
 };
 use super::GuardedClearOutcome;
 use crate::services::discord::abandon_request_store;
@@ -118,6 +118,60 @@ pub(in crate::services::discord::inflight) fn request_inflight_abandon_if_matche
     expected_user_msg_id: u64,
     token_hash: &str,
 ) -> GuardedClearOutcome {
+    request_inflight_abandon_matching_in_root(
+        root,
+        provider,
+        channel_id,
+        AbandonOwner::UserMessage(expected_user_msg_id),
+        token_hash,
+    )
+}
+
+/// Drop cleanup for one captured actor episode, including zero-id synthetic
+/// turns. The pin is checked under the same sidecar lock as the durable handoff
+/// and unlink; a same-user successor cannot be abandoned by an older future.
+pub(in crate::services::discord) fn request_inflight_abandon_for_captured_episode(
+    provider: &ProviderKind,
+    channel_id: u64,
+    episode: &InflightEpisodePin,
+    token_hash: &str,
+) -> GuardedClearOutcome {
+    let Some(root) = inflight_runtime_root() else {
+        return GuardedClearOutcome::Missing;
+    };
+    request_inflight_abandon_matching_in_root(
+        &root,
+        provider,
+        channel_id,
+        AbandonOwner::Episode(episode),
+        token_hash,
+    )
+}
+
+#[derive(Debug)]
+enum AbandonOwner<'a> {
+    UserMessage(u64),
+    ZeroOwned,
+    Episode(&'a InflightEpisodePin),
+}
+
+impl AbandonOwner<'_> {
+    fn matches(&self, state: &InflightTurnState) -> bool {
+        match self {
+            Self::UserMessage(id) => state.matches_finalizer_turn_id(*id),
+            Self::ZeroOwned => state.user_msg_id == 0,
+            Self::Episode(pin) => pin.matches_state(state),
+        }
+    }
+}
+
+fn request_inflight_abandon_matching_in_root(
+    root: &std::path::Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    expected: AbandonOwner<'_>,
+    token_hash: &str,
+) -> GuardedClearOutcome {
     let path = inflight_state_path(root, provider, channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedClearOutcome::IoError;
@@ -134,7 +188,7 @@ pub(in crate::services::discord::inflight) fn request_inflight_abandon_if_matche
     if state.rebind_origin {
         return GuardedClearOutcome::RebindOriginSkipped;
     }
-    if !state.matches_finalizer_turn_id(expected_user_msg_id) {
+    if !expected.matches(&state) {
         return GuardedClearOutcome::UserMsgMismatch;
     }
     #[cfg(unix)]
@@ -155,10 +209,7 @@ pub(in crate::services::discord::inflight) fn request_inflight_abandon_if_matche
         let Ok(restate) = parse_inflight_state_content(&reread) else {
             return GuardedClearOutcome::Missing;
         };
-        if !restate.matches_finalizer_turn_id(expected_user_msg_id)
-            || restate.restart_mode.is_some()
-            || restate.rebind_origin
-        {
+        if !expected.matches(&restate) || restate.restart_mode.is_some() || restate.rebind_origin {
             return GuardedClearOutcome::UserMsgMismatch;
         }
     }
@@ -183,7 +234,7 @@ pub(in crate::services::discord::inflight) fn request_inflight_abandon_if_matche
             tracing::warn!(
                 provider = %provider.as_str(),
                 channel_id,
-                expected_user_msg_id = expected_user_msg_id,
+                expected = ?expected,
                 error = %error,
                 "inflight abandon-request remove_file failed; treating as IoError so sweeper retries"
             );
@@ -213,48 +264,11 @@ pub(in crate::services::discord::inflight) fn request_inflight_abandon_if_matche
     channel_id: u64,
     token_hash: &str,
 ) -> GuardedClearOutcome {
-    let path = inflight_state_path(root, provider, channel_id);
-    let Ok(_lock) = lock_inflight_state_path(&path) else {
-        return GuardedClearOutcome::IoError;
-    };
-    let Ok(data) = fs::read_to_string(&path) else {
-        return GuardedClearOutcome::Missing;
-    };
-    let Ok(state) = serde_json::from_str::<InflightTurnState>(&data) else {
-        return GuardedClearOutcome::Missing;
-    };
-    if state.restart_mode.is_some() {
-        return GuardedClearOutcome::PlannedRestartSkipped;
-    }
-    if state.rebind_origin {
-        return GuardedClearOutcome::RebindOriginSkipped;
-    }
-    if state.user_msg_id != 0 {
-        return GuardedClearOutcome::UserMsgMismatch;
-    }
-    // #3859 r5: preserve the row if a finalizable placeholder's record fails to
-    // persist (never delete the row without its abandon-request).
-    if !enqueue_abandon_request_for_row(provider, channel_id, token_hash, &state) {
-        return GuardedClearOutcome::IoError;
-    }
-    log_inflight_remove(
+    request_inflight_abandon_matching_in_root(
+        root,
         provider,
         channel_id,
-        state.user_msg_id,
-        "request_inflight_abandon_if_matches_zero_owned",
-        &path,
-    );
-    match fs::remove_file(&path) {
-        Ok(()) => GuardedClearOutcome::Cleared,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => GuardedClearOutcome::Missing,
-        Err(error) => {
-            tracing::warn!(
-                provider = %provider.as_str(),
-                channel_id,
-                error = %error,
-                "inflight zero-owned abandon-request remove_file failed; treating as IoError so sweeper retries"
-            );
-            GuardedClearOutcome::IoError
-        }
-    }
+        AbandonOwner::ZeroOwned,
+        token_hash,
+    )
 }

@@ -4,6 +4,7 @@ use super::*;
 
 #[cfg(test)]
 mod pg_tests;
+mod preloop_cleanup_tests;
 use crate::services::{
     agent_protocol::RuntimeHandoffKind,
     discord::{
