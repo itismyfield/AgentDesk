@@ -290,39 +290,17 @@ pub(super) async fn collect_turn_stream_until_terminal(
         &watcher_provider,
         channel_id.get(),
     );
-    if watcher_provider == ProviderKind::Codex
-        && let Some(row) = startup_inflight_snapshot.as_ref()
-        && row.runtime_kind == Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
-        && row.tmux_session_name.as_deref() == Some(tmux_session_name.as_str())
-        && row.output_path.as_deref() == Some(output_path.as_str())
-        && let Some(start) = row.turn_start_offset
-        && start <= turn_data_start_offset
-    {
-        let token = shared.relay_frontier_token(channel_id);
-        let mutation = (token.reset_incarnation == source_authority.reset_incarnation)
-            .then(|| shared.acquire_relay_frontier_mutation(channel_id, token))
-            .flatten();
-        if mutation.is_none() {
+    match source_authority.restore_native_prefix(
+        ctx,
+        startup_inflight_snapshot.as_ref(),
+        turn_data_start_offset,
+    ) {
+        Ok(Some(decoder)) => tool_state.restore_native_codex(decoder, &mut full_response),
+        Ok(None) => {}
+        Err(()) => {
             *parser.current_offset = data_start_offset;
             utf8_decoder.clear_pending();
             return CollectOutcome::ContinueWatcherLoop;
-        }
-        match read_native_codex_state(
-            &output_path,
-            start,
-            turn_data_start_offset,
-            source_authority.source_file,
-            &tmux_session_name,
-            source_authority.generation_mtime_ns,
-            source_authority.source_stamp,
-        ) {
-            Ok(decoder) => tool_state.restore_native_codex(decoder, &mut full_response),
-            Err(error) => {
-                tracing::warn!(channel_id = channel_id.get(), %error, "native Codex restart prefix unavailable; retaining turn for retry");
-                *parser.current_offset = data_start_offset;
-                utf8_decoder.clear_pending();
-                return CollectOutcome::ContinueWatcherLoop;
-            }
         }
     }
     // #3805 P2 (PR-C): this turn's status-panel generation epoch, SEEDED from

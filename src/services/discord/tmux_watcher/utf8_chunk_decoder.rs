@@ -78,6 +78,41 @@ pub(super) fn source_authority_for_read(
     }
 }
 
+impl super::loop_poll_prologue::WatcherSourceAuthority {
+    pub(super) fn restore_native_prefix(
+        &self,
+        ctx: &super::TurnStreamCollectorContext,
+        row: Option<&super::InflightTurnState>,
+        cursor: u64,
+    ) -> Result<Option<crate::services::codex_tui::rollout_tail::RolloutRecordDecoder>, ()> {
+        if ctx.watcher_provider == super::ProviderKind::Codex
+            && let Some(row) = row
+            && row.runtime_kind
+                == Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
+            && row.tmux_session_name.as_deref() == Some(ctx.tmux_session_name.as_str())
+            && row.output_path.as_deref() == Some(ctx.output_path.as_str())
+            && let Some(start) = row.turn_start_offset
+            && start <= cursor
+        {
+            let token = ctx.shared.relay_frontier_token(ctx.channel_id);
+            let _mutation = (token.reset_incarnation == self.reset_incarnation)
+                .then(|| {
+                    ctx.shared
+                        .acquire_relay_frontier_mutation(ctx.channel_id, token)
+                })
+                .flatten()
+                .ok_or(())?;
+            return super::read_native_codex_state(
+                &ctx.output_path, start, cursor, self.source_file,
+                &ctx.tmux_session_name, self.generation_mtime_ns, self.source_stamp,
+            ).map(Some).map_err(|error| {
+                tracing::warn!(channel_id = ctx.channel_id.get(), %error, "native Codex restart prefix unavailable; retaining turn for retry");
+            });
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(all(test, unix))]
 mod source_epoch_read_tests {
     use super::*;

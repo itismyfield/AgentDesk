@@ -105,7 +105,19 @@ impl RelaySink for SessionBoundDiscordRelaySink {
             if let Some(response) = &native_response {
                 delivery.response_text.clone_from(response);
             }
-            let delivery_outcome = self.deliver_response(delivery).await;
+            let delivery_outcome = if native_response.is_some()
+                && delivery_frontier::current_inflight_matches(
+                    &delivery.provider,
+                    delivery.channel_id,
+                    &delivery.session_name,
+                    &delivery,
+                )
+                .is_none()
+            {
+                Ok(SessionRelayDeliveryOutcome::NotDelivered)
+            } else {
+                self.deliver_response(delivery).await
+            };
             #[cfg(test)]
             if let (Ok(outcome), Some(outcomes)) =
                 (delivery_outcome.as_ref(), &self.test_delivery_outcomes)
