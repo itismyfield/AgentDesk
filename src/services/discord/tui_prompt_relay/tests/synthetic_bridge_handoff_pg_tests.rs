@@ -275,6 +275,7 @@ fn synthetic_bridge_handoff_fixture(
                 let ((), capture) = tokio::join!(claim.take().unwrap(), capture);
                 capture
             };
+            drop(claim); // The exhausted future must release its borrow before restart.
             let mut capture = capture.expect("same admitted provider execution reaches bridge");
             if let Some(restart) = recovery {
                 // Drop the admitted adapter before it can post a frame; the durable

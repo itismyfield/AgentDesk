@@ -25,6 +25,25 @@ pub(in crate::services::discord::turn_bridge) struct ReceiptDecisionInput<'a> {
     pub full_response: &'a str,
 }
 
+impl<'a> ReceiptDecisionInput<'a> {
+    pub(super) fn from_terminal(
+        ctx: &'a TerminalOutcomeDeliveryContext,
+        state: &'a TerminalOutcomeDeliveryState,
+    ) -> Self {
+        Self {
+            provider: &state.provider,
+            channel_id: ctx.channel_id,
+            current_msg_id: ctx.current_msg_id,
+            watcher_owner_channel_id: ctx.watcher_owner_channel_id,
+            entry_was_rowless: ctx.entry_was_rowless,
+            codex_tui_terminal_range: ctx.codex_tui_terminal_range.as_ref(),
+            tmux_last_offset: ctx.tmux_last_offset,
+            inflight_state: &state.inflight_state,
+            full_response: &state.full_response,
+        }
+    }
+}
+
 pub(in crate::services::discord::turn_bridge) fn decision(
     ctx: ReceiptDecisionInput<'_>,
 ) -> TerminalReceiptDisposition {

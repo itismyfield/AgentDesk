@@ -159,7 +159,11 @@ async fn exact_receipt_terminal_decision_records_only_evaluated_frontier_5521() 
                     0,
                 );
             assert_eq!(
-                super::super::rowless_receipt::decision(&ctx, &state),
+                super::super::rowless_receipt::decision(
+                    super::super::rowless_receipt::ReceiptDecisionInput::from_terminal(
+                        &ctx, &state
+                    ),
+                ),
                 super::super::rowless_receipt::TerminalReceiptDisposition::Continue
             );
         } else {

@@ -58,14 +58,11 @@ pub(super) async fn run_terminal_outcome_delivery(
     ctx: TerminalOutcomeDeliveryContext,
     state: TerminalOutcomeDeliveryState,
 ) -> TerminalOutcomeDeliveryOutput {
-    let receipt_disposition = rowless_receipt::decision(rowless_receipt::ReceiptDecisionInput {
-        provider: &state.provider, channel_id: ctx.channel_id, current_msg_id: ctx.current_msg_id,
-        watcher_owner_channel_id: ctx.watcher_owner_channel_id, entry_was_rowless: ctx.entry_was_rowless,
-        codex_tui_terminal_range: ctx.codex_tui_terminal_range.as_ref(), tmux_last_offset: ctx.tmux_last_offset,
-        inflight_state: &state.inflight_state, full_response: &state.full_response,
-    });
-    let already_receipted = receipt_disposition
-        == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
+    let receipt_disposition = rowless_receipt::decision(
+        rowless_receipt::ReceiptDecisionInput::from_terminal(&ctx, &state),
+    );
+    let already_receipted =
+        receipt_disposition == rowless_receipt::TerminalReceiptDisposition::AlreadyDelivered;
     let may_publish = receipt_disposition == rowless_receipt::TerminalReceiptDisposition::Continue;
     let (channel_id, user_msg_id) = (ctx.channel_id, ctx.user_msg_id);
     let (current_msg_id, status_panel_msg_id) = (ctx.current_msg_id, ctx.status_panel_msg_id);
@@ -160,9 +157,10 @@ pub(super) async fn run_terminal_outcome_delivery(
     let mut bridge_should_emit_completion = true;
     let inflight_generation = inflight_state.born_generation;
 
-    if may_publish && !bridge_output_owner
-        .map(|owner| owner.skips_bridge_spinner_cleanup())
-        .unwrap_or(false)
+    if may_publish
+        && !bridge_output_owner
+            .map(|owner| owner.skips_bridge_spinner_cleanup())
+            .unwrap_or(false)
         && let Some(user_msg_id) = user_msg_id
     {
         tv_clear(
@@ -206,12 +204,17 @@ pub(super) async fn run_terminal_outcome_delivery(
     if already_receipted {
         (terminal_delivery_committed, terminal_body_visible) = (true, true);
         if cancelled {
-            let cancel_source = cancel_token.cancel_source().unwrap_or_else(||
-                tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON.to_string());
-            preserve_inflight_for_cleanup_retry |= cancel_prompt_replace::settle_cancelled_episode_work(
-                &shared_owned, dispatch_id.as_deref(), &cancel_source,
-                &mut active_background_child_session_ids,
-            ).await;
+            let cancel_source = cancel_token
+                .cancel_source()
+                .unwrap_or_else(|| tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON.to_string());
+            preserve_inflight_for_cleanup_retry |=
+                cancel_prompt_replace::settle_cancelled_episode_work(
+                    &shared_owned,
+                    dispatch_id.as_deref(),
+                    &cancel_source,
+                    &mut active_background_child_session_ids,
+                )
+                .await;
         }
         epilogue_response = Some((full_response.clone(), full_response.clone()));
     } else if !may_publish {
@@ -220,10 +223,19 @@ pub(super) async fn run_terminal_outcome_delivery(
         // retains a separate, stable obligation; otherwise only a fresh POST
         // may publish, with an explicit unresolved result if both sinks fail.
         match foreign_terminal_handoff::preserve_or_publish(foreign_terminal_handoff::Handoff {
-            shared: &shared_owned, gateway: gateway.as_ref(), provider: &provider,
-            local: &inflight_state, admitted, content: &full_response,
-            response_sent_offset, channel_id, old_anchor: current_msg_id, can_chain_locally,
-        }).await {
+            shared: &shared_owned,
+            gateway: gateway.as_ref(),
+            provider: &provider,
+            local: &inflight_state,
+            admitted,
+            content: &full_response,
+            response_sent_offset,
+            channel_id,
+            old_anchor: current_msg_id,
+            can_chain_locally,
+        })
+        .await
+        {
             foreign_terminal_handoff::Outcome::Deferred { outbox_id } => {
                 preserve_inflight_for_cleanup_retry = true;
                 terminal_outcome = TerminalOutcomeDeliveryOutcome::DeferredToOutbox { outbox_id };
@@ -871,7 +883,10 @@ pub(super) async fn run_terminal_outcome_delivery(
     // Consume, rather than re-sample, the stamp snapshot under the
     // `SettlementCapabilities` contract.
     // A failure of both delivery sinks is not a no-body success settlement.
-    if !matches!(terminal_outcome, TerminalOutcomeDeliveryOutcome::Unresolved { .. }) {
+    if !matches!(
+        terminal_outcome,
+        TerminalOutcomeDeliveryOutcome::Unresolved { .. }
+    ) {
         intake_settlement::settle_intake_row_at_bridge_exit(
             &shared_owned,
             &inflight_state,
