@@ -22,7 +22,7 @@ mod ops;
 mod unicode_units_tests;
 
 pub(super) use self::evidence::{
-    GuardedDeliveredElsewhereSignal, GuardedNonterminalDeleteDecision,
+    GuardedDeliveredElsewhereSignal, GuardedNonterminalDeleteDecision, cleanup_current_output_eof,
     guarded_cleanup_delivered_elsewhere_signal, guarded_nonterminal_delete_decision,
     placeholder_real_body_exposure_evidence,
 };

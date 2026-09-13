@@ -240,7 +240,7 @@ fn cleanup_output_eof_from_path(path: &str) -> Option<u64> {
     std::fs::metadata(path).ok().map(|meta| meta.len())
 }
 
-pub(super) fn cleanup_current_output_eof(
+pub(crate) fn cleanup_current_output_eof(
     shared: &SharedData,
     live_inflight: Option<&discord::inflight::InflightTurnState>,
     tmux_session_name: &str,
