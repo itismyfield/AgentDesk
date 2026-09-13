@@ -110,7 +110,7 @@ pub(in crate::services::discord) use status_panel::{
 // #3805 P2 (PR-C): the ONE generation staleness rule shared by the sink (here)
 // and the tmux WATCHER completion guard, so both paths supersede a stale
 // status edit by the SAME epoch semantics (parity).
-use stream_receiver::capture_bridge_clear_fence;
+use bridge_entry_persist::capture_bridge_clear_fence;
 pub(super) use stream_receiver::{
     StreamMessageReceiverAdapter, spawn_stream_message_receiver_adapter,
     turn_bridge_stream_wait_duration,
@@ -149,7 +149,10 @@ use super::watcher_lifecycle_decision::should_resume_watcher_after_turn;
 use crate::db::session_status::{AWAITING_BG, IDLE, TURN_ACTIVE};
 use bridge_entry_persist::bridge_stream_relay_suppressed;
 use completion_guard::complete_work_dispatch_on_turn_end;
-use context_window::{apply_context_token_update, persisted_context_tokens, resolve_done_response};
+use context_window::{
+    apply_context_token_update, compact_lower_bound, persisted_context_tokens,
+    resolve_done_response,
+};
 use current_message_anchor::{
     cleanup_unbound_bridge_anchor, detached_current_msg_id_from_durable,
     durable_current_msg_id_from_detached, edit_bound_current_message,

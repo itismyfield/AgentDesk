@@ -262,3 +262,41 @@ impl TerminalOutcomeDeliveryOutput {
         }
     }
 }
+
+pub(super) struct DeliveryEpilogueContext<'a> {
+    pub(super) shared_owned: &'a Arc<SharedData>,
+    pub(super) gateway: &'a Arc<dyn TurnGateway>,
+    pub(super) provider: &'a ProviderKind,
+    pub(super) channel_id: ChannelId,
+    pub(super) user_msg_id: Option<MessageId>,
+    pub(super) current_msg_id: MessageId,
+    pub(super) adk_session_key: &'a Option<String>,
+    pub(super) adk_cwd: &'a Option<String>,
+    pub(super) dispatch_id: &'a Option<String>,
+    pub(super) turn_id: &'a String,
+    pub(super) user_text_owned: &'a String,
+    pub(super) full_response: &'a String,
+    pub(super) delivery_response: &'a String,
+    pub(super) spoken_delivery_response: &'a String,
+    pub(super) cancelled: bool,
+    pub(super) is_prompt_too_long: bool,
+    pub(super) transport_error: bool,
+    pub(super) recovery_retry: bool,
+    pub(super) resume_failure_detected: bool,
+    pub(super) claude_tui_followup_pre_submit_requeue_candidate: bool,
+    pub(super) claude_tui_busy_requeue_pending: bool,
+    pub(super) tui_error_classification: TuiErrorClassification,
+    #[cfg(unix)]
+    pub(super) bridge_tui_gate_outcome_early:
+        Option<super::super::super::tmux::TuiCompletionGateOutcome>,
+    pub(super) terminal_delivery_committed: bool,
+    pub(super) already_receipted: bool,
+    pub(super) terminal_body_visible: bool,
+    pub(super) preserve_inflight_for_cleanup_retry: bool,
+    pub(super) should_complete_work_dispatch_after_delivery: bool,
+    pub(super) should_fail_dispatch_after_delivery: bool,
+    pub(super) bridge_relay_delegated_to_watcher: bool,
+    pub(super) watcher_delivery_pin: Option<&'a WatcherClaimIncarnation>,
+    pub(super) can_chain_locally: bool,
+    pub(super) inflight_generation: u64,
+}

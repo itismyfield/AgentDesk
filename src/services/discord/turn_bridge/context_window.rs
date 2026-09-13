@@ -167,3 +167,9 @@ mod tests {
         assert!(replaced.get(prior_offset..).is_none());
     }
 }
+
+pub(super) async fn compact_lower_bound(api_port: u16) -> u64 {
+    crate::services::discord::adk_session::fetch_context_thresholds(api_port)
+        .await
+        .compact_lower_bound_tokens
+}

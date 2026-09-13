@@ -34,6 +34,24 @@ pub(super) async fn voice_progress_playback_channel(
     }
 }
 
+// The non-Clone receiver is the phase witness: capture consumes it before stream processing.
+pub(super) async fn capture_bridge_clear_fence(
+    shared: &SharedData,
+    channel: ChannelId,
+    rx: mpsc::Receiver<StreamMessage>,
+    fence: &tokio::sync::OnceCell<ChannelClearFence>,
+) -> StreamMessageReceiverAdapter {
+    #[cfg(all(test, unix))]
+    let channel = resume_pin_tests::capture_channel(channel);
+    crate::db::session_transcripts::observe_channel_clear_fence_once(
+        fence,
+        shared.pg_pool.as_ref(),
+        &channel.get().to_string(),
+    )
+    .await;
+    spawn_stream_message_receiver_adapter(rx)
+}
+
 pub(super) struct BridgeEntryRuntimeState<'a> {
     pub(super) inflight_state: &'a mut InflightTurnState,
     pub(super) full_response: &'a mut String,
