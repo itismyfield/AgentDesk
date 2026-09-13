@@ -78,6 +78,7 @@ src/services/discord/runtime_bootstrap/intake_delivery_reconciler.rs
 src/services/discord/runtime_bootstrap/intake_delivery_sweep/tests.rs
 src/services/discord/session_runtime.rs
 src/services/discord/task_notification_delivery/tests.rs
+src/services/discord/terminal_delivery_custody/tests.rs
 src/services/discord/turn_bridge/completion_guard/completion_postgres.rs
 src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs
 src/services/discord/turn_bridge/intake_settlement/tests.rs
@@ -193,6 +194,7 @@ services::discord::runtime_bootstrap::intake_delivery_reconciler::postgres_tests
 services::discord::runtime_bootstrap::intake_delivery_sweep::tests
 services::discord::session_runtime::worktree_reuse_channel_isolation_tests
 services::discord::task_notification_delivery::tests
+services::discord::terminal_delivery_custody::tests
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests
 services::discord::tmux::watcher_lifecycle::restore_tests::restored_session_cwd_channel_isolation_pg_tests
 services::discord::turn_bridge::completion_guard::completion_postgres::dispatch_failure_pg_tests
@@ -812,6 +814,7 @@ services::discord::task_notification_delivery::tests::unclaimed_response_turn_do
 services::discord::task_notification_delivery::tests::unknown_reference_repair_advances_generation_and_never_reuses_old_nonce_pg
 services::discord::task_notification_delivery::tests::watcher_fallback_turn_key_resumes_sink_primary_key_without_second_row_pg
 services::discord::task_notification_delivery::tests::watcher_primary_key_blocks_late_sink_frame_alias_without_second_row_pg
+services::discord::terminal_delivery_custody::tests::foreign_terminal_custody_pg_failure_restart_and_exact_dedupe
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::current_generation_live_row_is_not_consumed
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::failed_ownership_proof_withholds_the_session_release
 services::discord::tmux::watcher_lifecycle::dispatched_origin_ghost_tests::dispatched_origin_ghost_order_pg_tests::live_turn_without_dispatch_keeps_its_inflight_row
@@ -856,7 +859,7 @@ services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_ca
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_rejects_foreign_or_stale_pg
 services::discord::turn_bridge::resume_pin_tests::sa2_actual_postlude_to_executor_pg
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_cancellation_settles_work_before_postlude_5521
-services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_insert_failure_falls_back_without_touching_successor_5521
+services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_5521
 services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tests::rowless_receipt_tests::pg_tests::exact_receipt_rowless_terminal_unknown_foreign_anchor_preserves_retry_5521
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_claims_pre_publish_reservation_by_correlation_pg
 services::discord::turn_bridge::voice_completion::voice_completion_tests::background_completion_target_consumes_legacy_flagged_local_only_fallback_pg

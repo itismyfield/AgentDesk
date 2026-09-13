@@ -3,7 +3,7 @@ use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
 use crate::services::discord::outbound::delivery_record::ExactJsonlSourceIdentity;
 use crate::services::discord::turn_bridge::{tmux_generation_file_mtime_ns, tmux_runtime_paths};
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(in crate::services::discord) struct CodexRange {
     pub(in crate::services::discord) identity: InflightTurnIdentity,
     pub(in crate::services::discord) result: String,

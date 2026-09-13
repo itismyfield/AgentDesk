@@ -74,7 +74,8 @@ pub(in crate::services::discord::turn_bridge) struct TerminalOutcomeDeliveryStat
 
 pub(in crate::services::discord::turn_bridge) enum TerminalOutcomeDeliveryOutcome {
     Completed,
-    DeferredToOutbox { outbox_id: i64 },
+    DeferredToCustody { key: String },
+    DeferredToOwner,
     Unresolved { error: String },
 }
 
@@ -228,5 +229,16 @@ mod tests {
             (claude.pinned, claude.exclusion_lease),
             (Some(99), Some(99))
         );
+    }
+}
+
+impl TerminalOutcomeDeliveryOutput {
+    pub(in crate::services::discord::turn_bridge) fn handoff_completion_authority(
+        &self,
+        guard: &mut super::super::guards::CompletionGuard,
+    ) {
+        if !matches!(self.outcome, TerminalOutcomeDeliveryOutcome::Completed) {
+            guard.relinquish_bridge_authority();
+        }
     }
 }

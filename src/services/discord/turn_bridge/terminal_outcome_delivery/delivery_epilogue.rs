@@ -344,36 +344,12 @@ pub(super) async fn handle_delivery_epilogue(
             bridge_should_emit_completion = bridge_gate_outcome.should_emit_completion();
         }
 
-        if should_complete_work_dispatch_after_terminal_delivery(
-            should_complete_work_dispatch_after_delivery,
-            terminal_delivery_committed,
-            preserve_inflight_for_cleanup_retry,
-            resume_failure_detected,
-            recovery_retry,
-            &full_response,
-        ) {
-            complete_work_dispatch_on_turn_end(
-                &shared_owned,
-                dispatch_id.as_deref(),
-                adk_cwd.as_deref(),
-                Some(&full_response),
-            )
-            .await;
-        } else if should_fail_dispatch_after_terminal_delivery(
-            should_fail_dispatch_after_delivery,
-            terminal_delivery_committed,
-            preserve_inflight_for_cleanup_retry,
-        ) {
-            // Transport error — fail the dispatch only after the terminal
-            // error response is deliverable, so auto-queue does not advance
-            // ahead of visible turn completion.
-            fail_dispatch_with_retry(
-                shared_owned.api_port,
-                dispatch_id.as_deref(),
-                &full_response,
-            )
-            .await;
-        }
+        settle_terminal_dispatch(TerminalDispatchSettlement {
+            shared: &shared_owned, dispatch_id: dispatch_id.as_deref(), adk_cwd: adk_cwd.as_deref(),
+            full_response: &full_response, should_complete: should_complete_work_dispatch_after_delivery,
+            should_fail: should_fail_dispatch_after_delivery, committed: terminal_delivery_committed,
+            preserve: preserve_inflight_for_cleanup_retry, resume_failure: resume_failure_detected, recovery_retry,
+        }).await;
 
         // Mark this turn delivered so the watcher will not relay it again when it resumes.
         // #3041 P1-2 (codex P1-c): a B2 Skip set
@@ -430,4 +406,47 @@ pub(super) async fn handle_delivery_epilogue(
     *state.status_panel_terminal_committed = status_panel_terminal_committed;
 
     DeliveryEpilogueOutcome::Continue
+}
+
+/// The nonvisual dispatch settlement used both after direct delivery and after
+/// a detached episode's durable retry. Publication authority stays at the caller.
+pub(super) struct TerminalDispatchSettlement<'a> {
+    pub shared: &'a Arc<SharedData>,
+    pub dispatch_id: Option<&'a str>,
+    pub adk_cwd: Option<&'a str>,
+    pub full_response: &'a str,
+    pub should_complete: bool,
+    pub should_fail: bool,
+    pub committed: bool,
+    pub preserve: bool,
+    pub resume_failure: bool,
+    pub recovery_retry: bool,
+}
+pub(super) async fn settle_terminal_dispatch(ctx: TerminalDispatchSettlement<'_>) -> bool {
+    if should_complete_work_dispatch_after_terminal_delivery(
+        ctx.should_complete,
+        ctx.committed,
+        ctx.preserve,
+        ctx.resume_failure,
+        ctx.recovery_retry,
+        ctx.full_response,
+    ) {
+        complete_work_dispatch_on_turn_end(
+            ctx.shared,
+            ctx.dispatch_id,
+            ctx.adk_cwd,
+            Some(ctx.full_response),
+        )
+        .await;
+        true
+    } else if should_fail_dispatch_after_terminal_delivery(
+        ctx.should_fail,
+        ctx.committed,
+        ctx.preserve,
+    ) {
+        fail_dispatch_with_retry(ctx.shared.api_port, ctx.dispatch_id, ctx.full_response).await;
+        true
+    } else {
+        false
+    }
 }

@@ -846,11 +846,14 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
                 },
             )
             .await;
+        terminal_outcome_delivery_output.handoff_completion_authority(&mut completion_guard);
         match terminal_outcome_delivery_output.outcome {
             terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::Completed => {}
-            terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::DeferredToOutbox { outbox_id } => {
-                tracing::info!(event = "rowless_terminal_outbox_handoff", channel_id = channel_id.get(), outbox_id,
-                    "detached terminal answer retained by durable outbox");
+            terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::DeferredToCustody { ref key } => {
+                tracing::info!(event = "rowless_terminal_custody_handoff", channel_id = channel_id.get(), %key,
+                    "detached terminal answer retained by durable custody");
+            }
+            terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::DeferredToOwner => {
             }
             terminal_outcome_delivery::TerminalOutcomeDeliveryOutcome::Unresolved { ref error } => {
                 tracing::error!(event = "rowless_terminal_delivery_unresolved", channel_id = channel_id.get(), %error,
@@ -979,3 +982,11 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
 
 #[cfg(all(test, unix))]
 mod resume_pin_tests;
+
+pub(in crate::services::discord) async fn resume_foreign_terminal_custody(
+    registry: &super::health::HealthRegistry,
+    payload: &mut serde_json::Value,
+    checkpoint: &crate::services::discord::terminal_delivery_custody::CustodyCheckpoint,
+) -> Result<bool, String> {
+    terminal_outcome_delivery::resume_foreign_terminal_custody(registry, payload, checkpoint).await
+}

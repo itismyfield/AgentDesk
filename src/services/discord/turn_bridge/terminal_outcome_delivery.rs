@@ -219,30 +219,55 @@ pub(super) async fn run_terminal_outcome_delivery(
         epilogue_response = Some((full_response.clone(), full_response.clone()));
     } else if !may_publish {
         bridge_should_emit_completion = false;
-        // A foreign row is not this episode's live holder. The existing outbox
-        // retains a separate, stable obligation; otherwise only a fresh POST
-        // may publish, with an explicit unresolved result if both sinks fail.
-        match foreign_terminal_handoff::preserve_or_publish(foreign_terminal_handoff::Handoff {
-            shared: &shared_owned,
-            gateway: gateway.as_ref(),
-            provider: &provider,
-            local: &inflight_state,
-            admitted,
-            content: &full_response,
-            response_sent_offset,
-            channel_id,
-            old_anchor: current_msg_id,
-            can_chain_locally,
-        })
-        .await
-        {
-            foreign_terminal_handoff::Outcome::Deferred { outbox_id } => {
-                preserve_inflight_for_cleanup_retry = true;
-                terminal_outcome = TerminalOutcomeDeliveryOutcome::DeferredToOutbox { outbox_id };
+        let cancel_source = cancel_token
+            .cancel_source()
+            .unwrap_or_else(|| tmux_runtime::ANONYMOUS_TURN_BRIDGE_TEARDOWN_REASON.to_string());
+        if bridge_output_owner.is_some() {
+            if cancelled {
+                preserve_inflight_for_cleanup_retry |=
+                    cancel_prompt_replace::settle_cancelled_episode_work(
+                        &shared_owned,
+                        dispatch_id.as_deref(),
+                        &cancel_source,
+                        &mut active_background_child_session_ids,
+                    )
+                    .await;
             }
-            foreign_terminal_handoff::Outcome::Published => terminal_delivery_committed = true,
-            foreign_terminal_handoff::Outcome::Unresolved { error } => {
-                terminal_outcome = TerminalOutcomeDeliveryOutcome::Unresolved { error };
+            // A known watcher/standby actor already owns this answer. Keep the
+            // same owner contract before creating any second publisher.
+            preserve_inflight_for_cleanup_retry = true;
+            terminal_outcome = TerminalOutcomeDeliveryOutcome::DeferredToOwner;
+        } else {
+            match foreign_terminal_handoff::preserve_or_publish(foreign_terminal_handoff::Handoff {
+                provider: &provider,
+                local: &inflight_state,
+                admitted,
+                content: &full_response,
+                response_sent_offset,
+                channel_id,
+                old_anchor: current_msg_id,
+                watcher_owner_channel_id,
+                tmux_last_offset,
+                cancelled,
+                cancel_source,
+                children: &active_background_child_session_ids,
+                dispatch_id: dispatch_id.as_deref(),
+                adk_cwd: adk_cwd.as_deref(),
+                should_complete: should_complete_work_dispatch_after_delivery,
+                should_fail: should_fail_dispatch_after_delivery,
+                resume_failure: resume_failure_detected,
+                recovery_retry,
+            })
+            .await
+            {
+                foreign_terminal_handoff::Outcome::Deferred { key } => {
+                    preserve_inflight_for_cleanup_retry = true;
+                    terminal_outcome = TerminalOutcomeDeliveryOutcome::DeferredToCustody { key };
+                }
+                foreign_terminal_handoff::Outcome::Unresolved { error } => {
+                    preserve_inflight_for_cleanup_retry = true;
+                    terminal_outcome = TerminalOutcomeDeliveryOutcome::Unresolved { error };
+                }
             }
         }
     } else if cancelled || is_prompt_too_long {
@@ -934,4 +959,12 @@ pub(super) async fn run_terminal_outcome_delivery(
         response_sent_offset,
         turn_start,
     }
+}
+
+pub(in crate::services::discord) async fn resume_foreign_terminal_custody(
+    registry: &crate::services::discord::health::HealthRegistry,
+    payload: &mut serde_json::Value,
+    checkpoint: &crate::services::discord::terminal_delivery_custody::CustodyCheckpoint,
+) -> Result<bool, String> {
+    foreign_terminal_handoff::resume(registry, payload, checkpoint).await
 }

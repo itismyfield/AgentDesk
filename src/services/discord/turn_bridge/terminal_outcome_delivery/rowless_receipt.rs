@@ -164,15 +164,13 @@ fn decision_with_evidence(ctx: &ReceiptDecisionInput<'_>) -> DecisionEvidence {
                 path,
             )
         };
-        if !source.is_authoritative()
-            || source.provider != ctx.provider.as_str()
-            || source.tmux_session_name != tmux
-            || Some(source.turn_nonce.as_str()) != local.turn_nonce.as_deref()
-            || Some(source.range.0) != local.turn_start_offset
-            || source.offset_authority_channel_id != ctx.watcher_owner_channel_id.get()
-            || source.delivery_channel_id != ctx.channel_id.get()
-            || source.generation_mtime_ns != dr::current_generation_mtime_ns(tmux)
-        {
+        if !source_matches_episode(
+            &source,
+            ctx.provider,
+            local,
+            ctx.watcher_owner_channel_id,
+            ctx.channel_id,
+        ) {
             return unknown(fallback);
         }
         let eof = std::fs::metadata(path)
@@ -228,4 +226,21 @@ fn decision_with_evidence(ctx: &ReceiptDecisionInput<'_>) -> DecisionEvidence {
             anchor.map(|_| frontier_covers),
         )
     })
+}
+
+pub(in crate::services::discord::turn_bridge) fn source_matches_episode(
+    source: &dr::ExactJsonlSourceIdentity,
+    provider: &ProviderKind,
+    local: &InflightTurnState,
+    owner: ChannelId,
+    delivery: ChannelId,
+) -> bool {
+    source.is_authoritative()
+        && source.provider == provider.as_str()
+        && Some(source.tmux_session_name.as_str()) == local.tmux_session_name.as_deref()
+        && Some(source.turn_nonce.as_str()) == local.turn_nonce.as_deref()
+        && Some(source.range.0) == local.turn_start_offset
+        && source.offset_authority_channel_id == owner.get()
+        && source.delivery_channel_id == delivery.get()
+        && source.generation_mtime_ns == dr::current_generation_mtime_ns(&source.tmux_session_name)
 }

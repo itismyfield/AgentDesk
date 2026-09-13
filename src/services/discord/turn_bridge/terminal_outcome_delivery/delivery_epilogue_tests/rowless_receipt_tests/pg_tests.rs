@@ -12,60 +12,47 @@ async fn exact_receipt_rowless_terminal_unknown_foreign_anchor_preserves_retry_5
     .await;
     let pool = db.connect_and_migrate().await;
     Arc::get_mut(&mut driver.shared).unwrap().pg_pool = Some(pool.clone());
-    let mut ids = Vec::new();
+    let mut keys = Vec::new();
     for _ in 0..2 {
         let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
         let mut successor = state.inflight_state.clone();
         successor.turn_nonce = Some("successor".into());
-        successor.turn_start_offset = Some(0);
         inflight::save_inflight_state(&successor).unwrap();
         ctx.codex_tui_terminal_range = None;
         let output = run(ctx, state).await;
-        let TerminalOutcomeDeliveryOutcome::DeferredToOutbox { outbox_id } = &output.outcome else {
-            panic!("must retain a real outbox row");
+        let TerminalOutcomeDeliveryOutcome::DeferredToCustody { key } = &output.outcome else {
+            panic!("actual file obligation required")
         };
-        ids.push(*outbox_id);
-        assert!(!output.terminal_delivery_committed && !output.bridge_skip_holder_owns_inflight);
+        keys.push(key.clone());
         run_postlude(&driver, output, false, false).await;
         let fresh =
             inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID)
                 .unwrap();
         assert_eq!(fresh.turn_nonce, successor.turn_nonce);
-        assert_eq!(fresh.turn_start_offset, successor.turn_start_offset);
-        assert!(!fresh.terminal_delivery_committed);
     }
+    assert_eq!(keys[0], keys[1]);
+    let records = custody_records(&driver);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["payload"]["full_response"], DRIVER_BODY);
     assert_eq!(
-        ids[0], ids[1],
-        "the same episode retries the same durable obligation"
+        records[0]["payload"]["local"]["turn_nonce"],
+        "receipt-nonce"
     );
-    let (content, source, session_key, reason, status): (
-        String,
-        String,
-        Option<String>,
-        String,
-        String,
-    ) = sqlx::query_as(
-        "SELECT content, source, session_key, reason_code, status FROM message_outbox WHERE id=$1",
-    )
-    .bind(ids[0])
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(content, DRIVER_BODY);
-    assert_eq!(source, "headless_turn");
-    assert_eq!(status, "pending");
     assert!(
-        session_key.is_none(),
-        "never rebind the successor session marker"
+        records[0]["payload"]["admitted"].is_null(),
+        "NoRange remains unknown"
     );
-    let identity: serde_json::Value = serde_json::from_str(&reason).unwrap();
-    assert_eq!(identity["turn_nonce"], "receipt-nonce");
-    assert_eq!(identity["turn_start_offset"], 0);
-    assert!(
-        identity["source"].is_null(),
-        "unknown range remains unknown"
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows, 0,
+        "async outbox transport must not escape the source lease"
     );
     assert!(driver.observations().is_empty());
+    assert_eq!(drain_custody(&driver).await.unwrap(), 1);
+    assert_eq!(driver.completed_publications(), 1);
     pool.close().await;
     db.drop().await;
 }
@@ -128,63 +115,65 @@ async fn exact_receipt_rowless_terminal_cancellation_settles_work_before_postlud
 }
 
 #[tokio::test]
-async fn exact_receipt_rowless_terminal_insert_failure_falls_back_without_touching_successor_5521()
-{
-    for post_fails in [false, true] {
-        let mut driver = TerminalDeliveryDriver::new(
-            if post_fails {
-                ReplaceBehaviour::FailedPost
-            } else {
-                ReplaceBehaviour::Edited
-            },
-            1,
-        );
-        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
-            "receipt_insert_failure",
-            "terminal outbox insert failure",
-        )
-        .await;
-        let pool = db.connect_and_migrate().await;
-        Arc::get_mut(&mut driver.shared).unwrap().pg_pool = Some(pool.clone());
-        sqlx::query(
-            "ALTER TABLE message_outbox ADD CONSTRAINT reject_receipt_fixture CHECK (false)",
-        )
+async fn exact_receipt_rowless_terminal_custody_ack_survives_dispatch_failure_5521() {
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "receipt_cleanup_retry",
+        "custody transport ack survives dispatch failure",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    Arc::get_mut(&mut driver.shared).unwrap().pg_pool = Some(pool.clone());
+    let dispatch_id = "receipt-custody-cancel-5521";
+    crate::dispatch::test_support::seed_pg_dispatch(&pool, dispatch_id, "custody cancel").await;
+    let (mut ctx, mut state, _) = receipt_parts(&driver, ProviderKind::Codex);
+    ctx.cancelled = true;
+    ctx.codex_tui_terminal_range = None;
+    state.dispatch_id = Some(dispatch_id.into());
+    let mut successor = state.inflight_state.clone();
+    successor.turn_nonce = Some("successor".into());
+    inflight::save_inflight_state(&successor).unwrap();
+    let output = run(ctx, state).await;
+    run_postlude(&driver, output, false, true).await;
+    sqlx::query("ALTER TABLE task_dispatches RENAME TO custody_dispatches_unavailable")
         .execute(&pool)
         .await
         .unwrap();
-        let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
-        let mut successor = state.inflight_state.clone();
-        successor.turn_nonce = Some("successor".into());
-        successor.turn_start_offset = Some(64);
-        inflight::save_inflight_state(&successor).unwrap();
-        ctx.codex_tui_terminal_range = None;
-        let output = run(ctx, state).await;
-        assert_eq!(output.terminal_delivery_committed, !post_fails);
-        assert!(
-            !output.preserve_inflight_for_cleanup_retry && !output.bridge_skip_holder_owns_inflight
-        );
-        if post_fails {
-            assert!(
-                matches!(&output.outcome, TerminalOutcomeDeliveryOutcome::Unresolved { error } if error.contains("reject_receipt_fixture") && error.contains("POST failed"))
-            );
-        }
-        run_postlude(&driver, output, false, false).await;
-        assert!(
-            driver
-                .observations()
-                .iter()
-                .all(|o| o.call == DriverCall::Send)
-        );
-        let fresh =
-            inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID)
-                .unwrap();
-        assert_eq!(fresh.turn_nonce, successor.turn_nonce);
-        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM message_outbox")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(rows, 0);
-        pool.close().await;
-        db.drop().await;
-    }
+    assert_eq!(drain_custody(&driver).await.unwrap(), 0);
+    let records = custody_records(&driver);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0]["payload"]["delivery_receipts"][0],
+        DRIVER_FALLBACK_ANCHOR_MSG_ID
+    );
+    assert_eq!(driver.completed_publications(), 1);
+    assert_eq!(drain_custody(&driver).await.unwrap(), 0);
+    assert_eq!(
+        driver.completed_publications(),
+        1,
+        "cleanup retry must not POST again"
+    );
+    sqlx::query("ALTER TABLE custody_dispatches_unavailable RENAME TO task_dispatches")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(drain_custody(&driver).await.unwrap(), 1);
+    assert_eq!(driver.completed_publications(), 1);
+    let status: String = sqlx::query_scalar("SELECT status FROM task_dispatches WHERE id=$1")
+        .bind(dispatch_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled");
+    let fresh =
+        inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID).unwrap();
+    assert_eq!(fresh.turn_nonce, successor.turn_nonce);
+    assert!(
+        driver
+            .observations()
+            .iter()
+            .all(|o| o.call == DriverCall::Send)
+    );
+    pool.close().await;
+    db.drop().await;
 }

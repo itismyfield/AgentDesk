@@ -342,46 +342,93 @@ async fn exact_receipt_rowless_terminal_preserves_foreign_anchor_and_successor_5
 
 #[tokio::test]
 async fn exact_receipt_rowless_terminal_foreign_anchor_fallback_and_dual_failure_5521() {
-    for (post_fails, live_gateway) in [(false, true), (true, true), (false, false)] {
-        let replace = if post_fails {
-            ReplaceBehaviour::FailedPost
-        } else {
-            ReplaceBehaviour::Edited
-        };
-        let driver = TerminalDeliveryDriver::new(replace, 1);
+    for post_fails in [false, true] {
+        let driver = TerminalDeliveryDriver::new(
+            if post_fails {
+                ReplaceBehaviour::FailedPost
+            } else {
+                ReplaceBehaviour::Edited
+            },
+            1,
+        );
         let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
         let mut successor = state.inflight_state.clone();
         successor.turn_nonce = Some("successor".into());
         successor.turn_start_offset = Some(64);
         inflight::save_inflight_state(&successor).unwrap();
         ctx.codex_tui_terminal_range = None;
-        ctx.can_chain_locally = live_gateway;
         let output = run(ctx, state).await;
+        assert!(matches!(
+            output.outcome,
+            TerminalOutcomeDeliveryOutcome::DeferredToCustody { .. }
+        ));
+        assert!(!output.terminal_delivery_committed && !output.bridge_skip_holder_owns_inflight);
+        assert!(output.preserve_inflight_for_cleanup_retry);
+        let mut signals = driver.shared.inflight_signals.subscribe();
+        run_postlude(&driver, output, false, false).await;
+        assert_no_completed_signal(&mut signals);
         assert!(
-            !output.bridge_skip_holder_owns_inflight && !output.preserve_inflight_for_cleanup_retry
+            driver.observations().is_empty(),
+            "handoff itself never publishes"
         );
-        if post_fails || !live_gateway {
-            assert!(!output.terminal_delivery_committed);
-            assert!(
-                matches!(&output.outcome, TerminalOutcomeDeliveryOutcome::Unresolved { error } if error.contains("outbox") && (error.contains("POST failed") || error.contains("no live Discord")))
+        let drained = drain_custody(&driver).await;
+        if post_fails {
+            assert!(drained.is_err());
+            assert_eq!(
+                custody_records(&driver).len(),
+                1,
+                "failed POST survives restart as a real payload"
             );
         } else {
-            assert!(output.terminal_delivery_committed);
+            assert_eq!(drained.unwrap(), 1);
             assert_eq!(driver.completed_publications(), 1);
+            assert!(custody_records(&driver).is_empty());
         }
-        run_postlude(&driver, output, false, false).await;
         assert!(
             driver
                 .observations()
                 .iter()
-                .all(|o| o.call == DriverCall::Send),
-            "foreign anchor is never an edit/delete target"
+                .all(|o| o.call == DriverCall::Send)
         );
         let fresh =
             inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID)
                 .unwrap();
         assert_eq!(fresh.turn_nonce, successor.turn_nonce);
     }
+}
+
+fn custody_records(driver: &TerminalDeliveryDriver) -> Vec<serde_json::Value> {
+    let root = driver
+        ._temp
+        .path()
+        .join("runtime/discord_terminal_delivery_custody");
+    std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
+        .map(|entry| serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap())
+        .collect()
+}
+
+async fn drain_custody(driver: &TerminalDeliveryDriver) -> Result<usize, String> {
+    crate::services::discord::terminal_delivery_custody::drain_for_test(
+        |mut payload, checkpoint| {
+            let shared = driver.shared.clone();
+            let gateway = driver.gateway.clone();
+            async move {
+                let outcome = super::super::foreign_terminal_handoff::resume_payload_with_gateway(
+                    &shared,
+                    gateway.as_ref(),
+                    &mut payload,
+                    &checkpoint,
+                )
+                .await;
+                (payload, outcome)
+            }
+        },
+    )
+    .await
 }
 
 #[tokio::test]
@@ -484,7 +531,8 @@ async fn run_postlude(driver: &TerminalDeliveryDriver, output: TerminalOutcomeDe
     let fence = tokio::sync::OnceCell::new();
     let _ = super::super::super::capture_bridge_clear_fence(&driver.shared, channel_id, rx, &fence).await;
     let user_id = output.inflight_state.user_msg_id;
-    let completion_guard = guards::CompletionGuard::for_completion_test(driver.shared.clone(), channel_id, user_id);
+    let mut completion_guard = guards::CompletionGuard::for_completion_test(driver.shared.clone(), channel_id, user_id);
+    output.handoff_completion_authority(&mut completion_guard);
     let inflight_guard = guards::InflightCleanupGuard::for_completion_test(&output.inflight_state, driver.shared.token_hash.clone());
     let ctx = postlude::CompletionPostludeContext {
         shared_owned: output.shared_owned, gateway: output.gateway, channel_id,
@@ -584,5 +632,146 @@ async fn exact_receipt_rowless_terminal_postlude_preserves_same_user_and_zero_id
         assert_eq!(fresh.turn_start_offset, successor.turn_start_offset);
         assert!(!fresh.terminal_delivery_committed);
         assert!(driver.observations().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn exact_receipt_rowless_terminal_custody_respects_owner_and_live_lease_5521() {
+    for owner in [
+        Some(BridgeOutputOwner::WatcherRelay),
+        Some(BridgeOutputOwner::StandbyRelay),
+        None,
+    ] {
+        let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+        let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
+        let held = bridge_delivery_lease_for_inflight(
+            &driver.shared,
+            ctx.watcher_owner_channel_id,
+            driver.shared.restart.current_generation,
+            &state.inflight_state,
+            ctx.tmux_last_offset,
+        );
+        assert!(matches!(held, BridgeLeaseAcquire::Held(_)));
+        let mut successor = state.inflight_state.clone();
+        successor.turn_nonce = Some("successor".into());
+        inflight::save_inflight_state(&successor).unwrap();
+        ctx.bridge_output_owner = owner;
+        let output = run(ctx, state).await;
+        if owner.is_some() {
+            assert!(matches!(
+                output.outcome,
+                TerminalOutcomeDeliveryOutcome::DeferredToOwner
+            ));
+        } else {
+            assert!(matches!(
+                output.outcome,
+                TerminalOutcomeDeliveryOutcome::DeferredToCustody { .. }
+            ));
+        }
+        run_postlude(&driver, output, false, false).await;
+        assert_eq!(drain_custody(&driver).await.unwrap(), 0);
+        assert!(driver.observations().is_empty());
+        drop(held);
+        if owner.is_none() {
+            assert_eq!(drain_custody(&driver).await.unwrap(), 1);
+            assert_eq!(driver.completed_publications(), 1);
+        } else {
+            assert!(custody_records(&driver).is_empty());
+        }
+        assert_eq!(
+            inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID)
+                .unwrap()
+                .turn_nonce,
+            successor.turn_nonce
+        );
+    }
+}
+
+#[tokio::test]
+async fn exact_receipt_rowless_terminal_custody_long_partial_ack_survives_retry_5521() {
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::FailSecondPostOnce, 1)
+        .with_body("long answer ".repeat(700));
+    let (mut ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
+    let expected_chunks =
+        crate::services::discord::formatting::split_message(&state.full_response).len();
+    assert!(expected_chunks > 2);
+    let mut successor = state.inflight_state.clone();
+    successor.turn_nonce = Some("successor".into());
+    inflight::save_inflight_state(&successor).unwrap();
+    ctx.codex_tui_terminal_range = None;
+    let output = run(ctx, state).await;
+    run_postlude(&driver, output, false, false).await;
+    assert!(drain_custody(&driver).await.is_err());
+    let records = custody_records(&driver);
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0]["payload"]["delivery_receipts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(driver.completed_publications(), 1);
+    assert_eq!(drain_custody(&driver).await.unwrap(), 1);
+    assert_eq!(
+        driver.completed_publications(),
+        expected_chunks,
+        "ACKed first chunk must not be re-POSTed"
+    );
+    assert!(custody_records(&driver).is_empty());
+    assert!(
+        driver
+            .observations()
+            .iter()
+            .all(|o| o.call == DriverCall::Send)
+    );
+    assert_eq!(
+        inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID)
+            .unwrap()
+            .turn_nonce,
+        successor.turn_nonce
+    );
+}
+
+#[tokio::test]
+async fn exact_receipt_rowless_terminal_custody_io_failure_never_completes_5521() {
+    let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
+    let (ctx, state, _) = receipt_parts(&driver, ProviderKind::Codex);
+    let mut successor = state.inflight_state.clone();
+    successor.turn_nonce = Some("successor".into());
+    inflight::save_inflight_state(&successor).unwrap();
+    std::fs::write(
+        driver
+            ._temp
+            .path()
+            .join("runtime/discord_terminal_delivery_custody"),
+        "not a directory",
+    )
+    .unwrap();
+    let output = run(ctx, state).await;
+    assert!(
+        matches!(&output.outcome, TerminalOutcomeDeliveryOutcome::Unresolved { error } if error.contains("custody"))
+    );
+    assert!(!output.terminal_delivery_committed && !output.bridge_skip_holder_owns_inflight);
+    let mut signals = driver.shared.inflight_signals.subscribe();
+    run_postlude(&driver, output, false, false).await;
+    assert_no_completed_signal(&mut signals);
+    assert!(driver.observations().is_empty());
+    assert_eq!(
+        inflight::load_inflight_state_read_only(&ProviderKind::Codex, DRIVER_CHANNEL_ID)
+            .unwrap()
+            .turn_nonce,
+        successor.turn_nonce
+    );
+}
+
+fn assert_no_completed_signal(
+    signals: &mut tokio::sync::broadcast::Receiver<inflight::InflightSignal>,
+) {
+    while let Ok(signal) = signals.try_recv() {
+        assert!(
+            !matches!(signal, inflight::InflightSignal::Completed { .. }),
+            "deferred custody must not announce Completed"
+        );
     }
 }
