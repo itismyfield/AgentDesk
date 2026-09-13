@@ -161,6 +161,24 @@ fn claude_terminal_range_admits_actual_file_and_retains_receipt_after_cursor_pro
             assert_eq!(range.source.provider, "claude");
             assert_eq!(range.source.range, (0, fixture.end));
             assert_eq!(range.source_file_identity, Some(fixture.file));
+            let restored: InflightTurnState = serde_json::from_slice(&fixture.durable()).unwrap();
+            assert_eq!(
+                restored.tui_terminal_source_file_identity,
+                Some(fixture.file),
+                "restart retains the actual opened FD captured before terminal publication"
+            );
+            let mut old_row = serde_json::to_value(&restored).unwrap();
+            old_row
+                .as_object_mut()
+                .unwrap()
+                .remove("tui_terminal_source_file_identity");
+            assert!(
+                serde_json::from_value::<InflightTurnState>(old_row)
+                    .unwrap()
+                    .tui_terminal_source_file_identity
+                    .is_none(),
+                "old rows carry no inferred FD proof"
+            );
             assert!(range.revalidated_source(&fixture.local).unwrap().is_some());
             crate::services::tmux_common::with_tmux_source_authority(&fixture.tmux, |authority| {
                 assert!(range.source_authority_is_live(authority));

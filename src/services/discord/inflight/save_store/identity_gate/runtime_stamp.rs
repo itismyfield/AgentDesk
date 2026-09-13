@@ -180,6 +180,7 @@ fn persist_terminal_range(
     fresh.output_path = Some(canonical.clone());
     fresh.full_response = result.to_string();
     fresh.last_offset = range.1;
+    fresh.tui_terminal_source_file_identity = source_file_identity;
     let persisted = persist_under_lock_with_snapshot(
         root,
         path,
@@ -191,6 +192,7 @@ fn persist_terminal_range(
     baseline.clone_from(&persisted);
     local.output_path.clone_from(&persisted.output_path);
     local.session_id.clone_from(&persisted.session_id);
+    local.tui_terminal_source_file_identity = persisted.tui_terminal_source_file_identity;
     local.last_offset = persisted.last_offset;
     local.save_generation = persisted.save_generation;
     Ok(TuiTerminalRange {

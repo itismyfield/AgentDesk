@@ -245,6 +245,9 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// this row as an active provider turn after this point.
     #[serde(default)]
     pub terminal_delivery_committed: bool,
+    /// Original opened terminal FD (dev, ino); recovery must not synthesize this from a pathname.
+    #[serde(default)]
+    pub tui_terminal_source_file_identity: Option<(u64, u64)>,
     #[serde(default)]
     pub current_tool_line: Option<String>,
     #[serde(default)]
@@ -1067,6 +1070,7 @@ impl InflightTurnState {
             full_response: String::new(),
             response_sent_offset: 0,
             terminal_delivery_committed: false,
+            tui_terminal_source_file_identity: None,
             current_tool_line: None,
             last_tool_name: None,
             last_tool_summary: None,
