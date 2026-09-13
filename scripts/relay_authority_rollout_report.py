@@ -461,6 +461,7 @@ def delivery_boundary_counts(events: list[dict]) -> dict:
                     # An operation timestamp must stand on its own; publication time
                     # may locate malformed records, but cannot validate evidence.
                     and event_time({"observed_at": event.get("observed_at")}) is not None
+                    and event.get("publish_reason") == "operation_result"
                     and _uint(event.get("current_message_id"), zero=True)
                     and (event.get("turn_id") is None or type(event["turn_id"]) is int)):
                 counts["unknown"] += 1

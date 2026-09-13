@@ -1014,7 +1014,8 @@ class RowlessRangeReportTest(unittest.TestCase):
 class DeliveryBoundaryReportTest(unittest.TestCase):
     @staticmethod
     def operation(metric, value, turn=1, observed=BASE):
-        item = event(site=report.BOUNDARY_METRICS[metric], turn=turn, observed=observed)
+        item = event(site=report.BOUNDARY_METRICS[metric], turn=turn, observed=observed,
+                     publish_reason="operation_result")
         item.pop("axis_a")
         item.update(current_message_id=100 + turn, **{metric: value})
         if metric == "frontier_already_covers":
@@ -1041,6 +1042,20 @@ class DeliveryBoundaryReportTest(unittest.TestCase):
         self.assertEqual(result[cleanup]["recovery_unknown"], 1)
         rows[0].pop(terminal)
         self.assertEqual(report.delivery_boundary_counts(rows)[terminal]["unknown"], 2)
+        for metric in (terminal, cleanup):
+            for value in (False, True):
+                for reason in (None, "loop_exit"):
+                    with self.subTest(metric=metric, value=value, reason=reason):
+                        item = self.operation(metric, value)
+                        if reason is None:
+                            item.pop("publish_reason")
+                        else:
+                            item["publish_reason"] = reason
+                        result = RolloutReportTest().run_report([
+                            event(site="bridge_entry", turn=1, observed=BASE), item
+                        ])["target_segment"]["delivery_boundary_outcomes"][metric]
+                        self.assertEqual([result[key] for key in ("true", "false", "unknown")], [0, 0, 1])
+                        self.assertIsNone(result["share"])
 
     def test_cleanup_invalid_identity_and_outcomes_stay_unknown_in_reader(self):
         metric = "unbound_anchor_left"
