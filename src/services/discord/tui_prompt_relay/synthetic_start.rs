@@ -334,26 +334,15 @@ async fn claim_tui_direct_synthetic_turn_prepared(
         }
     }
 
-    if mailbox_activation_occurred {
-        super::super::increment_global_active(shared, "tui_direct_synthetic_save");
-        shared
-            .turn_start_times
-            .insert(channel_id, std::time::Instant::now());
-    }
-    if !bridge_handoff::record(
+    if !bridge_handoff::record_admitted(
+        shared,
         &inflight_state,
         active_snapshot.cancel_token.as_ref(),
         pg_pin,
-    ) {
-        if mailbox_activation_occurred {
-            bridge_handoff::release_unrecorded_actor(
-                shared,
-                &inflight_state,
-                active_snapshot.cancel_token.as_ref(),
-                true,
-            )
-            .await;
-        }
+        mailbox_activation_occurred,
+    )
+    .await
+    {
         return TuiDirectSyntheticTurnClaim::new(relay_owner, false, start_offset);
     }
     tracing::info!(

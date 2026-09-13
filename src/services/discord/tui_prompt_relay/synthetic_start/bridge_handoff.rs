@@ -94,18 +94,36 @@ pub(super) async fn refresh_existing(
         &expected,
         "tui_direct_synthetic_refresh",
     );
-    let claimed = saved == GuardedSaveOutcome::Saved && record(&row, actor, pg_pin);
+    let claimed = if saved == GuardedSaveOutcome::Saved {
+        record_admitted(shared, &row, actor, pg_pin, freshly_admitted).await
+    } else {
+        if freshly_admitted {
+            release_unrecorded_actor(shared, &row, actor, false).await;
+        }
+        false
+    };
+    TuiDirectSyntheticTurnClaim::new(relay_owner, claimed, start)
+}
+
+pub(super) async fn record_admitted(
+    shared: &Arc<SharedData>,
+    row: &InflightTurnState,
+    actor: Option<&Arc<CancelToken>>,
+    pg_pin: Option<HookSessionActorPin>,
+    freshly_admitted: bool,
+) -> bool {
+    let claimed = record(row, actor, pg_pin);
     if freshly_admitted {
         if claimed {
-            super::super::super::increment_global_active(shared, "tui_direct_synthetic_refresh");
+            super::super::super::increment_global_active(shared, "tui_direct_synthetic_claim");
             shared
                 .turn_start_times
                 .insert(ChannelId::new(row.channel_id), std::time::Instant::now());
         } else {
-            release_unrecorded_actor(shared, &row, actor, false).await;
+            release_unrecorded_actor(shared, row, actor, false).await;
         }
     }
-    TuiDirectSyntheticTurnClaim::new(relay_owner, claimed, start)
+    claimed
 }
 
 pub(super) async fn release_unrecorded_actor(
