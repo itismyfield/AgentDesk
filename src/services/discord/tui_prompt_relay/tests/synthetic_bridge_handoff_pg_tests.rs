@@ -1,6 +1,23 @@
 use super::*;
 
 #[cfg(unix)]
+fn spawn_handoff_reader(
+    path: &Path, start: u64, tx: mpsc::Sender<StreamMessage>,
+    end: tokio::sync::oneshot::Sender<Result<(u64, bool), String>>,
+) -> std::thread::JoinHandle<()> {
+    let path = path.to_str().unwrap().to_owned();
+    std::thread::spawn(move || {
+        let result = crate::services::session_backend::read_output_file_until_result_with_harvest(
+            &path, start, tx, None, crate::services::provider::SessionProbe::process(|| true),
+        );
+        let _ = end.send(result.map(|(result, stats)| match result {
+            ReadOutputResult::Completed { offset } => (offset, stats.decoded_terminal),
+            ReadOutputResult::SessionDied { offset } | ReadOutputResult::Cancelled { offset } => (offset, false),
+        }).map_err(|error| error.error));
+    })
+}
+
+#[cfg(unix)]
 fn synthetic_bridge_handoff_fixture(
     delayed_save: bool,
     foreign_actor: bool,
@@ -11,6 +28,8 @@ fn synthetic_bridge_handoff_fixture(
     source_retry: bool,
     empty_tail: Option<bool>,
     postgres_race: bool,
+    admission_race: bool,
+    prefix_read_error: bool,
 ) {
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
@@ -69,6 +88,31 @@ fn synthetic_bridge_handoff_fixture(
                 tmux,
                 lease,
             );
+            if admission_race {
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let resume = Arc::new(tokio::sync::Notify::new());
+                *synthetic_start::bridge_handoff::ADMISSION_PAUSE.lock().unwrap() =
+                    Some((channel.get(), entered.clone(), resume.clone()));
+                let attempt = synthetic_start::claim_tui_direct_synthetic_turn_inner::<false>(
+                    &shared, &provider, channel, tmux, "handoff prompt", anchor, &lease,
+                );
+                let replace = async {
+                    entered.notified().await;
+                    let original = crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.unwrap();
+                    crate::services::discord::mailbox_finish_turn(&shared, &provider, channel).await;
+                    let successor = Arc::new(CancelToken::from_persisted_turn_nonce(original.turn_nonce().map(str::to_owned)));
+                    assert!(crate::services::discord::mailbox_try_start_turn(
+                        &shared, channel, successor.clone(), serenity::UserId::new(TUI_DIRECT_SYNTHETIC_OWNER_USER_ID), anchor,
+                    ).await);
+                    resume.notify_one();
+                    successor
+                };
+                let (claim, successor) = tokio::join!(attempt, replace);
+                assert!(!claim.claimed, "inline admission cannot adopt its same-nonce successor");
+                assert!(crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).is_none());
+                assert!(Arc::ptr_eq(&crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.unwrap(), &successor));
+                return;
+            }
             let mut claim = Some(async {
                 if failed_save {
                     use crate::services::discord::{inflight, tui_direct_pending_start as pending};
@@ -328,17 +372,12 @@ fn synthetic_bridge_handoff_fixture(
             // transport; a headless fixture would wait on an unrelated outbox.
             let gateway = Arc::new(S3Gateway { local_delivery: true, ..Default::default() });
             let (tx, rx) = mpsc::channel();
+            let (end_tx, end_rx) = tokio::sync::oneshot::channel();
             let delivery = claude_idle_bridge::stream_tui_idle_response_with_gateway(
                 &shared, provider.clone(), channel, tmux, &output, original_start,
-                "handoff prompt", Vec::new(), rx, &resumed, gateway.clone(), 0,
+                "handoff prompt", Vec::new(), rx, Some(end_rx), &resumed, gateway.clone(), 0,
             );
-            let reader_path = output.to_str().unwrap().to_owned();
-            let reader = std::thread::spawn(move || {
-                crate::services::session_backend::read_output_file_until_result(
-                    &reader_path, original_start, tx, None,
-                    crate::services::provider::SessionProbe::process(|| true),
-                )
-            });
+            let reader = spawn_handoff_reader(&output, original_start, tx, end_tx);
             let observe = async {
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !gateway
@@ -362,14 +401,50 @@ fn synthetic_bridge_handoff_fixture(
                 crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get())
                     .is_some()
             );
+            if prefix_read_error {
+                let _fault = crate::services::provider::read_fault::after_offset(
+                    &output, std::fs::metadata(&output).unwrap().len(),
+                );
+                tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
+                return;
+            }
             use std::io::Write;
             let terminal = serde_json::json!({"type":"result", "subtype":"success", "result":body});
             std::fs::OpenOptions::new().append(true).open(&output).unwrap()
                 .write_all(format!("{terminal}\n").as_bytes()).unwrap();
-            tokio::task::spawn_blocking(move || reader.join().unwrap().unwrap()).await.unwrap();
+            tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
             };
             let (delivered, ()) = tokio::join!(tokio::time::timeout(Duration::from_secs(5), delivery), observe);
-            delivered.expect("actual adapter must finish within the original test bound").expect("actual idle adapter terminal publication completes");
+            let delivered = delivered.expect("actual adapter must finish within the original test bound");
+            if prefix_read_error {
+                assert!(delivered.is_err(), "a prefix followed by reader failure is not a terminal");
+                let retained = crate::services::discord::inflight::load_inflight_state_read_only(&provider, channel.get()).expect("reader failure retains its durable obligation");
+                assert_eq!(retained.full_response, body);
+                assert!(!retained.terminal_delivery_committed);
+                assert_eq!(retained.turn_start_offset, Some(original_start));
+                assert!(Arc::ptr_eq(&crate::services::discord::mailbox_snapshot(&shared, channel).await.cancel_token.unwrap(), &original_actor));
+                assert_eq!(crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux).unwrap().last_offset, source_start);
+                // Refresh the same captured actor, then resume at the saved read
+                // cursor with its body and confirmed prefix intact.
+                let renewed = crate::services::tui_prompt_dedupe::record_external_input_turn_lease(provider.as_str(), tmux, lease.clone());
+                assert!(synthetic_start::claim_tui_direct_synthetic_turn(
+                    &shared, &provider, channel, tmux, "handoff prompt", anchor, &renewed,
+                ).await.claimed);
+                use std::io::Write;
+                let terminal = serde_json::json!({"type":"result", "subtype":"success", "result":body});
+                std::fs::OpenOptions::new().append(true).open(&output).unwrap().write_all(format!("{terminal}\n").as_bytes()).unwrap();
+                let (tx, rx) = mpsc::channel();
+                let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+                let reader = spawn_handoff_reader(&output, retained.last_offset, tx, end_tx);
+                tokio::time::timeout(Duration::from_secs(5), claude_idle_bridge::stream_tui_idle_response_with_gateway(
+                    &shared, provider.clone(), channel, tmux, &output, retained.last_offset,
+                    "handoff prompt", Vec::new(), rx, Some(end_rx), &renewed, gateway.clone(), 0,
+                )).await.expect("resumed adapter finishes").expect("the original saved prefix and later terminal remain deliverable");
+                tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
+                assert!(gateway.bodies.lock().unwrap().iter().filter(|sent| sent.contains("첫 프레임")).all(|sent| sent.matches("첫 프레임").count() == 16), "resume must not append the already saved prefix again");
+            } else {
+                delivered.expect("actual idle adapter terminal publication completes");
+            }
             let source_end = std::fs::metadata(&output).unwrap().len();
             let record = crate::services::discord::outbound::delivery_record::read_record(
                 &provider, channel.get(),
@@ -411,31 +486,31 @@ fn synthetic_bridge_handoff_fixture(
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_delivers_first_frame_and_releases_original_actor() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false);
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, false, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_waits_for_later_claim_save_then_delivers() {
-    synthetic_bridge_handoff_fixture(true, false, false, false, None, false, false, None, false);
+    synthetic_bridge_handoff_fixture(true, false, false, false, None, false, false, None, false, false, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_same_nonce_different_actor() {
-    synthetic_bridge_handoff_fixture(false, true, false, false, None, false, false, None, false);
+    synthetic_bridge_handoff_fixture(false, true, false, false, None, false, false, None, false, false, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_rejects_different_source_without_row_mutation() {
-    synthetic_bridge_handoff_fixture(false, false, true, false, None, false, false, None, false);
+    synthetic_bridge_handoff_fixture(false, false, true, false, None, false, false, None, false, false, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_upserts_missing_postgres_session_before_first_frame() {
-    synthetic_bridge_handoff_fixture(false, false, false, true, None, false, false, None, false);
+    synthetic_bridge_handoff_fixture(false, false, false, true, None, false, false, None, false, false, false);
 }
 
 #[cfg(unix)]
@@ -450,6 +525,8 @@ fn synthetic_bridge_handoff_retries_unpublished_row_after_adapter_drops() {
         false,
         false,
         None,
+        false,
+        false,
         false,
     );
 }
@@ -467,19 +544,21 @@ fn synthetic_bridge_handoff_restarts_from_persisted_source_after_mailbox_loss() 
         false,
         None,
         false,
+        false,
+        false,
     );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_failed_inline_save_retries_original_bytes() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, true, false, None, false);
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, true, false, None, false, false, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_retry_preserves_original_source_and_cursor() {
-    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, true, None, false);
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, true, None, false, false, false);
 }
 
 #[cfg(unix)]
@@ -494,6 +573,8 @@ fn synthetic_bridge_handoff_reader_error_retains_obligation_then_delivers() {
         false,
         false,
         Some(false),
+        false,
+        false,
         false,
     );
 }
@@ -511,11 +592,25 @@ fn synthetic_bridge_handoff_decoded_empty_terminal_releases_only_original_episod
         false,
         Some(true),
         false,
+        false,
+        false,
     );
 }
 
 #[cfg(unix)]
 #[test]
 fn synthetic_bridge_handoff_delayed_pg_adapter_preserves_successor_session() {
-    synthetic_bridge_handoff_fixture(false, false, false, true, None, false, false, None, true);
+    synthetic_bridge_handoff_fixture(false, false, false, true, None, false, false, None, true, false, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn synthetic_bridge_handoff_inline_admission_rejects_replacement_actor() {
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, true, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn synthetic_bridge_handoff_prefix_then_read_error_retains_original_obligation() {
+    synthetic_bridge_handoff_fixture(false, false, false, false, None, false, false, None, false, false, true);
 }

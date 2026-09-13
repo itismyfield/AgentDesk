@@ -10,6 +10,8 @@ pub(crate) mod cancel_token_cleanup;
 mod cancel_watchdog;
 pub(crate) mod channel_rules;
 mod registry;
+#[cfg(test)]
+pub(crate) mod read_fault;
 pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 use cancel_watchdog::{current_unix_millis, enforce_watchdog_deadline};
 pub use registry::{
@@ -1598,7 +1600,11 @@ where
             });
         }
 
-        match file.read(&mut buf) {
+        #[cfg(test)]
+        let read_result = read_fault::read(output_path, current_offset, || file.read(&mut buf));
+        #[cfg(not(test))]
+        let read_result = file.read(&mut buf);
+        match read_result {
             Ok(0) => {
                 no_data_count += 1;
                 if no_data_count % 25 == 0 {

@@ -441,22 +441,16 @@ pub(super) async fn run_claude_idle_response_tail(
         &prompt_text,
         prefix,
         reader_rx,
+        Some(offset_rx),
         &lease,
     )
     .await;
     if delivery_result.is_err() {
         tracing::warn!(error = ?delivery_result, "Claude TUI-direct delivery failed; preserving successor and cursor");
     }
-    // #3041 / #3256: advance the runtime-binding offset on successful delivery so
-    // the watcher / idle paths never double-send this turn's bytes. The reader
-    // reports the authoritative final offset over `offset_rx`.
-    let final_offset = match offset_rx.await {
-        Ok(Ok((offset, _))) => Some(offset),
-        _ => None,
-    };
-    if let Some(final_offset) = final_offset
-        && tui_idle_tail_stream_should_commit_runtime_binding_offset(delivery_result.is_ok())
-    {
+    // The adapter consumes reader completion before Done. Only a decoded
+    // terminal plus committed publication can advance this source cursor.
+    if let Ok(Some(final_offset)) = delivery_result {
         advance_claude_tmux_runtime_binding_offset(
             &tmux_session_name,
             &transcript_path,

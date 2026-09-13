@@ -6224,7 +6224,7 @@ fn contending_turn_identities_keep_exactly_one_relay_owner() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 mod synthetic_bridge_handoff_pg_tests;
 
 #[cfg(unix)]

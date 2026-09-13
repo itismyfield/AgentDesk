@@ -15,6 +15,41 @@ struct Witness {
 static CLAIMS: LazyLock<Mutex<std::collections::HashMap<(String, u64), Witness>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
+#[cfg(test)]
+pub(in crate::services::discord::tui_prompt_relay) static ADMISSION_PAUSE: Mutex<
+    Option<(u64, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+> = Mutex::new(None);
+
+#[cfg(test)]
+pub(super) async fn pause_after_admission_for_test(channel: ChannelId) {
+    let pause = {
+        let mut slot = ADMISSION_PAUSE.lock().unwrap();
+        if slot.as_ref().is_some_and(|(id, _, _)| *id == channel.get()) {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, entered, resume)) = pause {
+        entered.notify_one();
+        resume.notified().await;
+    }
+}
+
+pub(super) async fn actor_is_current(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    anchor: MessageId,
+    actor: &Arc<CancelToken>,
+) -> bool {
+    let current = super::super::super::mailbox_snapshot(shared, channel).await;
+    current.active_user_message_id == Some(anchor)
+        && current
+            .cancel_token
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, actor))
+}
+
 pub(super) fn refresh_actor_matches(
     row: &InflightTurnState,
     actor: Option<&Arc<CancelToken>>,
@@ -112,7 +147,19 @@ pub(super) async fn record_admitted(
     pg_pin: Option<HookSessionActorPin>,
     freshly_admitted: bool,
 ) -> bool {
-    let claimed = record(row, actor, pg_pin);
+    let still_owned = match actor {
+        Some(actor) => {
+            actor_is_current(
+                shared,
+                ChannelId::new(row.channel_id),
+                MessageId::new(row.user_msg_id),
+                actor,
+            )
+            .await
+        }
+        None => false,
+    };
+    let claimed = still_owned && record(row, actor, pg_pin);
     if freshly_admitted {
         if claimed {
             super::super::super::increment_global_active(shared, "tui_direct_synthetic_claim");

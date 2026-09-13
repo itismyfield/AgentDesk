@@ -287,8 +287,9 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
     prompt_text: &str,
     prefix: Vec<StreamMessage>,
     reader_rx: mpsc::Receiver<StreamMessage>,
+    reader_end: Option<tokio::sync::oneshot::Receiver<Result<(u64, bool), String>>>,
     lease: &ExternalInputRelayLease,
-) -> Result<(), String> {
+) -> Result<Option<u64>, String> {
     let _lease_guard = TuiDirectExternalInputLeaseGuard::new(
         provider.clone(),
         tmux_session_name,
@@ -332,6 +333,7 @@ pub(super) async fn stream_tui_idle_response_through_bridge(
         prompt_text,
         prefix,
         reader_rx,
+        reader_end,
         lease,
         gateway,
         context_compact_percent,
@@ -351,10 +353,11 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
     prompt_text: &str,
     prefix: Vec<StreamMessage>,
     reader_rx: mpsc::Receiver<StreamMessage>,
+    reader_end: Option<tokio::sync::oneshot::Receiver<Result<(u64, bool), String>>>,
     lease: &ExternalInputRelayLease,
     gateway: Arc<dyn super::super::gateway::TurnGateway>,
     context_compact_percent: u64,
-) -> Result<(), String> {
+) -> Result<Option<u64>, String> {
     let claim = super::synthetic_start::bridge_handoff::capture(
         shared,
         &provider,
@@ -364,6 +367,9 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
         lease,
     )
     .await?;
+    if !claim.row.full_response.is_empty() && start_offset < claim.row.last_offset {
+        return Err("idle continuation must resume from its saved source cursor".into());
+    }
     let user_msg_id = MessageId::new(claim.row.user_msg_id);
     let current_msg_id = MessageId::new(claim.row.current_msg_id);
     let anchor = crate::services::tui_prompt_dedupe::prompt_anchor_for_response(
@@ -393,8 +399,8 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
         context_window_tokens: 0,
         context_compact_percent,
         current_msg_id: Some(current_msg_id),
-        response_sent_offset: 0,
-        full_response: String::new(),
+        response_sent_offset: claim.row.response_sent_offset,
+        full_response: claim.row.full_response.clone(),
         tmux_last_offset: Some(start_offset),
         new_session_id: None,
         defer_watcher_resume: false,
@@ -433,10 +439,16 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
     // Forward the buffered prefix + the live reader stream into the SINGLE
     // bridge `tx` on a blocking thread (the reader receiver and the bridge
     // sender are both sync `mpsc`). The bridge finalizes on the first terminal
-    // `Done`; we send a fallback `Done` only if the reader closed without one
-    // so the bridge always finalizes EXACTLY ONCE.
+    // `Done`; Claude terminal frames wait for the reader completion proof.
+    // A failed reader leaves the captured episode available for recovery.
     let forward_handle = tokio::task::spawn_blocking(move || {
-        forward_idle_stream_into_bridge_with_logging(prefix, reader_rx, tx, Some(frame_log_context))
+        forward_idle_stream_into_bridge_with_logging(
+            prefix,
+            reader_rx,
+            tx,
+            reader_end,
+            Some(frame_log_context),
+        )
     });
 
     // #3256: the forward thread runs for the WHOLE turn — it only returns once the
@@ -448,7 +460,7 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
     // placed before this join made >180s turns return `Err` despite a normal
     // delivery, which skipped the runtime-binding offset commit and risked a
     // duplicate re-relay on the next idle poll.
-    let _ = forward_handle.await;
+    let reader_outcome = forward_handle.await.map_err(|error| error.to_string());
 
     // Only NOW bound the post-`Done` bridge finalization (Discord edit/flush),
     // which should land within seconds of the terminal frame being forwarded.
@@ -465,7 +477,9 @@ pub(super) async fn stream_tui_idle_response_with_gateway(
     )
     .await;
     claim.preserve_continuation(shared).await;
-    result
+    let (_, source_offset) = reader_outcome?;
+    let source_offset = source_offset?;
+    result.map(|()| source_offset)
 }
 
 // Shared by both adapters; only Finalized may acknowledge delivery or clear the anchor.
@@ -556,11 +570,10 @@ pub(super) async fn finish_idle_bridge_completion(
 ///   left off.`) is stripped from the FIRST non-empty `Text` frame, matching
 ///   the old `compose_tui_idle_response` behavior so the streamed card never
 ///   flashes that chrome.
-/// - The transcript reader normally emits a terminal `Done` itself; if the
-///   stream closes WITHOUT one (e.g. dead session mid-stream), a synthetic
-///   `Done` is appended so the bridge still finalizes. A `Done` is forwarded at
-///   most once — subsequent frames after a `Done` are dropped, since the bridge
-///   has already claimed the turn outcome ("first wins").
+/// - The legacy forwarding helper retains its existing fallback Done. The
+///   production Claude adapter supplies reader completion evidence and keeps
+///   one Done pending until a real decoded terminal is confirmed. Failed reads
+///   close the stream while preserving the durable episode for recovery.
 ///
 /// Returns the number of `Text`-content frames forwarded (used by tests to
 /// prove progressive relay: more than one before the terminal `Done`).
@@ -571,7 +584,7 @@ pub(super) fn forward_idle_stream_into_bridge(
     reader_rx: mpsc::Receiver<StreamMessage>,
     tx: mpsc::Sender<StreamMessage>,
 ) -> usize {
-    forward_idle_stream_into_bridge_with_logging(prefix, reader_rx, tx, None)
+    forward_idle_stream_into_bridge_with_logging(prefix, reader_rx, tx, None, None).0
 }
 
 #[cfg(unix)]
@@ -579,8 +592,9 @@ fn forward_idle_stream_into_bridge_with_logging(
     prefix: Vec<StreamMessage>,
     reader_rx: mpsc::Receiver<StreamMessage>,
     tx: mpsc::Sender<StreamMessage>,
+    reader_end: Option<tokio::sync::oneshot::Receiver<Result<(u64, bool), String>>>,
     log_context: Option<IdleStreamFrameLogContext>,
-) -> usize {
+) -> (usize, Result<Option<u64>, String>) {
     let mut first_text_seen = false;
     let mut done_forwarded = false;
     let mut text_frames_forwarded = 0usize;
@@ -643,34 +657,47 @@ fn forward_idle_stream_into_bridge_with_logging(
         true
     };
 
-    for message in prefix {
+    // Source readers can synthesize Done after inactivity. Keep at most one
+    // terminal frame until their positive decoder evidence arrives; prose still
+    // flows immediately. A failed reader closes the bridge without claiming Done.
+    let strict_terminal = reader_end.is_some();
+    let mut terminal = None;
+    for message in prefix.into_iter().chain(reader_rx) {
+        if strict_terminal && (terminal.is_some() || matches!(message, StreamMessage::Done { .. }))
+        {
+            if terminal.is_none() {
+                terminal = Some(message);
+            }
+            continue;
+        }
         if !forward(
             message,
             &mut first_text_seen,
             &mut done_forwarded,
             &mut text_frames_forwarded,
         ) {
-            return text_frames_forwarded;
+            return (
+                text_frames_forwarded,
+                Err("idle bridge receiver closed".into()),
+            );
         }
     }
-    while let Ok(message) = reader_rx.recv() {
-        if !forward(
-            message,
-            &mut first_text_seen,
-            &mut done_forwarded,
-            &mut text_frames_forwarded,
-        ) {
-            return text_frames_forwarded;
-        }
-    }
-
-    if !done_forwarded {
-        let _ = tx.send(StreamMessage::Done {
+    let source_offset = match reader_end {
+        Some(end) => match end.blocking_recv() {
+            Ok(Ok((offset, true))) => Ok(Some(offset)),
+            Ok(Ok((_, false))) => Err("idle source reader ended without a decoded terminal".into()),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(format!("idle source reader lost its completion: {error}")),
+        },
+        None => Ok(None),
+    };
+    if source_offset.is_ok() && !done_forwarded {
+        let _ = tx.send(terminal.unwrap_or(StreamMessage::Done {
             result: String::new(),
             session_id: None,
-        });
+        }));
     }
-    text_frames_forwarded
+    (text_frames_forwarded, source_offset)
 }
 
 #[cfg(unix)]
