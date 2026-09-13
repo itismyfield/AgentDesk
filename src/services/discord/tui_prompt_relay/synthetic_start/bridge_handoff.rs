@@ -490,37 +490,12 @@ async fn capture_dormant(
     let provider = row.provider_kind()?;
     let channel = ChannelId::new(row.channel_id);
     let tmux = row.tmux_session_name.as_deref()?;
-    #[cfg(test)]
-    eprintln!("dormant_retry_diag: claim serial acquisition");
     let serial = super::super::super::tui_direct_pending_start::channel_lock(
         provider.as_str(),
         row.channel_id,
     )
     .try_lock_owned()
     .ok()?;
-    #[cfg(test)]
-    eprintln!(
-        "dormant_retry_diag: claim profile source={:?} runtime={:?} user={} owner={} injected={:?} relay={:?} path_matches={} external={:?} rebind={} start={:?} nonce={:?} tail={} watcher={} producer={}",
-        row.turn_source,
-        row.runtime_kind,
-        row.user_msg_id,
-        row.request_owner_user_id,
-        row.injected_prompt_message_id,
-        row.effective_relay_owner_kind(),
-        row.output_path.as_deref().map(Path::new) == Some(output),
-        row.external_turn_id,
-        row.rebind_origin,
-        row.turn_start_offset,
-        row.turn_nonce,
-        CLAUDE_IDLE_RESPONSE_TAILS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .contains(tmux),
-        tui_direct_watcher_can_own_output(&shared.tmux_watchers, tmux, Some(output)),
-        crate::services::cluster::relay_producer_registry::global_relay_producer_registry()
-            .get_live_producer(tmux)
-            .is_some()
-    );
     if row.turn_source != TurnSource::ExternalInput
         || row.runtime_kind != Some(RuntimeHandoffKind::ClaudeTui)
         || row.user_msg_id == 0
@@ -548,17 +523,6 @@ async fn capture_dormant(
         tmux,
         row.channel_id,
     );
-    #[cfg(test)]
-    eprintln!(
-        "dormant_retry_diag: claim lease present={} turn_matches={} session_matches={}",
-        live_lease.is_some(),
-        live_lease
-            .as_ref()
-            .is_none_or(|lease| lease.turn_id == row.external_turn_id),
-        live_lease
-            .as_ref()
-            .is_none_or(|lease| lease.session_key == row.session_key)
-    );
     if live_lease.as_ref().is_some_and(|lease| {
         lease.turn_id != row.external_turn_id
             || lease.session_key != row.session_key
@@ -569,20 +533,11 @@ async fn capture_dormant(
     let captured_pg_pin = capture_session_pin(shared, row.session_key.as_deref())
         .await
         .ok()?;
-    #[cfg(test)]
-    eprintln!("dormant_retry_diag: claim session_pin accepted; locking row");
     let pin = InflightEpisodePin::from_state(row);
     let locked =
         super::super::super::inflight::lock_inflight_episode(&provider, row.channel_id, &pin)
             .ok()?;
     let current = locked.state();
-    #[cfg(test)]
-    eprintln!(
-        "dormant_retry_diag: claim row locked sent={} body={} committed={} unpublished_only={unpublished_only}",
-        current.response_sent_offset,
-        current.full_response.len(),
-        current.terminal_delivery_committed
-    );
     let resumable_body = if unpublished_only {
         current.response_sent_offset == 0
             && current.full_response.is_empty()
@@ -600,15 +555,6 @@ async fn capture_dormant(
             .unwrap_or_else(|error| error.into_inner())
             .get(&(provider.as_str().to_owned(), row.channel_id))
             .is_some_and(|witness| {
-                #[cfg(test)]
-                eprintln!(
-                    "dormant_retry_diag: claim witness saved={:?} requested={pin:?} same_actor={}",
-                    witness.episode,
-                    witness
-                        .actor
-                        .upgrade()
-                        .is_some_and(|saved| Arc::ptr_eq(&saved, &actor))
-                );
                 witness.episode == pin
                     && witness
                         .actor
@@ -616,11 +562,6 @@ async fn capture_dormant(
                         .is_some_and(|saved| Arc::ptr_eq(&saved, &actor))
             });
         if !proven || actor.cancelled.load(Ordering::Relaxed) {
-            #[cfg(test)]
-            eprintln!(
-                "dormant_retry_diag: claim actor rejected proven={proven} cancelled={}",
-                actor.cancelled.load(Ordering::Relaxed)
-            );
             return None;
         }
         actor
@@ -657,15 +598,11 @@ async fn capture_dormant(
         actor
     };
     let pg_pin = original_session_pin(locked.state(), Some(&actor)).unwrap_or(captured_pg_pin);
-    #[cfg(test)]
-    eprintln!("dormant_retry_diag: claim actor accepted; recording");
     if !record(locked.state(), Some(&actor), pg_pin) {
         release_unrecorded_actor(shared, locked.state(), Some(&actor), true).await;
         return None;
     }
     let current = locked.state().clone();
-    #[cfg(test)]
-    eprintln!("dormant_retry_diag: claim record accepted");
     drop(locked);
     let mut lease = ExternalInputRelayLease::unassigned(Some(row.channel_id));
     lease.turn_id = row.external_turn_id.clone();
