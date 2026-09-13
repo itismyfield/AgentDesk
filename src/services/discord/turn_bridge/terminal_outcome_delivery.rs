@@ -165,7 +165,8 @@ pub(super) async fn run_terminal_outcome_delivery(
 
     if may_publish
         && !(provider == ProviderKind::Claude
-            && inflight_state.runtime_kind == Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
+            && inflight_state.runtime_kind
+                == Some(crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui)
             && admitted.is_some())
         && !bridge_output_owner
             .map(|owner| owner.skips_bridge_spinner_cleanup())
