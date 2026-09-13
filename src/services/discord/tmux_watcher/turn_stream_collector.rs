@@ -272,6 +272,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
     // so reset it after the deferred initial forward and keep watcher ownership.
     let mut full_response = stream_seed.full_response;
     let mut tool_state = WatcherToolState::new();
+    tool_state.set_provider(&watcher_provider);
 
     let mut spin_idx: usize = 0;
     let mut placeholder_msg_id: Option<serenity::MessageId> = stream_seed.placeholder_msg_id;
@@ -289,6 +290,41 @@ pub(super) async fn collect_turn_stream_until_terminal(
         &watcher_provider,
         channel_id.get(),
     );
+    if watcher_provider == ProviderKind::Codex
+        && let Some(row) = startup_inflight_snapshot.as_ref()
+        && row.runtime_kind == Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui)
+        && row.tmux_session_name.as_deref() == Some(tmux_session_name.as_str())
+        && row.output_path.as_deref() == Some(output_path.as_str())
+        && let Some(start) = row.turn_start_offset
+        && start <= turn_data_start_offset
+    {
+        let token = shared.relay_frontier_token(channel_id);
+        let mutation = (token.reset_incarnation == source_authority.reset_incarnation)
+            .then(|| shared.acquire_relay_frontier_mutation(channel_id, token))
+            .flatten();
+        if mutation.is_none() {
+            *parser.current_offset = data_start_offset;
+            utf8_decoder.clear_pending();
+            return CollectOutcome::ContinueWatcherLoop;
+        }
+        match read_native_codex_state(
+            &output_path,
+            start,
+            turn_data_start_offset,
+            source_authority.source_file,
+            &tmux_session_name,
+            source_authority.generation_mtime_ns,
+            source_authority.source_stamp,
+        ) {
+            Ok(decoder) => tool_state.restore_native_codex(decoder, &mut full_response),
+            Err(error) => {
+                tracing::warn!(channel_id = channel_id.get(), %error, "native Codex restart prefix unavailable; retaining turn for retry");
+                *parser.current_offset = data_start_offset;
+                utf8_decoder.clear_pending();
+                return CollectOutcome::ContinueWatcherLoop;
+            }
+        }
+    }
     // #3805 P2 (PR-C): this turn's status-panel generation epoch, SEEDED from
     // the on-disk row so a restart re-hydrating an existing panel carries the
     // SAME epoch it was created with (a stale-epoch completion is thus never
@@ -644,6 +680,8 @@ pub(super) async fn collect_turn_stream_until_terminal(
                 break;
             }
 
+            let read_witness =
+                watcher_source_witness(&watcher_provider, &tmux_session_name, &output_path);
             let read_more = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 tokio::task::spawn_blocking({
@@ -659,9 +697,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                     let authority = source_authority_for_read(
                         source_authority,
                         &tmux_session_name,
-                        crate::services::discord::delivery_lease_cell::source_epoch_observer::marker_if_enabled(
-                            &tmux_session_name,
-                        ),
+                        read_witness,
                         file_identity,
                     );
                     current_offset = off;

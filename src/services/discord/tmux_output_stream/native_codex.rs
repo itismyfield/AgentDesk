@@ -2,6 +2,88 @@
 //! watcher's existing normalized-event path. Raw byte offsets stay in the
 //! outer reader; normalized render bytes never become source coordinates.
 use super::*;
+
+pub(in crate::services::discord) fn watcher_source_witness(
+    provider: &ProviderKind,
+    session: &str,
+    path: &str,
+) -> Option<crate::services::cluster::stream_relay::SourceWitness> {
+    use crate::services::discord::delivery_lease_cell::source_epoch_observer as observer;
+    let native = *provider == ProviderKind::Codex
+        && crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
+            .is_some_and(|binding| {
+                binding.runtime_kind
+                    == crate::services::agent_protocol::RuntimeHandoffKind::CodexTui
+                    && binding.output_path == path
+            });
+    if native {
+        Some(observer::read_source_epoch_witness(session))
+    } else {
+        observer::marker_if_enabled(session)
+    }
+}
+
+pub(in crate::services::discord) fn is_native_codex_payload(
+    provider: &ProviderKind,
+    payload: &str,
+) -> bool {
+    *provider == ProviderKind::Codex
+        && payload.lines().any(|line| {
+            serde_json::from_str(line).ok().is_some_and(|value| {
+                crate::services::codex_tui::rollout_tail::RolloutRecordDecoder::is_native_record(
+                    &value,
+                )
+            })
+        })
+}
+
+pub(in crate::services::discord) fn read_native_codex_state(
+    path: &str,
+    start: u64,
+    end: u64,
+    expected_file: crate::services::cluster::stream_relay::SourceFileIdentity,
+    session: &str,
+    generation: i64,
+    expected_stamp: Option<crate::services::cluster::stream_relay::SourceStamp>,
+) -> Result<crate::services::codex_tui::rollout_tail::RolloutRecordDecoder, String> {
+    use crate::services::cluster::stream_relay::SourceFileIdentity;
+    use std::io::{BufReader, Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    if expected_file == SourceFileIdentity::Unavailable
+        || SourceFileIdentity::from_open_file(&file) != expected_file
+        || generation == 0
+        || read_generation_file_mtime_ns(session) != generation
+        || end < start
+        || end > file.metadata().map_err(|e| e.to_string())?.len()
+    {
+        return Err("native Codex restore source identity or range changed".into());
+    }
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| e.to_string())?;
+    // Stream only this turn's captured prefix; never allocate the whole rollout.
+    let mut range = file.take(end - start);
+    let decoder = crate::services::codex_tui::rollout_tail::RolloutRecordDecoder::from_reader(
+        BufReader::new(&mut range),
+    )?;
+    let current_file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let current_identity = SourceFileIdentity::from_open_file(&current_file);
+    let stamp_matches = expected_stamp.is_none_or(|expected| {
+        use crate::services::discord::delivery_lease_cell::source_epoch_observer as observer;
+        observer::source_stamp(
+            session,
+            observer::read_source_epoch_witness(session),
+            current_identity,
+        ) == Some(expected)
+    });
+    if range.limit() != 0
+        || read_generation_file_mtime_ns(session) != generation
+        || current_identity != expected_file
+        || !stamp_matches
+    {
+        return Err("native Codex restore source changed while reading".into());
+    }
+    Ok(decoder)
+}
 use crate::services::agent_protocol::StreamMessage;
 
 pub(super) fn process_native_codex_messages(

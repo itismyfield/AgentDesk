@@ -12,8 +12,8 @@ use super::RelaySuppressionSender;
 pub(crate) struct RolloutRecordDecoder(RolloutParseState);
 
 impl RolloutRecordDecoder {
-    pub(crate) fn decode(&mut self, record: &Value) -> Option<Vec<StreamMessage>> {
-        if !matches!(
+    pub(crate) fn is_native_record(record: &Value) -> bool {
+        matches!(
             record.get("type").and_then(Value::as_str),
             Some(
                 "session_meta"
@@ -22,14 +22,41 @@ impl RolloutRecordDecoder {
                     | "item.completed"
                     | "turn.completed"
             )
-        ) {
+        )
+    }
+
+    pub(crate) fn from_reader(reader: impl std::io::BufRead) -> Result<Self, String> {
+        replay_captured_reader(reader).map(Self)
+    }
+
+    pub(crate) fn response(&self) -> &str {
+        &self.0.final_text
+    }
+
+    pub(crate) fn completed_response(mut self) -> Result<String, String> {
+        super::promote_task_complete_fallback_text(&mut self.0);
+        if self.0.has_pending_tool_call()
+            || !self.0.turn_complete_seen
+            || !self.0.saw_assistant_text
+            || self.0.dropped_assistant_content
+        {
+            return Err("captured Codex range has no completed assistant response".into());
+        }
+        Ok(self.0.final_text)
+    }
+
+    pub(crate) fn decode(&mut self, record: &Value) -> Option<Vec<StreamMessage>> {
+        if !Self::is_native_record(record) {
             return None;
         }
         let mut messages = decode_rollout_record(record, &mut self.0);
         // An agent-message item can finish before the next tool call starts.
         // Only a turn completion witness authorizes this streaming consumer;
         // pending tools may defer that witnessed completion until their output.
-        if self.0.turn_complete_seen && super::explicit_finalize_path(&mut self.0, true).is_some() {
+        if self.0.turn_complete_seen
+            && !self.0.dropped_assistant_content
+            && super::explicit_finalize_path(&mut self.0, true).is_some()
+        {
             messages.push(StreamMessage::Done {
                 result: self.0.final_text.clone(),
                 session_id: self.0.session_id.clone(),
@@ -43,12 +70,7 @@ impl RolloutRecordDecoder {
 /// text policy. Missing completion/text remains unknown, just as the live
 /// explicit-completion schema-drift guard requires.
 pub(crate) fn recover_captured_rollout_response(bytes: &[u8]) -> Result<String, String> {
-    let mut state = replay_captured_lines(bytes)?;
-    super::promote_task_complete_fallback_text(&mut state);
-    if state.has_pending_tool_call() || !state.turn_complete_seen || !state.saw_assistant_text {
-        return Err("captured Codex range has no completed assistant response".into());
-    }
-    Ok(state.final_text)
+    RolloutRecordDecoder::from_reader(bytes)?.completed_response()
 }
 
 pub(super) fn task_complete_fallback_supersedes_final_text(
@@ -65,6 +87,7 @@ pub(super) struct RolloutParseState {
     pub(super) session_id: Option<String>,
     pub(super) final_text: String,
     pub(super) saw_assistant_text: bool,
+    pub(super) dropped_assistant_content: bool,
     pub(super) lines_read: usize,
     pub(super) bytes_read: u64,
     pub(super) pending_tool_calls: HashSet<String>,
@@ -286,8 +309,9 @@ fn response_message_items(payload: &Value, state: &mut RolloutParseState) -> Vec
     content
         .iter()
         .filter_map(|item| {
-            let item_type = item.get("type").and_then(Value::as_str)?;
-            if item_type != "output_text" && item_type != "text" {
+            let item_type = item.get("type").and_then(Value::as_str);
+            if !matches!(item_type, Some("output_text" | "text")) {
+                state.dropped_assistant_content = true;
                 return None;
             }
             let text = item.get("text").and_then(Value::as_str)?.to_string();
@@ -470,10 +494,17 @@ fn compact_json_or_string(value: &Value) -> String {
 /// Replay a captured range through the same native Codex event parser, without
 /// a tmux actor or a live stream sender. Malformed bytes remain unresolved.
 pub(super) fn replay_captured_lines(bytes: &[u8]) -> Result<RolloutParseState, String> {
-    let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+    replay_captured_reader(bytes)
+}
+
+fn replay_captured_reader(reader: impl std::io::BufRead) -> Result<RolloutParseState, String> {
     let mut state = RolloutParseState::default();
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let json = serde_json::from_str::<Value>(line).map_err(|e| e.to_string())?;
+    for line in reader.lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let json = serde_json::from_str::<Value>(&line).map_err(|e| e.to_string())?;
         let _ = rollout_messages(&json, &mut state);
     }
     Ok(state)

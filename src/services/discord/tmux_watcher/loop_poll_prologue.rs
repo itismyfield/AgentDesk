@@ -293,10 +293,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         commit_poll_state!();
         return PollOutcome::ContinueWatcherLoop;
     };
-    let source_witness =
-        crate::services::discord::delivery_lease_cell::source_epoch_observer::marker_if_enabled(
-            tmux_session_name,
-        );
+    let source_witness = watcher_source_witness(watcher_provider, tmux_session_name, output_path);
     let source_generation_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
 
     let read_result = tokio::time::timeout(

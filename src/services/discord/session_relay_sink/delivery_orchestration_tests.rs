@@ -137,26 +137,64 @@ async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
 async fn native_codex_restart_sink_fixture() {
     use crate::services::discord::{inflight, mailbox_snapshot, mailbox_try_start_turn};
     use crate::services::provider::CancelToken;
-    for successor in [false, true] {
+    for (successor, retained_sink) in [(false, false), (false, true), (true, false)] {
         let temp = tempfile::tempdir().unwrap();
         let _root = crate::config::set_agentdesk_root_for_test(temp.path());
-        let channel = ChannelId::new(50710031 + u64::from(successor));
+        let channel =
+            ChannelId::new(50710031 + u64::from(successor) * 2 + u64::from(retained_sink));
+        let path = temp.path().join("rollout-restart.jsonl");
         let binding = super::tests::matched_codex(&channel.get().to_string());
+        assert_ne!(binding.expected_rollout_path, path.to_string_lossy());
         let tmux = &binding.expected_session_name;
         let generation_path = crate::services::tmux_common::session_temp_path(tmux, "generation");
         std::fs::create_dir_all(std::path::Path::new(&generation_path).parent().unwrap()).unwrap();
         std::fs::write(&generation_path, "117").unwrap();
         let generation = dr::current_generation_mtime_ns(tmux);
-        let path = temp.path().join("rollout-restart.jsonl");
         let prefix = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"original-codex\"}}\n";
+        let captured = concat!(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"working first\"}]}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"call_id\":\"pending\",\"arguments\":\"{}\"}}\n",
+        );
         let body = concat!(
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"ADK5071-native\"}}\n",
             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ADK5071-native\"}]}}\n",
-            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"ADK5071-native\"}}\n"
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"ADK5071-native\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"pending\",\"output\":\"done\"}}\n",
         );
-        std::fs::write(&path, format!("{prefix}{body}")).unwrap();
+        std::fs::write(&path, format!("{prefix}{captured}{body}")).unwrap();
         let start = prefix.len() as u64;
+        let cursor = start + captured.len() as u64;
         let end = std::fs::metadata(&path).unwrap().len();
+        crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
+            tmux,
+            crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
+                runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
+                output_path: path.to_string_lossy().into_owned(),
+                relay_output_path: None,
+                input_fifo_path: None,
+                session_id: Some("original-codex".into()),
+                last_offset: cursor,
+                relay_last_offset: None,
+            },
+        );
+        let file_identity =
+            crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(
+                &std::fs::File::open(&path).unwrap(),
+            );
+        // Native recovery needs the actual opened file even in the default Legacy mode.
+        let witness = crate::services::discord::tmux::watcher_source_witness(
+            &ProviderKind::Codex,
+            tmux,
+            path.to_str().unwrap(),
+        )
+        .unwrap();
+        let stamp =
+            crate::services::discord::delivery_lease_cell::source_epoch_observer::source_stamp(
+                tmux,
+                witness,
+                file_identity,
+            )
+            .unwrap();
         let mut row = inflight_with_identity_offset(
             channel.get(),
             tmux,
@@ -166,10 +204,11 @@ async fn native_codex_restart_sink_fixture() {
         );
         row.provider = "codex".into();
         row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
+        row.last_offset = cursor;
+        row.full_response = "working first".into();
         row.turn_source = TurnSource::ExternalInput;
         row.injected_prompt_message_id = Some(row.user_msg_id);
         row.output_path = Some(path.display().to_string());
-        row.last_offset = start;
         row.turn_nonce = Some("37157420-570f-43c9-9c65-561a7ee8fddc".into());
         row.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
         row.set_relay_owner_kind(RelayOwnerKind::SessionBoundRelay);
@@ -201,27 +240,55 @@ async fn native_codex_restart_sink_fixture() {
         let mut sink = SessionBoundDiscordRelaySink::new(registry);
         sink.test_gateway = Some(gateway.clone());
         let source = std::fs::read_to_string(&path).unwrap();
-        let mut unread = source[start as usize..].to_string();
+        let mut unread = source[cursor as usize..].to_string();
         let mut parser_state = crate::services::session_backend::StreamLineState::new();
-        let mut response = String::new();
+        let mut response = row.full_response.clone();
         let mut tools = crate::services::discord::tmux::WatcherToolState::new();
+        tools.set_provider(&ProviderKind::Codex);
+        let decoder = crate::services::discord::tmux::read_native_codex_state(
+            path.to_str().unwrap(),
+            start,
+            cursor,
+            file_identity,
+            tmux,
+            generation,
+            Some(stamp),
+        )
+        .unwrap();
+        tools.restore_native_codex(decoder, &mut response);
+        let output_offset = unread.rfind("{\"type\":\"response_item\"").unwrap();
+        let output = unread.split_off(output_offset);
+        let pending = crate::services::discord::tmux::process_watcher_lines_for_turn(
+            &mut unread,
+            &mut parser_state,
+            &mut response,
+            &mut tools,
+            Some(cursor),
+            Some(start),
+        );
+        assert!(
+            !pending.found_result,
+            "restart must retain the pre-cursor pending tool"
+        );
+        assert!(unread.is_empty());
+        unread.push_str(&output);
         let parsed = crate::services::discord::tmux::process_watcher_lines_for_turn(
             &mut unread,
             &mut parser_state,
             &mut response,
             &mut tools,
-            Some(start),
+            Some(cursor + output_offset as u64),
             Some(start),
         );
         assert!(parsed.found_result);
-        assert_eq!(response, "ADK5071-native");
+        assert_eq!(response, "working first\n\nADK5071-native");
         let terminal_start = parsed.terminal_evidence_offset.unwrap();
         let terminal_len = source[terminal_start as usize..].find('\n').unwrap() + 1;
         let parsed_end = terminal_start + terminal_len as u64;
         assert_eq!(parsed_end, end - unread.len() as u64);
         let mut terminal = terminal_frame_offset(
             &binding,
-            &source[start as usize..],
+            &source[cursor as usize..],
             1,
             parsed_end,
             row.user_msg_id,
@@ -229,6 +296,51 @@ async fn native_codex_restart_sink_fixture() {
             Some(start),
         );
         terminal.relay_generation_mtime_ns = Some(generation);
+        terminal.relay_source_stamp = Some(stamp);
+        let mut stale_parser = super::turn_parser::SessionRelayParser::default();
+        let mut unfenced = terminal.clone();
+        unfenced.payload = body[..body.rfind("{\"type\":\"response_item\"").unwrap()].into();
+        unfenced.terminal_consumed_end = None;
+        assert!(stale_parser.ingest_frame(&unfenced).is_empty());
+        unfenced.payload = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"next actor\"}]}}\n".into();
+        unfenced.relay_range = Some((start, end));
+        assert!(
+            stale_parser.ingest_frame(&unfenced).is_empty(),
+            "an unfenced prior completion cannot finalize the next actor's message"
+        );
+        for missing_witness in [false, true] {
+            let mut unproven = terminal.clone();
+            if missing_witness {
+                unproven.relay_source_stamp = None;
+            } else {
+                unproven.relay_generation_mtime_ns = Some(generation.wrapping_add(1));
+            }
+            assert!(matches!(
+                sink.deliver(&unproven).await,
+                Err(RelaySinkError::Transient(_))
+            ));
+            assert_eq!(gateway.send_calls.load(Ordering::Acquire), 0);
+        }
+        let mut wrong_file = terminal.clone();
+        let foreign_path = temp.path().join("foreign-rollout.jsonl");
+        std::fs::write(&foreign_path, &source).unwrap();
+        wrong_file.relay_source_stamp.as_mut().unwrap().file =
+            crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(
+                &std::fs::File::open(&foreign_path).unwrap(),
+            );
+        assert!(matches!(
+            sink.deliver(&wrong_file).await,
+            Err(RelaySinkError::Transient(_))
+        ));
+        if retained_sink {
+            let mut partial = terminal.clone();
+            partial.payload = captured.into();
+            partial.terminal_consumed_end = None;
+            assert_eq!(
+                sink.deliver(&partial).await.unwrap(),
+                RelaySinkOutcome::FrameAccepted
+            );
+        }
         let result = sink.deliver(&terminal).await.unwrap();
         if successor {
             assert_eq!(result, RelaySinkOutcome::TerminalNotDelivered);
@@ -246,7 +358,7 @@ async fn native_codex_restart_sink_fixture() {
             assert_eq!(gateway.send_calls.load(Ordering::Acquire), 1);
             assert_eq!(
                 gateway.sent_contents.lock().unwrap().as_slice(),
-                &["ADK5071-native"]
+                &["working first\n\nADK5071-native"]
             );
             let receipt = dr::read_record(&ProviderKind::Codex, channel.get())
                 .unwrap()
@@ -265,6 +377,7 @@ async fn native_codex_restart_sink_fixture() {
         }
         assert_eq!(actor.turn_nonce(), row.turn_nonce.as_deref());
         inflight::clear_inflight_state(&ProviderKind::Codex, channel.get());
+        crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(tmux);
     }
 }
 

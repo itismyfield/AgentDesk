@@ -21,6 +21,7 @@ pub(in crate::services::discord) struct WatcherToolState {
     /// Provider-normalized status events for the status-panel-v2 message.
     status_events: Vec<StatusEvent>,
     codex_rollout: crate::services::codex_tui::rollout_tail::RolloutRecordDecoder,
+    native_codex_enabled: bool,
 }
 
 impl WatcherToolState {
@@ -36,7 +37,21 @@ impl WatcherToolState {
             placeholder_events: Vec::new(),
             status_events: Vec::new(),
             codex_rollout: Default::default(),
+            native_codex_enabled: false,
         }
+    }
+
+    pub(in crate::services::discord) fn set_provider(&mut self, provider: &ProviderKind) {
+        self.native_codex_enabled = *provider == ProviderKind::Codex;
+    }
+
+    pub(in crate::services::discord) fn restore_native_codex(
+        &mut self,
+        decoder: crate::services::codex_tui::rollout_tail::RolloutRecordDecoder,
+        response: &mut String,
+    ) {
+        *response = decoder.response().to_string();
+        self.codex_rollout = decoder;
     }
 
     fn record_placeholder_events_from_json(&mut self, value: &serde_json::Value) {
@@ -182,6 +197,9 @@ fn watcher_placeholder_inlines_live_events(
 #[path = "tmux_output_stream/native_codex.rs"]
 mod native_codex;
 use native_codex::process_native_codex_messages;
+pub(in crate::services::discord) use native_codex::{
+    is_native_codex_payload, read_native_codex_state, watcher_source_witness,
+};
 
 /// Process buffered lines for the tmux watcher.
 /// Extracts text content, tracks tool status, and detects result events.
@@ -246,7 +264,9 @@ pub(in crate::services::discord) fn process_watcher_lines_for_turn(
                     outcome.pre_turn_bytes_skipped.saturating_add(line_len);
                 continue;
             }
-            if let Some(messages) = tool_state.codex_rollout.decode(&val) {
+            if tool_state.native_codex_enabled
+                && let Some(messages) = tool_state.codex_rollout.decode(&val)
+            {
                 let native =
                     process_native_codex_messages(messages, state, full_response, tool_state);
                 outcome.assistant_text_seen |= native.assistant_text_seen;
@@ -972,6 +992,7 @@ mod tests {
         let mut state = StreamLineState::new();
         let mut response = String::new();
         let mut tools = WatcherToolState::new();
+        tools.set_provider(&ProviderKind::Codex);
         let outcome = process_watcher_lines_for_turn(
             &mut buffer,
             &mut state,
@@ -1009,6 +1030,7 @@ mod tests {
             let mut state = StreamLineState::new();
             let mut response = String::new();
             let mut tools = WatcherToolState::new();
+            tools.set_provider(&ProviderKind::Codex);
             let pending = process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools);
             assert!(
                 !pending.found_result,
@@ -1030,6 +1052,7 @@ mod tests {
         let mut state = StreamLineState::new();
         let mut response = String::new();
         let mut tools = WatcherToolState::new();
+        tools.set_provider(&ProviderKind::Codex);
         let midturn = process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools);
         assert!(
             !midturn.found_result,
@@ -1049,6 +1072,16 @@ mod tests {
             process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools).found_result
         );
         assert_eq!(response, "on it");
+        let unknown = assistant.replace("output_text", "future_text");
+        let mut buffer = format!("{assistant}{unknown}{{\"type\":\"turn.completed\"}}\n");
+        let mut state = StreamLineState::new();
+        let mut response = String::new();
+        let mut tools = WatcherToolState::new();
+        tools.set_provider(&ProviderKind::Codex);
+        assert!(
+            !process_watcher_lines(&mut buffer, &mut state, &mut response, &mut tools).found_result,
+            "unknown final content cannot turn earlier commentary into a complete answer"
+        );
     }
 
     #[test]

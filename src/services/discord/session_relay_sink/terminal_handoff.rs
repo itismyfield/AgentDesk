@@ -5,6 +5,34 @@ use crate::services::cluster::stream_relay::{
     RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame,
 };
 
+fn recover_native_frame_response(frame: &StreamFrame) -> Result<Option<String>, RelaySinkError> {
+    use crate::services::discord::tmux::{is_native_codex_payload, read_native_codex_state};
+    if !is_native_codex_payload(&frame.binding.provider, &frame.payload) {
+        return Ok(None);
+    }
+    let (Some(start), Some(end)) = (frame.turn_start_offset, frame.terminal_consumed_end) else {
+        return Ok(None); // Ordered idle delivery retains its existing range contract.
+    };
+    let stamp = frame.relay_source_stamp.ok_or_else(|| {
+        RelaySinkError::Transient(
+            "native Codex terminal frame has no captured source witness".into(),
+        )
+    })?;
+    let source = super::idle_jsonl_relay_source_for_matched(&frame.binding);
+    read_native_codex_state(
+        &source.path,
+        start,
+        end,
+        stamp.file,
+        &frame.session_name,
+        frame.relay_generation_mtime_ns.unwrap_or(0),
+        Some(stamp),
+    )
+    .and_then(|decoder| decoder.completed_response())
+    .map(Some)
+    .map_err(RelaySinkError::Transient)
+}
+
 /// #3041 P1-5: the SINK-LOCAL terminal outcome stays deliberately 2-way — the sink
 /// always KNOWS its result: confirmed POST/edit → `Delivered`; deterministic
 /// route decline (foreign-owner block / bridge-owned / mismatched inflight) →
@@ -35,16 +63,36 @@ impl SessionRelayDeliveryOutcome {
     }
 }
 
+impl SessionBoundDiscordRelaySink {
+    fn ingest_frame(
+        &self,
+        frame: &StreamFrame,
+        native_response: Option<&str>,
+    ) -> Vec<SessionRelayDelivery> {
+        self.frames_total
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let Ok(mut sessions) = self.by_session.lock() else {
+            return Vec::new();
+        };
+        let parser = sessions.entry(frame.session_name.clone()).or_default();
+        match native_response {
+            Some(response) => parser.ingest_verified_native_terminal(frame, response),
+            None => parser.ingest_frame(frame),
+        }
+    }
+}
+
 #[async_trait]
 impl RelaySink for SessionBoundDiscordRelaySink {
     async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
+        let native_response = recover_native_frame_response(frame)?;
         // #3041 P1-3 R5 (codex — REVERT R4 fence-gating of the outcome): a result-bearing
         // delivery reports Delivered/NotDelivered REGARDLESS of a fence on this frame
         // (R4's gate BLACK-HOLED the legitimate no-inflight terminal — no fence but a real
         // terminal → `FrameAccepted` → watcher timed out). The co-chunked confusion is now
         // handled by the per-sequence ACK. The fence still ONLY gates the OFFSET ADVANCE
         // (inline in `deliver_response`) — outcome and advance are decoupled.
-        let deliveries = self.ingest_frame(frame);
+        let deliveries = self.ingest_frame(frame, native_response.as_deref());
         let fenced_terminal_without_delivery = deliveries.is_empty()
             && matches!(
                 (frame.turn_start_offset, frame.terminal_consumed_end),
@@ -53,7 +101,10 @@ impl RelaySink for SessionBoundDiscordRelaySink {
         let mut terminal_delivered = false;
         let mut terminal_fresh_delivered = None;
         let mut terminal_not_delivered = false;
-        for delivery in deliveries {
+        for mut delivery in deliveries {
+            if let Some(response) = &native_response {
+                delivery.response_text.clone_from(response);
+            }
             let delivery_outcome = self.deliver_response(delivery).await;
             #[cfg(test)]
             if let (Ok(outcome), Some(outcomes)) =

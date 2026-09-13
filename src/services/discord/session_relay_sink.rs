@@ -519,17 +519,6 @@ impl SessionBoundDiscordRelaySink {
         }
     }
 
-    fn ingest_frame(&self, frame: &StreamFrame) -> Vec<SessionRelayDelivery> {
-        self.frames_total.fetch_add(1, Ordering::AcqRel);
-        let Ok(mut sessions) = self.by_session.lock() else {
-            return Vec::new();
-        };
-        sessions
-            .entry(frame.session_name.clone())
-            .or_default()
-            .ingest_frame(frame)
-    }
-
     /// Commit a confirmed idle/catch-up delivery in the frame's ordered JSONL
     /// coordinate space. The wrapper generation and current EOF are rechecked
     /// after transport before either durable or in-memory authority advances.
