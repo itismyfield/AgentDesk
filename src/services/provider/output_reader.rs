@@ -8,6 +8,19 @@ use super::{
 };
 use crate::services::session_backend::ReadOutputFailure;
 
+pub fn fold_read_output_result<T>(
+    read_result: ReadOutputResult,
+    on_ready: impl FnOnce(u64) -> T,
+    on_session_died: impl FnOnce(u64) -> T,
+) -> T {
+    match read_result {
+        ReadOutputResult::Completed { offset } | ReadOutputResult::Cancelled { offset } => {
+            on_ready(offset)
+        }
+        ReadOutputResult::SessionDied { offset } => on_session_died(offset),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn poll_output_file_until_result<
     State,
