@@ -204,6 +204,15 @@ fn terminal_ordering_fixture(
             *crate::services::discord::turn_bridge::TERMINAL_PREPARE_TEST_HOOK.lock().unwrap() = None;
             if let Some(race) = source_race.filter(|race| *race != SourceRace::Unchanged) {
                 assert!(delivered.is_err(), "{race:?} cannot signal terminal completion");
+                if provider == ProviderKind::Codex {
+                    // Exercise the actual outer-tail settlement helper after the
+                    // bridge preserves its admitted source on failure.
+                    for reader_failed in [false, true] {
+                        codex_idle_rollout::finish_failed_codex_idle_reader(
+                            &shared, channel, tmux, &lease, reader_failed,
+                        ).await;
+                    }
+                }
                 let expected_turn_id = format!("discord:{}:{}", channel.get(), anchor.get());
                 let is_episode_quality = |event: &crate::services::observability::events::StructuredEvent|
                     event.channel_id == Some(channel.get()) && event.event_type == "agent_quality_event"

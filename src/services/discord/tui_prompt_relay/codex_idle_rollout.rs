@@ -406,6 +406,8 @@ async fn run_codex_idle_response_tail(
     let (reader_tx, reader_rx) = mpsc::channel::<StreamMessage>();
     let (offset_tx, offset_rx) =
         tokio::sync::oneshot::channel::<Result<claude_idle_bridge::IdleReaderCompletion, String>>();
+    let reader_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let failed_for_reader = reader_failed.clone();
     let rollout_for_reader = rollout_path.clone();
     let tmux_for_reader = tmux_session_name.clone();
     std::thread::Builder::new()
@@ -419,6 +421,7 @@ async fn run_codex_idle_response_tail(
                 || crate::services::tmux_diagnostics::tmux_session_has_live_pane(&tmux_for_reader),
                 &tmux_for_reader,
             );
+            failed_for_reader.store(read_result.is_err(), Ordering::Release);
             let _ = offset_tx.send(read_result);
         })
         .expect("spawn codex idle response tail reader thread");
@@ -511,13 +514,12 @@ async fn run_codex_idle_response_tail(
                 error = %error,
                 "codex idle rollout response tail failed"
             );
-            finish_tui_direct_synthetic_turn_if_current(
+            finish_failed_codex_idle_reader(
                 &shared,
-                &ProviderKind::Codex,
                 channel_id,
                 &tmux_session_name,
-                lease.session_key.as_deref(),
-                "codex_tui_direct_tail_failed",
+                &lease,
+                reader_failed.load(Ordering::Acquire),
             )
             .await;
         }
@@ -610,4 +612,29 @@ pub(super) fn read_codex_idle_completion(
     .map(|(result, outcome)| {
         claude_idle_bridge::IdleReaderCompletion::from_harvest(result, outcome.harvest, generation)
     })
+}
+
+#[cfg(unix)]
+pub(super) async fn finish_failed_codex_idle_reader(
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    tmux: &str,
+    lease: &ExternalInputRelayLease,
+    reader_failed: bool,
+) {
+    if !reader_failed
+        || inflight::load_inflight_state_read_only(&ProviderKind::Codex, channel.get())
+            .is_some_and(|row| row.requires_pinned_terminal_recovery())
+    {
+        return;
+    }
+    finish_tui_direct_synthetic_turn_if_current(
+        shared,
+        &ProviderKind::Codex,
+        channel,
+        tmux,
+        lease.session_key.as_deref(),
+        "codex_tui_direct_tail_failed",
+    )
+    .await;
 }
