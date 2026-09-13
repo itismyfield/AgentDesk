@@ -230,7 +230,7 @@ async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) ->
             }
             let id = if method == Method::POST && cycle {
                 next_id.fetch_add(1, Ordering::AcqRel)
-            } else if method == Method::PATCH {
+            } else if method == Method::PATCH && cycle {
                 uri.path().rsplit('/').next().and_then(|id| id.parse().ok()).unwrap_or(SERVER_MSG)
             } else { SERVER_MSG };
             if let Some(content) = payload["content"].as_str() {
