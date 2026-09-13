@@ -152,6 +152,8 @@ fn wrapper_patch(fx: &Fixture, identity: Option<&InflightTurnIdentity>,
 struct Recorder {
     calls: Arc<Mutex<Vec<(String, String)>>>,
     bodies: Arc<Mutex<Vec<String>>>,
+    visible: Arc<Mutex<std::collections::BTreeMap<u64, String>>>,
+    terminal_gate: Arc<tokio::sync::Notify>,
     http: Arc<serenity::Http>,
     server: tokio::task::AbortHandle,
 }
@@ -175,6 +177,11 @@ impl Recorder {
 /// network, tmux or database call happens.
 #[rustfmt::skip]
 async fn recorder(channel: ChannelId, delete_ok: bool) -> Recorder {
+    recorder_for_cycle(channel, delete_ok, false).await
+}
+
+#[rustfmt::skip]
+async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) -> Recorder {
     use axum::body::Bytes;
     use axum::http::{Method, StatusCode, Uri};
     use axum::response::IntoResponse;
@@ -183,14 +190,26 @@ async fn recorder(channel: ChannelId, delete_ok: bool) -> Recorder {
     let recorded = calls.clone();
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let captured_bodies = bodies.clone();
+    let visible = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    let captured_visible = visible.clone();
+    let terminal_gate = Arc::new(tokio::sync::Notify::new());
+    let captured_gate = terminal_gate.clone();
+    let next_id = Arc::new(std::sync::atomic::AtomicU64::new(SERVER_MSG));
     let channel_text = channel.get().to_string();
     let app = Router::new().fallback(any(move |method: Method, uri: Uri, body: Bytes| {
         let (recorded, channel_text, bodies) =
             (recorded.clone(), channel_text.clone(), captured_bodies.clone());
+        let (visible, terminal_gate, next_id) =
+            (captured_visible.clone(), captured_gate.clone(), next_id.clone());
         async move {
             let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             recorded.lock().unwrap().push((method.to_string(), uri.to_string()));
             if method == Method::DELETE {
+                if delete_ok {
+                    if let Some(id) = uri.path().rsplit('/').next().and_then(|id| id.parse().ok()) {
+                        visible.lock().unwrap().remove(&id);
+                    }
+                }
                 let status = if delete_ok { StatusCode::NO_CONTENT }
                     else { StatusCode::INTERNAL_SERVER_ERROR };
                 return (status, String::new()).into_response();
@@ -205,8 +224,20 @@ async fn recorder(channel: ChannelId, delete_ok: bool) -> Recorder {
                     }))).into_response();
                 }
             }
+            if cycle && method == Method::POST
+                && payload["content"].as_str().is_some_and(|body| body.contains("ADK5833-final")) {
+                terminal_gate.notified().await;
+            }
+            let id = if method == Method::POST && cycle {
+                next_id.fetch_add(1, Ordering::AcqRel)
+            } else if method == Method::PATCH {
+                uri.path().rsplit('/').next().and_then(|id| id.parse().ok()).unwrap_or(SERVER_MSG)
+            } else { SERVER_MSG };
+            if let Some(content) = payload["content"].as_str() {
+                visible.lock().unwrap().insert(id, content.to_owned());
+            }
             Json(serde_json::json!({
-                "id": SERVER_MSG.to_string(), "channel_id": channel_text,
+                "id": id.to_string(), "channel_id": channel_text,
                 "content": payload["content"],
                 "author": {"id":"1","username":"t","discriminator":"0001","avatar":null},
                 "timestamp":"2026-09-09T00:00:00+00:00", "edited_timestamp":null,
@@ -223,7 +254,7 @@ async fn recorder(channel: ChannelId, delete_ok: bool) -> Recorder {
             .build(),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Recorder { calls, bodies, http, server: server.abort_handle() }
+    Recorder { calls, bodies, visible, terminal_gate, http, server: server.abort_handle() }
 }
 
 #[rustfmt::skip]

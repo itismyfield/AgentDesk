@@ -31,6 +31,7 @@ pub(super) fn seed_recovered_row(
 fn collector_case(paused: bool, repeats: usize, name: &str) {
     const CHILD: &str = "AGENTDESK_5833_NATIVE_COLLECTOR_CHILD";
     let captured = name.starts_with("captured_native_collector_");
+    let cycle = name == "recovered_native_preview_terminal_has_one_visible_copy";
     let physical = name == "captured_native_collector_physical_batches_reach_http";
     if std::env::var_os(CHILD).is_none() {
         let qualified = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
@@ -52,7 +53,7 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         return;
     }
     let (_lock, root) = isolate_root();
-    if captured {
+    if captured || cycle {
         // install has no uninstall; this executes only in the isolated child.
         let mut config = crate::config::Config::default();
         config.runtime.relay_authority_mode = crate::config::RelayAuthorityMode::Enforce;
@@ -143,13 +144,30 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
         save_inflight_state(&row).unwrap();
         fx.identity = InflightTurnIdentity::from_state(&row);
         let mut shared = crate::services::discord::make_shared_data_for_tests();
-        if captured {
+        if captured || cycle {
             let ui = &mut Arc::get_mut(&mut shared).expect("unshared fixture").ui;
             ui.status_panel_v2_enabled = true;
             ui.two_message_panel_enabled = true;
             ui.placeholder_live_events_enabled = true;
         }
-        let rec = recorder(fx.channel, true).await;
+        let rec = recorder_for_cycle(fx.channel, true, cycle).await;
+        if cycle {
+            let actor = Arc::new(
+                crate::services::provider::CancelToken::from_persisted_turn_nonce(
+                    row.turn_nonce.clone(),
+                ),
+            );
+            assert!(
+                crate::services::discord::mailbox_try_start_turn(
+                    &shared,
+                    fx.channel,
+                    actor,
+                    serenity::UserId::new(row.request_owner_user_id),
+                    serenity::MessageId::new(row.user_msg_id),
+                )
+                .await
+            );
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         let ctx = TurnStreamCollectorContext {
             http: rec.http.clone(),
@@ -172,7 +190,7 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
             turn_result_relayed: false,
             restored_injected_prompt_message_id: row.injected_prompt_message_id,
         };
-        if physical {
+        if physical || cycle {
             crate::services::tui_prompt_dedupe::register_tmux_runtime_binding(
                 &fx.tmux,
                 crate::services::tui_prompt_dedupe::TuiRuntimeBinding {
@@ -201,6 +219,25 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                 source_file,
             ),
         };
+        let sink: Arc<dyn crate::services::cluster::stream_relay::RelaySink> = if cycle {
+            let health = Arc::new(crate::services::discord::health::HealthRegistry::new());
+            health.register("codex".into(), shared.clone()).await;
+            let mut sink =
+                crate::services::discord::session_relay_sink::SessionBoundDiscordRelaySink::new(
+                    health,
+                );
+            sink.test_gateway = Some(Arc::new(
+                crate::services::discord::gateway::DiscordGateway::new(
+                    rec.http.clone(),
+                    shared.clone(),
+                    fx.provider.clone(),
+                    None,
+                ),
+            ));
+            Arc::new(sink)
+        } else {
+            Arc::new(DiscardSink)
+        };
         let handle = spawn_stream_relay(
             MatchedChannel {
                 channel_id: fx.channel.get().to_string(),
@@ -209,7 +246,7 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
                 expected_session_name: fx.tmux.clone(),
                 expected_rollout_path: fx.output_path.clone(),
             },
-            Arc::new(DiscardSink),
+            sink,
         );
         let registry = Arc::new(RelayProducerRegistry::new());
         registry.register(fx.tmux.clone(), handle.producer());
@@ -274,9 +311,136 @@ fn collector_case(paused: bool, repeats: usize, name: &str) {
             {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            cancel.store(true, Ordering::Release);
+            if cycle {
+                use std::io::Write;
+                assert!(
+                    !rec.seen("POST").is_empty(),
+                    "preview must precede terminal input"
+                );
+                let terminal = concat!(
+                    "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"channel\":\"final\",\"content\":[{\"type\":\"output_text\",\"text\":\"ADK5833-final\"}]}}\n",
+                    "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"ADK5833-final\"}}\n",
+                );
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&fx.output_path)
+                    .unwrap()
+                    .write_all(terminal.as_bytes())
+                    .unwrap();
+                ctx.jsonl_notify.notify_one();
+            } else {
+                cancel.store(true, Ordering::Release);
+            }
         };
-        let (outcome, ()) = tokio::join!(run, stop);
+        let (outcome, ()) = tokio::join!(
+            async {
+                tokio::time::timeout(Duration::from_secs(30), run)
+                    .await
+                    .expect("bounded collector")
+            },
+            stop,
+        );
+        if cycle {
+            let CollectOutcome::Fallthrough(mut turn) = outcome else {
+                panic!("terminal collector discarded turn")
+            };
+            assert!(turn.found_result);
+            assert_eq!(
+                turn.full_response,
+                format!("0: {TRAILING_BODY}\n\nADK5833-final")
+            );
+            let target = ack
+                .clone()
+                .expect("terminal producer must retain exact ACK");
+            assert_eq!(target.turn_start_offset, Some(source_start));
+            let guard = run_pre_emit_guard(
+                &PreEmitGuardContext {
+                    http: &rec.http,
+                    shared: &shared,
+                    channel_id: fx.channel,
+                    watcher_provider: &fx.provider,
+                    tmux_session_name: &fx.tmux,
+                    output_path: &fx.output_path,
+                    paused: &ctx.paused,
+                    pause_epoch: &ctx.pause_epoch,
+                    turn_delivered: &ctx.turn_delivered,
+                },
+                PreEmitGuardLocals {
+                    epoch_snapshot: 0,
+                    monitor_auto_turn_deferred: turn.monitor_auto_turn_deferred,
+                    placeholder_msg_id: turn.placeholder_msg_id,
+                    turn_data_start_offset: turn.turn_data_start_offset,
+                    current_offset: offset,
+                    response_sent_offset: turn.response_sent_offset,
+                    data_start_offset: source_start,
+                    stale_resume_detected: turn.stale_resume_detected,
+                    last_edit_text: &turn.last_edit_text,
+                },
+                &mut PreEmitGuardState {
+                    monitor_auto_turn_claimed: &mut turn.monitor_auto_turn_claimed,
+                    monitor_auto_turn_finished: &mut turn.monitor_auto_turn_finished,
+                    monitor_auto_turn_synthetic_msg_id: &mut turn
+                        .monitor_auto_turn_synthetic_msg_id,
+                    monitor_auto_turn_ledger_generation: &mut turn
+                        .monitor_auto_turn_ledger_generation,
+                    all_data: &mut buffer,
+                    all_data_start_offset: &mut buffer_start,
+                    all_data_fully_mirrored_to_session_relay: &mut mirrored,
+                    all_data_session_bound_relay_ack: &mut ack,
+                    all_data_first_forwarded_relay_sequence: &mut first,
+                    last_relayed_offset: &mut None,
+                    last_observed_generation_mtime_ns: &mut None,
+                    full_response: &mut turn.full_response,
+                },
+            )
+            .await;
+            assert_eq!(guard, PreEmitGuardOutcome::ContinueWatcherLoop);
+            rec.terminal_gate.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while target
+                    .metrics
+                    .terminal_outcome_for_sequence(target.sequence)
+                    .is_none()
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("terminal sink must resolve its exact sequence");
+            assert_eq!(
+                target
+                    .metrics
+                    .terminal_outcome_for_sequence(target.sequence),
+                Some(crate::services::cluster::stream_relay::DeliveryOutcome::Delivered)
+            );
+            let receipt = crate::services::discord::outbound::delivery_record::read_record(
+                &fx.provider,
+                fx.channel.get(),
+            )
+            .unwrap()
+            .delivered_frontier
+            .unwrap();
+            assert_eq!(receipt.range, (source_start, offset));
+            assert_eq!(
+                receipt.generation_mtime_ns,
+                source_authority.generation_mtime_ns
+            );
+            let visible = rec.visible.lock().unwrap();
+            assert!(visible[&receipt.panel_msg_id.unwrap()].contains("ADK5833-final"));
+            assert_eq!(
+                visible
+                    .values()
+                    .filter(|body| body.contains(TRAILING_BODY))
+                    .count(),
+                1,
+                "exact terminal delivery must leave one visible copy of the commentary"
+            );
+            drop(visible);
+            handle.shutdown().await;
+            crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&fx.tmux);
+            std::fs::remove_file(marker).unwrap();
+            return;
+        }
         if captured {
             if let CollectOutcome::Fallthrough(turn) = &outcome {
                 eprintln!(
@@ -431,4 +595,13 @@ impl Drop for OwnedCapturePane {
             "5833 private collector fixture cleanup",
         );
     }
+}
+
+#[test]
+fn recovered_native_preview_terminal_has_one_visible_copy() {
+    collector_case(
+        false,
+        1,
+        "recovered_native_preview_terminal_has_one_visible_copy",
+    );
 }
