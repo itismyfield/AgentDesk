@@ -1042,6 +1042,31 @@ class DeliveryBoundaryReportTest(unittest.TestCase):
         rows[0].pop(terminal)
         self.assertEqual(report.delivery_boundary_counts(rows)[terminal]["unknown"], 2)
 
+    def test_cleanup_invalid_identity_and_outcomes_stay_unknown_in_reader(self):
+        metric = "unbound_anchor_left"
+        changes = ({"current_message_id": 0}, {"turn_id": 17},
+                   {"source": {}}, {"anchor": {}}, {"disposition": "continue"},
+                   {"provider": "not-a-provider"}, {"recovery_enqueue_attempted": False},
+                   {"recovery_enqueue_attempted": 1}, {"recovery_enqueued": "true"},
+                   {"recovery_enqueue_attempted": False, "recovery_enqueued": True})
+        for change in changes:
+            with self.subTest(change=change):
+                item = {**self.operation(metric, True), **change}
+                result = RolloutReportTest().run_report([item])["target_segment"]["delivery_boundary_outcomes"][metric]
+                self.assertEqual(result["unknown"], 1)
+                self.assertIsNone(result["share"])
+                self.assertEqual(result["recovery_attempted"], 0)
+        item = {**self.operation(metric, False), "recovery_enqueued": True}
+        self.assertEqual(report.delivery_boundary_counts([item])[metric]["unknown"], 1)
+
+    def test_unknown_matching_provider_is_not_authoritative_frontier(self):
+        metric = "frontier_already_covers"
+        item = self.operation(metric, True)
+        item["provider"] = item["source"]["provider"] = "not-a-provider"
+        result = RolloutReportTest().run_report([item])["target_segment"]["delivery_boundary_outcomes"][metric]
+        self.assertEqual(result["unknown"], 1)
+        self.assertIsNone(result["share"])
+
     def test_duplicate_and_conflicting_operation_records_are_not_extra_successes(self):
         metric = "frontier_already_covers"
         item = self.operation(metric, True)

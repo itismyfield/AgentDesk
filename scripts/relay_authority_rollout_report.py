@@ -398,6 +398,23 @@ def _advancing_range(value) -> bool:
             and all(_uint(offset, zero=True) for offset in value) and value[0] < value[1])
 
 
+def _known_delivery_provider(value) -> bool:
+    # Observation producers serialize ProviderKind::as_str(), never CLI aliases.
+    return value in ("claude", "codex", "gemini", "opencode", "qwen", "grok")
+
+
+def _consistent_cleanup_evidence(event: dict, payload: dict) -> bool:
+    value = payload["unbound_anchor_left"]
+    attempted, enqueued = payload["recovery_enqueue_attempted"], payload["recovery_enqueued"]
+    return (_uint(event["current_message_id"])
+            and _known_delivery_provider(event["provider"])
+            and event.get("turn_id") is None
+            and all(payload[field] is None for field in ("source", "anchor", "disposition"))
+            and type(value) is bool and attempted is value
+            and (enqueued is None or type(enqueued) is bool)
+            and (enqueued is not True or attempted is True))
+
+
 def _consistent_frontier_evidence(event: dict, payload: dict) -> bool:
     """Validate the emitted predicate's inputs, without recreating a receipt read."""
     source, anchor = payload["source"], payload["anchor"]
@@ -408,6 +425,7 @@ def _consistent_frontier_evidence(event: dict, payload: dict) -> bool:
             and type(generation) is int and -(2**63) <= generation < 2**63 and generation != 0
             and all(isinstance(source.get(field), str) and source[field]
                     for field in ("provider", "tmux_session_name", "turn_nonce"))
+            and _known_delivery_provider(source["provider"])
             and source["provider"] == event["provider"]
             and all(_uint(source.get(field)) for field in
                     ("offset_authority_channel_id", "delivery_channel_id"))
@@ -459,8 +477,10 @@ def delivery_boundary_counts(events: list[dict]) -> dict:
             if metric == "frontier_already_covers" and type(value) is bool:
                 if not _consistent_frontier_evidence(event, payload):
                     value = None
+            if metric == "unbound_anchor_left" and not _consistent_cleanup_evidence(event, payload):
+                value = None
             counts["true" if value is True else "false" if value is False else "unknown"] += 1
-            if metric == "unbound_anchor_left" and payload["recovery_enqueue_attempted"] is True:
+            if metric == "unbound_anchor_left" and value is True:
                 counts["recovery_attempted"] += 1
                 counts["recovery_unknown"] += payload["recovery_enqueued"] is not True
         known = counts["true"] + counts["false"]

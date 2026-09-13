@@ -415,7 +415,7 @@ mod tests {
                 .matches(concat!(
                     "spawn_turn_bridge_with_pin(\n",
                     "        shared.clone(),\n",
-                    "        Arc::new(CancelToken::new()),\n",
+                    "        claim.actor.clone(),\n",
                     "        rx,\n",
                     "        bridge,\n",
                     "        pin,\n",
@@ -423,7 +423,7 @@ mod tests {
                 ))
                 .count(),
             2,
-            "both TUI-direct entries intentionally omit mailbox registration"
+            "both TUI-direct entries preserve the captured synthetic mailbox actor"
         );
     }
 }
