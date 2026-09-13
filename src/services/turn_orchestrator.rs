@@ -2938,24 +2938,13 @@ fn spawn_channel_mailbox(channel_id: ChannelId) -> ChannelMailboxHandle {
                     // mirrors `mailbox_finish_turn`'s idempotent second-call
                     // shape, so the finalizer's `removed_token.is_some()` gate
                     // skips the counter decrement and trailing release.
-                    let matches = state
-                        .active_user_message_id
-                        .is_some_and(|active| active == expected_user_message_id)
-                        && expected_actor.as_ref().is_none_or(|expected| {
-                            state
-                                .cancel_token
-                                .as_ref()
-                                .is_some_and(|current| Arc::ptr_eq(current, expected))
-                        })
-                        && active_started_before.is_none_or(|started_before| {
-                            state
-                                .turn_started_instant
-                                .is_some_and(|started_at| started_at < started_before)
-                        })
-                        && turn_nonce_guard_matches(
-                            &turn_nonce_guard,
-                            state.active_turn_nonce.as_deref(),
-                        );
+                    let matches = episode_identity::finish_turn_identity_matches(
+                        &state,
+                        expected_user_message_id,
+                        &expected_actor,
+                        active_started_before,
+                        &turn_nonce_guard,
+                    );
                     if matches {
                         state.last_persistence = Some(persistence.clone());
                         let finished_user_message_id = state.active_user_message_id;

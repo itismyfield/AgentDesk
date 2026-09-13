@@ -184,6 +184,30 @@ impl ChannelMailboxHandle {
     }
 }
 
+pub(super) fn finish_turn_identity_matches(
+    state: &ChannelMailboxState,
+    expected_user_message_id: MessageId,
+    expected_actor: &Option<Arc<CancelToken>>,
+    active_started_before: Option<Instant>,
+    turn_nonce_guard: &TurnNonceGuard,
+) -> bool {
+    state
+        .active_user_message_id
+        .is_some_and(|active| active == expected_user_message_id)
+        && expected_actor.as_ref().is_none_or(|expected| {
+            state
+                .cancel_token
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, expected))
+        })
+        && active_started_before.is_none_or(|started_before| {
+            state
+                .turn_started_instant
+                .is_some_and(|started_at| started_at < started_before)
+        })
+        && turn_nonce_guard_matches(turn_nonce_guard, state.active_turn_nonce.as_deref())
+}
+
 pub(super) fn persist_queue_or_restore(
     state: &mut ChannelMailboxState,
     channel_id: ChannelId,
