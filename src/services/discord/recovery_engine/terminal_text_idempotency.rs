@@ -45,14 +45,14 @@ pub(super) fn captured_terminal_receipt_exists(
         if receipt.source.provider != provider.as_str() {
             return false;
         }
-        let captured = inflight::CodexRange {
-            identity: inflight::InflightTurnIdentity::from_state(state),
-            result: state.full_response.clone(),
-            rollout_path: path.clone(),
-            session_id: state.session_id.clone().unwrap_or_default(),
-            source_file_identity: state.tui_terminal_source_file_identity,
-            source: receipt.source.clone(),
-        };
+        let captured = inflight::CodexRange::new(
+            inflight::InflightTurnIdentity::from_state(state),
+            state.full_response.clone(),
+            path.clone(),
+            state.session_id.clone().unwrap_or_default(),
+            receipt.source.clone(),
+            state.tui_terminal_source_file_identity,
+        );
         captured.confirmed_receipt_for_captured_row(state, receipt.message_id)
     })
 }

@@ -1081,7 +1081,14 @@ mod tests {
             // production caller can reach, and every sub-case below passes vacuously.
             crate::services::codex_tui::session::install_codex_tui_runtime_binding(tmux, Some(0), crate::services::tui_prompt_dedupe::TuiRuntimeBinding { runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind::CodexTui, output_path: rollout.display().to_string(), relay_output_path: None, input_fifo_path: None, session_id: Some("raw-session".into()), last_offset: 64, relay_last_offset: None });
             let source = ExactJsonlSourceIdentity { provider: "codex".into(), tmux_session_name: tmux.into(), turn_nonce: format!("nonce-{user}"), range: (0,64), generation_mtime_ns: stamp(tmux, 1_700_526_400), offset_authority_channel_id: owner.get(), delivery_channel_id: CH };
-            let range = CodexRange { source_file_identity: None, identity: InflightTurnIdentity { user_msg_id: user, started_at: "now".into(), tmux_session_name: Some(tmux.into()), turn_start_offset: Some(0) }, result: "answer".into(), rollout_path: rollout.display().to_string(), session_id: "raw-session".into(), source: source.clone() };
+            let range = CodexRange::new(
+                InflightTurnIdentity { user_msg_id: user, started_at: "now".into(), tmux_session_name: Some(tmux.into()), turn_start_offset: Some(0) },
+                "answer".into(),
+                rollout.display().to_string(),
+                "raw-session".into(),
+                source.clone(),
+                None,
+            );
             // Canonicalized: `revalidated_source` compares the row's output path against
             // the canonicalized live source path, and on macOS the tempdir resolves
             // /var -> /private/var. A raw tempdir path makes revalidation return Ok(None)

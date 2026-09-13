@@ -1358,14 +1358,14 @@ async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirr
                     crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&tmux)
                         .is_none()
                 );
-                let captured = inflight::CodexRange {
-                    identity: inflight::InflightTurnIdentity::from_state(&state),
-                    result: state.full_response.clone(),
-                    rollout_path: path.display().to_string(),
-                    session_id: state.session_id.clone().unwrap_or_default(),
-                    source_file_identity: state.tui_terminal_source_file_identity,
-                    source: source.clone(),
-                };
+                let captured = inflight::CodexRange::new(
+                    inflight::InflightTurnIdentity::from_state(&state),
+                    state.full_response.clone(),
+                    path.display().to_string(),
+                    state.session_id.clone().unwrap_or_default(),
+                    source.clone(),
+                    state.tui_terminal_source_file_identity,
+                );
                 assert!(
                     !matches!(captured.revalidated_source(&state), Ok(Some(_))),
                     "a stored receipt must not authorize a new unbound publication"

@@ -235,6 +235,25 @@ fn persist_terminal_range(
 }
 
 impl TuiTerminalRange {
+    pub(in crate::services::discord) fn new(
+        identity: InflightTurnIdentity,
+        result: String,
+        rollout_path: String,
+        session_id: String,
+        source: ExactJsonlSourceIdentity,
+        source_file_identity: Option<(u64, u64)>,
+    ) -> Self {
+        Self {
+            identity,
+            result,
+            rollout_path,
+            session_id,
+            source,
+            source_file_identity,
+            retained_codex_terminal: false,
+        }
+    }
+
     /// Reconstruct only previously admitted evidence; live validation remains
     /// the existing publisher's responsibility.
     pub(in crate::services::discord) fn from_retained_tui_terminal(
