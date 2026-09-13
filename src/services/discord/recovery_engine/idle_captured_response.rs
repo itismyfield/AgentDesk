@@ -87,6 +87,8 @@ pub(in crate::services::discord) async fn recover_idle_partial_response_from_rea
     // the captured FD, range and generation still govern pinned publication.
     let canonical_output = if row.requires_pinned_terminal_recovery() {
         let Ok(path) = std::fs::canonicalize(output) else {
+            #[cfg(test)]
+            eprintln!("dormant_retry_diag: canonical_source rejected");
             return false;
         };
         Some(path)
@@ -95,25 +97,42 @@ pub(in crate::services::discord) async fn recover_idle_partial_response_from_rea
     };
     let output = canonical_output.as_deref().unwrap_or(output);
     let Some(source) = SourceAtEof::capture(row, output) else {
+        #[cfg(test)]
+        eprintln!("dormant_retry_diag: source_at_eof rejected");
         return false;
     };
     let Some(start) = row.turn_start_offset.filter(|start| *start < source.end) else {
+        #[cfg(test)]
+        eprintln!("dormant_retry_diag: source_start rejected");
         return false;
     };
     if extract_response_from_output(&output.to_string_lossy(), start) != row.full_response {
+        #[cfg(test)]
+        eprintln!("dormant_retry_diag: source_body rejected");
         return false;
     }
+    #[cfg(test)]
+    eprintln!("dormant_retry_diag: source accepted; entering dormant_claim");
     let Some(claim) =
         super::super::tui_prompt_relay::capture_dormant_partial(shared, row, output).await
     else {
+        #[cfg(test)]
+        eprintln!("dormant_retry_diag: dormant_claim rejected");
         return false;
     };
     if SourceAtEof::capture(&claim.row, output).as_ref() != Some(&source)
         || shared.relay_emission_in_flight(ChannelId::new(row.channel_id))
     {
+        #[cfg(test)]
+        eprintln!("dormant_retry_diag: source_after_claim rejected");
         return false;
     }
     let state = &claim.row;
+    #[cfg(test)]
+    eprintln!(
+        "dormant_retry_diag: claim accepted; typed={}",
+        state.requires_pinned_terminal_recovery()
+    );
     // Typed terminals use the existing pinned range lease inside their
     // publisher. Taking a second markerless lease here would block that lease.
     let _lease = if state.requires_pinned_terminal_recovery() {
@@ -271,6 +290,8 @@ where
     Fut::Output: Into<CapturedRecoveryDelivery>,
 {
     if state.restart_mode.is_some() || state.rebind_origin {
+        #[cfg(test)]
+        eprintln!("dormant_retry_diag: settle_restart rejected");
         return false;
     }
     // A pre-existing actor must be the caller's captured incarnation. IDs and
@@ -291,8 +312,19 @@ where
                 || current.save_generation != state.save_generation
         })
     {
+        #[cfg(test)]
+        eprintln!(
+            "dormant_retry_diag: settle_identity rejected actor={admissible_actor} requested_generation={} current_generation={:?} row_matches={}",
+            state.save_generation,
+            current.as_ref().map(|row| row.save_generation),
+            current.as_ref().is_some_and(
+                |row| inflight::InflightEpisodePin::from_state(state).matches_state(row)
+            )
+        );
         return false;
     }
+    #[cfg(test)]
+    eprintln!("dormant_retry_diag: settle admitted");
     let mut snapshot = super::turn_finalizer::SyntheticClaimSnapshot::from_row(state);
     snapshot.recovery_actor = actor.map(Arc::downgrade);
     if recovery_ready_without_output_already_delivered(state) {
@@ -315,6 +347,8 @@ where
         return true;
     }
     if recovery_ready_without_output_has_captured_response(state) {
+        #[cfg(test)]
+        eprintln!("dormant_retry_diag: publishing captured response");
         // response_sent_offset covers frozen Discord prefixes, unlike last_offset
         // and last_watcher_relayed_offset, which use source JSONL coordinates.
         let response = &state.full_response[state.response_sent_offset..];
