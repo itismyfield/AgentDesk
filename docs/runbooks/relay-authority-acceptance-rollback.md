@@ -150,12 +150,24 @@ The September 12 measurement above remains a historical 328-turn / 7-day snapsho
 not current live acceptance. Stage 2 adoption does not sign R6, close rollback,
 waive the campaign budget, or establish source identity or successful delivery.
 The [current canonical checkpoint](https://github.com/itismyfield/AgentDesk/issues/5464#issuecomment-5650847622)
-records the approval and remaining gates. Both nodes deployed main `f41b2dc2c9`;
-reader ingress recovered, but the actual first Discord frame and owner-state
-acceptance **failed**, as recorded in the
-[primary failure evidence](https://github.com/itismyfield/AgentDesk/issues/5833#issuecomment-5655132183).
-A source repair remains in progress. Deployment permission and accumulated
-historical observations do not turn this failed live check into a pass.
+records the approval and remaining gates. Both nodes deployed main `f41b2dc2c9`.
+The September 14 03:08 KST (September 13 18:08 UTC) first-frame uncertainty is
+historical; the subsequent first-frame FAIL interpretation is withdrawn.
+Actual original adk-cdx streaming is now confirmed by direct native-source text
+matching [Discord message 1548761098407125013](https://discord.com/channels/@me/1479671301387059200/1548761098407125013),
+authored by bot `1479425196824989758`, created September 14 03:23:40.450 KST
+and edited 03:57:31.116 KST. Earlier successive chunks were
+`1548760938675576925`, `1548760832970858509` and `1548760627466604567`.
+The watcher `tmux_alive_relay_dead` / `last_relay_offset=0` report did not reflect
+that observed delivery; it does not establish a new production defect.
+See the [corrected primary evidence](https://github.com/itismyfield/AgentDesk/issues/5833#issuecomment-5655132183).
+
+Original terminal, exact receipt, natural release and the next normal input
+remain **PENDING**. Strong-capture diagnostic `67ffac10068e0cf174608c2af644ebce46da91c2`
+completed five tests with zero ignored at September 14 03:58:52 KST, covering
+source witness, actual UI and Enforce/100. Those diagnostic results are not a
+live-cycle pass; the joined preview-to-terminal diagnostic is still awaiting
+execution. Stage 2 approval and the R6, A2 and T6 pending boundaries are unchanged.
 
 ## Rollback
 
