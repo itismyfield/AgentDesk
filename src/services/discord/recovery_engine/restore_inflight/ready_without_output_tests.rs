@@ -945,6 +945,7 @@ async fn captured_episode_claim_preserves_actor_witness_and_refuses_mismatched_r
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn ready_eof_exact_fallback_receipt_skips_retransport_before_terminal_mirror() {
     use crate::services::agent_protocol::RuntimeHandoffKind;

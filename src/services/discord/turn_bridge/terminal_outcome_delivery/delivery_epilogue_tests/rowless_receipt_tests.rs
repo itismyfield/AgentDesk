@@ -1083,7 +1083,7 @@ async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_succe
             channel,
             original_actor.clone(),
             serenity::UserId::new(DRIVER_USER_MSG_ID),
-            Some(ctx.current_msg_id),
+            Some(MessageId::new(original.user_msg_id)),
         )
         .await;
         let key = TurnKey::new(
@@ -1126,7 +1126,7 @@ async fn exact_receipt_short_fallback_settles_original_actor_and_preserves_succe
                 channel,
                 actor.clone(),
                 serenity::UserId::new(DRIVER_USER_MSG_ID),
-                Some(MessageId::new(DRIVER_CURRENT_MSG_ID)),
+                Some(MessageId::new(original.user_msg_id)),
             )
             .await;
             Some(actor)
