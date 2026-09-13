@@ -8,7 +8,10 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use super::{
@@ -26,6 +29,77 @@ struct Record {
     key: String,
     seed_sha256: String,
     payload: Value,
+}
+
+struct CheckpointState {
+    record: Record,
+    encoded: String,
+    lock: Option<DeliveryRecordLock>,
+}
+
+/// The existing per-record flock stays owned by this handle throughout a
+/// terminal publication attempt. The adapter can persist each actual chunk
+/// receipt before attempting the next POST, without releasing that lock.
+pub(in crate::services::discord) struct CustodyCheckpoint {
+    path: PathBuf,
+    state: Mutex<CheckpointState>,
+}
+
+impl CustodyCheckpoint {
+    fn verify_current(&self, state: &CheckpointState) -> Result<(), String> {
+        if state.lock.is_none() {
+            return Err("terminal custody checkpoint is no longer active".into());
+        }
+        if fs::read_to_string(&self.path).map_err(|error| error.to_string())? != state.encoded {
+            return Err("terminal custody changed during resume; record preserved".into());
+        }
+        Ok(())
+    }
+
+    fn persist_locked(&self, state: &mut CheckpointState, payload: &Value) -> Result<(), String> {
+        self.verify_current(state)?;
+        if !payload.is_object() {
+            return Err("terminal custody resume payload is invalid; record preserved".into());
+        }
+        if payload != &state.record.payload {
+            let updated = Record {
+                version: state.record.version,
+                key: state.record.key.clone(),
+                seed_sha256: state.record.seed_sha256.clone(),
+                payload: payload.clone(),
+            };
+            let encoded = serde_json::to_string(&updated).map_err(|error| error.to_string())?;
+            runtime_store::atomic_write(&self.path, &encoded)?;
+            // Track a completed rename even when the subsequent directory
+            // fsync fails, so the final attempt compares against those bytes.
+            state.record = updated;
+            state.encoded = encoded;
+        }
+        runtime_store::fsync_parent_dir(&self.path).map_err(|error| error.to_string())
+    }
+
+    pub(in crate::services::discord) fn persist(&self, payload: &Value) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|error| error.to_string())?;
+        self.persist_locked(&mut state, payload)
+    }
+
+    fn finish(&self, payload: &Value, result: Result<bool, String>) -> Result<bool, String> {
+        let mut state = self.state.lock().map_err(|error| error.to_string())?;
+        let outcome = (|| {
+            if matches!(result, Ok(true)) {
+                self.verify_current(&state)?;
+                fs::remove_file(&self.path).map_err(|error| error.to_string())?;
+                runtime_store::fsync_parent_dir(&self.path).map_err(|error| error.to_string())?;
+                Ok(true)
+            } else {
+                self.persist_locked(&mut state, payload)?;
+                result
+            }
+        })();
+        // An escaped handle cannot mutate custody after this attempt ends.
+        drop(state.lock.take());
+        outcome
+    }
 }
 
 fn root() -> Result<PathBuf, String> {
@@ -98,10 +172,13 @@ async fn persist_at(root: &Path, key: &str, payload: &Value) -> Result<(), Strin
 pub(crate) async fn drain(registry: &super::health::HealthRegistry) {
     let result = match root() {
         Ok(root) => {
-            drain_with(&root, |mut payload| async move {
-                let result =
-                    super::turn_bridge::resume_foreign_terminal_custody(registry, &mut payload)
-                        .await;
+            drain_with(&root, |mut payload, checkpoint| async move {
+                let result = super::turn_bridge::resume_foreign_terminal_custody(
+                    registry,
+                    &mut payload,
+                    &checkpoint,
+                )
+                .await;
                 (payload, result)
             })
             .await
@@ -113,9 +190,18 @@ pub(crate) async fn drain(registry: &super::health::HealthRegistry) {
     }
 }
 
+#[cfg(test)]
+pub(in crate::services::discord) async fn drain_for_test<F, Fut>(resume: F) -> Result<usize, String>
+where
+    F: FnMut(Value, Arc<CustodyCheckpoint>) -> Fut,
+    Fut: std::future::Future<Output = (Value, Result<bool, String>)>,
+{
+    drain_with(&root()?, resume).await
+}
+
 async fn drain_with<F, Fut>(root: &Path, mut resume: F) -> Result<usize, String>
 where
-    F: FnMut(Value) -> Fut,
+    F: FnMut(Value, Arc<CustodyCheckpoint>) -> Fut,
     Fut: std::future::Future<Output = (Value, Result<bool, String>)>,
 {
     let entries = match fs::read_dir(root) {
@@ -142,14 +228,13 @@ where
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let _lock = lock(&path).await?;
+        let record_lock = lock(&path).await?;
         let encoded = match fs::read_to_string(&path) {
             Ok(encoded) => encoded,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.to_string()),
         };
-        let mut record: Record =
-            serde_json::from_str(&encoded).map_err(|error| error.to_string())?;
+        let record: Record = serde_json::from_str(&encoded).map_err(|error| error.to_string())?;
         if record.version != 1
             || record_path(root, &record.key) != path
             || record.seed_sha256.len() != 64
@@ -163,33 +248,19 @@ where
                 "terminal custody version, identity or payload is invalid; record preserved".into(),
             );
         }
-        let (payload, result) = resume(record.payload.clone()).await;
-        // The flock spans resume and removal, so another process cannot replay
-        // or replace this episode between publication and this exact CAS.
-        if fs::read_to_string(&path).map_err(|error| error.to_string())? != encoded {
-            return Err("terminal custody changed during resume; record preserved".into());
+        let payload = record.payload.clone();
+        let checkpoint = Arc::new(CustodyCheckpoint {
+            path,
+            state: Mutex::new(CheckpointState {
+                record,
+                encoded,
+                lock: Some(record_lock),
+            }),
+        });
+        let (payload, result) = resume(payload, checkpoint.clone()).await;
+        if checkpoint.finish(&payload, result)? {
+            settled += 1;
         }
-        if !matches!(result, Ok(true)) {
-            // A real transport receipt must survive a later cleanup failure.
-            // The adapter owns this progress; storage never interprets it as
-            // delivery evidence or replaces the immutable initial identity.
-            if payload != record.payload {
-                if !payload.is_object() {
-                    return Err(
-                        "terminal custody resume payload is invalid; record preserved".into(),
-                    );
-                }
-                record.payload = payload;
-                let updated = serde_json::to_string(&record).map_err(|error| error.to_string())?;
-                runtime_store::atomic_write(&path, &updated)?;
-                runtime_store::fsync_parent_dir(&path).map_err(|error| error.to_string())?;
-            }
-            result?;
-            continue;
-        }
-        fs::remove_file(&path).map_err(|error| error.to_string())?;
-        runtime_store::fsync_parent_dir(&path).map_err(|error| error.to_string())?;
-        settled += 1;
     }
     Ok(settled)
 }

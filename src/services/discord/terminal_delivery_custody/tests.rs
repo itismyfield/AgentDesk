@@ -33,7 +33,7 @@ async fn foreign_terminal_custody_restart_retries_original_snapshot() {
     let path = record_path(&root, "episode-A");
     let before = fs::read(&path).unwrap();
     assert_eq!(
-        drain_with(&root, |value| async { (value, Ok(false)) })
+        drain_with(&root, |value, _| async { (value, Ok(false)) })
             .await
             .unwrap(),
         0
@@ -43,7 +43,7 @@ async fn foreign_terminal_custody_restart_retries_original_snapshot() {
     // captured identity must be reconstructed from the durable payload.
     let seen = original.clone();
     assert_eq!(
-        drain_with(&root, move |value| {
+        drain_with(&root, move |value, _| {
             assert_eq!(value, seen);
             async { (value, Ok(true)) }
         })
@@ -78,7 +78,7 @@ async fn foreign_terminal_custody_unknown_schema_and_changed_snapshot_survive() 
     let path = record_path(temp.path(), "episode-A");
     fs::write(&path, r#"{"version":2,"key":"episode-A","payload":{}}"#).unwrap();
     assert!(
-        drain_with(temp.path(), |_| async {
+        drain_with(temp.path(), |_, _| async {
             panic!("unknown schema must not publish")
         })
         .await
@@ -91,7 +91,7 @@ async fn foreign_terminal_custody_unknown_schema_and_changed_snapshot_survive() 
         .unwrap();
     let changed_path = path.clone();
     assert!(
-        drain_with(temp.path(), move |value| {
+        drain_with(temp.path(), move |value, _| {
             fs::write(&changed_path, "changed outside the custody protocol").unwrap();
             async { (value, Ok(true)) }
         })
@@ -114,14 +114,14 @@ async fn foreign_terminal_custody_concurrent_drains_publish_once() {
     let first_calls = calls.clone();
     let second_calls = calls.clone();
     let (first, second) = tokio::join!(
-        drain_with(temp.path(), move |value| {
+        drain_with(temp.path(), move |value, _| {
             first_calls.fetch_add(1, Ordering::SeqCst);
             async {
                 tokio::task::yield_now().await;
                 (value, Ok(true))
             }
         }),
-        drain_with(temp.path(), move |value| {
+        drain_with(temp.path(), move |value, _| {
             second_calls.fetch_add(1, Ordering::SeqCst);
             async { (value, Ok(true)) }
         }),
@@ -151,7 +151,7 @@ async fn foreign_terminal_custody_pg_failure_restart_and_exact_dedupe() {
         .execute(&pool)
         .await
         .unwrap();
-    let enqueue = |value: Value| {
+    let enqueue = |value: Value, _: Arc<CustodyCheckpoint>| {
         let pool = pool.clone();
         async move {
             let state: InflightTurnState =
@@ -206,7 +206,7 @@ async fn foreign_terminal_custody_receipt_progress_survives_cleanup_failure() {
     // The terminal adapter received an actual Discord message ID, but the
     // first lifecycle settlement fails. Preserve that receipt before retry.
     assert!(
-        drain_with(temp.path(), |mut value| async move {
+        drain_with(temp.path(), |mut value, _| async move {
             value["delivery_receipts"] = serde_json::json!([91]);
             value["children_remaining"] = serde_json::json!(["child-A"]);
             (value, Err("lifecycle settlement unavailable".into()))
@@ -224,7 +224,7 @@ async fn foreign_terminal_custody_receipt_progress_survives_cleanup_failure() {
         .await
         .unwrap();
     assert_eq!(
-        drain_with(temp.path(), |mut value| async move {
+        drain_with(temp.path(), |mut value, _| async move {
             assert_eq!(value["delivery_receipts"], serde_json::json!([91]));
             value["children_remaining"] = serde_json::json!([]);
             (value, Ok(false))
@@ -237,7 +237,7 @@ async fn foreign_terminal_custody_receipt_progress_survives_cleanup_failure() {
         .await
         .unwrap();
     assert_eq!(
-        drain_with(temp.path(), |value| async move {
+        drain_with(temp.path(), |value, _| async move {
             assert_eq!(value["delivery_receipts"], serde_json::json!([91]));
             assert_eq!(value["children_remaining"], serde_json::json!([]));
             (value, Ok(true))
@@ -247,4 +247,129 @@ async fn foreign_terminal_custody_receipt_progress_survives_cleanup_failure() {
         1
     );
     assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn foreign_terminal_custody_checkpoint_survives_interrupted_callback() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().to_path_buf();
+    persist_at(&root, "episode-A", &payload()).await.unwrap();
+    let attempt_root = root.clone();
+    let attempt = tokio::spawn(async move {
+        drain_with(&attempt_root, |mut value, checkpoint| async move {
+            value["delivery_receipts"] = serde_json::json!([91, 92]);
+            checkpoint.persist(&value).unwrap();
+            // Simulate interruption before the adapter can return progress.
+            panic!("next chunk aborted after earlier ACKs");
+        })
+        .await
+    });
+    assert!(attempt.await.unwrap_err().is_panic());
+    let retained: Record =
+        serde_json::from_slice(&fs::read(record_path(&root, "episode-A")).unwrap()).unwrap();
+    assert_eq!(
+        retained.payload["delivery_receipts"],
+        serde_json::json!([91, 92])
+    );
+    assert_eq!(
+        drain_with(&root, |value, checkpoint| async move {
+            assert_eq!(value["delivery_receipts"], serde_json::json!([91, 92]));
+            checkpoint.persist(&value).unwrap();
+            (value, Ok(true))
+        })
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn foreign_terminal_custody_checkpoint_failure_does_not_settle_or_overwrite() {
+    let temp = tempfile::tempdir().unwrap();
+    persist_at(temp.path(), "episode-A", &payload())
+        .await
+        .unwrap();
+    let path = record_path(temp.path(), "episode-A");
+    let before = fs::read_to_string(&path).unwrap();
+    let changed_path = path.clone();
+    assert!(
+        drain_with(temp.path(), move |mut value, checkpoint| {
+            // A file changed outside the lock protocol cannot be overwritten or
+            // falsely acknowledged by either an intermediate checkpoint or finish.
+            fs::write(&changed_path, "foreign retained bytes").unwrap();
+            async move {
+                value["delivery_receipts"] = serde_json::json!([91]);
+                let result = checkpoint.persist(&value);
+                assert!(result.is_err());
+                (value, result.map(|()| true))
+            }
+        })
+        .await
+        .is_err()
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), "foreign retained bytes");
+    // Restore the same pending record and verify a closed handle cannot write
+    // after a completed callback relinquished the existing flock.
+    fs::write(&path, before).unwrap();
+    let handle = Arc::new(Mutex::new(None));
+    let escaped = handle.clone();
+    assert_eq!(
+        drain_with(temp.path(), move |value, checkpoint| {
+            *escaped.lock().unwrap() = Some(checkpoint);
+            async { (value, Ok(false)) }
+        })
+        .await
+        .unwrap(),
+        0
+    );
+    assert!(
+        handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .persist(&payload())
+            .is_err()
+    );
+    assert!(path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn foreign_terminal_custody_checkpoint_write_failure_is_explicit() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    persist_at(temp.path(), "episode-A", &payload())
+        .await
+        .unwrap();
+    let path = record_path(temp.path(), "episode-A");
+    let before = fs::read(&path).unwrap();
+    let root = temp.path().to_path_buf();
+    let checked_path = path.clone();
+    assert!(
+        drain_with(temp.path(), move |mut value, checkpoint| {
+            let root = root.clone();
+            let checked_path = checked_path.clone();
+            let before = before.clone();
+            async move {
+                value["delivery_receipts"] = serde_json::json!([91]);
+                let permissions = fs::metadata(&root).unwrap().permissions();
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+                let result = checkpoint.persist(&value);
+                fs::set_permissions(&root, permissions).unwrap();
+                assert!(result.is_err(), "failed checkpoint must stop publication");
+                assert_eq!(fs::read(&checked_path).unwrap(), before);
+                (value, result.map(|()| true))
+            }
+        })
+        .await
+        .is_err()
+    );
+    // The final attempt can retain the in-memory ACK after writes recover,
+    // but it must still report the adapter failure and keep custody pending.
+    let retained: Record = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        retained.payload["delivery_receipts"],
+        serde_json::json!([91])
+    );
 }
