@@ -33,9 +33,6 @@ pub(super) fn captured_terminal_receipt_exists(
     ) {
         return false;
     }
-    let Some(channel_id) = opt_channel_id(state.channel_id) else {
-        return false;
-    };
     let Some(path) = state.output_path.as_ref() else {
         return false;
     };
@@ -45,6 +42,9 @@ pub(super) fn captured_terminal_receipt_exists(
         return false;
     };
     record.confirmed_deliveries.iter().any(|receipt| {
+        if receipt.source.provider != provider.as_str() {
+            return false;
+        }
         let captured = inflight::CodexRange {
             identity: inflight::InflightTurnIdentity::from_state(state),
             result: state.full_response.clone(),
@@ -53,21 +53,7 @@ pub(super) fn captured_terminal_receipt_exists(
             source_file_identity: state.tui_terminal_source_file_identity,
             source: receipt.source.clone(),
         };
-        if !matches!(captured.revalidated_source(state), Ok(Some(_))) {
-            return false;
-        }
-        crate::services::tmux_common::with_tmux_source_authority(
-            &captured.source.tmux_session_name,
-            |authority| {
-                captured.source_receipt_is_live(authority)
-                    && delivery_record::confirmed_delivery_receipt_exists(
-                        provider,
-                        channel_id,
-                        receipt.message_id,
-                        &captured.source,
-                    )
-            },
-        )
+        captured.confirmed_receipt_for_captured_row(state, receipt.message_id)
     })
 }
 

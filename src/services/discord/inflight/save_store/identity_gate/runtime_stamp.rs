@@ -292,12 +292,13 @@ impl TuiTerminalRange {
                         || (receipt && binding.last_offset > source.range.1))
             })
     }
-    pub(in crate::services::discord) fn revalidated_source(
+    fn with_revalidated_row<T>(
         &self,
         local: &InflightTurnState,
-    ) -> Result<Option<CodexRange>, ()> {
+        validate: impl FnOnce(&InflightTurnState) -> T,
+    ) -> Result<T, ()> {
         let source = &self.source;
-        let (start, end) = source.range;
+        let (start, _) = source.range;
         if source.delivery_channel_id != local.channel_id
             || !self.identity.matches_state(local)
             || !StreamRelayAuthority::from_state(local).bridge_owns_relay()
@@ -342,34 +343,94 @@ impl TuiTerminalRange {
         {
             return Err(());
         }
-        let Some(canonical) = self.live_source_path() else {
-            return Ok(None);
-        };
-        let exact = fresh.output_path.as_deref() == Some(canonical.to_string_lossy().as_ref())
-            && fresh.last_offset == end
+        Ok(validate(&fresh))
+    }
+
+    fn matches_durable_terminal(&self, fresh: &InflightTurnState, path: &Path) -> bool {
+        fresh.output_path.as_deref() == Some(path.to_string_lossy().as_ref())
+            && fresh.last_offset == self.source.range.1
             && fresh.full_response == self.result
-            && if provider == ProviderKind::Claude {
-                crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
-                    &source.tmux_session_name,
-                )
-                .is_some_and(|binding| {
-                    claude_binding_matches(
-                        &binding,
+    }
+
+    pub(in crate::services::discord) fn revalidated_source(
+        &self,
+        local: &InflightTurnState,
+    ) -> Result<Option<CodexRange>, ()> {
+        self.with_revalidated_row(local, |fresh| {
+            let source = &self.source;
+            let (start, end) = source.range;
+            let canonical = self.live_source_path()?;
+            let exact = self.matches_durable_terminal(fresh, &canonical)
+                && if fresh.provider_kind() == Some(ProviderKind::Claude) {
+                    crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(
+                        &source.tmux_session_name,
+                    )
+                    .is_some_and(|binding| {
+                        claude_binding_matches(
+                            &binding,
+                            &canonical,
+                            &self.session_id,
+                            (start, end),
+                            false,
+                        )
+                    })
+                } else {
+                    binding_matches(
+                        &source.tmux_session_name,
                         &canonical,
                         &self.session_id,
-                        (start, end),
-                        false,
+                        [end; 2],
                     )
-                })
-            } else {
-                binding_matches(
-                    &source.tmux_session_name,
-                    &canonical,
-                    &self.session_id,
-                    [end; 2],
-                )
-            };
-        Ok(exact.then(|| self.clone()))
+                };
+            exact.then(|| self.clone())
+        })
+    }
+
+    /// Consume an existing ACK after process-local bindings disappear. This
+    /// never returns publication authority or installs a replacement binding.
+    pub(in crate::services::discord) fn confirmed_receipt_for_captured_row(
+        &self,
+        local: &InflightTurnState,
+        message_id: u64,
+    ) -> bool {
+        use crate::services::{discord::outbound::delivery_record, tui_prompt_dedupe as dedupe};
+        self.with_revalidated_row(local, |fresh| {
+            let source = &self.source;
+            if !source.is_authoritative()
+                || nonempty(fresh.session_id.as_deref()) != nonempty(Some(&self.session_id))
+                || (fresh.runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
+                    && fresh.tui_terminal_source_file_identity != self.source_file_identity)
+            {
+                return false;
+            }
+            crate::services::tmux_common::with_tmux_source_authority(
+                &source.tmux_session_name,
+                |authority| {
+                    let Some(path) = self.receipt_source_path() else {
+                        return false;
+                    };
+                    if !self.matches_durable_terminal(fresh, &path)
+                        || tmux_generation_file_mtime_ns(&source.tmux_session_name)
+                            != source.generation_mtime_ns
+                    {
+                        return false;
+                    }
+                    if dedupe::runtime_binding_for_tmux_session_under_source_authority(authority)
+                        .is_some()
+                        && !self.source_receipt_is_live(authority)
+                    {
+                        return false;
+                    }
+                    delivery_record::confirmed_delivery_receipt_exists(
+                        &ProviderKind::from_str_or_unsupported(&source.provider),
+                        poise::serenity_prelude::ChannelId::new(fresh.channel_id),
+                        message_id,
+                        source,
+                    )
+                },
+            )
+        })
+        .unwrap_or(false)
     }
 }
 
