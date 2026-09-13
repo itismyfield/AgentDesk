@@ -73,6 +73,7 @@ use super::super::{SharedData, runtime_store};
 use super::cohort;
 use crate::config::RelayAuthorityMode;
 
+#[path = "authority_observation/delivery_boundary.rs"]
 pub(in crate::services::discord) mod delivery_boundary;
 
 /// Wire format identifier. The promotion script pins it, so a renamed field or a
