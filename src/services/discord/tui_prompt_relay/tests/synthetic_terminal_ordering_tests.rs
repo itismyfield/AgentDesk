@@ -15,6 +15,7 @@ fn terminal_ordering_fixture(replace_actor: bool, replace_after_delivery: bool) 
         .unwrap_or_else(|error| error.into_inner());
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
         .block_on(async {
+            let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::DEBUG).try_init();
             let shared = crate::services::discord::make_shared_data_for_tests();
             let provider = ProviderKind::Claude;
             let channel = ChannelId::new(583_310_001);
