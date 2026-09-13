@@ -73,6 +73,9 @@ fn synthetic_bridge_handoff_fixture(
                     let observed = ObservedTuiPrompt {
                         provider: provider.as_str().into(), tmux_session_name: tmux.into(),
                         prompt: "handoff prompt".into(), observed_at: chrono::Utc::now(),
+                        source_event_id: None,
+                        external_input_lease_generation: lease.generation,
+                        ssh_direct_observation_generation: crate::services::tui_prompt_dedupe::SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED,
                     };
                     let mut inline_lease = lease.clone();
                     assert!(synthetic_start_wiring::wire_tui_direct_synthetic_turn_start(
