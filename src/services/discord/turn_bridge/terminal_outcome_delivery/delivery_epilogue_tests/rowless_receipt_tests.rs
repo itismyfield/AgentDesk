@@ -104,6 +104,7 @@ async fn run(
 async fn exact_receipt_terminal_decision_records_only_evaluated_frontier_5521() {
     const CHILD: &str = "ADK_5071_TERMINAL_OBSERVATION_CHILD";
     if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
         let exact = format!(
             "{}::exact_receipt_terminal_decision_records_only_evaluated_frontier_5521",
             module_path!().split_once("::").unwrap().1
@@ -111,6 +112,7 @@ async fn exact_receipt_terminal_decision_records_only_evaluated_frontier_5521() 
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &exact, "--nocapture"])
             .env(CHILD, "1")
+            .env("AGENTDESK_ROOT_DIR", root.path())
             .output()
             .unwrap();
         assert!(child.status.success(), "{child:?}");
@@ -122,11 +124,22 @@ async fn exact_receipt_terminal_decision_records_only_evaluated_frontier_5521() 
     config.runtime.relay_authority_mode = crate::config::RelayAuthorityMode::Enforce;
     config.runtime.relay_authority_cohort_percent = 100;
     crate::config_live_reload::install(config);
-    for case in ["current_receipt", "frontier", "uncovered", "no_range"] {
+    let generation = crate::services::discord::runtime_store::allocate_process_generation();
+    assert_ne!(generation, 0);
+    // Keep the real boot allocation bound across this child's per-case roots,
+    // as production does; test process_generation otherwise rereads each root.
+    crate::services::discord::runtime_store::set_process_generation_for_tests(Some(generation));
+    for case in [
+        "current_receipt",
+        "frontier",
+        "uncovered",
+        "no_range",
+        "absent",
+    ] {
         let driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 1);
         let (mut ctx, state, mut source) = receipt_parts(&driver, ProviderKind::Codex);
         let settled = matches!(case, "current_receipt" | "frontier");
-        if case == "no_range" {
+        if matches!(case, "no_range" | "absent") {
             ctx.codex_tui_terminal_range = None;
         } else {
             if case == "uncovered" {
@@ -139,9 +152,20 @@ async fn exact_receipt_terminal_decision_records_only_evaluated_frontier_5521() 
             };
             dr::record_current_pinned_delivery(&source, anchor).unwrap();
         }
-        let output = run(ctx, state).await;
-        assert!(output.terminal_delivery_committed, "{case}");
-        assert_eq!(driver.completed_publications() == 0, settled, "{case}");
+        if case == "absent" {
+            ctx.current_msg_id =
+                super::super::super::current_message_anchor::detached_current_msg_id_from_durable(
+                    0,
+                );
+            assert_eq!(
+                super::super::rowless_receipt::decision(&ctx, &state),
+                super::super::rowless_receipt::TerminalReceiptDisposition::Continue
+            );
+        } else {
+            let output = run(ctx, state).await;
+            assert!(output.terminal_delivery_committed, "{case}");
+            assert_eq!(driver.completed_publications() == 0, settled, "{case}");
+        }
         let file = std::fs::read_dir(driver._temp.path().join("relay_authority"))
             .unwrap()
             .next()
@@ -156,6 +180,15 @@ async fn exact_receipt_terminal_decision_records_only_evaluated_frontier_5521() 
             .collect();
         assert_eq!(records.len(), 1, "{case}: one actual decision");
         let record = &records[0];
+        assert_eq!(record["process_generation"], generation);
+        assert_eq!(
+            record["current_message_id"],
+            if case == "absent" {
+                0
+            } else {
+                DRIVER_CURRENT_MSG_ID
+            }
+        );
         let expected = match case {
             "frontier" => Some(true),
             "uncovered" => Some(false),
@@ -174,7 +207,7 @@ async fn exact_receipt_terminal_decision_records_only_evaluated_frontier_5521() 
                 "continue"
             }
         );
-        if case == "no_range" {
+        if matches!(case, "no_range" | "absent") {
             assert!(record["source"].is_null());
         } else {
             assert_eq!(record["source"]["range"], serde_json::json!([0, 64]));
@@ -184,6 +217,35 @@ async fn exact_receipt_terminal_decision_records_only_evaluated_frontier_5521() 
             );
         }
         assert_eq!(record["anchor"].is_null(), expected.is_none());
+        let checked = std::process::Command::new("python3")
+            .args([
+                "-B",
+                "-c",
+                r#"
+import pathlib, runpy, sys
+r = runpy.run_path(sys.argv[1])
+events, warnings, _ = r['load_events'](pathlib.Path(sys.argv[2]) / 'relay_authority')
+assert not warnings, warnings
+metric = r['delivery_boundary_counts'](events)['frontier_already_covers']
+expected = sys.argv[3]
+assert metric[expected] == 1 and metric['records'] == 1, metric
+assert metric['status'] == ('unknown' if expected == 'unknown' else 'measured'), metric
+assert r['completion_scope_counts'](events) == {}
+"#,
+            ])
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/scripts/relay_authority_rollout_report.py"
+            ))
+            .arg(driver._temp.path())
+            .arg(match expected {
+                Some(true) => "true",
+                Some(false) => "false",
+                None => "unknown",
+            })
+            .output()
+            .unwrap();
+        assert!(checked.status.success(), "{checked:?}");
     }
 }
 

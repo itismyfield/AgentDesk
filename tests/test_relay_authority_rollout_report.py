@@ -34,6 +34,7 @@ shape.
 from __future__ import annotations
 
 import importlib.util
+import copy
 import json
 import sys
 import tempfile
@@ -1020,8 +1021,8 @@ class DeliveryBoundaryReportTest(unittest.TestCase):
             item.update(source={"provider": "codex", "tmux_session_name": "session",
                                 "turn_nonce": "nonce", "range": [10, 20],
                                 "generation_mtime_ns": 123,
-                                "offset_authority_channel_id": 1, "delivery_channel_id": 2},
-                        anchor={"channel_id": 2, "message_id": 101, "range": [10, 20]},
+                                "offset_authority_channel_id": 1, "delivery_channel_id": item["channel_id"]},
+                        anchor={"channel_id": item["channel_id"], "message_id": 101, "range": [10, 20]},
                         disposition="already_delivered" if value else "continue")
         else:
             item.pop("turn_id")  # Cleanup has operation context, no invented turn.
@@ -1063,6 +1064,49 @@ class DeliveryBoundaryReportTest(unittest.TestCase):
         item = self.operation(metric, True)
         item["anchor"] = {}
         self.assertEqual(report.delivery_boundary_counts([item])[metric]["unknown"], 1)
+
+    def test_malformed_or_conflicting_frontier_evidence_is_unknown_through_reader(self):
+        metric = "frontier_already_covers"
+        broken = [(("anchor",), None), (("anchor",), {}),
+                  (("anchor", "range"), [10, 10]), (("anchor", "range"), [20, 10]),
+                  (("anchor", "channel_id"), True), (("anchor", "message_id"), "101"),
+                  (("source", "provider"), "claude"), (("source", "turn_nonce"), 7),
+                  (("source", "tmux_session_name"), ["session"]),
+                  (("source", "offset_authority_channel_id"), "1"),
+                  (("source", "delivery_channel_id"), 2),
+                  (("source", "delivery_channel_id"), True),
+                  (("source", "generation_mtime_ns"), True),
+                  (("source", "range"), [False, 20]),
+                  (("source", "range"), [10, 2**64]),
+                  (("turn_id",), None), (("current_message_id",), True),
+                  (("disposition",), "unknown")]
+        for value in (False, True):
+            cases = broken + ([(("anchor", "range"), [0, 5]),
+                               (("anchor", "channel_id"), 2),
+                               (("disposition",), "continue")] if value else [])
+            for path, replacement in cases:
+                with self.subTest(value=value, path=path, replacement=replacement):
+                    item = copy.deepcopy(self.operation(metric, value))
+                    target = item
+                    for field in path[:-1]:
+                        target = target[field]
+                    target[path[-1]] = replacement
+                    summary = RolloutReportTest().run_report([
+                        event(site="bridge_entry", turn=1, observed=BASE), item])
+                    result = summary["target_segment"]["delivery_boundary_outcomes"][metric]
+                    self.assertEqual([result[key] for key in ("true", "false", "unknown")], [0, 0, 1])
+                    self.assertEqual(result["status"], "unknown")
+                    self.assertIsNone(result["share"])
+
+    def test_historical_receipt_and_foreign_frontier_can_be_measured_false(self):
+        metric = "frontier_already_covers"
+        for disposition in ("continue", "already_delivered", "foreign_anchor"):
+            item = self.operation(metric, False)
+            item["disposition"] = disposition
+            item["anchor"].update(channel_id=123, range=[20, 30])
+            result = report.delivery_boundary_counts([item])[metric]
+            self.assertEqual((result["false"], result["unknown"]), (1, 0))
+            self.assertEqual(result["status"], "measured")
 
     def test_actual_post_loop_operations_do_not_change_stage_or_range_criteria(self):
         rows = turns(210, days=7, sites=("bridge_entry", "stream_loop", "loop_exit"))

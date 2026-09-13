@@ -389,6 +389,43 @@ def completion_scope_counts(events: list[dict]) -> dict:
     )
 
 
+def _uint(value, *, zero=False) -> bool:
+    return type(value) is int and (0 if zero else 1) <= value < 2**64
+
+
+def _advancing_range(value) -> bool:
+    return (isinstance(value, list) and len(value) == 2
+            and all(_uint(offset, zero=True) for offset in value) and value[0] < value[1])
+
+
+def _consistent_frontier_evidence(event: dict, payload: dict) -> bool:
+    """Validate the emitted predicate's inputs, without recreating a receipt read."""
+    source, anchor = payload["source"], payload["anchor"]
+    if not isinstance(source, dict) or not isinstance(anchor, dict):
+        return False
+    generation = source.get("generation_mtime_ns")
+    if not (_advancing_range(source.get("range")) and _advancing_range(anchor.get("range"))
+            and type(generation) is int and -(2**63) <= generation < 2**63 and generation != 0
+            and all(isinstance(source.get(field), str) and source[field]
+                    for field in ("provider", "tmux_session_name", "turn_nonce"))
+            and source["provider"] == event["provider"]
+            and all(_uint(source.get(field)) for field in
+                    ("offset_authority_channel_id", "delivery_channel_id"))
+            and source["delivery_channel_id"] == event["channel_id"]
+            and all(_uint(anchor.get(field)) for field in ("channel_id", "message_id"))
+            and _uint(event.get("turn_id"), zero=True)
+            and payload["disposition"] in ("continue", "already_delivered", "foreign_anchor")):
+        return False
+    if payload["frontier_already_covers"] is True:
+        return (anchor["channel_id"] == source["delivery_channel_id"]
+                and anchor["range"][0] <= source["range"][0]
+                and anchor["range"][1] >= source["range"][1]
+                and payload["disposition"] == "already_delivered")
+    # False still requires a real current-generation anchor. A historical exact
+    # receipt may settle the turn even when this frontier predicate is false.
+    return True
+
+
 def delivery_boundary_counts(events: list[dict]) -> dict:
     """Outcomes of observed operations, not estimates for unobserved turns."""
     result = {}
@@ -402,10 +439,8 @@ def delivery_boundary_counts(events: list[dict]) -> dict:
                       "observed_at", "current_message_id")
             if not (all(isinstance(event.get(field), str) and event[field]
                         for field in ("host", "provider", "observed_at"))
-                    and all(type(event.get(field)) is int and event[field] > 0
-                            for field in ("process_generation", "channel_id"))
-                    and type(event.get("current_message_id")) is int
-                    and event["current_message_id"] >= 0
+                    and all(_uint(event.get(field)) for field in ("process_generation", "channel_id"))
+                    and _uint(event.get("current_message_id"), zero=True)
                     and (event.get("turn_id") is None or type(event["turn_id"]) is int)):
                 counts["unknown"] += 1
                 continue
@@ -413,32 +448,16 @@ def delivery_boundary_counts(events: list[dict]) -> dict:
             payload = {field: event.get(field) for field in
                        (metric, "source", "anchor", "disposition",
                         "recovery_enqueue_attempted", "recovery_enqueued")}
-            groups.setdefault(key, {})[json.dumps(payload, sort_keys=True)] = payload
+            groups.setdefault(key, {})[json.dumps(payload, sort_keys=True)] = (event, payload)
         for versions in groups.values():
             if len(versions) != 1:
                 counts["conflicting_operations"] += 1
                 counts["unknown"] += 1
                 continue
-            payload = next(iter(versions.values()))
+            event, payload = next(iter(versions.values()))
             value = payload[metric]
             if metric == "frontier_already_covers" and type(value) is bool:
-                source = payload["source"]
-                source_range = source.get("range") if isinstance(source, dict) else None
-                # Require the decision's exact source evidence, never infer it
-                # from a loop-exit range or a terminal latch.
-                if not (isinstance(source_range, list) and len(source_range) == 2
-                        and all(type(offset) is int for offset in source_range)
-                        and source_range[0] >= 0 and source_range[1] > source_range[0]
-                        and type(source.get("generation_mtime_ns")) is int
-                        and source["generation_mtime_ns"] != 0
-                        and all(source.get(field) for field in
-                                ("provider", "tmux_session_name", "turn_nonce",
-                                 "offset_authority_channel_id", "delivery_channel_id"))
-                        and (value is False or (
-                            isinstance(payload["anchor"], dict)
-                            and all(type(payload["anchor"].get(field)) is int
-                                    and payload["anchor"][field] > 0
-                                    for field in ("channel_id", "message_id"))))):
+                if not _consistent_frontier_evidence(event, payload):
                     value = None
             counts["true" if value is True else "false" if value is False else "unknown"] += 1
             if metric == "unbound_anchor_left" and payload["recovery_enqueue_attempted"] is True:

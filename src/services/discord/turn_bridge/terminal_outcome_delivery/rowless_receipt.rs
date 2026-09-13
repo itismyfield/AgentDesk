@@ -38,7 +38,10 @@ pub(in crate::services::discord::turn_bridge) fn decision(
         turn_id: ctx.inflight_state.effective_finalizer_turn_id(),
         source: source.as_ref(),
         anchor,
-        current_message_id: ctx.current_msg_id.get(),
+        current_message_id:
+            super::super::current_message_anchor::durable_current_msg_id_from_detached(
+                ctx.current_msg_id,
+            ),
         frontier_already_covers,
         disposition: match disposition {
             TerminalReceiptDisposition::Continue => "continue",
