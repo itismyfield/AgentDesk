@@ -210,9 +210,19 @@ joined preview→terminal 진단 `02c33a9975be7697b2380c03d02e9cc6425479ec`은
 9월 14일 04:12:47.683586 KST(9월 13일 19:12:47.683586 UTC)에 bounded 중복을 **재현**했다.
 exact sequence·range·generation·anchor receipt 검사는 통과했으나
 `native_collector_tests.rs:430`에서 visible commentary **실제 2회/기대 1회**로 RED였다.
-최소 수리가 진행 중이며 원래 streaming 확인은 유지한다. failure/opposite 경로 검증과
-자연 terminal·release·next-input cycle은 계속 대기다. 이 진단은 cleanup·배포·추가 production
-결함을 입증하지 않는다. Stage 2 승인과 R6·A2·T6 미완료는 유지한다.
+교정된 local joined 진단 `e2c28ca2a7`은 9월 14일 04:32:12 KST(9월 13일 19:32:12 UTC)
+visible commentary **1회·exact receipt PASS**였다. `0bc43d008b`의 pending-delete·successor·
+uncertainty 최종 8 controls는 실행 중이며 아직 PASS나 배포로 표시하지 않는다.
+actorless cleanup debt 접근은 철회했다. 새 store는 없고 cleanup 실패는 preview를 보존하며,
+durable retry를 제공한다는 주장도 없다.
+
+배포된 `f41b2dc2c9`의 원래 streaming 확인은 유지한다. 옛 preview anchor에는 durable
+ownership 증거가 없어 소급 삭제할 수 없다. 실제 terminal·exact receipt·자연 release·후속
+입력은 대기이며 원래 턴의 자연 완료 전 새 배포는 하지 않는다.
+9월 14일 04:15:40 KST(9월 13일 19:15:40 UTC) 완료한 Stage 2 관측은 **400턴·9일,
+100턴 부족**이다. A2 frontier 표본은 50건(false 3·true 0·unknown 47), unbound 0·unknown이다.
+이는 source count 증명이나 현재 바이너리 수용 증거가 아니며 9월 12일 등 앞선 관측은
+역사적 snapshot으로 유지한다. Stage 2 승인과 R6·A2·예산 귀속·rollback GO·T6 미완료는 유지한다.
 아래 #5917 OPEN·CI 미완료 서술은 해당 소스 대사 당시의 역사적 상태이며,
 현재 상태는 이 문단과 정본 체크포인트를 따른다.
 

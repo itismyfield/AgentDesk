@@ -170,11 +170,25 @@ live-cycle pass. The joined preview-to-terminal diagnostic at
 `02c33a9975be7697b2380c03d02e9cc6425479ec` reproduced a bounded duplicate at
 September 14 04:12:47.683586 KST (September 13 19:12:47.683586 UTC): exact
 sequence, range, generation and anchor receipt checks passed, then visible
-commentary was **2 rather than 1** (`native_collector_tests.rs:430`). A minimal
-repair is in progress. Original streaming remains confirmed; this diagnostic
-neither retracts that observation nor proves the natural terminal/release/next-input
-cycle. Failure/opposite-path checks and that natural cycle remain pending.
-Stage 2 approval and the R6, A2 and T6 pending boundaries are unchanged.
+commentary was **2 rather than 1** (`native_collector_tests.rs:430`). The corrected
+local joined diagnostic `e2c28ca2a7` passed with **1 visible commentary and an exact
+receipt** at September 14 04:32:12 KST (September 13 19:32:12 UTC).
+Eight pending-delete, successor and uncertainty controls are running on
+`0bc43d008b`; they are not yet PASS or deployed. The actorless cleanup-debt
+approach was withdrawn: no new store is introduced, cleanup failures preserve
+the preview, and no durable retry is claimed.
+
+Original streaming on deployed `f41b2dc2c9` remains confirmed. Old preview anchors
+lack durable ownership evidence and cannot be retrospectively deleted. Actual
+terminal, exact receipt, natural release and the one followup remain pending;
+no new deployment proceeds before the original turn completes naturally.
+The Stage 2 report completed at September 14 04:15:40 KST (September 13 19:15:40
+UTC) counted **400 turns / 9 days, 100 turns short**. Its A2 frontier sample was
+50: false 3, true 0, unknown 47; unbound 0, unknown. This is an observation
+snapshot, not current-binary acceptance or source-count proof. Earlier snapshots,
+including the September 12 report above, remain historical.
+Stage 2 approval is unchanged; R6, A2, budget attribution, rollback GO and T6
+remain pending. Local diagnostic success does not establish the natural live cycle.
 
 ## Rollback
 

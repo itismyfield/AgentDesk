@@ -74,23 +74,38 @@ fn sink_file_date(name: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(name.strip_suffix(FILE_SUFFIX)?, FILE_DATE_FORMAT).ok()
 }
 
-/// Remove whole daily files published before the retention window. Returns how
-/// many were removed. Never partially edits a file, never touches a name it
-/// cannot parse, and never touches a file dated today or later — a wall-clock
-/// rollback therefore deletes nothing rather than reclassifying live data.
+/// A zero removal count alone cannot distinguish a clean sweep from failed IO.
+#[derive(Default)]
+pub(in crate::services::discord) struct PruneOutcome {
+    removed: usize,
+    complete: bool,
+}
+
+/// Remove whole daily files published before the retention window. Preserve the
+/// actual removal count even if another entry fails. Only a complete sweep may
+/// consume the daily latch; later ordinary writes retry an incomplete sweep.
+/// The boundary day, unrecognized names, directories and future files remain
+/// outside the deletion set.
 pub(in crate::services::discord) fn prune_expired_observation_files(
     dir: &Path,
     today: NaiveDate,
     retention_days: i64,
-) -> usize {
+) -> PruneOutcome {
     let Some(cutoff) = today.checked_sub_signed(chrono::Duration::days(retention_days)) else {
-        return 0;
+        return PruneOutcome::default();
     };
     let Ok(entries) = fs::read_dir(dir) else {
-        return 0;
+        return PruneOutcome::default();
     };
-    let mut removed = 0;
-    for entry in entries.flatten() {
+    let mut outcome = PruneOutcome {
+        removed: 0,
+        complete: true,
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            outcome.complete = false;
+            continue;
+        };
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
@@ -100,14 +115,28 @@ pub(in crate::services::discord) fn prune_expired_observation_files(
             continue;
         }
         let path = entry.path();
-        if path.is_file() && fs::remove_file(&path).is_ok() {
-            removed += 1;
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            // Another cleanup may already have removed this entry.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                outcome.complete = false;
+                continue;
+            }
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => outcome.removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => outcome.complete = false,
         }
     }
-    removed
+    outcome
 }
 
-/// Last publish day this process already pruned, per sink directory. The
+/// Last publish day this process completely pruned, per sink directory. The
 /// directory is part of the key: a latch keyed on the day alone let the first
 /// caller's directory win the day and turned every other directory's prune
 /// into a silent no-op (#5891). The path is keyed as given, not canonicalised,
@@ -115,16 +144,14 @@ pub(in crate::services::discord) fn prune_expired_observation_files(
 static LAST_PRUNED_DAY: LazyLock<Mutex<HashMap<PathBuf, NaiveDate>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Best-effort prune, at most once per process per publish day per directory,
-/// driven from the sink's own write path so retention needs no new task, timer
-/// or failure mode.
+/// Best-effort prune, once successfully per process, publish day and directory.
+/// The sink's ordinary write path retries failed sweeps; no new task or timer
+/// is needed, and failures never propagate back into the producing turn.
 ///
-/// Cost is one `read_dir` over a directory this policy holds at ~30 entries plus
-/// at most a handful of unlinks, and it is charged to the first write of each
-/// day only. Like every other step on this path it is best-effort: a failure is
-/// dropped rather than propagated back into the turn that produced the record.
-/// The lock is held across the prune so the latch commits after the work, and
-/// two first writers of one day serialise instead of both seeing an open latch.
+/// The lock covers both the sweep and its success-only latch commit. An absent
+/// directory, iteration error, metadata error or failed unlink cannot consume
+/// the day's opportunity (#5891). A file already removed by another cleanup is
+/// not a failure. A successful sweep, including zero removals, still latches.
 pub(in crate::services::discord) fn prune_observation_dir_once_per_day(
     dir: &Path,
     today: NaiveDate,
@@ -135,8 +162,10 @@ pub(in crate::services::discord) fn prune_observation_dir_once_per_day(
     if last.get(dir) == Some(&today) {
         return;
     }
-    let _ = prune_expired_observation_files(dir, today, OBSERVATION_RETENTION_DAYS);
-    last.insert(dir.to_path_buf(), today);
+    let outcome = prune_expired_observation_files(dir, today, OBSERVATION_RETENTION_DAYS);
+    if outcome.complete {
+        last.insert(dir.to_path_buf(), today);
+    }
 }
 
 #[cfg(test)]
@@ -184,9 +213,16 @@ mod tests {
         let inside = write_cohabiting_file(dir, "2026-09-04.jsonl");
         let current = write_cohabiting_file(dir, "2026-09-11.jsonl");
 
-        let removed = prune_expired_observation_files(dir, today, OBSERVATION_RETENTION_DAYS);
+        let outcome = prune_expired_observation_files(dir, today, OBSERVATION_RETENTION_DAYS);
 
-        assert_eq!(removed, 2, "only the two files past the window are removed");
+        assert!(
+            outcome.complete,
+            "all eligible files were inspected successfully"
+        );
+        assert_eq!(
+            outcome.removed, 2,
+            "only the two files past the window are removed"
+        );
         assert!(!expired.exists());
         assert!(!just_expired.exists());
         // 2026-08-12 is exactly today-30: the boundary day is retained, because
@@ -225,7 +261,8 @@ mod tests {
         let expired = write_cohabiting_file(dir, "2026-01-02.jsonl");
 
         assert_eq!(
-            prune_expired_observation_files(dir, day("2026-09-11"), OBSERVATION_RETENTION_DAYS),
+            prune_expired_observation_files(dir, day("2026-09-11"), OBSERVATION_RETENTION_DAYS)
+                .removed,
             1
         );
         // Whole-file removal, not a surviving axis-B-only remnant.
@@ -243,13 +280,19 @@ mod tests {
         fs::write(&odd, "archived by an operator").expect("write archive");
         let nested = dir.join("2026-08-01");
         fs::create_dir(&nested).expect("create dir named like a date");
+        let dated_directory = dir.join("2026-08-01.jsonl");
+        fs::create_dir(&dated_directory).expect("create directory with a valid sink filename");
         // Wall-clock rollback: the sink is ahead of `today`.
         let future = write_cohabiting_file(dir, "2026-12-25.jsonl");
 
-        assert_eq!(
-            prune_expired_observation_files(dir, day("2026-09-11"), OBSERVATION_RETENTION_DAYS),
-            0
+        let outcome =
+            prune_expired_observation_files(dir, day("2026-09-11"), OBSERVATION_RETENTION_DAYS);
+        assert_eq!(outcome.removed, 0);
+        assert!(
+            outcome.complete,
+            "a directory must be skipped, not unsuccessfully unlinked"
         );
+        assert!(dated_directory.is_dir());
         assert!(readme.exists());
         assert!(odd.exists());
         assert!(nested.exists());
@@ -259,11 +302,44 @@ mod tests {
     #[test]
     fn a_missing_sink_directory_is_not_an_error() {
         let temp = tempfile::TempDir::new().expect("temp sink dir");
-        let absent = temp.path().join("relay_authority");
-        assert_eq!(
-            prune_expired_observation_files(&absent, day("2026-09-11"), OBSERVATION_RETENTION_DAYS),
-            0
-        );
+        let today = day("2026-09-11");
+        for initially_a_file in [false, true] {
+            let dir = temp.path().join(if initially_a_file {
+                "not-a-dir"
+            } else {
+                "missing"
+            });
+            if initially_a_file {
+                fs::write(&dir, "not a directory").expect("create non-directory obstacle");
+            }
+            let outcome = prune_expired_observation_files(&dir, today, OBSERVATION_RETENTION_DAYS);
+            assert_eq!(outcome.removed, 0);
+            assert!(
+                !outcome.complete,
+                "unreadable directory is not a successful empty sweep"
+            );
+
+            // Exercise the production caller, not merely its result predicate.
+            // Neither missing-directory nor ENOTDIR failure may latch the day.
+            prune_observation_dir_once_per_day(&dir, today);
+            if initially_a_file {
+                fs::remove_file(&dir).expect("remove non-directory obstacle");
+            }
+            fs::create_dir(&dir).expect("make the sink available later the same day");
+            let expired = write_cohabiting_file(&dir, "2026-08-01.jsonl");
+            prune_observation_dir_once_per_day(&dir, today);
+            assert!(
+                !expired.exists(),
+                "a failed sweep must be retried on a later write"
+            );
+
+            let replanted = write_cohabiting_file(&dir, "2026-08-01.jsonl");
+            prune_observation_dir_once_per_day(&dir, today);
+            assert!(
+                replanted.exists(),
+                "a successful retry still consumes the daily latch"
+            );
+        }
     }
 
     /// Production only ever calls the once-per-day entry point; every test
