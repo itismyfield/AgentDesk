@@ -88,7 +88,9 @@ mod tests {
     fn tui_direct_bridge_completion_rejects_uncommitted_matching_inflight() {
         use crate::services::discord::gateway::HeadlessGateway;
         use crate::services::discord::turn_bridge::BridgeCompletionSignal;
-        use crate::services::tui_prompt_dedupe::{prompt_anchor_for_response, record_prompt_anchor};
+        use crate::services::tui_prompt_dedupe::{
+            prompt_anchor_for_response, record_prompt_anchor,
+        };
 
         let temp = tempfile::tempdir().expect("temp runtime root");
         let _root = crate::config::set_agentdesk_root_for_test(temp.path());
