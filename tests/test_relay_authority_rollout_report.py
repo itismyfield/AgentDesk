@@ -194,7 +194,7 @@ class RolloutReportTest(unittest.TestCase):
                 "runtime_ptr": "0x1", "cohort_fingerprint": FINGERPRINT,
                 "provider": "codex", "channel_id": 4259300,
                 "site": "operator_relay_recovery", "structural_action": "reattach_watcher",
-                "structural_eligible": True, "ledger_action": "observe_only",
+                "ledger_action": "observe_only", "structural_eligible": True,
                 "ledger_eligible": False, "diff": "ledger_milder", "cleanup_delay_ms": 12}
 
     def test_valid_axis_b_does_not_change_axis_a_promotion(self):
@@ -392,15 +392,16 @@ class RolloutReportTest(unittest.TestCase):
     def test_entry_only_turns_do_not_pass_on_the_turn_count(self):
         """legB P1-2: 200 turns, 7 days, and no stream or loop-exit record.
 
-        Every turn-counting floor is satisfied and `new_stricter` is 0 only
-        because no stream record exists to be nonzero. This is the false-green
-        r1 produced, and it must now fail on both coverage floors.
+        Every turn-counting floor is satisfied, but no stream observation
+        exists to establish a measured zero. Require unknown `new_stricter`
+        evidence as well as failures on both coverage floors.
         """
 
         summary = self.run_report(turns(210, days=7, sites=("bridge_entry",)))
         self.assertTrue(summary["criteria"]["window_days"]["met"])
         self.assertTrue(summary["criteria"]["turn_samples"]["met"])
-        self.assertTrue(summary["criteria"]["new_stricter"]["met"])
+        self.assertIsNone(summary["criteria"]["new_stricter"]["value"])
+        self.assertFalse(summary["criteria"]["new_stricter"]["met"])
         self.assertFalse(summary["criteria"]["stream_coverage"]["met"])
         self.assertFalse(summary["criteria"]["loop_exit_coverage"]["met"])
         self.assertFalse(summary["promotion_ready"])
