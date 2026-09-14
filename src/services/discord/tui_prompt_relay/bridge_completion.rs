@@ -88,9 +88,7 @@ mod tests {
     fn tui_direct_bridge_completion_rejects_uncommitted_matching_inflight() {
         use crate::services::discord::gateway::HeadlessGateway;
         use crate::services::discord::turn_bridge::BridgeCompletionSignal;
-        use crate::services::tui_prompt_dedupe::{
-            prompt_anchor_for_response, record_prompt_anchor,
-        };
+        use crate::services::tui_prompt_dedupe::{prompt_anchor_for_response, record_prompt_anchor};
 
         let temp = tempfile::tempdir().expect("temp runtime root");
         let _root = crate::config::set_agentdesk_root_for_test(temp.path());
@@ -194,6 +192,10 @@ mod tests {
                 ("committed fallback", delivered, delivered.len(), true, true),
                 ("committed empty", "", 0, true, true),
             ] {
+                // Each case is an independent initial state, not a rewind of
+                // the preceding turn's durable delivery progress. Reset only
+                // this test-owned row; keep production monotonicity checks.
+                std::fs::remove_file(&path).expect("reset independent completion fixture");
                 let mut row = state.clone();
                 row.full_response = body.to_string();
                 row.response_sent_offset = sent;
