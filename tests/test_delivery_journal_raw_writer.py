@@ -949,7 +949,7 @@ class RawWriterAllowlistTests(unittest.TestCase):
            `src/`, and the shipped journal schema carries no `source_kind`,
            `pipe_stream_epoch` or `pipe_sequence` column, so there is no durable
            coordinate a pipe obligation could be keyed by; the journal has one
-           key type. The collector also has exactly ONE caller, in
+           key type. The collector also has exactly ONE production caller, in
            `tmux_watcher.rs`, shared by pipe and TUI alike -- pipe is a runtime
            overlay on a shared path, not a module family. Any of those three
            facts changing is a signal to reconsider the family, which is why they
@@ -1006,8 +1006,12 @@ class RawWriterAllowlistTests(unittest.TestCase):
                 epoch_mentions[rel] = code.count("stream_epoch")
         self.assertEqual(
             callers,
-            {"src/services/discord/tmux_watcher.rs": 1},
-            "the collector gained or lost a caller; the claim that pipe and TUI join on one "
+            {
+                "src/services/discord/tmux_watcher.rs": 1,
+                "src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs": 1,
+            },
+            "the collector gained or lost a caller (one production caller plus the pinned "
+            "native regression); the claim that pipe and TUI join on one "
             "shared watcher, with no pipe-only delivery path, has to be re-measured",
         )
         self.assertEqual(
