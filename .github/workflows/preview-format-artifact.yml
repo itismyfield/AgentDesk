@@ -1,0 +1,37 @@
+name: Preview candidate formatting artifact
+
+on:
+  push:
+    branches: ['fix/5071-preview-settlement-review-20260914']
+    paths: ['.github/workflows/preview-format-artifact.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.94.1'
+          components: rustfmt
+      - name: Export original source and formatter-only delta
+        run: |
+          mkdir -p /tmp/preview-format
+          git rev-parse HEAD > /tmp/preview-format/source-commit.txt
+          git archive HEAD | gzip > /tmp/preview-format/source.tar.gz
+          cargo fmt --all
+          git diff --binary > /tmp/preview-format/rustfmt.patch
+          git diff --name-only > /tmp/preview-format/changed-files.txt
+          cargo fmt --all --check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-format-exact-source
+          path: /tmp/preview-format/
+          retention-days: 3
+          if-no-files-found: error
