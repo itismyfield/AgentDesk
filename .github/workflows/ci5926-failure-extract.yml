@@ -18,13 +18,14 @@ jobs:
           set -euo pipefail
           mkdir evidence
           for job in 103844493772 103844493763; do
-            gh api "/repos/itismyfield/AgentDesk/actions/jobs/${job}/logs" > "evidence/${job}.log"
+            gh api --allow-escape-sequences "/repos/itismyfield/AgentDesk/actions/jobs/${job}/logs" > "evidence/${job}.log"
           done
           python3 - <<'PY'
           import pathlib, re
           for path in sorted(pathlib.Path('evidence').glob('*.log')):
-              lines = path.read_text(encoding='utf-8-sig').splitlines()
-              hits = [i for i, line in enumerate(lines) if re.search(r'panicked at|^.*test .* \.\.\. FAILED$|^.*failures:|^.*test result: FAILED|AssertionError:|reference count|call.site.*drift|error: test failed|::error::|[0-9]+ failed;', line)]
+              text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', path.read_text(encoding='utf-8-sig'))
+              lines = text.splitlines()
+              hits = [i for i, line in enumerate(lines) if re.search(r'panicked at|^.*test .* \.\.\. FAILED$|^.*failures:|^.*test result: FAILED|AssertionError:|reference count|call.site.*drift|error: test failed|::error::|[1-9][0-9]* failed;', line)]
               selected = set()
               for i in hits:
                   selected.update(range(max(0, i-4), min(len(lines), i+25)))
