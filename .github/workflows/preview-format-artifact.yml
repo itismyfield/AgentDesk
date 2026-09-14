@@ -10,8 +10,11 @@ permissions:
 
 jobs:
   format:
+    if: github.repository == 'itismyfield/AgentDesk' && github.actor == 'itismyfield'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,18 +23,28 @@ jobs:
         with:
           toolchain: '1.94.1'
           components: rustfmt
-      - name: Export original source and formatter-only delta
+      - name: Format only the three verified files
         run: |
-          mkdir -p /tmp/preview-format
-          git rev-parse HEAD > /tmp/preview-format/source-commit.txt
-          git archive HEAD | gzip > /tmp/preview-format/source.tar.gz
           cargo fmt --all
-          git diff --binary > /tmp/preview-format/rustfmt.patch
-          git diff --name-only > /tmp/preview-format/changed-files.txt
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              'src/services/discord/tmux_watcher.rs',
+              'src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs',
+              'src/services/discord/tmux_watcher/terminal_commit_epilogue/continuation_marker_tests.rs',
+          }
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          if changed != allowed:
+              raise SystemExit(f'Refusing unexpected formatter scope: {changed}')
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          subprocess.run(['git', 'add', '--', *sorted(allowed)], check=True)
+          PY
           cargo fmt --all --check
-      - uses: actions/upload-artifact@v4
-        with:
-          name: preview-format-exact-source
-          path: /tmp/preview-format/
-          retention-days: 3
-          if-no-files-found: error
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'style(relay): apply Rust 1.94.1 formatter to reviewed preview candidate'
+      - name: Fast-forward only the isolated review branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/fix/5071-preview-settlement-review-20260914
+          header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=$header" push origin HEAD:refs/heads/fix/5071-preview-settlement-review-20260914
