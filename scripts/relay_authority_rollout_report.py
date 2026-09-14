@@ -45,10 +45,16 @@ dial positions cannot be added up into one promotion case:
                              would have ended a lifecycle the shipped gate kept,
                              which the monotone-relaxing contract forbids and
                              which blocks S4/S7a outright.
-* ``loop_exit_coverage``   — loop-exit records per bridge-entry record, floored.
-* ``stream_coverage``      — stream-loop records per bridge-entry record, floored.
+* ``loop_exit_coverage``   — matched distinct exits per distinct entry episode, floored.
+* ``stream_coverage``      — matched distinct streams per distinct entry episode, floored.
 * ``line_integrity``       — unusable lines, capped, as a share of the target
                              segment's own records plus them (see below).
+
+Coverage uses distinct entry-anchored episode/site pairs, not line counts.
+Exact replays cannot increase coverage, turn/day floors, stream counters or the
+integrity denominator. Conflicting records and missing/invalid u32 stream
+counters keep ``new_stricter`` unknown and block promotion; measured positive
+witnesses remain visible as lower bounds. Historical reports must be recomputed.
 
 The last three are what make an incomplete log fail instead of pass. The
 JSONL sink is best-effort by contract (nothing may propagate back into the turn
@@ -147,7 +153,7 @@ from pathlib import Path
 SCHEMA = "relay_authority.axis_a.v3"
 STAGE_TURN_FLOOR = {1: 200, 2: 500}
 WINDOW_DAY_FLOOR = 7
-# Per-site record counts, as a share of bridge-entry records. Both floors are
+# Matched distinct episode counts, as a share of entry episodes. Both floors are
 # below 1.0 on purpose: the two populations this slice measures legitimately skip
 # post-loop finalize (`Missing` at entry is ended by the shipped gate, and
 # `AuthorityLost` leaves the bridge mid-stream), and a turn that never performed a
@@ -182,6 +188,31 @@ BOUNDARY_METRICS = {
     "frontier_already_covers": "completion_terminal_receipt",
     "unbound_anchor_left": "completion_unbound_anchor_cleanup",
 }
+
+
+STREAM_COUNTERS = ("ticks", "old_ended_lifecycle", "new_ended_lifecycle", "diff", "new_stricter")
+EPISODE_TEXT_KEYS = ("host", "runtime_ptr", "provider", "observed_at")
+EPISODE_INT_BOUNDS = {"api_port": 2**16, "process_generation": 2**64,
+                      "channel_id": 2**64, "turn_id": 2**64}
+
+
+def valid_episode(event: dict) -> bool:
+    """Require the episode stamp already emitted by the v3 producer.
+
+    Publication time and source filename are NOT identity. Missing stamps must
+    not join unrelated turns into a single apparently complete observation.
+    """
+    return (all(isinstance(event.get(key), str) and event[key].strip()
+                for key in EPISODE_TEXT_KEYS)
+            and event_time({"observed_at": event.get("observed_at")}) is not None
+            and all(type(event.get(key)) is int and 0 <= event[key] < bound
+                    for key, bound in EPISODE_INT_BOUNDS.items()))
+
+
+def observation_signature(event: dict) -> str:
+    """Replay identity excludes publication provenance, not evidence content."""
+    return json.dumps({key: value for key, value in event.items()
+                       if key not in (SOURCE_FILE_KEY, "ts")}, sort_keys=True)
 
 
 def default_root() -> Path:
@@ -363,19 +394,16 @@ def apply_window(events: list[dict], days: int | None) -> list[dict]:
 
 
 def turn_key(event: dict) -> tuple:
-    return (
-        event.get("host"),
-        event.get("process_generation"),
-        event.get("runtime_ptr"),
-        event.get("channel_id"),
-        event.get("turn_id"),
-    )
+    # Serialization also keeps malformed JSON identities hashable for diagnostic
+    # inventories. Only valid_episode identities may enter promotion counts.
+    return tuple(json.dumps(event.get(key), sort_keys=True)
+                 for key in (*EPISODE_TEXT_KEYS, *EPISODE_INT_BOUNDS))
 
 
 def is_axis_a_event(event: dict) -> bool:
-    return event.get("site") in {"bridge_entry", "stream_loop", "loop_exit"} and isinstance(
-        event.get("axis_a"), dict
-    )
+    # A v3 lifecycle row with a missing payload is evidence failure, not an
+    # unrelated record that may silently disappear from the judged segment.
+    return event.get("site") in ("bridge_entry", "stream_loop", "loop_exit")
 
 
 def completion_scope_counts(events: list[dict]) -> dict:
@@ -571,58 +599,98 @@ def build_segment(fingerprint: str, run: list[tuple[datetime, dict]]) -> dict:
 
 
 def tally(events: list[dict]) -> dict:
-    """Promotion counts over an already axis-A-only segment."""
+    """Count entry-anchored episodes, never occurrences of a log line.
 
+    Each producer flushes at most one immutable payload per episode/site.
+    Identical replay is idempotent; competing payloads are conflicting evidence,
+    not extra coverage and not a reason to select the most reassuring version.
+    """
     events = [event for event in events if is_axis_a_event(event)]
-    days = {event_time(event).date().isoformat() for event in events}
-    turns = {turn_key(event) for event in events}
-    sites = Counter()
-    entry_verdicts = Counter()
-    rowless_turns: set[tuple] = set()
-    range_shapes = Counter()
-    stream = Counter()
-    # Provenance is a property of the publication, so it is counted per turn: all
-    # three of a turn's site records are written by one call and carry one value.
-    # A record without the field is `unattributed` rather than assumed — there are
-    # no such records in a v2 log, and guessing would be the fail-open reading.
-    reason_of_turn: dict[tuple, str] = {}
-
+    groups: dict[tuple, dict[str, dict[str, dict]]] = {}
+    invalid_identities = set()
     for event in events:
-        site = event.get("site")
-        sites[site] += 1
-        reason_of_turn.setdefault(
-            turn_key(event), str(event.get("publish_reason") or "unattributed")
-        )
-        axis_a = event.get("axis_a") or {}
-        if site == "bridge_entry":
-            entry_verdicts[f"{axis_a.get('old')}->{axis_a.get('new')}"] += 1
-            if axis_a.get("rowless_continuation"):
-                rowless_turns.add(turn_key(event))
-        elif site == "stream_loop":
-            for field in (
-                "ticks",
-                "old_ended_lifecycle",
-                "new_ended_lifecycle",
-                "diff",
-                "new_stricter",
-            ):
-                stream[field] += int(axis_a.get(field) or 0)
-        elif site == "loop_exit":
-            range_shapes[axis_a.get("lease_range_shape")] += 1
+        if not valid_episode(event):
+            invalid_identities.add(observation_signature(event))
+            continue
+        group = groups.setdefault(turn_key(event), {})
+        versions = group.setdefault(event["site"], {})
+        # Source-file and publication-time changes do not create new evidence.
+        versions[observation_signature(event)] = event
 
-    reasons = Counter(reason_of_turn.values())
+    entries = {key for key, group in groups.items() if "bridge_entry" in group}
+    days, rowless_turns = set(), set()
+    sites, entry_verdicts, range_shapes, reasons = Counter(), Counter(), Counter(), Counter()
+    stream, errors = Counter(), Counter()
+    errors["invalid_identity_records"] = len(invalid_identities)
+    unique_records = valid_stream_records = orphan_sites = 0
+    for key, group in groups.items():
+        if key in entries:
+            entry_versions = group["bridge_entry"]
+            entry = next(iter(entry_versions.values()))
+            days.add(event_time(entry).date().isoformat())
+            sites["bridge_entry"] += 1
+            if len(entry_versions) == 1:
+                axis = entry.get("axis_a") if isinstance(entry.get("axis_a"), dict) else {}
+                entry_verdicts[f"{axis.get('old')}->{axis.get('new')}"] += 1
+                if axis.get("rowless_continuation"):
+                    rowless_turns.add(key)
+                reasons[str(entry.get("publish_reason") or "unattributed")] += 1
+            else:
+                reasons["conflicting"] += 1
+        for site, versions in group.items():
+            unique_records += len(versions)
+            payload_valid = all(isinstance(event.get("axis_a"), dict) for event in versions.values())
+            errors["invalid_axis_payload_sites"] += not payload_valid
+            coherent = len(versions) == 1 and payload_valid
+            errors["conflicting_episode_sites"] += len(versions) > 1
+            if site != "bridge_entry" and key not in entries:
+                orphan_sites += 1
+            if site == "stream_loop":
+                valid = True
+                observed = Counter()
+                for event in versions.values():
+                    axis = event.get("axis_a") if isinstance(event.get("axis_a"), dict) else {}
+                    for field in STREAM_COUNTERS:
+                        value = axis.get(field)
+                        # bool is an int subclass; floats/strings/null/missing
+                        # are not the u32 counter emitted by the JSONL producer.
+                        if type(value) is not int or not 0 <= value < 2**32:
+                            valid = False
+                        else:
+                            observed[field] = max(observed[field], value)
+                if not valid:
+                    errors["invalid_stream_counter_sites"] += 1
+                # A positive witness survives a conflicting or malformed sibling.
+                # These lower bounds are diagnostic, never a zero-violation proof.
+                stream.update(observed)
+                if valid and coherent:
+                    valid_stream_records += 1
+                    if key in entries:
+                        sites[site] += 1
+            elif site == "loop_exit" and coherent and key in entries:
+                sites[site] += 1
+                axis = next(iter(versions.values()))["axis_a"]
+                shape = axis.get("lease_range_shape")
+                range_shapes[shape if isinstance(shape, str) else "unknown"] += 1
+
+    errors = {name: count for name, count in errors.items() if count}
+    measured = bool(valid_stream_records) and not errors
     published = sum(reasons.values())
     return {
         "days": sorted(days),
-        "turn_samples": len(turns),
+        "turn_samples": len(entries),
         "sites": dict(sites),
         "entry_verdict_transitions": dict(entry_verdicts),
         "rowless_continuation_turns": len(rowless_turns),
-        "stream_gate": dict(stream),
+        "stream_gate": {field: stream[field] if measured else None
+                        for field in STREAM_COUNTERS},
+        "stream_gate_observed_lower_bounds": dict(stream),
+        "evidence_errors": errors,
+        "valid_stream_records": valid_stream_records,
+        "orphan_episode_sites": orphan_sites,
+        "duplicate_records": len(events) - unique_records - len(invalid_identities),
         "lease_range_shapes": dict(range_shapes),
         "publish_reasons": dict(reasons),
-        # Displayed, never gated (see the module docstring). This is the share of
-        # the window that reached the log only because a successor turn arrived.
         "evicted_publication_share": (
             (reasons.get("evicted", 0) / published) if published else None
         ),
@@ -735,9 +803,12 @@ def criteria_for(counts: dict, stage: int, integrity: dict) -> dict:
             "met": counts["turn_samples"] >= turn_floor,
         },
         "new_stricter": {
-            "value": counts["stream_gate"].get("new_stricter", 0),
+            "value": counts["stream_gate"].get("new_stricter"),
+            "observed_lower_bound": counts.get("stream_gate_observed_lower_bounds", {}).get("new_stricter"),
+            "evidence_errors": counts.get("evidence_errors", {}),
             "must_be": 0,
-            "met": counts["stream_gate"].get("new_stricter", 0) == 0,
+            "met": counts["stream_gate"].get("new_stricter") == 0
+            and not counts.get("evidence_errors"),
         },
         "loop_exit_coverage": site_coverage(counts["sites"], "loop_exit"),
         "stream_coverage": site_coverage(counts["sites"], "stream_loop"),
@@ -754,7 +825,7 @@ def criteria_for(counts: dict, stage: int, integrity: dict) -> dict:
 def scoped_integrity(target: dict | None, by_file: dict[str, dict]) -> dict:
     """The line tally charged to the target segment.
 
-    Denominator: the target segment's own usable records, PLUS every unusable
+    Denominator: the target segment's distinct usable records, PLUS every unusable
     line in the files those records were read from. Deliberately not the whole
     line count of those files. A daily file is named by publish day and the dial
     moves mid-day, so the target's first file routinely also holds the previous
@@ -800,12 +871,14 @@ def scoped_integrity(target: dict | None, by_file: dict[str, dict]) -> dict:
         else set()
     )
     scoped = merge_integrity(by_file[name] for name in files if name in by_file)
-    records = len(target["events"]) if target else 0
+    raw_records = len(target["events"]) if target else 0
+    records = len({observation_signature(event) for event in target["events"]}) if target else 0
+    scoped["duplicate_target_lines"] = raw_records - records
     # Usable lines in those files belonging to some other segment. Excluded from
     # the denominator; reported so the exclusion is auditable rather than silent.
     scoped["cohabiting_usable_lines"] = (
         scoped["lines"] - scoped["unusable"] - scoped[COMPLETION_LINES]
-        - scoped["axis_b_lines"] - records
+        - scoped["axis_b_lines"] - raw_records
     )
     # The symmetric display for the fail-open residual: unusable lines in files
     # this target has no usable record in, which leave BOTH sides of the ratio.
@@ -859,16 +932,18 @@ def summarize(events: list[dict], stage: int, by_file: dict[str, dict]) -> dict:
                 "cohort_fingerprint": segment["cohort_fingerprint"],
                 "first_observed": segment["first_observed"],
                 "last_observed": segment["last_observed"],
-                "turns": len({turn_key(event) for event in segment["events"]}),
+                "turns": tally(segment["events"])["turn_samples"],
                 "days": len(
-                    {event_time(event).date().isoformat() for event in segment["events"]}
+                    {event_time(event).date().isoformat() for event in segment["events"]
+                     if event["site"] == "bridge_entry" and valid_episode(event)}
                 ),
             }
             for segment in segments
         ],
         # Context only. Promotion is judged on the target segment above, because
         # two segments can sit at different dial positions.
-        "all_segments_turn_samples": len({turn_key(event) for event in lifecycle_events}),
+        "all_segments_turn_samples": len({turn_key(event) for event in lifecycle_events
+                                          if event["site"] == "bridge_entry" and valid_episode(event)}),
         "rowless_no_range_share": rowless["share"],
         "rowless_range_measurement": rowless,
         "line_integrity": integrity,
@@ -903,7 +978,10 @@ def render(summary: dict, warnings: list[str]) -> str:
             f"  observed window    : {target['first_observed']} .. {target['last_observed']}",
             f"  days in window     : {len(days)} {days[:1]}..{days[-1:]}",
             f"  distinct turns     : {target['turn_samples']}",
-            f"  events by site     : {target['sites']}",
+            f"  matched episodes   : {target['sites']}",
+            f"  evidence errors    : {target['evidence_errors']}",
+            f"  duplicate records  : {target['duplicate_records']}; "
+            f"orphan sites={target['orphan_episode_sites']}",
             f"  entry old->new     : {target['entry_verdict_transitions']}",
             f"  rowless turns      : {target['rowless_continuation_turns']}",
             f"  stream gate totals : {target['stream_gate']}",
