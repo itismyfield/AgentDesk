@@ -43,7 +43,10 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
             .env("AGENTDESK_STATUS_INTERVAL_SECS", "0")
             .output()
             .unwrap();
-        assert!(result.status.success(), "native collector child: {result:?}");
+        assert!(
+            result.status.success(),
+            "native collector child: {result:?}"
+        );
         assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed; 0 failed"));
         return;
     }
@@ -64,7 +67,8 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
                 "phase":"commentary", "channel":"commentary",
                 "content":[{"type":"output_text", "text":format!("0: {TRAILING_BODY}")}]
             }})
-        ).into_bytes();
+        )
+        .into_bytes();
         std::fs::write(&fx.output_path, &data).unwrap();
         row.turn_start_offset = Some(0);
         row.last_offset = 0;
@@ -77,15 +81,20 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
         ui.placeholder_live_events_enabled = true;
         let rec = recorder_for_cycle(fx.channel, true, true).await;
         let actor = Arc::new(
-            crate::services::provider::CancelToken::from_persisted_turn_nonce(row.turn_nonce.clone()),
+            crate::services::provider::CancelToken::from_persisted_turn_nonce(
+                row.turn_nonce.clone(),
+            ),
         );
-        assert!(crate::services::discord::mailbox_try_start_turn(
-            &shared,
-            fx.channel,
-            actor,
-            serenity::UserId::new(row.request_owner_user_id),
-            serenity::MessageId::new(row.user_msg_id),
-        ).await);
+        assert!(
+            crate::services::discord::mailbox_try_start_turn(
+                &shared,
+                fx.channel,
+                actor,
+                serenity::UserId::new(row.request_owner_user_id),
+                serenity::MessageId::new(row.user_msg_id),
+            )
+            .await
+        );
         let ctx = TurnStreamCollectorContext {
             http: rec.http.clone(),
             shared: shared.clone(),
@@ -154,7 +163,10 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
         sink.enable_delivery_for_test();
         sink.test_gateway = Some(Arc::new(
             crate::services::discord::gateway::DiscordGateway::new(
-                rec.http.clone(), shared.clone(), fx.provider.clone(), None,
+                rec.http.clone(),
+                shared.clone(),
+                fx.provider.clone(),
+                None,
             ),
         ));
         let handle = spawn_stream_relay(
@@ -209,30 +221,50 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
         let run = collect_turn_stream_until_terminal(
             &ctx,
             TurnStreamCollectorIo {
-                data, data_start_offset: 0, epoch_snapshot: 0, source_authority,
+                data,
+                data_start_offset: 0,
+                epoch_snapshot: 0,
+                source_authority,
             },
-            &mut parser, &mut relay, &mut monitor, &mut render,
+            &mut parser,
+            &mut relay,
+            &mut monitor,
+            &mut render,
         );
         let finish_input = async {
             use std::io::Write;
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            while !rec.bodies.lock().unwrap().iter().any(|body| body.contains(TRAILING_BODY))
+            while !rec
+                .bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|body| body.contains(TRAILING_BODY))
                 && tokio::time::Instant::now() < deadline
             {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            assert!(!rec.seen("POST").is_empty(), "preview must precede terminal input");
+            assert!(
+                !rec.seen("POST").is_empty(),
+                "preview must precede terminal input"
+            );
             let terminal = concat!(
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"channel\":\"final\",\"content\":[{\"type\":\"output_text\",\"text\":\"ADK5833-final\"}]}}\n",
                 "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"ADK5833-final\"}}\n",
             );
-            std::fs::OpenOptions::new().append(true).open(&fx.output_path).unwrap()
-                .write_all(terminal.as_bytes()).unwrap();
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&fx.output_path)
+                .unwrap()
+                .write_all(terminal.as_bytes())
+                .unwrap();
             ctx.jsonl_notify.notify_one();
         };
         let (outcome, ()) = tokio::join!(
             async {
-                tokio::time::timeout(Duration::from_secs(30), run).await.expect("bounded collector")
+                tokio::time::timeout(Duration::from_secs(30), run)
+                    .await
+                    .expect("bounded collector")
             },
             finish_input,
         );
@@ -240,8 +272,13 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
             panic!("terminal collector discarded turn")
         };
         assert!(turn.found_result);
-        assert_eq!(turn.full_response, format!("0: {TRAILING_BODY}\n\nADK5833-final"));
-        let target = ack.clone().expect("terminal producer must retain exact ACK");
+        assert_eq!(
+            turn.full_response,
+            format!("0: {TRAILING_BODY}\n\nADK5833-final")
+        );
+        let target = ack
+            .clone()
+            .expect("terminal producer must retain exact ACK");
         assert_eq!(target.turn_start_offset, Some(0));
         let guard = run_pre_emit_guard(
             &PreEmitGuardContext {
@@ -282,7 +319,8 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
                 last_observed_generation_mtime_ns: &mut None,
                 full_response: &mut turn.full_response,
             },
-        ).await;
+        )
+        .await;
         assert_eq!(guard, PreEmitGuardOutcome::Proceed);
         let before_relay = load_inflight_state(&fx.provider, fx.channel.get());
         let context = TerminalRelayPlanContext {
@@ -297,11 +335,14 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
             prompt_anchor_present_before_relay: false,
             external_input_lease_before_relay: false,
             session_bound_relay_turn_fully_mirrored: turn.session_bound_relay_turn_fully_mirrored,
-            session_bound_relay_turn_first_forwarded_sequence:
-                turn.session_bound_relay_turn_first_forwarded_sequence,
+            session_bound_relay_turn_first_forwarded_sequence: turn
+                .session_bound_relay_turn_first_forwarded_sequence,
             split_trailing_turn_follows: turn.split_trailing_turn_follows,
             startup_soft_terminal_authority: watcher_soft_terminal_has_turn_authority(
-                turn.startup_inflight_snapshot.as_ref(), &fx.tmux, 0, row.turn_nonce.as_deref(),
+                turn.startup_inflight_snapshot.as_ref(),
+                &fx.tmux,
+                0,
+                row.turn_nonce.as_deref(),
             ),
         };
         let mut plan_state = TerminalRelayPlanState {
@@ -356,25 +397,45 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
                 edit: &mut turn.last_edit_text,
                 frozen: &mut turn.watcher_streaming_rollover_frozen_msg_ids,
             },
-        ).await;
+        )
+        .await;
         tokio::time::timeout(Duration::from_secs(5), async {
-            while target.metrics.terminal_outcome_for_sequence(target.sequence).is_none() {
+            while target
+                .metrics
+                .terminal_outcome_for_sequence(target.sequence)
+                .is_none()
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.expect("terminal sink must resolve its exact sequence");
+        })
+        .await
+        .expect("terminal sink must resolve its exact sequence");
         assert_eq!(
-            target.metrics.terminal_outcome_for_sequence(target.sequence),
+            target
+                .metrics
+                .terminal_outcome_for_sequence(target.sequence),
             Some(crate::services::cluster::stream_relay::DeliveryOutcome::Delivered),
         );
         let receipt = crate::services::discord::outbound::delivery_record::read_record(
-            &fx.provider, fx.channel.get(),
-        ).unwrap().delivered_frontier.unwrap();
+            &fx.provider,
+            fx.channel.get(),
+        )
+        .unwrap()
+        .delivered_frontier
+        .unwrap();
         assert_eq!(receipt.range, (0, offset));
-        assert_eq!(receipt.generation_mtime_ns, source_authority.generation_mtime_ns);
+        assert_eq!(
+            receipt.generation_mtime_ns,
+            source_authority.generation_mtime_ns
+        );
         let visible = rec.visible.lock().unwrap();
         assert!(visible[&receipt.panel_msg_id.unwrap()].contains("ADK5833-final"));
         assert_eq!(
-            visible.values().filter(|body| body.contains(TRAILING_BODY)).count(), 1,
+            visible
+                .values()
+                .filter(|body| body.contains(TRAILING_BODY))
+                .count(),
+            1,
             "exact terminal delivery must leave one visible copy of the commentary",
         );
         drop(visible);

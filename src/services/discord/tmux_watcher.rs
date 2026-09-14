@@ -666,7 +666,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
         let pre_emit_guard_outcome = {
             let pre_emit_guard_context = PreEmitGuardContext {
-                captured_turn: startup_inflight_snapshot.as_ref(), cancel: &cancel,
+                captured_turn: startup_inflight_snapshot.as_ref(),
+                cancel: &cancel,
                 http: &http,
                 shared: &shared,
                 channel_id,
@@ -1363,19 +1364,33 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             slot_guard.release();
             continue 'watcher_loop;
         }
-        if relay_ok && (session_bound_relay_owns_terminal_delivery
-            || matches!(watcher_resend_action, Some(WatcherTerminalResendAction::SkipAlreadyCommitted))) {
+        if relay_ok
+            && (session_bound_relay_owns_terminal_delivery
+                || matches!(
+                    watcher_resend_action,
+                    Some(WatcherTerminalResendAction::SkipAlreadyCommitted)
+                ))
+        {
             terminal_send::committed_placeholder_cleanup::reconcile_confirmed_preview(
                 terminal_send::committed_placeholder_cleanup::ConfirmedPreviewCleanup {
-                    http: &http, shared: &shared, provider: &watcher_provider,
-                    channel: channel_id, session: &tmux_session_name,
+                    http: &http,
+                    shared: &shared,
+                    provider: &watcher_provider,
+                    channel: channel_id,
+                    session: &tmux_session_name,
                     expected_turn: inflight_before_relay.as_ref(),
-                    range: (turn_data_start_offset, terminal_event_consumed_offset(current_offset, &all_data)),
-                    sent_offset: response_sent_offset, placeholder: &mut placeholder_msg_id,
-                    restored: &mut placeholder_from_restored_inflight, edit: &mut last_edit_text,
+                    range: (
+                        turn_data_start_offset,
+                        terminal_event_consumed_offset(current_offset, &all_data),
+                    ),
+                    sent_offset: response_sent_offset,
+                    placeholder: &mut placeholder_msg_id,
+                    restored: &mut placeholder_from_restored_inflight,
+                    edit: &mut last_edit_text,
                     frozen: &mut watcher_streaming_rollover_frozen_msg_ids,
                 },
-            ).await;
+            )
+            .await;
         }
         let relay_suppressed = relay_decision.suppressed;
         let terminal_output_committed = relay_ok || relay_suppressed;
