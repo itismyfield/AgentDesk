@@ -1,5 +1,4 @@
-//! Joined native collector -> terminal sink -> receipt -> preview reconciliation.
-//! Uses synthetic records and local HTTP; private captures and live panes stay out of CI.
+//! Native collector -> sink -> receipt -> preview test: synthetic JSONL and local HTTP only.
 use super::*;
 use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
 use crate::services::cluster::session_matcher::MatchedChannel;
