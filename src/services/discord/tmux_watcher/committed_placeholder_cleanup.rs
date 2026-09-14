@@ -105,3 +105,141 @@ pub(in crate::services::discord) async fn reconcile_already_committed_after_edit
         record_source,
     );
 }
+
+/// Reconcile streamed copies only after the existing terminal plan confirms delivery.
+pub(in crate::services::discord) struct ConfirmedPreviewCleanup<'a> {
+    pub http: &'a Arc<serenity::Http>,
+    pub shared: &'a Arc<SharedData>,
+    pub provider: &'a ProviderKind,
+    pub channel: ChannelId,
+    pub session: &'a str,
+    pub expected_turn: Option<&'a InflightTurnState>,
+    pub range: (u64, u64),
+    pub sent_offset: usize,
+    pub placeholder: &'a mut Option<MessageId>,
+    pub restored: &'a mut bool,
+    pub edit: &'a mut String,
+    pub frozen: &'a mut Vec<MessageId>,
+}
+
+pub(in crate::services::discord) async fn reconcile_confirmed_preview(
+    ctx: ConfirmedPreviewCleanup<'_>,
+) {
+    let load_current = || {
+        let current = crate::services::discord::inflight::load_inflight_state(
+            ctx.provider,
+            ctx.channel.get(),
+        );
+        current
+            .as_ref()
+            .is_none_or(|row| {
+                ctx.expected_turn.is_some_and(|expected| {
+                    crate::services::discord::inflight::InflightTurnIdentity::from_state(expected)
+                        .matches_state(row)
+                        && expected.turn_nonce == row.turn_nonce
+                        && expected.provider == row.provider
+                        && expected.request_owner_user_id == row.request_owner_user_id
+                        && expected.finalizer_turn_id == row.finalizer_turn_id
+                        && expected.output_path == row.output_path
+                        && expected.runtime_kind == row.runtime_kind
+                })
+            })
+            .then_some(current)
+    };
+    let Some(current) = load_current() else {
+        return;
+    };
+    let mut ids = ctx.frozen.clone();
+    ids.extend(*ctx.placeholder);
+    ids.sort_unstable();
+    ids.dedup();
+    // Persist all proven cleanup debts before the first await. A timeout or
+    // restart can then release the delivered turn without losing frozen IDs.
+    ids.retain(|id| {
+        matches!(
+            guarded_cleanup_delivered_elsewhere_signal(
+                ctx.provider,
+                ctx.channel,
+                ctx.session,
+                *id,
+                Some(ctx.range),
+                cleanup_current_output_eof(ctx.shared, current.as_ref(), ctx.session),
+                crate::services::discord::tmux::committed_frontier_for_current_generation(
+                    ctx.shared,
+                    ctx.channel,
+                    ctx.session
+                ),
+            ),
+            GuardedDeliveredElsewhereSignal::Found { .. }
+        )
+    });
+    for id in &ids {
+        crate::services::discord::status_panel_orphan_store::enqueue(
+            ctx.provider,
+            &ctx.shared.token_hash,
+            ctx.channel.get(),
+            id.get(),
+        );
+    }
+    let cleanup = async {
+        for &id in &ids {
+            // ACK and prior DELETEs awaited network; reject a fresh successor.
+            let Some(current) = load_current() else {
+                for id in &ids {
+                    drop_placeholder_orphan_record(ctx.provider, ctx.shared, ctx.channel, *id);
+                }
+                return;
+            };
+            let outcome = delete_terminal_placeholder_unless_delivered(
+                ctx.http,
+                ctx.channel,
+                ctx.shared,
+                ctx.provider,
+                ctx.session,
+                id,
+                current.as_ref(),
+                Some(ctx.range),
+                ctx.sent_offset,
+                ctx.edit,
+                true,
+                "watcher_confirmed_sink_preview_cleanup",
+            )
+            .await;
+            if outcome
+                .as_ref()
+                .is_some_and(PlaceholderCleanupOutcome::is_committed)
+            {
+                ctx.frozen.retain(|frozen| *frozen != id);
+                if *ctx.placeholder == Some(id) {
+                    reconcile_committed_placeholder_cleanup(
+                        outcome.as_ref(),
+                        ctx.placeholder,
+                        ctx.restored,
+                        ctx.edit,
+                        || {},
+                    );
+                }
+                drop_placeholder_orphan_record(ctx.provider, ctx.shared, ctx.channel, id);
+            } else if outcome.is_none()
+                || outcome
+                    .as_ref()
+                    .is_some_and(PlaceholderCleanupOutcome::is_permanent_failure)
+            {
+                drop_placeholder_orphan_record(ctx.provider, ctx.shared, ctx.channel, id);
+            }
+        }
+    };
+    if watcher_completion_chrome_with_timeout(cleanup)
+        .await
+        .is_err()
+    {
+        warn_watcher_completion_chrome_timeout(
+            ctx.provider,
+            ctx.channel,
+            ctx.session,
+            ctx.range.0,
+            ctx.range.1,
+            "confirmed_sink_preview_cleanup",
+        );
+    }
+}

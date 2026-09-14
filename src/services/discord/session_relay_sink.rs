@@ -491,7 +491,7 @@ pub(in crate::services::discord) struct SessionBoundDiscordRelaySink {
     #[cfg(test)]
     lease_test_probe: Option<Arc<SinkLeaseTestProbe>>,
     #[cfg(test)]
-    test_gateway: Option<Arc<dyn super::gateway::TurnGateway>>,
+    pub(in crate::services::discord) test_gateway: Option<Arc<dyn super::gateway::TurnGateway>>,
     #[cfg(test)]
     test_replace_anchor: Option<formatting::ReplaceLastChunkAnchor>,
     #[cfg(test)]

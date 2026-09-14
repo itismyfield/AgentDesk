@@ -11,6 +11,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tracing_subscriber::fmt::MakeWriter;
 
+#[path = "native_collector_tests.rs"]
+mod native_collector_tests;
+
 const WARN_EVENT: &str = "watcher_stream_progress_terminal_rejected";
 const PANEL_CHILD_ENV: &str = "AGENTDESK_5191_PANEL_FIXTURE_CHILD";
 const COMMITTED_BODY: &str = "완료된 응답 A";
@@ -148,6 +151,9 @@ fn wrapper_patch(fx: &Fixture, identity: Option<&InflightTurnIdentity>,
 
 struct Recorder {
     calls: Arc<Mutex<Vec<(String, String)>>>,
+    bodies: Arc<Mutex<Vec<String>>>,
+    visible: Arc<Mutex<std::collections::BTreeMap<u64, String>>>,
+    terminal_gate: Arc<tokio::sync::Notify>,
     http: Arc<serenity::Http>,
     server: tokio::task::AbortHandle,
 }
@@ -171,25 +177,67 @@ impl Recorder {
 /// network, tmux or database call happens.
 #[rustfmt::skip]
 async fn recorder(channel: ChannelId, delete_ok: bool) -> Recorder {
+    recorder_for_cycle(channel, delete_ok, false).await
+}
+
+#[rustfmt::skip]
+async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) -> Recorder {
     use axum::body::Bytes;
     use axum::http::{Method, StatusCode, Uri};
     use axum::response::IntoResponse;
     use axum::{Json, Router, routing::any};
     let calls = Arc::new(Mutex::new(Vec::new()));
     let recorded = calls.clone();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let captured_bodies = bodies.clone();
+    let visible = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    let captured_visible = visible.clone();
+    let terminal_gate = Arc::new(tokio::sync::Notify::new());
+    let captured_gate = terminal_gate.clone();
+    let next_id = Arc::new(std::sync::atomic::AtomicU64::new(SERVER_MSG));
     let channel_text = channel.get().to_string();
     let app = Router::new().fallback(any(move |method: Method, uri: Uri, body: Bytes| {
-        let (recorded, channel_text) = (recorded.clone(), channel_text.clone());
+        let (recorded, channel_text, bodies) =
+            (recorded.clone(), channel_text.clone(), captured_bodies.clone());
+        let (visible, terminal_gate, next_id) =
+            (captured_visible.clone(), captured_gate.clone(), next_id.clone());
         async move {
             let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
             recorded.lock().unwrap().push((method.to_string(), uri.to_string()));
             if method == Method::DELETE {
+                if delete_ok {
+                    if let Some(id) = uri.path().rsplit('/').next().and_then(|id| id.parse().ok()) {
+                        visible.lock().unwrap().remove(&id);
+                    }
+                }
                 let status = if delete_ok { StatusCode::NO_CONTENT }
                     else { StatusCode::INTERNAL_SERVER_ERROR };
                 return (status, String::new()).into_response();
             }
+            if let Some(content) = payload["content"].as_str() {
+                bodies.lock().unwrap().push(content.to_owned());
+                if content.encode_utf16().count() > 2000 {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                        "code": 50035, "message": "Invalid Form Body",
+                        "errors": {"content": {"_errors": [{"code": "BASE_TYPE_MAX_LENGTH",
+                            "message": "Must be 2000 or fewer in length."}]}}
+                    }))).into_response();
+                }
+            }
+            if cycle && method == Method::POST
+                && payload["content"].as_str().is_some_and(|body| body.contains("ADK5833-final")) {
+                terminal_gate.notified().await;
+            }
+            let id = if method == Method::POST && cycle {
+                next_id.fetch_add(1, Ordering::AcqRel)
+            } else if method == Method::PATCH && cycle {
+                uri.path().rsplit('/').next().and_then(|id| id.parse().ok()).unwrap_or(SERVER_MSG)
+            } else { SERVER_MSG };
+            if let Some(content) = payload["content"].as_str() {
+                visible.lock().unwrap().insert(id, content.to_owned());
+            }
             Json(serde_json::json!({
-                "id": SERVER_MSG.to_string(), "channel_id": channel_text,
+                "id": id.to_string(), "channel_id": channel_text,
                 "content": payload["content"],
                 "author": {"id":"1","username":"t","discriminator":"0001","avatar":null},
                 "timestamp":"2026-09-09T00:00:00+00:00", "edited_timestamp":null,
@@ -206,7 +254,7 @@ async fn recorder(channel: ChannelId, delete_ok: bool) -> Recorder {
             .build(),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Recorder { calls, http, server: server.abort_handle() }
+    Recorder { calls, bodies, visible, terminal_gate, http, server: server.abort_handle() }
 }
 
 #[rustfmt::skip]
@@ -503,6 +551,35 @@ fn active_progress_tick_emits_once() {
         run_tick(&mut locals, &rec, &shared, &fx, false).await;
         assert_eq!(rec.seen("POST").len(), 1, "no duplicate on the next tick");
         assert_eq!(locals.placeholder, msg(SERVER_MSG), "anchor retained");
+    });
+}
+
+/// #5833: isolate the visible HTTP boundary from collector admission. A recovered
+/// SBR row alone must not be mistaken for proof that the streaming tick ran.
+#[test]
+fn recovered_session_bound_codex_stream_tick_reaches_http() {
+    let (_lock, guard) = isolate_root();
+    capture_warns(async {
+        let (fx, _) = native_collector_tests::seed_recovered_row(guard.root.path(), 5833);
+        let before = fx.row_bytes();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let rec = recorder(fx.channel, true).await;
+        let mut locals = tick_locals(&fx, None);
+        assert_eq!(
+            run_tick(&mut locals, &rec, &shared, &fx, false).await,
+            FALLTHROUGH
+        );
+        assert_eq!(
+            rec.seen("POST").len(),
+            1,
+            "a reached native streaming tick must publish its first frame"
+        );
+        assert_eq!(locals.placeholder, msg(SERVER_MSG));
+        assert_eq!(
+            fx.row_bytes(),
+            before,
+            "planned-restart row still rejects the ordinary progress writer"
+        );
     });
 }
 
