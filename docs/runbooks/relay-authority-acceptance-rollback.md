@@ -3,14 +3,15 @@
 Source issue: #5464 (#5071 T5). Related: #5874 (cohort-width publication),
 #5883 (observation-sink retention), #5902 (entry-gate cutover).
 
-Last refreshed: 2026-09-12
+Last refreshed: 2026-09-14
 
-> **No sign-off has been recorded. Every owner slot in [Sign-Off](#sign-off) is
-> blank and marked `사용자 비준 필요`; the stage question in
-> [Which Stage Governs](#which-stage-governs--undefined) is likewise unresolved.**
-> This runbook documents the procedure and the evidence. It is not itself an
-> acceptance, and it does not authorise a dial move today. Every coordinate below
-> is pinned to `main` @ `26687f6264`.
+> **[Stage 2](#governing-stage--stage-2-approved-acceptance-remains-pending) is
+> selected; live acceptance, R6 sign-off and rollback GO remain unsigned.**
+> Acceptance owner and rollback reviewer slots in [Sign-Off](#sign-off) remain
+> blank and marked `사용자 비준 필요`. Deployment and bounded real tests are
+> approved; this runbook does not itself establish successful acceptance or
+> authorise a dial move. Historical source coordinates below remain pinned to
+> `main` @ `26687f6264`; the governing-stage section records the later decision.
 
 ## Scope
 
@@ -138,18 +139,56 @@ six PASS, `promotion_ready: True`, rc 0 (328 turns / 7 days, `new_stricter` 0,
 coverage 0.81 / 0.83, `line_integrity` 0.0). Stage 2 — `turn_samples` 328 < 500
 FAIL, `promotion_ready: False`, rc 1.
 
-### Which Stage Governs — UNDEFINED
+### Governing Stage — Stage 2 approved; acceptance remains pending
 
-`--stage` selects the turn-sample floor and **defaults to 1**
-(`relay_authority_rollout_report.py:144,762`). Which stage T5 acceptance is
-judged at is **not defined anywhere in the repository**, and the two answers
-disagree on the live archive: stage 1 passes 6/6, stage 2 fails on
-`turn_samples` alone. Nothing else differs between them.
+The user approved deployment and bounded real tests and adopted the recommended
+**Stage 2: at least 7 days and 500 distinct turns**. This supersedes the earlier
+undefined-stage/operator-ratification note. The CLI still defaults `--stage` to 1;
+acceptance reporting must explicitly select `--stage 2`.
 
-**`사용자 비준 필요` — the operator picks the stage, and this runbook must not.**
-Record the choice and its rationale at sign-off. Choosing stage 2 means the
-acceptance waits for ~172 more distinct turns at the current fingerprint; a dial
-move before then restarts the segment and the count.
+The September 12 measurement above remains a historical 328-turn / 7-day snapshot,
+not current live acceptance. Stage 2 adoption does not sign R6, close rollback,
+waive the campaign budget, or establish source identity or successful delivery.
+The [current canonical checkpoint](https://github.com/itismyfield/AgentDesk/issues/5464#issuecomment-5650847622)
+records the approval and remaining gates. Both nodes deployed main `f41b2dc2c9`.
+The September 14 03:08 KST (September 13 18:08 UTC) first-frame uncertainty is
+historical; the subsequent first-frame FAIL interpretation is withdrawn.
+Actual original adk-cdx streaming is now confirmed by direct native-source text
+matching [Discord message 1548761098407125013](https://discord.com/channels/@me/1479671301387059200/1548761098407125013),
+authored by bot `1479425196824989758`, created September 14 03:23:40.450 KST
+and edited 03:57:31.116 KST. Earlier successive chunks were
+`1548760938675576925`, `1548760832970858509` and `1548760627466604567`.
+The watcher `tmux_alive_relay_dead` / `last_relay_offset=0` report did not reflect
+that observed delivery; it does not establish a new production defect.
+See the [corrected primary evidence](https://github.com/itismyfield/AgentDesk/issues/5833#issuecomment-5655132183).
+
+Original terminal, exact receipt, natural release and the next normal input
+remain **PENDING**. Strong-capture diagnostic `67ffac10068e0cf174608c2af644ebce46da91c2`
+completed five tests with zero ignored at September 14 03:58:52 KST, covering
+source witness, actual UI and Enforce/100. Those diagnostic results are not a
+live-cycle pass. The joined preview-to-terminal diagnostic at
+`02c33a9975be7697b2380c03d02e9cc6425479ec` reproduced a bounded duplicate at
+September 14 04:12:47.683586 KST (September 13 19:12:47.683586 UTC): exact
+sequence, range, generation and anchor receipt checks passed, then visible
+commentary was **2 rather than 1** (`native_collector_tests.rs:430`). The corrected
+local joined diagnostic `e2c28ca2a7` passed with **1 visible commentary and an exact
+receipt** at September 14 04:32:12 KST (September 13 19:32:12 UTC).
+Eight pending-delete, successor and uncertainty controls are running on
+`0bc43d008b`; they are not yet PASS or deployed. The actorless cleanup-debt
+approach was withdrawn: no new store is introduced, cleanup failures preserve
+the preview, and no durable retry is claimed.
+
+Original streaming on deployed `f41b2dc2c9` remains confirmed. Old preview anchors
+lack durable ownership evidence and cannot be retrospectively deleted. Actual
+terminal, exact receipt, natural release and the one followup remain pending;
+no new deployment proceeds before the original turn completes naturally.
+The Stage 2 report completed at September 14 04:15:40 KST (September 13 19:15:40
+UTC) counted **400 turns / 9 days, 100 turns short**. Its A2 frontier sample was
+50: false 3, true 0, unknown 47; unbound 0, unknown. This is an observation
+snapshot, not current-binary acceptance or source-count proof. Earlier snapshots,
+including the September 12 report above, remain historical.
+Stage 2 approval is unchanged; R6, A2, budget attribution, rollback GO and T6
+remain pending. Local diagnostic success does not establish the natural live cycle.
 
 ## Rollback
 
@@ -311,8 +350,8 @@ explicitly rather than assuming the file is authoritative.
 
 - Author: #5464 (#5071 T5) R6, 2026-09-12 — procedure and evidence documented;
   no acceptance and no GO recorded.
-- Acceptance stage (1 or 2): **blank — `사용자 비준 필요`** (see
-  [Which Stage Governs](#which-stage-governs--undefined)).
+- Acceptance stage: **Stage 2 approved — 7 days / 500 turns** (see
+  [Governing Stage](#governing-stage--stage-2-approved-acceptance-remains-pending)).
 - Acceptance owner: **blank — `사용자 비준 필요`**.
 - Rollback GO reviewer: **blank — `사용자 비준 필요`**.
 
