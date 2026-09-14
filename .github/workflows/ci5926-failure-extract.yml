@@ -1,0 +1,40 @@
+name: PR 5926 failure evidence
+on:
+  push:
+    branches: [ci/5926-failure-extract-20260914]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch only the two failed job logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          for job in 103844493772 103844493763; do
+            gh api "/repos/itismyfield/AgentDesk/actions/jobs/${job}/logs" > "evidence/${job}.log"
+          done
+          python3 - <<'PY'
+          import pathlib, re
+          for path in sorted(pathlib.Path('evidence').glob('*.log')):
+              lines = path.read_text(encoding='utf-8-sig').splitlines()
+              hits = [i for i, line in enumerate(lines) if re.search(r'panicked at|^.*test .* \.\.\. FAILED$|^.*failures:|^.*test result: FAILED|AssertionError:|reference count|call.site.*drift|error: test failed|::error::|[0-9]+ failed;', line)]
+              selected = set()
+              for i in hits:
+                  selected.update(range(max(0, i-4), min(len(lines), i+25)))
+              output = '\n'.join(f'{i+1}: {lines[i]}' for i in sorted(selected))
+              path.with_suffix('.excerpt.txt').write_text(output, encoding='utf-8')
+              print(path.name, 'total lines=', len(lines), 'hits=', len(hits))
+              print(output[-45000:])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci5926-failed-job-evidence
+          path: evidence/
+          retention-days: 3
