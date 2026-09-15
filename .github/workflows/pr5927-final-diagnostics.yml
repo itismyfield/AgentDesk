@@ -11,29 +11,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Capture the actual failed job log
+      - name: Capture failed PostgreSQL job
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api --allow-escape-sequences repos/itismyfield/AgentDesk/actions/jobs/104246141545/logs > "$RUNNER_TEMP/scripts.log"
-          tail -160 "$RUNNER_TEMP/scripts.log" > "$RUNNER_TEMP/tail.txt"
+          gh api --allow-escape-sequences repos/itismyfield/AgentDesk/actions/jobs/104246141614/logs > "$RUNNER_TEMP/postgres.log"
           python3 - <<'PY'
-          import os,pathlib,re
-          s=pathlib.Path(os.environ['RUNNER_TEMP'],'scripts.log').read_text(encoding='utf-8-sig')
+          import os,pathlib
+          s=pathlib.Path(os.environ['RUNNER_TEMP'],'postgres.log').read_text(encoding='utf-8-sig')
           lines=s.splitlines()
-          indices=[i for i,line in enumerate(lines) if '##[error]' in line or 'FAIL:' in line or 'FAIL ' in line or 'Error:' in line]
+          indices=[i for i,line in enumerate(lines) if '##[error]' in line or 'FAILED' in line or 'panicked' in line or 'failures:' in line]
           chosen=set()
-          for i in indices[-10:]: chosen.update(range(max(0,i-18),min(len(lines),i+5)))
+          for i in indices[-15:]: chosen.update(range(max(0,i-12),min(len(lines),i+12)))
           out='\n'.join(lines[i] for i in sorted(chosen))
           pathlib.Path(os.environ['RUNNER_TEMP'],'failure.txt').write_text(out)
           print(out)
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: pr5927-final-script-diagnostics
+          name: pr5927-final-pg-diagnostics
           path: |
-            ${{ runner.temp }}/scripts.log
-            ${{ runner.temp }}/tail.txt
+            ${{ runner.temp }}/postgres.log
             ${{ runner.temp }}/failure.txt
           retention-days: 2
