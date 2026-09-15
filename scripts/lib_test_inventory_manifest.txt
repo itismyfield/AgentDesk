@@ -948,7 +948,7 @@ server::policy_tick_schedule_tests::slo_api_friction_aggregation_falls_back_to_f
 server::policy_tick_schedule_tests::slo_api_friction_aggregation_runs_while_leader_epoch_is_pending
 server::rate_limit_header_tests::parses_openai_relative_reset_duration
 server::rate_limit_header_tests::parses_rfc3339_reset_timestamp
-server::rate_limit_profile_tests::test_011_upsert_conflict_is_provider_and_profile
+server::rate_limit_profiles::tests::test_011_upsert_conflict_is_provider_and_profile
 server::rate_limit_sync::backoff::tests::exponential_backoff_doubles_and_caps_at_thirty_minutes
 server::rate_limit_sync::backoff::tests::parses_retry_after_seconds_and_http_date
 server::rate_limit_sync::backoff::tests::retry_after_is_clamped_and_leaves_the_ladder_alone
