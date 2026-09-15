@@ -501,6 +501,7 @@ impl SupervisedWorkerRegistry {
                     tracing::warn!(
                         worker = spec.name,
                         target = spec.target,
+                        observability_target = spec.target,
                         kind = spec.kind.as_doc_str(),
                         stage = spec.start_stage.as_doc_str(),
                         order = spec.start_order,
@@ -518,6 +519,7 @@ impl SupervisedWorkerRegistry {
                     tracing::warn!(
                         worker = spec.name,
                         target = spec.target,
+                        observability_target = spec.target,
                         kind = spec.kind.as_doc_str(),
                         stage = spec.start_stage.as_doc_str(),
                         order = spec.start_order,
@@ -536,6 +538,7 @@ impl SupervisedWorkerRegistry {
                     tracing::info!(
                         worker = spec.name,
                         target = spec.target,
+                        observability_target = spec.target,
                         kind = spec.kind.as_doc_str(),
                         stage = spec.start_stage.as_doc_str(),
                         order = spec.start_order,
@@ -582,6 +585,7 @@ impl SupervisedWorkerRegistry {
         tracing::info!(
             worker = spec.name,
             target = spec.target,
+            observability_target = spec.target,
             kind = spec.kind.as_doc_str(),
             stage = spec.start_stage.as_doc_str(),
             order = spec.start_order,
@@ -600,6 +604,7 @@ impl SupervisedWorkerRegistry {
         tracing::info!(
             worker = spec.name,
             target = spec.target,
+            observability_target = spec.target,
             kind = spec.kind.as_doc_str(),
             stage = spec.start_stage.as_doc_str(),
             order = spec.start_order,

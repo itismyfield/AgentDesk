@@ -1071,12 +1071,10 @@ pub fn handle_dcserver(token: Option<String>) {
                     if let Some(map) = json.get(section).and_then(|v| v.as_object()) {
                         for (_key, entry) in map {
                             if let Some(ws) = entry.get("workspace").and_then(|v| v.as_str()) {
-                                let expanded = if ws.starts_with("~/") {
-                                    if let Some(home) = dirs::home_dir() {
-                                        format!("{}{}", home.display(), &ws[1..])
-                                    } else {
-                                        ws.to_string()
-                                    }
+                                let expanded = if ws.starts_with('~') {
+                                    crate::runtime_layout::expand_user_path(ws)
+                                        .map(|p| p.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| ws.to_string())
                                 } else {
                                     ws.to_string()
                                 };
