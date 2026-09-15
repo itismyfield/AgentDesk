@@ -35,11 +35,12 @@ jobs:
           git show 23eb9bba132ad71f0336645705ab8597a59d1c1c:src/services/discord/tmux_watcher/turn_stream_collector.rs > "$RUNNER_TEMP/evidence/base/turn_stream_collector.rs"
           git show 73fce0926f0248bda0558f42dec8008c20b61e58:scripts/destructive_call_site_baseline.json > "$RUNNER_TEMP/evidence/head/destructive_call_site_baseline.json"
           git show 73fce0926f0248bda0558f42dec8008c20b61e58:scripts/test_only_module_skip_pin.py > "$RUNNER_TEMP/evidence/head/test_only_module_skip_pin.py"
-          gh api repos/itismyfield/AgentDesk/actions/jobs/104226626929/logs > "$RUNNER_TEMP/evidence/library-sweep.log"
+          gh api --allow-escape-sequences repos/itismyfield/AgentDesk/actions/jobs/104226626929/logs > "$RUNNER_TEMP/evidence/library-sweep.log"
           cp "$(rustup which rustfmt)" "$RUNNER_TEMP/evidence/rustfmt"
           ldd "$(rustup which rustfmt)" > "$RUNNER_TEMP/evidence/rustfmt-libraries.txt" || true
           git diff 23eb9bba132ad71f0336645705ab8597a59d1c1c 73fce0926f0248bda0558f42dec8008c20b61e58 > "$RUNNER_TEMP/evidence/original-pr.patch"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: pr5927-investigation
           path: ${{ runner.temp }}/evidence
