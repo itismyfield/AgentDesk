@@ -1423,6 +1423,29 @@ mod generation_allocation_tests {
 
     #[test]
     fn site_a_emits_one_detailed_record_for_counter_read_failure() {
+        if std::env::var_os("ADK_5927_GENERATION_CAPTURE_CHILD").is_none() {
+            let qualified = format!(
+                "{}::site_a_emits_one_detailed_record_for_counter_read_failure",
+                module_path!().split_once("::").unwrap().1
+            );
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &qualified, "--nocapture"])
+                .env("ADK_5927_GENERATION_CAPTURE_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+                "child must execute this exact test"
+            );
+            return;
+        }
+
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("generation");
         std::fs::write(&path, "nan").unwrap();

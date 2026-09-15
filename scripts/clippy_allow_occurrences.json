@@ -588,7 +588,7 @@
       "count": 5
     },
     {
-      "path": "src/services/discord/tmux_watcher/turn_stream_collector.rs",
+      "path": "src/services/discord/tmux_watcher/turn_stream_collector/state.rs",
       "lint": "large_enum_variant",
       "count": 1
     },

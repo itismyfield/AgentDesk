@@ -316,9 +316,11 @@ EXPECTED_CALL_SITES: dict[str, dict[str, int]] = {
     },
     # -- S8-1b: previously unpinned pinned-source and bridge writers ---------
     "record_current_pinned_delivery": {
+        "src/services/discord/session_relay_sink/delivery_frontier.rs": 1,
         "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
     },
     "record_pinned_delivery_metadata": {
+        "src/services/discord/session_relay_sink/delivery_frontier.rs": 1,
         "src/services/discord/turn_bridge/terminal_delivery.rs": 1,
     },
     # terminal_delivery retains its separately pinned function-value binding.

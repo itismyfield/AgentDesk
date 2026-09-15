@@ -1,4 +1,6 @@
 use super::*;
+#[path = "tmux_watcher/cancel_handoff.rs"]
+pub(in crate::services::discord) mod cancel_handoff;
 use crate::services::discord::InflightTurnState;
 use crate::services::discord::http::{edit_channel_message, send_channel_message};
 use crate::services::discord::outbound::delivery_record as dr; // #3089 B2b
@@ -216,46 +218,25 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
     restored_turn: Option<RestoredWatcherTurn>,
 ) {
-    // #3041 P1-1: this watcher instance's delivery-lease holder id. Minted once
-    // per spawn so a replacement watcher cannot release/commit (or be mistaken
-    // for) this instance's lease across a reattach (§5.2 B2). #3277 (Defect B):
-    // minted BEFORE the start log so start/stop pairs are attributable — in the
-    // incident two overlapping instances' unlabeled start/stop lines were
-    // misread as one watcher dying.
-    let watcher_instance_id = next_watcher_instance_id();
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] 👁 tmux watcher started for #{tmux_session_name} at offset {initial_offset} (instance {watcher_instance_id})"
-    );
-
-    // E5 (#2412): cache the supervisor-owned StreamRelay producer for this
-    // tmux session, if the supervisor is running and has matched the
-    // session. `None` covers three legitimate cases:
-    //   1. `cluster.session_bound_relay_enabled = false` (supervisor never
-    //      spawned, registry empty).
-    //   2. SessionDiscovery hasn't yet observed this session — the cache is
-    //      refreshed below per chunk-read in that case.
-    //   3. This watcher attached to a session the registry doesn't know
-    //      (e.g. legacy session name pattern). The watcher keeps the legacy
-    //      fallback path for envelopes the supervisor-owned relay cannot own.
-    let producer_registry =
-        crate::services::cluster::relay_producer_registry::global_relay_producer_registry();
-    // Cached clone so we don't take the registry RwLock on every chunk. The
-    // supervisor only ever publishes ONE producer per session name, but it
-    // CAN republish after an Updated event (channel rebind). We refresh on
-    // miss and after every send-failure (relay torn down → producer stale).
-    let mut cached_relay_producer = producer_registry.get_producer(&tmux_session_name);
-
-    // #1134: mark the attach moment so `record_first_relay` (below) can compute
-    // attach→first-relay latency. Single instrumentation point covers all
-    // spawn sites (recovery_engine, turn_bridge, tmux self-recovery).
-    crate::services::observability::watcher_latency::record_attach(channel_id.get());
-
+    let (watcher_instance_id, producer_registry, mut cached_relay_producer) =
+        entry::start_watcher(channel_id, &tmux_session_name, initial_offset);
     let (watcher_provider, watcher_channel_name) =
         parse_provider_and_channel_from_tmux_name(&tmux_session_name).unwrap_or((
             crate::services::provider::ProviderKind::Claude,
             String::new(),
         ));
+    let Some(mut cancellation_custody) = cancel_handoff::Custody::acquire(
+        &shared,
+        channel_id,
+        &watcher_provider,
+        &tmux_session_name,
+        &output_path,
+        &cancel,
+    )
+    .await
+    else {
+        return;
+    };
     let watcher_thread_channel_id =
         crate::services::discord::adk_session::parse_thread_channel_id_from_name(
             &watcher_channel_name,
@@ -274,6 +255,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     let mut all_data_session_bound_relay_ack: Option<SessionBoundRelayAckTarget> = None;
     let mut all_data_first_forwarded_relay_sequence: Option<u64> = None;
     let mut utf8_decoder = Utf8ChunkDecoder::default();
+    let mut retained_source = None;
+    let mut continuation = None;
     let mut prompt_too_long_killed = false;
     let mut turn_result_relayed = false;
     let mut terminal_delivery_observed = false;
@@ -302,79 +285,23 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     // hourglass-anchored turn that loses its inflight MID-STREAM re-acquiring an
     // inflight that still carries the pinned message id, so the `⏳ → ✅`
     // completion cleanup can find its own message instead of orphaning it.
-    let restored_injected_prompt_message_id = restored_turn
+    let mut restored_injected_prompt_message_id = restored_turn
         .as_ref()
         .and_then(|turn| turn.injected_prompt_message_id);
-    // Guard against duplicate relay: track the offset from which the last relay was sent.
-    // If the outer loop circles back and current_offset hasn't advanced past this point,
-    // the relay is suppressed.
-    // Initialize from persisted inflight state so replacement watcher instances skip
-    // already-delivered output (fixes double-reply on stale watcher replacement).
-    // #1270: load both the persisted offset AND its matching
-    // `.generation` mtime so a replacement watcher can correctly classify
-    // an output regression on restored state. When we have a persisted
-    // mtime, it labels the wrapper that produced the persisted offset:
-    //   - matches current `.generation` mtime → same wrapper after
-    //     `truncate_jsonl_head_safe` → pin to EOF (don't re-flood
-    //     surviving content; codex P2 on PR #1271).
-    //   - differs from current `.generation` mtime → cancel→respawn into
-    //     the same session name → reset to 0 to pick up the fresh
-    //     response.
-    // When the persisted state predates this field (legacy `None`), we
-    // fall back to "no baseline known" semantics — the regression check
-    // treats it as a first observation and resets to 0, which is the
-    // safer choice for not silently dropping a fresh response.
-    let restored_inflight =
-        parse_provider_and_channel_from_tmux_name(&tmux_session_name).and_then(|(pk, _)| {
-            crate::services::discord::inflight::load_inflight_state(&pk, channel_id.get())
-        });
-    let mut watcher_turn_identity =
-        matching_watcher_turn_identity(restored_inflight.as_ref(), &tmux_session_name);
-    let mut watcher_turn_nonce =
-        matching_watcher_turn_nonce(restored_inflight.as_ref(), &tmux_session_name);
-    let mut last_relayed_offset: Option<u64> = restored_inflight
-        .as_ref()
-        .and_then(|s| s.last_watcher_relayed_offset);
-    let mut last_observed_generation_mtime_ns: Option<i64> = restored_inflight
-        .as_ref()
-        .and_then(|s| s.last_watcher_relayed_generation_mtime_ns);
+    let (
+        mut watcher_turn_identity,
+        mut watcher_turn_nonce,
+        mut last_relayed_offset,
+        mut last_observed_generation_mtime_ns,
+    ) = entry::restore_delivery_position(&shared, channel_id, &tmux_session_name, &output_path);
     let mut pending_terminal_rewind_seed: Option<RestoredWatcherTurn> = None;
     let mut terminal_rewind_attempt_key: Option<WatcherRewindAttemptKey> = None;
     let mut terminal_rewind_attempts: u8 = 0;
-    if let Ok(meta) = std::fs::metadata(&output_path) {
-        let observed_output_end = meta.len();
-        reset_stale_relay_watermark_if_output_regressed(
-            &shared,
-            channel_id,
-            &tmux_session_name,
-            observed_output_end,
-            "watcher_start",
-        );
-        reset_stale_local_relay_offset_if_output_regressed(
-            &mut last_relayed_offset,
-            &mut last_observed_generation_mtime_ns,
-            channel_id,
-            &tmux_session_name,
-            observed_output_end,
-            "watcher_start",
-        );
-    }
     let mut rotation_tick: u32 = 0;
 
-    // #2441 (H1) — spawn a single `notify`-crate-backed JsonlWatcher
-    // keyed on the session output path. Its `Notify` is awaited alongside
-    // each polling `sleep()` in this function so a real wrapper write
-    // wakes us immediately while the sleep still bounds the maximum
-    // wake-up latency. The watcher is dropped automatically when this
-    // task exits (or the wrapper rotates the file away).
-    let jsonl_watcher = crate::services::discord::jsonl_watcher::JsonlWatcher::spawn(
-        std::path::PathBuf::from(&output_path),
-    );
+    let (jsonl_watcher, dead_marker_watcher) =
+        entry::source_notifications(&output_path, &tmux_session_name);
     let jsonl_notify = jsonl_watcher.notify();
-    let dead_marker_watcher =
-        crate::services::discord::jsonl_watcher::JsonlWatcher::spawn(std::path::PathBuf::from(
-            crate::services::tmux_common::session_dead_marker_path(&tmux_session_name),
-        ));
     let dead_marker_notify = dead_marker_watcher.notify();
     let poll_context = PollWatcherContext {
         http: &http,
@@ -398,64 +325,100 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     };
 
     'watcher_loop: loop {
-        let (data, data_start_offset, epoch_snapshot, source_authority) = {
-            let mut relay_offset_state = RelayOffsetState {
-                current_offset: &mut current_offset,
-                terminal_delivery_observed: &mut terminal_delivery_observed,
-                last_relayed_offset: &mut last_relayed_offset,
-                last_observed_generation_mtime_ns: &mut last_observed_generation_mtime_ns,
-                rotation_tick: &mut rotation_tick,
-                watcher_turn_identity: &mut watcher_turn_identity,
-                watcher_turn_nonce: &mut watcher_turn_nonce,
-            };
-            let mut loop_poll_state = LoopPollState {
-                prompt_too_long_killed,
-                all_data: &all_data,
-                utf8_decoder: &mut utf8_decoder,
-                completion_footer_idle: &mut completion_footer_idle,
-                last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
-            };
-            let mut post_terminal_state = PostTerminalState {
-                turn_result_relayed,
-                post_terminal_continuation_logged: &mut post_terminal_continuation_logged,
-                last_post_terminal_suppressed_range: &mut last_post_terminal_suppressed_range,
-                active_stream_inflight_reacquire_logged:
-                    &mut active_stream_inflight_reacquire_logged,
-                restored_turn: &restored_turn,
-                restored_injected_prompt_message_id,
-            };
-            match poll_watcher_output_or_continue(
-                &poll_context,
-                &poll_controls,
-                &mut relay_offset_state,
-                &mut loop_poll_state,
-                &mut post_terminal_state,
-            )
-            .await
-            {
-                PollOutcome::OutputReady {
-                    data,
-                    data_start_offset,
-                    epoch_snapshot,
-                    source_authority,
-                } => (data, data_start_offset, epoch_snapshot, source_authority),
-                PollOutcome::ContinueWatcherLoop => continue,
-                PollOutcome::DiscardPendingBufferAndContinue => {
-                    discard_watcher_pending_buffer_after_suppressed_turn(
-                        &mut all_data,
-                        &mut all_data_start_offset,
-                        &mut all_data_fully_mirrored_to_session_relay,
-                        &mut all_data_session_bound_relay_ack,
-                        &mut all_data_first_forwarded_relay_sequence,
-                        current_offset,
-                    );
-                    continue;
+        let resume = cancellation_custody.take_for_current(&shared, channel_id);
+        let (data, data_start_offset, epoch_snapshot, source_authority) =
+            if let Some(resume) = resume {
+                watcher_turn_identity = resume.identity.clone();
+                watcher_turn_nonce = resume.nonce.clone();
+                restored_injected_prompt_message_id = resume
+                    .turn
+                    .as_ref()
+                    .and_then(|turn| turn.startup_inflight_snapshot.as_ref())
+                    .and_then(|row| row.injected_prompt_message_id);
+                current_offset = resume.offset;
+                all_data = resume.buffer;
+                all_data_start_offset = resume.buffer_start;
+                utf8_decoder = resume.utf8;
+                retained_source = Some(resume.source);
+                restored_turn = resume.restored;
+                pending_terminal_rewind_seed = resume.rewind;
+                terminal_rewind_attempt_key = resume.rewind_key;
+                terminal_rewind_attempts = resume.rewind_attempts;
+                all_data_fully_mirrored_to_session_relay = resume.mirrored;
+                all_data_session_bound_relay_ack = resume.ack;
+                all_data_first_forwarded_relay_sequence = resume.first_sequence;
+                let start = resume
+                    .turn
+                    .as_ref()
+                    .map_or(all_data_start_offset, |turn| turn.turn_data_start_offset);
+                continuation = resume.turn;
+                (
+                    Vec::new(),
+                    start,
+                    pause_epoch.load(std::sync::atomic::Ordering::Acquire),
+                    resume.authority,
+                )
+            } else {
+                let mut relay_offset_state = RelayOffsetState {
+                    current_offset: &mut current_offset,
+                    terminal_delivery_observed: &mut terminal_delivery_observed,
+                    last_relayed_offset: &mut last_relayed_offset,
+                    last_observed_generation_mtime_ns: &mut last_observed_generation_mtime_ns,
+                    rotation_tick: &mut rotation_tick,
+                    watcher_turn_identity: &mut watcher_turn_identity,
+                    watcher_turn_nonce: &mut watcher_turn_nonce,
+                };
+                let mut loop_poll_state = LoopPollState {
+                    retained_source: &mut retained_source,
+                    prompt_too_long_killed,
+                    all_data: &all_data,
+                    utf8_decoder: &mut utf8_decoder,
+                    completion_footer_idle: &mut completion_footer_idle,
+                    last_activity_heartbeat_at: &mut last_activity_heartbeat_at,
+                };
+                let mut post_terminal_state = PostTerminalState {
+                    turn_result_relayed,
+                    post_terminal_continuation_logged: &mut post_terminal_continuation_logged,
+                    last_post_terminal_suppressed_range: &mut last_post_terminal_suppressed_range,
+                    active_stream_inflight_reacquire_logged:
+                        &mut active_stream_inflight_reacquire_logged,
+                    restored_turn: &restored_turn,
+                    restored_injected_prompt_message_id,
+                };
+                match poll_watcher_output_or_continue(
+                    &poll_context,
+                    &poll_controls,
+                    &mut relay_offset_state,
+                    &mut loop_poll_state,
+                    &mut post_terminal_state,
+                )
+                .await
+                {
+                    PollOutcome::OutputReady {
+                        data,
+                        data_start_offset,
+                        epoch_snapshot,
+                        source_authority,
+                    } => (data, data_start_offset, epoch_snapshot, source_authority),
+                    PollOutcome::ContinueWatcherLoop => continue,
+                    PollOutcome::DiscardPendingBufferAndContinue => {
+                        discard_watcher_pending_buffer_after_suppressed_turn(
+                            &mut all_data,
+                            &mut all_data_start_offset,
+                            &mut all_data_fully_mirrored_to_session_relay,
+                            &mut all_data_session_bound_relay_ack,
+                            &mut all_data_first_forwarded_relay_sequence,
+                            current_offset,
+                        );
+                        continue;
+                    }
+                    PollOutcome::BreakWatcherLoop => break 'watcher_loop,
                 }
-                PollOutcome::BreakWatcherLoop => break 'watcher_loop,
-            }
-        };
+            };
 
         let mut turn_parse_state = TurnParseState {
+            retained_source: &retained_source,
+            continuation: &mut continuation,
             current_offset: &mut current_offset,
             all_data: &mut all_data,
             all_data_start_offset: &mut all_data_start_offset,
@@ -477,26 +440,14 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         };
         let mut monitor_auto_turn_state = MonitorAutoTurnState::default();
         let mut render_seed_state = RenderSeedState::default();
-        let collected_turn_stream = match collect_turn_stream_until_terminal(
-            &TurnStreamCollectorContext {
-                http: http.clone(),
-                shared: shared.clone(),
-                channel_id,
-                watcher_provider: watcher_provider.clone(),
-                tmux_session_name: tmux_session_name.clone(),
-                output_path: output_path.clone(),
-                input_fifo_path: input_fifo_path.clone(),
-                watcher_thread_channel_id,
-                cancel: cancel.clone(),
-                paused: paused.clone(),
-                pause_epoch: pause_epoch.clone(),
-                turn_delivered: turn_delivered.clone(),
-                last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
-                jsonl_notify: jsonl_notify.clone(),
-                dead_marker_notify: dead_marker_notify.clone(),
+        let collection_outcome = collect_turn_stream_until_terminal(
+            &TurnStreamCollectorContext::from_poll(
+                &poll_context,
+                &poll_controls,
+                &input_fifo_path,
                 turn_result_relayed,
                 restored_injected_prompt_message_id,
-            },
+            ),
             TurnStreamCollectorIo {
                 data,
                 data_start_offset,
@@ -508,8 +459,33 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             &mut monitor_auto_turn_state,
             &mut render_seed_state,
         )
-        .await
-        {
+        .await;
+        let checkpoint_row = crate::services::discord::inflight::load_inflight_state(
+            &watcher_provider,
+            channel_id.get(),
+        )
+        .filter(|row| {
+            turn_parse_state
+                .watcher_turn_identity
+                .as_ref()
+                .is_some_and(|identity| identity.matches_state(row))
+                && row.turn_nonce == watcher_turn_nonce
+        });
+        let checkpoint_turn = match &collection_outcome {
+            CollectOutcome::Fallthrough(turn) => Some(turn),
+            _ => None,
+        };
+        cancellation_custody.checkpoint(
+            &turn_parse_state,
+            &supervisor_relay_state,
+            source_authority,
+            checkpoint_turn,
+            checkpoint_row.as_ref(),
+        );
+        if cancel_handoff::cancel_yields_before_delivery(&cancel, checkpoint_turn) {
+            break 'watcher_loop;
+        }
+        let collected_turn_stream = match collection_outcome {
             CollectOutcome::ContinueWatcherLoop => continue,
             CollectOutcome::Fallthrough(collected) => collected,
         };
@@ -526,6 +502,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             mut status_panel_msg_id,
             single_message_panel_footer_mode,
             startup_inflight_snapshot,
+            completion_actor,
             this_turn_status_panel_generation,
             turn_is_external_input_for_session,
             turn_identity_for_panel,
@@ -554,6 +531,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             fresh_assistant_text_seen,
             was_paused,
             active_read_state,
+            ..
         } = collected_turn_stream;
         let startup_soft_terminal_authority = watcher_soft_terminal_has_turn_authority(
             startup_inflight_snapshot.as_ref(),
@@ -1378,7 +1356,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     provider: &watcher_provider,
                     channel: channel_id,
                     session: &tmux_session_name,
-                    expected_turn: inflight_before_relay.as_ref(),
+                    expected_turn: startup_inflight_snapshot.as_ref(),
                     range: (
                         turn_data_start_offset,
                         terminal_event_consumed_offset(current_offset, &all_data),
@@ -1392,9 +1370,25 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             )
             .await;
         }
+        if relay_ok {
+            cancel_handoff::completion::finish_after_receipt(
+                &shared,
+                channel_id,
+                &watcher_provider,
+                startup_inflight_snapshot.as_ref(),
+                completion_actor.as_ref(),
+                source_authority,
+                (
+                    turn_data_start_offset,
+                    terminal_event_consumed_offset(current_offset, &all_data),
+                ),
+            )
+            .await;
+        }
         let relay_suppressed = relay_decision.suppressed;
         let terminal_output_committed = relay_ok || relay_suppressed;
         if terminal_output_committed {
+            cancellation_custody.settled();
             terminal_delivery_observed = true;
         }
         // #3003: the no-response/stopped external-input panel reclaim runs once at
@@ -2512,6 +2506,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         .await;
     }
 
+    // Publish custody before the old task's independently fenced registry cleanup.
+    drop(cancellation_custody);
     // #4229 S5: post-stream-exit finalize tail moved verbatim to tmux_watcher/post_stream_exit.rs.
     run_post_stream_exit(PostStreamExitContext {
         channel_id,

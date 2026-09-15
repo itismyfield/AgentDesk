@@ -73,6 +73,29 @@ async fn relay_deliver_propagates_injected_transport_error() {
 // Kills M10 and anchor-drop: persisted proof stays Delivered and records the tail anchor.
 #[tokio::test]
 async fn relay_deliver_preserves_tail_anchor_and_observes_persisted_proof() {
+    if std::env::var_os("ADK_5927_RELAY_FIXTURE_CHILD").is_none() {
+        let qualified = format!(
+            "{}::relay_deliver_preserves_tail_anchor_and_observes_persisted_proof",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &qualified, "--nocapture"])
+            .env("ADK_5927_RELAY_FIXTURE_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "child must execute this exact test"
+        );
+        return;
+    }
+
     let temp = tempfile::tempdir().expect("temp runtime root");
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
     let channel_id = 44_003;

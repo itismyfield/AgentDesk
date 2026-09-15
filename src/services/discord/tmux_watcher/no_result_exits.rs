@@ -580,16 +580,20 @@ pub(super) async fn handle_no_result_exits(
                 shutting_down = shared.restart.shutting_down.load(Ordering::Relaxed),
                 "tmux watcher stopping for #{tmux_session_name}: cancelled/shutdown"
             );
-            finish_monitor_auto_turn_if_claimed(
-                &shared,
-                &watcher_provider,
-                channel_id,
-                &mut *state.monitor_auto_turn_claimed,
-                &mut *state.monitor_auto_turn_finished,
-                &mut *state.monitor_auto_turn_synthetic_msg_id,
-                &mut *state.monitor_auto_turn_ledger_generation,
-            )
-            .await;
+            // Cooperative cancellation transfers custody, not actor completion.
+            // Keep the existing global-shutdown behavior when no replacement is requested.
+            if !cancel.load(Ordering::Acquire) {
+                finish_monitor_auto_turn_if_claimed(
+                    &shared,
+                    &watcher_provider,
+                    channel_id,
+                    &mut *state.monitor_auto_turn_claimed,
+                    &mut *state.monitor_auto_turn_finished,
+                    &mut *state.monitor_auto_turn_synthetic_msg_id,
+                    &mut *state.monitor_auto_turn_ledger_generation,
+                )
+                .await;
+            }
             return NoResultExitOutcome::BreakWatcherLoop;
         }
 

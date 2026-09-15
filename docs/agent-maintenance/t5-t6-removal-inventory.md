@@ -917,3 +917,15 @@ mixed-version 금지 문서 계약은 필요 없다. 다만 그 PR이 남긴 회
 `write_agentdesk_discord_config`·`write_agentdesk_channel_bindings` 안에 있다). 재현:
 `git grep -n 'save_to_path' -- src/` 후 `#[cfg(test)]` 경계로 분류하고 정의 1행을 뺀다.
 PR #5803이 이 writer 들을 명시적으로 유예했고 이슈 #5750 코멘트 5593859378이 후속으로 들고 있다.
+
+
+## PR #5927 — cooperative cancel → same-turn successor (review candidate, 2026-09-15)
+
+Based on main `23eb9bba132ad71f0336645705ab8597a59d1c1c`; this entry describes only this PR, not a later-main census or completion of #5071/#5464.
+
+- Replaces cooperative-cancel loss of watcher-local original source/parser/body with `tmux_watcher/cancel_handoff.rs` custody on the existing channel relay coordinate. A matching replacement consumes it before polling, including already-parsed terminal EOF, without replaying the exact terminal ACK.
+- Removes monitor finalization merely because its watcher was cooperatively cancelled. Pure shutdown retains its previous behavior. Delivery/completion/progress remain guarded by the existing original turn nonce, opened-file, generation/reset, watcher incarnation and receipt/lease checks.
+- Adds continuation wiring; **no legacy delivery authority is replaced or approved for T6 removal**. Existing terminal and no-transport settlement decisions remain.
+- Process-local, captured original episode/source only. In the Enforce cohort, a genuinely absent inflight projection may resume from the original captured row/nonce/source; it must not recreate a row or infer identity from the successor. Corrupt/unreadable or foreign rows and replaced sources cannot acquire that capsule and remain retained without a detached drain. Hard process loss, all outer-loop cancellation edges and live daemon acceptance remain outside this slice; this is not a crash-durable store or receipt.
+- Rowless delivery reuses the existing sink, source/destination receipt and lease gates. Captured immutable episode metadata is not send permission. Original actor completion goes through the existing finalizer only after an exact matching receipt; an ACK high-watermark alone cannot release the actor, and stale completion cannot release its successor.
+- Native tests cover two successive cancellations and immediate re-cancellation before polling, body/native decoder carry, incomplete JSON/UTF-8, no-new-append EOF, source replacement and admission-fence rejection, one visible body, and rowless exact receipt -> original actor release -> next input. These are injected collector/sink tests, not latest-binary live daemon acceptance. New destructive-call baseline sites are test fixtures only.

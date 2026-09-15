@@ -32,6 +32,22 @@ impl WatcherReadBatch {
         Ok(self)
     }
 
+    pub(super) fn into_retained_parts(
+        self,
+    ) -> (
+        Vec<u8>,
+        u64,
+        SourceFileIdentity,
+        std::sync::Arc<std::fs::File>,
+    ) {
+        (
+            self.bytes,
+            self.end,
+            self.origin,
+            std::sync::Arc::new(self.file),
+        )
+    }
+
     pub(super) fn into_parts(self) -> (Vec<u8>, u64, SourceFileIdentity) {
         (self.bytes, self.end, self.origin)
     }
@@ -65,6 +81,22 @@ pub(super) async fn read_watcher_source_chunk_with_witness(
     )
     .await;
     (read, witness)
+}
+
+pub(super) async fn read_retained_watcher_source_chunk(
+    source: std::sync::Arc<std::fs::File>,
+    offset: u64,
+) -> Result<Result<SourceChunk, tokio::task::JoinError>, tokio::time::error::Elapsed> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            let file = source
+                .try_clone()
+                .map_err(|error| format!("clone retained source: {error}"))?;
+            read_watcher_source_chunk_from_file(file, offset)
+        }),
+    )
+    .await
 }
 
 fn read_watcher_source_chunk_from_file(file: std::fs::File, offset: u64) -> SourceChunk {
@@ -181,7 +213,7 @@ mod source_epoch_read_tests {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct Utf8ChunkDecoder {
     pending: Vec<u8>,
     pending_start_offset: Option<u64>,

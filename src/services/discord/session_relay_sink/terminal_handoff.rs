@@ -142,6 +142,7 @@ impl RelaySink for SessionBoundDiscordRelaySink {
                     &delivery,
                 )
                 .is_none()
+                && !self.cancelled_episode_is_retained(&delivery).await
             {
                 Ok(SessionRelayDeliveryOutcome::NotDelivered)
             } else {

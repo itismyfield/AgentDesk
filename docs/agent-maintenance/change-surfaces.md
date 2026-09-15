@@ -2661,3 +2661,10 @@ reintroducing bespoke clamp expressions.
   issue (deadline-less registration is rejected by the generator) and add it to
   its feature block in the same PR — do not let the inventory generator be the
   only signal.
+
+
+## #5071 cancellation custody (PR #5927 review candidate)
+
+`src/services/discord/tmux_watcher/cancel_handoff.rs` owns process-local source/parser/render custody for cooperative replacement, not a journal, receipt writer or detached drain. `src/services/discord/tmux_watcher.rs` has acquisition/adoption/checkpoint wiring at its existing poll/collector/terminal boundaries; `src/services/discord/tmux_watcher/turn_stream_collector.rs` rehydrates the native decoder and enters the existing terminal receipt/lease path.
+
+Root growth is an explicit reviewable cap admission linked to the existing #4712 split issue, not a waiver for future growth. Splitting must retain all downstream identity, epoch/reset, stop/pause, ACK and receipt guards.

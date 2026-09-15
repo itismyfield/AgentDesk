@@ -64,6 +64,7 @@ pub(super) struct RelayOffsetState<'a> {
 }
 
 pub(super) struct LoopPollState<'a> {
+    pub(super) retained_source: &'a mut Option<std::sync::Arc<std::fs::File>>,
     pub(super) prompt_too_long_killed: bool,
     pub(super) all_data: &'a String,
     pub(super) utf8_decoder: &'a mut Utf8ChunkDecoder,
@@ -308,8 +309,8 @@ pub(super) async fn poll_watcher_output_or_continue(
     .await;
     drop(source_frontier_mutation);
 
-    let (data, new_offset, source_file_identity) = match read_result {
-        Ok(Ok(Ok(batch))) => batch.into_parts(),
+    let (data, new_offset, source_file_identity, source_file) = match read_result {
+        Ok(Ok(Ok(batch))) => batch.into_retained_parts(),
         _ => {
             match tmux_liveness_decision(
                 cancel.load(Ordering::Relaxed),
@@ -358,6 +359,7 @@ pub(super) async fn poll_watcher_output_or_continue(
         }
     };
 
+    *loop_poll_state.retained_source = Some(source_file);
     let source_stamp = source_witness.and_then(|marker| {
         crate::services::discord::delivery_lease_cell::source_epoch_observer::source_stamp(
             tmux_session_name,

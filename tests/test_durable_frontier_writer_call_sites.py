@@ -40,7 +40,8 @@ INTAKE_SPEC.loader.exec_module(intake_guard)
 
 # Measured on e60416050248aaa4d2157dd3077b1edfc099cb76 (S8-1b base). S7 moved
 # five counts for a net 42 -> 41 over 23 -> 24 symbols; S8-1b adds five
-# directly pinned spellings for seven sites, reaching 48 sites over 29 symbols.
+# directly pinned spellings for seven sites. The cancelled-source sink adds two
+# reviewed pinned receipt/metadata sites, reaching 50 sites over 29 symbols.
 # Three raw calls left `recovery_engine/terminal_text_idempotency.rs`
 # (`write_delivered_frontier`, `write_proven_gone_equal_range_frontier`,
 # `append_completed_turn`), one funnel call replaced them
@@ -48,7 +49,7 @@ INTAKE_SPEC.loader.exec_module(intake_guard)
 # private caller.
 # #5755 removes the unproven loop_poll_prologue shared-frontier advance.
 # T5 detached custody adds one direct historical pinned receipt write.
-TOTAL_CALL_SITES = 48
+TOTAL_CALL_SITES = 50
 PINNED_SYMBOLS = 29
 ZERO_PINNED = {
     "write_confirmed_delivery",
