@@ -246,6 +246,18 @@ pub(super) fn build_system_prompt_with_manifest(
         channel_id.get(),
         discord_token_hash(token),
     );
+    if let Some(prefix) =
+        crate::services::agent_recovery::fallback_prompt_prefix(&channel_id.get().to_string())
+    {
+        system_prompt_owned.push_str("\n\n");
+        system_prompt_owned.push_str(&prefix);
+    }
+    if let Some(packet) =
+        crate::services::agent_recovery::take_restore_packet(&channel_id.get().to_string())
+    {
+        system_prompt_owned.push_str("\n\n");
+        system_prompt_owned.push_str(&packet);
+    }
     prompt_manifest_layers.push(prompt_manifest_layer(
         "base_discord",
         "prompt_builder.base_discord",

@@ -1135,6 +1135,15 @@ mod live_pane_tests {
             );
         }
 
+        // The final session closes the tmux server before its asynchronous
+        // run-shell hook can execute. Keep the server alive for this assertion.
+        let keeper = unique_test_session_name();
+        let output = tmux_command()
+            .args(["new-session", "-d", "-s", &keeper, "sleep 60"])
+            .output()
+            .expect("hook keeper session should be created");
+        assert!(output.status.success(), "hook keeper session should start");
+
         let _ = kill_session(&session, "dead marker hook test trigger");
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while std::time::Instant::now() < deadline && !std::path::Path::new(&marker_path).exists() {
@@ -1142,6 +1151,7 @@ mod live_pane_tests {
         }
         let marker_exists = std::path::Path::new(&marker_path).exists();
 
+        let _ = kill_session(&keeper, "dead marker hook keeper cleanup");
         crate::services::tmux_common::cleanup_session_temp_files(&session);
         let _ = std::fs::remove_dir_all(&root);
         match previous_root {

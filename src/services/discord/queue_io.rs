@@ -1,4 +1,8 @@
 use super::*;
+mod turn_admission;
+pub(super) use turn_admission::{
+    mailbox_recovery_kickoff, mailbox_try_start_turn_kinded_with_feedback,
+};
 
 /// #2044 F3: RAII guard that ensures `deferred_hook_backlog` is
 /// decremented even if the spawned future panics inside
@@ -367,38 +371,6 @@ pub(super) fn schedule_post_enqueue_idle_queue_kick(
             .await;
         }
     });
-}
-
-pub(super) async fn mailbox_try_start_turn_kinded_with_feedback(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    cancel_token: Arc<CancelToken>,
-    request_owner: UserId,
-    user_message_id: MessageId,
-    turn_kind: ActiveTurnKind,
-) -> bool {
-    let result = shared
-        .mailbox(channel_id)
-        .try_start_turn_kinded_with_persistence(
-            cancel_token,
-            request_owner,
-            user_message_id,
-            turn_kind,
-            queue_persistence_context(shared, &shared.provider, channel_id),
-        )
-        .await;
-    apply_queue_exit_feedback(shared, channel_id, &result.queue_exit_events).await;
-    if let Some(error) = result.persistence_error.as_ref() {
-        tracing::error!(
-            provider = shared.provider.as_str(),
-            channel_id = channel_id.get(),
-            user_message_id = user_message_id.get(),
-            turn_kind = ?turn_kind,
-            error = %error,
-            "mailbox try-start failed durable active-source queue purge"
-        );
-    }
-    result.started
 }
 
 pub(super) async fn kick_idle_queue_channel_if_context_available(

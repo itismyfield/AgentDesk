@@ -79,6 +79,8 @@ pub(super) async fn handle_terminal(
 
     let pending = take_exact_pending_completion_admission(pending_admission, ledger_key);
     let entry = ledger.entry(ledger_key).or_insert(LedgerEntry {
+        // An orphan completion cannot borrow the current takeover's lease.
+        recovery_lease: None,
         phase: Phase::Pending,
         relay_owner: RelayOwnerKind::None,
         provider,

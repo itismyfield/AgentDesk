@@ -1,3 +1,6 @@
+mod provider_credentials;
+use provider_credentials::{check_claude_cswap_global_conflict, check_credential_permissions};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -942,6 +945,7 @@ fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec
         check_qwen_auth_hints(qwen_configured),
         check_qwen_runtime_artifacts(qwen_configured),
         check_provider_bindings(cfg, snapshot),
+        check_claude_cswap_global_conflict(),
         check_credential_permissions(cfg),
     ]
 }
@@ -1459,111 +1463,6 @@ fn permission_finding(label: &'static str, path: &Path, _sensitive: bool) -> Per
             owner_is_current: None,
             risk: None,
         }
-    }
-}
-
-fn check_credential_permissions(cfg: &config::Config) -> Check {
-    let mut candidates: Vec<(&'static str, PathBuf, bool)> = Vec::new();
-    if let Some(root) = config::runtime_root() {
-        candidates.push((
-            "agentdesk_yaml",
-            crate::runtime_layout::config_file_path(&root),
-            cfg.server
-                .auth_token
-                .as_deref()
-                .is_some_and(|token| !token.trim().is_empty()),
-        ));
-        candidates.push((
-            "discord_credential_dir",
-            crate::runtime_layout::credential_dir(&root),
-            true,
-        ));
-        let mut bot_names = cfg.discord.bots.keys().cloned().collect::<Vec<_>>();
-        bot_names.sort();
-        for bot_name in bot_names {
-            let label = match bot_name.as_str() {
-                "command" => "discord_command_token",
-                "announce" => "discord_announce_token",
-                "notify" => "discord_notify_token",
-                _ => "discord_bot_token",
-            };
-            candidates.push((
-                label,
-                crate::runtime_layout::credential_token_path(&root, &bot_name),
-                true,
-            ));
-        }
-    }
-    if let Some(home) = qwen_home_dir() {
-        candidates.push((
-            "qwen_oauth_cache",
-            home.join(".qwen").join("oauth_creds.json"),
-            true,
-        ));
-    }
-    if let Some(project) = qwen_project_dir() {
-        candidates.push(("qwen_project_env", project.join(".qwen").join(".env"), true));
-        candidates.push(("project_env", project.join(".env"), true));
-    }
-
-    let findings = candidates
-        .iter()
-        .map(|(label, path, sensitive)| permission_finding(label, path, *sensitive))
-        .collect::<Vec<_>>();
-    let risks = findings
-        .iter()
-        .filter_map(|finding| {
-            finding
-                .risk
-                .as_ref()
-                .map(|risk| format!("{}: {risk}", finding.label))
-        })
-        .collect::<Vec<_>>();
-    let existing = findings.iter().filter(|finding| finding.exists).count();
-    let evidence = json!({
-        "checked": findings.iter().map(|finding| json!({
-            "label": finding.label,
-            "path": finding.path.clone(),
-            "exists": finding.exists,
-            "mode": finding.mode.clone(),
-            "owner_is_current": finding.owner_is_current,
-            "risk": finding.risk.clone(),
-        })).collect::<Vec<_>>(),
-        "risk_count": risks.len(),
-    });
-    let detail = format!(
-        "checked={} existing={} risks={}",
-        findings.len(),
-        existing,
-        risks.len()
-    );
-    if risks.is_empty() {
-        Check::ok(
-            "credential_permissions",
-            CheckGroup::ProviderRuntime,
-            "Credential Permissions",
-            detail.clone(),
-        )
-        .with_subsystem("security")
-        .with_expected_actual("no credential permission risks", detail)
-        .with_evidence(evidence)
-        .with_security_exposure(SecurityExposure::CredentialMetadata)
-    } else {
-        Check::warn(
-            "credential_permissions",
-            CheckGroup::ProviderRuntime,
-            "Credential Permissions",
-            format!("{detail}; {}", risks.join("; ")),
-            "credential/config 파일 내용은 읽거나 출력하지 않고 권한/owner metadata만 점검했습니다.",
-        )
-        .with_subsystem("security")
-        .with_expected_actual("credential files owned by current user with private permissions", detail)
-        .with_evidence(evidence)
-        .with_security_exposure(SecurityExposure::CredentialMetadata)
-        .with_next_steps(vec![
-            "chmod 700 ~/.adk/release/credential".to_string(),
-            "chmod 600 <credential-file>".to_string(),
-        ])
     }
 }
 
@@ -2647,15 +2546,7 @@ fn check_provider_cli(
     snapshot: &HealthSnapshot,
 ) -> Check {
     let id = provider_check_id(&provider);
-    let name = match provider {
-        ProviderKind::Claude => "claude CLI",
-        ProviderKind::Codex => "codex CLI",
-        ProviderKind::Gemini => "gemini CLI",
-        ProviderKind::OpenCode => "opencode CLI",
-        ProviderKind::Qwen => "qwen CLI",
-        ProviderKind::Grok => "grok CLI",
-        ProviderKind::Unsupported(_) => "provider CLI",
-    };
+    let name = super::provider_cli_name::provider_cli_check_name(&provider);
     let capability_summary = provider_capability_summary(&provider);
     let connected = provider_connected(snapshot, &provider);
     let log_hint = dcserver_log_hint();
