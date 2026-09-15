@@ -229,26 +229,7 @@ pub(super) async fn validate_agent_id_request(
     }
 }
 
-pub(super) fn validate_distinct_fallback_agent(
-    agent_id: Option<&str>,
-    fallback_agent_id: Option<&str>,
-) -> AppResult<()> {
-    let Some(agent_id) = agent_id.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(());
-    };
-    let Some(fallback_agent_id) = fallback_agent_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(());
-    };
-    if agent_id == fallback_agent_id {
-        return Err(AppError::bad_request(
-            "routine fallback_agent_id must differ from agent_id",
-        ));
-    }
-    Ok(())
-}
+pub(super) use crate::services::agent_recovery::validate_distinct_fallback_agent;
 
 fn routine_health_target(config: &Config) -> Option<String> {
     config

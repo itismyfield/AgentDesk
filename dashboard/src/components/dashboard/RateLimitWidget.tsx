@@ -29,6 +29,7 @@ interface RateLimitBucket {
 
 interface RateLimitProvider {
   provider: string;
+  profileId: string;
   buckets: RateLimitBucket[];
   fetched_at: number;
   stale: boolean;
@@ -51,6 +52,7 @@ interface RawBucket {
 
 interface RawProvider {
   provider: string;
+  profile_id?: string;
   buckets: RawBucket[];
   fetched_at: number;
   stale: boolean;
@@ -120,8 +122,10 @@ export function transformRawData(
             level,
           };
         });
+      const profileId = (rp.profile_id ?? "default").trim() || "default";
       return {
         provider: normalizeRateLimitProviderLabel(rp.provider),
+        profileId,
         fetched_at: rp.fetched_at,
         stale: rp.stale,
         unsupported: Boolean(rp.unsupported),
@@ -133,9 +137,10 @@ export function transformRawData(
   const seen = new Map<string, number>();
   const merged: RateLimitProvider[] = [];
   for (const row of rows) {
-    const existingIndex = seen.get(row.provider);
+    const mergeKey = `${row.provider}::${row.profileId}`;
+    const existingIndex = seen.get(mergeKey);
     if (existingIndex === undefined) {
-      seen.set(row.provider, merged.length);
+      seen.set(mergeKey, merged.length);
       merged.push(row);
       continue;
     }
@@ -402,7 +407,7 @@ function RateLimitWidgetImpl({ t, onOpenSettings }: RateLimitWidgetProps) {
 
             return (
               <SurfaceCard
-                key={provider.provider}
+                key={`${provider.provider}:${provider.profileId}`}
                 className="rounded-3xl p-5"
                 style={{
                   borderColor: providerMeta.border,
@@ -416,6 +421,7 @@ function RateLimitWidgetImpl({ t, onOpenSettings }: RateLimitWidgetProps) {
                       style={{ color: accent }}
                     >
                       {(PROVIDER_ICONS[provider.provider] ?? "•")} {provider.provider}
+                      {provider.profileId !== "default" ? ` · ${provider.profileId}` : ""}
                     </div>
                     <div className="mt-1 text-[11px]" style={{ color: "var(--th-text-muted)" }}>
                       {provider.unsupported

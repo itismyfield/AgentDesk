@@ -221,19 +221,25 @@ mod tests {
         let watcher = JsonlWatcher::spawn(path.clone());
         let notify = watcher.notify();
 
-        // Give the notify backend a beat to register the watch.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Register the waiter before writing: notify_waiters does not retain
+        // a permit for a task that has not yet polled its future.
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
 
-        let waiter = tokio::spawn(async move {
-            tokio::time::timeout(Duration::from_secs(3), notify.notified())
-                .await
-                .map(|_| ())
-        });
-
-        // Append a line — the wrapper's normal write pattern.
-        std::fs::write(&path, "{}\n{}\n").unwrap();
-
-        let result = waiter.await.expect("waiter task panicked");
+        // Watch installation runs on another OS thread. Keep producing real
+        // writes until it is ready, bounded by a deadline rather than assuming
+        // a fixed sleep is enough on a loaded CI runner.
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                std::fs::write(&path, "{}\n{}\n").unwrap();
+                tokio::select! {
+                    _ = &mut notified => break,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
+            }
+        })
+        .await;
         assert!(
             result.is_ok(),
             "JsonlWatcher Notify should fire on file modify"

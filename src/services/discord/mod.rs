@@ -39,7 +39,7 @@ mod metrics;
 mod model_catalog;
 mod model_picker_interaction;
 pub(crate) mod monitoring_status;
-mod org_schema;
+pub(crate) mod org_schema;
 pub(crate) mod org_writer;
 pub(crate) mod outbound;
 mod placeholder_cleanup;
@@ -1783,34 +1783,7 @@ async fn mailbox_restore_active_turn(
         .await;
 }
 
-async fn mailbox_recovery_kickoff(
-    shared: &SharedData,
-    channel_id: ChannelId,
-    cancel_token: Arc<CancelToken>,
-    request_owner: UserId,
-    // `None` when the recovery turn has no anchored user message
-    // (user_msg_id == 0, e.g. a TUI-direct turn).
-    user_message_id: Option<MessageId>,
-) -> RecoveryKickoffResult {
-    // #2443 — reset the per-channel `recovery_done` latch BEFORE recovery
-    // starts; a stale "done" flag would let `watchers/lifecycle.rs` graduate
-    // its skip early and race the ongoing recovery. Idempotent and cheap.
-    shared.mailboxes.recovery_done(channel_id).reset();
-    // #3297 r3 — tombstone refusal ⇒ retry on a fresh registered actor.
-    let result = shared
-        .mailboxes
-        .recovery_kickoff_with_closed_retry(
-            channel_id,
-            cancel_token,
-            request_owner,
-            user_message_id,
-        )
-        .await;
-    if result.activated_turn {
-        increment_global_active(shared, "recovery_kickoff");
-    }
-    result
-}
+use queue_io::mailbox_recovery_kickoff;
 
 fn ensure_cancel_token_bound_from_inflight_state(
     provider: &ProviderKind,

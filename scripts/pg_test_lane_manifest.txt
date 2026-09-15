@@ -47,6 +47,7 @@ src/server/routes/stats.rs
 src/server/routes/tests/auto_queue_preflight_harness_tests.rs
 src/server/task_dispatch_claims.rs
 src/services/agent_quality/regression_alerts.rs
+src/services/agent_recovery/durable/postgres_tests.rs
 src/services/auto_queue.rs
 src/services/auto_queue/activate_command.rs
 src/services/auto_queue/cancel_run.rs
@@ -161,6 +162,7 @@ server::routes::scheduled_messages::postgres_tests
 server::routes::stats::memento_feedback_stats_pg_tests
 server::task_dispatch_claims::task_dispatch_claims_pg_tests
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests
+services::agent_recovery::durable::postgres_tests
 services::auto_queue::cancel_run::pg_tests
 services::auto_queue::cleanup_tasks::cleanup_tasks_pg_tests::pg_tests
 services::auto_queue::route::activate_command::tests::activate_upstream_eligibility_gate_pg_tests
@@ -594,6 +596,15 @@ server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_waits_when_al
 server::task_dispatch_claims::task_dispatch_claims_pg_tests::claim_waits_when_per_cluster_semaphore_is_exhausted
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::quality_channel_uses_db_precedence_and_no_target_off_switch_pg
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::regression_outbox_and_cooldown_commit_or_roll_back_together_pg
+services::agent_recovery::durable::postgres_tests::postgres_competing_coordinators_yield_only_one_spawn_plan
+services::agent_recovery::durable::postgres_tests::postgres_failed_launch_ack_keeps_a_retryable_pending_intent
+services::agent_recovery::durable::postgres_tests::postgres_failed_wal_append_never_publishes_the_staged_takeover
+services::agent_recovery::durable::postgres_tests::postgres_mailbox_admission_serializes_takeover_before_a_state_row_exists
+services::agent_recovery::durable::postgres_tests::postgres_pending_launch_and_restore_require_the_exact_internal_lease
+services::agent_recovery::durable::postgres_tests::postgres_restart_and_catalog_removal_preserve_the_frozen_recovery_fence
+services::agent_recovery::durable::postgres_tests::postgres_stale_completion_cannot_claim_a_restarted_takeover
+services::agent_recovery::durable::postgres_tests::postgres_takeover_is_invisible_until_commit
+services::agent_recovery::durable::postgres_tests::postgres_wal_frontier_rejects_same_generation_stale_progress
 services::auto_queue::cancel_run::pg_tests::cancel_live_dispatches_for_runs_pg_preserves_entry_until_force_pause_skip
 services::auto_queue::cancel_run::pg_tests::cancel_live_dispatches_for_runs_pg_preserves_foreign_session
 services::auto_queue::cancel_run::pg_tests::cancel_selected_runs_with_pg_atomically_terminalizes_run_entry_and_dispatch

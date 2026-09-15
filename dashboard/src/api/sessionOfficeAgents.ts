@@ -134,6 +134,7 @@ export async function updateAgent(
     prompt_content?: string;
     auto_commit?: boolean;
     commit_message?: string;
+    auth_profile?: string | null;
   },
 ): Promise<Agent> {
   const data = await request<{ agent: Agent } | Agent>(`/api/agents/${id}`, {

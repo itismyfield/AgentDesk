@@ -802,15 +802,7 @@ pub(crate) fn resolved_models(
 pub(in crate::services::discord) fn provider_supports_model_override(
     provider: &ProviderKind,
 ) -> bool {
-    matches!(
-        provider,
-        ProviderKind::Claude
-            | ProviderKind::Codex
-            | ProviderKind::Gemini
-            | ProviderKind::OpenCode
-            | ProviderKind::Qwen
-            | ProviderKind::Grok
-    )
+    provider.is_supported()
 }
 
 pub(in crate::services::discord) fn model_hint(
@@ -827,6 +819,7 @@ pub(in crate::services::discord) fn model_hint(
         }
         ProviderKind::OpenCode => "default + custom providerID/modelID".to_string(),
         ProviderKind::Grok => "default + custom Grok model id".to_string(),
+        ProviderKind::Antigravity => "default + custom model id from agy models".to_string(),
         ProviderKind::Qwen => {
             let catalog = resolve_qwen_model_catalog(working_dir);
             if catalog.entries.is_empty() {
@@ -844,7 +837,10 @@ pub(crate) fn known_models(provider: &ProviderKind) -> Vec<ModelCatalogEntry> {
         ProviderKind::Claude => claude::resolved_models(),
         ProviderKind::Codex => build_codex_model_catalog(),
         ProviderKind::Gemini => build_gemini_model_catalog(),
-        ProviderKind::Grok | ProviderKind::OpenCode | ProviderKind::Qwen => Vec::new(),
+        ProviderKind::Grok
+        | ProviderKind::Antigravity
+        | ProviderKind::OpenCode
+        | ProviderKind::Qwen => Vec::new(),
         ProviderKind::Unsupported(_) => Vec::new(),
     }
 }
@@ -886,9 +882,11 @@ fn model_aliases(provider: &ProviderKind) -> &'static [(&'static str, &'static s
     match provider {
         ProviderKind::Codex => CODEX_MODEL_ALIASES,
         ProviderKind::Gemini => GEMINI_MODEL_ALIASES,
-        ProviderKind::Claude | ProviderKind::Grok | ProviderKind::OpenCode | ProviderKind::Qwen => {
-            &[]
-        }
+        ProviderKind::Claude
+        | ProviderKind::Grok
+        | ProviderKind::Antigravity
+        | ProviderKind::OpenCode
+        | ProviderKind::Qwen => &[],
         ProviderKind::Unsupported(_) => &[],
     }
 }

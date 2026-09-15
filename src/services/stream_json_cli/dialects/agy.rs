@@ -101,6 +101,10 @@ pub(crate) fn prepare(request: &ProviderTurnRequest) -> Result<PreparedCommand, 
         args,
         redacted_args,
         current_dir: request.working_directory.clone(),
+        env: crate::services::provider_auth_profile::overlay_env_pairs(&request.auth_overlay),
+        unset_env: crate::services::provider_auth_profile::overlay_unset_keys(
+            &request.auth_overlay,
+        ),
         codec: Box::new(AgyCodec::new()),
     })
 }
@@ -130,7 +134,9 @@ pub fn resolve_agy_binary() -> crate::services::platform::BinaryResolution {
             let path = candidate.to_string_lossy().into_owned();
             resolution.resolved_path = Some(path.clone());
             resolution.canonical_path = Some(path.clone());
-            resolution.exec_path = Some(path);
+            // exec_path is a PATH search list, not the executable path. Let
+            // apply_binary_resolution augment PATH from resolved_path.
+            resolution.exec_path = None;
             resolution.source = Some("localappdata_agy_bin".into());
         }
     }
@@ -149,7 +155,7 @@ mod tests {
 
     fn request() -> ProviderTurnRequest {
         ProviderTurnRequest {
-            provider: crate::services::provider::ProviderKind::Unsupported("antigravity".into()),
+            provider: crate::services::provider::ProviderKind::Antigravity,
             prompt: "hello".into(),
             system_prompt: Some("sys".into()),
             tool_policy: ConfiguredToolPolicy::for_new_stream_json_provider(),
@@ -160,6 +166,9 @@ mod tests {
             remote_profile: None,
             timeout: Duration::from_secs(120),
             cancel: None,
+            auth_overlay: crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
+                crate::services::provider::ProviderKind::Antigravity,
+            ),
         }
     }
 

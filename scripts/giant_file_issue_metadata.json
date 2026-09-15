@@ -49,7 +49,6 @@
         "src/services/qwen.rs",
         "src/services/settings.rs",
         "src/services/turn_orchestrator.rs",
-        "src/server/worker_registry.rs",
         "src/server/maintenance.rs"
       ]
     },

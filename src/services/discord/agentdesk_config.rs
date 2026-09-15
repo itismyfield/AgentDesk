@@ -12,6 +12,7 @@ use crate::config::{
     AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, Config, MeetingAgentEntry,
     MeetingSummaryAgentDef,
 };
+use crate::services::agent_identity::{identity_from_parts, identity_label};
 use crate::services::provider::ProviderKind;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
@@ -331,6 +332,7 @@ fn role_binding_from_channel(
         reasoning_effort: channel.reasoning_effort(),
         peer_agents_enabled: channel.peer_agents().unwrap_or(true),
         quality_feedback_injection_enabled: channel.quality_feedback_injection().unwrap_or(true),
+        auth_profile: "default".to_string(),
         memory: resolve_memory_settings(None, None),
     }
 }
@@ -344,6 +346,7 @@ fn role_binding_from_agent(agent: &crate::config::AgentDef, provider: ProviderKi
         reasoning_effort: None,
         peer_agents_enabled: true,
         quality_feedback_injection_enabled: true,
+        auth_profile: "default".to_string(),
         memory: resolve_memory_settings(None, None),
     }
 }
@@ -775,10 +778,22 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
                 if !seen.insert(agent.role_id.clone()) {
                     continue;
                 }
+                let provider = agent.provider.clone();
+                let identity = identity_from_parts(
+                    &agent.role_id,
+                    &agent.display_name,
+                    provider
+                        .clone()
+                        .unwrap_or_else(|| ProviderKind::Unsupported("unknown".into())),
+                    agent.model.clone(),
+                    None,
+                );
                 peers.push(PeerAgentInfo {
                     role_id: agent.role_id,
                     display_name: agent.display_name,
                     keywords: agent.keywords,
+                    provider,
+                    identity_label: identity_label(&identity),
                 });
             }
             return peers;
@@ -788,10 +803,24 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
     let mut peers = config
         .agents
         .iter()
-        .map(|agent| PeerAgentInfo {
-            role_id: agent.id.clone(),
-            display_name: agent_display_name(agent),
-            keywords: agent.keywords.clone(),
+        .map(|agent| {
+            let provider = ProviderKind::from_str(&agent.provider);
+            let identity = identity_from_parts(
+                &agent.id,
+                agent_display_name(agent),
+                provider
+                    .clone()
+                    .unwrap_or_else(|| ProviderKind::Unsupported(agent.provider.clone())),
+                None,
+                None,
+            );
+            PeerAgentInfo {
+                role_id: agent.id.clone(),
+                display_name: agent_display_name(agent),
+                keywords: agent.keywords.clone(),
+                provider,
+                identity_label: identity_label(&identity),
+            }
         })
         .collect::<Vec<_>>();
     peers.sort_by(|left, right| left.role_id.cmp(&right.role_id));
