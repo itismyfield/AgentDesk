@@ -121,7 +121,7 @@ mod tests {
             ("-oc", "opencode"),
             ("-qw", "qwen"),
             ("-gx", "grok"),
-            ("-agy", "antigravity"),
+            ("-ag", "antigravity"),
         ];
         assert_eq!(config.merged_provider_suffix_map().len(), historical.len());
         for (suffix, provider) in historical {
