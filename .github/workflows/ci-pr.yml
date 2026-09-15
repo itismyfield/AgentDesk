@@ -872,8 +872,11 @@ jobs:
           env -u AGENTDESK_ROOT_DIR cargo test --lib watcher_terminal_commit_identity_mismatch_skips_without_clobbering_newer_row
           env -u AGENTDESK_ROOT_DIR cargo test --lib identity_guarded_save_rejects_stale_write_against_newer_turn
 
+      # Run 34926677210 selected 845 serial tests and completed 642 without
+      # failure before the 20-minute budget expired during active migrations.
+      # Preserve all tests and fail-closed results; bound the complete run at 40m.
       - name: just test-postgres
-        timeout-minutes: 20
+        timeout-minutes: 40
         shell: bash
         env:
           BASH_ENV: /dev/null
@@ -1573,7 +1576,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=4ed961da85aea2875ef4f5c710a088d0c8a834a9e30d36f06c52d9a6d4e759db
+          expected=9cf7a3fde3e74870c50a51ce11116698c52263e02451d2d10c56f53ab4ebb943
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
@@ -1688,7 +1691,7 @@ jobs:
             exit 1
           fi
           gate_path=scripts/check-ci-runner-hardening.sh
-          expected=4ed961da85aea2875ef4f5c710a088d0c8a834a9e30d36f06c52d9a6d4e759db
+          expected=9cf7a3fde3e74870c50a51ce11116698c52263e02451d2d10c56f53ab4ebb943
           actual="$(sha256sum "$gate_path" | cut -d ' ' -f 1)"
           if [ "$actual" != "$expected" ]; then
             echo "::error file=$gate_path::content hash mismatch: expected $expected, found $actual; review the gate and update both #5321 gate pins together"
