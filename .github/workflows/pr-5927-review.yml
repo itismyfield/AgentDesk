@@ -4,7 +4,7 @@ on:
   push:
     branches: ['review/pr-5927-20260915']
     paths:
-      - '.github/repair-pr5927.py'
+      - '.github/repair-pr5927*.py'
       - '.github/workflows/pr-5927-review.yml'
 
 permissions:
@@ -39,10 +39,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp .github/repair-pr5927.py "$RUNNER_TEMP/repair-pr5927.py"
+          cp .github/repair-pr5927*.py "$RUNNER_TEMP/"
           git merge-base --is-ancestor "$BASE_SHA" HEAD
           git checkout --detach "$BASE_SHA"
           python3 "$RUNNER_TEMP/repair-pr5927.py"
+          python3 "$RUNNER_TEMP/repair-pr5927-extra.py"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -65,44 +66,17 @@ jobs:
         with:
           node-version: '22'
       - name: Format and stage exact scope
+        id: prepared
         shell: bash
         run: |
           set -euo pipefail
           cargo fmt --all
-          git add .github/workflows/ci-pr.yml src/services/discord/tmux_watcher/cancel_handoff.rs src/services/discord/tmux_watcher/cancel_handoff/interrupted_adoption_tests.rs src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs
+          git add .github/workflows/ci-pr.yml scripts/destructive_call_site_baseline.json src/services/discord/tmux_watcher/cancel_handoff.rs src/services/discord/tmux_watcher/cancel_handoff/interrupted_adoption_tests.rs src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs
           git diff --exit-code
           git diff --cached --check
           git diff --cached --stat
           git diff --cached > "$RUNNER_TEMP/candidate.patch"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/candidate-source.tar.gz" "$(git write-tree)"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pr5927-candidate-source
-          path: |
-            ${{ runner.temp }}/candidate-source.tar.gz
-            ${{ runner.temp }}/candidate.patch
-          retention-days: 1
-      - name: Script contracts
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! ./scripts/ci-script-checks.sh > "$RUNNER_TEMP/script-checks.log" 2>&1; then
-            tail -n 140 "$RUNNER_TEMP/script-checks.log"
-            exit 1
-          fi
-          tail -n 50 "$RUNNER_TEMP/script-checks.log"
-      - name: Native collector handoff regressions
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests -- --test-threads=1 > "$RUNNER_TEMP/native.log" 2>&1; then
-            tail -n 180 "$RUNNER_TEMP/native.log"
-            exit 1
-          fi
-          tail -n 60 "$RUNNER_TEMP/native.log"
-          grep -q '4 passed; 0 failed' "$RUNNER_TEMP/native.log"
-          cargo fmt --all -- --check
-      - name: Publish tested Git objects only
+      - name: Publish candidate Git objects only, not validation claims or refs
         id: objects
         env:
           GH_TOKEN: ${{ github.token }}
@@ -114,6 +88,7 @@ jobs:
           from pathlib import Path
           expected = {
               '.github/workflows/ci-pr.yml',
+              'scripts/destructive_call_site_baseline.json',
               'src/services/discord/tmux_watcher/cancel_handoff.rs',
               'src/services/discord/tmux_watcher/cancel_handoff/interrupted_adoption_tests.rs',
               'src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs',
@@ -137,18 +112,49 @@ jobs:
           result = post('trees', {'base_tree': base_tree, 'tree': entries})
           local_tree = subprocess.check_output(['git', 'write-tree'], text=True).strip()
           assert result['sha'] == local_tree
-          proof = {'base': os.environ['BASE_SHA'], 'tree': result['sha'], 'files': entries, 'native_tests': '4 passed; 0 failed', 'script_checks': 'passed'}
-          Path(os.environ['RUNNER_TEMP'], 'proof.json').write_text(json.dumps(proof, indent=2))
+          candidate = {'base': os.environ['BASE_SHA'], 'tree': result['sha'], 'files': entries, 'validation': 'NOT YET RUN'}
+          Path(os.environ['RUNNER_TEMP'], 'candidate.json').write_text(json.dumps(candidate, indent=2))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write('tree=' + result['sha'] + '\n')
-          print(json.dumps(proof, indent=2))
+          print(json.dumps(candidate, indent=2))
           PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr5927-candidate-objects
+          path: |
+            ${{ runner.temp }}/candidate.json
+            ${{ runner.temp }}/candidate.patch
+          retention-days: 1
+      - name: Script contracts
+        id: contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! ./scripts/ci-script-checks.sh > "$RUNNER_TEMP/script-checks.log" 2>&1; then
+            tail -n 140 "$RUNNER_TEMP/script-checks.log"
+            exit 1
+          fi
+          tail -n 50 "$RUNNER_TEMP/script-checks.log"
+      - name: Native collector handoff regressions
+        id: native
+        if: ${{ !cancelled() && steps.prepared.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests -- --test-threads=1 > "$RUNNER_TEMP/native.log" 2>&1; then
+            tail -n 180 "$RUNNER_TEMP/native.log"
+            exit 1
+          fi
+          tail -n 60 "$RUNNER_TEMP/native.log"
+          grep -q '4 passed; 0 failed' "$RUNNER_TEMP/native.log"
+          cargo fmt --all -- --check
+          git diff --exit-code
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: pr5927-review-proof
           path: |
-            ${{ runner.temp }}/proof.json
+            ${{ runner.temp }}/candidate.json
             ${{ runner.temp }}/script-checks.log
             ${{ runner.temp }}/native.log
           retention-days: 1
