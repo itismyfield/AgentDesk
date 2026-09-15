@@ -174,7 +174,8 @@ impl Custody {
             return None;
         }
         let pending = pin.adopt_if_current(&shared.tmux_watchers, |pin| {
-            if pin.paused.load(Ordering::Acquire)
+            if self.cancel.load(Ordering::Acquire)
+                || pin.paused.load(Ordering::Acquire)
                 || pin
                     .resume_offset
                     .lock()
@@ -183,7 +184,14 @@ impl Custody {
             {
                 return None;
             }
-            Some(self.pending.remove(index))
+            let pending = self.pending.remove(index);
+            // Moving custody is not settlement. Keep an outgoing checkpoint
+            // before the successor can await: cancellation before its first
+            // collector checkpoint must not lose the only retained copy.
+            let mut checkpoint = pending.clone();
+            checkpoint.cancel = self.cancel.clone();
+            self.checkpoint = Some(checkpoint);
+            Some(pending)
         })??;
         tracing::info!(channel_id = channel.get(), session = %self.session, offset = pending.offset,
             "watcher consumed cancellation source/parser/body handoff");
@@ -248,3 +256,7 @@ impl Drop for Custody {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cancel_handoff/interrupted_adoption_tests.rs"]
+pub(super) mod interrupted_adoption_tests;

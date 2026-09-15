@@ -426,6 +426,7 @@ jobs:
               - 'src/services/discord/recovery_engine.rs'
               - 'src/services/discord/recovery_engine/**'
               - 'src/services/discord/recovery_paths/**'
+              - 'src/services/discord/relay_coord.rs'
               - 'src/services/discord/relay_health.rs'
               - 'src/services/discord/relay_recovery.rs'
               - 'src/services/discord/relay_recovery/**'

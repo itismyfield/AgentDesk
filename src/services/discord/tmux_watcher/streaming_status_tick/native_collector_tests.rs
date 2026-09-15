@@ -402,7 +402,11 @@ fn native_collector_case(test_name: &str, cancellation: u8) {
                     std::fs::remove_file(&fx.output_path).unwrap();
                     std::fs::rename(renamed, &fx.output_path).unwrap();
                 }
-                let saved = custody
+                cancel_handoff::interrupted_adoption_tests::assert_admission_fences(
+                    &ctx,
+                    &mut custody,
+                );
+                let mut saved = custody
                     .take_for_current(&shared, fx.channel)
                     .expect("successor claims original episode");
                 assert!(
@@ -413,6 +417,13 @@ fn native_collector_case(test_name: &str, cancellation: u8) {
                     parser.retained_source.as_ref().unwrap(),
                     &saved.source
                 ));
+                if round == 0 {
+                    (custody, saved) =
+                        cancel_handoff::interrupted_adoption_tests::interrupt_before_poll(
+                            &mut ctx, custody, saved,
+                        )
+                        .await;
+                }
                 let previous_sequence = relay
                     .all_data_session_bound_relay_ack
                     .as_ref()
