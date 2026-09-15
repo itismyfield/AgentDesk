@@ -8,53 +8,131 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ff0311437e492c20b8db64e80abe3a4cafacb491
           persist-credentials: false
           fetch-depth: 1
-      - name: Reproduce and validate exact relocation
+      - name: Apply narrow review correction
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/pr5927-audit
           git rev-parse HEAD > /tmp/pr5927-audit/source-sha.txt
-          git archive HEAD | gzip > /tmp/pr5927-audit/source.tar.gz
-          set +e
-          python3 scripts/check_clippy_allow_ratchet.py > /tmp/pr5927-audit/before.log 2>&1
-          before=$?
-          set -e
-          test "$before" -eq 1
-          grep -F 'turn_stream_collector/state.rs' /tmp/pr5927-audit/before.log
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          path = Path('scripts/clippy_allow_occurrences.json')
-          text = path.read_text()
-          old = 'src/services/discord/tmux_watcher/turn_stream_collector.rs'
-          new = 'src/services/discord/tmux_watcher/turn_stream_collector/state.rs'
-          before = json.loads(text)
-          matches = [row for row in before['occurrences'] if row['path'] == old and row['lint'] == 'large_enum_variant']
-          assert len(matches) == 1 and matches[0]['count'] == 1, matches
-          assert not any(row['path'] == new for row in before['occurrences'])
-          needle = f'"path": "{old}",\n      "lint": "large_enum_variant"'
-          assert text.count(needle) == 1
-          updated = text.replace(needle, f'"path": "{new}",\n      "lint": "large_enum_variant"')
-          after = json.loads(updated)
-          assert sum(row['count'] for row in before['occurrences']) == sum(row['count'] for row in after['occurrences'])
-          path.write_text(updated)
-          PY
-          python3 scripts/check_clippy_allow_ratchet.py | tee /tmp/pr5927-audit/after.log
-          python3 -m unittest tests.test_clippy_allow_ratchet > /tmp/pr5927-audit/tests.log 2>&1
-          cat /tmp/pr5927-audit/tests.log
+          git apply <<'PATCH'
+          diff --git a/docs/agent-maintenance/t5-t6-removal-inventory.md b/docs/agent-maintenance/t5-t6-removal-inventory.md
+          --- a/docs/agent-maintenance/t5-t6-removal-inventory.md
+          +++ b/docs/agent-maintenance/t5-t6-removal-inventory.md
+          @@ -926,5 +926,6 @@
+           - Replaces cooperative-cancel loss of watcher-local original source/parser/body with `tmux_watcher/cancel_handoff.rs` custody on the existing channel relay coordinate. A matching replacement consumes it before polling, including already-parsed terminal EOF, without replaying the exact terminal ACK.
+           - Removes monitor finalization merely because its watcher was cooperatively cancelled. Pure shutdown retains its previous behavior. Delivery/completion/progress remain guarded by the existing original turn nonce, opened-file, generation/reset, watcher incarnation and receipt/lease checks.
+           - Adds continuation wiring; **no legacy delivery authority is replaced or approved for T6 removal**. Existing terminal and no-transport settlement decisions remain.
+          -- Process-local, same live original row/source only. Foreign/rowless/replaced-source capsules are retained without a detached drain. Hard process loss, all outer-loop cancellation edges and live daemon acceptance remain outside this slice; this is not a crash-durable store or receipt.
+          -- Native tests cover two successive cancellations, body/native decoder carry, incomplete JSON/UTF-8, no-new-append EOF, source replacement rejection and one visible body. New destructive-call baseline sites are test fixtures only.
+          +- Process-local, captured original episode/source only. In the Enforce cohort, a genuinely absent inflight projection may resume from the original captured row/nonce/source; it must not recreate a row or infer identity from the successor. Corrupt/unreadable or foreign rows and replaced sources cannot acquire that capsule and remain retained without a detached drain. Hard process loss, all outer-loop cancellation edges and live daemon acceptance remain outside this slice; this is not a crash-durable store or receipt.
+          +- Rowless delivery reuses the existing sink, source/destination receipt and lease gates. Captured immutable episode metadata is not send permission. Original actor completion goes through the existing finalizer only after an exact matching receipt; an ACK high-watermark alone cannot release the actor, and stale completion cannot release its successor.
+          +- Native tests cover two successive cancellations and immediate re-cancellation before polling, body/native decoder carry, incomplete JSON/UTF-8, no-new-append EOF, source replacement and admission-fence rejection, one visible body, and rowless exact receipt -> original actor release -> next input. These are injected collector/sink tests, not latest-binary live daemon acceptance. New destructive-call baseline sites are test fixtures only.
+          diff --git a/scripts/clippy_allow_occurrences.json b/scripts/clippy_allow_occurrences.json
+          --- a/scripts/clippy_allow_occurrences.json
+          +++ b/scripts/clippy_allow_occurrences.json
+          @@ -588,7 +588,7 @@
+                 "count": 5
+               },
+               {
+          -      "path": "src/services/discord/tmux_watcher/turn_stream_collector.rs",
+          +      "path": "src/services/discord/tmux_watcher/turn_stream_collector/state.rs",
+                 "lint": "large_enum_variant",
+                 "count": 1
+               },
+          diff --git a/tests/test_clippy_allow_ratchet.py b/tests/test_clippy_allow_ratchet.py
+          --- a/tests/test_clippy_allow_ratchet.py
+          +++ b/tests/test_clippy_allow_ratchet.py
+          @@ -34,6 +34,31 @@
+                   self.assertEqual(len(problems), 1)
+                   self.assertIn("baseline 0", problems[0])
+           
+          +    def test_relocation_transfers_allowance_without_sharing_it(self) -> None:
+          +        old = ("src/collector.rs", "large_enum_variant")
+          +        new = ("src/collector/state.rs", "large_enum_variant")
+          +        original = Counter({old: 1})
+          +        relocated = Counter({new: 1})
+          +        # Moving the declaration without its admission must fail, even though
+          +        # the repository-wide total has not grown.
+          +        self.assertEqual(len(RATCHET.validate_occurrences(relocated, original)), 1)
+          +        self.assertEqual(sum(original.values()), sum(relocated.values()))
+          +        self.assertEqual(RATCHET.validate_occurrences(relocated, relocated), [])
+          +        # The old file must not retain a reusable second exception after a move.
+          +        duplicated = relocated + original
+          +        problems = RATCHET.validate_occurrences(duplicated, relocated)
+          +        self.assertEqual(len(problems), 1)
+          +        self.assertIn("src/collector.rs", problems[0])
+          +        self.assertIn("baseline 0", problems[0])
+          +
+          +    def test_collector_state_allowance_is_relocated_not_duplicated(self) -> None:
+          +        # PR #5927 extracted CollectOutcome verbatim. Admit the same one item
+          +        # in its child module, not a second allowance at the old root.
+          +        baseline = RATCHET.load_baseline()
+          +        root = "src/services/discord/tmux_watcher/turn_stream_collector"
+          +        self.assertEqual(baseline[(root + ".rs", "large_enum_variant")], 0)
+          +        self.assertEqual(baseline[(root + "/state.rs", "large_enum_variant")], 1)
+          +
+               def _collect_source(self, text: str) -> Counter[tuple[str, str]]:
+                   with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
+                       root = Path(temp_dir)
+          PATCH
           git diff --check
           git diff > /tmp/pr5927-audit/candidate.patch
-          cp scripts/clippy_allow_occurrences.json /tmp/pr5927-audit/clippy_allow_occurrences.json
+      - name: Validate ratchet and downstream contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check_clippy_allow_ratchet.py | tee /tmp/pr5927-audit/ratchet.log
+          python3 -m unittest tests.test_clippy_allow_ratchet > /tmp/pr5927-audit/tests.log 2>&1
+          cat /tmp/pr5927-audit/tests.log
+          python3 scripts/check_api_docs_coverage.py > /tmp/pr5927-audit/api-docs.log 2>&1
+          python3 scripts/check_contract_symbol_refs.py > /tmp/pr5927-audit/contract-refs.log 2>&1
+          python3 -m unittest tests.test_api_docs_coverage tests.test_contract_symbol_refs > /tmp/pr5927-audit/downstream-tests.log 2>&1
+          cat /tmp/pr5927-audit/downstream-tests.log
+      - name: Stage verified blobs only, without changing any branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess, urllib.request
+          from pathlib import Path
+          paths = [
+              'docs/agent-maintenance/t5-t6-removal-inventory.md',
+              'scripts/clippy_allow_occurrences.json',
+              'tests/test_clippy_allow_ratchet.py',
+          ]
+          changed = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
+          assert sorted(changed) == sorted(paths), changed
+          entries = []
+          for path in paths:
+              content = Path(path).read_bytes()
+              request = urllib.request.Request(
+                  'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/blobs',
+                  data=json.dumps({'content': content.decode('utf-8'), 'encoding': 'utf-8'}).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'},
+                  method='POST',
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  sha = json.load(response)['sha']
+              expected = hashlib.sha1(b'blob ' + str(len(content)).encode() + b'\0' + content).hexdigest()
+              assert sha == expected, (path, sha, expected)
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': sha})
+          Path('/tmp/pr5927-audit/entries.json').write_text(json.dumps(entries, indent=2) + '\n')
+          print(json.dumps(entries, indent=2))
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: pr5927-ci-audit
+          name: pr5927-ci-correction
           path: /tmp/pr5927-audit
           retention-days: 2
           if-no-files-found: error
