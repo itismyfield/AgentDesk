@@ -5,7 +5,6 @@ import { z } from "zod";
 import { catalogLabel, useProviderCatalog } from "../../api/providers";
 import type { Department } from "../../types";
 import { localeName, useI18n } from "../../i18n";
-import { ICON_SPRITE_POOL } from "./constants";
 import EmojiPicker from "./EmojiPicker";
 import AgentPromptEditor from "./AgentPromptEditor";
 import type { FormData } from "./types";
