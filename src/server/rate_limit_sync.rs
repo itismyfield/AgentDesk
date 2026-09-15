@@ -333,6 +333,36 @@ pub(super) async fn fetch_claude_oauth_usage(token: &str) -> Result<Buckets, any
     Ok(parse_claude_oauth_usage_buckets(&data))
 }
 
+/// Fetch Grok CLI billing usage for a named provider profile.
+pub(super) async fn fetch_grok_billing_usage(
+    token: &str,
+) -> Result<Vec<serde_json::Value>, anyhow::Error> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let resp = client
+        .get("https://cli-chat-proxy.grok.com/v1/billing")
+        .header("authorization", format!("Bearer {token}"))
+        .header("xai-grok-cli", "1")
+        .header("accept", "application/json")
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Grok billing API returned {}",
+            resp.status()
+        ));
+    }
+    let data: serde_json::Value = resp.json().await?;
+    if let Some(buckets) = data.get("buckets").and_then(|value| value.as_array()) {
+        return Ok(buckets.clone());
+    }
+    Ok(vec![serde_json::json!({
+        "label": "grok",
+        "raw": data,
+    })])
+}
+
 #[cfg(test)]
 mod tests {
     use super::backoff::{ClaudeSyncBackoff, ClaudeSyncOutcome, ClaudeUsageRateLimited};
