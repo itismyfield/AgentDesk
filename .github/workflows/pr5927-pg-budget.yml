@@ -1,0 +1,59 @@
+name: PR5927 PostgreSQL budget preparation
+on:
+  push:
+    branches: [review/pr5927-rowless-20260915]
+    paths: ['.github/workflows/pr5927-pg-budget.yml']
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: 'c2c248303938ad218b0be6bec9feb2c9bbfb2cd2', persist-credentials: false}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: python3 -m pip install PyYAML
+      - name: Adjust only the measured serial PG timeout
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('.github/workflows/ci-pr.yml');s=p.read_text()
+          old='      - name: just test-postgres\n        timeout-minutes: 20\n'
+          assert s.count(old)==1
+          new='''      # Run 34926677210 selected 845 serial tests and completed 642 without
+          # failure before the 20-minute budget expired during active migrations.
+          # Preserve all tests and fail-closed results; bound the complete run at 40m.
+                - name: just test-postgres
+                  timeout-minutes: 40
+          '''
+          new='      # Run 34926677210 selected 845 serial tests and completed 642 without\n      # failure before the 20-minute budget expired during active migrations.\n      # Preserve all tests and fail-closed results; bound the complete run at 40m.\n      - name: just test-postgres\n        timeout-minutes: 40\n'
+          p.write_text(s.replace(old,new))
+          PY
+          python3 -m unittest tests.test_fast_check_ci_wiring > "$RUNNER_TEMP/wiring.log" 2>&1
+          git diff --check
+      - name: Publish only the validated workflow blob
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import pathlib,subprocess,json,base64,hashlib,os
+          p=pathlib.Path('.github/workflows/ci-pr.yml');data=p.read_bytes()
+          assert subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()==[str(p)]
+          result=json.loads(subprocess.check_output(['gh','api','--method','POST','repos/itismyfield/AgentDesk/git/blobs','--input','-'],input=json.dumps({'content':base64.b64encode(data).decode(),'encoding':'base64'}).encode()))
+          sha=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest();assert result['sha']==sha
+          out=pathlib.Path(os.environ['RUNNER_TEMP'],'source');out.mkdir()
+          (out/'ci-pr.yml').write_bytes(data)
+          (out/'entry.json').write_text(json.dumps({'path':str(p),'mode':'100644','type':'blob','sha':sha}))
+          (out/'budget.patch').write_bytes(subprocess.check_output(['git','diff','--',str(p)]))
+          print('VALIDATED_WORKFLOW_BLOB',sha)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr5927-pg-budget
+          path: |
+            ${{ runner.temp }}/source
+            ${{ runner.temp }}/wiring.log
+          retention-days: 2
