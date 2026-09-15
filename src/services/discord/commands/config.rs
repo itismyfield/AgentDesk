@@ -12,6 +12,7 @@ use super::super::settings::{load_last_session_path, resolve_role_binding, save_
 use super::super::{Context, Error, SharedData, check_auth, check_owner};
 use super::model_ui::{
     build_model_picker_options, build_model_picker_summary_lines, has_pending_model_change,
+    provider_card_color,
 };
 use crate::services::provider::ProviderKind;
 
@@ -512,18 +513,6 @@ pub(in crate::services::discord) fn model_picker_pending_to_override(
         None => None,
         Some(value) if is_default_picker_value(value) => Some(None),
         Some(value) => Some(Some(value.to_string())),
-    }
-}
-
-fn provider_card_color(provider: &ProviderKind) -> u32 {
-    match provider {
-        ProviderKind::Claude => 0xD97706,
-        ProviderKind::Codex => 0x10B981,
-        ProviderKind::Gemini => 0x3B82F6,
-        ProviderKind::OpenCode => 0x8B5CF6,
-        ProviderKind::Qwen => 0x0EA5A4,
-        ProviderKind::Grok => 0x111827,
-        ProviderKind::Unsupported(_) => 0x5865F2,
     }
 }
 

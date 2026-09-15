@@ -4703,6 +4703,7 @@ services::discord::router::message_handler::pre_admission_control::pre_admission
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::intake_turn_keeps_the_gate_above_the_deferred_take
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::resolve_local_controls_clear_pending_turn_view
 services::discord::router::message_handler::pre_admission_control::pre_admission_control_tests::route_branch_table_is_pinned
+services::discord::router::message_handler::provider_dispatch::tests::agy_discord_dispatch_preserves_turn_identity_policy_and_cancellation
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_prelaunch_without_raw_seed_keeps_the_wrapper_end_offset
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::codex_tui_raw_seed_requires_exact_live_marker_binding_evidence
 services::discord::router::message_handler::provider_isolation::thread_role_inheritance_tests::managed_linked_worktree_skips_provider_reisolation_without_session_state
@@ -8252,6 +8253,13 @@ services::stale_turn_reconciler::tests::tmux_identity_rejects_provider_mismatch_
 services::stale_turn_reconciler::tests::transport_unknown_warrant_vetoes_the_destructive_apply_and_reachable_releases_it_pg
 services::stale_turn_reconciler::tests::unreadable_inflight_provider_maps_unknown_and_preserves_busy_session_pg
 services::stream_json_cli::codec::tests::agy_codec_does_not_duplicate_aggregate_after_delta
+services::stream_json_cli::codec::tests::agy_codec_failure_wins_over_partial_text_and_process_status
+services::stream_json_cli::codec::tests::agy_codec_keeps_step_failure_alongside_unrelated_stderr
+services::stream_json_cli::codec::tests::agy_codec_preserves_diagnostics_without_terminal_result
+services::stream_json_cli::codec::tests::agy_codec_preserves_step_failure_when_stderr_is_empty
+services::stream_json_cli::codec::tests::agy_codec_rejects_blank_success_with_or_without_session_identity
+services::stream_json_cli::codec::tests::agy_codec_success_requires_successful_exit_and_emits_done_once
+services::stream_json_cli::codec::tests::agy_codec_turns_empty_success_into_permission_error_with_stderr
 services::stream_json_cli::codec::tests::grok_messages_codec_emits_init_and_done
 services::stream_json_cli::codec::tests::grok_messages_codec_preserves_terminal_error
 services::stream_json_cli::codec::tests::grok_messages_codec_rejects_clean_eof_after_init
@@ -8270,6 +8278,8 @@ services::stream_json_cli::policy::tests::stream_json_legacy_vector_does_not_bec
 services::stream_json_cli::runner::tests::exit_before_protocol_progress_gets_terminal_reset_marker
 services::stream_json_cli::runner::tests::no_output_error_has_machine_readable_marker
 services::stream_json_cli::runner::tests::nonzero_no_output_timeout_keeps_default_watchdogs
+services::stream_json_cli::runner::tests::stderr_capture_is_bounded_and_drains_the_pipe
+services::stream_json_cli::runner::tests::stderr_capture_preserves_invalid_utf8_and_partial_characters
 services::stream_json_cli::runner::tests::zero_timeout_keeps_liveness_watchdogs_for_unbounded_turns
 services::stream_json_cli::session::tests::accepts_uuid
 services::stream_json_cli::session::tests::rejects_non_uuid

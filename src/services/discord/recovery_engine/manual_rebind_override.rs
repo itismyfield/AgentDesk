@@ -147,11 +147,13 @@ fn allowed_output_roots(provider: &ProviderKind) -> Vec<PathBuf> {
                 .chain(crate::services::tmux_common::persistent_sessions_dir())
                 .collect()
         }
-        ProviderKind::Gemini | ProviderKind::Grok | ProviderKind::OpenCode | ProviderKind::Qwen => {
-            crate::services::tmux_common::persistent_sessions_dir()
-                .into_iter()
-                .collect()
-        }
+        ProviderKind::Gemini
+        | ProviderKind::Grok
+        | ProviderKind::Antigravity
+        | ProviderKind::OpenCode
+        | ProviderKind::Qwen => crate::services::tmux_common::persistent_sessions_dir()
+            .into_iter()
+            .collect(),
         ProviderKind::Unsupported(_) => Vec::new(),
     }
 }

@@ -25,5 +25,8 @@ pub fn execute_streaming(
         StreamJsonDialectId::Grok => {
             dialects::execute(dialects::StreamJsonDialect::Grok, request, sender)
         }
+        StreamJsonDialectId::Agy => {
+            dialects::execute(dialects::StreamJsonDialect::Antigravity, request, sender)
+        }
     }
 }

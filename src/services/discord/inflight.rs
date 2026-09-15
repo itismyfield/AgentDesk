@@ -636,6 +636,7 @@ pub(crate) fn latest_request_owner_user_id_for_channel(channel_id: u64) -> Optio
         ProviderKind::Gemini,
         ProviderKind::Qwen,
         ProviderKind::Grok,
+        ProviderKind::Antigravity,
     ];
 
     providers

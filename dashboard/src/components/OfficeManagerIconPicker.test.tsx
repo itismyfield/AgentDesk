@@ -81,6 +81,12 @@ describe("Office manager icon picker accessibility", () => {
     expect(unselectedIcon.getAttribute("type")).toBe("button");
     expect(unselectedIcon.getAttribute("role")).toBe("radio");
     expect(unselectedIcon.getAttribute("aria-checked")).toBe("false");
+
+    const iconGroup = target.querySelector<HTMLElement>('[role="radiogroup"]');
+    expect(iconGroup?.getAttribute("aria-label")).toBeNull();
+    const iconLabelId = iconGroup?.getAttribute("aria-labelledby");
+    expect(iconLabelId).not.toBeNull();
+    expect(document.getElementById(iconLabelId ?? "")?.textContent).toContain("Icon");
   });
 
   it("renders modal create icon buttons as non-submit toggle buttons with Korean labels", async () => {
@@ -107,5 +113,8 @@ describe("Office manager icon picker accessibility", () => {
     expect(defaultIcon.getAttribute("type")).toBe("button");
     expect(defaultIcon.getAttribute("role")).toBe("radio");
     expect(defaultIcon.getAttribute("aria-checked")).toBe("true");
+    const iconGroup = defaultIcon.closest<HTMLElement>('[role="radiogroup"]');
+    expect(iconGroup?.getAttribute("aria-label")).toBeNull();
+    expect(iconGroup?.getAttribute("aria-labelledby")).not.toBeNull();
   });
 });

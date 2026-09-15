@@ -594,8 +594,17 @@ def main() -> int:
             raise RuntimeError("candidate SHA is not checked-out HEAD")
         if event == "pull_request":
             selector = "pr_strict_progress"
-            if repository != "itismyfield/AgentDesk" or env.get("GFP_HEAD_REPOSITORY") != repository:
-                raise RuntimeError("progress requires an exact same-repository PR")
+            # The runner checks out GitHub's synthetic merge candidate, then
+            # provenance_matches/pr_comparison_base bind that candidate to the
+            # event base and head objects below.  Requiring the head repository
+            # to equal the base repository adds no provenance guarantee, but it
+            # rejects legitimate PRs from a trusted fork before the same
+            # fail-closed object checks can run.
+            if repository != "itismyfield/AgentDesk" or not env.get("GFP_HEAD_REPOSITORY"):
+                raise RuntimeError(
+                    "progress requires a pull request targeting itismyfield/AgentDesk "
+                    "with a resolved head repository"
+                )
             event_base_sha = oid(env.get("GFP_BASE_SHA", ""))
             head_sha = oid(env.get("GFP_HEAD_SHA", ""))
             parents = str(git("rev-list", "--parents", "-n1", candidate_sha)).split()

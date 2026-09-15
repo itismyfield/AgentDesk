@@ -26,9 +26,7 @@ use std::time::Duration;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::platform::with_provider_execution_context;
-use crate::services::provider::{
-    CancelToken, ProviderExecutionAdapter, ProviderKind, StreamJsonDialectId,
-};
+use crate::services::provider::{CancelToken, ProviderExecutionAdapter, ProviderKind};
 use crate::services::provider_cli::ProviderExecutionContext;
 use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, execute_streaming,
@@ -105,7 +103,7 @@ fn execute_simple_blocking_inner(
         ProviderExecutionAdapter::Qwen => {
             qwen::execute_command_simple_cancellable(&prompt, cancel_token.as_deref())
         }
-        ProviderExecutionAdapter::StreamJsonCli(StreamJsonDialectId::Grok) => {
+        ProviderExecutionAdapter::StreamJsonCli(dialect) => {
             let (sender, receiver) = std::sync::mpsc::channel::<StreamMessage>();
             let request = ProviderTurnRequest {
                 provider: provider.clone(),
@@ -120,7 +118,7 @@ fn execute_simple_blocking_inner(
                 timeout: Duration::from_secs(300),
                 cancel: cancel_token,
             };
-            let result = execute_streaming(StreamJsonDialectId::Grok, request, sender);
+            let result = execute_streaming(dialect, request, sender);
             collect_stream_result(result, receiver)
         }
     }
@@ -258,7 +256,7 @@ pub async fn execute_structured_with_context(
                     None,
                     false,
                 ),
-                ProviderExecutionAdapter::StreamJsonCli(StreamJsonDialectId::Grok) => {
+                ProviderExecutionAdapter::StreamJsonCli(dialect) => {
                     let request = ProviderTurnRequest {
                         provider: provider.clone(),
                         prompt: prompt.clone(),
@@ -272,7 +270,7 @@ pub async fn execute_structured_with_context(
                         timeout: Duration::from_secs(timeout_secs),
                         cancel: Some(Arc::clone(&cancel_token)),
                     };
-                    execute_streaming(StreamJsonDialectId::Grok, request, sender.clone())
+                    execute_streaming(dialect, request, sender.clone())
                 }
             };
             drop(sender);

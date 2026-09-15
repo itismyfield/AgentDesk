@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useId } from "react";
 import { X, Plus, Trash2, UserPlus, UserMinus, Settings2 } from "lucide-react";
 import type { Office, Agent } from "../types";
 import AgentAvatar from "./AgentAvatar";
@@ -35,6 +35,9 @@ export default function OfficeManagerModal({
   const [view, setView] = useState<ModalView>("list");
   const [editOffice, setEditOffice] = useState<Office | null>(null);
   const [agentsOffice, setAgentsOffice] = useState<Office | null>(null);
+  const iconLabelId = useId();
+  const colorLabelId = useId();
+
   const {
     deleteOffice,
     draft,
@@ -306,12 +309,13 @@ export default function OfficeManagerModal({
                 <div className="space-y-4">
                   <div>
                     <label
+                      id={iconLabelId}
                       className="block text-xs font-medium mb-1"
                       style={{ color: "var(--th-text-secondary)" }}
                     >
                       {tr("아이콘", "Icon")}
                     </label>
-                    <div className="flex gap-1.5 flex-wrap" role="radiogroup" aria-label={tr("아이콘", "Icon")}>
+                    <div className="flex gap-1.5 flex-wrap" role="radiogroup" aria-labelledby={iconLabelId}>
                       {OFFICE_ICONS.map((ic, idx) => (
                         <button
                           key={ic}
@@ -361,12 +365,13 @@ export default function OfficeManagerModal({
                   </div>
                   <div>
                     <label
+                      id={colorLabelId}
                       className="block text-xs font-medium mb-1"
                       style={{ color: "var(--th-text-secondary)" }}
                     >
                       {tr("색상", "Color")}
                     </label>
-                    <div className="flex gap-1.5 flex-wrap" role="radiogroup" aria-label={tr("색상", "Color")}>
+                    <div className="flex gap-1.5 flex-wrap" role="radiogroup" aria-labelledby={colorLabelId}>
                       {OFFICE_COLORS.map((c, idx) => (
                         <button
                           key={c}
