@@ -9,7 +9,7 @@ use std::path::Path;
 /// The restart watcher and session relay consume raw rollout records too.
 /// Share the native tail's parser and explicit completion policy without its
 /// polling, prompt observation, or heuristic EOF completion.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct RolloutRecordDecoder(RolloutParseState);
 
 impl RolloutRecordDecoder {
@@ -83,7 +83,7 @@ pub(super) fn task_complete_fallback_supersedes_final_text(
     !streamed.is_empty() && fallback.len() > streamed.len() && fallback.ends_with(streamed)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(super) struct RolloutParseState {
     pub(super) harvest: crate::services::session_backend::ReadHarvestStats,
     pub(super) session_id: Option<String>,

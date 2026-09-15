@@ -18,6 +18,10 @@ pub(in crate::services) struct TmuxRelayCoord {
     /// hold the slot, so concurrent attempts from outgoing+incoming watchers
     /// serialize rather than double-fire.
     pub(in crate::services::discord) relay_slot: Arc<std::sync::atomic::AtomicU64>,
+    /// Cooperative replacement state; never a receipt or shared-frontier writer.
+    #[cfg(unix)]
+    pub(in crate::services::discord) cancel_handoffs:
+        super::tmux::tmux_watcher::cancel_handoff::Store,
     /// End offset (exclusive) of the last relay this process has confirmed
     /// delivery for. 0 = no confirmed delivery yet this process lifetime.
     ///
@@ -74,6 +78,8 @@ impl TmuxRelayCoord {
     pub(in crate::services::discord) fn new(channel_id: ChannelId) -> Self {
         Self {
             relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(unix)]
+            cancel_handoffs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reset_state: std::sync::Mutex::new(relay_health::FrontierResetState::default()),
             last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),

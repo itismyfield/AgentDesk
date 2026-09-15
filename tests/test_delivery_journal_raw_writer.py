@@ -1008,9 +1008,9 @@ class RawWriterAllowlistTests(unittest.TestCase):
             callers,
             {
                 "src/services/discord/tmux_watcher.rs": 1,
-                "src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs": 1,
+                "src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs": 2,
             },
-            "the collector gained or lost a caller (one production caller plus the pinned "
+            "the collector gained or lost a caller (one production caller plus the pinned original/resumed "
             "native regression); the claim that pipe and TUI join on one "
             "shared watcher, with no pipe-only delivery path, has to be re-measured",
         )

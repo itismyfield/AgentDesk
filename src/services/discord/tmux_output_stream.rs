@@ -1,6 +1,7 @@
 use super::*;
 
 /// Tracks tool/thinking status during watcher output processing.
+#[derive(Clone)]
 pub(in crate::services::discord) struct WatcherToolState {
     /// Current tool status line (e.g. "⚙ Bash: `ls`")
     pub current_tool_line: Option<String>,

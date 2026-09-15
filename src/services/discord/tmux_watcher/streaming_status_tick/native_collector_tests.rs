@@ -30,10 +30,38 @@ pub(super) fn seed_recovered_row(
 
 #[test]
 fn recovered_native_preview_terminal_has_one_visible_copy() {
+    native_collector_case("recovered_native_preview_terminal_has_one_visible_copy", 0);
+}
+
+#[test]
+fn cancelled_native_body_and_decoder_resume_without_new_append() {
+    native_collector_case(
+        "cancelled_native_body_and_decoder_resume_without_new_append",
+        1,
+    );
+}
+
+#[test]
+fn cancelled_native_terminal_at_eof_keeps_exact_ack_and_one_visible_copy() {
+    native_collector_case(
+        "cancelled_native_terminal_at_eof_keeps_exact_ack_and_one_visible_copy",
+        2,
+    );
+}
+
+#[test]
+fn cancelled_native_split_utf8_and_json_resume_without_append() {
+    native_collector_case(
+        "cancelled_native_split_utf8_and_json_resume_without_append",
+        3,
+    );
+}
+
+fn native_collector_case(test_name: &str, cancellation: u8) {
     const CHILD: &str = "AGENTDESK_5833_NATIVE_COLLECTOR_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let qualified = format!(
-            "{}::recovered_native_preview_terminal_has_one_visible_copy",
+            "{}::{test_name}",
             module_path!().split_once("::").unwrap().1,
         );
         let result = std::process::Command::new(std::env::current_exe().unwrap())
@@ -59,7 +87,7 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
         let (mut fx, mut row) = seed_recovered_row(root.root.path(), 5834);
         let marker = crate::services::tmux_common::session_temp_path(&fx.tmux, "generation");
         std::fs::write(&marker, b"1").unwrap();
-        let data = format!(
+        let mut data = format!(
             "{}\n",
             serde_json::json!({"type":"response_item", "payload": {
                 "id":"commentary-0", "type":"message", "role":"assistant",
@@ -69,6 +97,13 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
         )
         .into_bytes();
         std::fs::write(&fx.output_path, &data).unwrap();
+        if cancellation == 3 {
+            let scalar = data
+                .windows("후".len())
+                .position(|bytes| bytes == "후".as_bytes())
+                .unwrap();
+            data.truncate(scalar + 1); // cancel with both JSON and a UTF-8 scalar incomplete
+        }
         row.turn_start_offset = Some(0);
         row.last_offset = 0;
         save_inflight_state(&row).unwrap();
@@ -94,7 +129,7 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
             )
             .await
         );
-        let ctx = TurnStreamCollectorContext {
+        let mut ctx = TurnStreamCollectorContext {
             http: rec.http.clone(),
             shared: shared.clone(),
             channel_id: fx.channel,
@@ -103,7 +138,7 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
             output_path: fx.output_path.clone(),
             input_fifo_path: String::new(),
             watcher_thread_channel_id: None,
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(cancellation == 3)),
             paused: Arc::new(AtomicBool::new(false)),
             pause_epoch: Arc::new(AtomicU64::new(0)),
             turn_delivered: Arc::new(AtomicBool::new(false)),
@@ -184,6 +219,8 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
         let mut buffer = String::new();
         let mut buffer_start = 0;
         let mut decoder = Utf8ChunkDecoder::default();
+        let retained_source = Some(Arc::new(file));
+        let mut continuation = None;
         let mut pending = None;
         let mut restored = None;
         let mut rewind_key = None;
@@ -196,6 +233,8 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
         let mut ack = None;
         let mut first = None;
         let mut parser = TurnParseState {
+            retained_source: &retained_source,
+            continuation: &mut continuation,
             current_offset: &mut offset,
             all_data: &mut buffer,
             all_data_start_offset: &mut buffer_start,
@@ -217,6 +256,20 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
         };
         let mut monitor = MonitorAutoTurnState::default();
         let mut render = RenderSeedState::default();
+        let mut custody = cancel_handoff::Custody::acquire(
+            &shared,
+            fx.channel,
+            &fx.provider,
+            &fx.tmux,
+            &fx.output_path,
+            &ctx.cancel,
+        )
+        .await
+        .unwrap();
+        let terminal = concat!(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"channel\":\"final\",\"content\":[{\"type\":\"output_text\",\"text\":\"ADK5833-final\"}]}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"ADK5833-final\"}}\n",
+        );
         let run = collect_turn_stream_until_terminal(
             &ctx,
             TurnStreamCollectorIo {
@@ -232,6 +285,9 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
         );
         let finish_input = async {
             use std::io::Write;
+            if cancellation == 3 {
+                return;
+            }
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             while !rec
                 .bodies
@@ -247,10 +303,11 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
                 !rec.seen("POST").is_empty(),
                 "preview must precede terminal input"
             );
-            let terminal = concat!(
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"channel\":\"final\",\"content\":[{\"type\":\"output_text\",\"text\":\"ADK5833-final\"}]}}\n",
-                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"last_agent_message\":\"ADK5833-final\"}}\n",
-            );
+            if cancellation == 1 {
+                ctx.cancel.store(true, Ordering::Release);
+                ctx.jsonl_notify.notify_one();
+                return;
+            }
             std::fs::OpenOptions::new()
                 .append(true)
                 .open(&fx.output_path)
@@ -270,6 +327,137 @@ fn recovered_native_preview_terminal_has_one_visible_copy() {
         let CollectOutcome::Fallthrough(mut turn) = outcome else {
             panic!("terminal collector discarded turn")
         };
+        if cancellation == 1 || cancellation == 3 {
+            use std::io::Write;
+            assert!(!turn.found_result, "cancelled before terminal parsing");
+            if cancellation == 1 {
+                assert_eq!(turn.full_response, format!("0: {TRAILING_BODY}"));
+            } else {
+                assert!(turn.full_response.is_empty());
+                assert!(parser.utf8_decoder.has_pending());
+                assert!(!parser.all_data.is_empty());
+            }
+            // Complete the original source BEFORE successor admission. There is
+            // no append/notify after handoff; its owned decoder must find the end.
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&fx.output_path)
+                .unwrap()
+                .write_all(terminal.as_bytes())
+                .unwrap();
+        }
+        if cancellation != 0 {
+            let original_bytes = std::fs::read(&fx.output_path).unwrap();
+            for round in 0..2 {
+                let frontier = shared.committed_relay_offset(fx.channel);
+                custody.checkpoint(&parser, &relay, source_authority, Some(&turn), Some(&row));
+                ctx.cancel.store(true, Ordering::Release);
+                drop(custody);
+                assert_eq!(
+                    shared.committed_relay_offset(fx.channel),
+                    frontier,
+                    "custody is not a delivery receipt"
+                );
+                ctx.cancel = Arc::new(AtomicBool::new(false));
+                shared.tmux_watchers.insert(
+                    fx.channel,
+                    crate::services::discord::TmuxWatcherHandle {
+                        tmux_session_name: fx.tmux.clone(),
+                        output_path: fx.output_path.clone(),
+                        paused: ctx.paused.clone(),
+                        resume_offset: Arc::new(Mutex::new(None)),
+                        cancel: ctx.cancel.clone(),
+                        pause_epoch: ctx.pause_epoch.clone(),
+                        turn_delivered: ctx.turn_delivered.clone(),
+                        last_heartbeat_ts_ms: ctx.last_heartbeat_ts_ms.clone(),
+                    },
+                );
+                custody = cancel_handoff::Custody::acquire(
+                    &shared,
+                    fx.channel,
+                    &fx.provider,
+                    &fx.tmux,
+                    &fx.output_path,
+                    &ctx.cancel,
+                )
+                .await
+                .unwrap();
+                if round == 0 {
+                    let original_row = std::fs::read(fx.path()).unwrap();
+                    let mut foreign = row.clone();
+                    foreign.turn_nonce = Some("foreign-successor".into());
+                    std::fs::write(fx.path(), serde_json::to_vec(&foreign).unwrap()).unwrap();
+                    assert!(
+                        custody.take_for_current(&shared, fx.channel).is_none(),
+                        "nonce-distinct row cannot consume old body"
+                    );
+                    std::fs::write(fx.path(), original_row).unwrap();
+                    let renamed = format!("{}.cancelled-original", fx.output_path);
+                    std::fs::rename(&fx.output_path, &renamed).unwrap();
+                    std::fs::write(&fx.output_path, &original_bytes).unwrap();
+                    assert!(
+                        custody.take_for_current(&shared, fx.channel).is_none(),
+                        "same path/bytes on a new inode is not the source"
+                    );
+                    std::fs::remove_file(&fx.output_path).unwrap();
+                    std::fs::rename(renamed, &fx.output_path).unwrap();
+                }
+                let saved = custody
+                    .take_for_current(&shared, fx.channel)
+                    .expect("successor claims original episode");
+                assert!(
+                    custody.take_for_current(&shared, fx.channel).is_none(),
+                    "move exactly once"
+                );
+                assert!(Arc::ptr_eq(
+                    parser.retained_source.as_ref().unwrap(),
+                    &saved.source
+                ));
+                let previous_sequence = relay
+                    .all_data_session_bound_relay_ack
+                    .as_ref()
+                    .map(|ack| ack.sequence);
+                *parser.current_offset = saved.offset;
+                *parser.all_data = saved.buffer;
+                *parser.all_data_start_offset = saved.buffer_start;
+                *parser.utf8_decoder = saved.utf8;
+                *parser.continuation = saved.turn;
+                let resumed = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    collect_turn_stream_until_terminal(
+                        &ctx,
+                        TurnStreamCollectorIo {
+                            data: Vec::new(),
+                            data_start_offset: 0,
+                            epoch_snapshot: 0,
+                            source_authority: saved.authority,
+                        },
+                        &mut parser,
+                        &mut relay,
+                        &mut monitor,
+                        &mut render,
+                    ),
+                )
+                .await
+                .expect("successor must consume without append");
+                let CollectOutcome::Fallthrough(resumed) = resumed else {
+                    panic!("EOF skipped retained body")
+                };
+                turn = resumed;
+                assert!(turn.found_result);
+                assert_eq!(std::fs::read(&fx.output_path).unwrap(), original_bytes);
+                if cancellation == 2 || round == 1 {
+                    assert_eq!(
+                        relay
+                            .all_data_session_bound_relay_ack
+                            .as_ref()
+                            .map(|ack| ack.sequence),
+                        previous_sequence,
+                        "already forwarded terminal keeps the original exact ACK"
+                    );
+                }
+            }
+        }
         assert!(turn.found_result);
         assert_eq!(
             turn.full_response,

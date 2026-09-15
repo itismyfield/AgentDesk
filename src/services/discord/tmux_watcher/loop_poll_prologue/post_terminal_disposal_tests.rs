@@ -153,6 +153,7 @@ async fn suppressed_poll_keeps_shared_delivery_frontier() {
                     watcher_turn_nonce: &mut None,
                 },
                 &mut LoopPollState {
+                    retained_source: &mut None,
                     prompt_too_long_killed: false,
                     all_data: &carried,
                     utf8_decoder: &mut decoder,

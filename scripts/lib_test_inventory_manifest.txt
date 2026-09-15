@@ -5663,6 +5663,9 @@ services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_preserves_exact_row
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_tick_emits_no_republication
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::committed_progress_tick_preserves_cleanup_and_panel_parity
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::cancelled_native_body_and_decoder_resume_without_new_append
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::cancelled_native_split_utf8_and_json_resume_without_append
+services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::cancelled_native_terminal_at_eof_keeps_exact_ack_and_one_visible_copy
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests::recovered_native_preview_terminal_has_one_visible_copy
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_caller_uses_actual_terminal_outcome
 services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::progress_short_body_and_ioerror_stay_nonterminal

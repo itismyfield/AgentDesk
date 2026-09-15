@@ -41,6 +41,8 @@ pub(super) struct TurnStreamCollectorIo {
 }
 
 pub(super) struct TurnParseState<'a> {
+    pub(super) retained_source: &'a Option<Arc<std::fs::File>>,
+    pub(super) continuation: &'a mut Option<CollectedTurnStream>,
     pub(super) current_offset: &'a mut u64,
     pub(super) all_data: &'a mut String,
     pub(super) all_data_start_offset: &'a mut u64,
@@ -84,6 +86,7 @@ pub(super) struct RenderSeedState {
     pub(super) completion_footer_terminal_target: Option<WatcherCompletionFooterTerminalTarget>,
 }
 
+#[derive(Clone)]
 pub(super) struct ActiveReadState {
     pub(super) turn_start: tokio::time::Instant,
     pub(super) turn_timeout: std::time::Duration,
@@ -96,6 +99,7 @@ pub(super) struct ActiveReadState {
     pub(super) fresh_ready_for_input_idle: bool,
 }
 
+#[derive(Clone)]
 pub(super) struct CollectedTurnStream {
     pub(super) turn_data_start_offset: u64,
     pub(super) source_authority: WatcherSourceAuthority,
@@ -139,6 +143,9 @@ pub(super) struct CollectedTurnStream {
     pub(super) fresh_assistant_text_seen: bool,
     pub(super) was_paused: bool,
     pub(super) active_read_state: Option<ActiveReadState>,
+    pub(super) soft_terminal_seen_at: Option<tokio::time::Instant>,
+    pub(super) auto_compaction_lifecycle_attempted: bool,
+    pub(super) monitor_auto_turn_preamble_injected: bool,
 }
 
 pub(super) async fn collect_turn_stream_until_terminal(
@@ -149,6 +156,12 @@ pub(super) async fn collect_turn_stream_until_terminal(
     monitor: &mut MonitorAutoTurnState,
     render_seed: &mut RenderSeedState,
 ) -> CollectOutcome {
+    let mut continuation = parser.continuation.take();
+    // A terminal already parsed by the outgoing task goes through the ordinary
+    // receipt/lease path. EOF is not a new terminal and no frame is forwarded twice.
+    if continuation.as_ref().is_some_and(|turn| turn.found_result) {
+        return CollectOutcome::Fallthrough(continuation.take().unwrap());
+    }
     let http = ctx.http.clone();
     let shared = ctx.shared.clone();
     let channel_id = ctx.channel_id;
@@ -218,12 +231,15 @@ pub(super) async fn collect_turn_stream_until_terminal(
     if initial_buffer_was_empty {
         all_data_start_offset = decoded_data.start_offset.unwrap_or(data_start_offset);
     }
-    if decoded_data.text.is_empty() && all_data.is_empty() {
+    if decoded_data.text.is_empty() && all_data.is_empty() && continuation.is_none() {
         commit_persistent_state!();
         return CollectOutcome::ContinueWatcherLoop;
     }
     all_data.push_str(&decoded_data.text);
-    let turn_data_start_offset = all_data_start_offset;
+    let initial_buffer_start_offset = all_data_start_offset;
+    let turn_data_start_offset = continuation
+        .as_ref()
+        .map_or(all_data_start_offset, |turn| turn.turn_data_start_offset);
     reset_rewind_attempts(
         &mut terminal_rewind_attempt_key,
         &mut terminal_rewind_attempts,
@@ -231,7 +247,10 @@ pub(super) async fn collect_turn_stream_until_terminal(
     );
     // #3041 P1-3 R7: reset carried ACKs after terminal/next-turn splits so later turns cannot inherit them and black-hole.
     let mut split_trailing_turn_follows = false;
-    let mut state = StreamLineState::new();
+    let mut state = continuation
+        .as_ref()
+        .map(|turn| turn.state.clone())
+        .unwrap_or_default();
     let restored_turn_seed =
         take_pending_or_restored_rewind_seed(&mut pending_terminal_rewind_seed, &mut restored_turn);
     let prompt_anchor_for_seed_discard =
@@ -265,9 +284,26 @@ pub(super) async fn collect_turn_stream_until_terminal(
             seed_disposition.seed_reassigned_to_different_turn
         );
     }
-    let stream_seed = seed_disposition.stream_seed;
-    let restored_response_seed = stream_seed.full_response.clone();
-    let restored_assistant_text_seen = !restored_response_seed.trim().is_empty();
+    let stream_seed = continuation
+        .as_ref()
+        .map(|turn| WatcherStreamSeed {
+            full_response: turn.full_response.clone(),
+            placeholder_msg_id: turn.placeholder_msg_id,
+            status_panel_msg_id: turn.status_panel_msg_id,
+            last_edit_text: turn.last_edit_text.clone(),
+            response_sent_offset: turn.response_sent_offset,
+            streaming_rollover_frozen_msg_ids: turn
+                .watcher_streaming_rollover_frozen_msg_ids
+                .clone(),
+            task_notification_kind: turn.task_notification_kind,
+            finish_mailbox_on_completion: turn.finish_mailbox_on_completion,
+        })
+        .unwrap_or(seed_disposition.stream_seed);
+    let restored_response_seed = continuation
+        .as_ref()
+        .map(|turn| turn.restored_response_seed.clone())
+        .unwrap_or_else(|| stream_seed.full_response.clone());
+    let restored_assistant_text_seen = !stream_seed.full_response.trim().is_empty();
     // #3041 P1-3 B1: restored assistant text was not mirrored into StreamRelay,
     // so reset it after the deferred initial forward and keep watcher ownership.
     let mut full_response = stream_seed.full_response;
@@ -284,9 +320,15 @@ pub(super) async fn collect_turn_stream_until_terminal(
     // #3003 (codex P2 r4): cache whether this turn is a TUI-direct
     // external-input turn while the inflight row is still present, so the
     // orphan-panel reclaim can run after a stop/cancel clears inflight.
-    let Ok((mut tool_state, startup_inflight_snapshot)) =
+    let Ok((mut tool_state, startup_inflight_snapshot)) = (if let Some(turn) = continuation.as_ref()
+    {
+        Ok((
+            turn.tool_state.clone(),
+            turn.startup_inflight_snapshot.clone(),
+        ))
+    } else {
         source_authority.restore_stream_decoder(ctx, turn_data_start_offset, &mut full_response)
-    else {
+    }) else {
         *parser.current_offset = data_start_offset;
         utf8_decoder.clear_pending();
         return CollectOutcome::ContinueWatcherLoop;
@@ -318,7 +360,8 @@ pub(super) async fn collect_turn_stream_until_terminal(
         .as_ref()
         .filter(|state| state.tmux_session_name.as_deref() == Some(tmux_session_name.as_str()))
         .map(crate::services::discord::inflight::InflightTurnIdentity::from_state);
-    let (status_panel_started_at, footer_owner) = make_owner_now(turn_identity_for_panel.as_ref());
+    let (mut status_panel_started_at, footer_owner) =
+        make_owner_now(turn_identity_for_panel.as_ref());
     // #3003 P2: rehydrate a watcher-owned persisted panel id while the row
     // still exists; footer mode intentionally has no separate panel handle.
     if !single_message_panel_footer_mode
@@ -337,7 +380,8 @@ pub(super) async fn collect_turn_stream_until_terminal(
     let watcher_fresh_turn_frame = placeholder_msg_id.is_none()
         && status_panel_msg_id.is_none()
         && !restored_assistant_text_seen;
-    if watcher_fresh_turn_frame
+    if continuation.is_none()
+        && watcher_fresh_turn_frame
         && (shared.ui.placeholder_live_events_enabled || shared.ui.status_panel_v2_enabled)
     {
         if single_message_panel_footer_mode {
@@ -371,6 +415,21 @@ pub(super) async fn collect_turn_stream_until_terminal(
     // the byte-offset-derived synthetic id repeats after a wrapper respawn).
     let mut monitor_auto_turn_synthetic_msg_id: Option<MessageId> = None;
     let mut monitor_auto_turn_ledger_generation: Option<u64> = None;
+    if let Some(turn) = continuation.as_ref() {
+        this_turn_status_panel_generation = turn.this_turn_status_panel_generation;
+        turn_is_external_input_for_session = turn.turn_is_external_input_for_session;
+        turn_identity_for_panel = turn.turn_identity_for_panel.clone();
+        status_panel_started_at = turn.status_panel_started_at;
+        placeholder_from_restored_inflight = turn.placeholder_from_restored_inflight;
+        last_status_panel_text = turn.last_status_panel_text.clone();
+        monitor_auto_turn_claimed = turn.monitor_auto_turn_claimed;
+        monitor_auto_turn_deferred = turn.monitor_auto_turn_deferred;
+        monitor_auto_turn_finished = turn.monitor_auto_turn_finished;
+        monitor_auto_turn_synthetic_msg_id = turn.monitor_auto_turn_synthetic_msg_id;
+        monitor_auto_turn_ledger_generation = turn.monitor_auto_turn_ledger_generation;
+        completion_footer_terminal_target = turn.completion_footer_terminal_target.clone();
+        split_trailing_turn_follows = turn.split_trailing_turn_follows;
+    }
     // NOTE(r3): defined after the reset-local declarations above — macro_rules
     // bodies resolve local identifiers with definition-site hygiene, so this
     // macro must come after every local it commits (E0425 otherwise).
@@ -429,7 +488,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
         &mut state,
         &mut full_response,
         &mut tool_state,
-        Some(turn_data_start_offset),
+        Some(initial_buffer_start_offset),
         Some(turn_terminal_start_offset),
     );
     let initial_forward_text = watcher_forward_text_after_pre_turn_skip(
@@ -448,53 +507,67 @@ pub(super) async fn collect_turn_stream_until_terminal(
     // fence, no streaming-latency change beyond the synchronous parse reorder).
     // The ACK target is captured from THIS forward, so the watcher's wait now
     // correlates to the terminal frame's sequence (more precise).
-    let initial_terminal_fence = watcher_terminal_commit_fence(
-        initial_outcome.found_result,
-        turn_data_start_offset,
-        terminal_event_consumed_offset(current_offset, &all_data),
-        turn_identity_for_panel.as_ref(),
-        &tmux_session_name,
-    );
-    let data_mirrored_to_session_relay = match initial_terminal_fence {
-        // #3041 P1-3 (codex P1-3 issue 1): a single physical chunk may carry
-        // turn A's result PLUS turn B's first bytes. `all_data` after the parse
-        // holds turn B's leftover; split the decoded chunk at that boundary so
-        // the TERMINAL frame carries only turn A's bytes and turn B's tail rides
-        // a separate non-terminal frame (no black-hole, no shared-ACK reuse).
-        Some(fence) => forward_terminal_chunk_with_trailing_to_supervisor_relay(
-            &tmux_session_name,
-            initial_forward_text,
-            all_data.len(),
-            &producer_registry,
-            &mut cached_relay_producer,
-            fence,
-            initial_source_authority,
-        ),
-        None => forward_chunk_to_supervisor_relay_for_turn(
-            &tmux_session_name,
-            initial_forward_text,
-            &producer_registry,
-            &mut cached_relay_producer,
+    let (
+        mut session_bound_relay_turn_fully_mirrored,
+        mut session_bound_relay_turn_first_forwarded_sequence,
+    ) = if let Some(turn) = continuation.as_ref() {
+        (
+            turn.session_bound_relay_turn_fully_mirrored,
+            turn.session_bound_relay_turn_first_forwarded_sequence,
+        )
+    } else {
+        let initial_terminal_fence = watcher_terminal_commit_fence(
+            initial_outcome.found_result,
+            turn_data_start_offset,
+            terminal_event_consumed_offset(current_offset, &all_data),
             turn_identity_for_panel.as_ref(),
-            initial_source_authority,
-        ),
+            &tmux_session_name,
+        );
+        let data_mirrored_to_session_relay = match initial_terminal_fence {
+            // #3041 P1-3 (codex P1-3 issue 1): a single physical chunk may carry
+            // turn A's result PLUS turn B's first bytes. `all_data` after the parse
+            // holds turn B's leftover; split the decoded chunk at that boundary so
+            // the TERMINAL frame carries only turn A's bytes and turn B's tail rides
+            // a separate non-terminal frame (no black-hole, no shared-ACK reuse).
+            Some(fence) => forward_terminal_chunk_with_trailing_to_supervisor_relay(
+                &tmux_session_name,
+                initial_forward_text,
+                all_data.len(),
+                &producer_registry,
+                &mut cached_relay_producer,
+                fence,
+                initial_source_authority,
+            ),
+            None => forward_chunk_to_supervisor_relay_for_turn(
+                &tmux_session_name,
+                initial_forward_text,
+                &producer_registry,
+                &mut cached_relay_producer,
+                turn_identity_for_panel.as_ref(),
+                initial_source_authority,
+            ),
+        };
+        let supervisor_turn_state = apply_initial_supervisor_relay_forward(
+            &mut all_data_fully_mirrored_to_session_relay,
+            &mut all_data_session_bound_relay_ack,
+            &mut all_data_first_forwarded_relay_sequence,
+            &mut split_trailing_turn_follows,
+            &data_mirrored_to_session_relay,
+            initial_buffer_was_empty,
+            all_data.is_empty(),
+            restored_assistant_text_seen,
+            turn_identity_for_panel.as_ref(),
+        );
+        (
+            supervisor_turn_state.fully_mirrored,
+            supervisor_turn_state.first_forwarded_sequence,
+        )
     };
-    let supervisor_turn_state = apply_initial_supervisor_relay_forward(
-        &mut all_data_fully_mirrored_to_session_relay,
-        &mut all_data_session_bound_relay_ack,
-        &mut all_data_first_forwarded_relay_sequence,
-        &mut split_trailing_turn_follows,
-        &data_mirrored_to_session_relay,
-        initial_buffer_was_empty,
-        all_data.is_empty(),
-        restored_assistant_text_seen,
-        turn_identity_for_panel.as_ref(),
+    all_data_start_offset = advance_buffer_start_offset(
+        initial_buffer_start_offset,
+        initial_buffer_len,
+        all_data.len(),
     );
-    let mut session_bound_relay_turn_fully_mirrored = supervisor_turn_state.fully_mirrored;
-    let mut session_bound_relay_turn_first_forwarded_sequence =
-        supervisor_turn_state.first_forwarded_sequence;
-    all_data_start_offset =
-        advance_buffer_start_offset(turn_data_start_offset, initial_buffer_len, all_data.len());
     let live_events_dirty = flush_placeholder_live_events(&shared, channel_id, &mut tool_state);
     let mut found_result = initial_outcome.found_result;
     let mut terminal_kind = initial_outcome.terminal_kind;
@@ -512,10 +585,22 @@ pub(super) async fn collect_turn_stream_until_terminal(
     let mut assistant_text_seen =
         restored_assistant_text_seen || initial_outcome.assistant_text_seen;
     let mut fresh_assistant_text_seen = initial_outcome.assistant_text_seen;
+    if let Some(turn) = continuation.as_ref() {
+        terminal_kind = terminal_kind.or(turn.terminal_kind);
+        terminal_evidence_offset = terminal_evidence_offset.or(turn.terminal_evidence_offset);
+        soft_terminal_seen_at = soft_terminal_seen_at.or(turn.soft_terminal_seen_at);
+        is_prompt_too_long |= turn.is_prompt_too_long;
+        stale_resume_detected |= turn.stale_resume_detected;
+        assistant_text_seen |= turn.assistant_text_seen;
+        fresh_assistant_text_seen |= turn.fresh_assistant_text_seen;
+        task_notification_context = turn.task_notification_context.clone();
+        auto_compaction_lifecycle_attempted = turn.auto_compaction_lifecycle_attempted;
+        monitor_auto_turn_preamble_injected = turn.monitor_auto_turn_preamble_injected;
+    }
     if let Some(kind) = initial_outcome.task_notification_kind {
         task_notification_kind = merge_task_notification_kind(task_notification_kind, kind);
     }
-    if initial_outcome.auto_compacted {
+    if initial_outcome.auto_compacted && !auto_compaction_lifecycle_attempted {
         auto_compaction_lifecycle_attempted = emit_context_compacted_lifecycle_from_watcher(
             &shared,
             channel_id,
@@ -538,10 +623,13 @@ pub(super) async fn collect_turn_stream_until_terminal(
             "  [{ts}] 👁 post-terminal-success continuation: flushing relayed output for {tmux_session_name} immediately (offset {data_start_offset} -> {current_offset})"
         );
     }
-    if matches!(
-        task_notification_kind,
-        Some(TaskNotificationKind::MonitorAutoTurn)
-    ) {
+    if !monitor_auto_turn_claimed
+        && !cancel.load(Ordering::Acquire)
+        && matches!(
+            task_notification_kind,
+            Some(TaskNotificationKind::MonitorAutoTurn)
+        )
+    {
         let start = start_monitor_auto_turn_when_available(
             &shared,
             &watcher_provider,
@@ -582,7 +670,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
     // Check if a Discord turn claimed this data since our epoch snapshot
     let epoch_changed = pause_epoch.load(Ordering::Relaxed) != epoch_snapshot;
     let mut was_paused = paused.load(Ordering::Relaxed) || epoch_changed;
-    if was_paused && !monitor_auto_turn_deferred {
+    if was_paused && !monitor_auto_turn_deferred && !cancel.load(Ordering::Acquire) {
         // A Discord turn took over — discard what we read
         all_data.clear();
         all_data_start_offset = current_offset;
@@ -594,11 +682,17 @@ pub(super) async fn collect_turn_stream_until_terminal(
     }
     let mut active_read_state = None;
     if !found_result {
-        let turn_start = tokio::time::Instant::now();
+        let turn_start = continuation
+            .as_ref()
+            .and_then(|turn| turn.active_read_state.as_ref())
+            .map_or_else(tokio::time::Instant::now, |read| read.turn_start);
         let turn_timeout = crate::services::discord::turn_watchdog_timeout();
         let turn_idle_timeout = crate::services::discord::turn_idle_timeout();
         let mut last_status_update = tokio::time::Instant::now();
-        let mut last_output_at = tokio::time::Instant::now();
+        let mut last_output_at = continuation
+            .as_ref()
+            .and_then(|turn| turn.active_read_state.as_ref())
+            .map_or_else(tokio::time::Instant::now, |read| read.last_output_at);
         if watcher_live_events_dirty_should_force_status_update(
             live_events_dirty,
             single_message_panel_footer_mode,
@@ -646,17 +740,32 @@ pub(super) async fn collect_turn_stream_until_terminal(
                 break;
             }
 
-            let (read_more, read_witness) =
-                read_watcher_source_chunk_with_witness(ctx, current_offset).await;
+            let (read_more, read_witness) = if let Some(source) = parser.retained_source.as_ref() {
+                (
+                    read_retained_watcher_source_chunk(source.clone(), current_offset).await,
+                    None,
+                )
+            } else {
+                read_watcher_source_chunk_with_witness(ctx, current_offset).await
+            };
 
             match read_more.map(|r| r.map(|r| r.map(|batch| batch.into_parts()))) {
                 Ok(Ok(Ok((chunk, off, file_identity)))) if !chunk.is_empty() => {
-                    let authority = source_authority_for_read(
-                        source_authority,
-                        &tmux_session_name,
-                        read_witness,
-                        file_identity,
-                    );
+                    let authority = if parser.retained_source.is_some() {
+                        // This is the original opened descriptor, not a new file/marker
+                        // pair observed through a path that may have been replaced.
+                        WatcherSourceAuthority {
+                            source_file: file_identity,
+                            ..source_authority
+                        }
+                    } else {
+                        source_authority_for_read(
+                            source_authority,
+                            &tmux_session_name,
+                            read_witness,
+                            file_identity,
+                        )
+                    };
                     current_offset = off;
                     maybe_refresh_watcher_activity_heartbeat(
                         shared.pg_pool.as_ref(),
@@ -1134,5 +1243,8 @@ pub(super) async fn collect_turn_stream_until_terminal(
         fresh_assistant_text_seen,
         was_paused,
         active_read_state,
+        soft_terminal_seen_at,
+        auto_compaction_lifecycle_attempted,
+        monitor_auto_turn_preamble_injected,
     });
 }
