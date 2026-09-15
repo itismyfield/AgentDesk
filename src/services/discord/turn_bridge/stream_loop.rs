@@ -15,6 +15,7 @@ use content_arms::{
 use tool_arms::{
     StreamToolArmContext, StreamToolArmMessage, StreamToolArmOutcome, StreamToolArmState,
     handle_stream_tool_message, reconcile_exact_stream_frame_after_tool_outcome,
+    stop_on_tool_authority_loss,
 };
 mod content_arms;
 pub(super) mod exit_reconcile;
@@ -143,15 +144,6 @@ pub(super) async fn run_stream_loop(
                 false
             }
         }};
-    }
-
-    macro_rules! stop_on_tool_authority_loss {
-        ($outcome:expr, $loop_outcome:ident, $label:lifetime) => {
-            if matches!($outcome, StreamToolArmOutcome::AuthorityLost) {
-                $loop_outcome = StreamLoopOutcome::AuthorityLost;
-                break $label;
-            }
-        };
     }
 
     // #2289: both cancel guards share this macro to keep inflight sync, cancellation, and child abort atomic without closure borrow conflicts.
