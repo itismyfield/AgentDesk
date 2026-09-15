@@ -948,6 +948,7 @@ server::policy_tick_schedule_tests::slo_api_friction_aggregation_falls_back_to_f
 server::policy_tick_schedule_tests::slo_api_friction_aggregation_runs_while_leader_epoch_is_pending
 server::rate_limit_header_tests::parses_openai_relative_reset_duration
 server::rate_limit_header_tests::parses_rfc3339_reset_timestamp
+server::rate_limit_profile_tests::test_011_upsert_conflict_is_provider_and_profile
 server::rate_limit_sync::backoff::tests::exponential_backoff_doubles_and_caps_at_thirty_minutes
 server::rate_limit_sync::backoff::tests::parses_retry_after_seconds_and_http_date
 server::rate_limit_sync::backoff::tests::retry_after_is_clamped_and_leaves_the_ladder_alone
@@ -1105,6 +1106,10 @@ server::routes::pr_summary::tests::gh_fetch_failure_maps_to_502_with_source_cont
 server::routes::pr_summary::tests::validate_repo_accepts_owner_name
 server::routes::pr_summary::tests::validate_repo_rejects_empty_pieces
 server::routes::pr_summary::tests::validate_repo_rejects_injection_chars
+server::routes::provider_auth_profiles::tests::auth_profile_patch_null_clears
+server::routes::provider_auth_profiles::tests::test_012_login_payload_and_script_have_no_secrets
+server::routes::provider_auth_profiles::tests::test_013_account_payload_includes_usage_without_secrets
+server::routes::provider_auth_profiles::tests::unsupported_provider_account_is_not_reported_as_empty_usage
 server::routes::queue_api::cancel_force_tests::body_force_false_is_respected
 server::routes::queue_api::cancel_force_tests::body_force_true_is_honored_even_when_query_false
 server::routes::queue_api::cancel_force_tests::empty_body_falls_back_to_query
@@ -1210,6 +1215,9 @@ server::worker_registry::leader_takeover_tests::supervisor_respawns_worker_after
 server::ws::ws_auth_gate_tests::configured_token_accepts_only_the_exact_token
 server::ws::ws_auth_gate_tests::configured_token_rejects_wrong_missing_and_prefix_tokens
 server::ws::ws_auth_gate_tests::unset_or_empty_configured_token_leaves_the_route_open
+services::agent_identity::tests::agy_alias_interns_to_antigravity_via_provider_kind
+services::agent_identity::tests::identity_json_has_no_secret_fields
+services::agent_identity::tests::test_009_model_short_and_identity_short
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::fails_closed_on_column_decode_error
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::fails_closed_on_other_errors
 services::agent_quality::regression_alerts::explicit_decode_fallback_tests::metric_thresholds_preserve_retired_authority_policy
@@ -1232,6 +1240,7 @@ services::agents::turn::tests::normalize_recent_output_masks_sensitive_headers_a
 services::agents::turn::tests::turn_lookup_falls_back_to_latest_session_when_none_working
 services::agents::turn::tests::turn_lookup_prefers_working_session_over_latest_idle
 services::analytics::api_usage::tests::sort_provider_payloads_uses_stable_dashboard_order
+services::analytics::api_usage::tests::test_011_missing_profile_id_reads_as_default
 services::analytics::dispatch_metrics::tests::compute_streak_counts_adjacent_days_across_month_boundary
 services::analytics::dispatch_metrics::tests::compute_streak_counts_adjacent_days_across_year_boundary
 services::analytics::dispatch_metrics::tests::compute_streak_counts_consecutive_days_from_today
@@ -7654,6 +7663,7 @@ services::opencode::tests::scrub_startup_secrets_redacts_colon_delimited_forms
 services::opencode::tests::scrub_startup_secrets_redacts_entire_cookie_header_values
 services::opencode::tests::sse_idle_timer_refreshes_on_all_transport_lines
 services::opencode::tests::suspicious_active_leak_threshold_is_evidence_only
+services::opencode::tests::test_005_opencode_warm_server_key_separates_profile_id
 services::opencode::tests::warm_server_hard_kill_vetoed_when_co_resident
 services::opencode::tests::warm_server_snapshot_default_health_is_unprobed
 services::opencode::tests::warm_server_snapshot_redacts_key_fields_and_reports_state
