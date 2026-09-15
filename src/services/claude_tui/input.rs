@@ -1609,8 +1609,9 @@ fn wait_for_prompt_ready_polling(
         if prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
             return Ok(());
         }
-        // Startup dialogs (resume-from-summary picker, workspace trust) park
-        // the pane on an option selector whose highlighted `❯ 1. ...` row
+        // Claude Code dialogs (resume-from-summary, workspace trust, or its
+        // explicit rate-limit fallback picker) park the pane on an option
+        // selector whose highlighted `❯ 1. ...` row
         // reads as a composer draft, so neither the marker check above nor
         // the transcript fallback below would ever pass. Handle them before
         // the transcript fallback so an idle transcript cannot confirm

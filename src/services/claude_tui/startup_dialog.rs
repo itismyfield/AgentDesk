@@ -2,8 +2,9 @@
 //!
 //! Claude Code 2.1.170 can interpose modal dialogs between TUI launch and the
 //! first usable composer prompt: a "Resume from summary" picker when resuming
-//! a large/old session, and a workspace-trust confirmation when the spawn cwd
-//! is not yet trusted. Both render an option selector whose highlighted row
+//! a large/old session, a workspace-trust confirmation when the spawn cwd is
+//! not yet trusted, or Claude Code's explicit model-rate-limit fallback picker.
+//! Each renders an option selector whose highlighted row
 //! (`❯ 1. ...`) reads as a composer draft to the prompt-readiness scrape, so
 //! without explicit handling readiness blocks until the full timeout and the
 //! turn fails with `reason=prompt_marker_not_detected`.
@@ -17,12 +18,18 @@ const DIALOG_FOOTER_MARKER: &str = "Enter to confirm";
 const RESUME_FROM_SUMMARY_MARKER: &str = "Resume from summary";
 const WORKSPACE_TRUST_MARKER: &str = "Quick safety check";
 const WORKSPACE_TRUST_PATH_HEADER: &str = "Accessing workspace:";
+const RATE_LIMIT_FALLBACK_LIMIT_MARKER: &str = "You've hit your usage limit for the current model";
+const RATE_LIMIT_FALLBACK_OPTION_MARKER: &str = "Continue with the fallback model";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ClaudeStartupDialog {
     /// Large/old-session resume picker. Option 1 ("Resume from summary",
     /// recommended) is pre-highlighted, so a bare Enter accepts it.
     ResumeFromSummary,
+    /// Claude Code's explicit rate-limit fallback picker. Option 1 continues
+    /// in the CLI-selected fallback model; it does not change AgentDesk's
+    /// agent, authentication profile, channel lease, or recovery policy.
+    RateLimitFallback,
     /// Workspace trust confirmation. Option 1 ("Yes, I trust this folder") is
     /// pre-highlighted. `workspace` is the path the dialog displays; empty
     /// when the path line could not be located in the capture.
@@ -33,6 +40,7 @@ impl ClaudeStartupDialog {
     pub(crate) fn label(&self) -> &'static str {
         match self {
             ClaudeStartupDialog::ResumeFromSummary => "resume-from-summary",
+            ClaudeStartupDialog::RateLimitFallback => "rate-limit-fallback",
             ClaudeStartupDialog::WorkspaceTrust { .. } => "workspace-trust",
         }
     }
@@ -54,6 +62,14 @@ pub(crate) fn detect_claude_startup_dialog(pane_tail: &str) -> Option<ClaudeStar
     if pane_tail.contains(RESUME_FROM_SUMMARY_MARKER) {
         return Some(ClaudeStartupDialog::ResumeFromSummary);
     }
+    if pane_tail.contains(RATE_LIMIT_FALLBACK_LIMIT_MARKER)
+        && pane_tail.contains(RATE_LIMIT_FALLBACK_OPTION_MARKER)
+        && pane_tail
+            .lines()
+            .any(|line| line.trim_start().starts_with("❯ 1."))
+    {
+        return Some(ClaudeStartupDialog::RateLimitFallback);
+    }
     if pane_tail.contains(WORKSPACE_TRUST_MARKER) {
         let workspace = workspace_trust_dialog_path(pane_tail).unwrap_or_default();
         return Some(ClaudeStartupDialog::WorkspaceTrust { workspace });
@@ -70,7 +86,9 @@ fn plan_startup_dialog_response_with_home(
     home: Option<&Path>,
 ) -> StartupDialogPlan {
     match dialog {
-        ClaudeStartupDialog::ResumeFromSummary => StartupDialogPlan::DismissWithEnter,
+        ClaudeStartupDialog::ResumeFromSummary | ClaudeStartupDialog::RateLimitFallback => {
+            StartupDialogPlan::DismissWithEnter
+        }
         ClaudeStartupDialog::WorkspaceTrust { workspace } => {
             if workspace_trust_auto_accept_allowed(workspace, home) {
                 StartupDialogPlan::DismissWithEnter
@@ -159,6 +177,19 @@ mod tests {
 
  Enter to confirm · Esc to cancel";
 
+    // Captured from Claude Code's rate-limit picker.  Require both the exact
+    // limit explanation and the selected fallback option: other pickers can
+    // use the same shared footer and must never receive an automatic Enter.
+    const RATE_LIMIT_FALLBACK_DIALOG_PANE: &str = "\
+────────────────────────────────────────────────────────────────────────────────
+  You've hit your usage limit for the current model.
+  You can continue with the fallback model until the limit resets.
+
+  ❯ 1. Continue with the fallback model
+    2. Wait until reset
+
+  Enter to confirm · Esc to cancel";
+
     fn trust_dialog_pane_for(path: &str) -> String {
         TRUST_DIALOG_ROOT_PANE.replace("\n /\n", &format!("\n {path}\n"))
     }
@@ -172,6 +203,20 @@ mod tests {
             plan_startup_dialog_response_with_home(&dialog, Some(Path::new("/Users/kunkun"))),
             StartupDialogPlan::DismissWithEnter
         );
+    }
+
+    #[test]
+    fn rate_limit_fallback_dialog_is_detected_and_accepts_only_the_selected_default() {
+        let dialog = detect_claude_startup_dialog(RATE_LIMIT_FALLBACK_DIALOG_PANE)
+            .expect("rate-limit fallback dialog must be detected");
+        assert_eq!(dialog, ClaudeStartupDialog::RateLimitFallback);
+        assert_eq!(
+            plan_startup_dialog_response_with_home(&dialog, Some(Path::new("/Users/kunkun"))),
+            StartupDialogPlan::DismissWithEnter
+        );
+
+        let non_default = RATE_LIMIT_FALLBACK_DIALOG_PANE.replace("❯ 1.", "  1.");
+        assert_eq!(detect_claude_startup_dialog(&non_default), None);
     }
 
     #[test]
