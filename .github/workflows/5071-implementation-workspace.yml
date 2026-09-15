@@ -5,153 +5,73 @@ on:
     paths: [.github/workflows/5071-implementation-workspace.yml]
 permissions:
   contents: write
+  actions: read
 concurrency:
   group: 5071-implementation-workspace
   cancel-in-progress: false
 jobs:
-  implementation:
+  finalize:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    env:
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      CARGO_INCREMENTAL: '0'
-      CARGO_BUILD_JOBS: '2'
-      RUSTC_WRAPPER: ''
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: '1.94.1'
-          components: rustfmt
-      - name: Apply bounded follow-up to reviewed implementation
-        shell: bash
+      - name: Require completed native and all-target verification
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p /tmp/5071-evidence
-          git merge-base --is-ancestor bf2716f3f1ff10a0dd0d9549697d541cb56dab5a HEAD
+          mkdir -p /tmp/5071-final
+          gh api repos/itismyfield/AgentDesk/actions/runs/34915245444 --jq '{id,conclusion,head_sha,html_url}' | tee /tmp/5071-final/verification-run.json
+          test "$(gh api repos/itismyfield/AgentDesk/actions/runs/34915245444 --jq .conclusion)" = success
+          git merge-base --is-ancestor f09605902c633afb4091e5702ddde3c123e25fc6 HEAD
+          git diff --exit-code f09605902c633afb4091e5702ddde3c123e25fc6 HEAD -- src tests Cargo.toml Cargo.lock .cargo scripts/lib_test_inventory_manifest.txt
+      - name: Admit exact namespace growth without changing guard logic
+        run: |
           python3 - <<'PY'
           from pathlib import Path
-          root = Path.cwd()
-          p = root / 'src/services/discord/tmux_watcher.rs'
+          import re, tomllib
+          p = Path('scripts/audit_maintainability_config.toml')
           s = p.read_text()
-          old = '        if terminal_output_committed {\n            cancellation_custody.settled();\n        }\n'
-          assert s.count(old) == 1
-          s = s.replace(old, '')
-          anchor = '        let terminal_output_committed = relay_ok || relay_suppressed;\n        if terminal_output_committed {\n'
-          assert s.count(anchor) == 1
-          s = s.replace(anchor, anchor + '            cancellation_custody.settled();\n')
-          p.write_text(s)
-          p = root / 'src/services/discord/tmux_watcher/turn_stream_collector.rs'
-          s = p.read_text()
-          anchor = '            // Check for stale session error during streaming — abort relay immediately.\n'
-          assert s.count(anchor) == 1
-          s = s.replace(anchor, '''            // A resumed reader may consume the complete remaining turn in one
-                      // read. Hand its terminal to the existing receipt/lease path instead
-                      // of awaiting a streaming preview that races the terminal sink.
-                      if continuation.is_some() && found_result {
-                          break;
-                      }
-
-          '''.replace('                      ', '            ').replace('          ', '', 0) + anchor)
-          p.write_text(s)
-          p = root / 'scripts/destructive_call_site_baseline.json'
-          s = p.read_text()
-          pos = s.index('"watcher_cancel"')
-          a, b = s[:pos], s[pos:]
-          line = '      "src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs": 2,\n'
-          assert line not in b
-          anchor = '      "src/services/discord/tmux_watcher/placeholder_reclaim.rs": 1,\n'
-          assert b.count(anchor) == 1
-          p.write_text(a + b.replace(anchor, anchor + line))
-          p = root / 'docs/agent-maintenance/t5-t6-removal-inventory.md'
-          s = p.read_text()
-          assert '## PR #5927' not in s
-          s += '\n\n## PR #5927 — cooperative cancel → same-turn successor (review candidate, 2026-09-15)\n\n'
-          s += 'Based on main `23eb9bba132ad71f0336645705ab8597a59d1c1c`; this entry describes only this PR, not a later-main census or completion of #5071/#5464.\n\n'
-          s += '- Replaces cooperative-cancel loss of watcher-local original source/parser/body with `tmux_watcher/cancel_handoff.rs` custody on the existing channel relay coordinate. A matching replacement consumes it before polling, including already-parsed terminal EOF, without replaying the exact terminal ACK.\n'
-          s += '- Removes monitor finalization merely because its watcher was cooperatively cancelled. Pure shutdown retains its previous behavior. Delivery/completion/progress remain guarded by the existing original turn nonce, opened-file, generation/reset, watcher incarnation and receipt/lease checks.\n'
-          s += '- Adds continuation wiring; **no legacy delivery authority is replaced or approved for T6 removal**. Existing terminal and no-transport settlement decisions remain.\n'
-          s += '- Process-local, same live original row/source only. Foreign/rowless/replaced-source capsules are retained without a detached drain. Hard process loss, all outer-loop cancellation edges and live daemon acceptance remain outside this slice; this is not a crash-durable store or receipt.\n'
-          s += '- Native tests cover two successive cancellations, body/native decoder carry, incomplete JSON/UTF-8, no-new-append EOF, source replacement rejection and one visible body. New destructive-call baseline sites are test fixtures only.\n'
-          p.write_text(s)
-          p = root / 'docs/agent-maintenance/change-surfaces.md'
-          s = p.read_text()
-          s += '\n\n## #5071 cancellation custody (PR #5927 review candidate)\n\n'
-          s += '`src/services/discord/tmux_watcher/cancel_handoff.rs` owns process-local source/parser/render custody for cooperative replacement, not a journal, receipt writer or detached drain. `src/services/discord/tmux_watcher.rs` has acquisition/adoption/checkpoint wiring at its existing poll/collector/terminal boundaries; `src/services/discord/tmux_watcher/turn_stream_collector.rs` rehydrates the native decoder and enters the existing terminal receipt/lease path.\n\n'
-          s += 'Root growth is an explicit reviewable cap admission linked to the existing #4712 split issue, not a waiver for future growth. Splitting must retain all downstream identity, epoch/reset, stop/pause, ACK and receipt guards.\n'
+          for rel, expected in [('src/services/discord/tmux_watcher/turn_stream_collector.rs', 1161), ('src/services/discord/tmux_watcher/no_result_exits.rs', 824)]:
+              old = tomllib.loads(s)['namespace_size_caps'][rel]
+              assert old == expected
+              new = len(Path(rel).read_text().splitlines())
+              assert old < new <= old + 120, (rel, old, new)
+              pattern = '^' + re.escape('"' + rel + '"') + r' = ' + str(old) + r'(?=\s|$)'
+              replacement = '"' + rel + '" = ' + str(new) + ' # PR #5927 reviewable admission: cooperative continuation state / cancellation finalization separation; retain #4712 decomposition debt.'
+              s, count = re.subn(pattern, replacement, s, flags=re.M)
+              assert count == 1
+              print(rel, old, '->', new)
           p.write_text(s)
           PY
-          rustfmt --edition 2024 --config skip_children=true src/services/discord/tmux_watcher.rs src/services/discord/tmux_watcher/turn_stream_collector.rs
-          python3 - <<'PY'
-          from pathlib import Path
-          import re, sys, tomllib
-          sys.path.insert(0, 'scripts')
-          from generate_inventory_docs import split_prod_test_lines
-          rel = 'src/services/discord/tmux_watcher.rs'
-          text = Path(rel).read_text()
-          raw = len(text.splitlines())
-          prod, _ = split_prod_test_lines(text)
-          history = Path('scripts/ratchet_admission_history.toml')
-          hs = history.read_text()
-          count = max(x['count'] for x in tomllib.loads(hs)['admission'] if x['file'] == rel)
-          for file, table, new in [('scripts/hotfile_ratchet.toml', 'hotfile_ratchet', raw), ('scripts/audit_maintainability_giant_baseline.toml', 'giant_file_ratchet', prod)]:
-              p = Path(file)
-              s = p.read_text()
-              old = tomllib.loads(s)[table][rel]
-              if new > old:
-                  pattern = '^' + re.escape('"' + rel + '"') + r' = ' + str(old) + r'(?=\s|$)'
-                  s, n = re.subn(pattern, '"' + rel + '" = ' + str(new), s, flags=re.M)
-                  assert n == 1
-                  p.write_text(s)
-                  count += 1
-                  hs += f'\n\n# PR #5927: cancellation adoption/checkpoint wiring; reviewable growth.\n[[admission]]\nratchet = "{table}"\nfile = "{rel}"\nold_cap = {old}\nnew_cap = {new}\ndecompose_issue = 4712\ncount = {count}\n'
-                  print(file, old, '->', new)
-          history.write_text(hs)
-          PY
-      - name: Commit follow-up and record exact tested source
-        shell: bash
+      - name: Check maintenance and source guards
+        run: |
+          set -o pipefail
+          python3 -m unittest tests.test_delivery_journal_raw_writer 2>&1 | tee /tmp/5071-final/source-contracts.log
+          python3 scripts/check_destructive_call_site_ratchet.py --check 2>&1 | tee /tmp/5071-final/destructive-call-sites.log
+          python3 scripts/check_hotfile_ratchet.py 2>&1 | tee /tmp/5071-final/hotfile.log
+          python3 scripts/audit_maintainability.py --check --format json > /tmp/5071-final/maintainability.json 2> /tmp/5071-final/maintainability.stderr
+      - name: Remove temporary workflow and commit final source metadata
         run: |
           set -euo pipefail
-          git add src/services/discord/tmux_watcher.rs src/services/discord/tmux_watcher/turn_stream_collector.rs scripts/destructive_call_site_baseline.json scripts/hotfile_ratchet.toml scripts/audit_maintainability_giant_baseline.toml scripts/ratchet_admission_history.toml docs/agent-maintenance/change-surfaces.md docs/agent-maintenance/t5-t6-removal-inventory.md
+          git add scripts/audit_maintainability_config.toml
+          git rm .github/workflows/5071-implementation-workspace.yml
           git diff --cached --check
           git config user.name 'AgentDesk implementation bot'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix(relay): bypass resumed terminal preview wait and settle custody at commit'
+          git commit -m 'chore(relay): record scoped size admissions and remove temporary verification workflow'
           git push origin HEAD:refs/heads/fix/5071-cancel-handoff-20260915
-          git rev-parse HEAD | tee /tmp/5071-evidence/tested-sha.txt
-          git diff 23eb9bba132ad71f0336645705ab8597a59d1c1c HEAD -- src scripts tests docs > /tmp/5071-evidence/implementation.patch
-          git diff --name-only 23eb9bba132ad71f0336645705ab8597a59d1c1c HEAD -- src scripts tests docs > /tmp/5071-evidence/changed-files.txt
-          tar -czf /tmp/5071-evidence/changed-source.tar.gz -T /tmp/5071-evidence/changed-files.txt
-      - name: Native dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y libopus-dev libclang-dev pkg-config
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: cargo-dependencies-v2
-          cache-targets: false
-          cache-bin: false
-          save-if: false
-      - name: Source contracts and explicit admissions
-        run: |
-          set -o pipefail
-          python3 -m unittest tests.test_delivery_journal_raw_writer 2>&1 | tee /tmp/5071-evidence/source-contracts.log
-          python3 scripts/check_destructive_call_site_ratchet.py --check 2>&1 | tee /tmp/5071-evidence/destructive-call-sites.log
-          python3 scripts/check_hotfile_ratchet.py 2>&1 | tee /tmp/5071-evidence/hotfile.log
-      - name: Execute all four native collector contracts
-        run: |
-          set -o pipefail
-          cargo test --locked --lib native_collector_tests:: -- --test-threads=1 --nocapture 2>&1 | tee /tmp/5071-evidence/native-tests.log
-          grep -Eq 'test result: ok\. 4 passed; 0 failed;' /tmp/5071-evidence/native-tests.log
-      - name: Compile all targets
-        run: |
-          set -o pipefail
-          cargo check --all-targets --locked 2>&1 | tee /tmp/5071-evidence/cargo-check.log
+          git rev-parse HEAD | tee /tmp/5071-final/final-sha.txt
+          git diff --exit-code f09605902c633afb4091e5702ddde3c123e25fc6 HEAD -- src tests Cargo.toml Cargo.lock .cargo scripts/lib_test_inventory_manifest.txt
+          git diff --name-only 23eb9bba132ad71f0336645705ab8597a59d1c1c HEAD > /tmp/5071-final/changed-files.txt
+          tar -czf /tmp/5071-final/changed-source.tar.gz -T /tmp/5071-final/changed-files.txt
+          git diff 23eb9bba132ad71f0336645705ab8597a59d1c1c HEAD > /tmp/5071-final/implementation.patch
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: 5071-implementation-evidence-final
-          path: /tmp/5071-evidence
+          name: 5071-final-source-and-guards
+          path: /tmp/5071-final
           retention-days: 3
           if-no-files-found: warn
