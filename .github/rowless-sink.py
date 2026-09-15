@@ -16,8 +16,19 @@ pub(in crate::services::discord) struct HandoffStore {
 #[derive(Clone)]
 pub(in crate::services::discord) struct RecordedEpisode {
     pub(in crate::services::discord) original: InflightTurnState,
-    pub(in crate::services::discord) authority: WatcherSourceAuthority,
+    authority: WatcherSourceAuthority,
     source: Arc<std::fs::File>,
+}
+
+impl RecordedEpisode {
+    pub(in crate::services::discord) fn matches_source(
+        &self, generation: Option<i64>,
+        stamp: Option<crate::services::cluster::stream_relay::SourceStamp>,
+    ) -> bool {
+        generation == Some(self.authority.generation_mtime_ns)
+            && self.authority.source_stamp.is_some()
+            && stamp == self.authority.source_stamp
+    }
 }
 
 pub(in crate::services::discord) fn recorded_episode(
@@ -48,7 +59,9 @@ pub(in crate::services::discord) fn recorded_episode(
 ''')
 edit(b+'cancel_handoff.rs', 'impl Pending {', '''impl Pending {
     fn recorded_episode(&self) -> Option<RecordedEpisode> {
-        let original = self.turn.as_ref()?.startup_inflight_snapshot.as_ref()?;
+        let turn = self.turn.as_ref()?;
+        if turn.was_paused { return None; }
+        let original = turn.startup_inflight_snapshot.as_ref()?;
         if !self.identity.as_ref()?.matches_state(original) || self.nonce != original.turn_nonce {
             return None;
         }
@@ -75,15 +88,14 @@ fn cancellation_episode(
     let captured = crate::services::discord::tmux::tmux_watcher::cancel_handoff::recorded_episode(
         shared, &delivery.provider, ChannelId::new(delivery.channel_id), &delivery.session_name,
     )?;
+    let source_matches = captured.matches_source(delivery.relay_generation_mtime_ns, delivery.relay_source_stamp);
     let row = captured.original;
     let end = delivery.terminal_consumed_end?;
     (delivery.frame_turn_user_msg_id == row.user_msg_id
         && delivery.frame_turn_started_at == row.started_at
         && delivery.frame_turn_start_offset == row.turn_start_offset
         && row.turn_start_offset.is_some_and(|start| end > start)
-        && delivery.relay_generation_mtime_ns == Some(captured.authority.generation_mtime_ns)
-        && captured.authority.source_stamp.is_some()
-        && delivery.relay_source_stamp == captured.authority.source_stamp
+        && source_matches
         && row.output_path.as_ref().is_some_and(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() >= end)))
         .then_some(row)
 }
