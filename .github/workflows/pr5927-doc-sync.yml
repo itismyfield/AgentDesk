@@ -1,0 +1,38 @@
+name: PR5927 architecture synchronization
+on:
+  push:
+    branches: [review/pr5927-rowless-20260915]
+    paths: ['.github/workflows/pr5927-doc-sync.yml']
+permissions:
+  contents: write
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '0d5febe7a465dad3e481e23fc860fa2beeb7b129', persist-credentials: false}
+      - name: Generate existing architecture inventory and publish that blob only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/generate_inventory_docs.py
+          python3 - <<'PY'
+          import subprocess,pathlib,json,base64,os,hashlib
+          paths=subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()
+          assert paths==['ARCHITECTURE.md'],paths
+          p=pathlib.Path('ARCHITECTURE.md');data=p.read_bytes()
+          obj=json.loads(subprocess.check_output(['gh','api','--method','POST','repos/itismyfield/AgentDesk/git/blobs','--input','-'],input=json.dumps({'content':base64.b64encode(data).decode(),'encoding':'base64'}).encode()))
+          sha=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest();assert obj['sha']==sha
+          out=pathlib.Path(os.environ['RUNNER_TEMP'],'docs');out.mkdir()
+          (out/'ARCHITECTURE.md').write_bytes(data)
+          (out/'entry.json').write_text(json.dumps({'path':'ARCHITECTURE.md','mode':'100644','type':'blob','sha':sha}))
+          (out/'architecture.patch').write_bytes(subprocess.check_output(['git','diff','--','ARCHITECTURE.md']))
+          print('GENERATED_ARCHITECTURE_BLOB',sha)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr5927-architecture
+          path: ${{ runner.temp }}/docs
+          retention-days: 2
