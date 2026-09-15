@@ -379,6 +379,7 @@ src/
 │   ├── outbox_actionable_delivery.rs
 │   ├── outbox_delivery_alert.rs
 │   ├── outbox_worker.rs
+│   ├── rate_limit_profiles.rs
 │   ├── rate_limit_sync.rs
 │   ├── resource_locks.rs
 │   ├── routine_script_audit.rs

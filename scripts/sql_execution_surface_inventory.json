@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "361342fca878b897b7eb91324882d6946b2696f8",
+  "measured_at_sha": "6c58e433a6d306b5eb809b654af1effcced2f81a",
   "records": [
     {
       "root": "migrations/postgres",
@@ -16011,15 +16011,6 @@
       "api": "sqlx::query",
       "symbol": "query",
       "classification": "STATIC",
-      "fingerprint": "sha256:9b8a29b4266fdebd6646e354915eb6cc1ad54a01d92e6cff7d02ac08e5391ba0"
-    },
-    {
-      "root": "src",
-      "kind": "RUST",
-      "path": "src/server/mod.rs",
-      "api": "sqlx::query",
-      "symbol": "query",
-      "classification": "STATIC",
       "fingerprint": "sha256:9f3eeffdc651dda35632f6e3bda26f4e1dd0edbc8aa2fdb1f5e9bfe72f17a58f"
     },
     {
@@ -16309,6 +16300,15 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:e834e825633d9e5cd5d57ae5a84e06e5733818c30a19867947b0a93a476df1d8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/server/rate_limit_profiles.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8dcbfaba93c117a4a099dad4c6ec6f3aa5dd72d7ffd1c198213cf32c8c556681"
     },
     {
       "root": "src",
