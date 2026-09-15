@@ -73,6 +73,7 @@ fn managed_session_clear_behavior(provider: &ProviderKind) -> ManagedSessionClea
         }
         ProviderKind::Gemini
         | ProviderKind::Grok
+        | ProviderKind::Antigravity
         | ProviderKind::OpenCode
         | ProviderKind::Unsupported(_) => ManagedSessionClearBehavior::Noop,
     }
@@ -86,6 +87,7 @@ fn managed_session_reset_behavior(provider: &ProviderKind) -> ManagedSessionRese
         }
         ProviderKind::Gemini
         | ProviderKind::Grok
+        | ProviderKind::Antigravity
         | ProviderKind::OpenCode
         | ProviderKind::Unsupported(_) => ManagedSessionResetBehavior::Noop,
     }

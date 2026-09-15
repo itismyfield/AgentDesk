@@ -1,7 +1,13 @@
+mod process_session_launch;
+use process_session_launch::execute_streaming_local_process_codex;
+
 #[cfg(unix)]
 mod followup_reader;
 #[cfg(unix)]
 use followup_reader::send_followup_to_tmux;
+mod tui_session_launch;
+#[cfg(unix)]
+use tui_session_launch::prepare_codex_tui_launch_script;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::Value;
@@ -1594,94 +1600,6 @@ struct CodexTuiLaunchScript {
     rollout_modified_since: std::time::SystemTime,
 }
 
-/// Resolve the Codex binary, build the launch args + env, render and write the
-/// launch script, and register the Discord-originated prompt for dedupe.
-///
-/// Returns the resolved binary, script path, owner-marker path, and the
-/// rollout "modified since" stamp captured just before the script is written.
-/// Errors propagate exactly as the inline body did (`?`).
-#[cfg(unix)]
-fn prepare_codex_tui_launch_script(
-    tmux_session_name: &str,
-    session_id: Option<&str>,
-    prompt: &str,
-    launch_options: &CodexLaunchOptions,
-    report_channel_id: Option<u64>,
-    report_provider: Option<ProviderKind>,
-    warm_followup_enabled: bool,
-) -> Result<CodexTuiLaunchScript, String> {
-    write_tmux_owner_marker(tmux_session_name)?;
-    crate::services::tmux_common::write_tmux_runtime_kind_marker(
-        tmux_session_name,
-        crate::services::agent_protocol::RuntimeHandoffKind::CodexTui,
-    )?;
-    let owner_path = tmux_owner_path(tmux_session_name);
-
-    let resolution = resolve_codex_binary();
-    let codex_bin = resolution
-        .resolved_path
-        .clone()
-        .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
-    let env_lines = build_tmux_launch_env_lines(
-        resolution.exec_path.as_deref(),
-        report_channel_id,
-        report_provider,
-    );
-    let mut args = build_codex_tui_args(launch_options);
-    let codex_hook_overrides = if codex_direct_tui_hook_overrides_enabled() {
-        prepare_codex_tui_hook_overrides(
-            tmux_session_name,
-            session_id,
-            &codex_bin,
-            resolution.exec_path.as_deref(),
-        )
-    } else {
-        tracing::info!(
-            tmux_session_name,
-            "Codex direct TUI session hook overrides disabled; using rollout transcript tail for relay"
-        );
-        Vec::new()
-    };
-    if !codex_hook_overrides.is_empty() {
-        append_codex_config_overrides(&mut args, codex_hook_overrides);
-        if codex_resume_supports_hook_trust_bypass(&codex_bin, &resolution) {
-            insert_codex_resume_option_before_other_options(
-                &mut args,
-                "--dangerously-bypass-hook-trust",
-            );
-        } else {
-            tracing::warn!(
-                codex_bin,
-                "Codex resume does not advertise --dangerously-bypass-hook-trust; relying on session hook trust hashes"
-            );
-        }
-    }
-    let script_content = render_codex_tui_tmux_script(&env_lines, &codex_bin, &args);
-    let rollout_modified_since = std::time::SystemTime::now();
-
-    std::fs::write(&script_path, &script_content)
-        .map_err(|e| format!("Failed to write Codex TUI launch script: {}", e))?;
-    if warm_followup_enabled {
-        crate::services::codex_tui::session::write_codex_tui_launch_options_fingerprint(
-            tmux_session_name,
-            &crate::services::codex_tui::warm_followup::codex_tui_launch_options_fingerprint(
-                launch_options,
-            ),
-        )?;
-    }
-    crate::services::tui_prompt_dedupe::record_discord_originated_prompt(
-        ProviderKind::Codex.as_str(),
-        tmux_session_name,
-        prompt,
-    );
-    Ok(CodexTuiLaunchScript {
-        script_path,
-        owner_path,
-        rollout_modified_since,
-    })
-}
-
 /// Wire the cancel token to the freshly created tmux session: record the
 /// session name and (best-effort) the pane PID so a later /stop can target it.
 #[cfg(unix)]
@@ -1768,6 +1686,18 @@ fn execute_streaming_local_tui_tmux(
     let _turn_guard = turn_lock
         .as_ref()
         .map(|lock| lock.lock().unwrap_or_else(|error| error.into_inner()));
+    let auth_overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
+        ProviderKind::Codex,
+        tmux_session_name,
+    )?;
+    let auth_env_lines =
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+    let session_exists = tmux_session_exists(tmux_session_name);
+    let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    );
+    let session_id = profile_matches.then_some(session_id).flatten();
     let session_selection = crate::services::codex_tui::session::resolve_codex_tui_session(
         session_id,
         std::path::Path::new(working_dir),
@@ -1810,8 +1740,7 @@ fn execute_streaming_local_tui_tmux(
         );
     }
 
-    let session_exists = tmux_session_exists(tmux_session_name);
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
     let mut warm_fallback_reason = None;
     let mut warm_fallback_pane_stopped = false;
 
@@ -1872,6 +1801,7 @@ fn execute_streaming_local_tui_tmux(
         report_channel_id,
         report_provider,
         warm_followup_enabled,
+        &auth_env_lines,
     )?;
     if let Some(channel_id) = report_channel_id {
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
@@ -1894,6 +1824,11 @@ fn execute_streaming_local_tui_tmux(
         );
         return Err(format!("tmux error: {}", stderr));
     }
+
+    crate::services::tmux_common::write_tmux_session_auth_profile(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    )?;
 
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
@@ -2227,6 +2162,21 @@ fn execute_streaming_local_tmux(
     compact_token_limit: Option<u64>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
+    let auth_overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
+        ProviderKind::Codex,
+        tmux_session_name,
+    )?;
+    let auth_env_lines =
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+    let session_exists = tmux_session_exists(tmux_session_name);
+    let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    );
+    // Resume tokens are bound to the account that created them.  A profile
+    // change recreates the wrapper and deliberately begins a fresh provider
+    // session instead of leaking that token into another account.
+    let session_id = profile_matches.then_some(session_id).flatten();
     let output_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
     let input_fifo_path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, "input");
@@ -2236,8 +2186,7 @@ fn execute_streaming_local_tmux(
     // Accept either the new persistent location or the legacy /tmp location
     // so that dcserver restarts that lost /tmp files still re-attach to a
     // live tmux pane owned by an older wrapper. See issue #892.
-    let session_exists = tmux_session_exists(tmux_session_name);
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
     let resolved_output =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =
@@ -2369,11 +2318,12 @@ fn execute_streaming_local_tmux(
     // Write launch script to file to avoid tmux "command too long" errors
     let script_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "sh");
 
-    let env_lines = build_tmux_launch_env_lines(
+    let mut env_lines = build_tmux_launch_env_lines(
         resolution.exec_path.as_deref(),
         report_channel_id,
         report_provider,
     );
+    env_lines.push_str(&auth_env_lines);
 
     let script_content = render_codex_wrapper_tmux_script(
         &env_lines,
@@ -2408,6 +2358,11 @@ fn execute_streaming_local_tmux(
         let _ = std::fs::remove_file(&script_path);
         return Err(format!("tmux error: {}", stderr));
     }
+
+    crate::services::tmux_common::write_tmux_session_auth_profile(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    )?;
 
     // Keep tmux session alive after process exits for post-mortem analysis
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
@@ -2556,160 +2511,6 @@ fn send_codex_pipe_prompt_to_fifo(input_fifo_path: &str, prompt: &str) -> Result
         .map_err(|e| format!("Failed to write to input FIFO {input_fifo_path}: {e}"))?;
     fifo.flush()
         .map_err(|e| format!("Failed to flush input FIFO {input_fifo_path}: {e}"))?;
-    Ok(())
-}
-
-/// Execute Codex via ProcessBackend (direct child process, no tmux).
-#[allow(clippy::too_many_arguments)]
-fn execute_streaming_local_process_codex(
-    prompt: &str,
-    model: Option<&str>,
-    fast_mode_enabled: Option<bool>,
-    goals_enabled: Option<bool>,
-    session_id: Option<&str>,
-    working_dir: &str,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<std::sync::Arc<CancelToken>>,
-    session_name: &str,
-    developer_instructions: Option<&str>,
-    compact_token_limit: Option<u64>,
-    force_fresh_provider_session: bool,
-) -> Result<(), String> {
-    use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
-
-    let output_path = format!(
-        "{}/agentdesk-{}.jsonl",
-        std::env::temp_dir().display(),
-        session_name
-    );
-    let prompt_path = format!(
-        "{}/agentdesk-{}.prompt",
-        std::env::temp_dir().display(),
-        session_name
-    );
-
-    // Check for existing process session
-    let process_session_alive = process_session_is_alive(session_name);
-    if should_reuse_existing_provider_session(process_session_alive, force_fresh_provider_session) {
-        // Snapshot file length BEFORE sending input to avoid race:
-        // Codex wrapper appends JSONL immediately on stdin, so a fast
-        // response could be written before we read the offset.
-        let start_offset = std::fs::metadata(&output_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-
-        let encoded = format!(
-            "{}{}",
-            TMUX_PROMPT_B64_PREFIX,
-            BASE64_STANDARD.encode(prompt.as_bytes())
-        );
-        send_process_session_input(session_name, &encoded)?;
-        let read_result = read_output_file_until_result(
-            &output_path,
-            start_offset,
-            sender.clone(),
-            cancel_token,
-            process_session_probe(session_name),
-        )?;
-
-        fold_read_output_result(
-            read_result,
-            |offset| {
-                let _ = sender.send(StreamMessage::ProcessReady {
-                    output_path: output_path.to_string(),
-                    session_name: session_name.to_string(),
-                    last_offset: offset,
-                });
-            },
-            |_| {
-                let _ = sender.send(StreamMessage::Done {
-                    result: "⚠ 세션이 종료되었습니다.".to_string(),
-                    session_id: None,
-                });
-                remove_process_session(session_name);
-            },
-        );
-        return Ok(());
-    }
-
-    if force_fresh_provider_session && process_session_alive {
-        if let Some(handle) = remove_process_session(session_name) {
-            terminate_process_handle(handle);
-        }
-    }
-
-    // Clean up and create new session
-    let _ = std::fs::remove_file(&output_path);
-    let _ = std::fs::remove_file(&prompt_path);
-    std::fs::write(&prompt_path, prompt)
-        .map_err(|e| format!("Failed to write prompt file: {}", e))?;
-
-    let resolution = resolve_codex_binary();
-    let codex_bin = resolution
-        .resolved_path
-        .clone()
-        .ok_or_else(|| "Codex CLI not found".to_string())?;
-    let exe =
-        std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
-    let launch_options = CodexLaunchOptions::new(prompt)
-        .with_resume_session_id(session_id)
-        .with_developer_instructions(developer_instructions)
-        .with_model(model)
-        .with_reasoning_effort(codex_reasoning_effort_from_env().as_deref())
-        .with_compact_token_limit(compact_token_limit)
-        .with_readonly_mode(false)
-        .with_fast_mode_enabled(fast_mode_enabled)
-        .with_goals_enabled(goals_enabled)
-        .with_cwd(Some(working_dir));
-
-    let config = SessionConfig {
-        session_name: session_name.to_string(),
-        working_dir: working_dir.to_string(),
-        agentdesk_exe: exe.display().to_string(),
-        output_path: output_path.clone(),
-        prompt_path: prompt_path.clone(),
-        wrapper_subcommand: "codex-tmux-wrapper".to_string(),
-        wrapper_args: build_codex_wrapper_cli_args(&launch_options, &codex_bin),
-        env_vars: resolution
-            .exec_path
-            .clone()
-            .map(|path| vec![("PATH".to_string(), path)])
-            .unwrap_or_default(),
-    };
-
-    let backend = ProcessBackend::new();
-    let handle = backend.create_session(&config)?;
-
-    register_child_pid(cancel_token.as_deref(), handle.pid());
-
-    insert_process_session(session_name.to_string(), handle);
-
-    let read_result = read_output_file_until_result(
-        &output_path,
-        0,
-        sender.clone(),
-        cancel_token,
-        process_session_probe(session_name),
-    )?;
-
-    fold_read_output_result(
-        read_result,
-        |offset| {
-            let _ = sender.send(StreamMessage::ProcessReady {
-                output_path,
-                session_name: session_name.to_string(),
-                last_offset: offset,
-            });
-        },
-        |_| {
-            let _ = sender.send(StreamMessage::Done {
-                result: "⚠ 프로세스가 종료되었습니다.".to_string(),
-                session_id: None,
-            });
-            remove_process_session(session_name);
-        },
-    );
-
     Ok(())
 }
 

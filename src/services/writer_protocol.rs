@@ -22,6 +22,7 @@ pub(crate) enum ProviderDomain {
     OpenCode,
     Qwen,
     Grok,
+    Antigravity,
     Unsupported,
 }
 
@@ -34,6 +35,7 @@ impl From<&ProviderKind> for ProviderDomain {
             ProviderKind::OpenCode => Self::OpenCode,
             ProviderKind::Qwen => Self::Qwen,
             ProviderKind::Grok => Self::Grok,
+            ProviderKind::Antigravity => Self::Antigravity,
             ProviderKind::Unsupported(_) => Self::Unsupported,
         }
     }
@@ -48,6 +50,7 @@ impl ProviderDomain {
             Self::OpenCode => "opencode",
             Self::Qwen => "qwen",
             Self::Grok => "grok",
+            Self::Antigravity => "antigravity",
             Self::Unsupported => "unsupported",
         }
     }

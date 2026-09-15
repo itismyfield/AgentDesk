@@ -1,3 +1,11 @@
+mod process_session_launch;
+pub(crate) use process_session_launch::execute_streaming_local_process;
+
+#[cfg(unix)]
+mod tui_session_launch;
+#[cfg(unix)]
+use tui_session_launch::prepare_and_create_claude_tui_session;
+
 use serde_json::Value;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
@@ -1709,6 +1717,18 @@ fn execute_streaming_local_tui_tmux(
         "=== execute_streaming_local_tui_tmux START: {} ===",
         tmux_session_name
     ));
+    let auth_overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
+        ProviderKind::Claude,
+        tmux_session_name,
+    )?;
+    let auth_env_lines =
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+    let session_exists = tmux_session_exists(tmux_session_name);
+    let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    );
+    let session_id = profile_matches.then_some(session_id).flatten();
     if let Some(channel_id) = report_channel_id {
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
     }
@@ -1729,8 +1749,7 @@ fn execute_streaming_local_tui_tmux(
     let mut transcript_path_string = transcript_path.display().to_string();
     let mut resume = session_resolution.resume;
 
-    let session_exists = tmux_session_exists(tmux_session_name);
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
     if session_exists
         && has_live_pane
         && !resume
@@ -1794,6 +1813,11 @@ fn execute_streaming_local_tui_tmux(
         model_override,
         hook_endpoint,
         resume,
+        &auth_env_lines,
+    )?;
+    crate::services::tmux_common::write_tmux_session_auth_profile(
+        tmux_session_name,
+        &auth_overlay.profile_id,
     )?;
     if let Some(channel_id) = report_channel_id {
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
@@ -1964,77 +1988,6 @@ fn cleanup_stale_claude_tui_session(tmux_session_name: &str) {
         tmux_session_name,
         "stale claude tui session cleanup before recreate",
     );
-}
-
-/// Prepare the Claude TUI launch script and hosted tmux session.
-/// Verbatim prep/create extraction: temp cleanup, owner/runtime markers, launch script, create_session; marker `?` exits precede cleanup, later failures keep original cleanup, success returns owner path.
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-fn prepare_and_create_claude_tui_session(
-    tmux_session_name: &str,
-    working_dir: &str,
-    working_dir_path: &std::path::Path,
-    resolved_session_id: &str,
-    system_prompt: Option<&str>,
-    model_override: Option<&str>,
-    hook_endpoint: String,
-    resume: bool,
-) -> Result<String, String> {
-    crate::services::tmux_common::cleanup_session_temp_files(tmux_session_name);
-    write_tmux_owner_marker(tmux_session_name)?;
-    crate::services::tmux_common::write_tmux_runtime_kind_marker(
-        tmux_session_name,
-        crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui,
-    )?;
-    let owner_path = tmux_owner_path(tmux_session_name);
-    let mut prepared_session_files = None;
-    let launch_result = (|| -> Result<std::process::Output, String> {
-        let exe =
-            std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
-        let (claude_bin, _resolution) = resolve_claude_binary()?;
-        let launch_config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
-            tmux_session_name: tmux_session_name.to_string(),
-            working_dir: working_dir_path.to_path_buf(),
-            claude_bin,
-            agentdesk_exe: exe,
-            hook_endpoint,
-            session_id: resolved_session_id.to_string(),
-            system_prompt: system_prompt.map(str::to_string),
-            model: model_override.map(str::to_string),
-            resume,
-        };
-        let session_files =
-            crate::services::claude_tui::session::prepare_claude_tui_launch(&launch_config)?;
-        let launch_script_path = session_files.launch_script_path.clone();
-        prepared_session_files = Some(session_files);
-        crate::services::platform::tmux::create_session(
-            tmux_session_name,
-            Some(working_dir),
-            &format!(
-                "bash {}",
-                shell_escape(&launch_script_path.display().to_string())
-            ),
-        )
-    })();
-    let tmux_result = match launch_result {
-        Ok(result) => result,
-        Err(error) => {
-            if let Some(files) = prepared_session_files.as_ref() {
-                files.cleanup_best_effort();
-            }
-            let _ = std::fs::remove_file(&owner_path);
-            return Err(error);
-        }
-    };
-    if !tmux_result.status.success() {
-        let stderr = String::from_utf8_lossy(&tmux_result.stderr);
-        if let Some(files) = prepared_session_files.as_ref() {
-            files.cleanup_best_effort();
-        }
-        let _ = std::fs::remove_file(&owner_path);
-        return Err(format!("tmux error: {}", stderr));
-    }
-    Ok(owner_path)
 }
 
 /// On success returns the read result, the harvest counters, and the actual
@@ -2536,6 +2489,27 @@ fn execute_streaming_local_tmux(
         tmux_session_name
     ));
 
+    let auth_overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
+        ProviderKind::Claude,
+        tmux_session_name,
+    )?;
+    let auth_env_lines =
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+    let session_exists = tmux_session_exists(tmux_session_name);
+    let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    );
+    // A provider session id is account-scoped.  When a named auth profile
+    // replaces a warm tmux wrapper, never pass the old account's `--resume`
+    // token into the fresh process.
+    let fresh_args;
+    let args = if profile_matches {
+        args
+    } else {
+        fresh_args = process_session_launch::without_resume_arg(args);
+        &fresh_args
+    };
     let output_path = crate::services::tmux_common::session_temp_path(tmux_session_name, "jsonl");
     let input_fifo_path =
         crate::services::tmux_common::session_temp_path(tmux_session_name, "input");
@@ -2547,8 +2521,7 @@ fn execute_streaming_local_tmux(
     // (under `runtime_root()/runtime/sessions/`) or the legacy `/tmp/` path
     // that older wrappers still hold open fds to — so a dcserver restart
     // that lost its /tmp files does not invalidate a still-alive tmux pane.
-    let session_exists = tmux_session_exists(tmux_session_name);
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
     let resolved_output =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =
@@ -2556,7 +2529,10 @@ fn execute_streaming_local_tmux(
     // Resume id selected for this turn (`--resume <sid>` was pushed by the
     // caller when `session_id` is a valid id). Used to recognise a live pane
     // that was deliberately reused for provider-session continuity.
-    let resume_session_id = session_id.filter(|sid| is_valid_session_id(sid));
+    let resume_session_id = profile_matches
+        .then_some(session_id)
+        .flatten()
+        .filter(|sid| is_valid_session_id(sid));
     let startup_plan = classify_local_tmux_startup_plan(
         session_exists,
         has_live_pane,
@@ -2771,12 +2747,13 @@ fn execute_streaming_local_tmux(
         compact_percent,
         compact_lower_bound_tokens,
     );
-    let env_lines = build_tmux_launch_env_lines(
+    let mut env_lines = build_tmux_launch_env_lines(
         resolution.exec_path.as_deref(),
         report_channel_id,
         report_provider,
         auto_compact_window,
     );
+    env_lines.push_str(&auth_env_lines);
 
     let mut escaped_claude_bin = String::new();
     claude_bin.append_shell_escaped_to(&mut escaped_claude_bin);
@@ -2824,6 +2801,11 @@ fn execute_streaming_local_tmux(
         let _ = std::fs::remove_file(&script_path);
         return Err(format!("tmux error: {}", stderr));
     }
+
+    crate::services::tmux_common::write_tmux_session_auth_profile(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    )?;
 
     // Keep tmux session alive after process exits for post-mortem analysis
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
@@ -2947,160 +2929,6 @@ fn send_followup_to_tmux(
         debug_log("tmux session died after streaming partial follow-up output — suppress replay");
     }
     Ok(outcome)
-}
-
-/// Poll-read the output file from a given offset until a "result" event is received.
-/// Uses raw File::read to handle growing file (not BufReader which caches EOF).
-// ─── ProcessBackend execution path ────────────────────────────────────────────
-
-/// Execute Claude via ProcessBackend (direct child process, no tmux).
-/// Used when tmux is not available or on Windows.
-pub(crate) fn execute_streaming_local_process(
-    args: &[String],
-    prompt: &str,
-    working_dir: &str,
-    sender: Sender<StreamMessage>,
-    cancel_token: Option<std::sync::Arc<CancelToken>>,
-    session_name: &str,
-    compact_percent: Option<u64>,
-    compact_lower_bound_tokens: u64,
-) -> Result<(), String> {
-    use crate::services::session_backend::{ProcessBackend, SessionConfig};
-
-    debug_log(&format!(
-        "=== execute_streaming_local_process START: {} ===",
-        session_name
-    ));
-
-    let output_path = format!(
-        "{}/agentdesk-{}.jsonl",
-        std::env::temp_dir().display(),
-        session_name
-    );
-    let prompt_path = format!(
-        "{}/agentdesk-{}.prompt",
-        std::env::temp_dir().display(),
-        session_name
-    );
-
-    // Check for existing process session (follow-up)
-    // ProcessBackend sessions don't persist across restarts, so we track via static map
-    if process_session_available_for_followup(session_name) {
-        debug_log("Existing process session found — sending follow-up");
-        match send_followup_to_process(
-            prompt,
-            &output_path,
-            session_name,
-            sender.clone(),
-            cancel_token.clone(),
-        )? {
-            ClaudeFollowupResult::Delivered => return Ok(()),
-            ClaudeFollowupResult::RecreateSession { error } => {
-                debug_log(&format!(
-                    "Process follow-up failed, recreating session: {}",
-                    error
-                ));
-                if let Some(handle) = remove_process_session(session_name) {
-                    terminate_process_handle(handle);
-                }
-            }
-            ClaudeFollowupResult::FinalizeWithNotice { error, notice } => {
-                debug_log(&format!(
-                    "Process follow-up streamed partial output before session death — suppressing replay: {}",
-                    error
-                ));
-                if let Some(handle) = remove_process_session(session_name) {
-                    terminate_process_handle(handle);
-                }
-                emit_followup_restart_suppressed_notice(&sender, &notice);
-                return Ok(());
-            }
-        }
-    }
-
-    // Clean up stale files
-    let _ = std::fs::remove_file(&output_path);
-    let _ = std::fs::remove_file(&prompt_path);
-
-    // Write prompt
-    std::fs::write(&prompt_path, prompt)
-        .map_err(|e| format!("Failed to write prompt file: {}", e))?;
-
-    // Build wrapper args — no shell_escape here because ProcessBackend uses
-    // Command::new().args() (direct argv), not a shell script.
-    let (claude_bin, resolution) = resolve_claude_binary()?;
-    let mut wrapper_args = Vec::new();
-    claude_bin.append_process_backend_wrapper_args(&mut wrapper_args);
-    wrapper_args.extend(args.iter().map(|a| a.to_string()));
-
-    let exe =
-        std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
-
-    let env_vars = resolution
-        .exec_path
-        .clone()
-        .map(|path| vec![("PATH".to_string(), path)])
-        .unwrap_or_default();
-    let auto_compact_window = launch_auto_compact_window_for_session(
-        session_name,
-        claude_model_from_args(args),
-        compact_percent,
-        compact_lower_bound_tokens,
-    );
-    let config = SessionConfig {
-        session_name: session_name.to_string(),
-        working_dir: working_dir.to_string(),
-        agentdesk_exe: exe.display().to_string(),
-        output_path: output_path.clone(),
-        prompt_path: prompt_path.clone(),
-        wrapper_subcommand: "tmux-wrapper".to_string(),
-        wrapper_args,
-        env_vars,
-    };
-
-    let backend = ProcessBackend::new();
-    let handle = backend.create_session_with_command_env(&config, |command| {
-        // Compact-window overlay (#4591).
-        apply_auto_compact_window_to_command(command, auto_compact_window);
-    })?;
-
-    // Store child PID in cancel token
-    register_child_pid(cancel_token.as_deref(), handle.pid());
-
-    // Store handle for follow-up messages and protect it from tmux-takeover cleanup.
-    let active_turn = insert_process_session_and_mark_active_turn(session_name.to_string(), handle);
-
-    // Poll output file until result
-    let read_result = read_output_file_until_result(
-        &output_path,
-        0,
-        sender.clone(),
-        cancel_token,
-        process_session_probe(session_name),
-    )?;
-    drop(active_turn);
-
-    fold_read_output_result(
-        read_result,
-        |offset| {
-            let _ = sender.send(StreamMessage::ProcessReady {
-                output_path,
-                session_name: session_name.to_string(),
-                last_offset: offset,
-            });
-        },
-        |_| {
-            let _ = sender.send(StreamMessage::Done {
-                result: "⚠ 프로세스가 종료되었습니다. 새 메시지를 보내면 새 세션이 시작됩니다."
-                    .to_string(),
-                session_id: None,
-            });
-            remove_process_session(session_name);
-        },
-    );
-
-    debug_log("=== execute_streaming_local_process END ===");
-    Ok(())
 }
 
 /// Send a follow-up message to an existing ProcessBackend session.

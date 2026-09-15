@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::services::provider::CancelToken;
 use crate::services::provider::ProviderKind;
+use crate::services::provider_auth_profile::ProviderAuthOverlay;
 use crate::services::remote::RemoteProfile;
 
 use super::policy::ConfiguredToolPolicy;
@@ -25,6 +26,7 @@ pub struct ProviderTurnRequest {
     pub remote_profile: Option<RemoteProfile>,
     pub timeout: Duration,
     pub cancel: Option<Arc<CancelToken>>,
+    pub auth_overlay: ProviderAuthOverlay,
 }
 
 impl ProviderTurnRequest {
@@ -45,7 +47,8 @@ impl ProviderTurnRequest {
         remote_profile: Option<RemoteProfile>,
         timeout: Duration,
         cancel: Option<Arc<CancelToken>>,
-    ) -> Self {
+        channel_id: Option<u64>,
+    ) -> Result<Self, String> {
         let session = if force_fresh {
             None
         } else {
@@ -54,7 +57,10 @@ impl ProviderTurnRequest {
                 .filter(|value| !value.is_empty())
                 .map(ProviderSessionToken::new_opaque)
         };
-        Self {
+        let auth_overlay =
+            crate::services::discord::org_schema::spawn_auth_overlay(provider.clone(), channel_id)
+                .map_err(|error| format!("provider auth profile resolution failed: {error}"))?;
+        Ok(Self {
             provider,
             prompt,
             system_prompt,
@@ -66,6 +72,7 @@ impl ProviderTurnRequest {
             remote_profile,
             timeout,
             cancel,
-        }
+            auth_overlay,
+        })
     }
 }

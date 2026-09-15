@@ -31,7 +31,8 @@ import { AgentInfoProfileSections } from "./AgentInfoProfileSections";
 import { AgentInfoRoutingSections } from "./AgentInfoRoutingSections";
 import { inferBindingSource } from "./AgentInfoCardModel";
 import { isDiscordSnowflake } from "./discord-routing";
-import { catalogLabel, useProviderCatalog } from "../../api/providers";
+import { catalogLabel, getProviderAuthProfiles, useProviderCatalog } from "../../api/providers";
+import type { ProviderAuthProvider } from "../settings/SettingsProvidersModel";
 
 export { getAgentLevel, getAgentTitle } from "./agentProgress";
 
@@ -84,6 +85,9 @@ export default function AgentInfoCard({
   );
   const providerCatalog = useProviderCatalog(selectedProvider);
   const [savingProvider, setSavingProvider] = useState(false);
+  const [providerAuthProfiles, setProviderAuthProfiles] = useState<ProviderAuthProvider[]>([]);
+  const [selectedAuthProfile, setSelectedAuthProfile] = useState("__primary__");
+  const [savingAuthProfile, setSavingAuthProfile] = useState(false);
   const [officeMemberships, setOfficeMemberships] = useState<
     AgentOfficeMembership[]
   >([]);
@@ -121,10 +125,29 @@ export default function AgentInfoCard({
     setAliasValue(agent.alias ?? "");
     setSelectedDeptId(agent.department_id ?? "");
     setSelectedProvider(agent.cli_provider ?? "claude");
+    setSelectedAuthProfile("__primary__");
     setSessionsOpen(true);
     setRoutingOpen(false);
     setIdleSessionsOpen(false);
   }, [agent.alias, agent.department_id, agent.cli_provider, agent.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getProviderAuthProfiles()
+      .then((response) => {
+        if (cancelled) return;
+        const providers = Array.isArray(response.providers) ? response.providers : [];
+        setProviderAuthProfiles(providers);
+        const override = response.agent_profile_overrides?.find(
+          (entry) => entry.agent_id === agent.id,
+        );
+        setSelectedAuthProfile(override?.profile_id ?? "__primary__");
+      })
+      .catch(() => {
+        if (!cancelled) setProviderAuthProfiles([]);
+      });
+    return () => { cancelled = true; };
+  }, [agent.id]);
 
   const saveDepartment = async (nextDeptId: string) => {
     const previousDeptId = selectedDeptId;
@@ -151,7 +174,9 @@ export default function AgentInfoCard({
     try {
       await api.updateAgent(agent.id, {
         cli_provider: nextProvider as Agent["cli_provider"],
+        auth_profile: null,
       });
+      setSelectedAuthProfile("__primary__");
       onAgentUpdated?.();
     } catch (e) {
       setSelectedProvider(previousProvider);
@@ -160,6 +185,31 @@ export default function AgentInfoCard({
       setSavingProvider(false);
     }
   };
+
+  const saveAuthProfile = async (nextProfile: string) => {
+    if (nextProfile === selectedAuthProfile) return;
+    const previousProfile = selectedAuthProfile;
+    setSelectedAuthProfile(nextProfile);
+    setSavingAuthProfile(true);
+    try {
+      await api.updateAgent(agent.id, {
+        auth_profile: nextProfile === "__primary__" ? null : nextProfile,
+      });
+      onAgentUpdated?.();
+    } catch (error) {
+      setSelectedAuthProfile(previousProfile);
+      console.error("Auth profile save failed:", error);
+    } finally {
+      setSavingAuthProfile(false);
+    }
+  };
+
+  const authProfileOptions = [
+    { id: "__primary__", home: "" },
+    ...(providerAuthProfiles
+      .find((provider) => provider.id === selectedProvider)
+      ?.accounts ?? [{ id: "default", home: "" }]),
+  ];
 
   const toggleOfficeMembership = async (office: AgentOfficeMembership) => {
     const nextAssigned = !office.assigned;
@@ -552,6 +602,10 @@ export default function AgentInfoCard({
               }
               savingProvider={savingProvider}
               onSaveProvider={(nextProvider) => void saveProvider(nextProvider)}
+              selectedAuthProfile={selectedAuthProfile}
+              authProfileOptions={authProfileOptions.map((account) => account.id)}
+              savingAuthProfile={savingAuthProfile}
+              onSaveAuthProfile={(profileId) => void saveAuthProfile(profileId)}
               loadingOffices={loadingOffices}
               officeMemberships={officeMemberships}
               savingOfficeIds={savingOfficeIds}
