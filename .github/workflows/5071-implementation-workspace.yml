@@ -1,0 +1,33 @@
+name: 5071 implementation workspace (temporary)
+
+on:
+  push:
+    branches:
+      - fix/5071-cancel-handoff-20260915
+    paths:
+      - .github/workflows/5071-implementation-workspace.yml
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 23eb9bba132ad71f0336645705ab8597a59d1c1c
+          persist-credentials: false
+      - name: Export immutable tracked source for implementation
+        run: |
+          git rev-parse HEAD > /tmp/5071-base-sha.txt
+          git archive --format=tar HEAD | gzip > /tmp/5071-base-source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 5071-base-source
+          path: |
+            /tmp/5071-base-source.tar.gz
+            /tmp/5071-base-sha.txt
+          retention-days: 1
+          if-no-files-found: error
