@@ -18,7 +18,6 @@ const NATIVE_STANDARD_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 const ONE_MILLION_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
 const CLAUDE_AUTO_COMPACT_MIN_TOKENS: u64 = 100_000;
 pub(crate) const CLAUDE_AUTO_COMPACT_MAX_TOKENS: u64 = 1_000_000;
-const DEFAULT_TUI_AUTO_COMPACT_WINDOW_TOKENS: u64 = 700_000;
 const LAUNCH_PROVENANCE_TTL: Duration = Duration::from_secs(4 * 60 * 60);
 const MAX_LAUNCH_PROVENANCE: usize = 512;
 pub(crate) const CLAUDE_AUTO_COMPACT_WINDOW_ENV: &str = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
@@ -147,13 +146,19 @@ pub(crate) fn launch_auto_compact_window_for_session(
 }
 
 /// Resolve the absolute setting for a new TUI launch without model inference.
-pub(crate) fn tui_launch_auto_compact_window_from_setting(configured: Option<u64>) -> u64 {
-    configured
-        .unwrap_or(DEFAULT_TUI_AUTO_COMPACT_WINDOW_TOKENS)
-        .clamp(
+///
+/// `None` means the operator configured nothing. #5935: that case must not
+/// export an absolute window at all. The inherited value is still scrubbed by
+/// [`append_auto_compact_window_shell_env`], so the launch starts from Claude
+/// Code's own resolution and in-session `/autocompact` stays usable. Only an
+/// explicitly configured value is clamped and exported.
+pub(crate) fn tui_launch_auto_compact_window_from_setting(configured: Option<u64>) -> Option<u64> {
+    configured.map(|window| {
+        window.clamp(
             CLAUDE_AUTO_COMPACT_MIN_TOKENS,
             CLAUDE_AUTO_COMPACT_MAX_TOKENS,
         )
+    })
 }
 
 /// Render an isolation fence for shell-based launches. An inherited absolute
