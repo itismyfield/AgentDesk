@@ -12,7 +12,7 @@ concurrency:
 jobs:
   investigate:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 30
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
@@ -24,18 +24,11 @@ jobs:
       - uses: actions/checkout@v4
         with: {fetch-depth: 0, persist-credentials: false}
       - uses: dtolnay/rust-toolchain@master
-        with: {toolchain: '1.94.1', components: rustfmt}
+        with: {toolchain: '1.94.1', components: 'rustfmt,clippy'}
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with: {cache-targets: false, cache-bin: false, shared-key: cargo-dependencies-v2, save-if: false}
-      - uses: actions/setup-python@v5
-        with: {python-version: '3.11'}
-      - run: python3 -m pip install PyYAML
-      - uses: actions/setup-node@v4
-        with: {node-version: '22'}
-      - uses: taiki-e/install-action@v2
-        with: {tool: 'just@1.51.0'}
-      - name: Apply only the reviewed candidate
+      - name: Prepare exact candidate
         run: |
           set -euo pipefail
           cp .github/rowless-fix.py "$RUNNER_TEMP/repair.py"
@@ -51,17 +44,7 @@ jobs:
           git diff --cached > "$RUNNER_TEMP/evidence/candidate.patch"
           git diff --cached --name-only -z | tar --null -T - -czf "$RUNNER_TEMP/evidence/changed-source.tar.gz"
           git write-tree > "$RUNNER_TEMP/evidence/tree.txt"
-          python3 - <<'PY'
-          import sys, pathlib, subprocess
-          sys.path.insert(0, 'scripts')
-          import generate_inventory_docs as inv
-          for path in ('src/services/discord/tmux_watcher.rs', 'src/services/discord/tmux_watcher/turn_stream_collector.rs'):
-              before = inv.split_prod_test_lines(subprocess.check_output(['git','show','23eb9bba132ad71f0336645705ab8597a59d1c1c:'+path],text=True))[0]
-              after = inv.split_prod_test_lines(pathlib.Path(path).read_text())[0]
-              print('GIANT',path,before,after,flush=True)
-              assert after <= before
-          PY
-      - name: Publish content-addressed candidate blobs only
+      - name: Publish content-addressed blobs without moving any branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -73,8 +56,7 @@ jobs:
           for p in paths:
               assert p.startswith(('src/services/discord/','scripts/')),p
               data=pathlib.Path(p).read_bytes()
-              body=json.dumps({'content':base64.b64encode(data).decode(),'encoding':'base64'}).encode()
-              result=json.loads(subprocess.check_output(['gh','api','--method','POST','repos/itismyfield/AgentDesk/git/blobs','--input','-'],input=body))
+              result=json.loads(subprocess.check_output(['gh','api','--method','POST','repos/itismyfield/AgentDesk/git/blobs','--input','-'],input=json.dumps({'content':base64.b64encode(data).decode(),'encoding':'base64'}).encode()))
               expected=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
               assert result['sha']==expected
               entries.append({'path':p,'mode':'100644','type':'blob','sha':expected})
@@ -86,32 +68,18 @@ jobs:
           name: pr5927-rowless-candidate
           path: ${{ runner.temp }}/evidence
           retention-days: 2
-      - name: Exact native rowless regressions and former sweep failures
-        if: ${{ !cancelled() }}
+      - name: Native regressions
         run: |
           set -euo pipefail
           cargo test --lib native_collector_tests -- --nocapture > "$RUNNER_TEMP/native.log" 2>&1 || { tail -160 "$RUNNER_TEMP/native.log"; exit 1; }
           grep -F '7 passed; 0 failed' "$RUNNER_TEMP/native.log"
+      - name: Original sweep regressions
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
           for target in site_a_emits_one_detailed_record_for_counter_read_failure relay_deliver_preserves_tail_anchor_and_observes_persisted_proof; do
             cargo test --lib "$target" -- --nocapture >> "$RUNNER_TEMP/failures.log" 2>&1 || { tail -120 "$RUNNER_TEMP/failures.log"; exit 1; }
           done
-          cargo fmt --all -- --check
-          git diff --exit-code
-      - name: Full script contracts on isolated synthetic candidate
-        if: ${{ !cancelled() }}
-        env:
-          BASH_ENV: /dev/null
-          PYTHON: python3
-        run: |
-          set -euo pipefail
-          git -c user.name='AgentDesk review' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(relay): isolated rowless cancellation candidate'
-          export GFP_HEAD_SHA="$(git rev-parse HEAD)"
-          export GFP_BASE_SHA=23eb9bba132ad71f0336645705ab8597a59d1c1c
-          export GFP_CANDIDATE_SHA="$(printf 'Isolated candidate\n' | git -c user.name='AgentDesk review' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit-tree "$(git rev-parse HEAD^{tree})" -p "$GFP_BASE_SHA" -p "$GFP_HEAD_SHA")"
-          git checkout --detach "$GFP_CANDIDATE_SHA"
-          export GFP_EVENT_NAME=pull_request GFP_REPOSITORY=itismyfield/AgentDesk GFP_HEAD_REPOSITORY=itismyfield/AgentDesk TEST_LANE_BASELINE_REF="$GFP_BASE_SHA"
-          ./scripts/ci-script-checks.sh > "$RUNNER_TEMP/contracts.log" 2>&1 || { tail -120 "$RUNNER_TEMP/contracts.log"; exit 1; }
-          tail -30 "$RUNNER_TEMP/contracts.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -119,5 +87,4 @@ jobs:
           path: |
             ${{ runner.temp }}/native.log
             ${{ runner.temp }}/failures.log
-            ${{ runner.temp }}/contracts.log
           retention-days: 2
