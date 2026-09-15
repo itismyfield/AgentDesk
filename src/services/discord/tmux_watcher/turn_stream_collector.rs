@@ -1125,6 +1125,13 @@ pub(super) async fn collect_turn_stream_until_terminal(
                 }
             }
 
+            // A resumed reader may consume the complete remaining turn in one
+            // read. Hand its terminal to the existing receipt/lease path instead
+            // of awaiting a streaming preview that races the terminal sink.
+            if continuation.is_some() && found_result {
+                break;
+            }
+
             // Check for stale session error during streaming — abort relay immediately.
             // Only structured error/result events can trip this flag.
             if stale_resume_detected {

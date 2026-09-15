@@ -1472,6 +1472,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let relay_suppressed = relay_decision.suppressed;
         let terminal_output_committed = relay_ok || relay_suppressed;
         if terminal_output_committed {
+            cancellation_custody.settled();
             terminal_delivery_observed = true;
         }
         // #3003: the no-response/stopped external-input panel reclaim runs once at
@@ -2587,9 +2588,6 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             is_prompt_too_long,
         })
         .await;
-        if terminal_output_committed {
-            cancellation_custody.settled();
-        }
     }
 
     // Publish custody before the old task's independently fenced registry cleanup.

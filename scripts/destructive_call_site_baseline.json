@@ -48,6 +48,7 @@
         "src/services/discord/runtime_bootstrap/gateway_lease.rs": 1,
         "src/services/discord/task_supervisor/watcher_completion_tests.rs": 1,
         "src/services/discord/tmux_watcher/placeholder_reclaim.rs": 1,
+      "src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs": 2,
         "src/services/discord/tmux_watcher_registry.rs": 1,
         "src/services/discord/tmux_watcher_registry_restore_tests.rs": 1,
         "src/services/discord/tui_direct_pending_start.rs": 1,
