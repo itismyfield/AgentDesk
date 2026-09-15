@@ -1,6 +1,3 @@
-mod rate_limit_sync;
-use rate_limit_sync::{rate_limit_sync_loop, upsert_rate_limit_cache_entry};
-
 pub(crate) mod cluster;
 pub(crate) mod cluster_session_routing;
 pub(crate) mod cron_catalog;
@@ -973,12 +970,43 @@ async fn record_periodic_job_execution_pg(
     upsert_kv_meta_pg_ignore(pg_pool, &key_duration, &elapsed_ms).await;
 }
 
+async fn upsert_rate_limit_cache_entry(
+    pg_pool: &PgPool,
+    provider: &str,
+    profile_id: &str,
+    data: &str,
+    fetched_at: i64,
+) {
+    let profile_id = if profile_id.trim().is_empty() {
+        "default"
+    } else {
+        profile_id
+    };
+    if let Err(error) = sqlx::query(
+        "INSERT INTO rate_limit_cache (provider, profile_id, data, fetched_at)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (provider, profile_id)
+         DO UPDATE SET data = EXCLUDED.data, fetched_at = EXCLUDED.fetched_at",
+    )
+    .bind(provider)
+    .bind(profile_id)
+    .bind(data)
+    .bind(fetched_at)
+    .execute(pg_pool)
+    .await
+    {
+        tracing::warn!(
+            "[rate-limit-sync] failed to upsert rate_limit_cache row for {provider}: {error}"
+        );
+    }
+}
+
 fn rate_limit_upsert_conflict_target() -> &'static str {
     "(provider, profile_id)"
 }
 
 async fn sync_named_profile_rate_limits(pg_pool: &PgPool) {
-    let catalog = crate::services::discord::provider_auth_catalog();
+    let catalog = crate::services::discord::org_schema::provider_auth_catalog();
     let now = chrono::Utc::now().timestamp();
     for (profile_id, def) in catalog {
         let Ok(provider) = crate::services::provider_auth_profile::intern_provider(&def.provider)
@@ -992,7 +1020,7 @@ async fn sync_named_profile_rate_limits(pg_pool: &PgPool) {
             provider.clone(),
             Some(&profile_id),
             None,
-            &crate::services::discord::provider_auth_catalog(),
+            &crate::services::discord::org_schema::provider_auth_catalog(),
         ) else {
             continue;
         };
@@ -1026,7 +1054,9 @@ async fn sync_named_profile_rate_limits(pg_pool: &PgPool) {
                 rate_limit_sync::fetch_claude_oauth_usage(&token).await
             }
             crate::services::provider::ProviderKind::Codex => fetch_codex_oauth_usage(&token).await,
-            crate::services::provider::ProviderKind::Grok => fetch_grok_billing_usage(&token).await,
+            crate::services::provider::ProviderKind::Grok => {
+                rate_limit_sync::fetch_grok_billing_usage(&token).await
+            }
             _ => continue,
         };
         match buckets {
