@@ -1,0 +1,165 @@
+name: PR 5927 isolated review
+
+on:
+  push:
+    branches: ['review/pr-5927-20260915']
+    paths:
+      - '.github/repair-pr5927.py'
+      - '.github/workflows/pr-5927-review.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-5927-isolated-review
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.repository == 'itismyfield/AgentDesk' && github.ref == 'refs/heads/review/pr-5927-20260915'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    outputs:
+      tree: ${{ steps.objects.outputs.tree }}
+    env:
+      BASE_SHA: 86649e3005ac3afa1c3e5e21d540ebecd69dbe3d
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: 'true'
+      SCCACHE_GHA_RW_MODE: READ_ONLY
+      SCCACHE_CACHE_SIZE: 10G
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare only the reviewed candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/repair-pr5927.py "$RUNNER_TEMP/repair-pr5927.py"
+          git merge-base --is-ancestor "$BASE_SHA" HEAD
+          git checkout --detach "$BASE_SHA"
+          python3 "$RUNNER_TEMP/repair-pr5927.py"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python3 -m pip install PyYAML
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.94.1'
+          components: rustfmt, clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.51.0
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+          cache-bin: false
+          shared-key: cargo-dependencies-v2
+          save-if: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Format and stage exact scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          git add .github/workflows/ci-pr.yml src/services/discord/tmux_watcher/cancel_handoff.rs src/services/discord/tmux_watcher/cancel_handoff/interrupted_adoption_tests.rs src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs
+          git diff --exit-code
+          git diff --cached --check
+          git diff --cached --stat
+          git diff --cached > "$RUNNER_TEMP/candidate.patch"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/candidate-source.tar.gz" "$(git write-tree)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr5927-candidate-source
+          path: |
+            ${{ runner.temp }}/candidate-source.tar.gz
+            ${{ runner.temp }}/candidate.patch
+          retention-days: 1
+      - name: Script contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! ./scripts/ci-script-checks.sh > "$RUNNER_TEMP/script-checks.log" 2>&1; then
+            tail -n 140 "$RUNNER_TEMP/script-checks.log"
+            exit 1
+          fi
+          tail -n 50 "$RUNNER_TEMP/script-checks.log"
+      - name: Native collector handoff regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! env -u AGENTDESK_ROOT_DIR cargo test --lib services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::native_collector_tests -- --test-threads=1 > "$RUNNER_TEMP/native.log" 2>&1; then
+            tail -n 180 "$RUNNER_TEMP/native.log"
+            exit 1
+          fi
+          tail -n 60 "$RUNNER_TEMP/native.log"
+          grep -q '4 passed; 0 failed' "$RUNNER_TEMP/native.log"
+          cargo fmt --all -- --check
+      - name: Publish tested Git objects only
+        id: objects
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, json, os, subprocess, urllib.request
+          from pathlib import Path
+          expected = {
+              '.github/workflows/ci-pr.yml',
+              'src/services/discord/tmux_watcher/cancel_handoff.rs',
+              'src/services/discord/tmux_watcher/cancel_handoff/interrupted_adoption_tests.rs',
+              'src/services/discord/tmux_watcher/streaming_status_tick/native_collector_tests.rs',
+          }
+          paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          assert set(paths) == expected, paths
+          subprocess.run(['git', 'diff', '--exit-code'], check=True)
+          def post(endpoint, payload):
+              req = urllib.request.Request(
+                  'https://api.github.com/repos/itismyfield/AgentDesk/git/' + endpoint,
+                  data=json.dumps(payload).encode(), method='POST',
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'},
+              )
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  return json.load(response)
+          entries = []
+          for path in paths:
+              blob = post('blobs', {'content': base64.b64encode(Path(path).read_bytes()).decode(), 'encoding': 'base64'})
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
+          base_tree = subprocess.check_output(['git', 'rev-parse', os.environ['BASE_SHA'] + '^{tree}'], text=True).strip()
+          result = post('trees', {'base_tree': base_tree, 'tree': entries})
+          local_tree = subprocess.check_output(['git', 'write-tree'], text=True).strip()
+          assert result['sha'] == local_tree
+          proof = {'base': os.environ['BASE_SHA'], 'tree': result['sha'], 'files': entries, 'native_tests': '4 passed; 0 failed', 'script_checks': 'passed'}
+          Path(os.environ['RUNNER_TEMP'], 'proof.json').write_text(json.dumps(proof, indent=2))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('tree=' + result['sha'] + '\n')
+          print(json.dumps(proof, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr5927-review-proof
+          path: |
+            ${{ runner.temp }}/proof.json
+            ${{ runner.temp }}/script-checks.log
+            ${{ runner.temp }}/native.log
+          retention-days: 1
+  proof:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tested candidate tree
+        env:
+          CANDIDATE_TREE: ${{ needs.verify.outputs.tree }}
+        run: |
+          echo "BASE=86649e3005ac3afa1c3e5e21d540ebecd69dbe3d"
+          echo "TREE=$CANDIDATE_TREE"
+          echo 'Script contracts passed; 4 native collector tests passed. No refs were changed by this workflow.'
