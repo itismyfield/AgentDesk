@@ -26,11 +26,13 @@ src/
 │   ├── doctor/
 │   │   ├── orchestrator/
 │   │   │   ├── config_dir_checks.rs
+│   │   │   ├── provider_credentials.rs
 │   │   │   └── relay_notifications.rs
 │   │   ├── contract.rs
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
 │   │   ├── orchestrator.rs
+│   │   ├── provider_cli_name.rs
 │   │   └── startup.rs
 │   ├── migrate/
 │   │   ├── apply.rs
@@ -246,6 +248,8 @@ src/
 │   ├── rate_limit_sync/
 │   │   └── backoff.rs
 │   ├── routes/
+│   │   ├── agents_crud/
+│   │   │   └── agent_read.rs
 │   │   ├── dispatches/
 │   │   │   ├── crud.rs
 │   │   │   ├── discord_delivery.rs
@@ -301,6 +305,8 @@ src/
 │   │   │   │   ├── types.rs
 │   │   │   │   └── validation.rs
 │   │   │   └── auto_queue_preflight_harness_tests.rs
+│   │   ├── v1/
+│   │   │   └── agent_read.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
 │   │   ├── agents_setup.rs
@@ -340,6 +346,7 @@ src/
 │   │   ├── pipeline.rs
 │   │   ├── pr_summary.rs
 │   │   ├── prompt_manifest_retention.rs
+│   │   ├── provider_auth_profiles.rs
 │   │   ├── provider_cli_api.rs
 │   │   ├── queue_api.rs
 │   │   ├── receipt.rs
@@ -460,7 +467,9 @@ src/
 │   ├── claude/
 │   │   ├── active_usage.rs
 │   │   ├── backend_routing.rs
-│   │   └── stream_result.rs
+│   │   ├── process_session_launch.rs
+│   │   ├── stream_result.rs
+│   │   └── tui_session_launch.rs
 │   ├── claude_e/
 │   │   ├── cancellation.rs
 │   │   ├── jsonl_parser.rs
@@ -530,7 +539,9 @@ src/
 │   │   ├── stream_relay.rs
 │   │   └── watcher_supervisor.rs
 │   ├── codex/
-│   │   └── followup_reader.rs
+│   │   ├── followup_reader.rs
+│   │   ├── process_session_launch.rs
+│   │   └── tui_session_launch.rs
 │   ├── codex_tmux_wrapper/
 │   │   └── input.rs
 │   ├── codex_tui/
@@ -901,6 +912,7 @@ src/
 │   │   │   │   ├── intake_turn.rs
 │   │   │   │   ├── latency_spans.rs
 │   │   │   │   ├── pre_admission_control.rs
+│   │   │   │   ├── provider_dispatch.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
@@ -1458,6 +1470,8 @@ src/
 │   │   ├── voice_routing.rs
 │   │   ├── voice_sensitivity.rs
 │   │   └── zombie_foreground_release.rs
+│   ├── dispatch_gate/
+│   │   └── auth_profiles.rs
 │   ├── dispatched_sessions/
 │   │   └── canonical_identity.rs
 │   ├── dispatches/
@@ -1523,6 +1537,7 @@ src/
 │   │   ├── mod.rs
 │   │   └── provider.rs
 │   ├── opencode/
+│   │   ├── server_launch.rs
 │   │   └── streaming_entry.rs
 │   ├── platform/
 │   │   ├── binary_resolver/
@@ -1602,6 +1617,7 @@ src/
 │   │   ├── push_handoff.rs
 │   │   └── timing.rs
 │   ├── session_backend/
+│   │   ├── auth_profiles.rs
 │   │   ├── stream_line.rs
 │   │   └── terminal_usage.rs
 │   ├── session_forwarding/
@@ -1623,6 +1639,8 @@ src/
 │   │   ├── request.rs
 │   │   ├── runner.rs
 │   │   └── session.rs
+│   ├── tmux_common/
+│   │   └── session_markers.rs
 │   ├── tui_prompt_dedupe/
 │   │   ├── extract.rs
 │   │   ├── observation.rs
@@ -1651,6 +1669,7 @@ src/
 │   │   │   └── lexical.rs
 │   │   ├── authority.rs
 │   │   └── namespace.rs
+│   ├── agent_identity.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
 │   ├── auto_queue.rs
@@ -1702,6 +1721,7 @@ src/
 │   ├── process.rs
 │   ├── provider.rs
 │   ├── provider_auth.rs
+│   ├── provider_auth_profile.rs
 │   ├── provider_error_transcript.rs
 │   ├── provider_exec.rs
 │   ├── provider_hosting.rs

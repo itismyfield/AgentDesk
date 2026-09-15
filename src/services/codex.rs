@@ -2514,7 +2514,6 @@ fn send_codex_pipe_prompt_to_fifo(input_fifo_path: &str, prompt: &str) -> Result
     Ok(())
 }
 
-
 fn normalize_codex_mcp_segment(value: &str) -> Option<String> {
     let normalized = value
         .trim()
