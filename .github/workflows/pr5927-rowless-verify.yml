@@ -2,7 +2,7 @@ name: PR5927 rowless verification
 on:
   push:
     branches: [review/pr5927-rowless-20260915]
-    paths: ['.github/workflows/pr5927-rowless-verify.yml', '.github/rowless-fix.py', '.github/rowless-followup.py']
+    paths: ['.github/workflows/pr5927-rowless-verify.yml', '.github/rowless-*.py']
 permissions:
   contents: write
   actions: read
@@ -33,9 +33,11 @@ jobs:
           set -euo pipefail
           cp .github/rowless-fix.py "$RUNNER_TEMP/repair.py"
           cp .github/rowless-followup.py "$RUNNER_TEMP/followup.py"
+          cp .github/rowless-sink.py "$RUNNER_TEMP/sink.py"
           git checkout --detach 73fce0926f0248bda0558f42dec8008c20b61e58
           python3 "$RUNNER_TEMP/repair.py"
           python3 "$RUNNER_TEMP/followup.py"
+          python3 "$RUNNER_TEMP/sink.py"
           cargo fmt --all
           git add src/services/discord scripts/audit_maintainability_giant_baseline.toml scripts/lib_test_inventory_manifest.txt
           git diff --exit-code
@@ -51,7 +53,7 @@ jobs:
           python3 - <<'PY'
           import os,json,base64,subprocess,pathlib,hashlib
           paths=subprocess.check_output(['git','diff','--cached','--name-only'],text=True).splitlines()
-          assert len(paths)==13, paths
+          assert len(paths)==16, paths
           entries=[]
           for p in paths:
               assert p.startswith(('src/services/discord/','scripts/')),p
@@ -73,6 +75,12 @@ jobs:
           set -euo pipefail
           cargo test --lib native_collector_tests -- --nocapture > "$RUNNER_TEMP/native.log" 2>&1 || { tail -160 "$RUNNER_TEMP/native.log"; exit 1; }
           grep -F '7 passed; 0 failed' "$RUNNER_TEMP/native.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr5927-native-immediate
+          path: ${{ runner.temp }}/native.log
+          retention-days: 2
       - name: Original sweep regressions
         if: ${{ !cancelled() }}
         run: |
