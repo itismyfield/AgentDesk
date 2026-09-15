@@ -629,6 +629,11 @@ fn native_collector_case(test_name: &str, mode: u8) {
             panic!("terminal plan lost obligation")
         };
         assert!(plan.session_bound_relay_owns_terminal_delivery);
+        if rowless {
+            cancel_handoff::interrupted_adoption_tests::assert_committed_preflight_reaches_settlement(
+                &ctx, &mut turn, &buffer, offset,
+            ).await;
+        }
         terminal_send::committed_placeholder_cleanup::reconcile_confirmed_preview(
             terminal_send::committed_placeholder_cleanup::ConfirmedPreviewCleanup {
                 http: &rec.http,

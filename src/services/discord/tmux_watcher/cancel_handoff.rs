@@ -406,3 +406,27 @@ pub(super) mod interrupted_adoption_tests;
 
 #[path = "cancel_handoff/completion.rs"]
 pub(super) mod completion;
+
+/// A retained original episode still owes preview/actor settlement after the
+/// sink commits. Do not let the rowless watermark shortcut bypass that epilogue.
+/// This only preserves candidacy; existing sink ACK/receipt and lease gates run.
+pub(super) fn has_recorded_completion(
+    context: &TerminalPreflightContext<'_>,
+    start: u64,
+    end: u64,
+) -> bool {
+    recorded_episode(
+        context.shared,
+        context.watcher_provider,
+        context.channel_id,
+        context.tmux_session_name,
+    )
+    .is_some_and(|episode| {
+        episode.original.turn_start_offset == Some(start)
+            && end > start
+            && episode
+                .source
+                .metadata()
+                .is_ok_and(|meta| meta.len() >= end)
+    })
+}

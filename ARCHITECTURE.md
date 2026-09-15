@@ -991,6 +991,9 @@ src/
 │   │   │   ├── ops.rs
 │   │   │   └── unicode_units_tests.rs
 │   │   ├── tmux_watcher/
+│   │   │   ├── cancel_handoff/
+│   │   │   │   ├── completion.rs
+│   │   │   │   └── interrupted_adoption_tests.rs
 │   │   │   ├── jsonl_rotation/
 │   │   │   │   ├── backstop.rs
 │   │   │   │   ├── backstop_tests.rs
@@ -1006,6 +1009,9 @@ src/
 │   │   │   │   └── continuation_marker_tests.rs
 │   │   │   ├── turn_identity/
 │   │   │   │   └── soft_terminal_authority.rs
+│   │   │   ├── turn_stream_collector/
+│   │   │   │   └── state.rs
+│   │   │   ├── cancel_handoff.rs
 │   │   │   ├── commit_decisions.rs
 │   │   │   ├── committed_placeholder_cleanup.rs
 │   │   │   ├── completion_gate.rs

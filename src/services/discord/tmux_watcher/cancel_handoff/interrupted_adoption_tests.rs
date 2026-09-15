@@ -150,3 +150,70 @@ pub(in crate::services::discord) fn remove_projection_without_granting_delivery(
     std::fs::remove_file(path).unwrap();
     assert_eq!(ctx.shared.committed_relay_offset(ctx.channel_id), frontier);
 }
+
+/// Exercise the real outer-watcher preflight after the sink has already committed.
+/// Without the exemption this returned Continue and stranded the original actor.
+pub(in crate::services::discord) async fn assert_committed_preflight_reaches_settlement(
+    ctx: &TurnStreamCollectorContext,
+    turn: &mut CollectedTurnStream,
+    buffer: &String,
+    offset: u64,
+) {
+    let context = TerminalPreflightContext {
+        http: &ctx.http,
+        shared: &ctx.shared,
+        channel_id: ctx.channel_id,
+        watcher_provider: &ctx.watcher_provider,
+        tmux_session_name: &ctx.tmux_session_name,
+        output_path: &ctx.output_path,
+    };
+    let start = turn.turn_data_start_offset;
+    let end = terminal_event_consumed_offset(offset, buffer);
+    assert!(ctx.shared.committed_relay_offset(ctx.channel_id) >= end);
+    assert!(has_recorded_completion(&context, start, end));
+    assert!(!has_recorded_completion(&context, start + 1, end));
+    let mut last_offset = None;
+    let mut last_generation = None;
+    let result = run_terminal_preflight_suppression(
+        &context,
+        TerminalPreflightSuppressionLocals {
+            current_offset: offset,
+            all_data: buffer,
+            data_start_offset: start,
+            turn_data_start_offset: start,
+            has_assistant_response: true,
+            has_current_response: true,
+            inflight_missing_before_relay: true,
+            inflight_silent_turn: false,
+            recent_stop_for_output: None,
+            placeholder_msg_id: turn.placeholder_msg_id,
+            placeholder_from_restored_inflight: turn.placeholder_from_restored_inflight,
+            last_edit_text: turn.last_edit_text.clone(),
+            last_relayed_offset: None,
+            last_observed_generation_mtime_ns: None,
+            monitor_auto_turn_claimed: turn.monitor_auto_turn_claimed,
+            monitor_auto_turn_finished: turn.monitor_auto_turn_finished,
+            monitor_auto_turn_synthetic_msg_id: turn.monitor_auto_turn_synthetic_msg_id,
+            monitor_auto_turn_ledger_generation: turn.monitor_auto_turn_ledger_generation,
+        },
+        &mut TerminalPreflightSuppressionState {
+            placeholder_from_restored_inflight: &mut turn.placeholder_from_restored_inflight,
+            last_edit_text: &mut turn.last_edit_text,
+            last_relayed_offset: &mut last_offset,
+            last_observed_generation_mtime_ns: &mut last_generation,
+            monitor_auto_turn_claimed: &mut turn.monitor_auto_turn_claimed,
+            monitor_auto_turn_finished: &mut turn.monitor_auto_turn_finished,
+            monitor_auto_turn_synthetic_msg_id: &mut turn.monitor_auto_turn_synthetic_msg_id,
+            monitor_auto_turn_ledger_generation: &mut turn.monitor_auto_turn_ledger_generation,
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, TerminalPreflightOutcome::Proceed(_)),
+        "confirmed cancelled episode must reach the existing settlement epilogue"
+    );
+    assert!(
+        ctx.shared.mailbox(ctx.channel_id).has_active_turn().await,
+        "preflight alone must not release the actor"
+    );
+}

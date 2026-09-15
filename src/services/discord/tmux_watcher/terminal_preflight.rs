@@ -326,18 +326,9 @@ pub(super) async fn run_terminal_preflight_suppression(
         return TerminalPreflightOutcome::ContinueWatcherLoop;
     }
 
-    // #3017 single output-offset authority — cross-actor relay dedup for
-    // the inflight-less wake / idle-background / monitor turn (E-13). When
-    // there is NO inflight, the idle-JSONL relay
-    // (`session_relay_sink::run_idle_jsonl_relay_loop`) reads the SAME
-    // JSONL and can relay this exact range. If it already committed the
-    // authoritative relayed offset at/past this turn's END, that range was
-    // already delivered to Discord — so the watcher must SKIP to avoid the
-    // duplicate `[E2E:E13:WAKE]`. This is deliberately gated on
-    // `inflight_missing_before_relay`: a normal Discord-origin turn
-    // (inflight present) keeps the watcher as the sole relay owner and is
-    // NEVER suppressed by the shared watermark (the long-standing
-    // invariant), so this only de-duplicates the un-owned wake/idle paths.
+    // #3017: rowless idle relays may suppress an already delivered range, but a
+    // retained cancellation episode must still reach preview and actor settlement.
+    // This shortcut is not the transport dedup gate; that stays in the relay plan.
     if inflight_missing_before_relay
         && has_current_response
         && current_offset > turn_data_start_offset
@@ -392,7 +383,14 @@ pub(super) async fn run_terminal_preflight_suppression(
             &tmux_session_name,
             output_eof_for_no_inflight_dedup,
         );
-        if committed >= turn_consumed_offset && turn_consumed_offset > turn_data_start_offset {
+        if committed >= turn_consumed_offset
+            && turn_consumed_offset > turn_data_start_offset
+            && !cancel_handoff::has_recorded_completion(
+                context,
+                turn_data_start_offset,
+                turn_consumed_offset,
+            )
+        {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::info!(
                 "  [{ts}] 👁 watcher: suppressed no-inflight terminal relay for channel {} — range {}..{} already committed by another relay actor (offset authority, committed_end={})",
