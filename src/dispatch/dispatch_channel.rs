@@ -70,6 +70,7 @@ pub(super) fn provider_from_channel_suffix(channel: &str) -> Option<&'static str
         ProviderKind::OpenCode => Some("opencode"),
         ProviderKind::Qwen => Some("qwen"),
         ProviderKind::Grok => Some("grok"),
+        ProviderKind::Antigravity => Some("antigravity"),
         ProviderKind::Unsupported(_) => None,
     })
 }

@@ -97,6 +97,104 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             }),
         ),
         ep(
+            "GET",
+            "/api/provider-auth-profiles",
+            "providers",
+            "List system-default and extra CLI auth-profile accounts per provider. Secrets are omitted; usage bars come from rate_limit_cache keyed by profile_id.",
+        )
+        .with_example(
+            json!(null),
+            json!({
+                "providers": [{
+                    "id": "codex",
+                    "default_home": "~/.codex",
+                    "primary_profile_id": "codex-alt",
+                    "accounts": [{
+                        "id": "default",
+                        "home": "~/.codex",
+                        "bound_agents": ["coder"],
+                        "usage": {"buckets": [], "stale": false, "unsupported": false, "reason": null}
+                    }]
+                }]
+            }),
+        ),
+        ep(
+            "PUT",
+            "/api/provider-auth-profiles/{provider}/primary",
+            "providers",
+            "Select the provider-wide primary profile used when a channel and agent have no explicit auth_profile. Use default to restore the system home.",
+        )
+        .with_params([
+            ("provider", path_param("Provider id")),
+            ("profile_id", body_param("string", false, "Named account id, default, or null for system default")),
+        ])
+        .with_example(
+            json!({"path": {"provider": "codex"}, "body": {"profile_id": "codex-alt"}}),
+            json!({"ok": true, "provider": "codex", "primary_profile_id": "codex-alt"}),
+        ),
+        ep(
+            "POST",
+            "/api/provider-auth-profiles/{provider}/login-start",
+            "providers",
+            "Create an empty isolated extra-account home and spawn vendor login in tmux. Never copies the global home.",
+        )
+        .with_params([
+            ("provider", path_param("Provider id (claude, codex, grok, qwen, opencode)")),
+            ("profile_id", body_param("string", false, "Optional catalog id; allocated when omitted")),
+        ])
+        .with_example(
+            json!({"path": {"provider": "codex"}, "body": {}}),
+            json!({
+                "profile_id": "codex-alt",
+                "home": "/Users/me/.adk/profiles/codex/codex-alt",
+                "tmux_session": "adk-login-codex-codex-alt",
+                "attach": "tmux attach -t adk-login-codex-codex-alt"
+            }),
+        ),
+        ep(
+            "POST",
+            "/api/provider-auth-profiles/{provider}/login-complete",
+            "providers",
+            "Detect credentials in the extra-account home and append the catalog. Fail-closed if creds are still missing.",
+        )
+        .with_params([
+            ("provider", path_param("Provider id")),
+            ("profile_id", body_param("string", true, "Catalog id returned by login-start")),
+            ("home", body_param("string", false, "Optional overlay home; derived from the catalog id when omitted")),
+        ])
+        .with_example(
+            json!({"path": {"provider": "codex"}, "body": {"profile_id": "codex-alt"}}),
+            json!({"ok": true, "profile_id": "codex-alt", "home": "~/.adk/profiles/codex/codex-alt"}),
+        ),
+        ep(
+            "DELETE",
+            "/api/provider-auth-profiles/{provider}/{profile_id}",
+            "providers",
+            "Unlink an unused extra account from the catalog. The managed credential home is retained and can be connected again later.",
+        )
+        .with_params([
+            ("provider", path_param("Provider id")),
+            ("profile_id", path_param("Named extra account id")),
+        ])
+        .with_example(
+            json!({"path": {"provider": "codex", "profile_id": "codex-alt"}}),
+            json!({"ok": true, "provider": "codex", "profile_id": "codex-alt", "credentials_retained": true}),
+        ),
+        ep(
+            "PATCH",
+            "/api/channels/{id}",
+            "discord",
+            "Set or clear a channel binding auth_profile in org.yaml. Null clears to the implicit default.",
+        )
+        .with_params([
+            ("id", path_param("Discord channel id")),
+            ("auth_profile", body_param("string", true, "Catalog id, empty/default, or null to clear")),
+        ])
+        .with_example(
+            json!({"path": {"id": "1495040912361914398"}, "body": {"auth_profile": "work"}}),
+            json!({"ok": true, "channel_id": "1495040912361914398", "auth_profile": "work"}),
+        ),
+        ep(
             "POST",
             "/api/claude-accounts/switch",
             "claude-accounts",

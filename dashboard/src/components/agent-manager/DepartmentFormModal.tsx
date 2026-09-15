@@ -312,10 +312,11 @@ export default function DepartmentFormModal({
             <div className="space-y-4">
               <div className="flex items-start gap-3">
                 <div>
-                  <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                  <label htmlFor="department-icon" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                     {tr("아이콘", "Icon")}
                   </label>
                   <EmojiPicker
+                    id="department-icon"
                     value={form.icon}
                     onChange={(emoji) => setValue("icon", emoji, { shouldDirty: true, shouldValidate: true })}
                     aria-label={
@@ -353,9 +354,9 @@ export default function DepartmentFormModal({
               </div>
 
               <div role="radiogroup" aria-labelledby="dept-theme-color-label">
-                <label id="dept-theme-color-label" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                <div id="dept-theme-color-label" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                   {tr("테마 색상", "Theme Color")}
-                </label>
+                </div>
                 <div className="flex gap-2 flex-wrap">
                   {DEPT_COLORS.map((c, index) => (
                     <button

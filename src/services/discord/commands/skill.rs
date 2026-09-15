@@ -98,6 +98,9 @@ pub(in crate::services::discord) fn build_provider_skill_prompt(
                 ))
             }
         }
+        ProviderKind::Antigravity => {
+            Err("Antigravity native skill invocation is not supported.".to_string())
+        }
         ProviderKind::Unsupported(name) => Err(format!(
             "Provider '{}' is not installed. This skill cannot run.",
             name

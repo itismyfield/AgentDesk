@@ -1182,7 +1182,6 @@ async fn load_card_pr_number_pg(pool: &PgPool, card_id: &str) -> Option<i64> {
 ///
 /// Returns `(parent_dispatch_id, chain_depth)` after validating that the
 /// referenced parent dispatch exists and belongs to the same card.
-#[allow(dead_code)] // Wired into create_dispatch_core_internal under #850.
 pub(super) async fn resolve_parent_dispatch_context(
     pool: &PgPool,
     card_id: &str,

@@ -1096,7 +1096,7 @@ fn parse_ratelimit_window_start_data(data: &str) -> Option<DateTime<Utc>> {
 }
 
 pub async fn ratelimit_window_start_pg(pool: &sqlx::PgPool) -> Option<DateTime<Utc>> {
-    let row = sqlx::query("SELECT data FROM rate_limit_cache WHERE provider = 'claude' LIMIT 1")
+    let row = sqlx::query("SELECT data FROM rate_limit_cache WHERE provider = 'claude' AND profile_id = 'default' LIMIT 1")
         .fetch_optional(pool)
         .await
         .ok()??;

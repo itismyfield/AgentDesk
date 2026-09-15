@@ -10,7 +10,9 @@ use super::settings::{
     MemoryConfigOverride, PeerAgentInfo, RegisteredChannelBinding, RoleBinding,
     resolve_memory_settings,
 };
+use crate::services::agent_identity::{self, identity_from_parts, identity_label};
 use crate::services::provider::ProviderKind;
+use crate::services::provider_auth_profile::{ProviderAuthProfileDef, validate_catalog};
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
 // ─── YAML Schema Types ──────────────────────────────────────────────────────
@@ -42,6 +44,10 @@ pub(super) struct OrgSchema {
     pub channels: Option<ChannelsConfig>,
     pub meeting: Option<MeetingDef>,
     pub suffix_map: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub provider_auth_profiles: Option<HashMap<String, ProviderAuthProfileDef>>,
+    #[serde(default)]
+    pub provider_auth_primary_profiles: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +65,8 @@ pub(super) struct AgentDef {
     pub workspace: Option<String>,
     pub peer_agents: Option<bool>,
     #[serde(default)]
+    pub auth_profile: Option<String>,
+    #[serde(default)]
     pub memory: Option<MemoryConfigOverride>,
 }
 
@@ -75,6 +83,8 @@ pub(super) struct ChannelBinding {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub peer_agents: Option<bool>,
+    #[serde(default)]
+    pub auth_profile: Option<String>,
     #[serde(default)]
     pub memory: Option<MemoryConfigOverride>,
 }
@@ -115,9 +125,316 @@ pub(super) struct SummaryRuleDef {
 // ─── Loading ────────────────────────────────────────────────────────────────
 
 fn load_org_schema() -> Option<OrgSchema> {
-    let path = org_schema_path()?;
-    let content = fs::read_to_string(path).ok()?;
-    serde_yaml::from_str(&content).ok()
+    match load_org_schema_for_auth() {
+        Ok(schema) => schema,
+        Err(error) => {
+            tracing::error!("{error}");
+            None
+        }
+    }
+}
+
+fn load_org_schema_for_auth() -> Result<Option<OrgSchema>, String> {
+    let Some(path) = org_schema_path() else {
+        return Ok(None);
+    };
+    match fs::read_to_string(&path) {
+        Ok(content) => parse_org_schema(&content)
+            .map(Some)
+            .map_err(|error| format!("org schema rejected: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("read org schema '{}': {error}", path.display())),
+    }
+}
+
+pub(crate) fn provider_auth_catalog()
+-> std::collections::HashMap<String, crate::services::provider_auth_profile::ProviderAuthProfileDef>
+{
+    load_org_schema()
+        .and_then(|schema| schema.provider_auth_profiles)
+        .unwrap_or_default()
+}
+
+pub(crate) fn provider_auth_primary_profiles() -> std::collections::HashMap<String, String> {
+    load_org_schema()
+        .and_then(|schema| schema.provider_auth_primary_profiles)
+        .unwrap_or_default()
+}
+
+pub(crate) fn parse_org_schema(content: &str) -> Result<OrgSchema, String> {
+    let schema: OrgSchema =
+        serde_yaml::from_str(content).map_err(|error| format!("org schema yaml: {error}"))?;
+    if let Some(catalog) = schema.provider_auth_profiles.as_ref() {
+        validate_catalog(catalog).map_err(|error| error.to_string())?;
+    }
+    if let Some(primary) = schema.provider_auth_primary_profiles.as_ref() {
+        let catalog = schema
+            .provider_auth_profiles
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+        for (provider, profile_id) in primary {
+            let kind = ProviderKind::from_str(provider)
+                .ok_or_else(|| format!("unknown primary profile provider '{provider}'"))?;
+            if profile_id == "default" {
+                continue;
+            }
+            let profile = catalog.get(profile_id).ok_or_else(|| {
+                format!(
+                    "provider primary '{provider}' references unknown auth_profile '{profile_id}'"
+                )
+            })?;
+            if !profile.provider.eq_ignore_ascii_case(kind.as_str()) {
+                return Err(format!(
+                    "provider primary '{provider}' auth_profile '{profile_id}' belongs to '{}'",
+                    profile.provider
+                ));
+            }
+        }
+    }
+    Ok(schema)
+}
+
+fn configured_auth_profile<'a>(
+    channel: Option<&'a str>,
+    agent: Option<&'a str>,
+) -> Option<&'a str> {
+    channel
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| agent.map(str::trim).filter(|value| !value.is_empty()))
+}
+
+fn provider_primary_profile(schema: &OrgSchema, provider: Option<&str>) -> String {
+    provider
+        .and_then(|provider| {
+            let provider = provider.to_ascii_lowercase();
+            schema
+                .provider_auth_primary_profiles
+                .as_ref()
+                .and_then(|profiles| profiles.get(&provider))
+        })
+        .cloned()
+        .unwrap_or_else(|| "default".to_string())
+}
+
+pub(crate) fn spawn_auth_overlay(
+    provider: ProviderKind,
+    channel_id: Option<u64>,
+) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
+    let context = crate::services::platform::active_provider_context(provider.as_str());
+    let channel_id = channel_id.or_else(|| {
+        context
+            .as_ref()
+            .and_then(|context| context.channel_id.as_deref())
+            .and_then(|id| id.parse().ok())
+    });
+    let agent_id = context
+        .as_ref()
+        .and_then(|context| context.agent_id.clone())
+        .or_else(|| {
+            channel_id.and_then(|id| {
+                resolve_role_binding(ChannelId::new(id), None).map(|binding| binding.role_id)
+            })
+        });
+    spawn_auth_overlay_for_context(provider, channel_id, agent_id.as_deref())
+}
+
+fn spawn_auth_overlay_for_context(
+    provider: ProviderKind,
+    channel_id: Option<u64>,
+    agent_id: Option<&str>,
+) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
+    use crate::services::provider_auth_profile::resolve;
+
+    let schema = load_org_schema_for_auth()?;
+    let catalog = schema
+        .as_ref()
+        .and_then(|schema| schema.provider_auth_profiles.clone())
+        .unwrap_or_default();
+    let channel_profile = channel_id.and_then(|id| {
+        schema.as_ref().and_then(|schema| {
+            resolve_channel_binding(schema, ChannelId::new(id), None)
+                .and_then(|(binding, _)| binding.auth_profile.clone())
+        })
+    });
+    let agent_profile = agent_id.and_then(|agent_id| {
+        schema.as_ref().and_then(|schema| {
+            schema
+                .agents
+                .get(agent_id)
+                .and_then(|agent| agent.auth_profile.clone())
+        })
+    });
+    let profile = configured_auth_profile(channel_profile.as_deref(), agent_profile.as_deref())
+        .map(str::to_string)
+        .or_else(|| {
+            schema
+                .as_ref()
+                .map(|schema| provider_primary_profile(schema, Some(provider.as_str())))
+        });
+    let overlay = resolve(provider.clone(), profile.as_deref(), None, &catalog)
+        .map_err(|error| error.to_string())?;
+    if let Some(binding) = channel_id.and_then(|id| resolve_role_binding(ChannelId::new(id), None))
+    {
+        if let Some(bound_provider) = binding.provider.clone() {
+            let identity = identity_from_parts(
+                &binding.role_id,
+                &binding.role_id,
+                bound_provider,
+                binding.model.clone(),
+                Some(binding.auth_profile.as_str()),
+            );
+            tracing::info!(
+                identity = %identity_label(&identity),
+                profile_id = %overlay.profile_id,
+                home = overlay.home.as_ref().map(|path| path.display().to_string()),
+                "provider spawn identity"
+            );
+        }
+    }
+    Ok(overlay)
+}
+
+pub(crate) fn overlay_from_tmux_session(
+    provider: ProviderKind,
+    session_name: &str,
+) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
+    let context = crate::services::platform::active_provider_context(provider.as_str());
+    let channel_id = context
+        .as_ref()
+        .and_then(|context| context.channel_id.as_deref())
+        .and_then(|channel_id| channel_id.parse().ok())
+        .or_else(|| {
+            crate::services::provider::parse_provider_and_channel_from_tmux_name(session_name)
+                .and_then(|(_, channel)| channel.parse().ok())
+        });
+    spawn_auth_overlay_for_context(
+        provider,
+        channel_id,
+        context
+            .as_ref()
+            .and_then(|context| context.agent_id.as_deref()),
+    )
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProfileBinding {
+    pub agent_id: String,
+    pub provider: String,
+    pub profile_id: String,
+    /// `None` is an agent-level effective profile. `Some` identifies a channel
+    /// whose effective profile differs independently from the agent setting.
+    pub channel_id: Option<String>,
+    /// Whether this effective profile was explicitly pinned at the agent or
+    /// channel level rather than inherited from the provider primary.
+    pub is_explicit: bool,
+}
+
+pub(crate) fn list_profile_bindings() -> Vec<ProfileBinding> {
+    let Some(schema) = load_org_schema() else {
+        return Vec::new();
+    };
+    list_profile_bindings_from_schema(&schema)
+}
+
+fn list_profile_bindings_from_schema(schema: &OrgSchema) -> Vec<ProfileBinding> {
+    let mut bindings = Vec::new();
+    for (agent_id, def) in &schema.agents {
+        let provider = def
+            .provider
+            .as_deref()
+            .and_then(ProviderKind::from_str)
+            .map(|kind| kind.as_str().to_string())
+            .unwrap_or_else(|| {
+                def.provider
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
+        let explicit_profile = configured_auth_profile(None, def.auth_profile.as_deref());
+        let profile_id = explicit_profile
+            .map(str::to_string)
+            .unwrap_or_else(|| provider_primary_profile(&schema, def.provider.as_deref()));
+        bindings.push(ProfileBinding {
+            agent_id: agent_id.clone(),
+            provider,
+            profile_id,
+            channel_id: None,
+            is_explicit: explicit_profile.is_some(),
+        });
+    }
+    if let Some(channels) = schema
+        .channels
+        .as_ref()
+        .and_then(|channels| channels.by_id.as_ref())
+    {
+        for (channel_id, binding) in channels {
+            let agent_def = schema.agents.get(&binding.agent);
+            let provider = binding
+                .provider
+                .as_deref()
+                .or(agent_def.and_then(|def| def.provider.as_deref()))
+                .and_then(ProviderKind::from_str)
+                .map(|kind| kind.as_str().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let explicit_profile = configured_auth_profile(
+                binding.auth_profile.as_deref(),
+                agent_def.and_then(|def| def.auth_profile.as_deref()),
+            );
+            let profile_id = explicit_profile.map(str::to_string).unwrap_or_else(|| {
+                provider_primary_profile(
+                    &schema,
+                    binding
+                        .provider
+                        .as_deref()
+                        .or(agent_def.and_then(|def| def.provider.as_deref())),
+                )
+            });
+            bindings.push(ProfileBinding {
+                agent_id: binding.agent.clone(),
+                provider,
+                profile_id,
+                channel_id: Some(channel_id.clone()),
+                is_explicit: explicit_profile.is_some(),
+            });
+        }
+    }
+    bindings
+}
+
+pub(crate) fn api_agent_identity(
+    agent_id: &str,
+    db_provider: Option<&str>,
+    db_name: Option<&str>,
+) -> serde_json::Value {
+    let schema = load_org_schema();
+    let def = schema
+        .as_ref()
+        .and_then(|schema| schema.agents.get(agent_id));
+    let provider = def
+        .and_then(|def| def.provider.as_deref())
+        .or(db_provider)
+        .and_then(ProviderKind::from_str)
+        .unwrap_or_else(|| ProviderKind::Unsupported(db_provider.unwrap_or("unknown").to_string()));
+    let effective_profile =
+        configured_auth_profile(None, def.and_then(|def| def.auth_profile.as_deref()))
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                schema
+                    .as_ref()
+                    .map(|schema| provider_primary_profile(schema, Some(provider.as_str())))
+                    .unwrap_or_else(|| "default".to_string())
+            });
+    let identity = identity_from_parts(
+        agent_id,
+        def.map(|def| def.display_name.clone())
+            .or_else(|| db_name.map(str::to_string))
+            .unwrap_or_else(|| agent_id.to_string()),
+        provider,
+        def.and_then(|def| def.model.clone()),
+        Some(&effective_profile),
+    );
+    agent_identity::identity_json(&identity)
 }
 
 pub(super) fn org_schema_exists() -> bool {
@@ -202,6 +519,15 @@ pub(super) fn resolve_role_binding(
         })
         .unwrap_or_default();
 
+    let auth_profile = configured_auth_profile(
+        ch_binding.auth_profile.as_deref(),
+        agent_def.auth_profile.as_deref(),
+    )
+    .map(str::to_string)
+    .unwrap_or_else(|| {
+        provider_primary_profile(&schema, provider.as_ref().map(ProviderKind::as_str))
+    });
+
     Some(RoleBinding {
         role_id: ch_binding.agent.clone(),
         prompt_file,
@@ -210,6 +536,7 @@ pub(super) fn resolve_role_binding(
         reasoning_effort: None,
         peer_agents_enabled,
         quality_feedback_injection_enabled: true,
+        auth_profile,
         memory,
     })
 }
@@ -256,10 +583,24 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
 
     let mut result = Vec::new();
     for (role_id, def) in &schema.agents {
+        let provider = def
+            .provider
+            .as_deref()
+            .and_then(ProviderKind::from_str)
+            .unwrap_or(ProviderKind::Unsupported("unknown".into()));
+        let identity = identity_from_parts(
+            role_id,
+            def.display_name.clone(),
+            provider.clone(),
+            def.model.clone(),
+            def.auth_profile.as_deref(),
+        );
         result.push(PeerAgentInfo {
             role_id: role_id.clone(),
             display_name: def.display_name.clone(),
             keywords: def.keywords.clone().unwrap_or_default(),
+            provider: Some(provider),
+            identity_label: identity_label(&identity),
         });
     }
 
@@ -399,4 +740,110 @@ pub(super) fn lookup_suffix_provider(channel_name: &str) -> Option<ProviderKind>
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::agent_identity::identity_label;
+
+    #[test]
+    fn test_010_peer_identity_label_uses_formatter() {
+        let yaml = r#"
+version: 1
+agents:
+  coder:
+    display_name: Coder
+    provider: codex
+    model: gpt-5.6-terra
+    keywords: [code]
+"#;
+        let schema = parse_org_schema(yaml).expect("schema");
+        let def = schema.agents.get("coder").expect("coder");
+        let provider = ProviderKind::from_str(def.provider.as_deref().unwrap()).unwrap();
+        let identity = identity_from_parts(
+            "coder",
+            def.display_name.clone(),
+            provider,
+            def.model.clone(),
+            def.auth_profile.as_deref(),
+        );
+        assert_eq!(identity_label(&identity), "coder · codex terra · default");
+        let json = agent_identity::identity_json(&identity);
+        assert_eq!(json["label"], "coder · codex terra · default");
+        assert!(json.get("token").is_none());
+    }
+
+    #[test]
+    fn unknown_catalog_id_fails_org_load() {
+        let yaml = r#"
+version: 1
+provider_auth_profiles:
+  default:
+    provider: codex
+    home: ~/.adk/profiles/codex/default
+agents:
+  coder:
+    display_name: Coder
+    provider: codex
+"#;
+        let err = parse_org_schema(yaml).unwrap_err();
+        assert!(err.contains("reserved") || err.contains("default"));
+    }
+
+    #[test]
+    fn primary_profile_is_inherited_until_agent_or_channel_explicitly_overrides_it() {
+        let yaml = r#"
+version: 1
+provider_auth_profiles:
+  codex-work:
+    provider: codex
+    home: ~/.adk/profiles/codex/codex-work
+  codex-personal:
+    provider: codex
+    home: ~/.adk/profiles/codex/codex-personal
+provider_auth_primary_profiles:
+  codex: codex-work
+agents:
+  coder:
+    display_name: Coder
+    provider: codex
+channels:
+  by_id:
+    "123":
+      agent: coder
+      auth_profile: codex-personal
+"#;
+        let schema = parse_org_schema(yaml).expect("schema");
+        let bindings = list_profile_bindings_from_schema(&schema);
+        let agent = bindings
+            .iter()
+            .find(|binding| binding.channel_id.is_none())
+            .expect("agent binding");
+        assert_eq!(agent.profile_id, "codex-work");
+        assert!(!agent.is_explicit);
+
+        let channel = bindings
+            .iter()
+            .find(|binding| binding.channel_id.as_deref() == Some("123"))
+            .expect("channel binding");
+        assert_eq!(channel.profile_id, "codex-personal");
+        assert!(channel.is_explicit);
+    }
+
+    #[test]
+    fn provider_primary_rejects_profile_from_another_provider() {
+        let yaml = r#"
+version: 1
+provider_auth_profiles:
+  claude-work:
+    provider: claude
+    home: ~/.adk/profiles/claude/claude-work
+provider_auth_primary_profiles:
+  codex: claude-work
+agents: {}
+"#;
+        let error = parse_org_schema(yaml).expect_err("provider mismatch must fail");
+        assert!(error.contains("belongs to"));
+    }
 }

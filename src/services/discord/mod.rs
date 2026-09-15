@@ -39,7 +39,7 @@ mod metrics;
 mod model_catalog;
 mod model_picker_interaction;
 pub(crate) mod monitoring_status;
-mod org_schema;
+pub(crate) mod org_schema;
 pub(crate) mod org_writer;
 pub(crate) mod outbound;
 mod placeholder_cleanup;

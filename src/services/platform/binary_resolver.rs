@@ -812,7 +812,7 @@ pub fn with_provider_execution_context<T>(
     run()
 }
 
-fn active_provider_context(
+pub(crate) fn active_provider_context(
     provider: &str,
 ) -> Option<crate::services::provider_cli::ProviderExecutionContext> {
     ACTIVE_PROVIDER_CONTEXTS.with(|contexts| {

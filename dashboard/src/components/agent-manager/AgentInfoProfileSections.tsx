@@ -28,6 +28,10 @@ interface AgentInfoProfileSectionsProps {
   providerNotice?: string | null;
   savingProvider: boolean;
   onSaveProvider: (nextProvider: string) => void;
+  selectedAuthProfile: string;
+  authProfileOptions: string[];
+  savingAuthProfile: boolean;
+  onSaveAuthProfile: (profileId: string) => void;
   loadingOffices: boolean;
   officeMemberships: AgentOfficeMembership[];
   savingOfficeIds: Record<string, boolean>;
@@ -55,6 +59,10 @@ export function AgentInfoProfileSections({
   providerNotice,
   savingProvider,
   onSaveProvider,
+  selectedAuthProfile,
+  authProfileOptions,
+  savingAuthProfile,
+  onSaveAuthProfile,
   loadingOffices,
   officeMemberships,
   savingOfficeIds,
@@ -91,6 +99,33 @@ export function AgentInfoProfileSections({
           </select>
           <span className="self-start text-xs sm:shrink-0" style={{ color: "var(--th-text-muted)" }}>
             {savingDept ? tr("저장 중...", "Saving...") : null}
+          </span>
+        </div>
+      </SurfaceSubsection>
+
+      <SurfaceSubsection title={tr("Provider 계정", "Provider Account")} className="min-w-0">
+        <div className="min-w-0 flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
+          <select
+            value={selectedAuthProfile}
+            onChange={(e) => onSaveAuthProfile(e.target.value)}
+            disabled={savingAuthProfile}
+            className="min-w-0 w-full rounded-xl border px-3 py-2 text-sm outline-none sm:flex-1"
+            style={{
+              background: "var(--th-input-bg)",
+              borderColor: "var(--th-input-border)",
+              color: "var(--th-text-primary)",
+            }}
+          >
+            {authProfileOptions.map((profileId) => (
+              <option key={profileId} value={profileId}>
+                {profileId === "__primary__"
+                  ? tr("Provider 기본 계정", "Provider primary account")
+                  : profileId === "default" ? tr("시스템 기본", "System default") : profileId}
+              </option>
+            ))}
+          </select>
+          <span className="self-start text-xs sm:shrink-0" style={{ color: "var(--th-text-muted)" }}>
+            {savingAuthProfile ? tr("저장 중...", "Saving...") : null}
           </span>
         </div>
       </SurfaceSubsection>

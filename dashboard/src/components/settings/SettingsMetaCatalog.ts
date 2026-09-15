@@ -439,14 +439,35 @@ export function useSettingsMetaCatalog({
     return metas;
   }, [voiceAliasConflict, voiceDraft]);
 
+  const providersMetas = useMemo<SettingRowMeta[]>(
+    () => [
+      {
+        key: "providers.extra_accounts",
+        group: "providers",
+        source: "computed",
+        editable: false,
+        restartRequired: false,
+        effectiveValue: "",
+        flags: ["read_only"],
+        labelKo: "프로바이더 extra 계정",
+        labelEn: "Provider extra accounts",
+        hintKo: "시스템 기본 홈은 유지하고 extra 계정은 빈 격리 홈에 누적합니다.",
+        hintEn: "Keep the system default home and accumulate extra accounts in empty isolated homes.",
+        inputKind: "readonly",
+      },
+    ],
+    [],
+  );
+
   const allMetas = useMemo<SettingRowMeta[]>(
-    () => [...pipelineMetas, ...runtimeMetas, ...voiceMetas, ...onboardingMetas, ...generalMetas],
-    [pipelineMetas, runtimeMetas, voiceMetas, onboardingMetas, generalMetas],
+    () => [...pipelineMetas, ...runtimeMetas, ...providersMetas, ...voiceMetas, ...onboardingMetas, ...generalMetas],
+    [pipelineMetas, runtimeMetas, providersMetas, voiceMetas, onboardingMetas, generalMetas],
   );
   const groupCounts = useMemo(() => {
     const counts: Record<string, number> = {
       pipeline: 0,
       runtime: 0,
+      providers: 0,
       connectors: 0,
       voice: 0,
       onboarding: 0,

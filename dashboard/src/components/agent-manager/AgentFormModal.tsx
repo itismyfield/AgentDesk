@@ -5,6 +5,7 @@ import { z } from "zod";
 import { catalogLabel, useProviderCatalog } from "../../api/providers";
 import type { Department } from "../../types";
 import { localeName, useI18n } from "../../i18n";
+import { ICON_SPRITE_POOL } from "./constants";
 import EmojiPicker from "./EmojiPicker";
 import AgentPromptEditor from "./AgentPromptEditor";
 import type { FormData } from "./types";
@@ -145,64 +146,64 @@ export default function AgentFormModal({
             <div className="space-y-4">
             {/* ── 스프라이트 얼굴 미리보기 + 위/아래 변경 ── */}
             <div
-              className="flex items-center gap-3 rounded focus:outline-none focus:ring-2 focus:ring-[var(--th-accent-primary)] focus:ring-offset-2 focus:ring-offset-[var(--th-bg-surface)]"
-              role="spinbutton"
+              className="flex items-center gap-3 rounded"
+              role="group"
               aria-label={tr("스프라이트 번호", "Sprite Number")}
-              aria-valuenow={spriteNum || 0}
-              aria-valuemin={0}
-              aria-valuetext={spriteNum ? t({ ko: `선택된 스프라이트: ${spriteNum}`, en: `Selected sprite: ${spriteNum}` }) : tr("선택 안됨", "Not selected")}
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.currentTarget !== e.target) {
-                  return;
-                }
-                if (e.key === "ArrowUp") {
-                  e.preventDefault();
-                  const next = Math.max(1, spriteNum || 0) + 1;
-                  setValue("sprite_number", next, { shouldDirty: true, shouldValidate: true });
-                } else if (e.key === "ArrowDown") {
-                  e.preventDefault();
-                  const next = Math.max(1, (spriteNum || 1) - 1);
-                  setValue("sprite_number", next, { shouldDirty: true, shouldValidate: true });
-                }
-              }}
             >
               <div className="flex flex-col items-center gap-1">
                 <button
                   type="button"
                   aria-label={tr("다음 스프라이트", "Next Sprite")}
-                  className="w-6 h-6 rounded flex items-center justify-center text-xs transition-colors"
+                  className="w-6 h-6 rounded flex items-center justify-center text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--th-accent-primary)] focus:ring-offset-1 focus:ring-offset-[var(--th-bg-surface)]"
                   style={{
                     color: "var(--th-text-muted)",
                     border: "1px solid var(--th-input-border)",
                     background: "color-mix(in srgb, var(--th-bg-surface) 92%, transparent)",
                   }}
                   onClick={() => {
-                    const next = Math.max(1, spriteNum || 0) + 1;
+                    const next = Math.min(ICON_SPRITE_POOL.length, Math.max(1, spriteNum || 0) + 1);
                     setValue("sprite_number", next, { shouldDirty: true, shouldValidate: true });
                   }}
                 >
                   ▲
                 </button>
                 <div
-                  className="w-14 h-14 rounded-xl overflow-hidden bg-th-bg-surface flex items-center justify-center flex-shrink-0"
+                  className="w-14 h-14 rounded-xl overflow-hidden bg-th-bg-surface flex items-center justify-center flex-shrink-0 focus:outline-none focus:ring-2 focus:ring-[var(--th-accent-primary)] focus:ring-offset-2 focus:ring-offset-[var(--th-bg-surface)]"
                   style={{ border: "2px solid var(--th-input-border)" }}
+                  role="spinbutton"
+                  aria-label={tr("스프라이트", "Sprite")}
+                  aria-valuenow={spriteNum || 0}
+                  aria-valuemin={0}
+                  aria-valuemax={ICON_SPRITE_POOL.length}
+                  aria-valuetext={spriteNum ? tr(`선택된 스프라이트: ${spriteNum}`, `Selected sprite: ${spriteNum}`) : tr("선택 안됨", "Not selected")}
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.currentTarget !== e.target) {
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      const next = Math.min(ICON_SPRITE_POOL.length, Math.max(1, spriteNum || 0) + 1);
+                      setValue("sprite_number", next, { shouldDirty: true, shouldValidate: true });
+                    } else if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      const next = Math.max(1, (spriteNum || 1) - 1);
+                      setValue("sprite_number", next, { shouldDirty: true, shouldValidate: true });
+                    }
+                  }}
                 >
                   {spriteNum > 0 ? (
                     <img
                       src={`/sprites/${spriteNum}-D-1.png`}
-                      alt={t({ ko: `선택된 스프라이트 미리보기: ${spriteNum}`, en: `Selected sprite preview: ${spriteNum}` })}
+                      alt=""
+                      aria-hidden="true"
                       className="w-full h-full object-cover"
                       style={{ imageRendering: "pixelated" }}
                     />
                   ) : (
                     <span
                       className="text-2xl"
-                      role="img"
-                      aria-label={t({
-                        ko: `선택된 이모지 미리보기: ${formValues.avatar_emoji || "🤖"}`,
-                        en: `Selected emoji preview: ${formValues.avatar_emoji || "🤖"}`,
-                      })}
+                      aria-hidden="true"
                     >
                       {formValues.avatar_emoji || "🤖"}
                     </span>
@@ -211,7 +212,7 @@ export default function AgentFormModal({
                 <button
                   type="button"
                   aria-label={tr("이전 스프라이트", "Previous Sprite")}
-                  className="w-6 h-6 rounded flex items-center justify-center text-xs transition-colors"
+                  className="w-6 h-6 rounded flex items-center justify-center text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--th-accent-primary)] focus:ring-offset-1 focus:ring-offset-[var(--th-bg-surface)]"
                   style={{
                     color: "var(--th-text-muted)",
                     border: "1px solid var(--th-input-border)",
@@ -311,10 +312,11 @@ export default function AgentFormModal({
             )}
             <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 md:grid-cols-[72px_minmax(0,1fr)_minmax(0,1fr)]">
               <div>
-                <label className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                <label htmlFor="agent-emoji" className="block text-xs mb-1.5 font-medium" style={{ color: "var(--th-text-secondary)" }}>
                   {tr("이모지", "Emoji")}
                 </label>
                 <EmojiPicker
+                  id="agent-emoji"
                   value={formValues.avatar_emoji}
                   onChange={(emoji) => setValue("avatar_emoji", emoji, { shouldDirty: true, shouldValidate: true })}
                   aria-label={

@@ -7,6 +7,8 @@ from scripts.analyze_prs import (
     has_no_change_verification_ack,
     has_stale_branch_cleanup_ack,
     has_scratch_file_cleanup_ack,
+    has_pr_size_ack,
+    has_docs_only_verification_ack,
     has_overlap_reference,
     has_template_summary,
     is_scratch_file_path,
@@ -170,6 +172,16 @@ class PrAnalyzerNoChangeVerificationGuardTests(unittest.TestCase):
 
         self.assertTrue(has_no_change_verification_ack(body))
 
+    def test_unchecked_template_no_change_without_hyphen_is_not_acknowledgement(self):
+        body = "- [ ] **No change verification:** If this PR claims no change..."
+
+        self.assertFalse(has_no_change_verification_ack(body))
+
+    def test_checked_template_no_change_without_hyphen_is_acknowledgement(self):
+        body = "- [x] **No change verification:** If this PR claims no change..."
+
+        self.assertTrue(has_no_change_verification_ack(body))
+
     def test_filled_no_change_field_is_acknowledgement(self):
         body = "- no-change verification: checked using gh pr view --json files"
 
@@ -193,6 +205,23 @@ class PrAnalyzerStaleBranchCleanupGuardTests(unittest.TestCase):
         self.assertTrue(has_stale_branch_cleanup_ack(body))
 
 
+class PrAnalyzerPrSizeGuardTests(unittest.TestCase):
+    def test_unchecked_template_pr_size_guard_is_not_acknowledgement(self):
+        body = "- [ ] **PR size:** I ran `scripts/pr_cap_check.sh` on this PR head"
+
+        self.assertFalse(has_pr_size_ack(body))
+
+    def test_checked_template_pr_size_guard_is_acknowledgement(self):
+        body = "- [x] **PR size:** I ran `scripts/pr_cap_check.sh` on this PR head"
+
+        self.assertTrue(has_pr_size_ack(body))
+
+    def test_filled_pr_size_field_is_acknowledgement(self):
+        body = "- pr size: PASS (remaining 15 files/+400)"
+
+        self.assertTrue(has_pr_size_ack(body))
+
+
 class PrAnalyzerScratchFileCleanupGuardTests(unittest.TestCase):
     def test_unchecked_template_scratch_file_guard_is_not_acknowledgement(self):
         body = "- [ ] **Scratch file cleanup:** I have run `git status`..."
@@ -208,6 +237,23 @@ class PrAnalyzerScratchFileCleanupGuardTests(unittest.TestCase):
         body = "- scratch file cleanup: ran git diff --check and git status."
 
         self.assertTrue(has_scratch_file_cleanup_ack(body))
+
+
+class PrAnalyzerDocsOnlyVerificationGuardTests(unittest.TestCase):
+    def test_unchecked_template_docs_only_guard_is_not_acknowledgement(self):
+        body = "- [ ] **Docs-only verification:** If this is a docs-only change..."
+
+        self.assertFalse(has_docs_only_verification_ack(body))
+
+    def test_checked_template_docs_only_guard_is_acknowledgement(self):
+        body = "- [x] **docs-only verification:** verified via python3 scripts/generate_inventory_docs.py"
+
+        self.assertTrue(has_docs_only_verification_ack(body))
+
+    def test_filled_docs_only_field_is_acknowledgement(self):
+        body = "- docs-only verification: confirmed docs-only, verified markdown formatting."
+
+        self.assertTrue(has_docs_only_verification_ack(body))
 
 
 class PrAnalyzerOverlapReferenceTests(unittest.TestCase):
@@ -372,6 +418,7 @@ Update analyzer hygiene checks to match the current template.
 class PrAnalyzerScratchPathTests(unittest.TestCase):
     def test_root_scratch_files_are_flagged(self):
         self.assertTrue(is_scratch_file_path("pr-body.md"))
+        self.assertTrue(is_scratch_file_path("pr_body.md"))
         self.assertTrue(is_scratch_file_path("test.sh"))
         self.assertTrue(is_scratch_file_path("scratch.sh"))
         self.assertTrue(is_scratch_file_path("scratchpad.sh"))
@@ -407,6 +454,23 @@ class CiScriptScratchGuardTests(unittest.TestCase):
 
         self.assertIn("test.sql", script)
         self.assertIn("scratch[._-]*.sql", script)
+
+    def test_ci_guard_includes_root_json_and_log_scratch_files(self):
+        script = Path("scripts/ci-script-checks.sh").read_text()
+
+        self.assertIn("prs.json", script)
+        self.assertIn("scratch.json", script)
+        self.assertIn("scratchpad.json", script)
+        self.assertIn("cargo_out.txt", script)
+        self.assertIn("npm_output.log", script)
+        self.assertIn("bun_output.txt", script)
+
+    def test_ci_guard_scans_nested_global_scratch_files(self):
+        script = Path("scripts/ci-script-checks.sh").read_text()
+
+        self.assertIn("git ls-files -z", script)
+        self.assertIn("while IFS= read -r -d '' tracked_file", script)
+        self.assertIn("pr_body.md|prs.json|scratch.json", script)
 
     def test_ci_guard_includes_root_shell_scratch_globs(self):
         script = Path("scripts/ci-script-checks.sh").read_text()

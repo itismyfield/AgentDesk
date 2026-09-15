@@ -10,6 +10,19 @@ const DISCORD_SELECT_MENU_OPTION_LIMIT: usize = 25;
 const EXPLICIT_MODEL_OPTION_LIMIT: usize = DISCORD_SELECT_MENU_OPTION_LIMIT - 1;
 const DISCORD_SELECT_MENU_TEXT_LIMIT: usize = 100;
 
+pub(super) fn provider_card_color(provider: &ProviderKind) -> u32 {
+    match provider {
+        ProviderKind::Claude => 0xD97706,
+        ProviderKind::Codex => 0x10B981,
+        ProviderKind::Gemini => 0x3B82F6,
+        ProviderKind::OpenCode => 0x8B5CF6,
+        ProviderKind::Qwen => 0x0EA5A4,
+        ProviderKind::Grok => 0x111827,
+        ProviderKind::Antigravity => 0x7C3AED,
+        ProviderKind::Unsupported(_) => 0x5865F2,
+    }
+}
+
 fn truncate_picker_text(raw: &str) -> String {
     raw.chars().take(DISCORD_SELECT_MENU_TEXT_LIMIT).collect()
 }
