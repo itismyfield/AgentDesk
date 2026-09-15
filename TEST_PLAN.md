@@ -1,8 +1,9 @@
 # AgentDesk Test Plan & Queue Hygiene Guidelines
 
 ## Queue Hygiene & Merge-Readiness
-- **Duplicate Checks:** Before starting work, check open PRs for duplicates. If your generated inventory refresh or PR overlaps with existing open PRs, stop and report a no-change overlap.
+- **Duplicate Checks:** Before starting work, check open PRs for duplicates. If your generated inventory refresh or PR overlaps with existing open PRs, stop and report a no-change overlap. If the `gh` CLI tool is unavailable, fallback to fetching remotes and inspecting branch names (e.g., using `git branch -a`) to avoid duplicating work.
 - **Strict No-Change Verification:** A "no-change" report MUST have exactly zero changed files. Verify using `gh pr view --json files`. If a PR claims "no change" but modifies files (e.g. migrations, routines), it is unsafe. If an empty no-change PR is unavoidably created, its body must explicitly list the exact overlapping PR numbers and branches.
+- **Infrastructure CI Failures:** If a CI failure is determined to be an infrastructure issue or runner cancellation (e.g., 'The runner has received a shutdown signal') with no code fix applicable, produce an empty commit no-change report explaining the cancellation.
 - **Stale Branch Cleanup:** Treat low-signal or stale broad branches as queue debt. Explicitly close or recommend closing stale broad branches rather than attempting to salvage them in place. A no-change result should NOT become a PR unless it explicitly changes a queue-hygiene artifact.
 - **Clean Workspace (Scratch Files):** When using tools that generate scratch files or creating ad-hoc test scripts (e.g., `test_*.rs`, `test.sh`, `plan.md`, `pr-body.md`), always run a final changed-file audit (e.g. `git status`) before committing to ensure stray artifacts are not accidentally included, preventing repository pollution. Do not commit scratch PR body files such as `pr-body.md`; put PR text directly in the GitHub PR body.
 
@@ -17,7 +18,7 @@ Every PR must include:
 - Risk and rollback notes
 
 ## Verification Commands
-- **Rust Changes:** `cargo check --all-targets`, `cargo test <narrow-target>`
+- **Rust Changes:** `cargo check --all-targets`, `cargo test <narrow-target>`. When executing commands that might terminate the shell session (like `cargo check --all-targets`), wrap them in `bash -c '<command>'` to prevent session loss and preserve environment state.
 - **Dashboard Changes:** `./scripts/verify-dashboard.sh`
 - **Policy Changes:** `npm run test:policies`
 - **Scripts:** `shellcheck`
