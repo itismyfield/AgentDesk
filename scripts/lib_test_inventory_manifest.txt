@@ -1747,6 +1747,7 @@ services::claude_tui::startup_dialog::tests::auto_accept_requires_home_dir_resol
 services::claude_tui::startup_dialog::tests::busy_compacting_pane_is_not_a_startup_dialog
 services::claude_tui::startup_dialog::tests::effort_selector_footer_alone_is_not_a_startup_dialog
 services::claude_tui::startup_dialog::tests::idle_ready_pane_is_not_a_startup_dialog
+services::claude_tui::startup_dialog::tests::rate_limit_fallback_dialog_is_detected_and_accepts_only_the_selected_default
 services::claude_tui::startup_dialog::tests::resume_from_summary_dialog_is_detected_and_dismissed_with_enter
 services::claude_tui::startup_dialog::tests::trust_dialog_for_home_workspace_is_auto_accepted
 services::claude_tui::startup_dialog::tests::trust_dialog_for_root_workspace_fails_fast_instead_of_auto_trusting
