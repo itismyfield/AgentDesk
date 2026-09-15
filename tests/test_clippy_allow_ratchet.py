@@ -34,6 +34,31 @@ class ClippyAllowRatchetTest(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("baseline 0", problems[0])
 
+    def test_relocation_transfers_allowance_without_sharing_it(self) -> None:
+        old = ("src/collector.rs", "large_enum_variant")
+        new = ("src/collector/state.rs", "large_enum_variant")
+        original = Counter({old: 1})
+        relocated = Counter({new: 1})
+        # Moving the declaration without its admission must fail, even though
+        # the repository-wide total has not grown.
+        self.assertEqual(len(RATCHET.validate_occurrences(relocated, original)), 1)
+        self.assertEqual(sum(original.values()), sum(relocated.values()))
+        self.assertEqual(RATCHET.validate_occurrences(relocated, relocated), [])
+        # The old file must not retain a reusable second exception after a move.
+        duplicated = relocated + original
+        problems = RATCHET.validate_occurrences(duplicated, relocated)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("src/collector.rs", problems[0])
+        self.assertIn("baseline 0", problems[0])
+
+    def test_collector_state_allowance_is_relocated_not_duplicated(self) -> None:
+        # PR #5927 extracted CollectOutcome verbatim. Admit the same one item
+        # in its child module, not a second allowance at the old root.
+        baseline = RATCHET.load_baseline()
+        root = "src/services/discord/tmux_watcher/turn_stream_collector"
+        self.assertEqual(baseline[(root + ".rs", "large_enum_variant")], 0)
+        self.assertEqual(baseline[(root + "/state.rs", "large_enum_variant")], 1)
+
     def _collect_source(self, text: str) -> Counter[tuple[str, str]]:
         with tempfile.TemporaryDirectory(dir=ROOT) as temp_dir:
             root = Path(temp_dir)
