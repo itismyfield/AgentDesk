@@ -421,6 +421,7 @@ pub(super) async fn handle_stream_content_message(
                             }
                         }
         StreamContentArmMessage::Error { message, stderr } => {
+                            super::provider_recovery::on_error(&shared_owned, &provider, channel_id, ctx.recovery_lease, expected_identity, inflight_state, &full_response, &message, &stderr).await;
                             let is_stale_resume =
                                 stream_error_has_stale_resume_error(&message, &stderr);
                             let session_reset_required =

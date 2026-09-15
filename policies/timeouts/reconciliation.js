@@ -202,8 +202,7 @@ module.exports = function attachReconciliation(timeouts, helpers) {
             agentdesk.reviewState.sync(card.id, "idle");
             agentdesk.log.warn("[reconcile] Card " + card.id + " → " + rPending + ": " + reasons.join("; "));
             // #231: Queue deduped PM notification (flushed at tick end)
-            var cardTitle2 = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [card.id]);
-            var t2 = cardTitle2.length > 0 ? cardTitle2[0].title : card.id;
+            var t2 = card.title || card.id;
             for (var ri = 0; ri < reasons.length; ri++) {
               _queuePMDecision(card.id, t2, reasons[ri]);
             }

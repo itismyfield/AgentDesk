@@ -1,3 +1,6 @@
+mod provider_credentials;
+use provider_credentials::{check_claude_cswap_global_conflict, check_credential_permissions};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -942,6 +945,7 @@ fn build_provider_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec
         check_qwen_auth_hints(qwen_configured),
         check_qwen_runtime_artifacts(qwen_configured),
         check_provider_bindings(cfg, snapshot),
+        check_claude_cswap_global_conflict(),
         check_credential_permissions(cfg),
     ]
 }
@@ -1064,7 +1068,7 @@ fn check_health_db_dashboard(snapshot: &HealthSnapshot) -> Check {
             CheckGroup::Core,
             "DB/Dashboard Health",
             detail.clone(),
-            "DB health is false. Check the Postgres/SQLite source-of-truth status first.",
+            "DB health is false. Check the Postgres source-of-truth status first.",
         )
         .with_subsystem("health")
         .with_severity(Severity::Error)
@@ -1462,111 +1466,6 @@ fn permission_finding(label: &'static str, path: &Path, _sensitive: bool) -> Per
     }
 }
 
-fn check_credential_permissions(cfg: &config::Config) -> Check {
-    let mut candidates: Vec<(&'static str, PathBuf, bool)> = Vec::new();
-    if let Some(root) = config::runtime_root() {
-        candidates.push((
-            "agentdesk_yaml",
-            crate::runtime_layout::config_file_path(&root),
-            cfg.server
-                .auth_token
-                .as_deref()
-                .is_some_and(|token| !token.trim().is_empty()),
-        ));
-        candidates.push((
-            "discord_credential_dir",
-            crate::runtime_layout::credential_dir(&root),
-            true,
-        ));
-        let mut bot_names = cfg.discord.bots.keys().cloned().collect::<Vec<_>>();
-        bot_names.sort();
-        for bot_name in bot_names {
-            let label = match bot_name.as_str() {
-                "command" => "discord_command_token",
-                "announce" => "discord_announce_token",
-                "notify" => "discord_notify_token",
-                _ => "discord_bot_token",
-            };
-            candidates.push((
-                label,
-                crate::runtime_layout::credential_token_path(&root, &bot_name),
-                true,
-            ));
-        }
-    }
-    if let Some(home) = qwen_home_dir() {
-        candidates.push((
-            "qwen_oauth_cache",
-            home.join(".qwen").join("oauth_creds.json"),
-            true,
-        ));
-    }
-    if let Some(project) = qwen_project_dir() {
-        candidates.push(("qwen_project_env", project.join(".qwen").join(".env"), true));
-        candidates.push(("project_env", project.join(".env"), true));
-    }
-
-    let findings = candidates
-        .iter()
-        .map(|(label, path, sensitive)| permission_finding(label, path, *sensitive))
-        .collect::<Vec<_>>();
-    let risks = findings
-        .iter()
-        .filter_map(|finding| {
-            finding
-                .risk
-                .as_ref()
-                .map(|risk| format!("{}: {risk}", finding.label))
-        })
-        .collect::<Vec<_>>();
-    let existing = findings.iter().filter(|finding| finding.exists).count();
-    let evidence = json!({
-        "checked": findings.iter().map(|finding| json!({
-            "label": finding.label,
-            "path": finding.path.clone(),
-            "exists": finding.exists,
-            "mode": finding.mode.clone(),
-            "owner_is_current": finding.owner_is_current,
-            "risk": finding.risk.clone(),
-        })).collect::<Vec<_>>(),
-        "risk_count": risks.len(),
-    });
-    let detail = format!(
-        "checked={} existing={} risks={}",
-        findings.len(),
-        existing,
-        risks.len()
-    );
-    if risks.is_empty() {
-        Check::ok(
-            "credential_permissions",
-            CheckGroup::ProviderRuntime,
-            "Credential Permissions",
-            detail.clone(),
-        )
-        .with_subsystem("security")
-        .with_expected_actual("no credential permission risks", detail)
-        .with_evidence(evidence)
-        .with_security_exposure(SecurityExposure::CredentialMetadata)
-    } else {
-        Check::warn(
-            "credential_permissions",
-            CheckGroup::ProviderRuntime,
-            "Credential Permissions",
-            format!("{detail}; {}", risks.join("; ")),
-            "credential/config 파일 내용은 읽거나 출력하지 않고 권한/owner metadata만 점검했습니다.",
-        )
-        .with_subsystem("security")
-        .with_expected_actual("credential files owned by current user with private permissions", detail)
-        .with_evidence(evidence)
-        .with_security_exposure(SecurityExposure::CredentialMetadata)
-        .with_next_steps(vec![
-            "chmod 700 ~/.adk/release/credential".to_string(),
-            "chmod 600 <credential-file>".to_string(),
-        ])
-    }
-}
-
 fn build_all_checks(cfg: &config::Config, snapshot: &HealthSnapshot) -> Vec<Check> {
     let mut checks = build_core_checks(cfg, snapshot);
     checks.extend(build_provider_checks(cfg, snapshot));
@@ -1671,10 +1570,9 @@ fn check_voice_cli_present(
         .with_severity(Severity::Error);
     }
     let resolved = if trimmed.contains('/') || trimmed.starts_with('~') {
-        let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
-            std::env::var("HOME")
-                .map(|home| std::path::PathBuf::from(home).join(rest))
-                .unwrap_or_else(|_| std::path::PathBuf::from(trimmed))
+        let expanded = if trimmed.starts_with('~') {
+            crate::runtime_layout::expand_user_path(trimmed)
+                .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
         } else {
             std::path::PathBuf::from(trimmed)
         };
@@ -2648,15 +2546,7 @@ fn check_provider_cli(
     snapshot: &HealthSnapshot,
 ) -> Check {
     let id = provider_check_id(&provider);
-    let name = match provider {
-        ProviderKind::Claude => "claude CLI",
-        ProviderKind::Codex => "codex CLI",
-        ProviderKind::Gemini => "gemini CLI",
-        ProviderKind::OpenCode => "opencode CLI",
-        ProviderKind::Qwen => "qwen CLI",
-        ProviderKind::Grok => "grok CLI",
-        ProviderKind::Unsupported(_) => "provider CLI",
-    };
+    let name = super::provider_cli_name::provider_cli_check_name(&provider);
     let capability_summary = provider_capability_summary(&provider);
     let connected = provider_connected(snapshot, &provider);
     let log_hint = dcserver_log_hint();
@@ -2881,7 +2771,7 @@ fn check_runtime_path() -> Check {
             CheckGroup::ProviderRuntime,
             "Runtime PATH",
             "unable to resolve provider runtime PATH",
-            "login shell PATH를 읽지 못했습니다. 서비스 환경 PATH와 shell PATH를 비교하세요.",
+            "Could not read the login shell PATH. Compare the service environment PATH with your shell PATH.",
         )
         .with_expected_actual("runtime PATH resolved", "runtime PATH resolution failed")
         .with_next_steps(vec!["echo $PATH".to_string()]),
@@ -3889,7 +3779,7 @@ fn check_stale_zero_byte_db_files(cfg: &config::Config) -> Check {
             CheckGroup::Core,
             "Stale DB Files",
             "runtime root unresolved",
-            "실제 DB 경로를 먼저 확인한 뒤 root 경로의 0바이트 stale DB 파일을 정리하세요.",
+            "verify the canonical DB path and clean up zero-byte stale DB files in the runtime root.",
         )
         .with_expected_actual(
             "runtime root path resolvable",
@@ -3967,7 +3857,7 @@ fn check_stale_zero_byte_db_files(cfg: &config::Config) -> Check {
         "Stale DB Files",
         format!("zero-byte stale DB file(s): {listed}"),
         format!(
-            "실제 DB는 {} 입니다. 추측 경로로 sqlite3를 열지 말고, 필요하면 agentdesk doctor --fix 로 stale 파일을 정리하세요.",
+            "the canonical DB is {}; do not open guessed paths with sqlite3. Clean up stale files with agentdesk doctor --fix if necessary.",
             canonical_db_path.display()
         ),
     )

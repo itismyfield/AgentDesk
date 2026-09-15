@@ -1583,7 +1583,6 @@ test("timeouts idle-kill module excludes thread idle rows from the main batch", 
   });
 });
 
-
 test("S7 ordinary successor clears synthetic marker and starts its own counter", () => {
   const sessionKey = "provider:AgentDesk-claude-successor";
   let source = "external_input";
@@ -1611,4 +1610,30 @@ test("S7 ordinary successor clears synthetic marker and starts its own counter",
   assert.equal(state.httpPosts.filter((post) => post.url.endsWith("/force-kill")).length, 0);
   policy._section_I();
   assert.equal(JSON.parse(state.kv.get(key)).count, 1, "ordinary window must not double-count");
+});
+
+test("timeouts reconciliation uses typed card facade for title instead of db.query", () => {
+  const { policy, state, agentdesk } = loadPolicy("policies/timeouts.js", {
+    dbQuery: createSqlRouter([
+      { match: "SELECT key, value FROM kv_meta WHERE key LIKE 'reconcile_dispatch:%'", result: [{ key: "reconcile_dispatch:dp123", value: "dp123" }] },
+      { match: "SELECT id, kanban_card_id, to_agent_id", result: [{ id: "dp123", kanban_card_id: "kc123", dispatch_type: "plan", status: "completed" }] },
+      { match: "DELETE FROM kv_meta", result: [] },
+      { match: "SELECT title FROM kanban_cards", result: () => { throw new Error("Unexpected title query"); } }
+    ]),
+    cardsGet: function(id) {
+      return { id: id, status: "in_progress", title: "Test Card Title", metadata: { scope_depth: "full" } };
+    }
+  });
+
+  agentdesk.reviewState.sync = function() {};
+  agentdesk.kanban.setStatus = function() {};
+
+  assert.doesNotThrow(() => {
+    policy._section_R();
+  });
+
+  var pmDecisions = state.pmDecisions || [];
+  if (pmDecisions.length > 0) {
+    assert.equal(pmDecisions[0].title, "Test Card Title");
+  }
 });

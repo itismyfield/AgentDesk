@@ -12,7 +12,9 @@ mod outbox_actionable_delivery;
 mod outbox_delivery_alert;
 mod outbox_worker;
 use outbox_worker::message_outbox_loop;
+mod rate_limit_profiles;
 mod rate_limit_sync;
+use rate_limit_profiles::{sync_named_profile_rate_limits, upsert_rate_limit_cache_entry};
 pub(crate) mod resource_locks;
 pub mod routes;
 mod routine_script_audit;
@@ -970,32 +972,6 @@ async fn record_periodic_job_execution_pg(
     upsert_kv_meta_pg_ignore(pg_pool, &key_duration, &elapsed_ms).await;
 }
 
-/// Background task that periodically fetches rate-limit data from external providers
-/// and caches it in the `rate_limit_cache` table for the dashboard API.
-async fn upsert_rate_limit_cache_entry(
-    pg_pool: &PgPool,
-    provider: &str,
-    data: &str,
-    fetched_at: i64,
-) {
-    if let Err(error) = sqlx::query(
-        "INSERT INTO rate_limit_cache (provider, data, fetched_at)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (provider)
-         DO UPDATE SET data = EXCLUDED.data, fetched_at = EXCLUDED.fetched_at",
-    )
-    .bind(provider)
-    .bind(data)
-    .bind(fetched_at)
-    .execute(pg_pool)
-    .await
-    {
-        tracing::warn!(
-            "[rate-limit-sync] failed to upsert rate_limit_cache row for {provider}: {error}"
-        );
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClaudeRateLimitRefreshOutcome {
@@ -1430,7 +1406,6 @@ mod claude_oauth_usage_tests {
     }
 }
 
-/// Fetch Codex usage via chatgpt.com backend API (subscription-based, no API key needed).
 async fn fetch_codex_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>, anyhow::Error> {
     let client = reqwest::Client::new();
     let resp = client

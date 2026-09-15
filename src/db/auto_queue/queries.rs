@@ -325,17 +325,27 @@ pub async fn list_run_history_pg(
                 CASE WHEN r.completed_at IS NOT NULL
                     THEN EXTRACT(EPOCH FROM r.completed_at)::BIGINT * 1000
                 END AS completed_at,
-                COUNT(e.id)::BIGINT AS entry_count,
-                COALESCE(SUM(CASE WHEN e.status = 'done' THEN 1 ELSE 0 END), 0)::BIGINT AS done_count,
-                COALESCE(SUM(CASE WHEN e.status = 'skipped' THEN 1 ELSE 0 END), 0)::BIGINT AS skipped_count,
-                COALESCE(SUM(CASE WHEN e.status = 'pending' THEN 1 ELSE 0 END), 0)::BIGINT AS pending_count,
-                COALESCE(SUM(CASE WHEN e.status = 'dispatched' THEN 1 ELSE 0 END), 0)::BIGINT AS dispatched_count
+                agg.entry_count,
+                agg.done_count,
+                agg.skipped_count,
+                agg.pending_count,
+                agg.dispatched_count
          FROM auto_queue_runs r
-         LEFT JOIN auto_queue_entries e ON e.run_id = r.id
-         LEFT JOIN kanban_cards kc ON kc.id = e.kanban_card_id
-         WHERE ($1::TEXT IS NULL OR COALESCE(kc.repo_id, r.repo, '') = $1)
-           AND ($2::TEXT IS NULL OR COALESCE(e.agent_id, r.agent_id, '') = $2)
-         GROUP BY r.id, r.repo, r.agent_id, r.status, r.timeout_minutes, r.created_at, r.completed_at
+         CROSS JOIN LATERAL (
+             SELECT
+                 COUNT(e.id)::BIGINT AS entry_count,
+                 COUNT(e.id) FILTER (WHERE e.status = 'done')::BIGINT AS done_count,
+                 COUNT(e.id) FILTER (WHERE e.status = 'skipped')::BIGINT AS skipped_count,
+                 COUNT(e.id) FILTER (WHERE e.status = 'pending')::BIGINT AS pending_count,
+                 COUNT(e.id) FILTER (WHERE e.status = 'dispatched')::BIGINT AS dispatched_count,
+                 COUNT(*) > 0 AS has_match
+             FROM (SELECT r.id AS dummy) AS d
+             LEFT JOIN auto_queue_entries e ON e.run_id = r.id
+             LEFT JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+             WHERE ($1::TEXT IS NULL OR COALESCE(kc.repo_id, r.repo, '') = $1)
+               AND ($2::TEXT IS NULL OR COALESCE(e.agent_id, r.agent_id, '') = $2)
+         ) agg
+         WHERE agg.has_match
          ORDER BY r.created_at DESC
          LIMIT $3",
     )

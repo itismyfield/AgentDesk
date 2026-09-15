@@ -355,12 +355,25 @@ banner "High-risk recovery path-filter selection contract (#5232)"
 
 banner "Scratch file guard"
 FAIL=0
-for scratch_file in plan.md scratch.md scratch.txt scratch.sh scratchpad.md scratchpad.txt scratchpad.sh sql_test.rs test_scratch.rs plan.txt pr-body.md test.sh test.sql verify.sh; do
+for scratch_file in plan.md scratch.md scratch.txt scratch.sh scratchpad.md scratchpad.txt scratchpad.sh sql_test.rs test_scratch.rs plan.txt pr-body.md pr_body.md test.sh test.sql verify.sh prs.json scratch.json scratchpad.json cargo_out.txt npm_output.log bun_output.txt; do
   if [ -f "$scratch_file" ]; then
     echo "ERROR: Scratch file detected in repository root: $scratch_file"
     FAIL=1
   fi
 done
+while IFS= read -r -d '' tracked_file; do
+  scratch_basename=${tracked_file##*/}
+  case "$scratch_basename" in
+    pr-body.md|pr_body.md|prs.json|scratch.json|scratchpad.json|cargo_out.txt|npm_output.log|bun_output.txt)
+      case "$tracked_file" in
+        */*)
+          echo "ERROR: Scratch file detected below repository root: $tracked_file"
+          FAIL=1
+          ;;
+      esac
+      ;;
+  esac
+done < <(git ls-files -z)
 for scratch_file in scratch.sql scratchpad.sql scratch[._-]*.sql scratchpad[._-]*.sql test_scratch[._-]*.sql; do
   if [ -f "$scratch_file" ]; then
     echo "ERROR: Scratch SQL file detected in repository root: $scratch_file"
@@ -373,7 +386,7 @@ for scratch_file in scratch[._-]*.sh scratchpad[._-]*.sh test_scratch[._-]*.sh; 
     FAIL=1
   fi
 done
-for scratch_file in scratch[._-]*.md scratchpad[._-]*.md test_scratch[._-]*.md scratch[._-]*.txt scratchpad[._-]*.txt test_scratch[._-]*.txt scratch[._-]*.rs scratchpad[._-]*.rs test_scratch[._-]*.rs test_*.rs; do
+for scratch_file in scratch[._-]*.md scratchpad[._-]*.md test_scratch[._-]*.md scratch[._-]*.txt scratchpad[._-]*.txt test_scratch[._-]*.txt scratch[._-]*.rs scratchpad[._-]*.rs test_scratch[._-]*.rs test_*.rs test_*.py test_*.js test_*.json; do
   if [ -f "$scratch_file" ]; then
     echo "ERROR: Scratch file detected in repository root: $scratch_file"
     FAIL=1

@@ -23,6 +23,9 @@ mod leak_recovery_ledger;
 // of this file verbatim. `recovery.rs` recovers channels; this force-exits the
 // process, and the two share no state. Public so a later change can assert the
 // constants by importing them.
+mod live_agent_recovery;
+mod stall_watchdog_task;
+pub use stall_watchdog_task::spawn_stall_watchdog;
 pub(crate) mod self_watchdog;
 mod stall_alert;
 mod watchdog_decisions;
@@ -45,27 +48,8 @@ pub(crate) use watchdog_decisions::{
     stall_watchdog_should_force_clean_orphan_explicit_background_work,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RuntimeTurnStopResult {
-    pub lifecycle_path: &'static str,
-    pub had_active_turn: bool,
-    pub queue_depth: usize,
-    pub persistent_inflight_cleared: bool,
-    pub termination_recorded: bool,
-    /// #5176 — whether this stop actually took the mailbox foreground anchor.
-    /// `true` also covers "the mailbox was already free when we checked": the
-    /// contract this field reports is *ownership released*, and the caller only
-    /// needs to know whether the channel is still locked.
-    pub mailbox_foreground_free: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct IdleTmuxStaleTurnRepairResult {
-    pub had_active_turn: bool,
-    pub has_pending_queue: bool,
-    pub persistent_inflight_cleared: bool,
-    pub runtime_session_cleared: bool,
-}
+mod stop_result;
+pub use stop_result::{IdleTmuxStaleTurnRepairResult, RuntimeTurnStopResult};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IdleTmuxStaleTurnInflightPin {
@@ -184,18 +168,6 @@ async fn owning_runtime_http_for_channel(
     shared_for_provider(registry, provider, channel_id)
         .await
         .and_then(|shared| shared.serenity_http_or_token_fallback())
-}
-
-fn idle_tmux_repair_ready_for_input(
-    provider: &ProviderKind,
-    channel_id: u64,
-    tmux_session: &str,
-) -> bool {
-    super::super::relay_recovery::idle_tmux_repair_ready_for_input(
-        provider,
-        channel_id,
-        tmux_session,
-    )
 }
 
 #[cfg(test)]
@@ -327,8 +299,11 @@ fn preserve_cancel_can_skip_provider_interrupt_for_idle_tui(
     let Some(tmux_session) = cancel_token_tmux_session(token) else {
         return false;
     };
-    let tmux_ready_for_input =
-        idle_tmux_repair_ready_for_input(provider, channel_id.get(), &tmux_session);
+    let tmux_ready_for_input = watchdog_decisions::idle_tmux_repair_ready_for_input(
+        provider,
+        channel_id.get(),
+        &tmux_session,
+    );
     let inflight_safe_to_clear =
         discord::inflight_state_allows_idle_tmux_repair_for_channel(provider, channel_id.get())
             .unwrap_or(false);
@@ -1679,6 +1654,7 @@ pub(crate) async fn run_stall_watchdog_pass(
     let now_unix_secs = chrono::Utc::now().timestamp();
     stall_liveness::gc_stall_watchdog_liveness_state(now_unix_secs);
     watcher_respawn::gc_watcher_absence_state(now_unix_secs);
+    let recovering = live_agent_recovery::reconcile_provider(registry, provider).await;
 
     // Sweep every same-provider runtime; name-only lookup would miss later
     // bots, so keep the runtime that exposed each watcher.
@@ -1717,6 +1693,12 @@ pub(crate) async fn run_stall_watchdog_pass(
             Some(snapshot) => snapshot,
             None => continue,
         };
+        // A successful takeover owns this tick; the snapshot is now stale.
+        if recovering.contains(&channel_id.get())
+            || live_agent_recovery::observe_and_execute(registry, &snapshot).await
+        {
+            continue;
+        }
         let now_mono_secs = super::liveness_authority::monotonic_now_secs();
         let tick_inflight = discord::inflight::load_inflight_state(provider, channel_id.get());
         let capture_assessment = super::liveness_authority::observe_and_publish_from_tick(
@@ -1777,7 +1759,11 @@ pub(crate) async fn run_stall_watchdog_pass(
                 now_unix_secs,
                 STALL_WATCHDOG_LIVENESS_FRESHNESS_SECS,
             )
-            && idle_tmux_repair_ready_for_input(provider, channel_id.get(), &tmux_session)
+            && watchdog_decisions::idle_tmux_repair_ready_for_input(
+                provider,
+                channel_id.get(),
+                &tmux_session,
+            )
             && discord::inflight_state_allows_idle_tmux_repair_for_channel(
                 provider,
                 channel_id.get(),
@@ -2151,31 +2137,6 @@ pub(crate) async fn run_stall_watchdog_pass(
     watcher_respawn::retry_pending_watcher_respawns(registry, provider, &runtimes, now_unix_secs)
         .await;
     cleaned + relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &runtimes).await
-}
-
-/// Spawn the long-lived background task that runs the stall watchdog at
-/// `STALL_WATCHDOG_INTERVAL_SECS` cadence for the given provider. Should
-/// be called once per provider during dcserver bootstrap, alongside
-/// `placeholder_sweeper::spawn_placeholder_sweeper`.
-pub fn spawn_stall_watchdog(registry: Arc<HealthRegistry>, provider: ProviderKind) {
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(
-            STALL_WATCHDOG_INITIAL_DELAY_SECS,
-        ))
-        .await;
-        loop {
-            let cleaned = run_stall_watchdog_pass(&registry, &provider).await;
-            if cleaned > 0 {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ⚡ stall-watchdog ({}): cleaned={}",
-                    provider.as_str(),
-                    cleaned
-                );
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(STALL_WATCHDOG_INTERVAL_SECS)).await;
-        }
-    });
 }
 
 /// #2860 — recover a completed-stale inflight leak by delivering the generated

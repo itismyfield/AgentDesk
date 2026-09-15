@@ -222,6 +222,14 @@ export type {
   RoutineMetrics,
 } from "./client";
 
+export {
+  getProviderAuthProfiles,
+  startProviderAuthLogin,
+  completeProviderAuthLogin,
+  removeProviderAuthProfile,
+  setProviderAuthPrimaryProfile,
+} from "./providers";
+
 // ── Error type guard ──
 // #2050 P2 finding 9 — defer to the real ApiRequestError class. The previous
 // guard tested for a `code` field the thrown Error never had, so it was dead

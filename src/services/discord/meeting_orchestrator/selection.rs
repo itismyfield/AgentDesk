@@ -214,6 +214,7 @@ pub(super) fn summary_agent_context(
         reasoning_effort: agent.reasoning_effort.clone(),
         peer_agents_enabled: agent.peer_agents_enabled,
         quality_feedback_injection_enabled: true,
+        auth_profile: "default".to_string(),
         memory: agent.memory.clone(),
     })
     .unwrap_or_else(|| {
