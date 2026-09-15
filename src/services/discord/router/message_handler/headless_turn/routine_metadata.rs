@@ -79,10 +79,32 @@ pub(super) fn routine_metadata_role_binding(
         role_id: agent_id.to_string(),
         prompt_file,
         provider: Some(provider.clone()),
+        auth_profile: "default".to_string(),
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: true,
         quality_feedback_injection_enabled: true,
         memory: settings::resolve_memory_settings(None, None),
     })
+}
+
+pub(super) async fn persist_boundary_before_provider_clear<B, BFut, C, CFut, E>(
+    persist_boundary: bool,
+    clear_provider: bool,
+    boundary: B,
+    clear: C,
+) -> Result<(), E>
+where
+    B: FnOnce() -> BFut,
+    BFut: std::future::Future<Output = Result<(), E>>,
+    C: FnOnce() -> CFut,
+    CFut: std::future::Future<Output = ()>,
+{
+    if persist_boundary {
+        boundary().await?;
+    }
+    if clear_provider {
+        clear().await;
+    }
+    Ok(())
 }

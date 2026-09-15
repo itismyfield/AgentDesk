@@ -1,6 +1,50 @@
 use super::completion_admission::CompletionAdmission;
 use super::*;
 
+impl TurnFinalizer {
+    /// #3018 — register a turn so the ledger knows it exists before any
+    /// terminal can arrive. Idempotent: a second `Start` for a key already in
+    /// the ledger only refreshes the relay owner. #3016 phase-5a: `shared` is
+    /// downgraded to a `Weak` carried on the `Start` so the actor primes its
+    /// `cached_shared` from the first register (see `FinalizeMsg::Start`).
+    pub(in crate::services::discord) fn register_start(
+        &self,
+        key: TurnKey,
+        provider: ProviderKind,
+        relay_owner: RelayOwnerKind,
+        shared: &Arc<SharedData>,
+    ) {
+        self.register_start_with_completion_admission(
+            key,
+            provider,
+            relay_owner,
+            CompletionAdmissionPlan::Immediate,
+            shared,
+        );
+    }
+
+    pub(in crate::services::discord) fn register_start_with_completion_admission(
+        &self,
+        key: TurnKey,
+        provider: ProviderKind,
+        relay_owner: RelayOwnerKind,
+        completion_admission_plan: CompletionAdmissionPlan,
+        shared: &Arc<SharedData>,
+    ) {
+        let _ = self.tx.send(FinalizeMsg::Start {
+            key,
+            recovery_lease: crate::services::agent_recovery::lease_for_provider(
+                &key.channel_id.get().to_string(),
+                &provider,
+            ),
+            provider,
+            relay_owner,
+            completion_admission_plan,
+            shared: Arc::downgrade(shared),
+        });
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Phase {
     Pending,
@@ -9,6 +53,7 @@ pub(super) enum Phase {
 }
 
 pub(super) struct LedgerEntry {
+    pub(super) recovery_lease: Option<crate::services::agent_recovery::RecoveryLease>,
     pub(super) phase: Phase,
     pub(super) relay_owner: RelayOwnerKind,
     pub(super) provider: ProviderKind,
@@ -31,6 +76,7 @@ pub(super) struct PendingCompletionAdmission {
 pub(super) enum FinalizeMsg {
     Start {
         key: TurnKey,
+        recovery_lease: Option<crate::services::agent_recovery::RecoveryLease>,
         provider: ProviderKind,
         relay_owner: RelayOwnerKind,
         completion_admission_plan: CompletionAdmissionPlan,

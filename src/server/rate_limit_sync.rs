@@ -121,7 +121,8 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
             Ok(buckets) => {
                 let data = serde_json::json!({ "buckets": buckets }).to_string();
                 let now = chrono::Utc::now().timestamp();
-                upsert_rate_limit_cache_entry(pg_pool.as_ref(), "codex", &data, now).await;
+                upsert_rate_limit_cache_entry(pg_pool.as_ref(), "codex", "default", &data, now)
+                    .await;
                 tracing::info!("[rate-limit-sync] Codex: {} buckets cached", buckets.len());
             }
             Err(e) => {
@@ -136,7 +137,8 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
                 let n = buckets.len();
                 let data = serde_json::json!({ "buckets": buckets }).to_string();
                 let now = chrono::Utc::now().timestamp();
-                upsert_rate_limit_cache_entry(pg_pool.as_ref(), "gemini", &data, now).await;
+                upsert_rate_limit_cache_entry(pg_pool.as_ref(), "gemini", "default", &data, now)
+                    .await;
                 tracing::info!("[rate-limit-sync] Gemini: {} buckets cached", n);
             }
             Err(e) => {
@@ -163,6 +165,8 @@ pub(super) async fn rate_limit_sync_loop(pg_pool: Arc<PgPool>) {
                 }
             }
         }
+
+        super::sync_named_profile_rate_limits(pg_pool.as_ref()).await;
 
         // feature: rate-limit-aware-dispatch-gate — refresh the pressure +
         // agent→provider snapshots the gate reads O(1) off the dispatch path.
@@ -207,7 +211,7 @@ async fn sync_claude_rate_limit_cache_once(pg_pool: &PgPool) -> Result<usize, an
             let bucket_count = buckets.len();
             let data = serde_json::json!({ "buckets": buckets }).to_string();
             let now = chrono::Utc::now().timestamp();
-            upsert_rate_limit_cache_entry(pg_pool, "claude", &data, now).await;
+            upsert_rate_limit_cache_entry(pg_pool, "claude", "default", &data, now).await;
             tracing::info!("[rate-limit-sync] Claude: {} buckets cached", bucket_count);
             Ok(bucket_count)
         }
@@ -220,7 +224,8 @@ async fn sync_claude_rate_limit_cache_once(pg_pool: &PgPool) -> Result<usize, an
                     if !limited.buckets.is_empty() {
                         let data = serde_json::json!({ "buckets": limited.buckets }).to_string();
                         let now = chrono::Utc::now().timestamp();
-                        upsert_rate_limit_cache_entry(pg_pool, "claude", &data, now).await;
+                        upsert_rate_limit_cache_entry(pg_pool, "claude", "default", &data, now)
+                            .await;
                     }
                     // The loop logs 429s with backoff context (WARN, then INFO).
                     tracing::debug!("[rate-limit-sync] Claude rate_limit fetch failed: {e}");
@@ -301,7 +306,7 @@ async fn fetch_anthropic_rate_limits(api_key: &str) -> Result<Buckets, anyhow::E
 }
 
 /// Fetch Claude usage via the OAuth API (subscription): 5h/7d utilization.
-async fn fetch_claude_oauth_usage(token: &str) -> Result<Buckets, anyhow::Error> {
+pub(super) async fn fetch_claude_oauth_usage(token: &str) -> Result<Buckets, anyhow::Error> {
     let client = reqwest::Client::builder()
         .timeout(CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT)
         .build()?;
@@ -329,6 +334,36 @@ async fn fetch_claude_oauth_usage(token: &str) -> Result<Buckets, anyhow::Error>
 
     let data: serde_json::Value = resp.json().await?;
     Ok(parse_claude_oauth_usage_buckets(&data))
+}
+
+/// Fetch Grok CLI billing usage for a named provider profile.
+pub(super) async fn fetch_grok_billing_usage(
+    token: &str,
+) -> Result<Vec<serde_json::Value>, anyhow::Error> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+    let resp = client
+        .get("https://cli-chat-proxy.grok.com/v1/billing")
+        .header("authorization", format!("Bearer {token}"))
+        .header("xai-grok-cli", "1")
+        .header("accept", "application/json")
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Grok billing API returned {}",
+            resp.status()
+        ));
+    }
+    let data: serde_json::Value = resp.json().await?;
+    if let Some(buckets) = data.get("buckets").and_then(|value| value.as_array()) {
+        return Ok(buckets.clone());
+    }
+    Ok(vec![serde_json::json!({
+        "label": "grok",
+        "raw": data,
+    })])
 }
 
 #[cfg(test)]

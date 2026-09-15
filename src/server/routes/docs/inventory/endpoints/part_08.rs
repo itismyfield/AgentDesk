@@ -232,7 +232,22 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "GET",
             "/api/rate-limits",
             "analytics",
-            "Cached rate limits per provider",
+            "Cached rate limits per provider and auth profile. Missing profile_id is read as default.",
+        )
+        .with_example(
+            json!({}),
+            json!({
+                "providers": [
+                    {
+                        "provider": "codex",
+                        "profile_id": "default",
+                        "buckets": [],
+                        "stale": false,
+                        "unsupported": false,
+                        "reason": null
+                    }
+                ]
+            }),
         ),
         ep("GET", "/api/receipt", "analytics", "Latest usage receipt snapshot"),
         ep(

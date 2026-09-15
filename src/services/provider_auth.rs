@@ -54,6 +54,17 @@ pub fn detect_provider_credentials(
     provider_id: &str,
     spec: &ProviderAuthSpec,
 ) -> ProviderCredentialStatus {
+    detect_provider_credentials_with_overlay(provider_id, spec, None)
+}
+
+pub fn detect_provider_credentials_with_overlay(
+    provider_id: &str,
+    spec: &ProviderAuthSpec,
+    overlay: Option<&crate::services::provider_auth_profile::ProviderAuthOverlay>,
+) -> ProviderCredentialStatus {
+    if let Some(overlay) = overlay.filter(|overlay| !overlay.is_default()) {
+        return detect_named_overlay_credentials(overlay, spec);
+    }
     let provider = provider_id.trim().to_ascii_lowercase();
     let file_source = detect_provider_file_auth(&provider, spec);
     if let Some(source) = file_source {
@@ -70,6 +81,70 @@ pub fn detect_provider_credentials(
     }
 
     ProviderCredentialStatus::missing()
+}
+
+fn detect_named_overlay_credentials(
+    overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
+    spec: &ProviderAuthSpec,
+) -> ProviderCredentialStatus {
+    if let Some(home) = overlay.home.as_ref() {
+        for relative in
+            crate::services::provider_auth_profile::detect_relative_paths(&overlay.provider)
+        {
+            let path = home.join(relative);
+            if path.is_file() {
+                return ProviderCredentialStatus::present(format!("file:{}", path.display()));
+            }
+        }
+    }
+    if let Some(env_key) = spec.env_keys.iter().copied().find(|key| {
+        overlay
+            .env
+            .get(*key)
+            .is_some_and(|value| !value.trim().is_empty())
+    }) {
+        return ProviderCredentialStatus::present(format!("env:{env_key}"));
+    }
+    ProviderCredentialStatus::missing()
+}
+
+pub fn claude_oauth_token_from_home(home: &std::path::Path) -> Option<String> {
+    let path = home.join(".credentials.json");
+    read_json_path(&path)
+        .and_then(|creds| {
+            creds
+                .get("claudeAiOauth")
+                .and_then(|oauth| oauth.get("accessToken"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .filter(|token| !token.trim().is_empty())
+}
+
+pub fn codex_access_token_from_home(home: &std::path::Path) -> Option<String> {
+    let path = home.join("auth.json");
+    read_json_path(&path)
+        .and_then(|auth| {
+            auth.get("tokens")
+                .and_then(|tokens| tokens.get("access_token"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .filter(|token| !token.trim().is_empty())
+}
+
+pub fn grok_token_from_home(home: &std::path::Path) -> Option<String> {
+    let path = home.join("auth.json");
+    read_json_path(&path).and_then(|auth| {
+        ["apiKey", "api_key", "accessToken", "token", "xaiApiKey"]
+            .iter()
+            .find_map(|key| {
+                auth.get(key)
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .filter(|token| !token.trim().is_empty())
+            })
+    })
 }
 
 fn detect_provider_file_auth(provider: &str, spec: &ProviderAuthSpec) -> Option<String> {
@@ -641,5 +716,39 @@ mod tests {
                 None => std::env::remove_var("AGENTDESK_PROVIDER_AUTH_TEST_KEY"),
             }
         }
+    }
+
+    #[test]
+    fn test_006_named_codex_overlay_detects_home_auth_without_global() {
+        let dir = tempfile::tempdir().expect("overlay home");
+        let auth_path = dir.path().join("auth.json");
+        std::fs::write(&auth_path, r#"{"tokens":{"access_token":"overlay-token"}}"#).unwrap();
+        let overlay = crate::services::provider_auth_profile::ProviderAuthOverlay {
+            profile_id: "work".into(),
+            provider: crate::services::provider::ProviderKind::Codex,
+            env: Default::default(),
+            unset: Default::default(),
+            home: Some(dir.path().to_path_buf()),
+        };
+        let spec = ProviderAuthSpec {
+            credential_paths: &["~/.codex/auth.json"],
+            env_keys: &["OPENAI_API_KEY"],
+            auth_check_argv: None,
+        };
+        let status = detect_provider_credentials_with_overlay("codex", &spec, Some(&overlay));
+        assert!(status.credential_present);
+        let source = status.source.expect("source");
+        assert!(source.contains("auth.json"));
+        assert!(!source.contains("/.codex/"));
+    }
+
+    #[test]
+    fn test_007_claude_accounts_handlers_have_no_agent_or_profile_param() {
+        let src = include_str!("../server/routes/claude_accounts_api.rs");
+        assert!(src.contains("struct SwitchClaudeAccountRequest"));
+        assert!(src.contains("pub account: String"));
+        assert!(!src.contains("agent_id"));
+        assert!(!src.contains("auth_profile"));
+        assert!(!src.contains("profile_id"));
     }
 }

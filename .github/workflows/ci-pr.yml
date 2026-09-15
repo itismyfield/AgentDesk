@@ -202,6 +202,7 @@ jobs:
               - 'src/server/worker_registry.rs'
               - 'src/services/auto_queue.rs'
               - 'src/services/auto_queue/**'
+              - 'src/services/agent_recovery/**'
               - 'src/services/automation_candidate_materializer/**'
               - 'src/services/dispatches/**'
               - 'src/services/queue.rs'

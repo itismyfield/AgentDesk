@@ -348,44 +348,6 @@ impl TurnFinalizer {
         })
     }
 
-    /// #3018 — register a turn so the ledger knows it exists before any
-    /// terminal can arrive. Idempotent: a second `Start` for a key already in
-    /// the ledger only refreshes the relay owner. #3016 phase-5a: `shared` is
-    /// downgraded to a `Weak` carried on the `Start` so the actor primes its
-    /// `cached_shared` from the first register (see `FinalizeMsg::Start`).
-    pub(in crate::services::discord) fn register_start(
-        &self,
-        key: TurnKey,
-        provider: ProviderKind,
-        relay_owner: RelayOwnerKind,
-        shared: &Arc<SharedData>,
-    ) {
-        self.register_start_with_completion_admission(
-            key,
-            provider,
-            relay_owner,
-            CompletionAdmissionPlan::Immediate,
-            shared,
-        );
-    }
-
-    pub(in crate::services::discord) fn register_start_with_completion_admission(
-        &self,
-        key: TurnKey,
-        provider: ProviderKind,
-        relay_owner: RelayOwnerKind,
-        completion_admission_plan: CompletionAdmissionPlan,
-        shared: &Arc<SharedData>,
-    ) {
-        let _ = self.tx.send(FinalizeMsg::Start {
-            key,
-            provider,
-            relay_owner,
-            completion_admission_plan,
-            shared: Arc::downgrade(shared),
-        });
-    }
-
     pub(in crate::services::discord) fn note_mailbox_released(
         &self,
         key: TurnKey,
@@ -637,6 +599,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                 match msg {
                     FinalizeMsg::Start {
                         key,
+                        recovery_lease,
                         provider,
                         relay_owner,
                         completion_admission_plan,
@@ -667,6 +630,7 @@ async fn actor_loop(mut rx: mpsc::UnboundedReceiver<FinalizeMsg>) {
                             exact_key,
                         );
                         let entry = ledger.entry(exact_key).or_insert(LedgerEntry {
+                            recovery_lease,
                             phase: Phase::Pending,
                             relay_owner,
                             provider: provider.clone(),

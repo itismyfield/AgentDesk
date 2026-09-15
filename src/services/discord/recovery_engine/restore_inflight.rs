@@ -66,54 +66,10 @@ pub(in crate::services::discord) async fn finish_recovered_turn_mailbox(
     let _ = stop_source;
 }
 
+#[path = "restore_inflight/output_paths.rs"]
+mod output_paths;
 #[cfg(unix)]
-fn tmux_pane_pid(tmux_session_name: &str) -> Option<u32> {
-    let mut cmd = Command::new("tmux");
-    binary_resolver::apply_runtime_path(&mut cmd);
-    let output = cmd
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            &tmux_exact_target(tmux_session_name),
-            "#{pane_pid}",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
-        .ok()?
-        .trim()
-        .parse::<u32>()
-        .ok()
-}
-
-#[cfg(unix)]
-pub(super) fn detect_live_tmux_output_path(
-    tmux_session_name: &str,
-    fallback_path: &str,
-) -> Result<Option<DetectedRebindOutputPath>, StaleOutputCandidate> {
-    let Some(pane_pid) = tmux_pane_pid(tmux_session_name) else {
-        return Ok(None);
-    };
-    let mut cmd = Command::new("lsof");
-    binary_resolver::apply_runtime_path(&mut cmd);
-    let output = match cmd.args(["-Fn", "-p", &pane_pid.to_string()]).output() {
-        Ok(output) => output,
-        Err(_) => return Ok(None),
-    };
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let stdout = match String::from_utf8(output.stdout) {
-        Ok(stdout) => stdout,
-        Err(_) => return Ok(None),
-    };
-    let candidates = parse_lsof_output_candidates(&stdout);
-    detect_rebind_output_path_from_candidates(fallback_path, candidates)
-}
+pub(super) use output_paths::detect_live_tmux_output_path;
 
 fn observe_restore_inflight_snapshot(
     provider: &ProviderKind,
@@ -156,6 +112,16 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
     // its bound is the next boot that successfully advances the epoch. An allocation-
     // provenance witness belongs to #5482.
     for mut state in states {
+        if matches!(
+            crate::services::agent_recovery::channel_recovery_intake(
+                provider,
+                &state.channel_id.to_string()
+            )
+            .await,
+            Some(crate::services::agent_recovery::RecoveryIntake::Skip)
+        ) {
+            continue;
+        }
         // #897 round-4 High: rebind_origin inflights are synthetic
         // placeholders owned by `/api/inflight/rebind` and do NOT carry
         // a real user message, dispatch context, or placeholder Discord
@@ -2122,7 +2088,7 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
             restore_recovered_session_worktree(session, &state);
         }
 
-        mailbox_recovery_kickoff(
+        let kickoff = mailbox_recovery_kickoff(
             shared,
             channel_id,
             cancel_token.clone(),
@@ -2133,6 +2099,9 @@ pub(in crate::services::discord) async fn restore_inflight_turns(
         )
         .await;
 
+        if !kickoff.activated_turn {
+            continue;
+        }
         // Consume outgoing planned-restart authority (identity-guarded readoption)
         // before the reader publishes RuntimeReady; failed adoption stays fail-closed.
         if super::runtime::readopt_marker_eligible_real_user(&state) {

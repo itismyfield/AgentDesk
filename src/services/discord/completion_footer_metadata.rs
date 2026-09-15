@@ -354,7 +354,7 @@ async fn terminal_rate_limit_summary(
 ) -> Option<String> {
     let data = if let Some(pool) = shared.pg_pool.as_ref() {
         let provider = provider.as_str();
-        sqlx::query("SELECT data FROM rate_limit_cache WHERE lower(provider) = lower($1) LIMIT 1")
+        sqlx::query("SELECT data FROM rate_limit_cache WHERE lower(provider) = lower($1) AND profile_id = 'default' LIMIT 1")
             .bind(provider)
             .fetch_optional(pool)
             .await

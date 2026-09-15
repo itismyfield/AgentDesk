@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { z } from "zod";
+import type {
+  PendingProviderLogin,
+  ProviderAuthProfilesResponse,
+  ProviderLoginStartResponse,
+} from "../components/settings/SettingsProvidersModel";
+import { loginAttachInstruction } from "../components/settings/SettingsProvidersModel";
 
 import { getProviderLabel } from "../app/providerTheme";
 import {
@@ -38,6 +44,65 @@ export async function getProviderCatalog(): Promise<ProviderCatalogEntry[]> {
     providerCatalogResponseSchema,
   );
   return body.catalog;
+}
+
+export async function getProviderAuthProfiles(): Promise<ProviderAuthProfilesResponse> {
+  return request("/api/provider-auth-profiles");
+}
+
+export async function startProviderAuthLogin(
+  providerId: string,
+  profileId?: string,
+): Promise<PendingProviderLogin> {
+  const body = await request<ProviderLoginStartResponse>(
+    `/api/provider-auth-profiles/${encodeURIComponent(providerId)}/login-start`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(profileId ? { profile_id: profileId } : {}),
+      maxRetries: 0,
+    },
+  );
+  return {
+    providerId,
+    profileId: body.profile_id,
+    home: body.home,
+    tmuxSession: body.tmux_session,
+    attach: body.attach || loginAttachInstruction(body.tmux_session),
+  };
+}
+
+export async function completeProviderAuthLogin(
+  providerId: string,
+  profileId: string,
+  home?: string,
+): Promise<{ ok: boolean; profile_id: string; home: string }> {
+  return request(`/api/provider-auth-profiles/${encodeURIComponent(providerId)}/login-complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile_id: profileId, home }),
+  });
+}
+
+export async function removeProviderAuthProfile(
+  providerId: string,
+  profileId: string,
+): Promise<{ ok: boolean; credentials_retained: boolean }> {
+  return request(
+    `/api/provider-auth-profiles/${encodeURIComponent(providerId)}/${encodeURIComponent(profileId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function setProviderAuthPrimaryProfile(
+  providerId: string,
+  profileId: string,
+): Promise<{ ok: boolean; primary_profile_id: string }> {
+  return request(`/api/provider-auth-profiles/${encodeURIComponent(providerId)}/primary`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ profile_id: profileId }),
+  });
 }
 
 export function selectableCatalogIds(

@@ -147,6 +147,16 @@ pub(in crate::services::discord) async fn provider_handles_channel(
     settings: &DiscordBotSettings,
     channel_id: serenity::model::id::ChannelId,
 ) -> bool {
+    match crate::services::agent_recovery::channel_recovery_intake(
+        provider,
+        &channel_id.get().to_string(),
+    )
+    .await
+    {
+        Some(crate::services::agent_recovery::RecoveryIntake::Skip) => return false,
+        Some(crate::services::agent_recovery::RecoveryIntake::Allow) => return true,
+        None => {}
+    }
     validate_live_channel_routing(ctx, provider, settings, channel_id)
         .await
         .is_ok()
