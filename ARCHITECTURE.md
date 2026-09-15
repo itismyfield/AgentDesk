@@ -31,6 +31,7 @@ src/
 │   │   ├── health.rs
 │   │   ├── mailbox.rs
 │   │   ├── orchestrator.rs
+│   │   ├── provider_cli_name.rs
 │   │   └── startup.rs
 │   ├── migrate/
 │   │   ├── apply.rs
@@ -876,6 +877,7 @@ src/
 │   │   │   │   ├── intake_turn.rs
 │   │   │   │   ├── latency_spans.rs
 │   │   │   │   ├── pre_admission_control.rs
+│   │   │   │   ├── provider_dispatch.rs
 │   │   │   │   ├── provider_isolation.rs
 │   │   │   │   ├── session_strategy_lifecycle_tests.rs
 │   │   │   │   ├── tui_followup.rs
