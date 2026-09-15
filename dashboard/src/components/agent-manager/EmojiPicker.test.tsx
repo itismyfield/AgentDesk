@@ -49,6 +49,13 @@ describe("EmojiPicker", () => {
     expect(button?.getAttribute("aria-haspopup")).toBe("dialog");
   });
 
+  it("passes id prop to the button", async () => {
+    const target = await render(<EmojiPicker id="test-emoji-picker" value="🤖" onChange={() => {}} />);
+    const button = target.querySelector("button");
+    expect(button).not.toBeNull();
+    expect(button?.getAttribute("id")).toBe("test-emoji-picker");
+  });
+
   it("renders the dialog with a translated accessible name", async () => {
     const target = await render(<EmojiPicker value="🤖" onChange={() => {}} />);
     const button = target.querySelector("button");

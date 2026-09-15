@@ -952,9 +952,10 @@ class GiantFileLedgerIntegrationTest(unittest.TestCase):
                     G.giant_file_snapshot(root)
 
     def run_main(self, before, after, now, *, candidate="merge", base="base",
-                 head="head", origin="base", checkout=None, parents=None):
+                 head="head", origin="base", checkout=None, parents=None,
+                 head_repository="itismyfield/AgentDesk"):
         env = {"GFP_EVENT_NAME": "pull_request", "GFP_REPOSITORY": "itismyfield/AgentDesk",
-               "GFP_HEAD_REPOSITORY": "itismyfield/AgentDesk", "GFP_CANDIDATE_SHA": candidate,
+               "GFP_HEAD_REPOSITORY": head_repository, "GFP_CANDIDATE_SHA": candidate,
                "GFP_BASE_SHA": base, "GFP_HEAD_SHA": head}
         lineage = [candidate, base, head] if parents is None else parents
         def git(*args, **kwargs):
@@ -993,6 +994,15 @@ class GiantFileLedgerIntegrationTest(unittest.TestCase):
         rc, evidence, calls = self.run_main(self.files(), self.files(deadline=NEW, history=marker()), NOW)
         self.assertEqual((rc, calls, evidence["selector"]), (0, 1, "pr_ledger_repair"))
         self.assertEqual(evidence["retired"], [])
+
+    def test_cross_repository_pr_uses_the_same_provenance_checks(self):
+        rc, evidence, calls = self.run_main(
+            self.files(),
+            self.files(deadline=NEW, history=marker()),
+            NOW,
+            head_repository="kunkunGames/AgentDesk",
+        )
+        self.assertEqual((rc, calls, evidence["selector"]), (0, 1, "pr_ledger_repair"), evidence)
 
     def repair_pair(self):
         return self.files(), self.files(deadline=NEW, history=marker())
