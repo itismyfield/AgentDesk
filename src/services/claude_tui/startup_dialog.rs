@@ -64,9 +64,11 @@ pub(crate) fn detect_claude_startup_dialog(pane_tail: &str) -> Option<ClaudeStar
     }
     if pane_tail.contains(RATE_LIMIT_FALLBACK_LIMIT_MARKER)
         && pane_tail.contains(RATE_LIMIT_FALLBACK_OPTION_MARKER)
-        && pane_tail
-            .lines()
-            .any(|line| line.trim_start().starts_with("❯ 1."))
+        && pane_tail.lines().any(|line| {
+            line.trim_start()
+                .strip_prefix("❯ 1.")
+                .is_some_and(|option| option.trim() == RATE_LIMIT_FALLBACK_OPTION_MARKER)
+        })
     {
         return Some(ClaudeStartupDialog::RateLimitFallback);
     }
@@ -217,6 +219,19 @@ mod tests {
 
         let non_default = RATE_LIMIT_FALLBACK_DIALOG_PANE.replace("❯ 1.", "  1.");
         assert_eq!(detect_claude_startup_dialog(&non_default), None);
+
+        let selected_wait = RATE_LIMIT_FALLBACK_DIALOG_PANE
+            .replace(
+                "❯ 1. Continue with the fallback model",
+                "❯ 1. Wait until reset",
+            )
+            .replace("2. Wait until reset", "2. Continue with the fallback model");
+        assert_eq!(detect_claude_startup_dialog(&selected_wait), None);
+
+        for marker in [DIALOG_FOOTER_MARKER, RATE_LIMIT_FALLBACK_LIMIT_MARKER] {
+            let incomplete = RATE_LIMIT_FALLBACK_DIALOG_PANE.replace(marker, "");
+            assert_eq!(detect_claude_startup_dialog(&incomplete), None);
+        }
     }
 
     #[test]
