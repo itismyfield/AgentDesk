@@ -411,6 +411,9 @@ fn write_launch_script(
     let mut env_exports = String::new();
     // #5172 R1: snapshot the YAML provider setting for each new launch. Its
     // absolute value is independent of the launch model and later model changes.
+    // #5935: an unset provider setting exports nothing — the inherited window is
+    // still scrubbed, but Claude Code's own default and in-session `/autocompact`
+    // remain in control instead of a hardcoded absolute value.
     let runtime = crate::config::load_graceful().runtime;
     let compact_window =
         crate::services::claude_compact_context::tui_launch_auto_compact_window_from_setting(
@@ -418,7 +421,7 @@ fn write_launch_script(
         );
     crate::services::claude_compact_context::append_auto_compact_window_shell_env(
         &mut env_exports,
-        Some(compact_window),
+        compact_window,
     );
     let mut escaped_claude_bin = String::new();
     config
