@@ -7,146 +7,9 @@ use crate::services::discord::task_notification_delivery::merge_context;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
-#[allow(clippy::large_enum_variant)]
-pub(super) enum CollectOutcome {
-    ContinueWatcherLoop,
-    Fallthrough(CollectedTurnStream),
-}
-
-pub(super) struct TurnStreamCollectorContext {
-    pub(super) http: Arc<serenity::Http>,
-    pub(super) shared: Arc<SharedData>,
-    pub(super) channel_id: ChannelId,
-    pub(super) watcher_provider: ProviderKind,
-    pub(super) tmux_session_name: String,
-    pub(super) output_path: String,
-    pub(super) input_fifo_path: String,
-    pub(super) watcher_thread_channel_id: Option<u64>,
-    pub(super) cancel: Arc<AtomicBool>,
-    pub(super) paused: Arc<AtomicBool>,
-    pub(super) pause_epoch: Arc<AtomicU64>,
-    pub(super) turn_delivered: Arc<AtomicBool>,
-    pub(super) last_heartbeat_ts_ms: Arc<AtomicI64>,
-    pub(super) jsonl_notify: Arc<tokio::sync::Notify>,
-    pub(super) dead_marker_notify: Arc<tokio::sync::Notify>,
-    pub(super) turn_result_relayed: bool,
-    pub(super) restored_injected_prompt_message_id: Option<u64>,
-}
-
-pub(super) struct TurnStreamCollectorIo {
-    pub(super) data: Vec<u8>,
-    pub(super) data_start_offset: u64,
-    pub(super) epoch_snapshot: u64,
-    pub(super) source_authority: WatcherSourceAuthority,
-}
-
-pub(super) struct TurnParseState<'a> {
-    pub(super) retained_source: &'a Option<Arc<std::fs::File>>,
-    pub(super) continuation: &'a mut Option<CollectedTurnStream>,
-    pub(super) current_offset: &'a mut u64,
-    pub(super) all_data: &'a mut String,
-    pub(super) all_data_start_offset: &'a mut u64,
-    pub(super) utf8_decoder: &'a mut Utf8ChunkDecoder,
-    pub(super) pending_terminal_rewind_seed: &'a mut Option<RestoredWatcherTurn>,
-    pub(super) restored_turn: &'a mut Option<RestoredWatcherTurn>,
-    pub(super) terminal_rewind_attempt_key: &'a mut Option<WatcherRewindAttemptKey>,
-    pub(super) terminal_rewind_attempts: &'a mut u8,
-    pub(super) watcher_turn_identity:
-        &'a Option<crate::services::discord::inflight::InflightTurnIdentity>,
-    pub(super) last_activity_heartbeat_at: &'a mut Option<std::time::Instant>,
-    pub(super) active_stream_inflight_reacquire_logged: &'a mut bool,
-}
-
-pub(super) struct SupervisorRelayState<'a> {
-    pub(super) producer_registry: &'a Arc<RelayProducerRegistry>,
-    pub(super) cached_relay_producer: &'a mut Option<RelayProducer>,
-    pub(super) all_data_fully_mirrored_to_session_relay: &'a mut bool,
-    pub(super) all_data_session_bound_relay_ack: &'a mut Option<SessionBoundRelayAckTarget>,
-    pub(super) all_data_first_forwarded_relay_sequence: &'a mut Option<u64>,
-}
-
-#[derive(Default)]
-pub(super) struct MonitorAutoTurnState {
-    pub(super) monitor_auto_turn_claimed: bool,
-    pub(super) monitor_auto_turn_deferred: bool,
-    pub(super) monitor_auto_turn_finished: bool,
-    pub(super) monitor_auto_turn_synthetic_msg_id: Option<MessageId>,
-    pub(super) monitor_auto_turn_ledger_generation: Option<u64>,
-}
-
-#[derive(Default)]
-pub(super) struct RenderSeedState {
-    pub(super) placeholder_msg_id: Option<serenity::MessageId>,
-    pub(super) placeholder_from_restored_inflight: bool,
-    pub(super) status_panel_msg_id: Option<serenity::MessageId>,
-    pub(super) last_status_panel_text: String,
-    pub(super) last_edit_text: String,
-    pub(super) response_sent_offset: usize,
-    pub(super) watcher_streaming_rollover_frozen_msg_ids: Vec<serenity::MessageId>,
-    pub(super) completion_footer_terminal_target: Option<WatcherCompletionFooterTerminalTarget>,
-}
-
-#[derive(Clone)]
-pub(super) struct ActiveReadState {
-    pub(super) turn_start: tokio::time::Instant,
-    pub(super) turn_timeout: std::time::Duration,
-    pub(super) turn_idle_timeout: std::time::Duration,
-    pub(super) last_output_at: tokio::time::Instant,
-    pub(super) tmux_death_observed: bool,
-    pub(super) ready_for_input_failure_notice: Option<String>,
-    pub(super) ready_for_input_stall_dispatch_id: Option<String>,
-    pub(super) ready_for_input_stall_inflight_snapshot: Option<InflightTurnState>,
-    pub(super) fresh_ready_for_input_idle: bool,
-}
-
-#[derive(Clone)]
-pub(super) struct CollectedTurnStream {
-    pub(super) turn_data_start_offset: u64,
-    pub(super) source_authority: WatcherSourceAuthority,
-    pub(super) split_trailing_turn_follows: bool,
-    pub(super) state: StreamLineState,
-    pub(super) restored_response_seed: String,
-    pub(super) full_response: String,
-    pub(super) tool_state: WatcherToolState,
-    pub(super) placeholder_msg_id: Option<serenity::MessageId>,
-    pub(super) placeholder_from_restored_inflight: bool,
-    pub(super) status_panel_msg_id: Option<serenity::MessageId>,
-    pub(super) single_message_panel_footer_mode: bool,
-    pub(super) startup_inflight_snapshot: Option<InflightTurnState>,
-    pub(super) this_turn_status_panel_generation: u64,
-    pub(super) turn_is_external_input_for_session: bool,
-    pub(super) turn_identity_for_panel:
-        Option<crate::services::discord::inflight::InflightTurnIdentity>,
-    pub(super) status_panel_started_at: i64,
-    pub(super) last_status_panel_text: String,
-    pub(super) last_edit_text: String,
-    pub(super) response_sent_offset: usize,
-    pub(super) watcher_streaming_rollover_frozen_msg_ids: Vec<serenity::MessageId>,
-    pub(super) finish_mailbox_on_completion: bool,
-    pub(super) monitor_auto_turn_claimed: bool,
-    pub(super) monitor_auto_turn_deferred: bool,
-    pub(super) monitor_auto_turn_finished: bool,
-    pub(super) monitor_auto_turn_synthetic_msg_id: Option<MessageId>,
-    pub(super) monitor_auto_turn_ledger_generation: Option<u64>,
-    pub(super) completion_footer_terminal_target: Option<WatcherCompletionFooterTerminalTarget>,
-    pub(super) session_bound_relay_turn_fully_mirrored: bool,
-    pub(super) session_bound_relay_turn_first_forwarded_sequence: Option<u64>,
-    pub(super) found_result: bool,
-    pub(super) terminal_kind: Option<WatcherTerminalKind>,
-    pub(super) terminal_evidence_offset: Option<u64>,
-    pub(super) is_prompt_too_long: bool,
-    pub(super) stale_resume_detected: bool,
-    pub(super) task_notification_kind: Option<TaskNotificationKind>,
-    pub(super) task_notification_context:
-        Option<crate::services::discord::task_notification_delivery::TaskNotificationContext>,
-    pub(super) assistant_text_seen: bool,
-    pub(super) fresh_assistant_text_seen: bool,
-    pub(super) was_paused: bool,
-    pub(super) active_read_state: Option<ActiveReadState>,
-    pub(super) soft_terminal_seen_at: Option<tokio::time::Instant>,
-    pub(super) auto_compaction_lifecycle_attempted: bool,
-    pub(super) monitor_auto_turn_preamble_injected: bool,
-}
+#[path = "turn_stream_collector/state.rs"]
+mod state;
+pub(super) use state::*;
 
 pub(super) async fn collect_turn_stream_until_terminal(
     ctx: &TurnStreamCollectorContext,
@@ -332,6 +195,16 @@ pub(super) async fn collect_turn_stream_until_terminal(
         *parser.current_offset = data_start_offset;
         utf8_decoder.clear_pending();
         return CollectOutcome::ContinueWatcherLoop;
+    };
+    let completion_actor = if let Some(turn) = continuation.as_ref() {
+        turn.completion_actor.clone()
+    } else {
+        cancel_handoff::completion::capture_actor(
+            &shared,
+            channel_id,
+            startup_inflight_snapshot.as_ref(),
+        )
+        .await
     };
     // #3805 P2 (PR-C): this turn's status-panel generation epoch, SEEDED from
     // the on-disk row so a restart re-hydrating an existing panel carries the
@@ -1222,6 +1095,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
         status_panel_msg_id,
         single_message_panel_footer_mode,
         startup_inflight_snapshot,
+        completion_actor,
         this_turn_status_panel_generation,
         turn_is_external_input_for_session,
         turn_identity_for_panel,

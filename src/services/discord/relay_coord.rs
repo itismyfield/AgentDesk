@@ -79,7 +79,7 @@ impl TmuxRelayCoord {
         Self {
             relay_slot: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(unix)]
-            cancel_handoffs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            cancel_handoffs: Default::default(),
             confirmed_end_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reset_state: std::sync::Mutex::new(relay_health::FrontierResetState::default()),
             last_relay_ts_ms: Arc::new(std::sync::atomic::AtomicI64::new(0)),

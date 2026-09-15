@@ -601,10 +601,25 @@ pub(in crate::services::discord) fn load_inflight_state_read_only(
     provider: &ProviderKind,
     channel_id: u64,
 ) -> Option<InflightTurnState> {
-    let root = inflight_runtime_root()?;
+    load_inflight_state_read_only_result(provider, channel_id)
+        .ok()
+        .flatten()
+}
+
+/// Read without backfills, distinguishing genuine absence from failed observation.
+pub(in crate::services::discord) fn load_inflight_state_read_only_result(
+    provider: &ProviderKind,
+    channel_id: u64,
+) -> Result<Option<InflightTurnState>, String> {
+    let root = inflight_runtime_root().ok_or("inflight root unavailable")?;
     let path = inflight_state_path(&root, provider, channel_id);
-    let data = fs::read_to_string(&path).ok()?;
-    parse_inflight_state_content(&data).ok()
+    match fs::read_to_string(path) {
+        Ok(data) => parse_inflight_state_content(&data)
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 pub(super) fn load_inflight_states(provider: &ProviderKind) -> Vec<InflightTurnState> {

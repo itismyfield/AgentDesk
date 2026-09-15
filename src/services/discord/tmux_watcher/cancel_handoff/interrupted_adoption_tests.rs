@@ -120,3 +120,33 @@ pub(in crate::services::discord) async fn interrupt_before_poll(
     );
     (next, saved)
 }
+
+/// A corrupt projection is NOT a missing projection. Test both before removal.
+pub(in crate::services::discord) fn remove_projection_without_granting_delivery(
+    ctx: &TurnStreamCollectorContext,
+    custody: &mut Custody,
+    original: &InflightTurnState,
+) {
+    let path = crate::services::discord::inflight::inflight_runtime_root()
+        .unwrap()
+        .join(ctx.watcher_provider.as_str())
+        .join(format!("{}.json", ctx.channel_id.get()));
+    let frontier = ctx.shared.committed_relay_offset(ctx.channel_id);
+    std::fs::write(&path, b"{broken").unwrap();
+    assert!(
+        custody
+            .take_for_current(&ctx.shared, ctx.channel_id)
+            .is_none()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+    let mut foreign = original.clone();
+    foreign.turn_nonce = Some("rowless-foreign-successor".into());
+    std::fs::write(&path, serde_json::to_vec(&foreign).unwrap()).unwrap();
+    assert!(
+        custody
+            .take_for_current(&ctx.shared, ctx.channel_id)
+            .is_none()
+    );
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(ctx.shared.committed_relay_offset(ctx.channel_id), frontier);
+}

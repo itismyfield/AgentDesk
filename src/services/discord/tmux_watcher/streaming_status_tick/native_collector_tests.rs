@@ -15,6 +15,8 @@ pub(super) fn seed_recovered_row(
     std::fs::remove_file(fx.path()).unwrap();
     fx.provider = ProviderKind::Codex;
     row.provider = fx.provider.as_str().to_owned();
+    fx.tmux = format!("native-5927-{}", uuid::Uuid::new_v4().simple());
+    row.tmux_session_name = Some(fx.tmux.clone());
     row.current_msg_id = 0;
     row.current_msg_len = 3;
     row.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
@@ -57,7 +59,33 @@ fn cancelled_native_split_utf8_and_json_resume_without_append() {
     );
 }
 
-fn native_collector_case(test_name: &str, cancellation: u8) {
+#[test]
+fn rowless_cancelled_native_body_reaches_exact_receipt_without_append() {
+    native_collector_case(
+        "rowless_cancelled_native_body_reaches_exact_receipt_without_append",
+        4,
+    );
+}
+
+#[test]
+fn rowless_cancelled_native_terminal_preserves_exact_ack_at_eof() {
+    native_collector_case(
+        "rowless_cancelled_native_terminal_preserves_exact_ack_at_eof",
+        5,
+    );
+}
+
+#[test]
+fn rowless_cancelled_native_split_utf8_preserves_original_decoder() {
+    native_collector_case(
+        "rowless_cancelled_native_split_utf8_preserves_original_decoder",
+        6,
+    );
+}
+
+fn native_collector_case(test_name: &str, mode: u8) {
+    let rowless = mode >= 4;
+    let cancellation = if rowless { mode - 3 } else { mode };
     const CHILD: &str = "AGENTDESK_5833_NATIVE_COLLECTOR_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let qualified = format!(
@@ -402,6 +430,11 @@ fn native_collector_case(test_name: &str, cancellation: u8) {
                     std::fs::remove_file(&fx.output_path).unwrap();
                     std::fs::rename(renamed, &fx.output_path).unwrap();
                 }
+                if rowless {
+                    cancel_handoff::interrupted_adoption_tests::remove_projection_without_granting_delivery(
+                        &ctx, &mut custody, &row,
+                    );
+                }
                 cancel_handoff::interrupted_adoption_tests::assert_admission_fences(
                     &ctx,
                     &mut custody,
@@ -520,6 +553,22 @@ fn native_collector_case(test_name: &str, cancellation: u8) {
         )
         .await;
         assert_eq!(guard, PreEmitGuardOutcome::Proceed);
+        if rowless {
+            cancel_handoff::completion::finish_after_receipt(
+                &shared,
+                fx.channel,
+                &fx.provider,
+                turn.startup_inflight_snapshot.as_ref(),
+                turn.completion_actor.as_ref(),
+                source_authority,
+                (0, offset),
+            )
+            .await;
+            assert!(
+                shared.mailbox(fx.channel).has_active_turn().await,
+                "no receipt: no actor release"
+            );
+        }
         let before_relay = load_inflight_state(&fx.provider, fx.channel.get());
         let context = TerminalRelayPlanContext {
             http: &rec.http,
@@ -587,7 +636,7 @@ fn native_collector_case(test_name: &str, cancellation: u8) {
                 provider: &fx.provider,
                 channel: fx.channel,
                 session: &fx.tmux,
-                expected_turn: before_relay.as_ref(),
+                expected_turn: turn.startup_inflight_snapshot.as_ref(),
                 range: (0, offset),
                 sent_offset: turn.response_sent_offset,
                 placeholder: &mut turn.placeholder_msg_id,
@@ -637,6 +686,60 @@ fn native_collector_case(test_name: &str, cancellation: u8) {
             "exact terminal delivery must leave one visible copy of the commentary",
         );
         drop(visible);
+        if rowless {
+            assert!(
+                load_inflight_state(&fx.provider, fx.channel.get()).is_none(),
+                "custody must not recreate the row"
+            );
+            cancel_handoff::completion::finish_after_receipt(
+                &shared,
+                fx.channel,
+                &fx.provider,
+                turn.startup_inflight_snapshot.as_ref(),
+                turn.completion_actor.as_ref(),
+                source_authority,
+                (0, offset),
+            )
+            .await;
+            assert!(
+                !shared.mailbox(fx.channel).has_active_turn().await,
+                "exact receipt releases original actor"
+            );
+            let successor = Arc::new(crate::services::provider::CancelToken::new());
+            assert!(
+                crate::services::discord::mailbox_try_start_turn(
+                    &shared,
+                    fx.channel,
+                    successor.clone(),
+                    serenity::UserId::new(row.request_owner_user_id),
+                    serenity::MessageId::new(row.user_msg_id + 1),
+                )
+                .await,
+                "next input can start without a forced clear"
+            );
+            cancel_handoff::completion::finish_after_receipt(
+                &shared,
+                fx.channel,
+                &fx.provider,
+                turn.startup_inflight_snapshot.as_ref(),
+                turn.completion_actor.as_ref(),
+                source_authority,
+                (0, offset),
+            )
+            .await;
+            assert!(
+                Arc::ptr_eq(
+                    &shared
+                        .mailbox(fx.channel)
+                        .snapshot()
+                        .await
+                        .cancel_token
+                        .unwrap(),
+                    &successor
+                ),
+                "old completion cannot release successor"
+            );
+        }
         handle.shutdown().await;
         crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&fx.tmux);
         std::fs::remove_file(marker).unwrap();

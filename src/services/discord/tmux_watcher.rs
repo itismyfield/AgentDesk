@@ -218,41 +218,8 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     last_heartbeat_ts_ms: Arc<std::sync::atomic::AtomicI64>,
     restored_turn: Option<RestoredWatcherTurn>,
 ) {
-    // #3041 P1-1: this watcher instance's delivery-lease holder id. Minted once
-    // per spawn so a replacement watcher cannot release/commit (or be mistaken
-    // for) this instance's lease across a reattach (§5.2 B2). #3277 (Defect B):
-    // minted BEFORE the start log so start/stop pairs are attributable — in the
-    // incident two overlapping instances' unlabeled start/stop lines were
-    // misread as one watcher dying.
-    let watcher_instance_id = next_watcher_instance_id();
-    let ts = chrono::Local::now().format("%H:%M:%S");
-    tracing::info!(
-        "  [{ts}] 👁 tmux watcher started for #{tmux_session_name} at offset {initial_offset} (instance {watcher_instance_id})"
-    );
-
-    // E5 (#2412): cache the supervisor-owned StreamRelay producer for this
-    // tmux session, if the supervisor is running and has matched the
-    // session. `None` covers three legitimate cases:
-    //   1. `cluster.session_bound_relay_enabled = false` (supervisor never
-    //      spawned, registry empty).
-    //   2. SessionDiscovery hasn't yet observed this session — the cache is
-    //      refreshed below per chunk-read in that case.
-    //   3. This watcher attached to a session the registry doesn't know
-    //      (e.g. legacy session name pattern). The watcher keeps the legacy
-    //      fallback path for envelopes the supervisor-owned relay cannot own.
-    let producer_registry =
-        crate::services::cluster::relay_producer_registry::global_relay_producer_registry();
-    // Cached clone so we don't take the registry RwLock on every chunk. The
-    // supervisor only ever publishes ONE producer per session name, but it
-    // CAN republish after an Updated event (channel rebind). We refresh on
-    // miss and after every send-failure (relay torn down → producer stale).
-    let mut cached_relay_producer = producer_registry.get_producer(&tmux_session_name);
-
-    // #1134: mark the attach moment so `record_first_relay` (below) can compute
-    // attach→first-relay latency. Single instrumentation point covers all
-    // spawn sites (recovery_engine, turn_bridge, tmux self-recovery).
-    crate::services::observability::watcher_latency::record_attach(channel_id.get());
-
+    let (watcher_instance_id, producer_registry, mut cached_relay_producer) =
+        entry::start_watcher(channel_id, &tmux_session_name, initial_offset);
     let (watcher_provider, watcher_channel_name) =
         parse_provider_and_channel_from_tmux_name(&tmux_session_name).unwrap_or((
             crate::services::provider::ProviderKind::Claude,
@@ -321,76 +288,20 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
     let mut restored_injected_prompt_message_id = restored_turn
         .as_ref()
         .and_then(|turn| turn.injected_prompt_message_id);
-    // Guard against duplicate relay: track the offset from which the last relay was sent.
-    // If the outer loop circles back and current_offset hasn't advanced past this point,
-    // the relay is suppressed.
-    // Initialize from persisted inflight state so replacement watcher instances skip
-    // already-delivered output (fixes double-reply on stale watcher replacement).
-    // #1270: load both the persisted offset AND its matching
-    // `.generation` mtime so a replacement watcher can correctly classify
-    // an output regression on restored state. When we have a persisted
-    // mtime, it labels the wrapper that produced the persisted offset:
-    //   - matches current `.generation` mtime → same wrapper after
-    //     `truncate_jsonl_head_safe` → pin to EOF (don't re-flood
-    //     surviving content; codex P2 on PR #1271).
-    //   - differs from current `.generation` mtime → cancel→respawn into
-    //     the same session name → reset to 0 to pick up the fresh
-    //     response.
-    // When the persisted state predates this field (legacy `None`), we
-    // fall back to "no baseline known" semantics — the regression check
-    // treats it as a first observation and resets to 0, which is the
-    // safer choice for not silently dropping a fresh response.
-    let restored_inflight =
-        parse_provider_and_channel_from_tmux_name(&tmux_session_name).and_then(|(pk, _)| {
-            crate::services::discord::inflight::load_inflight_state(&pk, channel_id.get())
-        });
-    let mut watcher_turn_identity =
-        matching_watcher_turn_identity(restored_inflight.as_ref(), &tmux_session_name);
-    let mut watcher_turn_nonce =
-        matching_watcher_turn_nonce(restored_inflight.as_ref(), &tmux_session_name);
-    let mut last_relayed_offset: Option<u64> = restored_inflight
-        .as_ref()
-        .and_then(|s| s.last_watcher_relayed_offset);
-    let mut last_observed_generation_mtime_ns: Option<i64> = restored_inflight
-        .as_ref()
-        .and_then(|s| s.last_watcher_relayed_generation_mtime_ns);
+    let (
+        mut watcher_turn_identity,
+        mut watcher_turn_nonce,
+        mut last_relayed_offset,
+        mut last_observed_generation_mtime_ns,
+    ) = entry::restore_delivery_position(&shared, channel_id, &tmux_session_name, &output_path);
     let mut pending_terminal_rewind_seed: Option<RestoredWatcherTurn> = None;
     let mut terminal_rewind_attempt_key: Option<WatcherRewindAttemptKey> = None;
     let mut terminal_rewind_attempts: u8 = 0;
-    if let Ok(meta) = std::fs::metadata(&output_path) {
-        let observed_output_end = meta.len();
-        reset_stale_relay_watermark_if_output_regressed(
-            &shared,
-            channel_id,
-            &tmux_session_name,
-            observed_output_end,
-            "watcher_start",
-        );
-        reset_stale_local_relay_offset_if_output_regressed(
-            &mut last_relayed_offset,
-            &mut last_observed_generation_mtime_ns,
-            channel_id,
-            &tmux_session_name,
-            observed_output_end,
-            "watcher_start",
-        );
-    }
     let mut rotation_tick: u32 = 0;
 
-    // #2441 (H1) — spawn a single `notify`-crate-backed JsonlWatcher
-    // keyed on the session output path. Its `Notify` is awaited alongside
-    // each polling `sleep()` in this function so a real wrapper write
-    // wakes us immediately while the sleep still bounds the maximum
-    // wake-up latency. The watcher is dropped automatically when this
-    // task exits (or the wrapper rotates the file away).
-    let jsonl_watcher = crate::services::discord::jsonl_watcher::JsonlWatcher::spawn(
-        std::path::PathBuf::from(&output_path),
-    );
+    let (jsonl_watcher, dead_marker_watcher) =
+        entry::source_notifications(&output_path, &tmux_session_name);
     let jsonl_notify = jsonl_watcher.notify();
-    let dead_marker_watcher =
-        crate::services::discord::jsonl_watcher::JsonlWatcher::spawn(std::path::PathBuf::from(
-            crate::services::tmux_common::session_dead_marker_path(&tmux_session_name),
-        ));
     let dead_marker_notify = dead_marker_watcher.notify();
     let poll_context = PollWatcherContext {
         http: &http,
@@ -530,25 +441,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let mut monitor_auto_turn_state = MonitorAutoTurnState::default();
         let mut render_seed_state = RenderSeedState::default();
         let collection_outcome = collect_turn_stream_until_terminal(
-            &TurnStreamCollectorContext {
-                http: http.clone(),
-                shared: shared.clone(),
-                channel_id,
-                watcher_provider: watcher_provider.clone(),
-                tmux_session_name: tmux_session_name.clone(),
-                output_path: output_path.clone(),
-                input_fifo_path: input_fifo_path.clone(),
-                watcher_thread_channel_id,
-                cancel: cancel.clone(),
-                paused: paused.clone(),
-                pause_epoch: pause_epoch.clone(),
-                turn_delivered: turn_delivered.clone(),
-                last_heartbeat_ts_ms: last_heartbeat_ts_ms.clone(),
-                jsonl_notify: jsonl_notify.clone(),
-                dead_marker_notify: dead_marker_notify.clone(),
+            &TurnStreamCollectorContext::from_poll(
+                &poll_context,
+                &poll_controls,
+                &input_fifo_path,
                 turn_result_relayed,
                 restored_injected_prompt_message_id,
-            },
+            ),
             TurnStreamCollectorIo {
                 data,
                 data_start_offset,
@@ -602,6 +501,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             mut status_panel_msg_id,
             single_message_panel_footer_mode,
             startup_inflight_snapshot,
+            completion_actor,
             this_turn_status_panel_generation,
             turn_is_external_input_for_session,
             turn_identity_for_panel,
@@ -1455,7 +1355,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     provider: &watcher_provider,
                     channel: channel_id,
                     session: &tmux_session_name,
-                    expected_turn: inflight_before_relay.as_ref(),
+                    expected_turn: startup_inflight_snapshot.as_ref(),
                     range: (
                         turn_data_start_offset,
                         terminal_event_consumed_offset(current_offset, &all_data),
@@ -1466,6 +1366,21 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                     edit: &mut last_edit_text,
                     frozen: &mut watcher_streaming_rollover_frozen_msg_ids,
                 },
+            )
+            .await;
+        }
+        if relay_ok {
+            cancel_handoff::completion::finish_after_receipt(
+                &shared,
+                channel_id,
+                &watcher_provider,
+                startup_inflight_snapshot.as_ref(),
+                completion_actor.as_ref(),
+                source_authority,
+                (
+                    turn_data_start_offset,
+                    terminal_event_consumed_offset(current_offset, &all_data),
+                ),
             )
             .await;
         }

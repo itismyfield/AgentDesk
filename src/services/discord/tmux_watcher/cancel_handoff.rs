@@ -12,7 +12,86 @@ use std::sync::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
-pub(in crate::services::discord) type Store = Arc<Mutex<Vec<Pending>>>;
+pub(in crate::services::discord) type Store = Arc<HandoffStore>;
+
+#[derive(Default)]
+pub(in crate::services::discord) struct HandoffStore {
+    pending: Arc<Mutex<Vec<Pending>>>,
+    // Receipt metadata from the SAME custody capsule, readable while its
+    // successor owns the reader mutex. This is not a new transport permission.
+    recorded: std::sync::Mutex<Option<RecordedEpisode>>,
+}
+
+#[derive(Clone)]
+pub(in crate::services::discord) struct RecordedEpisode {
+    pub(in crate::services::discord) original: InflightTurnState,
+    authority: WatcherSourceAuthority,
+    source: Arc<std::fs::File>,
+}
+
+impl RecordedEpisode {
+    pub(in crate::services::discord) fn matches_source(
+        &self,
+        generation: Option<i64>,
+        stamp: Option<crate::services::cluster::stream_relay::SourceStamp>,
+    ) -> bool {
+        generation == Some(self.authority.generation_mtime_ns)
+            && self.authority.source_stamp.is_some()
+            && stamp == self.authority.source_stamp
+    }
+}
+
+pub(in crate::services::discord) fn recorded_episode(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    session: &str,
+) -> Option<RecordedEpisode> {
+    if !crate::services::discord::relay_recovery::cohort::enforcement_admits(channel.get())
+        || !matches!(
+            crate::services::discord::inflight::load_inflight_state_read_only_result(
+                provider,
+                channel.get()
+            ),
+            Ok(None)
+        )
+    {
+        return None;
+    }
+    let recorded = shared
+        .tmux_relay_coord(channel)
+        .cancel_handoffs
+        .recorded
+        .lock()
+        .ok()?
+        .clone()?;
+    let row = &recorded.original;
+    let path = row.output_path.as_deref()?;
+    let start = row.turn_start_offset?;
+    (row.provider == provider.as_str()
+        && row.channel_id == channel.get()
+        && row.delivery_record_owner_channel_id() == channel.get()
+        && row.tmux_session_name.as_deref() == Some(session)
+        && row
+            .turn_nonce
+            .as_deref()
+            .is_some_and(|nonce| !nonce.is_empty())
+        && recorded.authority.generation_mtime_ns != 0
+        && recorded.authority.generation_mtime_ns == read_generation_file_mtime_ns(session)
+        && recorded.authority.reset_incarnation
+            == shared.relay_frontier_token(channel).reset_incarnation
+        && recorded.authority.source_file
+            != crate::services::cluster::stream_relay::SourceFileIdentity::Unavailable
+        && crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(
+            &recorded.source,
+        ) == recorded.authority.source_file
+        && std::fs::File::open(path).ok().is_some_and(|file| {
+            crate::services::cluster::stream_relay::SourceFileIdentity::from_open_file(&file)
+                == recorded.authority.source_file
+        })
+        && recent_turn_stop_for_watcher_range(channel, session, start).is_none())
+    .then_some(recorded)
+}
 
 #[derive(Clone)]
 pub(in crate::services::discord) struct Pending {
@@ -39,6 +118,22 @@ pub(in crate::services::discord) struct Pending {
 }
 
 impl Pending {
+    fn recorded_episode(&self) -> Option<RecordedEpisode> {
+        let turn = self.turn.as_ref()?;
+        if turn.was_paused {
+            return None;
+        }
+        let original = turn.startup_inflight_snapshot.as_ref()?;
+        if !self.identity.as_ref()?.matches_state(original) || self.nonce != original.turn_nonce {
+            return None;
+        }
+        Some(RecordedEpisode {
+            original: original.clone(),
+            authority: self.authority,
+            source: self.source.clone(),
+        })
+    }
+
     fn matches(
         &self,
         custody: &Custody,
@@ -52,20 +147,46 @@ impl Pending {
             custody.path.as_str(),
             &custody.cancel,
         );
-        let Some(row) = row else {
-            return false;
+        let same_episode = match row {
+            Some(row) => {
+                self.identity
+                    .as_ref()
+                    .is_some_and(|id| id.matches_state(row))
+                    && self.nonce == row.turn_nonce
+                    && row.output_path.as_deref() == Some(path)
+            }
+            None => {
+                // Missing projection is not lost custody. Resume only an episode
+                // captured while the original source/turn was known, never a fresh
+                // rowless read or an identity reconstructed from the successor.
+                // Existing publication/receipt/lease gates still decide delivery.
+                crate::services::discord::relay_recovery::cohort::enforcement_admits(channel.get())
+                    && self
+                        .turn
+                        .as_ref()
+                        .and_then(|turn| turn.startup_inflight_snapshot.as_ref())
+                        .is_some_and(|original| {
+                            self.identity
+                                .as_ref()
+                                .is_some_and(|id| id.matches_state(original))
+                                && self.nonce.as_deref().is_some_and(|nonce| !nonce.is_empty())
+                                && self.nonce == original.turn_nonce
+                                && original.provider == provider.as_str()
+                                && original.channel_id == channel.get()
+                                && original.tmux_session_name.as_deref() == Some(session)
+                                && original.output_path.as_deref() == Some(path)
+                                && original
+                                    .turn_start_offset
+                                    .is_some_and(|start| start < self.offset)
+                        })
+            }
         };
         self.provider == *provider
             && self.session == session
             && self.path == path
             && self.cancel.load(Ordering::Acquire)
             && !Arc::ptr_eq(&self.cancel, cancel)
-            && self
-                .identity
-                .as_ref()
-                .is_some_and(|identity| identity.matches_state(row))
-            && self.nonce == row.turn_nonce
-            && row.output_path.as_deref() == Some(path)
+            && same_episode
             && self.authority.generation_mtime_ns != 0
             && self.authority.generation_mtime_ns == read_generation_file_mtime_ns(session)
             && self.authority.reset_incarnation
@@ -95,6 +216,7 @@ impl Pending {
 /// Waiting is bounded: a wedged reader leaves custody intact and the caller exits
 /// for the existing recovery machinery, rather than guessing that it joined.
 pub(super) struct Custody {
+    store: Store,
     pending: OwnedMutexGuard<Vec<Pending>>,
     checkpoint: Option<Pending>,
     cancel: Arc<AtomicBool>,
@@ -115,7 +237,7 @@ impl Custody {
         let store = shared.tmux_relay_coord(channel).cancel_handoffs.clone();
         let pending = match tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            store.lock_owned(),
+            store.pending.clone().lock_owned(),
         )
         .await
         {
@@ -130,6 +252,7 @@ impl Custody {
             }
         };
         Some(Self {
+            store,
             pending,
             checkpoint: None,
             cancel: cancel.clone(),
@@ -161,12 +284,6 @@ impl Custody {
             return None;
         }
         drop(handle);
-        let row =
-            crate::services::discord::inflight::load_inflight_state(&self.provider, channel.get());
-        let index = self
-            .pending
-            .iter()
-            .position(|pending| pending.matches(self, shared, channel, row.as_ref()))?;
         let pin = crate::services::discord::tmux_watcher_registry::WatcherClaimIncarnation::capture_for_source(
             &shared.tmux_watchers, &self.session, std::path::Path::new(&self.path),
         )?;
@@ -184,7 +301,23 @@ impl Custody {
             {
                 return None;
             }
+            // Re-read at the incarnation-fenced take, and do not treat an I/O or
+            // parse failure as rowless permission. This read cannot backfill a row.
+            let row = crate::services::discord::inflight::load_inflight_state_read_only_result(
+                &self.provider,
+                channel.get(),
+            )
+            .ok()?;
+            let index = self
+                .pending
+                .iter()
+                .position(|pending| pending.matches(self, shared, channel, row.as_ref()))?;
             let pending = self.pending.remove(index);
+            *self
+                .store
+                .recorded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = pending.recorded_episode();
             // Moving custody is not settlement. Keep an outgoing checkpoint
             // before the successor can await: cancellation before its first
             // collector checkpoint must not lose the only retained copy.
@@ -242,6 +375,11 @@ impl Custody {
 
     pub(super) fn settled(&mut self) {
         self.checkpoint = None;
+        *self
+            .store
+            .recorded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
@@ -252,6 +390,11 @@ impl Drop for Custody {
         {
             tracing::info!(session = %self.session, offset = checkpoint.offset,
                 "watcher retained cancellation source/parser/body without advancing delivery");
+            *self
+                .store
+                .recorded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = checkpoint.recorded_episode();
             self.pending.push(checkpoint);
         }
     }
@@ -260,3 +403,6 @@ impl Drop for Custody {
 #[cfg(test)]
 #[path = "cancel_handoff/interrupted_adoption_tests.rs"]
 pub(super) mod interrupted_adoption_tests;
+
+#[path = "cancel_handoff/completion.rs"]
+pub(super) mod completion;

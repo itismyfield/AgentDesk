@@ -47,6 +47,7 @@ impl<'a> SinkDeliveryCtx<'a> {
             &self.delivery.session_name,
             self.delivery,
         )
+        .or_else(|| cancellation_episode(self.shared, self.delivery))
     }
 }
 
@@ -113,6 +114,11 @@ pub(super) fn persist_sink_delivery(
     terminal_anchor_msg_id: Option<u64>,
     raw_body: &str,
 ) -> SinkDeliveryProofResult {
+    if let Some(original) = cancellation_episode(ctx.shared, ctx.delivery) {
+        // `mutation` continues holding the existing reset-incarnation guard
+        // while the confirmed receipt is persisted; never recreate the row.
+        return persist_cancelled_episode(ctx, &original, terminal_anchor_msg_id, raw_body);
+    }
     if !mutation.persist(
         ctx.target(),
         ctx.authority.range,
@@ -149,4 +155,72 @@ pub(super) fn finish_sink_delivery(
         guard.commit(LeaseOutcome::Delivered);
     }
     result
+}
+
+/// Reuse a cancelled reader's original episode only for the exact source/fenced
+/// frame. The existing sink lease still serializes every actual transport.
+fn cancellation_episode(
+    shared: &SharedData,
+    delivery: &SessionRelayDelivery,
+) -> Option<crate::services::discord::InflightTurnState> {
+    let captured = crate::services::discord::tmux::tmux_watcher::cancel_handoff::recorded_episode(
+        shared,
+        &delivery.provider,
+        ChannelId::new(delivery.channel_id),
+        &delivery.session_name,
+    )?;
+    let source_matches = captured.matches_source(
+        delivery.relay_generation_mtime_ns,
+        delivery.relay_source_stamp,
+    );
+    let row = captured.original;
+    let end = delivery.terminal_consumed_end?;
+    (delivery.frame_turn_user_msg_id == row.user_msg_id
+        && delivery.frame_turn_started_at == row.started_at
+        && delivery.frame_turn_start_offset == row.turn_start_offset
+        && row.turn_start_offset.is_some_and(|start| end > start)
+        && source_matches
+        && row
+            .output_path
+            .as_ref()
+            .is_some_and(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() >= end)))
+    .then_some(row)
+}
+
+impl super::SessionBoundDiscordRelaySink {
+    pub(super) async fn cancelled_episode_is_retained(
+        &self,
+        delivery: &SessionRelayDelivery,
+    ) -> bool {
+        self.health_registry
+            .shared_for_provider(&delivery.provider)
+            .await
+            .is_some_and(|shared| cancellation_episode(&shared, delivery).is_some())
+    }
+}
+
+fn persist_cancelled_episode(
+    ctx: SinkDeliveryCtx<'_>,
+    original: &crate::services::discord::InflightTurnState,
+    anchor: Option<u64>,
+    body: &str,
+) -> SinkDeliveryProofResult {
+    use crate::services::discord::outbound::delivery_record as records;
+    let Some(anchor) = anchor.filter(|id| *id != 0) else {
+        return SinkDeliveryProofResult::LandedUnrecorded;
+    };
+    let source = records::ExactJsonlSourceIdentity {
+        provider: ctx.provider.as_str().into(),
+        tmux_session_name: ctx.delivery.session_name.clone(),
+        turn_nonce: original.turn_nonce.clone().unwrap_or_default(),
+        range: ctx.authority.range,
+        generation_mtime_ns: ctx.authority.identity.generation_mtime_ns,
+        offset_authority_channel_id: ctx.channel.get(),
+        delivery_channel_id: ctx.channel.get(),
+    };
+    if records::record_current_pinned_delivery(&source, anchor).is_err() {
+        return SinkDeliveryProofResult::LandedUnrecorded;
+    }
+    records::record_pinned_delivery_metadata(&source, body, original.effective_finalizer_turn_id());
+    SinkDeliveryProofResult::Persisted
 }
