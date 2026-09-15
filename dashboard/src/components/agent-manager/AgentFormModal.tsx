@@ -29,6 +29,9 @@ const agentFormSchema = z.object({
   auto_commit: z.boolean(),
 });
 
+// The icon randomizer uses only 1–20; agent portraits ship as 1–40.
+const MAX_AGENT_SPRITE_NUMBER = 40;
+
 type AgentFormValues = z.infer<typeof agentFormSchema>;
 
 export default function AgentFormModal({
@@ -161,7 +164,7 @@ export default function AgentFormModal({
                     background: "color-mix(in srgb, var(--th-bg-surface) 92%, transparent)",
                   }}
                   onClick={() => {
-                    const next = Math.min(ICON_SPRITE_POOL.length, Math.max(1, spriteNum || 0) + 1);
+                    const next = Math.min(MAX_AGENT_SPRITE_NUMBER, Math.max(0, spriteNum || 0) + 1);
                     setValue("sprite_number", next, { shouldDirty: true, shouldValidate: true });
                   }}
                 >
@@ -174,7 +177,7 @@ export default function AgentFormModal({
                   aria-label={tr("스프라이트", "Sprite")}
                   aria-valuenow={spriteNum || 0}
                   aria-valuemin={0}
-                  aria-valuemax={ICON_SPRITE_POOL.length}
+                  aria-valuemax={MAX_AGENT_SPRITE_NUMBER}
                   aria-valuetext={spriteNum ? tr(`선택된 스프라이트: ${spriteNum}`, `Selected sprite: ${spriteNum}`) : tr("선택 안됨", "Not selected")}
                   tabIndex={0}
                   onKeyDown={(e) => {
@@ -183,7 +186,7 @@ export default function AgentFormModal({
                     }
                     if (e.key === "ArrowUp") {
                       e.preventDefault();
-                      const next = Math.min(ICON_SPRITE_POOL.length, Math.max(1, spriteNum || 0) + 1);
+                      const next = Math.min(MAX_AGENT_SPRITE_NUMBER, Math.max(0, spriteNum || 0) + 1);
                       setValue("sprite_number", next, { shouldDirty: true, shouldValidate: true });
                     } else if (e.key === "ArrowDown") {
                       e.preventDefault();
