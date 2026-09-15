@@ -1,0 +1,60 @@
+name: PR 5927 isolated ratchet audit
+on:
+  push:
+    branches: [review/pr5927-ci-audit-20260915]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ff0311437e492c20b8db64e80abe3a4cafacb491
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Reproduce and validate exact relocation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pr5927-audit
+          git rev-parse HEAD > /tmp/pr5927-audit/source-sha.txt
+          git archive HEAD | gzip > /tmp/pr5927-audit/source.tar.gz
+          set +e
+          python3 scripts/check_clippy_allow_ratchet.py > /tmp/pr5927-audit/before.log 2>&1
+          before=$?
+          set -e
+          test "$before" -eq 1
+          grep -F 'turn_stream_collector/state.rs' /tmp/pr5927-audit/before.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('scripts/clippy_allow_occurrences.json')
+          text = path.read_text()
+          old = 'src/services/discord/tmux_watcher/turn_stream_collector.rs'
+          new = 'src/services/discord/tmux_watcher/turn_stream_collector/state.rs'
+          before = json.loads(text)
+          matches = [row for row in before['occurrences'] if row['path'] == old and row['lint'] == 'large_enum_variant']
+          assert len(matches) == 1 and matches[0]['count'] == 1, matches
+          assert not any(row['path'] == new for row in before['occurrences'])
+          needle = f'"path": "{old}",\n      "lint": "large_enum_variant"'
+          assert text.count(needle) == 1
+          updated = text.replace(needle, f'"path": "{new}",\n      "lint": "large_enum_variant"')
+          after = json.loads(updated)
+          assert sum(row['count'] for row in before['occurrences']) == sum(row['count'] for row in after['occurrences'])
+          path.write_text(updated)
+          PY
+          python3 scripts/check_clippy_allow_ratchet.py | tee /tmp/pr5927-audit/after.log
+          python3 -m unittest tests.test_clippy_allow_ratchet > /tmp/pr5927-audit/tests.log 2>&1
+          cat /tmp/pr5927-audit/tests.log
+          git diff --check
+          git diff > /tmp/pr5927-audit/candidate.patch
+          cp scripts/clippy_allow_occurrences.json /tmp/pr5927-audit/clippy_allow_occurrences.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr5927-ci-audit
+          path: /tmp/pr5927-audit
+          retention-days: 2
+          if-no-files-found: error
