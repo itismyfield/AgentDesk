@@ -109,23 +109,3 @@ old_cap = 2335
 new_cap = 2359
 decompose_issue = 5462
 count = 1
-
-
-# PR #5927: cancellation adoption/checkpoint wiring; reviewable growth.
-[[admission]]
-ratchet = "hotfile_ratchet"
-file = "src/services/discord/tmux_watcher.rs"
-old_cap = 2544
-new_cap = 2609
-decompose_issue = 4712
-count = 5
-
-
-# PR #5927: cancellation adoption/checkpoint wiring; reviewable growth.
-[[admission]]
-ratchet = "giant_file_ratchet"
-file = "src/services/discord/tmux_watcher.rs"
-old_cap = 2550
-new_cap = 2609
-decompose_issue = 4712
-count = 6

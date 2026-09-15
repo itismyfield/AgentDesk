@@ -471,17 +471,18 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                 .is_some_and(|identity| identity.matches_state(row))
                 && row.turn_nonce == watcher_turn_nonce
         });
+        let checkpoint_turn = match &collection_outcome {
+            CollectOutcome::Fallthrough(turn) => Some(turn),
+            _ => None,
+        };
         cancellation_custody.checkpoint(
             &turn_parse_state,
             &supervisor_relay_state,
             source_authority,
-            match &collection_outcome {
-                CollectOutcome::Fallthrough(turn) => Some(turn),
-                _ => None,
-            },
+            checkpoint_turn,
             checkpoint_row.as_ref(),
         );
-        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+        if cancel_handoff::cancel_yields_before_delivery(&cancel, checkpoint_turn) {
             break 'watcher_loop;
         }
         let collected_turn_stream = match collection_outcome {

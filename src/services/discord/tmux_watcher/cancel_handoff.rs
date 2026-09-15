@@ -430,3 +430,13 @@ pub(super) fn has_recorded_completion(
                 .is_ok_and(|meta| meta.len() >= end)
     })
 }
+
+/// Cancellation moves custody; it does not discard output this collector already
+/// parsed. The post-collect cancel exit belongs to the no-result path only, so a
+/// turn whose terminal was parsed before the cancel still reaches delivery.
+pub(super) fn cancel_yields_before_delivery(
+    cancel: &AtomicBool,
+    turn: Option<&CollectedTurnStream>,
+) -> bool {
+    cancel.load(Ordering::Acquire) && !turn.is_some_and(|turn| turn.found_result)
+}

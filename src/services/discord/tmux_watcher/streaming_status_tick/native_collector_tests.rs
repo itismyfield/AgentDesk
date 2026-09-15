@@ -503,6 +503,18 @@ fn native_collector_case(test_name: &str, mode: u8) {
             }
         }
         assert!(turn.found_result);
+        // P1-2: a cancel raised while this terminal was being collected must not
+        // discard it. The receipt/visibility assertions below are the delivery
+        // this same turn still has to reach.
+        let racing_cancel = AtomicBool::new(true);
+        assert!(
+            !cancel_handoff::cancel_yields_before_delivery(&racing_cancel, Some(&turn)),
+            "parsed terminal must survive a cancellation set during collection"
+        );
+        assert!(cancel_handoff::cancel_yields_before_delivery(
+            &racing_cancel,
+            None
+        ));
         assert_eq!(
             turn.full_response,
             format!("0: {TRAILING_BODY}\n\nADK5833-final")
