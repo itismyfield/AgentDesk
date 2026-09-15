@@ -217,8 +217,24 @@ pub struct DispatchGateDiagnostics {
     pub last_defer_at: Option<i64>,
 }
 
-/// Replace the in-memory provider-pressure snapshot. Called off the hot path by
-/// the rate-limit sync loop after it refreshes the Postgres cache.
+/// Only fresh, fully exhausted quota blocks automatic account selection.
+pub(crate) fn profile_exhausted(
+    provider: &crate::services::provider::ProviderKind,
+    profile: &str,
+) -> bool {
+    let map = pressure_map().read().unwrap_or_else(|p| p.into_inner());
+    evaluate_provider_pressure(
+        provider.as_str(),
+        map.get(&auth_profiles::account_key(provider.as_str(), profile)),
+        100,
+        stale_sec(),
+        chrono::Utc::now().timestamp(),
+    )
+    .verdict
+    .is_defer()
+}
+
+/// Replace the pressure snapshot after refreshing the Postgres cache.
 pub fn set_provider_pressure_snapshot(snapshot: HashMap<String, ProviderPressureSnapshot>) {
     let lock = pressure_map();
     *lock.write().unwrap_or_else(|p| p.into_inner()) = snapshot;
@@ -740,9 +756,11 @@ pub fn evaluate_agent_provider_pressure_with_overrides(
     let decision = {
         let lock = pressure_map();
         let map = lock.read().unwrap_or_else(|p| p.into_inner());
-        evaluate_provider_pressure(
+        auth_profiles::evaluate_with_fallbacks(
             &provider,
-            map.get(&auth_profiles::agent_account_key(agent_id, &provider)),
+            &auth_profiles::agent_account_key(agent_id, &provider),
+            &auth_profiles::agent_fallback_keys(agent_id),
+            &map,
             danger,
             stale_override.unwrap_or_else(stale_sec),
             now,

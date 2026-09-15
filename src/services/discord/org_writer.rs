@@ -51,6 +51,9 @@ struct OrgDocument {
     provider_auth_profiles: BTreeMap<String, ProviderAuthProfileDef>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_auth_primary_profiles: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_auth_fallbacks:
+        BTreeMap<String, crate::services::provider_auth_profile::fallback::FallbackPolicy>,
     #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
     extra: BTreeMap<String, Value>,
 }
@@ -443,6 +446,14 @@ pub(crate) fn remove_provider_auth_profile_at(
             "auth profile '{profile_id}' is the provider primary; select another primary first"
         ));
     }
+    if document.provider_auth_fallbacks.values().any(|policy| {
+        policy.fallback_profile.as_deref() == Some(profile_id)
+            || policy.priority.iter().any(|id| id == profile_id)
+    }) {
+        return Err(format!(
+            "auth profile '{profile_id}' is still bound to a fallback policy; detach it first"
+        ));
+    }
     document.provider_auth_profiles.remove(profile_id);
     persist_org_document(org_path, &document)
 }
@@ -451,6 +462,41 @@ pub(crate) fn remove_provider_auth_profile_at(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn fallback_policy_survives_writes_and_protects_referenced_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("org.yaml");
+        for field in ["fallback_profile: work", "priority: [work]"] {
+            fs::write(
+                &path,
+                format!(
+                    "version: 1\nagents: {{}}\nprovider_auth_fallbacks:\n  codex:\n    {field}\n"
+                ),
+            )
+            .unwrap();
+            append_provider_auth_profile_at(
+                &path,
+                "work",
+                ProviderAuthProfileDef {
+                    provider: "codex".into(),
+                    home: Some("~/.adk/profiles/codex/work".into()),
+                    env: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+            assert!(
+                remove_provider_auth_profile_at(&path, "work", "codex")
+                    .unwrap_err()
+                    .contains("still bound")
+            );
+            assert!(
+                fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("provider_auth_fallbacks:")
+            );
+        }
+    }
 
     #[test]
     fn test_012_catalog_append_round_trips_extra_and_skips_secrets() {

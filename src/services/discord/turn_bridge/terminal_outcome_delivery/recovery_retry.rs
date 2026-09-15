@@ -56,7 +56,7 @@ pub(super) async fn handle_recovery_retry(
     // Recovery auto-retry: session died during restart recovery
         let ts = chrono::Local::now().format("%H:%M:%S");
         tracing::warn!(
-            "  [{ts}] ↻ Recovery session died — triggering auto-retry with history (channel {})",
+            "  [{ts}] ↻ Session recovery — triggering auto-retry with history (channel {})",
             channel_id
         );
         reset_session_for_auto_retry(
@@ -67,7 +67,7 @@ pub(super) async fn handle_recovery_retry(
             &mut new_session_id,
             &mut new_raw_provider_session_id,
             &mut inflight_state,
-            "recovery session died",
+            "session recovery or auth profile fallback",
         )
         .await;
         // #2452 H6: schedule the auto-retry via the explicit

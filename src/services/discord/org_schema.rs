@@ -12,6 +12,7 @@ use super::settings::{
 };
 use crate::services::agent_identity::{self, identity_from_parts, identity_label};
 use crate::services::provider::ProviderKind;
+use crate::services::provider_auth_profile::fallback::{self, FallbackPolicy};
 use crate::services::provider_auth_profile::{ProviderAuthProfileDef, validate_catalog};
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
@@ -19,6 +20,8 @@ use crate::utils::format::expand_tilde_string as expand_tilde;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct OrgSchema {
+    #[serde(default)]
+    pub provider_auth_fallbacks: HashMap<String, FallbackPolicy>,
     // #3034: serde wire fields deserialized from the org schema for forward
     // compatibility; no in-code reader today.
     #[allow(dead_code)]
@@ -183,6 +186,20 @@ pub(crate) fn parse_org_schema(content: &str) -> Result<OrgSchema, String> {
     if let Some(catalog) = schema.provider_auth_profiles.as_ref() {
         validate_catalog(catalog).map_err(|error| error.to_string())?;
     }
+    for (name, policy) in &schema.provider_auth_fallbacks {
+        let provider = crate::services::provider_auth_profile::intern_provider(name)
+            .map_err(|error| error.to_string())?;
+        if name != provider.as_str() {
+            return Err(format!(
+                "profile fallback provider must use canonical name '{}'",
+                provider.as_str()
+            ));
+        }
+        policy.validate(
+            &provider,
+            &schema.provider_auth_profiles.clone().unwrap_or_default(),
+        )?;
+    }
     if let Some(primary) = schema.provider_auth_primary_profiles.as_ref() {
         let catalog = schema
             .provider_auth_profiles
@@ -232,6 +249,52 @@ fn provider_primary_profile(schema: &OrgSchema, provider: Option<&str>) -> Strin
         })
         .cloned()
         .unwrap_or_else(|| "default".to_string())
+}
+
+fn fallback_profile_available(
+    provider: &ProviderKind,
+    id: &str,
+    catalog: &HashMap<String, ProviderAuthProfileDef>,
+) -> bool {
+    !crate::services::dispatch_gate::profile_exhausted(provider, id)
+        && crate::services::provider_auth_profile::resolve(
+            provider.clone(),
+            Some(id),
+            None,
+            catalog,
+        )
+        .is_ok()
+}
+
+pub(crate) fn provider_auth_fallback_policies() -> HashMap<String, FallbackPolicy> {
+    load_org_schema()
+        .map(|schema| schema.provider_auth_fallbacks)
+        .unwrap_or_default()
+}
+
+/// Called only after the bridge has checked the current turn identity.
+pub(crate) fn advance_auth_profile(
+    provider: &ProviderKind,
+    channel: u64,
+    request: u64,
+) -> Result<Option<(String, String)>, String> {
+    let Some(schema) = load_org_schema_for_auth()? else {
+        return Ok(None);
+    };
+    let policy = schema
+        .provider_auth_fallbacks
+        .get(provider.as_str())
+        .cloned()
+        .unwrap_or_default();
+    let catalog = schema.provider_auth_profiles.unwrap_or_default();
+    Ok(fallback::fail(
+        provider,
+        channel,
+        request,
+        &policy,
+        &catalog,
+        |id| fallback_profile_available(provider, id, &catalog),
+    ))
 }
 
 pub(crate) fn spawn_auth_overlay(
@@ -293,6 +356,7 @@ fn spawn_auth_overlay_for_context(
         })
         .transpose()?
         .flatten();
+    let recovery_pinned = pinned_profile.is_some();
     let profile = pinned_profile.or_else(|| {
         configured_auth_profile(channel_profile.as_deref(), agent_profile.as_deref())
             .map(str::to_string)
@@ -302,8 +366,24 @@ fn spawn_auth_overlay_for_context(
                     .map(|schema| provider_primary_profile(schema, Some(provider.as_str())))
             })
     });
-    let overlay = resolve(provider.clone(), profile.as_deref(), None, &catalog)
+    // Validate the configured primary first: a typo must not silently choose an account.
+    let primary_overlay = resolve(provider.clone(), profile.as_deref(), None, &catalog)
         .map_err(|error| error.to_string())?;
+    let overlay = if let Some(channel) = channel_id.filter(|_| !recovery_pinned) {
+        let policy = schema
+            .as_ref()
+            .and_then(|schema| schema.provider_auth_fallbacks.get(provider.as_str()))
+            .cloned()
+            .unwrap_or_default();
+        let candidates = policy.candidates(&provider, &primary_overlay.profile_id, &catalog);
+        let selected = fallback::select(&provider, channel, &candidates, |id| {
+            fallback_profile_available(&provider, id, &catalog)
+        });
+        resolve(provider.clone(), Some(&selected), None, &catalog)
+            .map_err(|error| error.to_string())?
+    } else {
+        primary_overlay
+    };
     if let Some(binding) = channel_id.and_then(|id| resolve_role_binding(ChannelId::new(id), None))
     {
         if let Some(bound_provider) = binding.provider.clone() {
@@ -817,6 +897,20 @@ pub(super) fn lookup_suffix_provider(channel_name: &str) -> Option<ProviderKind>
 mod tests {
     use super::*;
     use crate::services::agent_identity::identity_label;
+
+    #[test]
+    fn profile_fallback_configuration_validates_and_defaults_to_auto() {
+        let yaml = "version: 1\nagents: {}\nprovider_auth_fallbacks:\n  codex:\n    fallback_profile: default\n    include_remaining: false\n";
+        let schema = parse_org_schema(yaml).unwrap();
+        let policy = &schema.provider_auth_fallbacks["codex"];
+        assert!(policy.enabled);
+        assert!(!policy.include_remaining);
+        let invalid = yaml.replace("fallback_profile: default", "fallback_profile: missing");
+        assert!(parse_org_schema(&invalid).is_err());
+        assert!(parse_org_schema(&yaml.replace("codex:", "gemini:")).is_err());
+        let defaults = parse_org_schema("version: 1\nagents: {}\n").unwrap();
+        assert!(defaults.provider_auth_fallbacks.is_empty());
+    }
 
     #[test]
     fn test_010_peer_identity_label_uses_formatter() {
