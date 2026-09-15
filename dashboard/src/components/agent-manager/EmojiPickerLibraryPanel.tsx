@@ -26,25 +26,21 @@ export default function EmojiPickerLibraryPanel({
 
   // emoji-picker-react (v4) renders each emoji as `button.epr-emoji` whose
   // visible text is the native emoji. The library exposes no selected state, so
-  // we mark the current value with `aria-current="true"` for screen readers.
-  // aria-current is used (not aria-selected, which is ignored on an implicit
-  // role=button) so the "current selection in the set" is actually announced.
+  // we expose a complete `aria-pressed` state for every button.
+  // aria-pressed is used to indicate the toggle state on an implicit role=button.
   // The match is exact (ignoring the FE0F variation selector) so composed
   // sequences that merely contain the same codepoint are not tagged.
   useEffect(() => {
     const container = containerRef.current;
-    if (!value || !container) return;
+    if (!container) return;
 
     const normalize = (text: string) => text.replace(/\uFE0F/g, "").trim();
-    const target = normalize(value);
+    const target = value ? normalize(value) : null;
 
     const syncSelected = () => {
       container.querySelectorAll("button.epr-emoji").forEach((button) => {
-        if (normalize(button.textContent ?? "") === target) {
-          button.setAttribute("aria-current", "true");
-        } else {
-          button.removeAttribute("aria-current");
-        }
+        const isSelected = target !== null && normalize(button.textContent ?? "") === target;
+        button.setAttribute("aria-pressed", isSelected ? "true" : "false");
       });
     };
 
