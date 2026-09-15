@@ -70,6 +70,12 @@ pub(super) fn automatic_progression(
     channel_id: ChannelId,
     snapshot: &ChannelMailboxSnapshot,
 ) -> AutomaticQueueProgression {
+    if !crate::services::agent_recovery::allows_cli_turn_for_provider(
+        &channel_id.get().to_string(),
+        provider,
+    ) {
+        return AutomaticQueueProgression::Empty;
+    }
     if let Some(intervention) = snapshot.intervention_queue.iter().find(|intervention| {
         intervention.mode == InterventionMode::Soft
             && !busy_retry_is_capped(provider, channel_id, intervention)

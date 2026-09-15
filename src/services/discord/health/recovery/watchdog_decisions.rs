@@ -5,6 +5,14 @@ use crate::services::discord::relay_recovery::{self, RelayRecoveryActionKind};
 use crate::services::discord::{self as discord};
 use crate::services::provider::ProviderKind;
 
+pub(crate) fn idle_tmux_repair_ready_for_input(
+    provider: &ProviderKind,
+    channel_id: u64,
+    tmux_session: &str,
+) -> bool {
+    relay_recovery::idle_tmux_repair_ready_for_input(provider, channel_id, tmux_session)
+}
+
 /// #1446 stall-deadlock recovery - pure decision helper for the
 /// `stall_watchdog` periodic loop. Returns `true` when the watchdog should
 /// force-clean a watcher's state. The caller is responsible for actually

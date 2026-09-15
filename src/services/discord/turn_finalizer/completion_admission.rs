@@ -91,6 +91,29 @@ pub(super) fn publish_claimed_queue_eligible(shared: &SharedData, entry: &mut Le
         entry.turn_key.channel_id,
         Some(entry.turn_key.user_msg_id),
     );
+    if let Some(lease) = entry.recovery_lease.clone() {
+        let payload = crate::services::agent_recovery::CheckpointPayload::compact(
+            &lease.active_writer_agent_id,
+            "",
+            "agent turn complete",
+            "",
+            Vec::new(),
+            "",
+            "",
+        );
+        tokio::spawn(async move {
+            if let Err(error) =
+                crate::services::agent_recovery::complete_turn_durable(&lease, payload).await
+            {
+                tracing::warn!(
+                    channel_id = %lease.channel_id,
+                    generation = lease.generation,
+                    error = %error,
+                    "agent recovery turn completion was not durably committed"
+                );
+            }
+        });
+    }
     true
 }
 
