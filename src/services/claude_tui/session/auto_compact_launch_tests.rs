@@ -63,8 +63,26 @@ pub(super) fn assert_window(script: &str, expected: u64) {
     assert!(script.find(export.as_str()).unwrap() < script.find("exec ").unwrap());
 }
 
+/// #5935: an unset provider setting must still scrub the inherited window
+/// exactly once, but must not export an absolute one.
+pub(super) fn assert_no_window(script: &str) {
+    let unset = format!("unset {WINDOW_ENV}\n");
+    let export_prefix = format!("export {WINDOW_ENV}=");
+    assert_eq!(
+        script.matches(unset.as_str()).count(),
+        1,
+        "scrub inherited window once even with no configured value"
+    );
+    assert_eq!(
+        script.matches(export_prefix.as_str()).count(),
+        0,
+        "#5935 forbids exporting an absolute window without a configured value: {script}"
+    );
+    assert!(script.find(unset.as_str()).unwrap() < script.find("exec ").unwrap());
+}
+
 #[test]
-fn default_absolute_window_is_exported_without_a_model() {
+fn unset_setting_scrubs_without_exporting_a_window() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _context = crate::services::claude_compact_context::state_test_guard();
     let root = tempfile::tempdir().unwrap();
@@ -75,15 +93,31 @@ fn default_absolute_window_is_exported_without_a_model() {
     );
     let script = generated_script(root.path(), "default.sh", None);
     assert!(!script.contains("'--model'"));
-    assert_window(&script, 700_000);
+    assert_no_window(&script);
 }
 
 #[test]
-fn absolute_window_is_identical_for_model_free_sonnet_and_opus_launches() {
+fn unset_setting_exports_nothing_for_every_launch_model() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _context = crate::services::claude_compact_context::state_test_guard();
     let root = tempfile::tempdir().unwrap();
     let path = write_provider_setting(root.path(), None);
+    let _config_path = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_CONFIG",
+        &path,
+    );
+    for model in [None, Some("sonnet"), Some("opus"), Some("sonnet[1m]")] {
+        let script = generated_script(root.path(), "model.sh", model);
+        assert_no_window(&script);
+    }
+}
+
+#[test]
+fn configured_absolute_window_is_identical_for_model_free_sonnet_and_opus_launches() {
+    let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
+    let _context = crate::services::claude_compact_context::state_test_guard();
+    let root = tempfile::tempdir().unwrap();
+    let path = write_provider_setting(root.path(), Some(700_000));
     let _config_path = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_CONFIG",
         &path,
@@ -116,7 +150,7 @@ fn new_launch_override_does_not_rewrite_an_existing_launch_artifact() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _context = crate::services::claude_compact_context::state_test_guard();
     let root = tempfile::tempdir().unwrap();
-    let path = write_provider_setting(root.path(), None);
+    let path = write_provider_setting(root.path(), Some(700_000));
     let _config_path = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_CONFIG",
         &path,
