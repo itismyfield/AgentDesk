@@ -229,7 +229,7 @@ export function MiniRateLimitBar({
     const providerMeta = getProviderMeta(p.provider);
     const visible = p.buckets;
     return (
-      <div key={p.provider} className="space-y-1.5">
+      <div key={`${p.provider}:${p.profileId}`} className="space-y-1.5">
         <div className="flex items-center gap-1">
           <span
             className="text-sm font-bold uppercase truncate"
@@ -301,7 +301,7 @@ export function MiniRateLimitBar({
     const providerMeta = getProviderMeta(p.provider);
     const visible = p.buckets;
     return (
-      <div key={p.provider} className="min-w-0 space-y-1.5">
+      <div key={`${p.provider}:${p.profileId}`} className="min-w-0 space-y-1.5">
         <div className="flex h-5 min-w-0 items-center gap-1">
           <span
             className="truncate text-sm font-bold uppercase"
@@ -396,7 +396,7 @@ export function MiniRateLimitBar({
         const providerMeta = getProviderMeta(p.provider);
         const visible = p.buckets;
         return (
-          <div key={p.provider} className="flex items-center gap-0">
+          <div key={`${p.provider}:${p.profileId}`} className="flex items-center gap-0">
             <div className="flex items-center gap-1 shrink-0" style={{ width: 96 }}>
               <span
                 className="text-xs font-bold uppercase truncate"

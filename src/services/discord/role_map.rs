@@ -8,6 +8,7 @@ use super::settings::{
     MemoryConfigOverride, PeerAgentInfo, RegisteredChannelBinding, RoleBinding,
     resolve_memory_settings,
 };
+use crate::services::agent_identity::{identity_from_parts, identity_label};
 use crate::services::provider::ProviderKind;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
@@ -53,6 +54,7 @@ fn parse_role_binding(value: &serde_json::Value) -> Option<RoleBinding> {
         reasoning_effort,
         peer_agents_enabled,
         quality_feedback_injection_enabled: true,
+        auth_profile: "default".to_string(),
         memory: resolve_memory_settings(None, memory_override.as_ref()),
     })
 }
@@ -541,10 +543,22 @@ pub(super) fn load_peer_agents() -> Vec<PeerAgentInfo> {
             continue;
         }
 
+        let provider = agent.provider.clone();
+        let identity = identity_from_parts(
+            &agent.role_id,
+            &agent.display_name,
+            provider
+                .clone()
+                .unwrap_or_else(|| ProviderKind::Unsupported("unknown".into())),
+            agent.model.clone(),
+            None,
+        );
         result.push(PeerAgentInfo {
             role_id: agent.role_id,
             display_name: agent.display_name,
             keywords: agent.keywords,
+            provider,
+            identity_label: identity_label(&identity),
         });
     }
 

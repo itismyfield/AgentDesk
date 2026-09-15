@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
 use super::runtime_store::org_schema_path_for_root;
+use crate::services::provider_auth_profile::{ProviderAuthProfileDef, validate_profile_def};
 
 #[derive(Clone, Debug)]
 pub(crate) struct OrgAgentUpdate {
@@ -46,6 +47,10 @@ struct OrgDocument {
     meeting: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     suffix_map: Option<Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_auth_profiles: BTreeMap<String, ProviderAuthProfileDef>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_auth_primary_profiles: BTreeMap<String, String>,
     #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
     extra: BTreeMap<String, Value>,
 }
@@ -66,6 +71,8 @@ struct OrgAgentDef {
     workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     peer_agents: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_profile: Option<String>,
     #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
     extra: BTreeMap<String, Value>,
 }
@@ -92,6 +99,8 @@ struct OrgChannelBinding {
     model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     peer_agents: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth_profile: Option<String>,
     #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
     extra: BTreeMap<String, Value>,
 }
@@ -166,4 +175,401 @@ fn load_org_document(path: &Path) -> Result<OrgDocument, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read '{}': {e}", path.display()))?;
     serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse '{}': {e}", path.display()))
+}
+
+static ORG_PROFILE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn persist_org_document(path: &Path, document: &OrgDocument) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create '{}': {e}", parent.display()))?;
+    }
+    let rendered = serde_yaml::to_string(document)
+        .map_err(|e| format!("Failed to serialize '{}': {e}", path.display()))?;
+    let tmp = path.with_extension("yaml.tmp");
+    fs::write(&tmp, rendered).map_err(|e| format!("Failed to write '{}': {e}", tmp.display()))?;
+    fs::rename(&tmp, path).map_err(|e| {
+        format!(
+            "Failed to replace '{}' with '{}': {e}",
+            path.display(),
+            tmp.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn org_yaml_path() -> Result<PathBuf, String> {
+    let root =
+        crate::config::runtime_root().ok_or_else(|| "runtime root not configured".to_string())?;
+    Ok(org_schema_path_for_root(&root))
+}
+
+fn normalized_auth_profile(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+pub(crate) fn set_provider_primary_profile(provider: &str, profile_id: &str) -> Result<(), String> {
+    set_provider_primary_profile_at(&org_yaml_path()?, provider, profile_id)
+}
+
+pub(crate) fn set_provider_primary_profile_at(
+    org_path: &Path,
+    provider: &str,
+    profile_id: &str,
+) -> Result<(), String> {
+    let provider = provider.trim().to_ascii_lowercase();
+    let profile_id = profile_id.trim();
+    let _guard = ORG_PROFILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "org profile writer lock poisoned".to_string())?;
+    let mut document = load_org_document(org_path)?;
+    if profile_id.is_empty() || profile_id == "default" {
+        document.provider_auth_primary_profiles.remove(&provider);
+        return persist_org_document(org_path, &document);
+    }
+    let Some(profile) = document.provider_auth_profiles.get(profile_id) else {
+        return Err(format!("unknown auth_profile '{profile_id}'"));
+    };
+    if !profile.provider.eq_ignore_ascii_case(&provider) {
+        return Err(format!(
+            "auth_profile '{profile_id}' provider '{}' does not match provider '{provider}'",
+            profile.provider
+        ));
+    }
+    document
+        .provider_auth_primary_profiles
+        .insert(provider, profile_id.to_string());
+    persist_org_document(org_path, &document)
+}
+
+pub(crate) fn append_provider_auth_profile(
+    profile_id: &str,
+    def: ProviderAuthProfileDef,
+) -> Result<(), String> {
+    append_provider_auth_profile_at(&org_yaml_path()?, profile_id, def)
+}
+
+pub(crate) fn append_provider_auth_profile_at(
+    org_path: &Path,
+    profile_id: &str,
+    def: ProviderAuthProfileDef,
+) -> Result<(), String> {
+    validate_profile_def(profile_id, &def).map_err(|error| error.to_string())?;
+    let _guard = ORG_PROFILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "org profile writer lock poisoned".to_string())?;
+    let mut document = load_org_document(org_path)?;
+    if let Some(existing) = document.provider_auth_profiles.get(profile_id) {
+        if existing == &def {
+            return Ok(());
+        }
+        return Err(format!("auth profile '{profile_id}' already exists"));
+    }
+    document
+        .provider_auth_profiles
+        .insert(profile_id.to_string(), def);
+    persist_org_document(org_path, &document)
+}
+
+pub(crate) fn set_agent_auth_profile(
+    role_id: &str,
+    auth_profile: Option<&str>,
+) -> Result<(), String> {
+    set_agent_auth_profile_at(&org_yaml_path()?, role_id, auth_profile)
+}
+
+pub(crate) fn set_agent_auth_profile_at(
+    org_path: &Path,
+    role_id: &str,
+    auth_profile: Option<&str>,
+) -> Result<(), String> {
+    let _guard = ORG_PROFILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "org profile writer lock poisoned".to_string())?;
+    let mut document = load_org_document(org_path)?;
+    if !document.agents.contains_key(role_id) {
+        return Err(format!(
+            "agent '{role_id}' not found in '{}'",
+            org_path.display()
+        ));
+    }
+    let next = match normalized_auth_profile(auth_profile) {
+        Some(profile_id) if profile_id == "default" => Some(profile_id),
+        Some(profile_id) => {
+            let Some(profile) = document.provider_auth_profiles.get(&profile_id) else {
+                return Err(format!("unknown auth_profile '{profile_id}'"));
+            };
+            let Some(agent) = document.agents.get(role_id) else {
+                return Err(format!("agent '{role_id}' not found"));
+            };
+            if let Some(agent_provider) = agent.provider.as_deref()
+                && !profile.provider.eq_ignore_ascii_case(agent_provider)
+            {
+                return Err(format!(
+                    "auth_profile '{profile_id}' provider '{}' does not match agent '{role_id}' provider '{agent_provider}'",
+                    profile.provider
+                ));
+            }
+            Some(profile_id)
+        }
+        None => None,
+    };
+    if let Some(agent) = document.agents.get_mut(role_id) {
+        agent.auth_profile = next;
+    }
+    persist_org_document(org_path, &document)
+}
+
+pub(crate) fn set_channel_auth_profile(
+    channel_id: &str,
+    auth_profile: Option<&str>,
+) -> Result<(), String> {
+    set_channel_auth_profile_at(&org_yaml_path()?, channel_id, auth_profile)
+}
+
+pub(crate) fn set_channel_auth_profile_at(
+    org_path: &Path,
+    channel_id: &str,
+    auth_profile: Option<&str>,
+) -> Result<(), String> {
+    let _guard = ORG_PROFILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "org profile writer lock poisoned".to_string())?;
+    let mut document = load_org_document(org_path)?;
+    let has_binding = document
+        .channels
+        .as_ref()
+        .is_some_and(|channels| channels.by_id.contains_key(channel_id));
+    if !has_binding {
+        return Err(format!(
+            "channel '{channel_id}' not found in '{}'",
+            org_path.display()
+        ));
+    }
+    let next = match normalized_auth_profile(auth_profile) {
+        Some(profile_id) if profile_id == "default" => Some(profile_id),
+        Some(profile_id) => {
+            let Some(profile) = document.provider_auth_profiles.get(&profile_id) else {
+                return Err(format!("unknown auth_profile '{profile_id}'"));
+            };
+            let binding = document
+                .channels
+                .as_ref()
+                .and_then(|channels| channels.by_id.get(channel_id))
+                .expect("checked channel binding exists");
+            let channel_provider = binding.provider.as_deref().or_else(|| {
+                document
+                    .agents
+                    .get(binding.agent.as_str())
+                    .and_then(|agent| agent.provider.as_deref())
+            });
+            if let Some(channel_provider) = channel_provider
+                && !profile.provider.eq_ignore_ascii_case(channel_provider)
+            {
+                return Err(format!(
+                    "auth_profile '{profile_id}' provider '{}' does not match channel '{channel_id}' provider '{channel_provider}'",
+                    profile.provider
+                ));
+            }
+            Some(profile_id)
+        }
+        None => None,
+    };
+    if let Some(binding) = document
+        .channels
+        .as_mut()
+        .and_then(|channels| channels.by_id.get_mut(channel_id))
+    {
+        binding.auth_profile = next;
+    }
+    persist_org_document(org_path, &document)
+}
+
+/// Removes only the catalog binding. Credential material remains in the
+/// managed profile home so an operator never loses an account by clicking the
+/// dashboard's unlink button. A bound profile must be detached first.
+pub(crate) fn remove_provider_auth_profile(profile_id: &str, provider: &str) -> Result<(), String> {
+    remove_provider_auth_profile_at(&org_yaml_path()?, profile_id, provider)
+}
+
+pub(crate) fn remove_provider_auth_profile_at(
+    org_path: &Path,
+    profile_id: &str,
+    provider: &str,
+) -> Result<(), String> {
+    let _guard = ORG_PROFILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "org profile writer lock poisoned".to_string())?;
+    let mut document = load_org_document(org_path)?;
+    let Some(profile) = document.provider_auth_profiles.get(profile_id) else {
+        return Err(format!("auth profile '{profile_id}' not found"));
+    };
+    if !profile.provider.eq_ignore_ascii_case(provider) {
+        return Err(format!(
+            "auth profile '{profile_id}' belongs to provider '{}', not '{provider}'",
+            profile.provider
+        ));
+    }
+    let bound_agents = document
+        .agents
+        .iter()
+        .filter(|(_, agent)| agent.auth_profile.as_deref() == Some(profile_id))
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>();
+    let bound_channels = document
+        .channels
+        .as_ref()
+        .into_iter()
+        .flat_map(|channels| channels.by_id.iter())
+        .filter(|(_, binding)| binding.auth_profile.as_deref() == Some(profile_id))
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>();
+    if !bound_agents.is_empty() || !bound_channels.is_empty() {
+        return Err(format!(
+            "auth profile '{profile_id}' is still bound to agents [{}] or channels [{}]; select default first",
+            bound_agents.join(", "),
+            bound_channels.join(", ")
+        ));
+    }
+    if document
+        .provider_auth_primary_profiles
+        .get(provider)
+        .is_some_and(|primary| primary == profile_id)
+    {
+        return Err(format!(
+            "auth profile '{profile_id}' is the provider primary; select another primary first"
+        ));
+    }
+    document.provider_auth_profiles.remove(profile_id);
+    persist_org_document(org_path, &document)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_012_catalog_append_round_trips_extra_and_skips_secrets() {
+        let dir = tempfile::tempdir().expect("org dir");
+        let path = dir.path().join("org.yaml");
+        fs::write(
+            &path,
+            "version: 1\nname: desk\ncustom_flag: true\nagents:\n  coder:\n    display_name: Coder\n    provider: codex\n",
+        )
+        .unwrap();
+
+        append_provider_auth_profile_at(
+            &path,
+            "work",
+            ProviderAuthProfileDef {
+                provider: "codex".into(),
+                home: Some("~/.adk/profiles/codex/work".into()),
+                env: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        let rendered = fs::read_to_string(&path).unwrap();
+        assert!(rendered.contains("provider_auth_profiles:"));
+        assert!(rendered.contains("work:"));
+        assert!(rendered.contains("custom_flag: true"));
+        assert!(!rendered.contains("sk-"));
+        assert!(!rendered.contains("access_token"));
+
+        set_agent_auth_profile_at(&path, "coder", Some("work")).unwrap();
+        let rendered = fs::read_to_string(&path).unwrap();
+        assert!(rendered.contains("auth_profile: work"));
+        set_agent_auth_profile_at(&path, "coder", None).unwrap();
+        let rendered = fs::read_to_string(&path).unwrap();
+        assert!(!rendered.contains("auth_profile: work"));
+    }
+
+    #[test]
+    fn extra_login_does_not_overwrite_missing_catalog_on_unknown_agent() {
+        let dir = tempfile::tempdir().expect("org dir");
+        let path = dir.path().join("org.yaml");
+        let err = set_agent_auth_profile_at(&path, "missing", Some("work")).unwrap_err();
+        assert!(err.contains("not found"));
+        assert!(
+            !path.exists()
+                || !fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .contains("auth_profile")
+        );
+    }
+
+    #[test]
+    fn named_profile_unlink_requires_detach_and_keeps_catalog_operation_scoped() {
+        let dir = tempfile::tempdir().expect("org dir");
+        let path = dir.path().join("org.yaml");
+        fs::write(
+            &path,
+            "version: 1\nagents:\n  coder:\n    display_name: Coder\n    provider: codex\n",
+        )
+        .unwrap();
+        let profile = ProviderAuthProfileDef {
+            provider: "codex".into(),
+            home: Some("~/.adk/profiles/codex/work".into()),
+            env: BTreeMap::new(),
+        };
+        append_provider_auth_profile_at(&path, "work", profile.clone()).unwrap();
+        set_agent_auth_profile_at(&path, "coder", Some("work")).unwrap();
+        let err = remove_provider_auth_profile_at(&path, "work", "codex").unwrap_err();
+        assert!(err.contains("still bound"));
+
+        set_agent_auth_profile_at(&path, "coder", None).unwrap();
+        remove_provider_auth_profile_at(&path, "work", "codex").unwrap();
+        let rendered = fs::read_to_string(&path).unwrap();
+        assert!(!rendered.contains("auth_profile: work"));
+        assert!(!rendered.contains("\n  work:"));
+    }
+
+    #[test]
+    fn named_profile_rejects_provider_mismatch_before_persisting_binding() {
+        let dir = tempfile::tempdir().expect("org dir");
+        let path = dir.path().join("org.yaml");
+        fs::write(
+            &path,
+            "version: 1\nagents:\n  coder:\n    display_name: Coder\n    provider: codex\n",
+        )
+        .unwrap();
+        append_provider_auth_profile_at(
+            &path,
+            "claude-work",
+            ProviderAuthProfileDef {
+                provider: "claude".into(),
+                home: Some("~/.adk/profiles/claude/claude-work".into()),
+                env: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let err = set_agent_auth_profile_at(&path, "coder", Some("claude-work")).unwrap_err();
+        assert!(err.contains("does not match"));
+    }
+
+    #[test]
+    fn primary_profile_cannot_be_unlinked_until_reset_to_system_default() {
+        let dir = tempfile::tempdir().expect("org dir");
+        let path = dir.path().join("org.yaml");
+        fs::write(&path, "version: 1\nagents: {}\n").unwrap();
+        append_provider_auth_profile_at(
+            &path,
+            "work",
+            ProviderAuthProfileDef {
+                provider: "codex".into(),
+                home: Some("~/.adk/profiles/codex/work".into()),
+                env: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        set_provider_primary_profile_at(&path, "codex", "work").unwrap();
+        let err = remove_provider_auth_profile_at(&path, "work", "codex").unwrap_err();
+        assert!(err.contains("provider primary"));
+        set_provider_primary_profile_at(&path, "codex", "default").unwrap();
+        remove_provider_auth_profile_at(&path, "work", "codex").unwrap();
+    }
 }

@@ -33,12 +33,12 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_API_URL` | `src/cli/client.rs:11` (+1 more) | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
 | `AGENTDESK_CATCH_UP_POLL_SECS` | `src/services/discord/runtime_bootstrap/spawns.rs:412` |  |
 | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` | `src/services/discord/catch_up.rs:714` | `AGENTDESK_CATCH_UP_SCAN_PACE_MS` overrides the gap (0 disables — used by tests and by operators who want the old unthrottled behaviour). |
-| `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` | `src/services/claude.rs:66` (+1 more) | Default ON; set `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` to `0`, `false`, `off`, `no`, `disable`, or `disabled` for emergency opt-out. |
+| `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` | `src/services/claude.rs:74` (+1 more) | Default ON; set `AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE` to `0`, `false`, `off`, `no`, `disable`, or `disabled` for emergency opt-out. |
 | `AGENTDESK_CLUSTER_API_BASE_URL` | `src/services/cluster/session_routing.rs:19` |  |
-| `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` | `src/services/codex.rs:433` |  |
+| `AGENTDESK_CODEX_DIRECT_TUI_HOOKS` | `src/services/codex.rs:439` |  |
 | `AGENTDESK_CODEX_FIRST_EVENT_TIMEOUT_SECS` | `src/services/codex_tmux_wrapper.rs:218` |  |
-| `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs:197` |  |
-| `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex.rs:1238` |  |
+| `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex.rs:203` |  |
+| `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex.rs:1244` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs:14` (+1 more) |  |
 | `AGENTDESK_CODEX_TURN_HARD_CEILING_SECS` | `src/services/codex_tmux_wrapper.rs:241` (+1 more) | Override via `AGENTDESK_CODEX_TURN_HARD_CEILING_SECS` (shared with the orchestrator-side auto-extend ceiling so a single knob bounds the Codex turn end to end). |
 | `AGENTDESK_CODEX_TURN_IDLE_RECV_SECS` | `src/services/codex_tmux_wrapper.rs:229` | Override via `AGENTDESK_CODEX_TURN_IDLE_RECV_SECS`. |
@@ -110,30 +110,30 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 
 | Variable | Defined at | Description |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | `src/server/rate_limit_sync.rs:199` (+1 more) | Priority: 1) OAuth token (Claude Code subscription), 2) ANTHROPIC_API_KEY. |
+| `ANTHROPIC_API_KEY` | `src/server/rate_limit_sync.rs:203` (+1 more) | Priority: 1) OAuth token (Claude Code subscription), 2) ANTHROPIC_API_KEY. |
 | `APPDATA` | `src/services/platform/binary_resolver.rs:1186` |  |
 | `CARGO_MANIFEST_DIR` | `src/services/maintenance/jobs/target_sweep.rs:55` | Order matters: `CARGO_MANIFEST_DIR` is set by cargo during dev/test runs (resolving the actual checkout) but is UNSET in the deployed release binary, so it cle… |
 | `CLAUDE_CONFIG_DIR` | `src/services/claude_tui/hook_output_guard.rs:57` (+3 more) | The Claude home this host reads rollout transcripts under, honouring the `CLAUDE_CONFIG_DIR` override. |
 | `CODEX_HOME` | `src/services/codex_tui/rollout_tail.rs:173` | The Codex home this host reads rollouts under, honouring the `CODEX_HOME` override. |
-| `COKACDIR_DEBUG` | `src/services/claude.rs:243` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
-| `COMPUTERNAME` | `src/services/tmux_common.rs:1136` |  |
+| `COKACDIR_DEBUG` | `src/services/claude.rs:251` | Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var. |
+| `COMPUTERNAME` | `src/services/tmux_common.rs:1142` |  |
 | `DATABASE_URL` | `src/db/postgres.rs:1138` |  |
-| `GEMINI_CLIENT_ID` | `src/server/mod.rs:1505` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
-| `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1506` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
+| `GEMINI_CLIENT_ID` | `src/server/mod.rs:1480` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
+| `GEMINI_CLIENT_SECRET` | `src/server/mod.rs:1481` | env vars GEMINI_CLIENT_ID / GEMINI_CLIENT_SECRET 2. |
 | `GEMINI_CLI_HOME` | `src/services/mcp_config.rs:665` |  |
-| `HOME` | `src/cli/doctor/orchestrator.rs:500` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
+| `HOME` | `src/cli/doctor/orchestrator.rs:503` (+9 more) | #2655: handler for the `install-memento-session-hook` CLI surface. |
 | `HOSTNAME` | `src/server/outbox_worker.rs:24` (+5 more) | Opens this turn's buffer and evicts whatever predecessor was left on this channel by a bridge exit that never reached post-loop finalize. |
 | `LOCALAPPDATA` | `src/services/platform/binary_resolver.rs:1114` (+2 more) |  |
 | `MEMENTO_WORKSPACE` | `src/server/routes/memory_api.rs:200` (+1 more) |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs:115` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs:1688` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
+| `PATH` | `src/cli/doctor/orchestrator.rs:1587` (+5 more) | Resolve via PATH using `which` semantics — mirror the existing ProviderRuntime checks which simply call the binary with --version. |
 | `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs:16` (+4 more) |  |
 | `POSTGRES_TEST_DATABASE_URL_BASE` | `src/db/postgres.rs:1152` | Read the shared PG fixture base; required PG lanes must not silently turn a missing base into a soft-skip. |
-| `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs:516` (+1 more) |  |
-| `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs:522` (+1 more) |  |
-| `QWEN_HOME` | `src/cli/doctor/orchestrator.rs:494` (+2 more) |  |
+| `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs:519` (+1 more) |  |
+| `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs:525` (+1 more) |  |
+| `QWEN_HOME` | `src/cli/doctor/orchestrator.rs:497` (+2 more) |  |
 | `REQUIRE_WAKE_WORD` | `src/voice/config.rs:103` | A live yaml with `wake_words: []` plus `REQUIRE_WAKE_WORD=1` would otherwise make EVERY utterance fail the (impossible-to-satisfy) gate and be silently dropped. |
 | `RUST_LOG` | `src/logging.rs:18` |  |
 | `SHELL` | `src/services/platform/binary_resolver.rs:1293` |  |
-| `USERPROFILE` | `src/cli/doctor/orchestrator.rs:504` (+6 more) |  |
+| `USERPROFILE` | `src/cli/doctor/orchestrator.rs:507` (+6 more) |  |
 | `VOICE_AUDIO_DEBUG_DIR` | `src/voice/receiver.rs:72` |  |
