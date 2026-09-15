@@ -1885,7 +1885,9 @@ pub struct RuntimeSettingsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_percent_claude: Option<u64>,
     /// YAML-only absolute window for new Claude TUI launches, independent of model.
-    /// Unset defaults to 700_000; the launch consumer clamps to 100_000..=1_000_000.
+    /// Unset exports no window at all, leaving Claude Code's own resolution and
+    /// in-session `/autocompact` in control (#5935); a configured value is clamped
+    /// by the launch consumer to 100_000..=1_000_000.
     /// Raw numeric values are preserved here; zero clamps to the minimum, not off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_window_claude: Option<u64>,

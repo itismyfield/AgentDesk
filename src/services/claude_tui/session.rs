@@ -454,8 +454,14 @@ mod tests {
         crate::services::claude_compact_context::state_test_guard()
     }
 
-    fn pin_provider_config_after_env_lock(root: &Path) -> crate::config::TestEnvVarGuard {
-        let path = super::auto_compact_launch_tests::write_provider_setting(root, None);
+    /// #5935 made "unset" a meaningful provider state, so every caller now states
+    /// which one it needs: `None` exercises the no-export path, `Some(window)` pins
+    /// the absolute value the window assertions below depend on.
+    fn pin_provider_config_after_env_lock(
+        root: &Path,
+        window: Option<u64>,
+    ) -> crate::config::TestEnvVarGuard {
+        let path = super::auto_compact_launch_tests::write_provider_setting(root, window);
         crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
             "AGENTDESK_CONFIG",
             &path,
@@ -526,7 +532,7 @@ mod tests {
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
-        let _config_path = pin_provider_config_after_env_lock(dir.path());
+        let _config_path = pin_provider_config_after_env_lock(dir.path(), None);
         let config = sample_config();
         let hook_settings_path = dir.path().join("settings.json");
         let launch_script_path = dir.path().join("launch.sh");
@@ -586,7 +592,9 @@ mod tests {
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
-        let _config_path = pin_provider_config_after_env_lock(dir.path());
+        // This test owns the configured-value contract, so it pins one explicitly;
+        // #5935 moved the unset case to its own assertions.
+        let _config_path = pin_provider_config_after_env_lock(dir.path(), Some(700_000));
         let mut config = sample_config();
         config.model = Some("sonnet".to_string());
         let launch_script_path = dir.path().join("launch.sh");
@@ -608,7 +616,9 @@ mod tests {
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
-        let _config_path = pin_provider_config_after_env_lock(dir.path());
+        // Model-independence is only observable when a window is actually exported,
+        // so this test pins one rather than using the #5935 unset path.
+        let _config_path = pin_provider_config_after_env_lock(dir.path(), Some(700_000));
         let mut config = sample_config();
         let launch_script_path = dir.path().join("launch.sh");
 
@@ -675,7 +685,7 @@ mod tests {
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let _context_guard = context_state_guard();
         let dir = tempfile::tempdir().unwrap();
-        let _config_path = pin_provider_config_after_env_lock(dir.path());
+        let _config_path = pin_provider_config_after_env_lock(dir.path(), None);
         let old_session_id = uuid::Uuid::new_v4().to_string();
         let new_session_id = uuid::Uuid::new_v4().to_string();
         let files = ClaudeTuiSessionFiles {
@@ -796,7 +806,7 @@ mod tests {
         let previous_root = std::env::var_os("AGENTDESK_ROOT_DIR");
         let previous_host = std::env::var_os("HOSTNAME");
         let root = tempfile::tempdir().unwrap();
-        let _config_path = pin_provider_config_after_env_lock(root.path());
+        let _config_path = pin_provider_config_after_env_lock(root.path(), None);
         unsafe {
             std::env::set_var("AGENTDESK_ROOT_DIR", root.path());
             std::env::set_var("HOSTNAME", "issue-2143-host");
