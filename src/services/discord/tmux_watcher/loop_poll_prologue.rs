@@ -1,4 +1,7 @@
 use super::*;
+#[path = "loop_poll_prologue/watcher_resume.rs"]
+mod watcher_resume;
+use self::watcher_resume::watcher_resume_outcome;
 use crate::services::discord::session_relay_sink::journal::watcher as journal_watcher;
 use crate::services::discord::tmux::tmux_output_stream::watcher_source_witness;
 use std::sync::Arc;
@@ -147,20 +150,17 @@ pub(super) async fn poll_watcher_output_or_continue(
     // between the previous paused check and now, so reading it here prevents
     // the watcher from using a stale current_offset after unpausing.
     if let Some(new_offset) = resume_offset.lock().ok().and_then(|mut g| g.take()) {
-        current_offset = new_offset;
+        // #5943 (contract I16): see `watcher_resume` for both rules.
         let bridge_delivered_turn = turn_delivered.load(Ordering::Acquire);
-        terminal_delivery_observed = watcher_lifecycle_terminal_delivery_observed(
+        let resumed = watcher_resume_outcome(
             terminal_delivery_observed,
             bridge_delivered_turn,
+            new_offset,
+            current_offset,
         );
-        // If the bridge already delivered the previous turn, treat this resume
-        // point as already consumed once so the watcher doesn't re-relay the
-        // same batch after unpausing.
-        last_relayed_offset = if bridge_delivered_turn {
-            Some(new_offset)
-        } else {
-            None
-        };
+        current_offset = new_offset;
+        terminal_delivery_observed = resumed.terminal_delivery_observed;
+        last_relayed_offset = resumed.last_relayed_offset;
         // #1275 P2 #2: snapshot the current `.generation` mtime alongside
         // the resumed offset. Without this, the local mtime baseline stays
         // at whatever the previous setter left it (often `None` for

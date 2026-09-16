@@ -1037,7 +1037,8 @@ src/
 │   │   │   │   ├── backstop_tests.rs
 │   │   │   │   └── idle_gate.rs
 │   │   │   ├── loop_poll_prologue/
-│   │   │   │   └── post_terminal_disposal_tests.rs
+│   │   │   │   ├── post_terminal_disposal_tests.rs
+│   │   │   │   └── watcher_resume.rs
 │   │   │   ├── streaming_status_tick/
 │   │   │   │   ├── committed_progress_tests.rs
 │   │   │   │   ├── existing_panel_update.rs

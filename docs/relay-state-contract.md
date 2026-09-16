@@ -238,9 +238,11 @@ the set comparison.
     (`sym:turn_bridge::terminal_outcome_delivery::run_terminal_outcome_delivery`)
     and the watcher terminal-commit epilogue `run_terminal_commit_epilogue`
     (`sym:tmux_watcher::terminal_commit_epilogue::run_terminal_commit_epilogue`).
-    (It is additionally *cleared* to false on the handoff/reset and auto-heal
-    paths, and by the watcher after it consumes the flag; those resets are not
-    producers of the delivered signal.)
+    (It is additionally *cleared* to false on the handoff/reset paths and by
+    the watcher after it consumes the flag; those resets are not producers of
+    the delivered signal. The auto-heal redrive used to clear it too — #5943
+    removed that, because the redrive re-reads a turn rather than starting one;
+    see I16.)
   - `resume_offset` is written (as the "already delivered in-band up to here"
     marker) by the completion postlude `run_completion_postlude`
     (`sym:turn_bridge::completion_postlude::run_completion_postlude`) and the
@@ -481,6 +483,61 @@ plan.
 - Tracing events: `redrive_frontier_no_progress` and
   `redrive_no_progress_capped`. This recovery path currently emits tracing logs
   rather than `record_invariant_check` observability rows.
+
+## I16. A redrive re-reads a turn; it does not retire one (#5943)
+
+Numbered I16, not I13: `docs/design/4987-relay-reachability.md` §8.2 reserves
+I13/I14/I15 for the reachability obligations. §-1.8 marks §8.2 "대체 → §-1.5",
+but that supersedes the section's *content* — §-1.5 says "I13 재작성", and §8.4's
+gate plan still reads "계약 문서 게이트 (S3에서 I13–I15 도입 시)". The numbers are
+still spoken for, so this one steps past them rather than colliding.
+
+- Definition: the undelivered-backlog redrive must not disarm the
+  `turn_delivered` marker, and a resume that moves a watcher BACKWARD must not
+  fold that marker into the watcher's sticky `terminal_delivery_observed` latch.
+- Producer: `health::relay_auto_heal`'s backlog nudge enqueues a resume point and
+  nothing else. It is admitted only for an UNDELIVERED backlog of the turn
+  already in flight (`should_redrive_undelivered_backlog`), so it re-reads a turn
+  rather than starting one, and the marker is not its to clear. The two real
+  producers of `turn_delivered == true` are the ones I5 enumerates — the bridge's
+  `run_terminal_outcome_delivery` and the watcher's own
+  `run_terminal_commit_epilogue` — and the redrive is neither.
+- Consumer: `tmux_watcher::watcher_resume` resolves the queued point. The
+  duplicate-relay floor keeps its pre-#5943 rule — pinned AT the resume point
+  when the bridge delivered the turn, dropped otherwise — which is what keeps
+  `pre_emit_guard`'s `data_start_offset < last_relayed_offset` branch unreachable
+  from this path. That branch is not a trim of the already-relayed prefix: it
+  suppresses the whole batch, deletes the placeholder and discards the pending
+  buffer, so a floor carried ABOVE the resume point would destroy the backlog
+  instead of re-relaying it. The latch takes the marker only from a FORWARD
+  resume; a backward one re-opens the current turn, so its marker belongs to an
+  earlier turn. The watcher still clears the marker once it has consumed the
+  resume point — that clear is what keeps the relay-suppression consumer below
+  from holding for the rest of the watcher's life.
+- Violation surface: FOUR consumers read the live marker for themselves, so
+  clearing it at the producer makes all of them wrong at once —
+  `pre_emit_guard` (-> `tmux::should_suppress_relay_before_emit`) stops
+  suppressing a relay the bridge already delivered, the streaming status tick
+  reads it for the same suppression question, the five watcher-observed tmux
+  death sites fold it into `terminal_delivery_observed` and so report a delivered
+  turn as undelivered, and this resume path folds it too. In the other direction,
+  latching a stale marker retires
+  `tmux_death_should_attempt_restart_handoff` — the only user-facing signal for
+  an abnormal mid-turn pane crash — for the whole remaining life of that watcher,
+  because `terminal_delivery_observed` is initialised once per dispatch and never
+  reset.
+- Scope, stated because it is easy to over-read: this invariant is about the
+  redrive DISARMING those guards. Whether the redrive's rewind itself caused the
+  duplicate relays observed on 2026-09-15 is NOT established — the 2026-09-16
+  issue correction withdrew that reading, leaving only time correlation — and
+  nothing here depends on it.
+- Tracing events: none of its own. The redrive's own refusals are I12's
+  (`redrive_frontier_no_progress`).
+- Invariant key: `redrive_may_not_disarm_the_delivery_marker` (enforced by
+  `relay_auto_heal::tests::redrive_does_not_clear_the_bridge_delivery_marker_5943`,
+  the `tmux_watcher::watcher_resume::tests` resume-contract set, and the
+  end-to-end `loop_poll_prologue` resume-consumption test; like I12 this path
+  emits tracing logs rather than `record_invariant_check` rows).
 
 ## How to add a new invariant
 
