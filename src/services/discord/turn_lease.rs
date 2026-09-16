@@ -1,5 +1,9 @@
-//! Explicit operator release of one mailbox episode. An inflight identity is
-//! required; unsupported or protected states are reported before submitting.
+//! Explicit operator release of one mailbox episode. The mailbox lease is the
+//! authority and the durable inflight row is only its projection (#5951 §2), so
+//! a missing row neither hides the episode from inspect nor blocks release. A
+//! row that IS present must still name this exact episode and must not be
+//! authority-pinned; unsupported or protected states are reported before
+//! submitting.
 use std::{
     sync::{Arc, OnceLock},
     time::Instant,
@@ -68,11 +72,11 @@ async fn identity(
         channel_id: channel.get(),
         generation: shared.restart.current_generation,
         runtime: shared.token_hash.clone(),
-        user_message_id: snapshot
-            .active_user_message_id
-            .map(|id| id.get())
-            .filter(|id| *id != 0)
-            .ok_or("active lease has no message identity")?,
+        // #5951 RG1 — a recovery / TUI-direct episode binds no user message
+        // (`active_user_message_id` is `None`, because `MessageId::new(0)`
+        // panics). Such a lease reports the canonical id 0 instead of refusing:
+        // an operator must be able to SEE a turn before deciding about it.
+        user_message_id: snapshot.active_user_message_id.map_or(0, |id| id.get()),
         turn_nonce: snapshot
             .active_turn_nonce
             .filter(|nonce| !nonce.is_empty())
@@ -83,12 +87,19 @@ async fn identity(
     }))
 }
 
+/// #5951 RG1 — the row is a projection, not the authority, so its ABSENCE is
+/// reported as `Ok(None)` rather than refused: that is the rowless lane an
+/// operator needs when no automatic path can see the turn any more. A row that
+/// exists still has to name this exact episode, and `restart_mode` /
+/// `rebind_origin` keep pinning authority to a planned restart or a rebind
+/// owner — those stay refusals.
 fn matching_inflight(
     provider: &ProviderKind,
     expected: &LeaseIdentity,
-) -> Result<inflight::InflightTurnState, String> {
-    let row = inflight::load_inflight_state(provider, expected.channel_id)
-        .ok_or("lease cannot be released: matching inflight identity is missing")?;
+) -> Result<Option<inflight::InflightTurnState>, String> {
+    let Some(row) = inflight::load_inflight_state(provider, expected.channel_id) else {
+        return Ok(None);
+    };
     if row.effective_finalizer_turn_id() != expected.user_message_id
         || row.turn_nonce.as_deref() != Some(expected.turn_nonce.as_str())
         || row.restart_mode.is_some()
@@ -96,7 +107,7 @@ fn matching_inflight(
     {
         return Err("lease cannot be released: inflight identity differs or is protected".into());
     }
-    Ok(row)
+    Ok(Some(row))
 }
 
 async fn release_on(
@@ -117,7 +128,17 @@ async fn release_on(
     if current != request.expected {
         return Err("lease changed; inspect again".into());
     }
-    matching_inflight(provider, &current)?;
+    let _ = matching_inflight(provider, &current)?;
+    // The mailbox CAS (`release_turn_lease_if_matches`) binds an exact
+    // `MessageId`, and an episode that never bound one has no such key —
+    // `MessageId::new(0)` panics. Refuse explicitly instead of releasing an
+    // unidentified lease through an unguarded finish.
+    if current.user_message_id == 0 {
+        return Err(
+            "lease cannot be released: episode has no bound message identity for the release CAS"
+                .into(),
+        );
+    }
     let key = TurnKey::new(channel, current.user_message_id, current.generation)
         .with_episode_nonce(Some(&current.turn_nonce));
     let clear_outcome = Arc::new(OnceLock::new());
@@ -179,6 +200,10 @@ impl OperatorRelease {
             return None;
         }
         let row = matching_inflight(provider, &self.request.expected).ok()?;
+        // `MessageId::new(0)` panics; an unbound episode carries no CAS key.
+        if key.user_msg_id == 0 {
+            return None;
+        }
         let result = shared
             .mailbox_peek(key.channel_id)?
             .release_turn_lease_if_matches(
@@ -190,12 +215,18 @@ impl OperatorRelease {
             .await;
         result.removed_token.as_ref()?;
         shared.mailboxes.recovery_done(key.channel_id).mark_done();
-        let cleared = inflight::clear_inflight_state_for_captured_episode(
-            provider,
-            key.channel_id.get(),
-            &inflight::InflightTurnIdentity::from_state(&row),
-            Some(&self.request.expected.turn_nonce),
-        );
+        let cleared = match row.as_ref() {
+            Some(row) => inflight::clear_inflight_state_for_captured_episode(
+                provider,
+                key.channel_id.get(),
+                &inflight::InflightTurnIdentity::from_state(row),
+                Some(&self.request.expected.turn_nonce),
+            ),
+            // Rowless episode: there is no projection of THIS episode to clear.
+            // Anything written between the check above and the mailbox CAS
+            // belongs to a successor and must survive untouched.
+            None => inflight::GuardedClearOutcome::Missing,
+        };
         let _ = self.clear_outcome.set(cleared);
         tracing::warn!(channel_id = key.channel_id.get(), turn_id = key.user_msg_id,
             turn_nonce = %self.request.expected.turn_nonce, generation = key.generation,

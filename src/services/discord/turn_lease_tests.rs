@@ -316,17 +316,15 @@ async fn operator_release_rejects_changed_identity_or_generation_without_effects
         assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
         assert!(inflight::load_inflight_state(&PROVIDER, channel.get()).is_some());
         assert!(rx.try_recv().is_err());
-        let row = inflight::load_inflight_state(&PROVIDER, channel.get()).unwrap();
-        inflight::clear_inflight_state_for_captured_episode(
-            &PROVIDER,
-            channel.get(),
-            &inflight::InflightTurnIdentity::from_state(&row),
-            token.turn_nonce(),
-        );
+        // A row that is present but names a DIFFERENT episode is still a
+        // refusal after #5951 S2 — only an ABSENT row opens the rowless lane.
+        let mut foreign = inflight::load_inflight_state(&PROVIDER, channel.get()).unwrap();
+        foreign.turn_nonce = Some(format!("{}-successor", request.expected.turn_nonce));
+        inflight::save_inflight_state(&foreign).unwrap();
         let error = release_on(&shared, &PROVIDER, channel, request)
             .await
             .unwrap_err();
-        assert!(error.contains("matching inflight identity is missing"));
+        assert!(error.contains("differs or is protected"), "{error}");
         assert!(Arc::ptr_eq(
             &token,
             &mailbox.snapshot().await.cancel_token.unwrap()
@@ -470,6 +468,217 @@ async fn operator_release_strict_clear_preserves_nonce_less_successor() {
             inflight::GuardedClearOutcome::UserMsgMismatch
         );
         assert!(inflight::load_inflight_state(&PROVIDER, channel.get()).is_some());
+    })
+    .await;
+}
+
+/// #5951 S2 closing test 2 — with no durable row at all the operator release
+/// COMMITS: the mailbox CAS is the only authority it ever needed, the provider
+/// is never cancelled, and the second call is still idempotent. Before S2 the
+/// required-row gate turned this channel into a permanently stuck lease.
+#[tokio::test]
+async fn operator_release_commits_without_any_inflight_row() {
+    with_isolated_runtime_root(|| async {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(575406);
+        let mailbox = shared.mailbox(channel);
+        let request = seed(&shared, channel).await;
+        let token = mailbox.snapshot().await.cancel_token.unwrap();
+        let row = inflight::load_inflight_state(&PROVIDER, channel.get()).unwrap();
+        assert_eq!(
+            inflight::clear_inflight_state_for_captured_episode(
+                &PROVIDER,
+                channel.get(),
+                &inflight::InflightTurnIdentity::from_state(&row),
+                token.turn_nonce(),
+            ),
+            inflight::GuardedClearOutcome::Cleared
+        );
+        assert!(
+            inflight::load_inflight_state(&PROVIDER, channel.get()).is_none(),
+            "precondition: the lease outlived its projection"
+        );
+        let mut rx = turn_completion_events::subscribe_turn_completion_events(&shared);
+        let result = release_on(&shared, &PROVIDER, channel, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(result["released"], true);
+        assert_eq!(result["status"], "operator_released");
+        assert!(mailbox.snapshot().await.cancel_token.is_none());
+        assert!(
+            !token.cancelled.load(Ordering::Acquire),
+            "provider must never receive cancellation"
+        );
+        assert!(token.is_completion_cleanup());
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
+        assert!(inflight::load_inflight_state(&PROVIDER, channel.get()).is_none());
+        assert_eq!(
+            rx.try_recv().unwrap().phase,
+            TurnCompletionPhase::MailboxReleased
+        );
+        assert_eq!(
+            release_on(&shared, &PROVIDER, channel, request)
+                .await
+                .unwrap()["released"],
+            false
+        );
+    })
+    .await;
+}
+
+/// #5951 S2 closing test 3 — a recovery / TUI-direct episode binds no user
+/// message id. Before S2 `identity` refused it outright, so it was invisible.
+/// It is now INSPECTABLE as id 0; release is refused with a named reason
+/// because `release_turn_lease_if_matches` keys on an exact `MessageId` and
+/// `MessageId::new(0)` panics — the CAS is deliberately left unchanged.
+#[tokio::test]
+async fn unbound_message_id_lease_is_inspectable_and_refuses_release_without_effects() {
+    with_isolated_runtime_root(|| async {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(575407);
+        let mailbox = shared.mailbox(channel);
+        let token = Arc::new(CancelToken::new());
+        mailbox
+            .recovery_kickoff(token.clone(), UserId::new(7), None)
+            .await;
+        shared.restart.global_active.store(1, Ordering::Relaxed);
+        assert!(
+            mailbox.snapshot().await.active_user_message_id.is_none(),
+            "precondition: this episode never bound a user message"
+        );
+        let current = identity(&shared, &PROVIDER, channel)
+            .await
+            .expect("an unbound episode is inspectable")
+            .expect("the lease exists");
+        assert_eq!(current.user_message_id, 0);
+        assert_eq!(Some(current.turn_nonce.as_str()), token.turn_nonce());
+        let mut rx = turn_completion_events::subscribe_turn_completion_events(&shared);
+        let error = release_on(
+            &shared,
+            &PROVIDER,
+            channel,
+            ReleaseRequest {
+                expected: current,
+                reason: "operator verified the provider finished".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("no bound message identity"), "{error}");
+        assert!(mailbox.snapshot().await.cancel_token.is_some());
+        assert!(!token.is_completion_cleanup());
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        assert!(rx.try_recv().is_err());
+    })
+    .await;
+}
+
+/// #5951 S2 closing test 4 — opening the rowless lane must not unpin authority.
+/// A `restart_mode` row marks a PLANNED restart that owns this episode, so both
+/// inspect and release stay refusals and the row is left byte-identical.
+#[tokio::test]
+async fn restart_mode_row_still_refuses_operator_inspect_and_release() {
+    with_isolated_runtime_root(|| async {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(575408);
+        let mailbox = shared.mailbox(channel);
+        let request = seed(&shared, channel).await;
+        let token = mailbox.snapshot().await.cancel_token.unwrap();
+        let mut row = inflight::load_inflight_state(&PROVIDER, channel.get()).unwrap();
+        row.set_restart_mode(crate::services::discord::InflightRestartMode::HotSwapHandoff);
+        inflight::save_inflight_state(&row).unwrap();
+        let before = inflight::load_inflight_state(&PROVIDER, channel.get()).unwrap();
+        assert!(before.restart_mode.is_some());
+        let inspect_error = matching_inflight(&PROVIDER, &request.expected).unwrap_err();
+        assert!(
+            inspect_error.contains("differs or is protected"),
+            "{inspect_error}"
+        );
+        let mut rx = turn_completion_events::subscribe_turn_completion_events(&shared);
+        let error = release_on(&shared, &PROVIDER, channel, request.clone())
+            .await
+            .unwrap_err();
+        assert!(error.contains("differs or is protected"), "{error}");
+        assert!(Arc::ptr_eq(
+            &token,
+            &mailbox.snapshot().await.cancel_token.unwrap()
+        ));
+        assert!(!token.is_completion_cleanup());
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        let after = inflight::load_inflight_state(&PROVIDER, channel.get()).unwrap();
+        assert_eq!(after.restart_mode, before.restart_mode);
+        assert_eq!(after.turn_nonce, before.turn_nonce);
+        assert!(rx.try_recv().is_err());
+        // The direct claim path is pinned too, not only the HTTP entry point.
+        let key = TurnKey::new(
+            channel,
+            request.expected.user_message_id,
+            request.expected.generation,
+        )
+        .with_episode_nonce(Some(&request.expected.turn_nonce));
+        let operator = OperatorRelease {
+            request,
+            observed_before: Instant::now(),
+            clear_outcome: Default::default(),
+        };
+        assert!(operator.claim(&shared, &PROVIDER, key).await.is_none());
+        assert!(mailbox.snapshot().await.cancel_token.is_some());
+    })
+    .await;
+}
+
+/// #5951 S2 closing test 5 — same pin for a `rebind_origin` row: the rebind
+/// owner holds this episode, so the rowless lane must not hand it to an
+/// operator and the row must survive the attempt untouched.
+#[tokio::test]
+async fn rebind_origin_row_still_refuses_operator_inspect_and_release() {
+    with_isolated_runtime_root(|| async {
+        let shared = super::super::make_shared_data_for_tests_with_storage(None);
+        let channel = ChannelId::new(575409);
+        let mailbox = shared.mailbox(channel);
+        let request = seed(&shared, channel).await;
+        let token = mailbox.snapshot().await.cancel_token.unwrap();
+        let mut row = inflight::load_inflight_state(&PROVIDER, channel.get()).unwrap();
+        row.rebind_origin = true;
+        inflight::save_inflight_state(&row).unwrap();
+        let before = inflight::load_inflight_state(&PROVIDER, channel.get()).unwrap();
+        assert!(before.rebind_origin);
+        let inspect_error = matching_inflight(&PROVIDER, &request.expected).unwrap_err();
+        assert!(
+            inspect_error.contains("differs or is protected"),
+            "{inspect_error}"
+        );
+        let mut rx = turn_completion_events::subscribe_turn_completion_events(&shared);
+        let error = release_on(&shared, &PROVIDER, channel, request.clone())
+            .await
+            .unwrap_err();
+        assert!(error.contains("differs or is protected"), "{error}");
+        assert!(Arc::ptr_eq(
+            &token,
+            &mailbox.snapshot().await.cancel_token.unwrap()
+        ));
+        assert!(!token.is_completion_cleanup());
+        assert!(!token.cancelled.load(Ordering::Acquire));
+        assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
+        let after = inflight::load_inflight_state(&PROVIDER, channel.get()).unwrap();
+        assert!(after.rebind_origin);
+        assert_eq!(after.turn_nonce, before.turn_nonce);
+        assert!(rx.try_recv().is_err());
+        let key = TurnKey::new(
+            channel,
+            request.expected.user_message_id,
+            request.expected.generation,
+        )
+        .with_episode_nonce(Some(&request.expected.turn_nonce));
+        let operator = OperatorRelease {
+            request,
+            observed_before: Instant::now(),
+            clear_outcome: Default::default(),
+        };
+        assert!(operator.claim(&shared, &PROVIDER, key).await.is_none());
+        assert!(mailbox.snapshot().await.cancel_token.is_some());
     })
     .await;
 }
