@@ -68,6 +68,13 @@ impl WatcherProgressOutcome {
     /// Every value the pre-#5951 `Skipped` stood for, in one place, so a
     /// consumer that only ever asked "was the write skipped?" keeps its
     /// verdict unchanged across the split.
+    ///
+    /// `#[cfg(test)]` because the audit found NO production consumer of the old
+    /// `Skipped` value: prod only ever compares against `Saved` (`tmux.rs`) or
+    /// `TerminalAlreadyCommitted` (`streaming_status_tick.rs`). Keeping it out
+    /// of the production surface is the truthful state; the slice that first
+    /// needs the legacy class in prod un-gates it.
+    #[cfg(test)]
     pub(in crate::services::discord) const fn is_skipped_legacy(self) -> bool {
         matches!(
             self,

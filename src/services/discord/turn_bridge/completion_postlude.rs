@@ -737,7 +737,7 @@ pub(super) async fn run_completion_postlude(
         completion_guard.relinquish_bridge_authority();
     } else if cancelled && cancel_token.restart_mode().is_some() {
         use crate::services::discord::inflight::{
-            GuardedSaveOutcome, patch_restart_full_response_if_identity_unchanged,
+            patch_restart_full_response_if_identity_unchanged,
             save_inflight_state_if_identity_unchanged,
         };
 
