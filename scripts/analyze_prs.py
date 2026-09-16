@@ -102,7 +102,7 @@ def has_duplicate_guard_ack(body):
     )
 
 def has_no_change_verification_ack(body):
-    if re.search(r"(?im)^[ \t]*[-*][ \t]*\[[xX]\][ \t]*\*\*no-change verification:\*\*", body):
+    if re.search(r"(?im)^[ \t]*[-*][ \t]*\[[xX]\][ \t]*\*\*no[- ]change verification:\*\*", body):
         return True
     return has_non_empty_body_field(
         body,
@@ -142,6 +142,17 @@ def has_scratch_file_cleanup_ack(body):
         [
             "scratch file cleanup",
             "scratch-file cleanup",
+        ],
+    )
+
+def has_docs_only_verification_ack(body):
+    if re.search(r"(?im)^[ \t]*[-*][ \t]*\[[xX]\][ \t]*\*\*docs-only verification:\*\*", body):
+        return True
+    return has_non_empty_body_field(
+        body,
+        [
+            "docs-only verification",
+            "docs only verification",
         ],
     )
 
@@ -292,6 +303,9 @@ def main():
             print("  [!] MISSING SCRATCH FILE CLEANUP CHECK: PR body lacks a completed scratch file cleanup acknowledgement.")
         if not has_pr_size_ack(body):
             print("  [!] MISSING PR SIZE CHECK: PR body lacks a completed PR size acknowledgement.")
+        if "docs-only" in normalized_body or "docs only" in normalized_body:
+            if not has_docs_only_verification_ack(body):
+                print("  [!] MISSING DOCS-ONLY VERIFICATION CHECK: PR body claims docs-only but lacks a completed docs-only verification acknowledgement.")
         if not has_non_empty_body_field(body, ["verification commands and results", "verification"]):
             print("  [!] MISSING VERIFICATION: PR body lacks the required 'verification' commands and results.")
         if not has_non_empty_body_field(
@@ -337,7 +351,7 @@ def main():
                 print("  [!] MISSING STALE BRANCH CLEANUP CHECK: PR body lacks a completed stale branch cleanup acknowledgement.")
 
         # PR #214/#215 lesson: no-change PRs must have 0 changed files
-        if "no-change" in title.lower():
+        if "no-change" in title.lower() or "no change" in title.lower():
             if not has_no_change_verification_ack(body):
                 print("  [!] MISSING NO-CHANGE VERIFICATION CHECK: PR body lacks a completed no-change verification acknowledgement.")
             if files_data.get("files") is not None:

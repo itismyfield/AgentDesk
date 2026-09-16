@@ -1064,7 +1064,7 @@ fn check_health_db_dashboard(snapshot: &HealthSnapshot) -> Check {
             CheckGroup::Core,
             "DB/Dashboard Health",
             detail.clone(),
-            "DB health is false. Check the Postgres/SQLite source-of-truth status first.",
+            "DB health is false. Check the Postgres source-of-truth status first.",
         )
         .with_subsystem("health")
         .with_severity(Severity::Error)
@@ -1671,10 +1671,9 @@ fn check_voice_cli_present(
         .with_severity(Severity::Error);
     }
     let resolved = if trimmed.contains('/') || trimmed.starts_with('~') {
-        let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
-            std::env::var("HOME")
-                .map(|home| std::path::PathBuf::from(home).join(rest))
-                .unwrap_or_else(|_| std::path::PathBuf::from(trimmed))
+        let expanded = if trimmed.starts_with('~') {
+            crate::runtime_layout::expand_user_path(trimmed)
+                .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
         } else {
             std::path::PathBuf::from(trimmed)
         };
@@ -2881,7 +2880,7 @@ fn check_runtime_path() -> Check {
             CheckGroup::ProviderRuntime,
             "Runtime PATH",
             "unable to resolve provider runtime PATH",
-            "login shell PATH를 읽지 못했습니다. 서비스 환경 PATH와 shell PATH를 비교하세요.",
+            "Could not read the login shell PATH. Compare the service environment PATH with your shell PATH.",
         )
         .with_expected_actual("runtime PATH resolved", "runtime PATH resolution failed")
         .with_next_steps(vec!["echo $PATH".to_string()]),
@@ -3889,7 +3888,7 @@ fn check_stale_zero_byte_db_files(cfg: &config::Config) -> Check {
             CheckGroup::Core,
             "Stale DB Files",
             "runtime root unresolved",
-            "실제 DB 경로를 먼저 확인한 뒤 root 경로의 0바이트 stale DB 파일을 정리하세요.",
+            "verify the canonical DB path and clean up zero-byte stale DB files in the runtime root.",
         )
         .with_expected_actual(
             "runtime root path resolvable",
@@ -3967,7 +3966,7 @@ fn check_stale_zero_byte_db_files(cfg: &config::Config) -> Check {
         "Stale DB Files",
         format!("zero-byte stale DB file(s): {listed}"),
         format!(
-            "실제 DB는 {} 입니다. 추측 경로로 sqlite3를 열지 말고, 필요하면 agentdesk doctor --fix 로 stale 파일을 정리하세요.",
+            "the canonical DB is {}; do not open guessed paths with sqlite3. Clean up stale files with agentdesk doctor --fix if necessary.",
             canonical_db_path.display()
         ),
     )

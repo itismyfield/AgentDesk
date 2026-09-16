@@ -8,6 +8,7 @@ from scripts.analyze_prs import (
     has_stale_branch_cleanup_ack,
     has_scratch_file_cleanup_ack,
     has_pr_size_ack,
+    has_docs_only_verification_ack,
     has_overlap_reference,
     has_template_summary,
     is_scratch_file_path,
@@ -171,6 +172,16 @@ class PrAnalyzerNoChangeVerificationGuardTests(unittest.TestCase):
 
         self.assertTrue(has_no_change_verification_ack(body))
 
+    def test_unchecked_template_no_change_without_hyphen_is_not_acknowledgement(self):
+        body = "- [ ] **No change verification:** If this PR claims no change..."
+
+        self.assertFalse(has_no_change_verification_ack(body))
+
+    def test_checked_template_no_change_without_hyphen_is_acknowledgement(self):
+        body = "- [x] **No change verification:** If this PR claims no change..."
+
+        self.assertTrue(has_no_change_verification_ack(body))
+
     def test_filled_no_change_field_is_acknowledgement(self):
         body = "- no-change verification: checked using gh pr view --json files"
 
@@ -226,6 +237,23 @@ class PrAnalyzerScratchFileCleanupGuardTests(unittest.TestCase):
         body = "- scratch file cleanup: ran git diff --check and git status."
 
         self.assertTrue(has_scratch_file_cleanup_ack(body))
+
+
+class PrAnalyzerDocsOnlyVerificationGuardTests(unittest.TestCase):
+    def test_unchecked_template_docs_only_guard_is_not_acknowledgement(self):
+        body = "- [ ] **Docs-only verification:** If this is a docs-only change..."
+
+        self.assertFalse(has_docs_only_verification_ack(body))
+
+    def test_checked_template_docs_only_guard_is_acknowledgement(self):
+        body = "- [x] **docs-only verification:** verified via python3 scripts/generate_inventory_docs.py"
+
+        self.assertTrue(has_docs_only_verification_ack(body))
+
+    def test_filled_docs_only_field_is_acknowledgement(self):
+        body = "- docs-only verification: confirmed docs-only, verified markdown formatting."
+
+        self.assertTrue(has_docs_only_verification_ack(body))
 
 
 class PrAnalyzerOverlapReferenceTests(unittest.TestCase):
