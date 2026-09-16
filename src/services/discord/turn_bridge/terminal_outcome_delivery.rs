@@ -176,7 +176,7 @@ pub(super) async fn run_terminal_outcome_delivery(
         .await;
     }
 
-    if may_publish && recovery_retry {
+    if may_publish && recovery_retry && !cancelled {
         let outcome = handle_recovery_retry(
             RecoveryRetryMessage::SessionDiedDuringRecovery,
             RecoveryRetryContext {

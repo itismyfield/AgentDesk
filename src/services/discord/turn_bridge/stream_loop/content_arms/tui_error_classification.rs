@@ -117,7 +117,7 @@ mod tests {
             r#"
                 let error_resolution = resolve_tui_error(&provider, &message, &stderr);
                 tui_error_classification = error_resolution.tui_error_classification;
-                transport_error = true;
+                transport_error = !recovery_retry;
             "#,
             "Error arm -> stream-loop state",
         );

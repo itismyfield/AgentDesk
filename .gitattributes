@@ -1,6 +1,8 @@
 scripts/** text eol=lf
 .githooks/** text eol=lf
 .github/workflows/*.yml text eol=lf
+# SQL inventory hashes migration bytes; keep checkouts identical across platforms.
+migrations/postgres/** text eol=lf
 
 # Custom merge driver for tracked generated inventory docs (#4724 slice B).
 # These two files are generated wholesale; line-count churn makes concurrent PRs

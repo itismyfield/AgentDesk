@@ -1,6 +1,41 @@
 //! Account selection for cached rate-limit pressure. Config reads happen at refresh.
 use super::*;
+static AGENT_FALLBACKS: OnceLock<RwLock<HashMap<String, Vec<String>>>> = OnceLock::new();
 static AGENT_PROFILE: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+type PressureOverrides = (Option<bool>, Option<u64>, Option<i64>);
+static AGENT_PRESSURE_OVERRIDES: OnceLock<RwLock<HashMap<String, PressureOverrides>>> =
+    OnceLock::new();
+
+fn pressure_overrides() -> &'static RwLock<HashMap<String, PressureOverrides>> {
+    AGENT_PRESSURE_OVERRIDES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Carry the activation's persisted settings into account selection on this
+/// serving node. Keep YAML fallbacks live, and replace overrides on each admission.
+pub(super) fn record_pressure_overrides(agent: &str, overrides: PressureOverrides) {
+    pressure_overrides()
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(agent.to_string(), overrides);
+}
+
+pub(super) fn selection_pressure_policy(agent: Option<&str>) -> (u64, i64) {
+    let (enabled, danger, stale) = agent
+        .and_then(|agent| {
+            pressure_overrides()
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(agent)
+                .copied()
+        })
+        .unwrap_or_default();
+    let danger = if enabled.unwrap_or_else(gate_enabled) {
+        danger.unwrap_or_else(danger_pct)
+    } else {
+        DEFAULT_DANGER_PCT
+    };
+    (danger, stale.unwrap_or_else(stale_sec))
+}
 pub(super) fn account_key(provider: &str, profile_id: &str) -> String {
     if profile_id.is_empty() || profile_id == "default" {
         provider.to_string()
@@ -13,6 +48,9 @@ pub(super) fn refresh_profiles(
 ) {
     let profiles = crate::services::discord::org_schema::list_profile_bindings();
     let primary = crate::services::discord::org_schema::provider_auth_primary_profiles();
+    let catalog = crate::services::discord::org_schema::provider_auth_catalog();
+    let policies = crate::services::discord::org_schema::provider_auth_fallback_policies();
+    let mut alternatives = HashMap::new();
     let mut snapshot = HashMap::new();
     for (agent_id, binding) in bindings {
         let Some(provider) = binding.resolved_primary_provider_kind() else {
@@ -33,14 +71,50 @@ pub(super) fn refresh_profiles(
             .map(|entry| entry.profile_id.clone())
             .or_else(|| primary.get(provider.as_str()).cloned())
             .unwrap_or_else(|| "default".to_string());
+        let candidates = policies
+            .get(provider.as_str())
+            .cloned()
+            .unwrap_or_default()
+            .candidates(&provider, &profile, &catalog)
+            .into_iter()
+            .skip(1)
+            .filter(|id| {
+                crate::services::provider_auth_profile::resolve(
+                    provider.clone(),
+                    Some(id),
+                    None,
+                    &catalog,
+                )
+                .is_ok()
+            })
+            .map(|id| account_key(provider.as_str(), &id))
+            .collect();
+        alternatives.insert(agent_id.clone(), candidates);
         snapshot.insert(agent_id.clone(), account_key(provider.as_str(), &profile));
     }
+    pressure_overrides()
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|agent, _| snapshot.contains_key(agent));
+    *AGENT_FALLBACKS
+        .get_or_init(|| RwLock::new(HashMap::new()))
+        .write()
+        .unwrap_or_else(|p| p.into_inner()) = alternatives;
     *AGENT_PROFILE
         .get_or_init(|| RwLock::new(HashMap::new()))
         .write()
         .unwrap_or_else(|p| p.into_inner()) = snapshot;
 }
 pub(super) fn clear_profiles() {
+    pressure_overrides()
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
+    AGENT_FALLBACKS
+        .get_or_init(|| RwLock::new(HashMap::new()))
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
     AGENT_PROFILE
         .get_or_init(|| RwLock::new(HashMap::new()))
         .write()
@@ -57,9 +131,62 @@ pub(super) fn agent_account_key(agent_id: &str, provider: &str) -> String {
         .cloned()
         .unwrap_or_else(|| provider.to_string())
 }
+/// Use the same pressure threshold as spawn, including persisted overrides.
+/// Unknown usage remains eligible in both admission and account selection.
+pub(super) fn evaluate_with_fallbacks(
+    provider: &str,
+    primary_key: &str,
+    alternatives: &[String],
+    map: &HashMap<String, ProviderPressureSnapshot>,
+    danger: u64,
+    stale: i64,
+    now: i64,
+) -> ProviderPressureDecision {
+    let primary = evaluate_provider_pressure(provider, map.get(primary_key), danger, stale, now);
+    if primary.verdict.is_defer() {
+        for key in alternatives {
+            let alternate = evaluate_provider_pressure(provider, map.get(key), danger, stale, now);
+            if !alternate.verdict.is_defer() {
+                return alternate;
+            }
+        }
+    }
+    primary
+}
+
+pub(super) fn agent_fallback_keys(agent_id: &str) -> Vec<String> {
+    AGENT_FALLBACKS
+        .get_or_init(|| RwLock::new(HashMap::new()))
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(agent_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod selection_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exhausted_primary_can_dispatch_to_backup_but_missing_or_exhausted_candidates_do_not_bypass_gate()
+     {
+        let pressure = pressure_snapshot_from_payloads(&[
+            serde_json::json!({"provider":"codex", "profile_id":"default", "fetched_at":100, "buckets":[{"limit":100,"used":100,"reset":200}]}),
+            serde_json::json!({"provider":"codex", "profile_id":"full", "fetched_at":100, "buckets":[{"limit":100,"used":100,"reset":200}]}),
+            serde_json::json!({"provider":"codex", "profile_id":"ready", "fetched_at":100, "buckets":[{"limit":100,"used":10,"reset":200}]}),
+        ]);
+        let evaluate = |keys: &[String]| {
+            evaluate_with_fallbacks("codex", "codex", keys, &pressure, 90, 600, 101).verdict
+        };
+        assert!(evaluate(&[]).is_defer());
+        assert!(evaluate(&["codex:full".into()]).is_defer());
+        assert!(!evaluate(&["codex:full".into(), "codex:ready".into()]).is_defer());
+        assert!(!evaluate(&["codex:unknown-usage".into()]).is_defer());
+    }
+
     #[test]
     fn named_account_pressure_does_not_replace_default_pressure() {
         let payloads = vec![

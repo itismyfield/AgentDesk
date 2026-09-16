@@ -1472,6 +1472,8 @@ src/
 │   │   ├── voice_sensitivity.rs
 │   │   └── zombie_foreground_release.rs
 │   ├── dispatch_gate/
+│   │   ├── auth_profiles/
+│   │   │   └── selection_tests.rs
 │   │   └── auth_profiles.rs
 │   ├── dispatched_sessions/
 │   │   └── canonical_identity.rs
@@ -1563,6 +1565,10 @@ src/
 │   │   ├── provider_conformance_invariant_tests.rs
 │   │   ├── read_fault.rs
 │   │   └── registry.rs
+│   ├── provider_auth_profile/
+│   │   ├── fallback/
+│   │   │   └── tests.rs
+│   │   └── fallback.rs
 │   ├── provider_cli/
 │   │   ├── canary.rs
 │   │   ├── context.rs

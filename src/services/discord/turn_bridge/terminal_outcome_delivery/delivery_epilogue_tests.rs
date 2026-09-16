@@ -20,6 +20,31 @@ use tracing_subscriber::fmt::MakeWriter;
 #[cfg(unix)]
 mod rowless_receipt_tests;
 
+#[tokio::test]
+async fn scheduled_recovery_keeps_dispatch_unsettled_after_notice_delivery() {
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    for (recovery_retry, resume_failure) in [(true, false), (false, true)] {
+        for (should_complete, should_fail) in [(true, false), (false, true)] {
+            assert!(
+                !settle_terminal_dispatch(TerminalDispatchSettlement {
+                    shared: &shared,
+                    dispatch_id: Some("profile-fallback-dispatch"),
+                    adk_cwd: None,
+                    full_response: "Recovery scheduled",
+                    should_complete,
+                    should_fail,
+                    committed: true,
+                    preserve: false,
+                    resume_failure,
+                    recovery_retry,
+                })
+                .await,
+                "only the replacement turn may settle the original dispatch"
+            );
+        }
+    }
+}
+
 #[derive(Clone)]
 struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
 
