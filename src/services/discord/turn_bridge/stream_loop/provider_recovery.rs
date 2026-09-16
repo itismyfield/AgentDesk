@@ -14,22 +14,39 @@ pub(super) async fn on_error(
     lease: Option<&RecoveryLease>,
     expected: &InflightTurnIdentity,
     inflight: &InflightTurnState,
+    allow_profile_retry: bool,
+    any_tool_used: bool,
     partial_response: &str,
     message: &str,
     stderr: &str,
-) {
+) -> bool {
+    // A profile retry owns dispatch recovery; do not also request an agent takeover.
+    if allow_profile_retry
+        && try_profile_retry(
+            provider,
+            channel,
+            expected,
+            inflight,
+            any_tool_used,
+            partial_response,
+            message,
+            stderr,
+        )
+    {
+        return true;
+    }
     let Some(lease) = lease else {
-        return;
+        return false;
     };
     let Some(signal) = agent_recovery::trigger_from_error_message(message)
         .or_else(|| agent_recovery::trigger_from_error_message(stderr))
     else {
-        return;
+        return false;
     };
     if !crate::services::discord::inflight::load_inflight_state_read_only(provider, channel.get())
         .is_some_and(|current| expected.matches_state(&current))
     {
-        return;
+        return false;
     }
     let workspace = shared
         .core
@@ -65,6 +82,7 @@ pub(super) async fn on_error(
             tracing::warn!(channel_id = channel.get(), error = %error, "provider error recovery not committed; retaining normal error handling")
         }
     }
+    false
 }
 
 /// Retry only an anchored, unprocessed request. A tool may have committed an

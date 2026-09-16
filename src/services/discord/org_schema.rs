@@ -254,9 +254,10 @@ fn provider_primary_profile(schema: &OrgSchema, provider: Option<&str>) -> Strin
 fn fallback_profile_available(
     provider: &ProviderKind,
     id: &str,
+    agent_id: Option<&str>,
     catalog: &HashMap<String, ProviderAuthProfileDef>,
 ) -> bool {
-    !crate::services::dispatch_gate::profile_exhausted(provider, id)
+    !crate::services::dispatch_gate::profile_deferred(provider, id, agent_id)
         && crate::services::provider_auth_profile::resolve(
             provider.clone(),
             Some(id),
@@ -287,13 +288,21 @@ pub(crate) fn advance_auth_profile(
         .cloned()
         .unwrap_or_default();
     let catalog = schema.provider_auth_profiles.unwrap_or_default();
+    let binding = resolve_role_binding(ChannelId::new(channel), None);
     Ok(fallback::fail(
         provider,
         channel,
         request,
         &policy,
         &catalog,
-        |id| fallback_profile_available(provider, id, &catalog),
+        |id| {
+            fallback_profile_available(
+                provider,
+                id,
+                binding.as_ref().map(|binding| binding.role_id.as_str()),
+                &catalog,
+            )
+        },
     ))
 }
 
@@ -377,7 +386,7 @@ fn spawn_auth_overlay_for_context(
             .unwrap_or_default();
         let candidates = policy.candidates(&provider, &primary_overlay.profile_id, &catalog);
         let selected = fallback::select(&provider, channel, &candidates, |id| {
-            fallback_profile_available(&provider, id, &catalog)
+            fallback_profile_available(&provider, id, agent_id, &catalog)
         });
         resolve(provider.clone(), Some(&selected), None, &catalog)
             .map_err(|error| error.to_string())?

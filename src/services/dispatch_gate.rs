@@ -217,17 +217,19 @@ pub struct DispatchGateDiagnostics {
     pub last_defer_at: Option<i64>,
 }
 
-/// Only fresh, fully exhausted quota blocks automatic account selection.
-pub(crate) fn profile_exhausted(
+/// Account selection honors the pressure policy used for this agent's admission.
+pub(crate) fn profile_deferred(
     provider: &crate::services::provider::ProviderKind,
     profile: &str,
+    agent: Option<&str>,
 ) -> bool {
+    let (danger, stale) = auth_profiles::selection_pressure_policy(agent);
     let map = pressure_map().read().unwrap_or_else(|p| p.into_inner());
     evaluate_provider_pressure(
         provider.as_str(),
         map.get(&auth_profiles::account_key(provider.as_str(), profile)),
-        100,
-        stale_sec(),
+        danger,
+        stale,
         chrono::Utc::now().timestamp(),
     )
     .verdict
@@ -736,6 +738,10 @@ pub fn evaluate_agent_provider_pressure_with_overrides(
 
     let danger = danger_override.unwrap_or_else(danger_pct);
     let enabled = enabled_override.unwrap_or_else(gate_enabled);
+    auth_profiles::record_pressure_overrides(
+        agent_id,
+        (enabled_override, danger_override, stale_override),
+    );
 
     if !enabled {
         return ProviderPressureDecision::allow(
@@ -1107,7 +1113,7 @@ mod tests {
     /// Serializes tests that mutate the process-global `config_live_reload`
     /// snapshot and the dispatch-gate snapshots so they do not race the parallel
     /// test runner.
-    fn global_gate_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(super) fn global_gate_test_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
             .lock()
@@ -1117,7 +1123,7 @@ mod tests {
     /// Installs a live config snapshot for the gate tests. `danger` drives the
     /// GATE-specific threshold (`dispatch_rate_limit_gate_danger_pct`) — NOT the
     /// dashboard `rate_limit_danger_pct` — since that is what the gate reads.
-    fn install_runtime(enabled: Option<bool>, danger: Option<u64>, stale: Option<u64>) {
+    pub(super) fn install_runtime(enabled: Option<bool>, danger: Option<u64>, stale: Option<u64>) {
         let mut config = crate::config::Config::default();
         config.runtime.dispatch_rate_limit_gate_enabled = enabled;
         config.runtime.dispatch_rate_limit_gate_danger_pct =

@@ -2,6 +2,40 @@
 use super::*;
 static AGENT_FALLBACKS: OnceLock<RwLock<HashMap<String, Vec<String>>>> = OnceLock::new();
 static AGENT_PROFILE: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+type PressureOverrides = (Option<bool>, Option<u64>, Option<i64>);
+static AGENT_PRESSURE_OVERRIDES: OnceLock<RwLock<HashMap<String, PressureOverrides>>> =
+    OnceLock::new();
+
+fn pressure_overrides() -> &'static RwLock<HashMap<String, PressureOverrides>> {
+    AGENT_PRESSURE_OVERRIDES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Carry the activation's persisted settings into account selection on this
+/// serving node. Keep YAML fallbacks live, and replace overrides on each admission.
+pub(super) fn record_pressure_overrides(agent: &str, overrides: PressureOverrides) {
+    pressure_overrides()
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(agent.to_string(), overrides);
+}
+
+pub(super) fn selection_pressure_policy(agent: Option<&str>) -> (u64, i64) {
+    let (enabled, danger, stale) = agent
+        .and_then(|agent| {
+            pressure_overrides()
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(agent)
+                .copied()
+        })
+        .unwrap_or_default();
+    let danger = if enabled.unwrap_or_else(gate_enabled) {
+        danger.unwrap_or_else(danger_pct)
+    } else {
+        DEFAULT_DANGER_PCT
+    };
+    (danger, stale.unwrap_or_else(stale_sec))
+}
 pub(super) fn account_key(provider: &str, profile_id: &str) -> String {
     if profile_id.is_empty() || profile_id == "default" {
         provider.to_string()
@@ -58,6 +92,10 @@ pub(super) fn refresh_profiles(
         alternatives.insert(agent_id.clone(), candidates);
         snapshot.insert(agent_id.clone(), account_key(provider.as_str(), &profile));
     }
+    pressure_overrides()
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|agent, _| snapshot.contains_key(agent));
     *AGENT_FALLBACKS
         .get_or_init(|| RwLock::new(HashMap::new()))
         .write()
@@ -68,6 +106,10 @@ pub(super) fn refresh_profiles(
         .unwrap_or_else(|p| p.into_inner()) = snapshot;
 }
 pub(super) fn clear_profiles() {
+    pressure_overrides()
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
     AGENT_FALLBACKS
         .get_or_init(|| RwLock::new(HashMap::new()))
         .write()
@@ -89,8 +131,8 @@ pub(super) fn agent_account_key(agent_id: &str, provider: &str) -> String {
         .cloned()
         .unwrap_or_else(|| provider.to_string())
 }
-/// If the primary is exhausted, allow dispatch to a healthy alternate. Spawn
-/// resolves the same account list again; unknown usage does not mean exhausted.
+/// Use the same pressure threshold as spawn, including persisted overrides.
+/// Unknown usage remains eligible in both admission and account selection.
 pub(super) fn evaluate_with_fallbacks(
     provider: &str,
     primary_key: &str,
@@ -101,11 +143,7 @@ pub(super) fn evaluate_with_fallbacks(
     now: i64,
 ) -> ProviderPressureDecision {
     let primary = evaluate_provider_pressure(provider, map.get(primary_key), danger, stale, now);
-    if primary.verdict.is_defer()
-        && evaluate_provider_pressure(provider, map.get(primary_key), 100, stale, now)
-            .verdict
-            .is_defer()
-    {
+    if primary.verdict.is_defer() {
         for key in alternatives {
             let alternate = evaluate_provider_pressure(provider, map.get(key), danger, stale, now);
             if !alternate.verdict.is_defer() {
@@ -125,6 +163,9 @@ pub(super) fn agent_fallback_keys(agent_id: &str) -> Vec<String> {
         .cloned()
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod selection_tests;
 
 #[cfg(test)]
 mod tests {

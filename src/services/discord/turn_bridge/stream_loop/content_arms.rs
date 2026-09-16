@@ -421,16 +421,7 @@ pub(super) async fn handle_stream_content_message(
                             }
                         }
         StreamContentArmMessage::Error { message, stderr } => {
-                            let profile_retry = !done && !recovery_retry && super::provider_recovery::try_profile_retry(
-                                &provider, channel_id, expected_identity, inflight_state,
-                                any_tool_used || !active_background_child_session_ids.is_empty(),
-                                &full_response, &message, &stderr,
-                            );
-                            if profile_retry {
-                                recovery_retry = true;
-                            } else if !recovery_retry {
-                                super::provider_recovery::on_error(&shared_owned, &provider, channel_id, ctx.recovery_lease, expected_identity, inflight_state, &full_response, &message, &stderr).await;
-                            }
+                            recovery_retry = recovery_retry || super::provider_recovery::on_error(&shared_owned, &provider, channel_id, ctx.recovery_lease, expected_identity, inflight_state, !done, any_tool_used || !active_background_child_session_ids.is_empty(), &full_response, &message, &stderr).await;
                             let is_stale_resume =
                                 stream_error_has_stale_resume_error(&message, &stderr);
                             let session_reset_required =
@@ -438,7 +429,7 @@ pub(super) async fn handle_stream_content_message(
                             let error_resolution = resolve_tui_error(&provider, &message, &stderr);
                             tui_error_classification =
                                 error_resolution.tui_error_classification;
-                            transport_error = true;
+                            transport_error = !recovery_retry;
                             match error_resolution.presentation {
                                 ProviderErrorPresentation::PromptTooLong(guidance) => {
                                     // Prompt too long is not a terminal failure — user can retry

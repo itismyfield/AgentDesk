@@ -387,6 +387,11 @@ pub(super) struct TerminalDispatchSettlement<'a> {
     pub recovery_retry: bool,
 }
 pub(super) async fn settle_terminal_dispatch(ctx: TerminalDispatchSettlement<'_>) -> bool {
+    // The replacement turn retains the dispatch. A recovery notice is neither
+    // successful work nor a failure that AutoQueue may independently replay.
+    if ctx.recovery_retry || ctx.resume_failure {
+        return false;
+    }
     if should_complete_work_dispatch_after_terminal_delivery(
         ctx.should_complete,
         ctx.committed,
