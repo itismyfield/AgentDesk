@@ -2876,6 +2876,7 @@ services::discord::health::relay_auto_heal::tests::frontier_reset_invalidates_pl
 services::discord::health::relay_auto_heal::tests::frontier_reset_rearms_capped_attempt_episode_4181
 services::discord::health::relay_auto_heal::tests::redrive_actions_and_cap_alarm_continue_while_producer_is_vouched_4615
 services::discord::health::relay_auto_heal::tests::redrive_cap_resets_only_for_progress_identity_or_watcher_4299
+services::discord::health::relay_auto_heal::tests::redrive_does_not_clear_the_bridge_delivery_marker_5943
 services::discord::health::relay_auto_heal::tests::redrive_frozen_backlog_backs_off_and_caps_once_4299
 services::discord::health::relay_auto_heal::tests::redrive_nudge_requires_matching_output_path
 services::discord::health::relay_auto_heal::tests::redrive_nudge_skips_healthy_advancing_backlog
@@ -2883,6 +2884,7 @@ services::discord::health::relay_auto_heal::tests::redrive_nudge_skips_if_live_f
 services::discord::health::relay_auto_heal::tests::redrive_nudge_yields_while_relay_emission_in_flight
 services::discord::health::relay_auto_heal::tests::redrive_owner_shield_freezes_first_episode_snapshot_4299
 services::discord::health::relay_auto_heal::tests::redrive_planner_refused_reattach_response_cools_down_instead_of_committing
+services::discord::health::relay_auto_heal::tests::redrive_requests_the_higher_of_the_two_frontier_witnesses_5943
 services::discord::health::relay_auto_heal::tests::redrive_reuse_no_op_reattach_response_cools_down_instead_of_committing_5021
 services::discord::health::relay_auto_heal::tests::redrive_self_reattach_identity_rejects_unrelated_synthetic_turns_4299
 services::discord::health::relay_auto_heal::tests::redrive_stale_frontier_token_cannot_nudge_after_reset_4181
@@ -5660,7 +5662,13 @@ services::discord::tmux::tmux_watcher::liveness::tests::legacy_streaming_edit_sa
 services::discord::tmux::tmux_watcher::liveness::tests::rollover_skips_subagent_notification_then_sanitizes_edit_3818
 services::discord::tmux::tmux_watcher::liveness::tests::rollover_skips_tui_chrome_prefixed_subagent_notification_3818
 services::discord::tmux::tmux_watcher::loop_poll_prologue::post_terminal_disposal_tests::carry_forward_uses_proven_frontier_not_local_consumption
+services::discord::tmux::tmux_watcher::loop_poll_prologue::post_terminal_disposal_tests::poll_resume_branch_scopes_the_delivery_marker_to_the_current_turn_5943
 services::discord::tmux::tmux_watcher::loop_poll_prologue::post_terminal_disposal_tests::suppressed_poll_keeps_shared_delivery_frontier
+services::discord::tmux::tmux_watcher::loop_poll_prologue::watcher_resume::tests::a_forward_resume_keeps_the_pre_5943_latch_contract_5943
+services::discord::tmux::tmux_watcher::loop_poll_prologue::watcher_resume::tests::a_resume_at_the_current_read_position_is_not_a_rewind_5943
+services::discord::tmux::tmux_watcher::loop_poll_prologue::watcher_resume::tests::a_rewinding_resume_does_not_latch_an_earlier_turns_delivery_5943
+services::discord::tmux::tmux_watcher::loop_poll_prologue::watcher_resume::tests::an_undelivered_resume_drops_the_duplicate_relay_floor_5943
+services::discord::tmux::tmux_watcher::loop_poll_prologue::watcher_resume::tests::no_resume_can_make_the_pre_emit_guard_suppress_the_batch_5943
 services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppression_tests::completion_footer_tick_requires_registered_unfinished_target
 services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppression_tests::discord_origin_managed_turn_keeps_footer_3969
 services::discord::tmux::tmux_watcher::panel_decisions::completion_footer_suppression_tests::gate_suppresses_for_either_mirror_signal_and_keeps_discord_origin_3964

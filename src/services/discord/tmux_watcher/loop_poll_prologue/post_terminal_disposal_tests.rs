@@ -241,3 +241,166 @@ fn carry_forward_uses_proven_frontier_not_local_consumption() {
     assert_eq!(synthetic_start_offset_carry_forward(3, Some(7)), 7);
     assert_eq!(synthetic_start_offset_carry_forward(80, Some(7)), 80);
 }
+
+/// #5943: drive `poll_watcher_output_or_continue` through its RESUME branch.
+///
+/// Until this test, the only fixture that called that function passed
+/// `Mutex::new(None)`, so the whole `if let Some(new_offset) = …` block —
+/// including everything #5943 changed — never executed under test. The unit
+/// tests in `tmux_watcher::watcher_resume` pin the rule; this pins the WIRING:
+/// which offsets reach the rule, in which order, and that the marker is still
+/// cleared afterwards.
+///
+/// It lives in this file rather than beside the code because
+/// `loop_poll_prologue.rs` sits exactly at its 700-line namespace cap.
+///
+/// Two cases, differing only in where the watcher had already read to:
+///
+/// * a REWIND (read 10.9 MB worth, resume to 0 — the 2026-09-15 shape) must not
+///   latch the marker into `terminal_delivery_observed`;
+/// * a resume AT the current position must, because that is a forward handback
+///   of a turn that really ended.
+///
+/// Kills three wiring mutants that all compile silently: moving
+/// `current_offset = new_offset` back above the call (which makes every resume
+/// look like a no-op and retires the fix), swapping the two adjacent `u64`
+/// arguments (the signature cannot tell them apart), and deleting the
+/// `turn_delivered.store(false, …)` that follows — the line
+/// `relay_auto_heal`'s #5943 comment names as the reason dropping the producer's
+/// clear is safe.
+#[cfg(unix)]
+#[tokio::test]
+async fn poll_resume_branch_scopes_the_delivery_marker_to_the_current_turn_5943() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD: &str = "ADK_5943_RESUME_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let tmux = root.path().join("tmux");
+        std::fs::write(&tmux, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let exact = format!(
+            "{}::poll_resume_branch_scopes_the_delivery_marker_to_the_current_turn_5943",
+            module_path!().split_once("::").unwrap().1
+        );
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &exact, "--nocapture"])
+            .env(CHILD, "1")
+            .env("AGENTDESK_ROOT_DIR", root.path())
+            .env("PATH", root.path())
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed; 0 failed"));
+        return;
+    }
+    let payload = "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"백로그\"}\n";
+    let end = payload.len() as u64;
+    for (index, (case, already_read, expect_latched)) in [
+        ("rewind", 10_914_930u64, false),
+        ("resume at the read position", 0, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let shared = make_shared_data_for_tests();
+        let channel =
+            ChannelId::new(59_430_000 + u64::from(std::process::id()) * 10 + index as u64);
+        let session = format!("resume-{}", channel.get());
+        let generation = crate::services::tmux_common::session_temp_path(&session, "generation");
+        std::fs::create_dir_all(std::path::Path::new(&generation).parent().unwrap()).unwrap();
+        std::fs::write(&generation, "fixture-generation").unwrap();
+        let path = crate::services::tmux_common::session_temp_path(&session, "jsonl");
+        std::fs::write(&path, payload).unwrap();
+
+        // The bridge's marker is SET — which, since #5943 removed the redrive's
+        // force-clear, is what a redrive resume actually finds.
+        let turn_delivered = Arc::new(AtomicBool::new(true));
+        let mut offset = already_read;
+        let mut terminal_delivery_observed = false;
+        let mut local_end = None;
+        let mut local_generation = None;
+        let all_data = String::new();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            poll_watcher_output_or_continue(
+                &PollWatcherContext {
+                    http: &Arc::new(serenity::Http::new("fixture-no-network")),
+                    shared: &shared,
+                    channel_id: channel,
+                    watcher_provider: &ProviderKind::Claude,
+                    tmux_session_name: &session,
+                    output_path: &path,
+                    watcher_thread_channel_id: None,
+                    watcher_instance_id: 5943,
+                },
+                &PollWatcherControls {
+                    cancel: &Arc::new(AtomicBool::new(false)),
+                    paused: &Arc::new(AtomicBool::new(false)),
+                    // The queued resume point: always the head of the transcript.
+                    resume_offset: &Arc::new(std::sync::Mutex::new(Some(0))),
+                    pause_epoch: &Arc::new(AtomicU64::new(0)),
+                    turn_delivered: &turn_delivered,
+                    last_heartbeat_ts_ms: &Arc::new(AtomicI64::new(0)),
+                    jsonl_notify: &Arc::new(tokio::sync::Notify::new()),
+                    dead_marker_notify: &Arc::new(tokio::sync::Notify::new()),
+                },
+                &mut RelayOffsetState {
+                    current_offset: &mut offset,
+                    terminal_delivery_observed: &mut terminal_delivery_observed,
+                    last_relayed_offset: &mut local_end,
+                    last_observed_generation_mtime_ns: &mut local_generation,
+                    rotation_tick: &mut 0,
+                    watcher_turn_identity: &mut None,
+                    watcher_turn_nonce: &mut None,
+                },
+                &mut LoopPollState {
+                    retained_source: &mut None,
+                    prompt_too_long_killed: false,
+                    all_data: &all_data,
+                    utf8_decoder: &mut Utf8ChunkDecoder::default(),
+                    completion_footer_idle: &mut WatcherCompletionFooterIdleState::default(),
+                    last_activity_heartbeat_at: &mut None,
+                },
+                &mut PostTerminalState {
+                    turn_result_relayed: false,
+                    post_terminal_continuation_logged: &mut false,
+                    last_post_terminal_suppressed_range: &mut None,
+                    active_stream_inflight_reacquire_logged: &mut false,
+                    restored_turn: &None,
+                    restored_injected_prompt_message_id: None,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let PollOutcome::OutputReady {
+            data_start_offset, ..
+        } = result
+        else {
+            panic!("{case}: the resumed backlog was not offered: {result:?}");
+        };
+        assert_eq!(
+            data_start_offset, 0,
+            "{case}: the batch must start at the RESUME point, not the old read position"
+        );
+        assert_eq!(offset, end, "{case}: the read position advances from there");
+        assert_eq!(
+            terminal_delivery_observed, expect_latched,
+            "{case}: a backward resume carries an EARLIER turn's marker and must \
+             not latch it; a resume at the read position is a forward handback \
+             and must"
+        );
+        assert!(
+            !turn_delivered.load(Ordering::Acquire),
+            "{case}: the watcher must clear the marker once it has consumed the \
+             resume point — `relay_auto_heal`'s #5943 comment depends on this \
+             line to justify dropping the producer's own clear"
+        );
+        assert_eq!(
+            local_end,
+            Some(0),
+            "{case}: a delivered marker pins the floor AT the resume point"
+        );
+    }
+}

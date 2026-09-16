@@ -677,7 +677,23 @@ fn nudge_watcher_handle_for_backlog(
         return false;
     }
     *resume_offset = Some(requested_frontier);
-    watcher.turn_delivered.store(false, Ordering::Release);
+    // #5943 (contract I16): a redrive re-reads an UNDELIVERED backlog —
+    // `should_redrive_undelivered_backlog` admitted it — so it is not the start
+    // of a new turn and must NOT clear the bridge's delivery marker. FOUR
+    // consumers read the live marker for themselves and the clear reached past
+    // the watcher into all of them: `pre_emit_guard`
+    // (-> `tmux::should_suppress_relay_before_emit`) and the streaming status
+    // tick stop suppressing a relay the bridge had already delivered, so the
+    // watcher re-posts it; and the five watcher-observed tmux death sites, plus
+    // the watcher's own resume fold, put the marker into
+    // `terminal_delivery_observed`, so a cleared marker reports a delivered turn
+    // as undelivered.
+    //
+    // The watcher clears the marker itself in `loop_poll_prologue` once it has
+    // consumed this resume point, so the flag still reaches `false` — it just
+    // stops doing so before the consumers have read it. The turn-start handoffs
+    // in `turn_bridge::runtime_handoff_loop` keep their own clears: those really
+    // do open a new turn.
     true
 }
 
@@ -1109,6 +1125,132 @@ mod tests {
         );
         assert_eq!(*resume_offset.lock().unwrap(), None);
         assert!(turn_delivered.load(Ordering::Acquire));
+    }
+
+    /// #5943: an admitted redrive must leave the bridge's delivery marker ALONE.
+    ///
+    /// The redrive is admitted by `should_redrive_undelivered_backlog`, i.e. for
+    /// an UNDELIVERED backlog of the turn already in flight — it re-reads a turn,
+    /// it does not start one. Clearing `turn_delivered` here reached past the
+    /// watcher into two consumers that read the live marker for themselves:
+    /// `pre_emit_guard` (-> `tmux::should_suppress_relay_before_emit`) stops
+    /// suppressing a relay the bridge already delivered, and every
+    /// watcher-observed tmux death folds the marker into
+    /// `terminal_delivery_observed`, so a cleared marker reports a delivered turn
+    /// as undelivered. The watcher still clears it in `loop_poll_prologue` once
+    /// it consumes this resume point; it just no longer happens before the
+    /// consumers have read it.
+    ///
+    /// Nothing pinned this before #5943, which is why the clear survived.
+    #[test]
+    fn redrive_does_not_clear_the_bridge_delivery_marker_5943() {
+        let provider = ProviderKind::Codex;
+        let channel_id = ChannelId::new(5_943_001);
+        let tmux_session = "AgentDesk-codex-5943-delivery-marker";
+        let output_path = "/tmp/agentdesk-5943-delivery-marker.jsonl";
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let resume_offset = Arc::new(Mutex::new(None));
+        let turn_delivered = Arc::new(AtomicBool::new(true));
+        shared.tmux_watchers.insert(
+            channel_id,
+            watcher_handle(
+                tmux_session,
+                output_path,
+                resume_offset.clone(),
+                turn_delivered.clone(),
+            ),
+        );
+        stall_liveness::clear_stall_watchdog_liveness_state(
+            &provider,
+            channel_id,
+            Some(tmux_session),
+        );
+
+        let now = 1_800_000_000;
+        let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 128, 301_613);
+        shared
+            .tmux_relay_coord(channel_id)
+            .confirmed_end_offset
+            .store(snapshot.last_relay_offset, Ordering::Release);
+        // The first pass only seeds the no-progress grace.
+        assert!(!nudge_existing_watcher_for_backlog(
+            &shared,
+            &provider,
+            &snapshot,
+            channel_id,
+            now,
+            shared.relay_frontier_token(channel_id),
+        ));
+
+        assert!(nudge_existing_watcher_for_backlog(
+            &shared,
+            &provider,
+            &snapshot,
+            channel_id,
+            now + stall_liveness::STALL_WATCHDOG_BACKLOG_NO_PROGRESS_GRACE_SECS as i64,
+            shared.relay_frontier_token(channel_id),
+        ));
+        assert_eq!(
+            *resume_offset.lock().unwrap(),
+            Some(snapshot.last_relay_offset),
+            "the redrive still enqueues its resume point"
+        );
+        assert!(
+            turn_delivered.load(Ordering::Acquire),
+            "an admitted redrive must not disarm the bridge's delivery marker"
+        );
+
+        stall_liveness::clear_stall_watchdog_liveness_state(
+            &provider,
+            channel_id,
+            Some(tmux_session),
+        );
+    }
+
+    /// #5943 M10. The requested frontier is the MAXIMUM of the two witnesses,
+    /// never the minimum.
+    ///
+    /// `nudge_existing_watcher_for_backlog` cannot observe this — its admission
+    /// gate only passes while the snapshot and the committed frontier agree, so
+    /// `max` and `min` return the same number there and the choice is invisible.
+    /// The handle-level entry point is where they can differ, and taking the
+    /// lower one would hand the watcher a resume point behind the frontier I12
+    /// forbids moving below.
+    #[test]
+    fn redrive_requests_the_higher_of_the_two_frontier_witnesses_5943() {
+        let channel_id = ChannelId::new(5_943_002);
+        let tmux_session = "AgentDesk-codex-5943-frontier-max";
+        let output_path = "/tmp/agentdesk-5943-frontier-max.jsonl";
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let resume_offset = Arc::new(Mutex::new(None));
+        let turn_delivered = Arc::new(AtomicBool::new(true));
+        let watcher = watcher_handle(
+            tmux_session,
+            output_path,
+            resume_offset.clone(),
+            turn_delivered.clone(),
+        );
+        // The watcher snapshot is AHEAD of the committed frontier, so the two
+        // witnesses disagree and only one of them is the safe request.
+        let snapshot = backlog_snapshot(channel_id, tmux_session, output_path, 256, 301_613);
+        shared
+            .tmux_relay_coord(channel_id)
+            .confirmed_end_offset
+            .store(128, Ordering::Release);
+
+        assert!(nudge_watcher_handle_for_backlog(
+            &shared,
+            &snapshot,
+            &watcher,
+            channel_id,
+            shared.relay_frontier_token(channel_id),
+        ));
+        assert_eq!(
+            *resume_offset.lock().unwrap(),
+            Some(256),
+            "the snapshot frontier (256) is ahead of the committed one (128); \
+             requesting the lower witness would rewind past I12's floor"
+        );
     }
 
     #[test]
