@@ -73,11 +73,7 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 "/internal/escalation/emit",
                 post(escalation::emit_escalation),
             )
-            .route("/audit-logs", get(analytics::audit_logs))
-            .route("/machine-status", get(analytics::machine_status))
-            .route("/rate-limits", get(analytics::rate_limits))
-            .route("/home/kpi-trends", get(home_metrics::home_kpi_trends))
-            .route("/skills-trend", get(analytics::skills_trend)),
+            .route("/home/kpi-trends", get(home_metrics::home_kpi_trends)),
         state,
     )
 }

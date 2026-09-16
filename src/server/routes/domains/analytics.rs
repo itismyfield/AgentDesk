@@ -16,7 +16,11 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/achievements", get(analytics::achievements))
             .route("/activity-heatmap", get(analytics::activity_heatmap))
             .route("/receipt", get(receipt::get_receipt))
-            .route("/token-analytics", get(receipt::get_token_analytics)),
+            .route("/token-analytics", get(receipt::get_token_analytics))
+            .route("/audit-logs", get(analytics::audit_logs))
+            .route("/machine-status", get(analytics::machine_status))
+            .route("/rate-limits", get(analytics::rate_limits))
+            .route("/skills-trend", get(analytics::skills_trend)),
         state,
     )
 }
