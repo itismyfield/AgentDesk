@@ -239,6 +239,20 @@ pub(super) fn signal_bridge_entry_abort_completion(
 ///
 /// An empty seed is not an adoption — it is what the other three construction
 /// sites pass — so it emits nothing, mirroring the no-op skip above.
+///
+/// MEASURED COVERAGE GAP, recorded here rather than left to be discovered: a
+/// mutant that reverts the `turn_bridge/mod.rs` call site back to
+/// `bridge.full_response.clone()` SURVIVES the suite (round-3 mutant MS-H,
+/// rc=0). The body of this function is covered — deleting its
+/// `observe_body_mutation` is killed by
+/// `seeding_the_bridge_local_body_from_a_durable_row_is_recorded` — but the
+/// one-line call that reaches it is not, because the only thing that executes it
+/// is `spawn_turn_bridge` itself and no unit test stands that up. Killing MS-H
+/// needs either an end-to-end bridge drive or a newtype on
+/// `TurnBridgeContext.full_response` that makes the bare clone fail to compile;
+/// the latter touches all five construction sites across four files and was
+/// judged too wide a blast radius for this PR. Consistent with this module's
+/// contract: the absence of a record is not evidence that nothing happened.
 pub(super) fn seed_bridge_local_body(bridge: &TurnBridgeContext) -> String {
     let seed = bridge.full_response.clone();
     if !seed.is_empty() {
