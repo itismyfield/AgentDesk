@@ -1,11 +1,11 @@
 use axum::{
     Router,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 
 use super::super::{
     ApiRouter, AppState, claude_accounts_api, discord, dm_reply, github, github_dashboard, hooks,
-    meetings, pr_summary, protected_api_domain,
+    meetings, pr_summary, protected_api_domain, provider_auth_profiles,
 };
 
 // Category: integrations
@@ -20,6 +20,30 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route(
                 "/claude-accounts/switch",
                 post(claude_accounts_api::switch_claude_account),
+            )
+            .route(
+                "/provider-auth-profiles",
+                get(provider_auth_profiles::list_provider_auth_profiles),
+            )
+            .route(
+                "/provider-auth-profiles/{provider}/login-start",
+                post(provider_auth_profiles::login_start),
+            )
+            .route(
+                "/provider-auth-profiles/{provider}/login-complete",
+                post(provider_auth_profiles::login_complete),
+            )
+            .route(
+                "/provider-auth-profiles/{provider}/primary",
+                put(provider_auth_profiles::set_primary_profile),
+            )
+            .route(
+                "/provider-auth-profiles/{provider}/{profile_id}",
+                delete(provider_auth_profiles::remove_profile),
+            )
+            .route(
+                "/channels/{id}",
+                patch(provider_auth_profiles::patch_channel_auth_profile),
             )
             .route("/github/issues/create", post(github::create_issue))
             .route(

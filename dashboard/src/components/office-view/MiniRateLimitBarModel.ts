@@ -12,6 +12,7 @@ export interface RLBucket {
 
 export interface RLProvider {
   provider: string;
+  profileId: string;
   buckets: RLBucket[];
   stale: boolean;
   unsupported: boolean;
@@ -29,6 +30,7 @@ export interface RawRLBucket {
 
 export interface RawRLProvider {
   provider: string;
+  profile_id?: string;
   buckets: RawRLBucket[];
   stale: boolean;
   unsupported?: boolean;
@@ -231,6 +233,7 @@ export function transformRLProviders(
       return [
         {
           provider: normalizeMiniRateLimitProviderLabel(rp.provider),
+          profileId: (rp.profile_id ?? "default").trim() || "default",
           stale: rp.stale,
           unsupported: Boolean(rp.unsupported),
           reason: typeof rp.reason === "string" ? rp.reason : null,

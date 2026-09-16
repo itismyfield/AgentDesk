@@ -53,7 +53,7 @@ export type PendingDangerousConfigSave = {
   edits: Record<string, ConfigEditValue>;
   keys: string[];
 };
-export type SettingsPanel = "general" | "runtime" | "pipeline" | "connectors" | "onboarding" | "voice";
+export type SettingsPanel = "general" | "runtime" | "pipeline" | "connectors" | "onboarding" | "voice" | "providers";
 export type SettingsNotificationType = "info" | "success" | "warning" | "error";
 
 /**
@@ -84,7 +84,7 @@ export type ValidationState =
   | { ok: true }
   | { ok: false; messageKo: string; messageEn: string };
 
-export type SettingGroupId = "pipeline" | "runtime" | "connectors" | "onboarding" | "general" | "voice";
+export type SettingGroupId = "pipeline" | "runtime" | "connectors" | "onboarding" | "general" | "voice" | "providers";
 
 /**
  * Canonical metadata that drives every SettingRow rendered in the settings page.
@@ -237,7 +237,7 @@ export const PRIMARY_PIPELINE_CATEGORIES: Array<keyof typeof SYSTEM_CATEGORY_MET
 export const ADVANCED_PIPELINE_CATEGORIES: Array<keyof typeof SYSTEM_CATEGORY_META> = ["context", "system"];
 
 export function isSettingsPanel(value: string | null): value is SettingsPanel {
-  return value === "general" || value === "runtime" || value === "pipeline" || value === "connectors" || value === "onboarding" || value === "voice";
+  return value === "general" || value === "runtime" || value === "pipeline" || value === "connectors" || value === "onboarding" || value === "voice" || value === "providers";
 }
 
 export function isRuntimeCategoryId(value: string | null): value is string {
@@ -507,6 +507,13 @@ export const SETTING_GROUPS: SettingGroupMeta[] = [
     nameEn: "Runtime",
     descKo: "실행 환경과 리소스 제어, 컨텍스트 정책을 다룹니다.",
     descEn: "Execution environment, resource controls, and context policy.",
+  },
+  {
+    id: "providers",
+    nameKo: "프로바이더",
+    nameEn: "Providers",
+    descKo: "시스템 기본 로그인과 extra 계정을 누적하고 사용량을 확인합니다.",
+    descEn: "Accumulate extra CLI accounts next to the system default home and inspect usage.",
   },
   {
     id: "voice",

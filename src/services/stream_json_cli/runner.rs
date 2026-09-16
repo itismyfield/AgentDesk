@@ -25,6 +25,8 @@ pub struct PreparedCommand {
     pub args: Vec<String>,
     pub redacted_args: Vec<String>,
     pub current_dir: PathBuf,
+    pub env: Vec<(String, String)>,
+    pub unset_env: Vec<String>,
     pub codec: Box<dyn StreamJsonCodec>,
 }
 
@@ -44,6 +46,12 @@ pub fn run_prepared(
     let mut command = Command::new(&prepared.executable);
     apply_binary_resolution(&mut command, &prepared.resolution);
     configure_child_process_group(&mut command);
+    for key in &prepared.unset_env {
+        command.env_remove(key);
+    }
+    for (key, value) in &prepared.env {
+        command.env(key, value);
+    }
     let mut child = command
         .args(&prepared.args)
         .current_dir(&prepared.current_dir)

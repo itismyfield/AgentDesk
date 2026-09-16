@@ -79,6 +79,7 @@ pub(super) fn routine_metadata_role_binding(
         role_id: agent_id.to_string(),
         prompt_file,
         provider: Some(provider.clone()),
+        auth_profile: "default".to_string(),
         model: None,
         reasoning_effort: None,
         peer_agents_enabled: true,

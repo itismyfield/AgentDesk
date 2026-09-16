@@ -7,6 +7,10 @@ import type {
 } from "../types";
 import * as api from "../api";
 import type { OperatorConnectorsResponse, RuntimeConfigMap, RuntimeConfigValue } from "../api";
+import type {
+  PendingProviderLogin,
+  ProviderAuthProvider,
+} from "./settings/SettingsProvidersModel";
 import { STORAGE_KEYS } from "../lib/storageKeys";
 import { writeLocalStorageValue } from "../lib/useLocalStorage";
 import { SurfaceEmptyState as SettingsEmptyState } from "./common/SurfacePrimitives";
@@ -76,6 +80,13 @@ export default function SettingsView({
   const [operatorConnectorsLoaded, setOperatorConnectorsLoaded] = useState(false);
   const [operatorConnectorsLoading, setOperatorConnectorsLoading] = useState(false);
   const [operatorConnectorsError, setOperatorConnectorsError] = useState<string | null>(null);
+  const [providerAuthProviders, setProviderAuthProviders] = useState<ProviderAuthProvider[]>([]);
+  const [providerAuthLoaded, setProviderAuthLoaded] = useState(false);
+  const [providerAuthLoading, setProviderAuthLoading] = useState(false);
+  const [providerAuthError, setProviderAuthError] = useState<string | null>(null);
+  const [pendingProviderLogin, setPendingProviderLogin] = useState<PendingProviderLogin | null>(null);
+  const [startingProviderId, setStartingProviderId] = useState<string | null>(null);
+  const [removingProviderAccountKey, setRemovingProviderAccountKey] = useState<string | null>(null);
 
   const [activePanel, setActivePanel] = useState<SettingsPanel>(() => readStoredSettingsPanel());
   const [activeRuntimeCategoryId, setActiveRuntimeCategoryId] = useState<string>(() => readStoredRuntimeCategory());
@@ -143,6 +154,102 @@ export default function SettingsView({
     }
   }, [tr]);
 
+  const loadProviderAuthProfiles = useCallback(async () => {
+    setProviderAuthLoading(true);
+    setProviderAuthError(null);
+    try {
+      const data = await api.getProviderAuthProfiles();
+      setProviderAuthProviders(Array.isArray(data.providers) ? data.providers : []);
+      setProviderAuthLoaded(true);
+      return data;
+    } catch {
+      setProviderAuthLoaded(true);
+      setProviderAuthError(tr("프로바이더 계정을 불러오지 못했습니다.", "Failed to load provider accounts."));
+      return null;
+    } finally {
+      setProviderAuthLoading(false);
+    }
+  }, [tr]);
+
+  const handleAddProviderAccount = useCallback(async (providerId: string) => {
+    setStartingProviderId(providerId);
+    setProviderAuthError(null);
+    try {
+      const pending = await api.startProviderAuthLogin(providerId);
+      setPendingProviderLogin(pending);
+      notify(
+        `${providerId} 로그인을 tmux에서 완료하세요.`,
+        `Finish the ${providerId} login in tmux.`,
+        "info",
+      );
+    } catch {
+      setProviderAuthError(tr("extra 계정 로그인을 시작하지 못했습니다.", "Failed to start extra-account login."));
+    } finally {
+      setStartingProviderId(null);
+    }
+  }, [notify, tr]);
+
+  const handleCompleteProviderLogin = useCallback(async () => {
+    if (!pendingProviderLogin) return;
+    setProviderAuthError(null);
+    try {
+      await api.completeProviderAuthLogin(
+        pendingProviderLogin.providerId,
+        pendingProviderLogin.profileId,
+        pendingProviderLogin.home,
+      );
+      setPendingProviderLogin(null);
+      notify("extra 계정이 카탈로그에 추가되었습니다.", "Extra account was added to the catalog.", "success");
+      await loadProviderAuthProfiles();
+    } catch {
+      setProviderAuthError(tr(
+        "아직 자격 증명이 보이지 않습니다. tmux에서 로그인을 마친 뒤 다시 확인하세요.",
+        "Credentials are still missing. Finish vendor login in tmux, then try again.",
+      ));
+    }
+  }, [loadProviderAuthProfiles, notify, pendingProviderLogin, tr]);
+
+  const handleRemoveProviderAccount = useCallback(async (providerId: string, profileId: string) => {
+    const key = `${providerId}:${profileId}`;
+    const confirmed = window.confirm(tr(
+      `“${profileId}” 계정 연결을 해제할까요? 저장된 자격 증명 폴더는 유지됩니다.`,
+      `Unlink “${profileId}”? Its saved credential directory will be kept.`,
+    ));
+    if (!confirmed) return;
+    setRemovingProviderAccountKey(key);
+    setProviderAuthError(null);
+    try {
+      await api.removeProviderAuthProfile(providerId, profileId);
+      notify("extra 계정 연결을 해제했습니다. 자격 증명은 유지됩니다.", "Extra account unlinked; credentials were kept.", "success");
+      await loadProviderAuthProfiles();
+    } catch (error) {
+      setProviderAuthError(error instanceof Error ? error.message : tr(
+        "연결 해제에 실패했습니다. 먼저 연결된 에이전트/채널을 기본 계정으로 바꾸세요.",
+        "Unlink failed. First move bound agents/channels back to the default account.",
+      ));
+    } finally {
+      setRemovingProviderAccountKey(null);
+    }
+  }, [loadProviderAuthProfiles, notify, tr]);
+
+  const handleSetProviderPrimary = useCallback(async (providerId: string, profileId: string) => {
+    setProviderAuthError(null);
+    try {
+      await api.setProviderAuthPrimaryProfile(providerId, profileId);
+      notify(
+        `${providerId} 기본 계정을 ${profileId === "default" ? "시스템 기본" : profileId}(으)로 변경했습니다.`,
+        `Updated ${providerId} primary account.`,
+        "success",
+      );
+      await loadProviderAuthProfiles();
+    } catch (error) {
+      setProviderAuthError(error instanceof Error ? error.message : tr(
+        "기본 계정을 변경하지 못했습니다.",
+        "Failed to update the primary account.",
+      ));
+    }
+  }, [loadProviderAuthProfiles, notify, tr]);
+
   useEffect(() => {
     setCompanyName(settings.companyName);
     setCeoName(settings.ceoName);
@@ -206,6 +313,13 @@ export default function SettingsView({
     }
     void loadOperatorConnectors();
   }, [activePanel, loadOperatorConnectors, operatorConnectorsLoaded]);
+
+  useEffect(() => {
+    if (activePanel !== "providers" || providerAuthLoaded) {
+      return;
+    }
+    void loadProviderAuthProfiles();
+  }, [activePanel, loadProviderAuthProfiles, providerAuthLoaded]);
 
   const normalizedCompanyName = companyName.trim();
   const normalizedCeoName = ceoName.trim();
@@ -595,8 +709,10 @@ export default function SettingsView({
         handleConfigSave, handleDangerousConfigConfirm, handlePanelChange,
         handleRcChange, handleRcReset, handleRcSave, handleSave, handleVoiceSave,
         inputStyle, isKo, isRowVisible, loadVoiceConfig, matchingKeysInActivePanel,
-        loadOperatorConnectors, onboardingMetas, openOnboarding, operatorConnectors,
+        handleAddProviderAccount, handleCompleteProviderLogin, handleRemoveProviderAccount, handleSetProviderPrimary, loadOperatorConnectors,
+        loadProviderAuthProfiles, onboardingMetas, openOnboarding, operatorConnectors,
         operatorConnectorsError, operatorConnectorsLoading, panelQuery, panelQueryNormalized,
+        pendingProviderLogin, providerAuthError, providerAuthLoading, providerAuthProviders,
         pendingDangerousConfigSave, pipelineAgents, pipelineMetas, pipelineRepos,
         pipelineSelectorError, pipelineSelectorLoading, primaryActionClass,
         primaryActionStyle, rcDirty, rcLoaded, rcSaving, renderSettingGroupCard,
@@ -604,9 +720,9 @@ export default function SettingsView({
         secondaryActionStyle, selectedPipelineAgentId, selectedPipelineRepo,
         setActiveRuntimeCategoryId, setPanelQuery, setPendingDangerousConfigSave,
         setSelectedPipelineAgentId, setSelectedPipelineRepo, setShowOnboarding,
-        showOnboarding, subtleButtonClass, subtleButtonStyle, tr, updateVoiceAgent,
-        updateVoiceGlobal, voiceAliasConflict, voiceDirty, voiceDraft, voiceError,
-        voiceLoaded, voiceSaving,
+        showOnboarding, startingProviderId, removingProviderAccountKey, subtleButtonClass, subtleButtonStyle, tr,
+        updateVoiceAgent, updateVoiceGlobal, voiceAliasConflict, voiceDirty, voiceDraft,
+        voiceError, voiceLoaded, voiceSaving,
       }}
     />
   );

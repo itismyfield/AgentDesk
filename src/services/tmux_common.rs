@@ -1,3 +1,9 @@
+mod session_markers;
+pub(crate) use session_markers::{
+    resolve_tmux_runtime_kind_marker, tmux_session_auth_profile_matches,
+    write_tmux_runtime_kind_marker, write_tmux_session_auth_profile,
+};
+
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -1204,6 +1210,8 @@ pub fn resolve_session_temp_path(session_name: &str, extension: &str) -> Option<
     None
 }
 
+const TMUX_AUTH_PROFILE_TEMP_EXT: &str = "auth_profile";
+
 /// Delete all known session temp files for the given tmux session.
 /// Idempotent — missing files are not errors. Hits both the new persistent
 /// location and the legacy `/tmp/` location so cleanup is total regardless
@@ -1223,6 +1231,7 @@ fn cleanup_session_temp_files_under_source_authority(session_name: &str) {
         "owner",
         "sh",
         "generation",
+        TMUX_AUTH_PROFILE_TEMP_EXT,
         // #3087: the per-spawn status-panel instance nonce. Must be swept on
         // teardown like the other session temp files — otherwise a respawn whose
         // fresh nonce write fails (logged, non-fatal) would leave the PRIOR
@@ -1292,23 +1301,6 @@ pub fn write_tmux_owner_marker(tmux_session_name: &str) -> Result<(), String> {
     let owner_path = tmux_owner_path(tmux_session_name);
     std::fs::write(&owner_path, current_tmux_owner_marker())
         .map_err(|e| format!("Failed to write tmux owner marker: {}", e))
-}
-
-pub(crate) fn write_tmux_runtime_kind_marker(
-    tmux_session_name: &str,
-    runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind,
-) -> Result<(), String> {
-    let path = session_temp_path(tmux_session_name, TMUX_RUNTIME_KIND_TEMP_EXT);
-    std::fs::write(&path, runtime_kind.as_str())
-        .map_err(|e| format!("Failed to write tmux runtime kind marker: {}", e))
-}
-
-pub(crate) fn resolve_tmux_runtime_kind_marker(
-    tmux_session_name: &str,
-) -> Option<crate::services::agent_protocol::RuntimeHandoffKind> {
-    let path = resolve_session_temp_path(tmux_session_name, TMUX_RUNTIME_KIND_TEMP_EXT)?;
-    let raw = std::fs::read_to_string(path).ok()?;
-    crate::services::agent_protocol::RuntimeHandoffKind::from_str(&raw)
 }
 
 /// Append-only JSONL writer that reopens the path when external rotation

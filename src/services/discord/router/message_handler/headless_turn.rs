@@ -1345,6 +1345,7 @@ mod recovery_context_take_order_tests {
             reasoning_effort: None,
             peer_agents_enabled: false,
             quality_feedback_injection_enabled: false,
+            auth_profile: "default".to_string(),
             memory: Default::default(),
         };
         let built = build_system_prompt_with_manifest(

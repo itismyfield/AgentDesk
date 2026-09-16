@@ -130,6 +130,8 @@ pub(crate) struct RoleBinding {
     pub peer_agents_enabled: bool,
     /// Whether hourly agent quality feedback may be injected into the system prompt.
     pub quality_feedback_injection_enabled: bool,
+    /// Resolved auth profile id (`default` when unset).
+    pub auth_profile: String,
     pub memory: ResolvedMemorySettings,
 }
 
@@ -211,6 +213,8 @@ pub(super) struct PeerAgentInfo {
     pub role_id: String,
     pub display_name: String,
     pub keywords: Vec<String>,
+    pub provider: Option<ProviderKind>,
+    pub identity_label: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

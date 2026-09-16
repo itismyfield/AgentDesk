@@ -1,3 +1,4 @@
+pub mod agent_identity;
 pub mod agent_protocol;
 pub mod agent_quality;
 pub mod agents;
@@ -90,6 +91,7 @@ pub mod process;
 #[allow(dead_code)]
 pub mod provider;
 pub mod provider_auth;
+pub mod provider_auth_profile;
 pub mod provider_cli;
 pub(crate) mod provider_error_transcript;
 pub mod provider_exec;

@@ -16,6 +16,18 @@ pub(super) fn execute_streaming_local_tmux(
     report_provider: Option<ProviderKind>,
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
+    let auth_overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
+        ProviderKind::Qwen,
+        tmux_session_name,
+    )?;
+    let auth_env_lines =
+        crate::services::provider_auth_profile::overlay_shell_env_lines(&auth_overlay);
+    let session_exists = tmux_session_exists(tmux_session_name);
+    let profile_matches = crate::services::tmux_common::tmux_session_auth_profile_matches(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    );
+    let force_fresh_provider_session = force_fresh_provider_session || !profile_matches;
     let resume_session_id = if force_fresh_provider_session {
         None
     } else {
@@ -29,12 +41,11 @@ pub(super) fn execute_streaming_local_tmux(
     // Accept either the new persistent location or the legacy /tmp location
     // so that dcserver restarts that lost /tmp files still re-attach to a
     // live tmux pane owned by an older wrapper. See issue #892.
-    let session_exists = tmux_session_exists(tmux_session_name);
     let resolved_output =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "jsonl");
     let resolved_input =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "input");
-    let has_live_pane = tmux_session_has_live_pane(tmux_session_name);
+    let has_live_pane = tmux_session_has_live_pane(tmux_session_name) && profile_matches;
     let session_usable = has_live_pane && resolved_output.is_some() && resolved_input.is_some();
 
     if force_fresh_provider_session {
@@ -158,6 +169,7 @@ pub(super) fn execute_streaming_local_tmux(
         ));
     }
 
+    env_lines.push_str(&auth_env_lines);
     let script_content = format!(
         "#!/bin/bash\n\
         {env}\
@@ -226,6 +238,10 @@ pub(super) fn execute_streaming_local_tmux(
         return Err(format!("tmux error: {}", stderr));
     }
 
+    crate::services::tmux_common::write_tmux_session_auth_profile(
+        tmux_session_name,
+        &auth_overlay.profile_id,
+    )?;
     crate::services::platform::tmux::set_option(tmux_session_name, "remain-on-exit", "on");
 
     // #3087: stamp the provider spawn markers before reading the session output.
@@ -298,6 +314,14 @@ pub(super) fn execute_streaming_local_process(
     force_fresh_provider_session: bool,
 ) -> Result<(), String> {
     use crate::services::session_backend::{ProcessBackend, SessionBackend, SessionConfig};
+
+    let overlay = crate::services::discord::org_schema::overlay_from_tmux_session(
+        ProviderKind::Qwen,
+        session_name,
+    )?;
+    let profile_matches =
+        crate::services::session_backend::auth_profiles::prepare(session_name, &overlay.profile_id);
+    let force_fresh_provider_session = force_fresh_provider_session || !profile_matches;
 
     let resume_session_id = if force_fresh_provider_session {
         None
@@ -397,15 +421,24 @@ pub(super) fn execute_streaming_local_process(
             }
             args
         },
-        env_vars: qwen_resolution
-            .exec_path
-            .as_ref()
-            .map(|exec_path| vec![("PATH".to_string(), exec_path.clone())])
-            .unwrap_or_default(),
+        env_vars: crate::services::provider_auth_profile::merge_overlay_env(
+            qwen_resolution
+                .exec_path
+                .as_ref()
+                .map(|exec_path| vec![("PATH".to_string(), exec_path.clone())])
+                .unwrap_or_default(),
+            &overlay,
+        ),
+        unset_env: crate::services::provider_auth_profile::overlay_unset_keys(&overlay),
     };
 
     let backend = ProcessBackend::new();
     let handle = backend.create_session(&config)?;
+    let handle = crate::services::session_backend::auth_profiles::record_launch(
+        session_name,
+        &overlay.profile_id,
+        handle,
+    )?;
 
     register_child_pid(cancel_token.as_deref(), handle.pid());
 

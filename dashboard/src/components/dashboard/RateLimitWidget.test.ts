@@ -67,6 +67,35 @@ describe("RateLimitWidget helpers", () => {
     });
   });
 
+  it("keeps extra auth profiles as separate rows instead of coalescing by provider", () => {
+    const data = transformRawData(
+      {
+        providers: [
+          {
+            provider: "codex",
+            profile_id: "default",
+            buckets: [{ name: "5h", limit: 100, used: 10, remaining: 90, reset: 0 }],
+            fetched_at: 1_700_000_000,
+            stale: false,
+          },
+          {
+            provider: "codex",
+            profile_id: "work",
+            buckets: [{ name: "5h", limit: 100, used: 40, remaining: 60, reset: 0 }],
+            fetched_at: 1_700_000_000,
+            stale: false,
+          },
+        ],
+      },
+      80,
+      95,
+    );
+
+    expect(data.providers).toHaveLength(2);
+    expect(data.providers.map((row) => row.profileId)).toEqual(["default", "work"]);
+    expect(data.providers[1]?.buckets[0]).toMatchObject({ utilization: 40 });
+  });
+
   it("keeps an unsupported provider with no measurable buckets visible (instead of dropping it)", () => {
     const data = transformRawData(
       {
