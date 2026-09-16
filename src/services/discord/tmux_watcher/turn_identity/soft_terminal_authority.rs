@@ -221,8 +221,8 @@ impl WatcherSoftTerminalAuthority {
     ///
     /// Shaped after the one cell T5 S4 moved in the bridge stream tick
     /// (`guarded_persist::visible_mutation_authority_after_guarded_save`'s
-    /// `GuardedSaveOutcome::Missing => Suppressed`): one structural signal
-    /// relaxed, with the exact-episode veto (`IdentityMismatch`) left in place.
+    /// `GuardedSaveOutcome::RowAbsent => Suppressed`): one structural signal
+    /// relaxed, with the exact-episode veto (the mismatch family) left in place.
     pub(crate) fn authorize_pre_relay_inflight_with_rowless_authority(
         &self,
         inflight_before_relay: Option<&crate::services::discord::inflight::InflightTurnState>,

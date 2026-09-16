@@ -54,7 +54,9 @@ pub(super) fn restore_codex_rollout_output_path(
                     inflight::GuardedSaveOutcome::Saved => {
                         output_path = rollout_str;
                     }
-                    inflight::GuardedSaveOutcome::IdentityMismatch => {
+                    inflight::GuardedSaveOutcome::AuthorityPinned
+                    | inflight::GuardedSaveOutcome::Unnameable
+                    | inflight::GuardedSaveOutcome::SuccessorOwned => {
                         tracing::warn!(
                             provider = %provider.as_str(),
                             channel_id = state.channel_id,
@@ -66,7 +68,7 @@ pub(super) fn restore_codex_rollout_output_path(
                         );
                         return RestorePersistOutcome::SkipWatcher;
                     }
-                    inflight::GuardedSaveOutcome::Missing => {
+                    inflight::GuardedSaveOutcome::RowAbsent => {
                         tracing::info!(
                             provider = %provider.as_str(),
                             channel_id = state.channel_id,

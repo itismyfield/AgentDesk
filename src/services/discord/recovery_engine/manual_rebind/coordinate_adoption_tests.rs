@@ -74,7 +74,7 @@ fn exercise(successor: bool) {
                     &mut held,
                 ));
             if successor {
-                assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+                assert!(outcome.is_identity_mismatch_legacy());
                 assert!(held.is_none());
             } else {
                 assert_eq!(outcome, GuardedSaveOutcome::Saved);

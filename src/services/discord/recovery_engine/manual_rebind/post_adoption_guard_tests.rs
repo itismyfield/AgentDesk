@@ -126,10 +126,7 @@ fn terminal_commit_between_reservation_and_adoption_invalidates_episode_pin() {
         reserved.turn_start_offset,
         None,
     );
-    assert!(matches!(
-        adoption,
-        Err(super::inflight::GuardedSaveOutcome::IdentityMismatch)
-    ));
+    assert!(matches!(adoption, Err(outcome) if outcome.is_identity_mismatch_legacy()));
 }
 
 #[test]
@@ -647,7 +644,7 @@ fn relay_setup_failure_rollbacks_are_exact_episode_guarded() {
         expected_episode: Some(adopted_pin),
     }
     .apply();
-    assert!(outcome.contains("IdentityMismatch"), "{outcome}");
+    assert!(outcome.contains("SuccessorOwned"), "{outcome}");
     assert_eq!(
         serde_json::to_value(
             super::inflight::load_inflight_state(&provider, replacement.channel_id)

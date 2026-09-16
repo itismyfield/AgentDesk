@@ -375,7 +375,7 @@ fn terminal_progress_no_false_authority() {
     let fx = seed_row(guard.root.path(), 2, true, false);
     let mut other = fx.identity.clone();
     other.user_msg_id += 1;
-    expect(&fx, Some(&other), WatcherProgressOutcome::Skipped);
+    expect(&fx, Some(&other), WatcherProgressOutcome::SuccessorOwned);
     // `None` identity keeps its historical behaviour: no late-birth denial.
     expect(&fx, None, WatcherProgressOutcome::Saved);
     let active = seed_row(guard.root.path(), 3, false, false);
@@ -387,13 +387,21 @@ fn terminal_progress_no_false_authority() {
     let mut row = load_inflight_state(&fx.provider, fx.channel.get()).expect("terminal row");
     row.rebind_origin = true;
     save_inflight_state(&row).expect("rebound row");
-    expect(&fx, Some(&fx.identity), WatcherProgressOutcome::Skipped);
+    expect(
+        &fx,
+        Some(&fx.identity),
+        WatcherProgressOutcome::AuthorityPinned,
+    );
     row.rebind_origin = false;
     row.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
     save_inflight_state(&row).expect("restart row");
-    expect(&fx, Some(&fx.identity), WatcherProgressOutcome::Skipped);
+    expect(
+        &fx,
+        Some(&fx.identity),
+        WatcherProgressOutcome::AuthorityPinned,
+    );
     std::fs::remove_file(fx.path()).expect("drop row");
-    expect(&fx, Some(&fx.identity), WatcherProgressOutcome::Skipped);
+    expect(&fx, Some(&fx.identity), WatcherProgressOutcome::RowAbsent);
 }
 
 #[test]
@@ -406,7 +414,7 @@ fn progress_short_body_and_ioerror_stay_nonterminal() {
             &fx.provider, fx.channel, &fx.tmux, Some(&fx.identity), None, "짧", 9_999,
             None, None, None, false, false, &[],
         ),
-        WatcherProgressOutcome::Skipped
+        WatcherProgressOutcome::CoordinateMismatch
     );
     let blocked = guard.root.path().join("blocked-root");
     std::fs::write(&blocked, b"not-a-dir").expect("blocking file");

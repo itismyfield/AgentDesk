@@ -101,7 +101,7 @@ impl LockedInflightEpisode {
             || self.state.restart_mode.is_some()
             || self.state.rebind_origin
         {
-            return GuardedSaveOutcome::IdentityMismatch;
+            return GuardedSaveOutcome::AuthorityPinned;
         }
         let mut updated = self.state.clone();
         updated.current_msg_id = updated.user_msg_id;
@@ -123,7 +123,7 @@ impl LockedInflightEpisode {
         &mut self,
     ) -> GuardedSaveOutcome {
         if self.state.rebind_origin {
-            return GuardedSaveOutcome::IdentityMismatch;
+            return GuardedSaveOutcome::AuthorityPinned;
         }
         persist_readopted_under_lock(
             &self.root,

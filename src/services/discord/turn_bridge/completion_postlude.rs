@@ -745,7 +745,7 @@ pub(super) async fn run_completion_postlude(
             &inflight_state,
             "turn_bridge::restart_mode_preserve@6330",
         );
-        if matches!(guarded_outcome, GuardedSaveOutcome::IdentityMismatch) {
+        if guarded_outcome.is_identity_mismatch_legacy() {
             let _ = patch_restart_full_response_if_identity_unchanged(
                 &inflight_state,
                 "turn_bridge::restart_full_response_patch@6330",

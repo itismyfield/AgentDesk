@@ -25,7 +25,7 @@ mod rebind_adoption;
 
 pub(in crate::services::discord) use self::delivery_rewind::save_inflight_delivery_rewind_if_matches_identity;
 pub(in crate::services::discord) use self::identity_gate::{
-    GuardedSaveOutcome, StreamRelayAuthority, bind_recovery_anchor_for_snapshot,
+    StreamRelayAuthority, bind_recovery_anchor_for_snapshot,
     bind_recovery_anchor_if_matches_identity, clear_long_running_placeholder_if_matches_identity,
     mark_readopted_from_inflight_if_identity_unchanged,
     patch_bridge_entry_state_if_identity_unchanged,
@@ -47,12 +47,14 @@ pub(in crate::services::discord) use self::rebind_adoption::{
     save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_episode,
     save_existing_inflight_rebind_adoption_with_offset_rebase_if_matches_identity,
 };
+pub(in crate::services::discord) use super::store::GuardedSaveOutcome;
 
 #[cfg(test)]
 use self::identity_gate::{
     patch_bridge_entry_state_if_identity_unchanged_in_root,
     save_inflight_state_if_identity_matches_allow_output_restamp_in_root,
     save_inflight_state_if_identity_unchanged_in_root,
+    touch_inflight_state_if_matches_identity_in_root,
 };
 #[cfg(test)]
 pub(super) use self::identity_gate::{
@@ -63,6 +65,9 @@ pub(super) use self::identity_gate::{
 #[cfg(test)]
 #[path = "save_store/bridge_entry_guard_tests.rs"]
 mod bridge_entry_guard_tests;
+#[cfg(test)]
+#[path = "save_store/outcome_decomposition_tests.rs"]
+mod outcome_decomposition_tests;
 
 /// Blind whole-blob write of `InflightTurnState`: serializes the ENTIRE row and
 /// clobbers whatever is on disk, with no compare-and-set on turn identity.
@@ -228,12 +233,12 @@ mod tests {
 
         let mut cleaned_snapshot = state.clone();
         cleaned_snapshot.full_response = cleaned.clone();
-        assert_eq!(
+        assert!(
             save_inflight_state_if_identity_unchanged(
                 &cleaned_snapshot,
                 "test::restart_cleaned_guarded_save_declines",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy(),
             "the broad identity-refresh save must keep refusing restart-owned rows"
         );
         assert_eq!(
@@ -283,12 +288,12 @@ mod tests {
 
         let mut cleaned_snapshot = state.clone();
         cleaned_snapshot.full_response = cleaned;
-        assert_eq!(
+        assert!(
             patch_restart_full_response_if_identity_unchanged(
                 &cleaned_snapshot,
                 "test::restart_cleaned_patch_prefix_declines",
-            ),
-            GuardedSaveOutcome::IdentityMismatch
+            )
+            .is_identity_mismatch_legacy()
         );
 
         let persisted = super::super::load_inflight_state(&ProviderKind::Codex, state.channel_id)
@@ -369,12 +374,12 @@ mod tests {
             ),
             GuardedSaveOutcome::Saved
         );
-        assert_eq!(
+        assert!(
             patch_restart_full_response_if_identity_unchanged(
                 &state,
                 "test::normal_cleaned_restart_patch_refuses",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy(),
             "the restart-only patch must not participate in ordinary rows"
         );
 
@@ -406,7 +411,7 @@ mod tests {
             None,
             "id-0 anchor reuse must fail closed when the row lacks turn_start_offset"
         );
-        assert_eq!(
+        assert!(
             bind_recovery_anchor_if_matches_identity(
                 &provider,
                 state.channel_id,
@@ -418,8 +423,8 @@ mod tests {
                 11,
                 None,
                 None,
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy(),
             "id-0 anchor bind must fail closed when either side lacks turn_start_offset"
         );
         assert_eq!(
@@ -447,7 +452,7 @@ mod tests {
             "test::id0_offsetless_identity_refresh_save_fails_closed",
         );
 
-        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert!(outcome.is_identity_mismatch_legacy());
         let persisted_path = inflight_state_path(temp.path(), &provider, state.channel_id);
         let persisted: InflightTurnState = serde_json::from_str(
             &std::fs::read_to_string(persisted_path).expect("read persisted inflight"),
@@ -530,13 +535,13 @@ mod tests {
             state.output_path, seeded_output_path,
             "fixture must exercise a genuine output_path restamp"
         );
-        assert_eq!(
+        assert!(
             save_inflight_state_if_identity_unchanged_in_root(
                 temp.path(),
                 &state,
                 "test::output_restamp_strict_variant_declines",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy(),
             "the strict variant must keep declining output_path drift"
         );
         assert_eq!(
@@ -577,14 +582,14 @@ mod tests {
         stale.user_msg_id = 77_010;
         let expected = InflightTurnIdentity::from_state(&stale);
         stale.output_path = Some("/tmp/legacy/AgentDesk-codex-restamp-own-4259.jsonl".to_string());
-        assert_eq!(
+        assert!(
             save_inflight_state_if_identity_matches_allow_output_restamp_in_root(
                 temp.path(),
                 &stale,
                 &expected,
                 "test::output_restamp_identity_mismatch_skips",
-            ),
-            GuardedSaveOutcome::IdentityMismatch
+            )
+            .is_identity_mismatch_legacy()
         );
 
         let persisted_path = inflight_state_path(temp.path(), &provider, owner.channel_id);
@@ -727,7 +732,7 @@ mod tests {
             "test::identity_unchanged_save_skips_after_adoption_rebased_turn_start_offset",
         );
 
-        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert!(outcome.is_identity_mismatch_legacy());
         let persisted_path = inflight_state_path(temp.path(), &provider, channel_id);
         let persisted: InflightTurnState = serde_json::from_str(
             &std::fs::read_to_string(persisted_path).expect("read persisted inflight"),
@@ -782,7 +787,7 @@ mod tests {
             "test::identity_unchanged_save_skips_after_adoption_changes_only_output_path",
         );
 
-        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert!(outcome.is_identity_mismatch_legacy());
         let persisted_path = inflight_state_path(temp.path(), &provider, channel_id);
         let persisted: InflightTurnState = serde_json::from_str(
             &std::fs::read_to_string(persisted_path).expect("read persisted inflight"),

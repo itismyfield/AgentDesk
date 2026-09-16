@@ -577,7 +577,11 @@ async fn process_ready_skips_reowned_row_and_does_not_queue_stale_flush() {
     )
     .await;
 
-    assert_eq!(outcome.outcome, Some(GuardedSaveOutcome::IdentityMismatch));
+    assert!(
+        outcome
+            .outcome
+            .is_some_and(GuardedSaveOutcome::is_identity_mismatch_legacy)
+    );
     assert!(outcome.retry_message.is_none());
     assert!(
         !state_dirty,
@@ -622,7 +626,11 @@ async fn assert_reowned_watcher_handoff_has_no_side_effects(
     )
     .await;
 
-    assert_eq!(observed.outcome, Some(GuardedSaveOutcome::IdentityMismatch));
+    assert!(
+        observed
+            .outcome
+            .is_some_and(GuardedSaveOutcome::is_identity_mismatch_legacy)
+    );
     assert!(observed.retry_message.is_none());
     assert_eq!(observed.claim_outcome, WatcherHandoffClaimOutcome::None);
     assert!(!observed.tmux_handed_off);

@@ -361,7 +361,7 @@ fn identity_mismatch_handoff_does_not_recapture_or_authorize_stream_tick_flush()
             &mut expected,
             &mut persisted_baseline,
             &stale,
-            Some(GuardedSaveOutcome::IdentityMismatch),
+            Some(GuardedSaveOutcome::SuccessorOwned),
         );
         assert_eq!(expected.tmux_session_name, None);
 
@@ -369,7 +369,7 @@ fn identity_mismatch_handoff_does_not_recapture_or_authorize_stream_tick_flush()
         stale.last_offset = 1_024;
         let mut expected_current_message = (stale.current_msg_id, stale.current_msg_len);
         let mut current_msg_id = detached_current_msg_id_from_durable(stale.current_msg_id);
-        assert_eq!(
+        assert!(
             persist_stream_tick_state(
                 &mut persisted_baseline,
                 &mut stale,
@@ -378,8 +378,8 @@ fn identity_mismatch_handoff_does_not_recapture_or_authorize_stream_tick_flush()
                 &mut current_msg_id,
                 channel,
                 "turn_bridge::stream_loop::mismatched_handoff_test",
-            ),
-            GuardedSaveOutcome::IdentityMismatch
+            )
+            .is_identity_mismatch_legacy()
         );
         let persisted =
             load_inflight_state(&ProviderKind::Codex, channel.get()).expect("persisted row");

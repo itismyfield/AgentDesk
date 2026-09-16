@@ -411,12 +411,14 @@ pub(super) fn persist_bridge_entry_inflight_state(
         GuardedSaveOutcome::Saved => {
             reconcile_runtime_locals_from_inflight_state(shared, runtime);
         }
-        GuardedSaveOutcome::Missing => tracing::warn!(
+        GuardedSaveOutcome::RowAbsent => tracing::warn!(
             channel_id = before.channel_id,
             caller = CALLER,
             "bridge-entry inflight patch skipped: durable row missing; row was not recreated"
         ),
-        GuardedSaveOutcome::IdentityMismatch => tracing::warn!(
+        GuardedSaveOutcome::AuthorityPinned
+        | GuardedSaveOutcome::Unnameable
+        | GuardedSaveOutcome::SuccessorOwned => tracing::warn!(
             channel_id = before.channel_id,
             caller = CALLER,
             "bridge-entry inflight patch skipped: durable row belongs to another turn"
@@ -462,7 +464,7 @@ pub(super) async fn establish_bridge_entry_authority(
     );
     let anchor_was_absent = durable_current_msg_id_from_detached(*runtime.current_msg_id) == 0;
     *ctx.entry_was_rowless =
-        outcome == crate::services::discord::inflight::GuardedSaveOutcome::Missing;
+        outcome == crate::services::discord::inflight::GuardedSaveOutcome::RowAbsent;
     if !bridge_entry_disposition_continues(
         outcome,
         bridge_entry_rowless_cohort_admits(ctx.bridge.inflight_state.channel_id),
@@ -638,8 +640,10 @@ mod tests {
     #[test]
     fn bridge_entry_failure_outcomes_abort_without_arming_cleanup() {
         for outcome in [
-            GuardedSaveOutcome::Missing,
-            GuardedSaveOutcome::IdentityMismatch,
+            GuardedSaveOutcome::RowAbsent,
+            GuardedSaveOutcome::AuthorityPinned,
+            GuardedSaveOutcome::Unnameable,
+            GuardedSaveOutcome::SuccessorOwned,
             GuardedSaveOutcome::IoError,
         ] {
             assert!(!bridge_entry_lifecycle_can_continue(outcome));
@@ -663,8 +667,10 @@ mod tests {
 
         for outcome in [
             GuardedSaveOutcome::Saved,
-            GuardedSaveOutcome::Missing,
-            GuardedSaveOutcome::IdentityMismatch,
+            GuardedSaveOutcome::RowAbsent,
+            GuardedSaveOutcome::AuthorityPinned,
+            GuardedSaveOutcome::Unnameable,
+            GuardedSaveOutcome::SuccessorOwned,
             GuardedSaveOutcome::IoError,
         ] {
             assert_eq!(
@@ -692,15 +698,15 @@ mod tests {
         // #5464 T5 S7a: the shipped predicate is now the OUT-OF-COHORT path, so
         // AC1 is stated per cohort state instead of in one framing.
         assert!(
-            !bridge_entry_lifecycle_can_continue(GuardedSaveOutcome::Missing)
-                && !entry_gate_new(GuardedSaveOutcome::Missing).ends_lifecycle(),
+            !bridge_entry_lifecycle_can_continue(GuardedSaveOutcome::RowAbsent)
+                && !entry_gate_new(GuardedSaveOutcome::RowAbsent).ends_lifecycle(),
             "AC1: the retained gate ends the turn on a missing row and AC2-R must not"
         );
         assert_eq!(
             (
-                bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, false, true),
-                bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, true, false),
-                bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, true, true),
+                bridge_entry_disposition_continues(GuardedSaveOutcome::RowAbsent, false, true),
+                bridge_entry_disposition_continues(GuardedSaveOutcome::RowAbsent, true, false),
+                bridge_entry_disposition_continues(GuardedSaveOutcome::RowAbsent, true, true),
             ),
             (false, false, true),
             "AC1: a rowless turn continues only inside the cohort and only onto an anchor \
@@ -737,7 +743,7 @@ mod tests {
                 "channel {channel_id} was admitted by the shipped dial"
             );
             assert!(
-                !bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, admits, true),
+                !bridge_entry_disposition_continues(GuardedSaveOutcome::RowAbsent, admits, true),
                 "channel {channel_id}: a rowless turn must still end outside the cohort"
             );
         }
@@ -805,7 +811,7 @@ mod tests {
                  the S7a entry cutover would govern nothing in production"
             );
             assert!(
-                bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, admits, true),
+                bridge_entry_disposition_continues(GuardedSaveOutcome::RowAbsent, admits, true),
                 "channel {channel_id}: at enforce/100 a rowless turn onto a live anchor continues"
             );
         }
@@ -872,7 +878,7 @@ mod tests {
             .await
         };
 
-        if bridge_entry_disposition_continues(GuardedSaveOutcome::Missing, true, anchor_present) {
+        if bridge_entry_disposition_continues(GuardedSaveOutcome::RowAbsent, true, anchor_present) {
             let _ = anchor().await;
         }
         assert!(
@@ -905,7 +911,7 @@ mod tests {
 
         let outcome = persist_bridge_entry_inflight_state(&before, &shared, runtime, &mut cleared);
 
-        assert_eq!(outcome, GuardedSaveOutcome::Missing);
+        assert_eq!(outcome, GuardedSaveOutcome::RowAbsent);
         assert_eq!(
             harness.runtime.full_response.as_str(),
             "pre-persist detached bytes",
@@ -1058,7 +1064,7 @@ mod tests {
                 &mut stale,
                 "turn_bridge::bridge_entry_persist::same_id_successor_test",
             );
-        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert!(outcome.is_identity_mismatch_legacy());
         assert!(!bridge_entry_lifecycle_can_continue(outcome));
         signal_bridge_entry_abort_completion(&mut completion_tx);
 

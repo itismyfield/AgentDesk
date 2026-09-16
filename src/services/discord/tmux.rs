@@ -2262,7 +2262,7 @@ fn persist_watcher_stream_progress(
             full_response_len = full_response.len(),
             "watcher: skipping stream-progress persistence until parsed body catches up"
         );
-        return super::inflight::WatcherProgressOutcome::Skipped;
+        return super::inflight::WatcherProgressOutcome::CoordinateMismatch;
     }
 
     // #3558: pre-emit the in-bounds telemetry against the caller's snapshot for

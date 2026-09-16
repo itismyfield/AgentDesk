@@ -20,7 +20,7 @@ pub(super) fn read_inflight_state_for_guarded_write(
                 snapshot_identity = ?expected,
                 "guarded inflight write skipped because the durable row is missing"
             );
-            return Err(GuardedSaveOutcome::Missing);
+            return Err(GuardedSaveOutcome::RowAbsent);
         }
         Err(error) => {
             tracing::warn!(

@@ -30,7 +30,7 @@ fn queued_restart_foreign_authority_propagates_loss_while_self_delegation_contin
     foreign.set_watcher_owner_channel_id(foreign.channel_id + 1);
     foreign.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
     let foreign_authority = visible_mutation_authority_after_guarded_save(
-        crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch,
+        crate::services::discord::inflight::GuardedSaveOutcome::SuccessorOwned,
         &foreign,
         intended,
     );

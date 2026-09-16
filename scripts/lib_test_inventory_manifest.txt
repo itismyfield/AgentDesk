@@ -3316,6 +3316,8 @@ services::discord::inflight::save_store::identity_gate::tests::output_restamp_ad
 services::discord::inflight::save_store::identity_gate::tests::readopted_marker_lands_on_restart_preserved_row_and_never_resurrects
 services::discord::inflight::save_store::identity_gate::tests::rebind_adoption_save_adopts_zero_id_orphan_but_refuses_live_synthetic_shapes
 services::discord::inflight::save_store::identity_gate::tests::slice_a_leak_prefix_adoption
+services::discord::inflight::save_store::outcome_decomposition_tests::every_split_variant_keeps_the_pre_split_identity_mismatch_verdict
+services::discord::inflight::save_store::outcome_decomposition_tests::guarded_save_outcome_truth_table_separates_all_six_identity_mismatch_causes
 services::discord::inflight::save_store::tests::create_new_atomic_write_failure_leaves_no_final_row_and_retry_succeeds
 services::discord::inflight::save_store::tests::create_new_existence_probe_error_fails_closed_without_writing
 services::discord::inflight::save_store::tests::existing_claude_transcript_adoption_rebase_save_persists_eof_coordinates_and_runtime
@@ -3440,6 +3442,7 @@ services::discord::inflight::stall_recovery_tests::watcher_terminal_commit_max_s
 services::discord::inflight::store::relay_state_contract_refs::contract_symbols_exist
 services::discord::inflight::terminal_delivery_evidence_loss::tests::identity_mismatch_bridge_outcome_emits_lost_evidence_warn
 services::discord::inflight::terminal_delivery_evidence_loss::tests::skipped_watcher_outcome_emits_lost_evidence_warn
+services::discord::inflight::watcher_state::watcher_progress_outcome_tests::watcher_progress_outcome_truth_table_separates_all_four_skipped_causes
 services::discord::inflight::wave_a_cleanup_tests::invalidate_stale_generation_empty_dir_is_no_op
 services::discord::inflight::wave_a_cleanup_tests::invalidate_stale_generation_evicts_non_planned_old_generations
 services::discord::inflight::wave_a_cleanup_tests::invalidate_stale_generation_preserves_current_generation_rows

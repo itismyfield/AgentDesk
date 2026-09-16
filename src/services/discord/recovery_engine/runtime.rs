@@ -113,8 +113,8 @@ pub(in crate::services::discord) fn readopt_marker_eligible_real_user(
 ///   * The on-disk `readopted_from_inflight` marker — the companion signal for a
 ///     PRESENT row, written through the identity-guarded narrow patch
 ///     `mark_readopted_from_inflight_if_identity_unchanged` (NOT a blind whole-row
-///     save): a concurrently-cleared row is NOT resurrected (`Missing`), and a row
-///     a newer turn re-owns is NOT clobbered (`IdentityMismatch`). Under the same
+///     save): a concurrently-cleared row is NOT resurrected (`RowAbsent`), and a
+///     row a newer turn re-owns is NOT clobbered (`SuccessorOwned`). Under the same
 ///     canonical lock it also consumes any planned-restart marker, transferring
 ///     durable authority to the replacement process before runtime handoff.
 ///
@@ -159,14 +159,16 @@ pub(super) fn mark_readopted_from_inflight(
     );
     match outcome {
         inflight::GuardedSaveOutcome::Saved => {}
-        inflight::GuardedSaveOutcome::Missing => {
+        inflight::GuardedSaveOutcome::RowAbsent => {
             tracing::debug!(
                 provider = %provider.as_str(),
                 channel_id = channel_id.get(),
                 "readopted-from-inflight marker skipped: durable row cleared concurrently; not resurrecting (#4370)"
             );
         }
-        inflight::GuardedSaveOutcome::IdentityMismatch => {
+        inflight::GuardedSaveOutcome::AuthorityPinned
+        | inflight::GuardedSaveOutcome::Unnameable
+        | inflight::GuardedSaveOutcome::SuccessorOwned => {
             tracing::debug!(
                 provider = %provider.as_str(),
                 channel_id = channel_id.get(),

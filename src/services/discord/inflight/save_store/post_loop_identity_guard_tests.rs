@@ -59,12 +59,12 @@ fn post_loop_finalize_saves_require_matching_identity() {
     newer_turn.long_running_placeholder_active = true;
     save_inflight_state(&newer_turn).expect("replace row with newer turn");
 
-    assert_eq!(
+    assert!(
         save_inflight_state_if_identity_unchanged(
             &same_turn_finalize,
             "turn_bridge::post_loop_finalize::mutation_test_mismatched_identity",
-        ),
-        GuardedSaveOutcome::IdentityMismatch,
+        )
+        .is_identity_mismatch_legacy(),
         "a stale post-loop finalize must decline after a different turn re-owns the row"
     );
     let persisted =

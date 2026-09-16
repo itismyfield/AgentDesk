@@ -80,7 +80,7 @@ impl PendingRecoveryAnchor {
         if !inflight::InflightEpisodePin::from_state(&self.expected).matches_state(state)
             || self.expected.save_generation != state.save_generation
         {
-            return inflight::GuardedSaveOutcome::IdentityMismatch;
+            return inflight::GuardedSaveOutcome::AuthorityPinned;
         }
         self.context.record_successful_fresh_send_with_snapshot(
             shared,
@@ -484,7 +484,7 @@ impl RecoveryDeliveryContext {
         };
         if matches!(
             bind,
-            inflight::GuardedSaveOutcome::Saved | inflight::GuardedSaveOutcome::Missing
+            inflight::GuardedSaveOutcome::Saved | inflight::GuardedSaveOutcome::RowAbsent
         ) {
             let settlement = self.record_durable_frontier(shared, anchor, text);
             unix_journal::settle_recovery_terminal(&mut observation, Some(anchor), settlement);

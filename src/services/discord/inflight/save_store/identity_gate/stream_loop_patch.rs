@@ -167,7 +167,7 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         return GuardedSaveOutcome::IoError;
     };
     if !expected.matches_state(state) || !expected.matches_state(persisted_baseline) {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
     let path = inflight_state_path(root, &provider, state.channel_id);
     if let Some(parent) = path.parent()
@@ -189,11 +189,11 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         Err(outcome) => return outcome,
     };
     if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::Unnameable;
     }
     if on_disk.restart_mode.is_some() || on_disk.rebind_origin || !expected.matches_state(&on_disk)
     {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
 
     let baseline_authority = StreamRelayAuthority::from_state(persisted_baseline);
@@ -220,7 +220,7 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
             );
             state.clone_from(&on_disk);
             persisted_baseline.clone_from(&on_disk);
-            return GuardedSaveOutcome::IdentityMismatch;
+            return GuardedSaveOutcome::AuthorityPinned;
         }
 
         // A durable current-message epoch change is NOT rejected on its own.
@@ -244,7 +244,7 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         //
         // That residual is accepted deliberately. Rejecting the whole class
         // instead produced a *fatal* false-positive: the caller collapses
-        // `IdentityMismatch` into `AuthorityLost` and returns before
+        // an identity mismatch into `AuthorityLost` and returns before
         // `post_loop_finalize`, orphaning the row with the finished answer
         // inside it. This does extend that residual to the
         // `StrictBridgeMutation` callers — that is the shipped behaviour change
@@ -301,7 +301,7 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         // replay instead of retrying the same divergent merge forever.
         state.clone_from(&on_disk);
         persisted_baseline.clone_from(&on_disk);
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     };
     updated.full_response = merged_response;
     updated.response_sent_offset = merged_response_offset;
@@ -425,7 +425,7 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         &updated,
         "src/services/discord/inflight/save_store/identity_gate/stream_loop_patch.rs:save_stream_tick_state_preserving_current_message_races_in_root",
     ) {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
     match persist_under_lock_with_snapshot(
         root,
@@ -438,7 +438,7 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
             persisted_baseline.clone_from(&persisted);
             GuardedSaveOutcome::Saved
         }
-        Ok(None) => GuardedSaveOutcome::IdentityMismatch,
+        Ok(None) => GuardedSaveOutcome::AuthorityPinned,
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -486,14 +486,14 @@ fn patch_restart_mode_if_matches_identity_in_root(
     if state.restart_mode.is_some() != state.restart_generation.is_some()
         || previous_restart_mode.is_some() != previous_restart_generation.is_some()
     {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
     let path = inflight_state_path(root, &provider, state.channel_id);
     let Ok(_lock) = lock_inflight_state_path(&path) else {
         return GuardedSaveOutcome::IoError;
     };
     let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
-        return GuardedSaveOutcome::Missing;
+        return GuardedSaveOutcome::RowAbsent;
     };
     let durable = InflightTurnIdentity::from_state(&on_disk);
     if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
@@ -505,7 +505,7 @@ fn patch_restart_mode_if_matches_identity_in_root(
             durable_identity = ?durable,
             "stream-loop restart-mode patch skipped because offsetless id-0 snapshot cannot safely match a durable row"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::Unnameable;
     }
     if on_disk.rebind_origin
         || !expected.matches_state(&on_disk)
@@ -525,7 +525,7 @@ fn patch_restart_mode_if_matches_identity_in_root(
             durable_rebind_origin = on_disk.rebind_origin,
             "stream-loop restart-mode patch skipped because durable row identity or authority changed"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
 
     on_disk.restart_mode = state.restart_mode;
@@ -576,7 +576,7 @@ fn clear_long_running_placeholder_if_matches_identity_in_root(
         return GuardedSaveOutcome::IoError;
     };
     let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
-        return GuardedSaveOutcome::Missing;
+        return GuardedSaveOutcome::RowAbsent;
     };
     let durable = InflightTurnIdentity::from_state(&on_disk);
     if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
@@ -588,7 +588,7 @@ fn clear_long_running_placeholder_if_matches_identity_in_root(
             durable_identity = ?durable,
             "stream-loop placeholder patch skipped because offsetless id-0 snapshot cannot safely match a durable row"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::Unnameable;
     }
     if on_disk.restart_mode.is_some() || on_disk.rebind_origin || !expected.matches_state(&on_disk)
     {
@@ -602,7 +602,7 @@ fn clear_long_running_placeholder_if_matches_identity_in_root(
             durable_rebind_origin = on_disk.rebind_origin,
             "stream-loop placeholder patch skipped because durable row identity or authority changed"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
 
     on_disk.long_running_placeholder_active = false;
@@ -730,7 +730,7 @@ mod tests {
         watcher.set_relay_owner_kind(RelayOwnerKind::Watcher);
         save_inflight_state_in_root(root.path(), &watcher).expect("watcher takes authority");
 
-        assert_eq!(
+        assert!(
             save_stream_tick_state_if_bridge_authority_in_root(
                 root.path(),
                 &mut baseline,
@@ -739,8 +739,8 @@ mod tests {
                 901,
                 12,
                 "test::strict_watcher_authority_fence",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         let persisted = load(root.path(), &ProviderKind::Codex, channel_id);
         assert_eq!(persisted.full_response, "base plus watcher delta");
@@ -841,7 +841,7 @@ mod tests {
         foreign.set_watcher_owner_channel_id(channel_id + 2);
         save_inflight_state_in_root(root.path(), &foreign).expect("foreign watcher takes owner");
 
-        assert_eq!(
+        assert!(
             save_stream_tick_state_if_bridge_authority_in_root(
                 root.path(),
                 &mut baseline,
@@ -850,8 +850,8 @@ mod tests {
                 0,
                 0,
                 "test::strict_foreign_delegated_projection",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         assert_eq!(
             StreamRelayAuthority::from_state(&local),
@@ -888,7 +888,7 @@ mod tests {
         (competing.current_msg_id, competing.current_msg_len) = (913, 21);
         save_inflight_state_in_root(root.path(), &competing).expect("advance durable epoch");
 
-        assert_eq!(
+        assert!(
             save_stream_tick_state_if_bridge_authority_in_root(
                 root.path(),
                 &mut baseline,
@@ -897,8 +897,8 @@ mod tests {
                 911,
                 12,
                 "test::strict_current_message_epoch_fence",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         let persisted = load(root.path(), &ProviderKind::Codex, channel_id);
         assert_eq!(persisted.full_response, competing.full_response);
@@ -1070,7 +1070,7 @@ mod tests {
     /// FAILS and so does the pre-existing
     /// `strict_visible_fence_fails_closed_when_epoch_change_carries_divergent_body`
     /// (its two bodies are prefix-incompatible, so a blind adopt turns its
-    /// expected `IdentityMismatch` into `Saved`). The test that stays green under
+    /// expected identity mismatch into `Saved`). The test that stays green under
     /// that mutant is `strict_visible_fence_merges_same_authority_current_message_
     /// epoch` — the one #5150 named — because its `durable ⊃ local` orientation
     /// makes adopt and merge agree.
@@ -1217,7 +1217,7 @@ mod tests {
         save_inflight_state_in_root(root.path(), &durable).expect("persist divergent row");
         let path = inflight_state_path(root.path(), &ProviderKind::Codex, channel_id);
         let durable_bytes_before = std::fs::read(&path).expect("read durable bytes");
-        assert_eq!(
+        assert!(
             save_stream_tick_state_preserving_current_message_races_in_root(
                 root.path(),
                 &mut baseline,
@@ -1226,8 +1226,8 @@ mod tests {
                 0,
                 0,
                 "test::non_prefix_divergence",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         assert_eq!(
             std::fs::read(path).expect("durable survives"),
@@ -1326,7 +1326,7 @@ mod tests {
         let mut successor = owner_state(channel_id, 99_999);
         successor.full_response = "new owner".to_string();
         save_inflight_state_in_root(root.path(), &successor).expect("seed successor row");
-        assert_eq!(
+        assert!(
             patch_restart_mode_if_matches_identity_in_root(
                 root.path(),
                 &cancelled,
@@ -1334,8 +1334,8 @@ mod tests {
                 None,
                 None,
                 "test::cancel_restart_reowner",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         assert_eq!(
             load(root.path(), &ProviderKind::Codex, channel_id).user_msg_id,
@@ -1345,7 +1345,7 @@ mod tests {
         successor = owner.clone();
         successor.set_restart_mode(InflightRestartMode::HotSwapHandoff);
         save_inflight_state_in_root(root.path(), &successor).expect("seed changed authority");
-        assert_eq!(
+        assert!(
             patch_restart_mode_if_matches_identity_in_root(
                 root.path(),
                 &cancelled,
@@ -1353,8 +1353,8 @@ mod tests {
                 None,
                 None,
                 "test::cancel_restart_authority",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         assert_eq!(
             load(root.path(), &ProviderKind::Codex, channel_id).restart_mode,
@@ -1380,7 +1380,7 @@ mod tests {
                 None,
                 "test::cancel_restart_missing",
             ),
-            GuardedSaveOutcome::Missing,
+            GuardedSaveOutcome::RowAbsent,
         );
         assert_eq!(
             clear_long_running_placeholder_if_matches_identity_in_root(
@@ -1390,7 +1390,7 @@ mod tests {
                 &expected,
                 "test::placeholder_missing",
             ),
-            GuardedSaveOutcome::Missing,
+            GuardedSaveOutcome::RowAbsent,
         );
         assert!(!inflight_state_path(root.path(), &ProviderKind::Codex, channel_id).exists());
     }
@@ -1422,15 +1422,15 @@ mod tests {
         successor.long_running_placeholder_active = true;
         successor.full_response = "new owner".to_string();
         save_inflight_state_in_root(root.path(), &successor).expect("seed successor row");
-        assert_eq!(
+        assert!(
             clear_long_running_placeholder_if_matches_identity_in_root(
                 root.path(),
                 &ProviderKind::Codex,
                 channel_id,
                 &expected,
                 "test::placeholder_reowner",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         let persisted = load(root.path(), &ProviderKind::Codex, channel_id);
         assert_eq!(persisted.user_msg_id, 99_999);
