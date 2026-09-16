@@ -1,9 +1,14 @@
 //! Explicit operator release of one mailbox episode. The mailbox lease is the
 //! authority and the durable inflight row is only its projection (#5951 §2), so
-//! a missing row neither hides the episode from inspect nor blocks release. A
-//! row that IS present must still name this exact episode and must not be
-//! authority-pinned; unsupported or protected states are reported before
-//! submitting.
+//! a missing row neither hides the episode from inspect nor blocks release.
+//!
+//! Authority pins have TWO sources and both are refused. `restart_mode` lives
+//! on the live `CancelToken` and is only PROJECTED onto the row (by
+//! `sync_inflight_restart_mode_from_cancel`), so the token is checked first and
+//! a planned-restart episode stays protected even with no row at all.
+//! `rebind_origin` exists on the row alone: a release that finds no row cannot
+//! observe it, and reports `rebind_pin_verified: false` rather than implying a
+//! complete pin check.
 use std::{
     sync::{Arc, OnceLock},
     time::Instant,
@@ -64,8 +69,18 @@ async fn identity(
         return Ok(None);
     };
     let snapshot = mailbox.snapshot().await;
-    if snapshot.cancel_token.is_none() {
+    let Some(token) = snapshot.cancel_token.clone() else {
         return Ok(None);
+    };
+    // #5951 P1-1 — the lease is the authority, so its PIN is the token's too.
+    // `cancel_active_token` stamps `restart_mode` on the live `CancelToken` and
+    // the row only receives a copy, so a row-only check would hand a
+    // planned-restart episode to an operator the moment its projection is gone
+    // — precisely the rowless case this lane opens. Refuse from the authority.
+    if token.restart_mode().is_some() {
+        return Err(
+            "lease cannot be released: the active episode is pinned by a planned restart".into(),
+        );
     }
     Ok(Some(LeaseIdentity {
         provider: provider.as_str().into(),
@@ -90,22 +105,34 @@ async fn identity(
 /// #5951 RG1 — the row is a projection, not the authority, so its ABSENCE is
 /// reported as `Ok(None)` rather than refused: that is the rowless lane an
 /// operator needs when no automatic path can see the turn any more. A row that
-/// exists still has to name this exact episode, and `restart_mode` /
-/// `rebind_origin` keep pinning authority to a planned restart or a rebind
-/// owner — those stay refusals.
+/// exists still has to name this exact episode, and `rebind_origin` (plus a
+/// `restart_mode` copy) keeps pinning authority — those stay refusals, reported
+/// apart from a plain identity mismatch so an operator can tell the two states
+/// apart.
 fn matching_inflight(
     provider: &ProviderKind,
     expected: &LeaseIdentity,
 ) -> Result<Option<inflight::InflightTurnState>, String> {
-    let Some(row) = inflight::load_inflight_state(provider, expected.channel_id) else {
+    // #5951 P2-1 — read-only: the plain loader rewrites the sidecar under a
+    // lock whenever it backfills `finalizer_turn_id`, and inspect is advertised
+    // as a non-mutating probe.
+    let Some(row) = inflight::load_inflight_state_read_only(provider, expected.channel_id) else {
         return Ok(None);
     };
-    if row.effective_finalizer_turn_id() != expected.user_message_id
-        || row.turn_nonce.as_deref() != Some(expected.turn_nonce.as_str())
-        || row.restart_mode.is_some()
-        || row.rebind_origin
-    {
-        return Err("lease cannot be released: inflight identity differs or is protected".into());
+    // #5951 P1-2 — an episode that bound no user message (id 0) has NO id axis
+    // to compare. Its row legitimately carries `user_msg_id == 0`, and
+    // `effective_finalizer_turn_id()` then synthesises a non-zero id that can
+    // never equal 0, so an unconditional `!=` would reject the episode's own
+    // row. Fall back to the nonce axis alone — the same exemption
+    // `InflightTurnState::matches_finalizer_turn_id` makes for `expected == 0`.
+    let identity_differs = (expected.user_message_id != 0
+        && row.effective_finalizer_turn_id() != expected.user_message_id)
+        || row.turn_nonce.as_deref() != Some(expected.turn_nonce.as_str());
+    if identity_differs {
+        return Err("lease cannot be released: inflight identity differs from this episode".into());
+    }
+    if row.restart_mode.is_some() || row.rebind_origin {
+        return Err("lease cannot be released: inflight identity is protected by a planned restart or a rebind origin".into());
     }
     Ok(Some(row))
 }
@@ -173,7 +200,17 @@ async fn release_on(
                     clear_outcome.get()
                 ));
             }
-            Ok(serde_json::json!({"released": true, "status": "operator_released"}))
+            // `rebind_origin` has no in-memory counterpart, so a release that
+            // cleared no row could not observe it. Report that instead of
+            // implying every pin was checked.
+            Ok(serde_json::json!({
+                "released": true,
+                "status": "operator_released",
+                "rebind_pin_verified": matches!(
+                    clear_outcome.get(),
+                    Some(inflight::GuardedClearOutcome::Cleared)
+                ),
+            }))
         }
         _ if identity(shared, provider, channel).await?.is_none() => {
             Ok(serde_json::json!({"released": false, "status": "already_released"}))
@@ -183,6 +220,26 @@ async fn release_on(
 }
 
 impl OperatorRelease {
+    /// Clear a projection that appeared after the rowless check ONLY while its
+    /// nonce still names this episode; anything else belongs to a successor.
+    fn clear_late_projection(
+        provider: &ProviderKind,
+        channel_id: ChannelId,
+        turn_nonce: &str,
+    ) -> inflight::GuardedClearOutcome {
+        match inflight::load_inflight_state_read_only(provider, channel_id.get()) {
+            Some(row) if row.turn_nonce.as_deref() == Some(turn_nonce) => {
+                inflight::clear_inflight_state_for_captured_episode(
+                    provider,
+                    channel_id.get(),
+                    &inflight::InflightTurnIdentity::from_state(&row),
+                    Some(turn_nonce),
+                )
+            }
+            _ => inflight::GuardedClearOutcome::Missing,
+        }
+    }
+
     /// Exact mailbox CAS precedes inflight cleanup, notification and audit.
     pub(in crate::services::discord) async fn claim(
         &self,
@@ -200,7 +257,11 @@ impl OperatorRelease {
             return None;
         }
         let row = matching_inflight(provider, &self.request.expected).ok()?;
-        // `MessageId::new(0)` panics; an unbound episode carries no CAS key.
+        // `MessageId::new(0)` panics and an unbound episode carries no CAS key.
+        // `release_on` already refuses id 0 before building the `TurnKey`, so
+        // this is unreachable from the HTTP lane; it is the guard for a direct
+        // `claim` caller, and `claim_refuses_unbound_message_id_without_panic`
+        // exercises exactly that entry.
         if key.user_msg_id == 0 {
             return None;
         }
@@ -222,10 +283,16 @@ impl OperatorRelease {
                 &inflight::InflightTurnIdentity::from_state(row),
                 Some(&self.request.expected.turn_nonce),
             ),
-            // Rowless episode: there is no projection of THIS episode to clear.
-            // Anything written between the check above and the mailbox CAS
-            // belongs to a successor and must survive untouched.
-            None => inflight::GuardedClearOutcome::Missing,
+            // #5951 P2-3 — a row appearing between the rowless check and the
+            // CAS is THIS episode's late projection (a stream tick persist),
+            // not a successor's: no successor can start until the CAS above
+            // released the lease. Sweep it, but only while it still names this
+            // episode, so a successor that did start keeps its own row.
+            None => Self::clear_late_projection(
+                provider,
+                key.channel_id,
+                &self.request.expected.turn_nonce,
+            ),
         };
         let _ = self.clear_outcome.set(cleared);
         tracing::warn!(channel_id = key.channel_id.get(), turn_id = key.user_msg_id,
