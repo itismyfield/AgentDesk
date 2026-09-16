@@ -56,6 +56,152 @@ fn cached_state(coordinator: &Coordinator) -> ChannelState {
 }
 
 #[tokio::test]
+async fn postgres_same_provider_error_takeover_pins_account_and_fences_owner() {
+    use crate::services::agent_recovery::admission::admit_on;
+    let (db, pool, coordinator) = fixture().await;
+    {
+        let mut runtime = lock(&coordinator.runtime);
+        runtime.catalog.agents.get_mut("claude").unwrap().provider = Some("codex".into());
+        runtime
+            .catalog
+            .agents
+            .get_mut("monitoring")
+            .unwrap()
+            .auth_profile = "backup-account".into();
+        let binding = runtime.catalog.channels.get_mut(CHANNEL).unwrap();
+        binding.owner_provider = ProviderKind::Codex;
+        binding.owner_auth_profile = "owner-account".into();
+    }
+    let owner = RecoveryLease {
+        channel_id: CHANNEL.into(),
+        generation: 0,
+        active_writer_agent_id: "claude".into(),
+    };
+    coordinator
+        .transition(CHANNEL, |runtime| {
+            provider_errors::apply_provider_error(
+                runtime,
+                &owner,
+                ObserveInput {
+                    channel_id: CHANNEL.into(),
+                    primary_turn_id: "quota-turn".into(),
+                    signal: DetectorSignal::TurnRateLimit,
+                },
+                payload("unfinished response"),
+                Some("/live/worktree".into()),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let state = load_channel_state(&pool, CHANNEL).await.unwrap().unwrap();
+    assert_eq!(state.status, ChannelRecoveryStatus::TakeoverPending);
+    let context = state.context.as_ref().unwrap();
+    assert_eq!(context.owner_auth_profile.as_deref(), Some("owner-account"));
+    assert_eq!(
+        context.fallback_auth_profile.as_deref(),
+        Some("backup-account")
+    );
+    assert_eq!(context.workspace, "/live/worktree");
+    let fallback = RecoveryLease::from_state(&state);
+    assert!(
+        admit_on(
+            &coordinator,
+            CHANNEL,
+            &ProviderKind::Codex,
+            Some("claude"),
+            Some(&fallback)
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        admit_on(
+            &coordinator,
+            CHANNEL,
+            &ProviderKind::Codex,
+            None,
+            Some(&fallback)
+        )
+        .await
+        .is_err()
+    );
+    drop(
+        admit_on(
+            &coordinator,
+            CHANNEL,
+            &ProviderKind::Codex,
+            Some("monitoring"),
+            Some(&fallback),
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(
+        coordinator
+            .transition(CHANNEL, |runtime| apply_completion(
+                runtime,
+                &owner,
+                payload("late owner completion")
+            ))
+            .await
+            .is_err()
+    );
+    coordinator
+        .transition(CHANNEL, |runtime| runtime.acknowledge_start(&fallback))
+        .await
+        .unwrap();
+    lock(&coordinator.runtime).clear_catalog();
+    coordinator.refresh(CHANNEL).await.unwrap();
+    assert_eq!(cached_state(&coordinator).context, state.context);
+    assert!(
+        admit_on(&coordinator, CHANNEL, &ProviderKind::Codex, None, None)
+            .await
+            .is_err()
+    );
+    drop(
+        admit_on(
+            &coordinator,
+            CHANNEL,
+            &ProviderKind::Codex,
+            Some("monitoring"),
+            None,
+        )
+        .await
+        .unwrap(),
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
+#[tokio::test]
+async fn postgres_error_takeover_store_failure_leaves_owner_unmodified() {
+    let (db, pool, coordinator) = fixture().await;
+    seed_owner(&coordinator).await;
+    let before = cached_state(&coordinator);
+    let lease = RecoveryLease::from_state(&before);
+    pool.close().await;
+    assert!(
+        coordinator
+            .transition(CHANNEL, |runtime| provider_errors::apply_provider_error(
+                runtime,
+                &lease,
+                ObserveInput {
+                    channel_id: CHANNEL.into(),
+                    primary_turn_id: "quota-turn".into(),
+                    signal: DetectorSignal::TurnRateLimit
+                },
+                payload("unfinished"),
+                None,
+            ))
+            .await
+            .is_err()
+    );
+    assert_eq!(cached_state(&coordinator), before);
+    db.drop().await;
+}
+
+#[tokio::test]
 async fn postgres_takeover_is_invisible_until_commit() {
     let (db, pool, coordinator) = fixture().await;
     seed_owner(&coordinator).await;

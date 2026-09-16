@@ -20,6 +20,17 @@ use authority::{
 use task_notification::{StreamTaskNotificationContext, handle_stream_task_notification};
 pub(super) use types::{StreamToolArmContext, StreamToolArmMessage, StreamToolArmState};
 
+macro_rules! stop_on_tool_authority_loss {
+    ($outcome:expr, $loop_outcome:ident, $label:lifetime) => {
+        if matches!($outcome, StreamToolArmOutcome::AuthorityLost) {
+            $loop_outcome = StreamLoopOutcome::AuthorityLost;
+            break $label;
+        }
+    };
+}
+
+pub(super) use stop_on_tool_authority_loss;
+
 #[rustfmt::skip]
 pub(super) async fn handle_stream_tool_message(
     message: StreamToolArmMessage,

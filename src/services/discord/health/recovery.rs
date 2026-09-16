@@ -24,6 +24,8 @@ mod leak_recovery_ledger;
 // process, and the two share no state. Public so a later change can assert the
 // constants by importing them.
 mod live_agent_recovery;
+mod stall_watchdog_task;
+pub use stall_watchdog_task::spawn_stall_watchdog;
 pub(crate) mod self_watchdog;
 mod stall_alert;
 mod watchdog_decisions;
@@ -2135,31 +2137,6 @@ pub(crate) async fn run_stall_watchdog_pass(
     watcher_respawn::retry_pending_watcher_respawns(registry, provider, &runtimes, now_unix_secs)
         .await;
     cleaned + relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &runtimes).await
-}
-
-/// Spawn the long-lived background task that runs the stall watchdog at
-/// `STALL_WATCHDOG_INTERVAL_SECS` cadence for the given provider. Should
-/// be called once per provider during dcserver bootstrap, alongside
-/// `placeholder_sweeper::spawn_placeholder_sweeper`.
-pub fn spawn_stall_watchdog(registry: Arc<HealthRegistry>, provider: ProviderKind) {
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(
-            STALL_WATCHDOG_INITIAL_DELAY_SECS,
-        ))
-        .await;
-        loop {
-            let cleaned = run_stall_watchdog_pass(&registry, &provider).await;
-            if cleaned > 0 {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::info!(
-                    "  [{ts}] ⚡ stall-watchdog ({}): cleaned={}",
-                    provider.as_str(),
-                    cleaned
-                );
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(STALL_WATCHDOG_INTERVAL_SECS)).await;
-        }
-    });
 }
 
 /// #2860 — recover a completed-stale inflight leak by delivering the generated
