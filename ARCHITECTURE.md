@@ -284,6 +284,8 @@ src/
 │   │   │   ├── onboarding.rs
 │   │   │   ├── ops.rs
 │   │   │   └── reviews.rs
+│   │   ├── health_api/
+│   │   │   └── public_projection.rs
 │   │   ├── review_verdict/
 │   │   │   ├── decision_route.rs
 │   │   │   ├── mod.rs
@@ -631,6 +633,7 @@ src/
 │   │   │   │   ├── external_verdict.rs
 │   │   │   │   ├── ledger.rs
 │   │   │   │   ├── ledger_tests.rs
+│   │   │   │   ├── ledger_ttl.rs
 │   │   │   │   ├── obligation.rs
 │   │   │   │   ├── obligation_tests.rs
 │   │   │   │   ├── observation.rs
@@ -644,6 +647,8 @@ src/
 │   │   │   │   ├── stall_watchdog_task.rs
 │   │   │   │   ├── stop_result.rs
 │   │   │   │   └── watchdog_decisions.rs
+│   │   │   ├── snapshot/
+│   │   │   │   └── relay_probe.rs
 │   │   │   ├── stall_liveness/
 │   │   │   │   └── redrive_grace.rs
 │   │   │   ├── headless_turn.rs

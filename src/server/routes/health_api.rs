@@ -17,6 +17,10 @@ use crate::services::{disk_monitor, health_diagnostics};
 
 use super::AppState;
 
+/// #5942 r4: the unauthenticated-body disclosure rules, split out of this file
+/// because it is a registered `shrink` giant (#4710).
+mod public_projection;
+
 const X_AGENTDESK_SOURCE: &str = "x-agentdesk-source";
 
 /// Preserve the long-standing health-control API envelope while centralizing
@@ -650,110 +654,6 @@ fn relay_authority_observation_health_json() -> serde_json::Value {
     .unwrap_or_else(|_| serde_json::json!({}))
 }
 
-/// Bare (argument-less) provider degraded-reason classifications emitted by
-/// `provider_probe::classify_provider`. Keep in sync with that producer.
-const PROVIDER_BARE_REASONS: &[&str] = &[
-    "disconnected",
-    "restart_pending",
-    "reconcile_in_progress",
-    // #5449: the finite-obligation promotion of `reconcile_in_progress`, and the
-    // standby role reason that predates it. A reason missing from this array is
-    // flattened to `provider:unsupported` by the fail-closed sanitizer, which
-    // makes exactly the states an operator needs to name unnameable in public
-    // health.
-    "reconcile_stalled",
-    "gateway_standby",
-];
-/// Counted (`<keyword>:<N>`) provider degraded-reason classifications emitted by
-/// `provider_probe::classify_provider`. Keep in sync with that producer.
-const PROVIDER_COUNTED_REASONS: &[&str] = &[
-    "deferred_hooks_backlog",
-    "pending_queue_depth",
-    "recovering_channels",
-];
-
-/// Sanitize one `provider:<name>:<reason>` string for public exposure.
-///
-/// #4386 round-2 defect: `<name>` is operator-controlled and — because a legacy
-/// `bot_settings.json` `provider` value is preserved verbatim as
-/// `ProviderKind::Unsupported(_)` — may itself contain `:`. A first-colon split
-/// (`split_once`) leaves everything after the first colon in the "reason" tail,
-/// leaking the rest of the name (`provider:prod-mini-01:customerA:disconnected`
-/// -> `customerA` survives). A left-anchored "is the first segment a known id"
-/// test is also bypassable (`provider:codex:leak:disconnected`). We therefore
-/// anchor on the FIXED reason vocabulary from the RIGHT: the trailing 1-2
-/// segments must match a known classification; everything before them is the
-/// name, which is replaced WHOLESALE with `unsupported` unless it is exactly a
-/// supported provider id (registry ids never contain `:`). Only the fixed reason
-/// keyword and an all-digits count can survive, so no arbitrary name byte leaks.
-/// Any unrecognized shape fails CLOSED to `provider:unsupported`.
-fn sanitize_provider_reason(rest: &str, supported: &[&str]) -> String {
-    let segments: Vec<&str> = rest.split(':').collect();
-    // Counted reason: `<name...> : <keyword> : <digits>`.
-    if segments.len() >= 3 {
-        let count = segments[segments.len() - 1];
-        let keyword = segments[segments.len() - 2];
-        if !count.is_empty()
-            && count.bytes().all(|b| b.is_ascii_digit())
-            && PROVIDER_COUNTED_REASONS.contains(&keyword)
-        {
-            let name = segments[..segments.len() - 2].join(":");
-            let reason = format!("{keyword}:{count}");
-            return sanitized_provider_reason(&name, &reason, supported);
-        }
-    }
-    // Bare reason: `<name...> : <keyword>`.
-    if segments.len() >= 2 {
-        let keyword = segments[segments.len() - 1];
-        if PROVIDER_BARE_REASONS.contains(&keyword) {
-            let name = segments[..segments.len() - 1].join(":");
-            return sanitized_provider_reason(&name, keyword, supported);
-        }
-    }
-    // Unknown / malformed shape: drop everything after `provider:` (fail closed).
-    "provider:unsupported".to_string()
-}
-
-fn sanitized_provider_reason(name: &str, reason: &str, supported: &[&str]) -> String {
-    if supported.contains(&name) {
-        format!("provider:{name}:{reason}")
-    } else {
-        format!("provider:unsupported:{reason}")
-    }
-}
-
-/// #4382 / #4386-review defect 1: `degraded_reasons` embeds `provider:<name>:...`
-/// where `<name>` can be an ARBITRARY, operator-chosen string — a legacy
-/// `bot_settings.json` `provider` field is parsed via
-/// `ProviderKind::from_str_or_unsupported`, which preserves the raw value as
-/// `Unsupported(_)` and re-emits it verbatim. Copying reasons unredacted onto the
-/// UNAUTHENTICATED public `/api/health` would leak internal identifiers/hostnames
-/// (e.g. `provider:prod-mini-01:disconnected`), breaking the allowlist guarantee
-/// the public projection is documented to uphold. Rewrite any `provider:<name>:`
-/// whose `<name>` is not a known, supported provider id to `provider:unsupported:`
-/// (see `sanitize_provider_reason` for the colon-safe, fail-closed parsing).
-/// `/api/health/detail` (authenticated) keeps the verbatim reasons. The rewrite is
-/// 1:1 so the `degraded <=> non-empty` invariant is preserved.
-fn sanitize_public_degraded_reasons(reasons: serde_json::Value) -> serde_json::Value {
-    let serde_json::Value::Array(items) = reasons else {
-        return serde_json::json!([]);
-    };
-    let supported = crate::services::provider::supported_provider_ids();
-    let sanitized: Vec<serde_json::Value> = items
-        .into_iter()
-        .map(|item| {
-            let Some(reason) = item.as_str() else {
-                return item;
-            };
-            match reason.strip_prefix("provider:") {
-                Some(rest) => serde_json::Value::String(sanitize_provider_reason(rest, &supported)),
-                None => serde_json::Value::String(reason.to_string()),
-            }
-        })
-        .collect();
-    serde_json::Value::Array(sanitized)
-}
-
 fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     let status = json
         .get("status")
@@ -826,11 +726,14 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
     // `degraded <=> degraded_reasons non-empty` invariant holds on the public shape.
     // Sanitized to strip operator-chosen provider ids before public exposure
     // (#4386-review defect 1); see `sanitize_public_degraded_reasons`.
-    let degraded_reasons = sanitize_public_degraded_reasons(
+    let degraded_reasons = public_projection::sanitize_public_degraded_reasons(
         json.get("degraded_reasons")
             .cloned()
             .unwrap_or_else(|| serde_json::json!([])),
     );
+    // #5942: see `public_projection::expired_relay_ledgers` for why this key
+    // rides the public body and why it never moves `ok`.
+    let expired_relay_ledgers = public_projection::expired_relay_ledgers(&json);
     let mut public = serde_json::json!({
         "ok": !degraded,
         "status": status,
@@ -842,6 +745,7 @@ fn public_health_json(json: serde_json::Value) -> serde_json::Value {
         "cluster_standby": cluster_standby,
         "degraded": degraded,
         "degraded_reasons": degraded_reasons,
+        "expired_relay_ledgers": expired_relay_ledgers,
     });
     if let Some(startup_status) = startup_status {
         public["startup_status"] = startup_status;
@@ -2885,6 +2789,118 @@ mod tests {
         );
         assert_eq!(public["ok"], json!(false));
         assert_eq!(public["degraded"], json!(true));
+    }
+
+    /// #5942 r4 (P1-2): the expired-ledger vector must survive the PROJECTION.
+    ///
+    /// Same defect shape as #5736 above, and the same fix. #5942 takes three
+    /// routine channels OUT of `degraded_reasons`; `expired_relay_ledgers` is
+    /// the signal that replaces them. `public_health_json` is an explicit
+    /// allowlist, so a field that is not named there is dropped — and the r3
+    /// guard for this lived in `health::snapshot` and serialized the STRUCT
+    /// BUILDER, which cannot see the allowlist at all. It stayed green while
+    /// `/api/health` published nothing. This is the layer that was unpinned.
+    #[test]
+    fn public_health_json_carries_the_expired_relay_ledgers_onto_the_summary() {
+        let detail = json!({
+            "status": "degraded",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": true,
+            "server_up": true,
+            "fully_recovered": true,
+            "degraded_reasons": ["relay_verdict_unknown_codex_1479671301387059200"],
+            "expired_relay_ledgers": [
+                "relay_verdict_expired_claude_1479671298497183835",
+                "relay_verdict_expired_codex_1479671299000000000",
+            ],
+        });
+        let public = public_health_json(detail.clone());
+        assert_eq!(
+            public["expired_relay_ledgers"], detail["expired_relay_ledgers"],
+            "the expired-ledger vector must reach the unauthenticated body intact"
+        );
+        assert_eq!(
+            public["degraded_reasons"], detail["degraded_reasons"],
+            "an expiry must not be laundered into the degraded axis on the way out"
+        );
+    }
+
+    /// #5942 r4 (P1-2): an expiry records a channel; it never moves `ok`.
+    ///
+    /// The counterpart of the test above. Publishing the vector must not
+    /// re-create the saturation #5942 removed, so a node whose only finding is
+    /// a set of expired ledgers still reads `ok: true` / `degraded: false`, and
+    /// the key is present-and-empty — never absent — when there is nothing to
+    /// report, because the reader is told to COUNT entries and must not have to
+    /// tell a missing key from an empty array first.
+    #[test]
+    fn public_expired_relay_ledgers_never_move_ok_and_default_to_an_empty_vector() {
+        let expired_only = public_health_json(json!({
+            "status": "healthy",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": true,
+            "server_up": true,
+            "fully_recovered": true,
+            "degraded_reasons": [],
+            "expired_relay_ledgers": ["relay_verdict_expired_codex_1479671301387059200"],
+        }));
+        assert_eq!(expired_only["ok"], json!(true));
+        assert_eq!(expired_only["degraded"], json!(false));
+        assert_eq!(
+            expired_only["expired_relay_ledgers"],
+            json!(["relay_verdict_expired_codex_1479671301387059200"])
+        );
+
+        let absent = public_health_json(json!({
+            "status": "healthy",
+            "version": "0.1.2",
+            "db": true,
+            "dashboard": true,
+            "server_up": true,
+        }));
+        assert_eq!(
+            absent["expired_relay_ledgers"],
+            json!([]),
+            "the key is always present so a counting reader never has to branch on absence"
+        );
+    }
+
+    /// #5942 r4 (P1-2): and the two ROUTES must publish the same vector.
+    ///
+    /// The mirror of `summary_and_detail_routes_agree_on_status_and_degraded_reasons`:
+    /// one registry, both URLs, through the real router. An empty fixture cannot
+    /// prove the CONTENTS agree, so what this pins is the projection hop that
+    /// `public_health_json` performs — the summary must not drop a key the
+    /// detail build published.
+    #[test]
+    fn summary_and_detail_routes_agree_on_expired_relay_ledgers() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let registry = Some(Arc::new(
+            crate::services::discord::health::HealthRegistry::new(),
+        ));
+
+        let public = runtime.block_on(health_body("/health", registry.clone()));
+        let detail = runtime.block_on(health_body("/health/detail", registry));
+
+        assert!(
+            detail["expired_relay_ledgers"].is_array(),
+            "the detail route must publish the vector, got {}",
+            detail["expired_relay_ledgers"]
+        );
+        assert!(
+            public["expired_relay_ledgers"].is_array(),
+            "the summary route must publish the vector, got {}",
+            public["expired_relay_ledgers"]
+        );
+        assert_eq!(
+            public["expired_relay_ledgers"], detail["expired_relay_ledgers"],
+            "the summary route must carry the detail route's expired ledgers"
+        );
     }
 
     /// #5736 r2: and the two ROUTES must project the same snapshot.
