@@ -11,8 +11,19 @@ use tracing_subscriber::fmt::writer::MakeWriter;
 const DEFAULT_DCSERVER_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_DCSERVER_LOG_MAX_FILES: usize = 10;
 
+/// The directive every shipped dcserver process adds on top of `RUST_LOG`.
+///
+/// Exported because it is a CONTRACT on tracing targets, not a local detail: its
+/// target match is a path prefix, so any `tracing` target whose first segment is
+/// not `agentdesk` is dropped unless an operator edits `RUST_LOG`. Instrumented
+/// call sites that must survive in `dcserver.stdout.log` filter a subscriber
+/// with this exact constant in their tests
+/// (`turn_bridge::…::body_mutation_telemetry_tests`), so a change here fails
+/// those tests instead of silently muting a production record.
+pub(crate) const DEFAULT_TRACING_DIRECTIVE: &str = "agentdesk=info";
+
 pub(crate) fn tracing_env_filter() -> Result<EnvFilter> {
-    let directive = "agentdesk=info"
+    let directive = DEFAULT_TRACING_DIRECTIVE
         .parse()
         .map_err(|error| anyhow::anyhow!("Failed to parse tracing directive: {error}"))?;
     Ok(EnvFilter::from_default_env().add_directive(directive))

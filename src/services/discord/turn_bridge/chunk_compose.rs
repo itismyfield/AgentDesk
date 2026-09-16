@@ -57,6 +57,7 @@ pub(super) fn append_streamed_text_chunk(full_response: &mut String, content: &s
     }
     body_mutation_telemetry::observe_body_append(
         body_mutation_telemetry::BodyMutationSite::AppendStreamedTextChunk,
+        body_mutation_telemetry::BodyMutationCorrelation::unavailable(),
         before_len,
         full_response,
     );
@@ -76,13 +77,34 @@ pub(super) fn append_streamed_text_chunk(full_response: &mut String, content: &s
 /// Caller keeps the surrounding `inflight_state` / `state_dirty` side effects
 /// inline — this helper is pure string composition only (no relay/watcher/
 /// ownership state, per the #3016 hot-file constraint). No-op on an empty body.
-pub(super) fn append_tool_boundary_separator(full_response: &mut String) {
+///
+/// #5938: this site both SHRINKS and grows the body — `truncate` drops a
+/// trailing whitespace run, then one `"\n\n"` goes back on — and
+/// `stream_loop/tool_arms.rs` copies the result straight into the durable row on
+/// the next statement, so it mutates exactly the body the telemetry exists to
+/// track. Leaving it unobserved put an unexplained `after_len=N` →
+/// `before_len=N-2` step into the record stream, which reads as loss. The
+/// pre-image is cloned rather than reconstructed because the retained prefix is
+/// NOT always `trimmed.len()`: a body already ending in `"\n\n"` is rewritten
+/// to itself, and the honest record for that is `prefix_len == after_len`, not a
+/// two-byte delta. One clone per `ToolUse` is not a streaming-tick cost.
+pub(super) fn append_tool_boundary_separator(
+    full_response: &mut String,
+    correlation: body_mutation_telemetry::BodyMutationCorrelation<'_>,
+) {
     if full_response.is_empty() {
         return;
     }
+    let before = full_response.clone();
     let trimmed = full_response.trim_end();
     full_response.truncate(trimmed.len());
     full_response.push_str("\n\n");
+    body_mutation_telemetry::observe_body_mutation(
+        body_mutation_telemetry::BodyMutationSite::AppendToolBoundarySeparator,
+        correlation,
+        &before,
+        full_response,
+    );
 }
 
 #[cfg(test)]

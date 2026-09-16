@@ -1223,6 +1223,8 @@ src/
 │   │   │   │   ├── process_backend_cancel.rs
 │   │   │   │   └── process_table.rs
 │   │   │   ├── activity_heartbeat.rs
+│   │   │   ├── body_mutation_telemetry.rs
+│   │   │   ├── body_mutation_telemetry_tests.rs
 │   │   │   ├── bridge_entry_persist.rs
 │   │   │   ├── bridge_latency_spans.rs
 │   │   │   ├── cancel_finalize_policy.rs
