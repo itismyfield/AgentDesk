@@ -282,7 +282,7 @@ pub(in crate::services::discord) fn spawn_turn_bridge_with_pin(
         let context_compact_percent = bridge.context_compact_percent;
         let voice_progress_playback_channel_id =
             bridge_entry_persist::voice_progress_playback_channel(&shared_owned, &bridge, &turn_id).await;
-        let mut full_response = bridge.full_response.clone();
+        let mut full_response = bridge_entry_persist::seed_bridge_local_body(&bridge);
         let mut terminal_empty_response_notice: Option<String> = None;
         let mut last_edit_text = String::new();
         let mut done = false;

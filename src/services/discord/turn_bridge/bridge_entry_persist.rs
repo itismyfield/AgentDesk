@@ -1,5 +1,8 @@
 //! Bridge-entry inflight persistence plus local-state reconciliation (#4259 R4).
 
+use super::chunk_compose::body_mutation_telemetry::{
+    self, BodyMutationCorrelation, BodyMutationSite,
+};
 use super::context::BridgeCompletionSignal;
 use super::*;
 
@@ -181,13 +184,115 @@ pub(super) fn signal_bridge_entry_abort_completion(
     }
 }
 
+/// #5938 (observation only): adopt the durable inflight row's body into the
+/// bridge-local `full_response`.
+///
+/// This is the only place the bridge-local body is replaced WHOLESALE (the
+/// other three observed sites append, splice or blank it), and it is the one
+/// option "A" of the issue would have been blind to: when the watcher writes the
+/// already-doubled body to the row first, the bridge adopts 1198 bytes here in
+/// one assignment and never appends at all.
+///
+/// The record is taken BEFORE the assignment so `before`/`after` are the real
+/// pair, and the assignment that follows is byte-for-byte the one this site has
+/// always performed — `String::clone_from` is `clear` + `extend_from_slice` on
+/// the inner `Vec`, which is what these two lines do. Nothing is gated on the
+/// record; the adoption always happens.
+///
+/// EXCEPT the no-op. `stream_tick`'s `stage_tick_state_for_guard!` pushes the
+/// bridge-local body INTO the row (`inflight_state.full_response.clone_from(
+/// &full_response)`) immediately before the guarded save, and on success this
+/// function reads that same row back — so the overwhelming majority of adoptions
+/// assign a string to itself. Recording them costs a whole-body SHA-256 plus a
+/// full prefix scan per tick and emits `before_len == after_len`,
+/// `prefix_len == after_len`, `delta_sha8 = e3b0c442` (the empty-string digest),
+/// which is precisely the shape an analyst has to filter back out. An equal
+/// body is not a mutation, so it is not recorded, and because `clear` +
+/// `push_str(durable)` on an equal `durable` is the identity, skipping the
+/// assignment with it changes no observable byte. Signal loss is zero: any
+/// adoption that actually changes the body still emits.
+///
+/// #5938 r2 P0-1: `site` is a parameter because this adoption has TWO production
+/// callers, not one. `reconcile_runtime_locals_from_inflight_state` below is the
+/// `stream_tick` side; `stream_loop::tool_arms::authority::
+/// reconcile_tool_arm_locals_after_guarded_save` is the tool-arm side, which ran
+/// the identical `full_response.clone_from(&inflight_state.full_response)` with
+/// no record at all. Routing both through this one function means the no-op skip
+/// and its rationale cannot diverge between them, while the distinct `site`
+/// keeps the readout able to say WHICH fence carried the durable bytes in.
+/// #5938 r3 P0-2: record the BIRTH of the bridge-local body.
+///
+/// `turn_bridge/mod.rs` seeds its `full_response` local from
+/// `TurnBridgeContext.full_response`, and two of the five production
+/// constructions of that context fill it from a durable inflight row —
+/// `recovery_engine/restore_inflight.rs` on restart recovery and
+/// `tui_prompt_relay/claude_idle_bridge.rs` on TUI-direct idle continuation.
+/// Those are durable-row adoptions that happen BEFORE the bridge task exists, so
+/// nothing downstream can report them: [`adopt_full_response_from_inflight_row`]
+/// skips `local == durable`, which means the first reconcile after such a seed
+/// is structurally guaranteed to be silent, and the watcher bytes already in the
+/// row would never appear in the readout at all.
+///
+/// Called from `turn_bridge/mod.rs` as a ONE-LINE replacement for the former
+/// `bridge.full_response.clone()`, because that file sits at its 968-line
+/// `scripts/hotfile_ratchet.toml` ceiling and this PR does not raise caps.
+///
+/// An empty seed is not an adoption — it is what the other three construction
+/// sites pass — so it emits nothing, mirroring the no-op skip above.
+///
+/// MEASURED COVERAGE GAP, recorded here rather than left to be discovered: a
+/// mutant that reverts the `turn_bridge/mod.rs` call site back to
+/// `bridge.full_response.clone()` SURVIVES the suite (round-3 mutant MS-H,
+/// rc=0). The body of this function is covered — deleting its
+/// `observe_body_mutation` is killed by
+/// `seeding_the_bridge_local_body_from_a_durable_row_is_recorded` — but the
+/// one-line call that reaches it is not, because the only thing that executes it
+/// is `spawn_turn_bridge` itself and no unit test stands that up. Killing MS-H
+/// needs either an end-to-end bridge drive or a newtype on
+/// `TurnBridgeContext.full_response` that makes the bare clone fail to compile;
+/// the latter touches all five construction sites across four files and was
+/// judged too wide a blast radius for this PR. Consistent with this module's
+/// contract: the absence of a record is not evidence that nothing happened.
+pub(super) fn seed_bridge_local_body(bridge: &TurnBridgeContext) -> String {
+    let seed = bridge.full_response.clone();
+    if !seed.is_empty() {
+        body_mutation_telemetry::observe_body_mutation(
+            BodyMutationSite::SeedFromTurnBridgeContext,
+            BodyMutationCorrelation::from_inflight_row(&bridge.inflight_state),
+            "",
+            seed.as_str(),
+        );
+    }
+    seed
+}
+
+pub(super) fn adopt_full_response_from_inflight_row(
+    local: &mut String,
+    durable: &str,
+    site: BodyMutationSite,
+    correlation: BodyMutationCorrelation<'_>,
+) {
+    if local.as_str() == durable {
+        return;
+    }
+    body_mutation_telemetry::observe_body_mutation(site, correlation, local.as_str(), durable);
+    local.clear();
+    local.push_str(durable);
+}
+
 pub(super) fn reconcile_runtime_locals_from_inflight_state(
     shared: &SharedData,
     state: &mut BridgeEntryRuntimeState<'_>,
 ) {
-    state
-        .full_response
-        .clone_from(&state.inflight_state.full_response);
+    // #5938 P1-4: the durable row carries both correlation keys, so this site
+    // (unlike the streaming append) can fill the `guard_fires` bucket and give
+    // the violation a key to join on.
+    adopt_full_response_from_inflight_row(
+        state.full_response,
+        state.inflight_state.full_response.as_str(),
+        BodyMutationSite::ReconcileFromInflightState,
+        BodyMutationCorrelation::from_inflight_row(state.inflight_state),
+    );
     *state.response_sent_offset = state.inflight_state.response_sent_offset;
     *state.bridge_confirmed_response_sent_offset = bridge_confirmed_response_sent_offset_seed(
         state.inflight_state.effective_relay_owner_kind(),
@@ -406,6 +511,129 @@ mod tests {
         GuardedSaveOutcome, InflightTurnState, RelayOwnerKind,
     };
     use crate::services::provider::ProviderKind;
+
+    fn seed_context(seed: &str, row: InflightTurnState) -> TurnBridgeContext {
+        let gateway: std::sync::Arc<dyn TurnGateway> =
+            std::sync::Arc::new(crate::services::discord::gateway::HeadlessGateway);
+        TurnBridgeContext {
+            provider: ProviderKind::Codex,
+            gateway,
+            channel_id: ChannelId::new(row.channel_id),
+            user_msg_id: None,
+            user_text_owned: String::new(),
+            request_owner_name: String::new(),
+            role_binding: None,
+            adk_session_key: None,
+            adk_session_name: None,
+            adk_session_info: None,
+            adk_cwd: None,
+            dispatch_id: None,
+            dispatch_kind: None,
+            memory_recall_usage: TokenUsage::default(),
+            context_window_tokens: 0,
+            context_compact_percent: 0,
+            current_msg_id: None,
+            response_sent_offset: 0,
+            full_response: seed.to_string(),
+            tmux_last_offset: None,
+            new_session_id: None,
+            defer_watcher_resume: false,
+            reuse_status_panel_message: false,
+            completion_tx: None,
+            is_external_input_tui_direct: false,
+            inflight_state: row,
+        }
+    }
+
+    fn seed_row() -> InflightTurnState {
+        let mut row = InflightTurnState::new(
+            ProviderKind::Codex,
+            5_938_031,
+            None,
+            343_742_347_365_974_026,
+            77_013,
+            18,
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        row.dispatch_id = Some("dispatch-5938-seed".to_string());
+        row
+    }
+
+    /// #5938 r3 P0-2. `recovery_engine/restore_inflight.rs` and
+    /// `tui_prompt_relay/claude_idle_bridge.rs` build a `TurnBridgeContext` whose
+    /// `full_response` IS a durable inflight row, so the bridge-local body is born
+    /// already holding bytes it did not produce. Nothing downstream can report it:
+    /// `adopt_full_response_from_inflight_row` skips `local == durable`, so the
+    /// first reconcile after such a seed is structurally silent. Driven through
+    /// the REAL adapter `turn_bridge/mod.rs` calls.
+    #[test]
+    fn seeding_the_bridge_local_body_from_a_durable_row_is_recorded() {
+        use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::body_mutation_telemetry_tests::captured_logs;
+
+        let bridge = seed_context("COUNT-001\nCOUNT-002\n", seed_row());
+        let mut seeded = String::new();
+        let logs = captured_logs(|| {
+            seeded = seed_bridge_local_body(&bridge);
+        });
+
+        // The seed itself is byte-identical to the former `bridge.full_response.clone()`.
+        assert_eq!(seeded, "COUNT-001\nCOUNT-002\n");
+        assert!(
+            logs.contains("site=\"bridge_entry_persist::seed_bridge_local_body\""),
+            "the birth of the bridge-local body must be recorded; got: {logs}"
+        );
+        assert!(logs.contains("before_len=0"), "got: {logs}");
+        assert!(logs.contains("after_len=20"), "got: {logs}");
+        // The row is in hand here, so unlike the streamed append this site is joinable.
+        assert!(
+            logs.contains("dispatch_id=\"dispatch-5938-seed\"") || !logs.contains("[invariant]")
+        );
+    }
+
+    /// The other three production `TurnBridgeContext` constructions pass
+    /// `String::new()`. An empty seed is not an adoption and must stay out of the
+    /// readout, or every ordinary turn opens with a phantom record.
+    #[test]
+    fn an_empty_seed_is_not_an_adoption_and_records_nothing() {
+        use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::body_mutation_telemetry_tests::captured_logs;
+
+        let bridge = seed_context("", seed_row());
+        let mut seeded = String::from("untouched");
+        let logs = captured_logs(|| {
+            seeded = seed_bridge_local_body(&bridge);
+        });
+        assert!(seeded.is_empty());
+        assert!(logs.is_empty(), "got: {logs}");
+    }
+
+    /// #5938 r3 P0-2, the reason the birth had to be recorded at all: after a
+    /// non-empty seed the shared adopter is guaranteed to say nothing, because the
+    /// loop stages that same body back into the row before reading it.
+    #[test]
+    fn the_first_reconcile_after_a_seed_is_structurally_silent() {
+        use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::body_mutation_telemetry_tests::captured_logs;
+
+        let bridge = seed_context("COUNT-001\nCOUNT-002\n", seed_row());
+        let mut local = seed_bridge_local_body(&bridge);
+        let logs = captured_logs(|| {
+            adopt_full_response_from_inflight_row(
+                &mut local,
+                "COUNT-001\nCOUNT-002\n",
+                BodyMutationSite::ReconcileFromInflightState,
+                BodyMutationCorrelation::from_inflight_row(&bridge.inflight_state),
+            );
+        });
+        assert!(
+            logs.is_empty(),
+            "if this ever starts emitting, the seed record is redundant — until \
+             then it is the ONLY record of those bytes; got: {logs}"
+        );
+    }
 
     #[test]
     fn bridge_entry_failure_outcomes_abort_without_arming_cleanup() {
@@ -1161,6 +1389,163 @@ mod tests {
             (true, false, false)
         );
         assert!(bridge_stream_relay_suppressed(watcher_owns, standby_owns));
+    }
+
+    // ------------------------------------------------------------------
+    // #5938 P1-1: the telemetry has to be proven THROUGH the production entry
+    // point, not through the helper. Calling `adopt_full_response_from_inflight_row`
+    // directly leaves the wiring in `reconcile_runtime_locals_from_inflight_state`
+    // untested, so reverting that call to the original `clone_from` stays green
+    // while production goes silent. Everything below drives the real reconcile.
+    // ------------------------------------------------------------------
+
+    #[derive(Clone, Default)]
+    struct TelemetryCapture {
+        buffer: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for TelemetryCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for TelemetryCapture {
+        type Writer = TelemetryCapture;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Capture what a reconcile logs, optionally through the filter the shipped
+    /// dcserver installs. `filtered = true` is the only way to prove the record
+    /// survives `logging::DEFAULT_TRACING_DIRECTIVE`; an unfiltered subscriber
+    /// admits every target and would pass with the `agentdesk::` prefix removed.
+    fn reconcile_logs(durable_body: &str, local_body: &str, filtered: bool) -> String {
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let owner = ChannelId::new(5_938_001);
+        let mut durable = watcher_durable(owner);
+        durable.full_response = durable_body.to_string();
+        let mut harness = ReconcileHarness::new(&mut durable, owner);
+        harness.runtime.full_response.push_str(local_body);
+
+        // One subscriber shape either way: only the directive changes, so
+        // `filtered = false` is a permissive baseline rather than a different
+        // code path, and the two results are comparable.
+        let directive = if filtered {
+            crate::logging::DEFAULT_TRACING_DIRECTIVE
+        } else {
+            "trace"
+        };
+        let writer = TelemetryCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::new(directive))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            reconcile_runtime_locals_from_inflight_state(&shared, &mut harness.runtime);
+        });
+        assert_eq!(
+            harness.runtime.full_response.as_str(),
+            durable_body,
+            "the reconcile must still adopt the durable body verbatim"
+        );
+        let bytes = writer.buffer.lock().unwrap().clone();
+        String::from_utf8(bytes).expect("captured log is utf-8")
+    }
+
+    /// MS1: reverting the reconcile's body assignment to a bare `clone_from`
+    /// must fail HERE, at the entry point production actually calls.
+    #[test]
+    fn the_reconcile_entry_point_records_the_body_it_adopts() {
+        let logs = reconcile_logs("COUNT-001\nCOUNT-002\n", "COUNT-001\n", false);
+        assert!(
+            logs.contains(
+                "site=\"bridge_entry_persist::reconcile_runtime_locals_from_inflight_state\""
+            ),
+            "the production reconcile must publish a body-mutation record; got: {logs}"
+        );
+        assert!(logs.contains("before_len=10"), "got: {logs}");
+        assert!(logs.contains("after_len=20"), "got: {logs}");
+        assert!(logs.contains("prefix_len=10"), "got: {logs}");
+    }
+
+    /// MS3: the shipped `agentdesk=info` directive matches on the target's first
+    /// path segment, so dropping the `agentdesk::` prefix deletes the record from
+    /// `dcserver.stdout.log` entirely. An unfiltered subscriber cannot see that.
+    #[test]
+    fn the_reconcile_record_survives_the_shipped_tracing_filter() {
+        let logs = reconcile_logs("COUNT-001\nCOUNT-002\n", "COUNT-001\n", true);
+        assert!(
+            logs.contains(
+                "site=\"bridge_entry_persist::reconcile_runtime_locals_from_inflight_state\""
+            ),
+            "`{}` must admit the record the reconcile emits; got: {logs}",
+            crate::logging::DEFAULT_TRACING_DIRECTIVE,
+        );
+    }
+
+    /// MS2 + P1-4: adopting a self-duplicated body must raise the invariant, and
+    /// it must carry the provider/channel_id the durable row already holds —
+    /// `observability::emit` only moves the `guard_fires` bucket when BOTH are
+    /// present, so `None`/`None` produced a violation no dashboard could join.
+    #[test]
+    fn adopting_a_self_duplicated_body_raises_a_correlated_invariant_violation() {
+        let half = "네, 확인했습니다.";
+        let doubled = half.repeat(2);
+        let logs = reconcile_logs(&doubled, "", false);
+
+        assert!(
+            logs.contains(body_mutation_telemetry::BODY_NOT_SELF_DUPLICATED_INVARIANT),
+            "a doubled durable body must raise the #5938 invariant; got: {logs}"
+        );
+        assert!(logs.contains("self_duplicate=true"), "got: {logs}");
+        // `emit_invariant_log!` renders an absent key as `provider=""` /
+        // `channel_id=0`, so these assertions fail if the site reverts to the
+        // `None`/`None` pair that left `guard_fires` unmoved.
+        assert!(
+            logs.contains(&format!("provider=\"{}\"", ProviderKind::Codex.as_str())),
+            "the violation must carry the row's provider; got: {logs}"
+        );
+        assert!(
+            logs.contains("channel_id=5938001"),
+            "the violation must carry the row's channel_id; got: {logs}"
+        );
+    }
+
+    #[test]
+    fn adopting_an_ordinary_body_raises_no_invariant_violation() {
+        let logs = reconcile_logs(
+            "The quick brown fox jumps over the lazy dog while the cat naps nearby.",
+            "The quick brown fox ",
+            false,
+        );
+        assert!(
+            !logs.contains(body_mutation_telemetry::BODY_NOT_SELF_DUPLICATED_INVARIANT),
+            "a healthy adoption must not raise the invariant; got: {logs}"
+        );
+        assert!(logs.contains("self_duplicate=false"), "got: {logs}");
+    }
+
+    /// P1-3: `stream_tick::stage_tick_state_for_guard!` writes the bridge-local
+    /// body into the row immediately before the guarded save, so on success this
+    /// reconcile reads back exactly what it just wrote. Recording that costs a
+    /// whole-body SHA-256 per tick and emits nothing but no-ops.
+    #[test]
+    fn a_reconcile_that_changes_nothing_records_nothing() {
+        let body = "COUNT-001\nCOUNT-002\n";
+        let logs = reconcile_logs(body, body, false);
+        assert!(
+            !logs.contains("turn_bridge full_response body mutation"),
+            "an identical adoption is not a mutation and must not be recorded; got: {logs}"
+        );
     }
 
     #[test]

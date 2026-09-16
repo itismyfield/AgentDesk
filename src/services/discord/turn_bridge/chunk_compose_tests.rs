@@ -1,5 +1,5 @@
 use super::{
-    append_streamed_text_chunk, append_tool_boundary_separator,
+    append_streamed_text_chunk, append_tool_boundary_separator, body_mutation_telemetry,
     streamed_text_inside_open_code_fence,
 };
 
@@ -18,7 +18,10 @@ fn tool_boundary_then_blank_leading_chunk_collapses_to_single_separator() {
     let mut full_response = String::new();
     append_streamed_text_chunk(&mut full_response, "first");
     // Real ToolUse boundary primitive (production path).
-    append_tool_boundary_separator(&mut full_response);
+    append_tool_boundary_separator(
+        &mut full_response,
+        body_mutation_telemetry::BodyMutationCorrelation::unavailable(),
+    );
     // Next text chunk that itself starts with a blank line.
     append_streamed_text_chunk(&mut full_response, "\n\nsecond");
 
@@ -40,7 +43,10 @@ fn text_tooluse_text_sequence_composes_single_separator_via_real_primitives() {
     // Text arm chunk 1.
     append_streamed_text_chunk(&mut full_response, "first");
     // ToolUse arm separator.
-    append_tool_boundary_separator(&mut full_response);
+    append_tool_boundary_separator(
+        &mut full_response,
+        body_mutation_telemetry::BodyMutationCorrelation::unavailable(),
+    );
     assert_eq!(full_response, "first\n\n");
     // Text arm chunk 2 (provider re-emits its own leading blank lines).
     append_streamed_text_chunk(&mut full_response, "\n\nsecond");
@@ -55,7 +61,10 @@ fn text_tooluse_text_sequence_composes_single_separator_via_real_primitives() {
 #[test]
 fn tool_boundary_separator_is_noop_on_empty_body() {
     let mut full_response = String::new();
-    append_tool_boundary_separator(&mut full_response);
+    append_tool_boundary_separator(
+        &mut full_response,
+        body_mutation_telemetry::BodyMutationCorrelation::unavailable(),
+    );
     assert_eq!(full_response, "");
 }
 
@@ -65,11 +74,17 @@ fn tool_boundary_separator_is_noop_on_empty_body() {
 #[test]
 fn tool_boundary_separator_collapses_trailing_whitespace() {
     let mut full_response = String::from("first\n\n");
-    append_tool_boundary_separator(&mut full_response);
+    append_tool_boundary_separator(
+        &mut full_response,
+        body_mutation_telemetry::BodyMutationCorrelation::unavailable(),
+    );
     assert_eq!(full_response, "first\n\n");
 
     let mut trailing_spaces = String::from("first  \n  \n");
-    append_tool_boundary_separator(&mut trailing_spaces);
+    append_tool_boundary_separator(
+        &mut trailing_spaces,
+        body_mutation_telemetry::BodyMutationCorrelation::unavailable(),
+    );
     assert_eq!(trailing_spaces, "first\n\n");
 }
 

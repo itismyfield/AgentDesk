@@ -1,5 +1,13 @@
 //! #3608 청크 경계 빈 줄 정규화 composition primitives.
 
+// #5938 body-mutation telemetry. Declared here rather than in
+// `turn_bridge/mod.rs` because that file sits exactly at its 968-line
+// `scripts/hotfile_ratchet.toml` ceiling, so a `mod` line there would fail the
+// ratchet, and this PR must not raise a cap. The `#[path]` spelling mirrors the
+// `chunk_compose_tests.rs` declaration at the bottom of this file.
+#[path = "body_mutation_telemetry.rs"]
+pub(in crate::services::discord::turn_bridge) mod body_mutation_telemetry;
+
 /// #3608: true when the accumulated `full_response` currently ends *inside* an
 /// open ``` code fence. Mirrors the fence toggle used by `format_for_discord`
 /// (`trim_start().starts_with("```")`), so blank-line runs the model placed
@@ -24,7 +32,16 @@ pub(super) fn streamed_text_inside_open_code_fence(full_response: &str) -> bool 
 /// `\n` run is trimmed before appending so the boundary collapses to a single
 /// `\n\n`. Intentional larger gaps *within* a single chunk are preserved, and
 /// blank lines inside an open code fence are never touched.
+///
+/// #5938: every branch below is a `push_str`, so the accumulated body is only
+/// ever extended, never rewritten. The post-append observation records that
+/// mutation and CANNOT suppress it — a gate here would swallow legitimately
+/// repeated model text and manufacture a fresh #5941-class silent loss.
 pub(super) fn append_streamed_text_chunk(full_response: &mut String, content: &str) {
+    // Captured before the append: because the branches only push, this length
+    // IS the retained prefix, so the record needs no clone of the body on this
+    // per-streaming-tick hot path.
+    let before_len = full_response.len();
     if full_response.ends_with("\n\n") && !streamed_text_inside_open_code_fence(full_response) {
         full_response.push_str(content.trim_start_matches('\n'));
     } else if !streamed_text_inside_open_code_fence(full_response)
@@ -38,6 +55,12 @@ pub(super) fn append_streamed_text_chunk(full_response: &mut String, content: &s
     } else {
         full_response.push_str(content);
     }
+    body_mutation_telemetry::observe_body_append(
+        body_mutation_telemetry::BodyMutationSite::AppendStreamedTextChunk,
+        body_mutation_telemetry::BodyMutationCorrelation::unavailable(),
+        before_len,
+        full_response,
+    );
 }
 
 /// #3608: append the tool-use paragraph separator to `full_response`.
@@ -54,13 +77,34 @@ pub(super) fn append_streamed_text_chunk(full_response: &mut String, content: &s
 /// Caller keeps the surrounding `inflight_state` / `state_dirty` side effects
 /// inline — this helper is pure string composition only (no relay/watcher/
 /// ownership state, per the #3016 hot-file constraint). No-op on an empty body.
-pub(super) fn append_tool_boundary_separator(full_response: &mut String) {
+///
+/// #5938: this site both SHRINKS and grows the body — `truncate` drops a
+/// trailing whitespace run, then one `"\n\n"` goes back on — and
+/// `stream_loop/tool_arms.rs` copies the result straight into the durable row on
+/// the next statement, so it mutates exactly the body the telemetry exists to
+/// track. Leaving it unobserved put an unexplained `after_len=N` →
+/// `before_len=N-2` step into the record stream, which reads as loss. The
+/// pre-image is cloned rather than reconstructed because the retained prefix is
+/// NOT always `trimmed.len()`: a body already ending in `"\n\n"` is rewritten
+/// to itself, and the honest record for that is `prefix_len == after_len`, not a
+/// two-byte delta. One clone per `ToolUse` is not a streaming-tick cost.
+pub(super) fn append_tool_boundary_separator(
+    full_response: &mut String,
+    correlation: body_mutation_telemetry::BodyMutationCorrelation<'_>,
+) {
     if full_response.is_empty() {
         return;
     }
+    let before = full_response.clone();
     let trimmed = full_response.trim_end();
     full_response.truncate(trimmed.len());
     full_response.push_str("\n\n");
+    body_mutation_telemetry::observe_body_mutation(
+        body_mutation_telemetry::BodyMutationSite::AppendToolBoundarySeparator,
+        correlation,
+        &before,
+        full_response,
+    );
 }
 
 #[cfg(test)]

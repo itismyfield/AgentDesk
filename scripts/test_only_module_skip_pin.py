@@ -132,6 +132,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/tui_prompt_relay/tests.rs",
         "src/services/discord/tui_prompt_relay/tests/synthetic_bridge_handoff_pg_tests.rs",
         "src/services/discord/tui_prompt_relay/tests/synthetic_terminal_ordering_tests.rs",
+        "src/services/discord/turn_bridge/body_mutation_telemetry_tests.rs",
         "src/services/discord/turn_bridge/chunk_compose_tests.rs",
         "src/services/discord/turn_bridge/completion_guard/span_tests.rs",
         "src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs",

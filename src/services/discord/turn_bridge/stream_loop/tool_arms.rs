@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::services::tool_output_guard::matched_or_last_tool;
 
+use super::super::chunk_compose::body_mutation_telemetry::BodyMutationCorrelation;
 use super::*;
 
 mod authority;
@@ -340,7 +341,14 @@ pub(super) async fn handle_stream_tool_message(
                 // `append_streamed_text_chunk`). inflight_state
                 // / state_dirty stay inline (hot-file #3016:
                 // only full_response composition is extracted).
-                chunk_compose::append_tool_boundary_separator(&mut full_response);
+                // #5938: the row this arm writes on the next line carries both
+                // correlation keys, so the boundary rewrite is recorded with a
+                // joinable key instead of an anonymous one.
+                let body_correlation = BodyMutationCorrelation::from_inflight_row(&inflight_state);
+                chunk_compose::append_tool_boundary_separator(
+                    &mut full_response,
+                    body_correlation,
+                );
                 inflight_state.full_response = full_response.clone();
                 state_dirty = true;
             }

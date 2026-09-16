@@ -277,11 +277,27 @@ pub(super) fn rewind_and_persist_delivery_on_reclaim(
     false
 }
 
+/// #5938: this is a body mutation like any other — it blanks the bridge-local
+/// body AND the durable row body in the same breath — so it has to appear in the
+/// record stream. Without it the stream shows `after_len=N` followed by a later
+/// `before_len=0` with nothing in between to explain where N bytes went, which
+/// is indistinguishable from the loss class the instrumentation is hunting.
+/// Both correlation keys are on the row this function already holds.
 pub(super) fn clear_response_delivery_state(
     full_response: &mut String,
     response_sent_offset: &mut usize,
     inflight_state: &mut InflightTurnState,
 ) {
+    use super::chunk_compose::body_mutation_telemetry::{
+        BodyMutationCorrelation, BodyMutationSite, observe_body_mutation,
+    };
+
+    observe_body_mutation(
+        BodyMutationSite::ClearResponseDeliveryState,
+        BodyMutationCorrelation::from_inflight_row(inflight_state),
+        full_response.as_str(),
+        "",
+    );
     full_response.clear();
     *response_sent_offset = 0;
     inflight_state.full_response.clear();
