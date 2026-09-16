@@ -1060,8 +1060,10 @@ server::routes::health_api::tests::health_detail_reports_provider_runtime_bot_to
 server::routes::health_api::tests::public_auto_queue_cleanup_backlog_does_not_move_ok_or_degraded_reasons
 server::routes::health_api::tests::public_auto_queue_cleanup_backlog_is_served_on_the_unauthenticated_endpoint
 server::routes::health_api::tests::public_auto_queue_cleanup_projection_is_count_only
+server::routes::health_api::tests::public_expired_relay_ledgers_never_move_ok_and_default_to_an_empty_vector
 server::routes::health_api::tests::public_health_exposes_release_source_read_failure
 server::routes::health_api::tests::public_health_exposes_rollout_flag_source_on_both_assembly_points
+server::routes::health_api::tests::public_health_json_carries_the_expired_relay_ledgers_onto_the_summary
 server::routes::health_api::tests::public_health_json_carries_the_relay_verdict_axis_onto_the_summary
 server::routes::health_api::tests::public_health_json_degraded_iff_reasons_nonempty
 server::routes::health_api::tests::public_health_json_degraded_status_reports_not_ok
@@ -1078,6 +1080,7 @@ server::routes::health_api::tests::registry_purge_decision_gates_on_request_and_
 server::routes::health_api::tests::stale_mailbox_repair_applied_includes_session_only_disconnect
 server::routes::health_api::tests::standalone_relay_authority_observation_publishes_the_whole_triage_block
 server::routes::health_api::tests::standalone_relay_authority_rollout_publishes_the_whole_dormant_block
+server::routes::health_api::tests::summary_and_detail_routes_agree_on_expired_relay_ledgers
 server::routes::health_api::tests::summary_and_detail_routes_agree_on_status_and_degraded_reasons
 server::routes::health_api::tests::supported_provider_ids_contain_no_colon
 server::routes::kanban::update_card_validation_tests::update_card_validation_accepts_valid_metadata_json_object
@@ -2706,6 +2709,7 @@ services::discord::health::reachability::composite::composite_tests::a_live_plac
 services::discord::health::reachability::composite::composite_tests::a_live_transcript_is_never_expired_even_with_no_executor_and_a_cold_ledger
 services::discord::health::reachability::composite::composite_tests::a_resolved_but_not_alive_transcript_still_expires_with_no_executor
 services::discord::health::reachability::composite::composite_tests::a_stale_high_frontier_does_not_retire_an_obligation_past_the_transcript_eof
+services::discord::health::reachability::composite::composite_tests::a_truncated_read_outranks_the_ttl_gate_even_when_every_expiry_conjunct_holds
 services::discord::health::reachability::composite::composite_tests::an_abandoned_ledger_past_its_ttl_expires_out_of_the_health_judgment
 services::discord::health::reachability::composite::composite_tests::an_external_override_keeps_the_in_band_redelivery_ban
 services::discord::health::reachability::composite::composite_tests::an_outstanding_obligation_blocks_expiry_of_a_stale_ledger
@@ -2722,6 +2726,7 @@ services::discord::health::reachability::composite::composite_tests::coverage_un
 services::discord::health::reachability::composite::composite_tests::each_branch_that_shared_transcript_unresolved_now_names_itself
 services::discord::health::reachability::composite::composite_tests::no_composed_verdict_authorizes_a_destructive_action
 services::discord::health::reachability::composite::composite_tests::nothing_observed_is_not_green
+services::discord::health::reachability::composite::composite_tests::observe_relay_verdict_expires_a_backdated_ledger_it_located_itself
 services::discord::health::reachability::composite::composite_tests::section_6_2_divergence_leaves_desynced_false_and_the_relay_verdict_not_healthy
 services::discord::health::reachability::composite::composite_tests::the_composition_ladder_covers_every_verdict_variant
 services::discord::health::reachability::composite::composite_tests::the_expired_report_publishes_its_age_and_its_abstention
@@ -2952,8 +2957,8 @@ services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::wa
 services::discord::health::snapshot::tests::row_coordinate_divergence_wiring::watcher_state_snapshot_records_row_vs_registry_identity_divergence
 services::discord::health::snapshot::tests::stale_ownerless_external_input_inflight_is_not_foreground_even_with_cancel_token
 services::discord::health::snapshot::tests::summary_and_detail_agree_on_the_composite_relay_verdict_polarity
-services::discord::health::snapshot::tests::the_expired_ledger_vector_is_published_on_every_build
-services::discord::health::snapshot::tests::the_two_health_paths_agree_inside_the_probe_and_diverge_on_the_wedge_and_the_budget
+services::discord::health::snapshot::tests::the_expired_ledger_vector_survives_serialization_on_every_snapshot_build
+services::discord::health::snapshot::tests::the_two_health_paths_agree_inside_the_probe_and_diverge_on_the_wedge_the_budget_and_the_blank_name
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_rejects_same_second_synthetic_successor_4181
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_rejects_successor_episode_4181
 services::discord::health::stall_liveness::redrive_grace::tests::redrive_durable_baseline_survives_process_restart_4181

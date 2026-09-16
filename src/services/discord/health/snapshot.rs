@@ -1,6 +1,12 @@
 use poise::serenity_prelude::ChannelId;
 use serde::Serialize;
 
+// #5942 r4: the relay-verdict operand assembly lives in a child module so this
+// file — a registered `shrink` giant (#5447) — does not grow to carry it. The
+// gate here replaces the per-item `#[cfg(unix)]` the four moved items carried.
+#[cfg(unix)]
+mod relay_probe;
+
 use super::liveness_authority::CaptureCoordinateObservation;
 use super::mailbox::MailboxHealthSnapshot;
 use super::provider_probe::{self, ProviderHealthSnapshot};
@@ -15,8 +21,6 @@ use super::reachability::composite::{
     RelayVerdict, RelayVerdictProbe, RelayVerdictReport, apply_relay_verdict_polarity,
     observe_relay_verdict, relay_verdict_source,
 };
-#[cfg(unix)]
-use super::reachability::ledger::{ledger_file_exists, ledger_path};
 #[cfg(unix)]
 use super::reachability::verdict::ReachabilityVerdict;
 use super::redaction;
@@ -37,6 +41,10 @@ use crate::services::discord::relay_recovery::authority_observation::{
 };
 use crate::services::discord::relay_recovery::cohort::{self, RelayAuthorityRolloutReport};
 use crate::services::provider::ProviderKind;
+#[cfg(unix)]
+use relay_probe::{
+    detail_executor_witness, reachability_ledger_operand_exists, relay_verdict_probe_operands,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -217,21 +225,10 @@ pub struct DiscordHealthSnapshot {
     degraded_reasons: Vec<String>,
     /// #5942: channels whose reachability ledger outlived every producer that
     /// could resolve it, and which therefore withdrew from the health polarity
-    /// instead of pinning the node non-GREEN forever.
-    ///
-    /// Published on the PUBLIC payload, beside `degraded_reasons` rather than
-    /// inside it. Expiry must not be silent — the failure this field exists for
-    /// is a set that grows — but it must also not be counted, because counting
-    /// it is the saturation #5942 reported.
-    ///
-    /// r3 corrects r2's claim that "an empty vector is the normal steady
-    /// state". It is not, on the node that reported #5942: three routine
-    /// channels are stamped once a day and expire about ten minutes after each
-    /// run, so this vector is NON-EMPTY for roughly 23 of every 24 hours. A
-    /// reader must therefore look at the entry COUNT and at
-    /// `unobserved_for_secs` (an age past a day means the routine did not run
-    /// at all), never at emptiness. There is no such reader in this repo yet —
-    /// #5947 tracks adding one or removing the field.
+    /// instead of pinning the node non-GREEN forever. Beside `degraded_reasons`,
+    /// never inside it, and re-projected onto the public `/api/health` body by
+    /// `routes::health_api::public_health_json`. How to read it — count the
+    /// entries, never test emptiness — is in `relay_probe`'s module doc.
     expired_relay_ledgers: Vec<String>,
     providers: Vec<ProviderHealthSnapshot>,
     mailboxes: Vec<MailboxHealthSnapshot>,
@@ -556,104 +553,6 @@ impl HealthRegistry {
             }
         }
         None
-    }
-}
-
-#[cfg(unix)]
-struct RelayVerdictProbeOperands {
-    pane_idle_confirmed: bool,
-    rowless_active_turn: bool,
-    placeholder_present: bool,
-    /// #5942: three-valued execution-owner witness for the ledger TTL. Derived
-    /// from the SAME observation `pane_idle_confirmed` is, so the two cannot
-    /// disagree about whether a session was seen.
-    executor: ExecutorWitness,
-    now_epoch_ms: u64,
-    process_started_at_epoch_ms: u64,
-}
-
-/// Preserve the reachability probe's three-valued tail evidence. A missing
-/// `unread_bytes` is not a proven drained tail for a row-backed turn; only the
-/// separately witnessed rowless case may use pane-idle as positive evidence.
-/// Do not collapse this to `unwrap_or(0) == 0`: the unmeasured-tail mutation is
-/// pinned by `call_site_withholds_the_pane_idle_witness_for_an_unmeasured_tail`.
-#[cfg(unix)]
-fn reachability_ledger_operand_exists(provider: &ProviderKind, channel_id: u64) -> bool {
-    ledger_path(provider, channel_id)
-        .as_deref()
-        .is_some_and(ledger_file_exists)
-}
-
-#[cfg(unix)]
-fn relay_verdict_probe_operands(
-    executor: ExecutorWitness,
-    relay_health: &RelayHealthSnapshot,
-    rowless_active_turn: bool,
-    process_started_at_unix: i64,
-) -> RelayVerdictProbeOperands {
-    // #5942 r3 (P1-B): `Present` ONLY. `pane_idle_confirmed` is 4987 §-1.4's
-    // second incarnation-alive witness, so widening this to "not Absent" would
-    // let `Unwitnessed` — "we could not check" — satisfy the alive gate and
-    // compose to `Reachable`. §7.2 forbids exactly that reading, and §1.5 names
-    // it the root defect of the predecessor design. Pinned by
-    // `an_unwitnessed_executor_never_confirms_the_pane_idle_witness`.
-    let pane_alive = matches!(executor, ExecutorWitness::Present);
-    RelayVerdictProbeOperands {
-        pane_idle_confirmed: pane_alive
-            && matches!(relay_health.active_turn, RelayActiveTurn::None)
-            && relay_health.idle_witness_tail_is_not_waiting(),
-        rowless_active_turn,
-        executor,
-        placeholder_present: relay_health.pending_discord_callback_msg_id.is_some(),
-        now_epoch_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
-        process_started_at_epoch_ms: process_started_at_unix.max(0).saturating_mul(1_000) as u64,
-    }
-}
-
-/// The detail path's execution-owner witness (#5942 r2, P1-4).
-///
-/// **The two health paths do NOT share a probe, and this comment used to claim
-/// they did.** They ask different questions on purpose and r2 left it that way:
-///
-/// * the AGGREGATE path (`build_health_snapshot_with_options`) probes
-///   `tmux::session_presence` — "does the session exist" — because the bool it
-///   also derives (`tmux_present`) has consumers all over this file and in
-///   stall recovery, and changing what THEY mean is not #5942's to do;
-/// * the DETAIL path probes `tmux::pane_liveness` — "does the session have a
-///   live pane" — which is what `tmux_session_alive` has always published.
-///
-/// The one property that matters for the ledger TTL is held on BOTH: a probe
-/// that could not answer yields [`ExecutorWitness::Unwitnessed`] and therefore
-/// cannot expire anything. `PaneLiveness::ProbeError` arrives here as `None`,
-/// and `SessionPresence::ProbeFailed` becomes `Unwitnessed` in
-/// `witness_tmux_session_within`.
-///
-/// They diverge in TWO places, both pinned by
-/// `the_two_health_paths_agree_inside_the_probe_and_diverge_on_the_wedge_and_the_budget`:
-///
-/// * the dead-pane wedge — a session that still exists with only dead panes.
-///   The aggregate reads `Present` (blocks expiry), the detail reads `Absent`
-///   (would expire);
-/// * the shared probe budget. Only the aggregate path is charged against it, so
-///   an exhausted budget withholds the aggregate witness while the detail one
-///   answers normally.
-///
-/// Both err in the safe direction where it counts: the aggregate is the path
-/// that decides `/api/health`'s `ok`, and on both divergences it is the one
-/// that refuses to expire.
-///
-/// `(None, None)` is not a probe fault — `probe_tmux_session_alive` returns
-/// `None` without probing when there is no session name — so it is a positive
-/// absence, matching the aggregate path's rule for the same situation.
-#[cfg(unix)]
-fn detail_executor_witness(
-    tmux_session_alive: Option<bool>,
-    tmux_session: Option<&str>,
-) -> ExecutorWitness {
-    match (tmux_session_alive, tmux_session) {
-        (Some(true), _) => ExecutorWitness::Present,
-        (Some(false), _) | (None, None) => ExecutorWitness::Absent,
-        (None, Some(_)) => ExecutorWitness::Unwitnessed,
     }
 }
 
@@ -1931,17 +1830,6 @@ mod tests {
         assert_eq!(shadow_status, HealthStatus::Healthy);
     }
 
-    /// #5942 r2 (P1-4): the two health paths' probe contract, both halves.
-    ///
-    /// The AGREEMENT half is the one the TTL depends on — neither path may
-    /// manufacture an `Absent` out of a probe that did not answer, because
-    /// `Absent` is the only value that expires a ledger. That agreement holds
-    /// INSIDE the probe, which is what the name now says: r2 called this test
-    /// "agree on probe faults and differ only on the dead pane wedge", and r3
-    /// (P2-7) found a second divergence — the shared budget — that the r2 name
-    /// denied. Both divergences are asserted below rather than wished away. If
-    /// someone later unifies the probes this test fails and makes them say so,
-    /// and if someone adds a THIRD divergence it fails too.
     /// #5942 r3 (P1-B): "we could not check" must never satisfy the alive gate.
     ///
     /// `relay_verdict_probe_operands` turns the executor witness into
@@ -1974,18 +1862,35 @@ mod tests {
         }
     }
 
+    /// #5942 r2 (P1-4) / r4 (P2-2): the two health paths' probe contract, both
+    /// halves, with the divergences ENUMERATED rather than promised.
+    ///
+    /// The AGREEMENT half is the one the TTL depends on — neither path may
+    /// manufacture an `Absent` out of a probe that did not answer, because
+    /// `Absent` is the only value that expires a ledger. That agreement holds
+    /// INSIDE the probe, which is what the name says.
+    ///
+    /// r3's version of this doc claimed "if someone adds a THIRD divergence it
+    /// fails too". That was false, and r4's review found the third divergence
+    /// already present: a BLANK session name. `tmux::session_presence` rejects
+    /// it as `ProbeFailed` (`platform/tmux.rs`'s `is_blank_session_name` guard)
+    /// and so the aggregate reads `Unwitnessed`, while `tmux::pane_liveness`
+    /// rejects the same name as `DeadOrAbsent`, which reaches
+    /// `detail_executor_witness` as `Some(false)` and reads `Absent`. It is
+    /// asserted below instead of denied, and a FOURTH divergence still would
+    /// not fail this test — no enumeration of examples can prove exhaustion, so
+    /// the doc no longer claims it does.
     #[cfg(unix)]
     #[tokio::test]
-    async fn the_two_health_paths_agree_inside_the_probe_and_diverge_on_the_wedge_and_the_budget() {
-        use crate::services::discord::health::session_enrichment::{
-            HealthSnapshotOptions, witness_tmux_session_within,
-        };
+    async fn the_two_health_paths_agree_inside_the_probe_and_diverge_on_the_wedge_the_budget_and_the_blank_name()
+     {
+        use crate::services::discord::health::session_enrichment::TmuxObservationBudget;
+        use crate::services::discord::health::session_enrichment::witness_tmux_session_within;
         use crate::services::platform::tmux::SessionPresence;
 
         // Agreement: a probe that could not answer withholds the witness on
         // both paths, so neither can expire a ledger on a broken tmux.
-        let mut budget = HealthSnapshotOptions::new(false).tmux;
-        budget.probe = |_| SessionPresence::ProbeFailed;
+        let mut budget = TmuxObservationBudget::answering(SessionPresence::ProbeFailed);
         assert_eq!(
             witness_tmux_session_within(Some("wedged"), &mut budget).await,
             ExecutorWitness::Unwitnessed,
@@ -2000,8 +1905,7 @@ mod tests {
         );
 
         // Agreement: a clean negative is a positive absence on both.
-        let mut budget = HealthSnapshotOptions::new(false).tmux;
-        budget.probe = |_| SessionPresence::Missing;
+        let mut budget = TmuxObservationBudget::answering(SessionPresence::Missing);
         assert_eq!(
             witness_tmux_session_within(Some("gone"), &mut budget).await,
             ExecutorWitness::Absent
@@ -2016,8 +1920,7 @@ mod tests {
 
         // Divergence 1: the dead-pane wedge. `session_presence` says the session
         // is there; `pane_liveness` says nothing is running in it.
-        let mut budget = HealthSnapshotOptions::new(false).tmux;
-        budget.probe = |_| SessionPresence::Present;
+        let mut budget = TmuxObservationBudget::answering(SessionPresence::Present);
         assert_eq!(
             witness_tmux_session_within(Some("wedge"), &mut budget).await,
             ExecutorWitness::Present,
@@ -2036,9 +1939,7 @@ mod tests {
         // faults" and this case is why that promise had to be narrowed to what
         // the assertions above actually cover: they agree on faults INSIDE the
         // probe, not on the budget that decides whether a probe runs.
-        let mut budget = HealthSnapshotOptions::new(false).tmux;
-        budget.remaining = std::time::Duration::ZERO;
-        budget.probe = |_| panic!("an exhausted budget must not spawn a probe");
+        let mut budget = TmuxObservationBudget::exhausted();
         assert_eq!(
             witness_tmux_session_within(Some("named"), &mut budget).await,
             ExecutorWitness::Unwitnessed
@@ -2048,18 +1949,49 @@ mod tests {
             ExecutorWitness::Present,
             "the detail path is not charged against the shared budget"
         );
+
+        // Divergence 3 (r4, P2-2): a BLANK session name. Both probes reject it
+        // before they reach tmux, and they disagree about what the rejection
+        // MEANS: `session_presence` calls it a probe fault, `pane_liveness`
+        // calls it a clean negative. The aggregate therefore refuses to expire
+        // and the detail would. It costs nothing today — the detail path
+        // publishes no expiry, only the warrant abstention — but r3's doc
+        // asserted this case could not exist, so it is asserted here instead.
+        let mut budget = TmuxObservationBudget::answering(SessionPresence::ProbeFailed);
+        assert_eq!(
+            witness_tmux_session_within(Some("   "), &mut budget).await,
+            ExecutorWitness::Unwitnessed,
+            "the aggregate path reads a blank name as a probe fault"
+        );
+        assert_eq!(
+            // `PaneLiveness::DeadOrAbsent` reaches this function as `Some(false)`.
+            detail_executor_witness(Some(false), Some("   ")),
+            ExecutorWitness::Absent,
+            "the detail path reads the same blank name as a clean negative"
+        );
     }
 
-    /// #5942 r2 (P1-2): the expired-ledger vector is actually on the wire.
+    /// #5942 r4 (P1-2): the SERIALIZER keeps the key on both snapshot builds.
     ///
-    /// `expired_relay_ledgers` is the whole basis for "withdraw the vote but do
-    /// not hide the channel", and nothing else in the repo reads it yet — an
-    /// external monitor polling `/api/health` is the consumer. A `#[serde(skip)]`
-    /// or a `skip_serializing_if = "Vec::is_empty"` would make the design's one
-    /// piece of evidence invisible while every other test stayed green, so the
-    /// key's PRESENCE is asserted here, on both builds, empty included.
+    /// r2 titled this "actually on the wire" and said an external monitor
+    /// polling `/api/health` was the consumer. Both claims were false. This
+    /// test serializes the STRUCT BUILDER, two layers below the wire, and
+    /// `routes::health_api::public_health_json` is an explicit allowlist that
+    /// did not name the field — so `/api/health` published nothing at all while
+    /// this stayed green, and the three routine channels #5942 withdraws from
+    /// `degraded_reasons` simply vanished from the credential-free surface. r4
+    /// added that projection and pinned the wire where the wire lives:
+    /// `public_health_json_carries_the_expired_relay_ledgers_onto_the_summary`
+    /// and `summary_and_detail_routes_agree_on_expired_relay_ledgers`.
+    ///
+    /// What remains here is the layer this module CAN see, and it is still load
+    /// bearing precisely because those route tests cannot see it: a
+    /// `#[serde(skip)]` or a `skip_serializing_if = "Vec::is_empty"` on the
+    /// field would starve the projection of anything to project, and the route
+    /// tests would stay green because the allowlist turns both an absent key
+    /// and an empty vector into `[]`.
     #[tokio::test]
-    async fn the_expired_ledger_vector_is_published_on_every_build() {
+    async fn the_expired_ledger_vector_survives_serialization_on_every_snapshot_build() {
         let registry = HealthRegistry::new();
         for (build, value) in [
             (
@@ -2725,8 +2657,8 @@ mod tests {
             let provider = ProviderKind::Codex;
             let channel =
                 ChannelId::new(super::NEXT_ABSENT_MAILBOX_CHANNEL.fetch_add(1, Ordering::Relaxed));
-            let path =
-                super::super::ledger_path(&provider, channel.get()).expect("canonical ledger path");
+            use crate::services::discord::health::reachability::ledger::ledger_path;
+            let path = ledger_path(&provider, channel.get()).expect("canonical ledger path");
             std::fs::create_dir_all(path.parent().expect("ledger parent"))
                 .expect("create canonical ledger directory");
             std::fs::write(&path, b"not-json").expect("write present ledger operand");

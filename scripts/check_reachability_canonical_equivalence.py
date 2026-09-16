@@ -229,6 +229,17 @@ SANCTIONED_TREE_CONSUMERS: set[str] = set()
 #
 #   * `health/snapshot.rs` — composes and publishes the verdict per channel and
 #     applies the `RelayVerdictSource` polarity switch.
+#   * `health/snapshot/relay_probe.rs` — the operand-assembly half of the file
+#     above, and nothing else. #5942 r4 split it out because `health/snapshot.rs`
+#     is a registered `shrink` giant (#5447) that r3 had grown past its pin; the
+#     four items that moved (`RelayVerdictProbeOperands`,
+#     `relay_verdict_probe_operands`, `reachability_ledger_operand_exists`,
+#     `detail_executor_witness`) are the same code with the same callers, so
+#     this is one reviewed file becoming two, not a new reader of the tree. It
+#     is listed HERE rather than reading the ledger through its parent's private
+#     `use`, which would have kept the allowance set unchanged at the cost of
+#     making the file invisible to this scan — the outcome the tier exists to
+#     prevent.
 #   * `health/mailbox.rs` — carries the published report as a detail field.
 #   * `health/stall_verdict.rs` — its detail-serialization test builds that field.
 #   * `health/recovery.rs` — #5464 T5 S5's watchdog witness imports the ledger,
@@ -241,6 +252,7 @@ SANCTIONED_TREE_CONSUMERS: set[str] = set()
 #     preserves a concrete verdict in the snapshot passed to axis-B observation.
 JUDGMENT_TREE_CONSUMERS = {
     "src/services/discord/health/snapshot.rs",
+    "src/services/discord/health/snapshot/relay_probe.rs",
     "src/services/discord/health/mailbox.rs",
     "src/services/discord/health/recovery.rs",
     "src/services/discord/health/stall_verdict.rs",

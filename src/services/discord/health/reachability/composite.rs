@@ -564,6 +564,12 @@ pub(in crate::services::discord) fn classify_reachability(
     // moved above the gate for that reason; it is hardcoded `false` at the
     // production call site today, so this makes an ordering claim true rather
     // than changing behaviour.
+    //
+    // r4 (P2-1): that claim now has a test. It had none, and an adversarial
+    // review moved this arm back under the gate with the whole suite still
+    // green — precisely because the production call site cannot reach it.
+    // `a_truncated_read_outranks_the_ttl_gate_even_when_every_expiry_conjunct_holds`
+    // is what fails if it moves again.
     if inputs.read_truncated {
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReadTruncated, 0);
     }

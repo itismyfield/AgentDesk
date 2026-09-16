@@ -9,6 +9,7 @@
 use tempfile::tempdir;
 
 use super::*;
+use crate::services::discord::health::STALL_WATCHDOG_INTERVAL_SECS;
 use crate::services::discord::health::liveness_authority::CaptureCoordinateObservation;
 use crate::services::discord::health::reachability::discovery::TranscriptFileId;
 use crate::services::discord::health::reachability::ledger::{
@@ -19,7 +20,6 @@ use crate::services::discord::health::reachability::ledger_ttl::{
     SHORTEST_PERIODIC_PRODUCER_PERIOD_SECS,
 };
 use crate::services::discord::health::reachability::observation::REACHABILITY_OBSERVATION_INTERVAL_SECS;
-use crate::services::discord::health::STALL_WATCHDOG_INTERVAL_SECS;
 use crate::services::discord::health::session_enrichment::{ExecutorWitness, SessionEnrichment};
 use crate::services::discord::health::snapshot::HealthStatus;
 use crate::services::discord::outbound::delivery_record::{
@@ -1489,5 +1489,147 @@ fn the_ttl_clock_is_the_ledger_files_modification_time_not_its_access_time() {
         ledger_committed_at_epoch_ms(&dir.path().join("absent.json")),
         None,
         "a ledger with no file has no commit time, and an unknown clock expires nothing"
+    );
+}
+
+/// #5942 r4 (P1-3): the TTL runs on the ledger `observe_relay_verdict` LOCATES,
+/// not on a number a test handed it.
+///
+/// Every other TTL test in this file builds [`ReachabilityInputs`] by hand
+/// through [`Case`], and the closest one to production —
+/// `the_ttl_clock_is_the_ledger_files_modification_time_not_its_access_time` —
+/// still calls `ledger_committed_at_epoch_ms` ITSELF and passes the result in.
+/// So the production wiring in `observe_relay_verdict` — resolving the path,
+/// stamping the commit time onto the inputs, forwarding the caller's executor
+/// witness — had no test at all, and an adversarial review killed it twice with
+/// the whole 623-test suite green:
+///
+/// * `ledger_path…and_then(ledger_committed_at_epoch_ms)` → `.and(None)`, which
+///   makes conjunct (6) unreachable and #5942 a permanent no-op;
+/// * `executor: probe.executor` → `ExecutorWitness::Absent`, which discards
+///   conjunct (1) and expires a stale ledger sitting next to a LIVE tmux.
+///
+/// This drives the real entry point against a real file at the canonical path
+/// and asserts both directions, so neither mutant survives: the first dies on
+/// the expiry, the second on the two witnesses that must refuse it.
+#[test]
+fn observe_relay_verdict_expires_a_backdated_ledger_it_located_itself() {
+    let root = tempdir().expect("temp runtime root");
+    let _env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root.path());
+
+    let provider = provider();
+    // Distinct from every other channel id in this binary: the test runtime
+    // root is process-wide, so a shared id would let two tests read each
+    // other's ledgers.
+    let channel_id = 5_942_000_000_000_000_041_u64;
+    let path = ledger_path(&provider, channel_id).expect("canonical ledger path");
+    std::fs::create_dir_all(path.parent().expect("ledger parent"))
+        .expect("create canonical ledger directory");
+    std::fs::write(
+        &path,
+        serde_json::to_string(&ledger_with(Vec::new(), proven_incarnation()))
+            .expect("serialize ledger"),
+    )
+    .expect("write ledger");
+
+    let now = std::time::SystemTime::now();
+    let now_ms = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_millis() as u64;
+    let stamp = |at: std::time::SystemTime| {
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open ledger for set_times")
+            .set_times(std::fs::FileTimes::new().set_accessed(now).set_modified(at))
+            .expect("set_times");
+    };
+    let observe = |executor| {
+        observe_relay_verdict(RelayVerdictProbe {
+            provider: Some(&provider),
+            channel_id,
+            // No coordinates and no transcript: the shape a routine leaves
+            // behind once its tmux session is gone, which is the #5942
+            // population.
+            row_output_path: None,
+            registry_output_path: None,
+            pane_idle_confirmed: false,
+            rowless_active_turn: false,
+            placeholder_present: false,
+            executor,
+            now_epoch_ms: now_ms,
+            process_started_at_epoch_ms: now_ms.saturating_sub(60_000),
+        })
+    };
+
+    stamp(now - std::time::Duration::from_secs(LEDGER_OBSERVATION_TTL_SECS + 300));
+    let expired = observe(ExecutorWitness::Absent);
+    assert!(
+        matches!(expired.in_band(), ReachabilityVerdict::Expired { .. }),
+        "a witnessed-absent owner over a ledger whose FILE is {}s stale must expire; got {:?} — \
+         the probe is not reading the ledger's commit time off disk",
+        LEDGER_OBSERVATION_TTL_SECS + 300,
+        expired.in_band()
+    );
+    assert!(
+        expired.abstains_from_health_polarity(),
+        "the composed verdict must withdraw from the polarity, not decide it"
+    );
+
+    for witness in [ExecutorWitness::Present, ExecutorWitness::Unwitnessed] {
+        let verdict = observe(witness);
+        assert!(
+            !matches!(verdict.in_band(), ReachabilityVerdict::Expired { .. }),
+            "{witness:?} must never expire the same backdated ledger; got {:?} — the probe's \
+             executor witness is not reaching the gate",
+            verdict.in_band()
+        );
+    }
+
+    // The control that makes the expiry above an age rather than a constant:
+    // the same file, the same call, stamped NOW.
+    stamp(now);
+    let fresh = observe(ExecutorWitness::Absent);
+    assert!(
+        !matches!(fresh.in_band(), ReachabilityVerdict::Expired { .. }),
+        "a ledger stamped on this tick must not expire; got {:?}",
+        fresh.in_band()
+    );
+}
+
+/// #5942 r4 (P2-1): the FAULT arms really do run before the timer.
+///
+/// `classify_reachability` carries a comment claiming every fault arm precedes
+/// the TTL gate, and r3 moved `read_truncated` above the gate to make the claim
+/// true. Nothing asserted it: an adversarial review moved that arm back under
+/// the gate and the suite stayed green, because `read_truncated` is hardcoded
+/// `false` at the one production call site so no other test can reach the
+/// ordering.
+///
+/// The claim is worth holding even so. A truncated read is a thing that went
+/// WRONG, and the whole point of the ordering is that a clock must not retire
+/// one — the moment a caller starts passing a real truncation flag, an arm
+/// under the gate would answer `Expired` for a channel whose coverage is
+/// unknown, which is exactly the "expire a real loss" failure conjunct (2)
+/// exists to prevent.
+#[test]
+fn a_truncated_read_outranks_the_ttl_gate_even_when_every_expiry_conjunct_holds() {
+    let expires = abandoned_ledger_case();
+    assert!(
+        matches!(expires.classify(), ReachabilityVerdict::Expired { .. }),
+        "fixture must expire without the truncation, or the assertion below is vacuous"
+    );
+
+    let truncated = Case {
+        read_truncated: true,
+        ..abandoned_ledger_case()
+    };
+    let verdict = truncated.classify();
+    assert_eq!(
+        verdict.unknown_reason(),
+        Some(ReachabilityUnknownReason::ReadTruncated),
+        "a truncated read must outrank the TTL gate; got {verdict:?} — a fault was retired by a \
+         clock"
     );
 }

@@ -42,13 +42,43 @@ impl HealthSnapshotOptions {
 }
 
 pub(super) struct TmuxObservationBudget {
-    /// #5942 r3: readable by the sibling health tests that pin what an
-    /// exhausted budget may and may not conclude; nothing outside `health`
-    /// sees it.
-    pub(super) remaining: std::time::Duration,
-    /// #5942 r2: readable by the sibling health tests that pin the two probe
-    /// paths' shared failure contract; nothing outside `health` can see it.
-    pub(super) probe: fn(&str) -> SessionPresence,
+    remaining: std::time::Duration,
+    probe: fn(&str) -> SessionPresence,
+}
+
+/// Test-only fixtures (#5942 r4, P2-5).
+///
+/// r2 and r3 widened `remaining` and `probe` to `pub(super)` so the sibling
+/// `health::snapshot` tests could pose an exhausted budget and a probe with a
+/// chosen answer. That handed every module under `health` a writable fn pointer
+/// and a writable clock in ALL builds, which is far more surface than those two
+/// shapes need. The fields are private again and the two shapes are named here
+/// instead, `#[cfg(test)]` so they do not exist in a release build at all.
+#[cfg(test)]
+impl TmuxObservationBudget {
+    /// A full budget whose probe always answers `presence`.
+    ///
+    /// Matched rather than closed over: `probe` is a plain fn pointer (it is
+    /// handed to `spawn_blocking`), so it cannot capture a runtime value.
+    pub(super) fn answering(presence: SessionPresence) -> Self {
+        Self {
+            remaining: TMUX_OBSERVATION_BUDGET,
+            probe: match presence {
+                SessionPresence::Present => |_: &str| SessionPresence::Present,
+                SessionPresence::Missing => |_: &str| SessionPresence::Missing,
+                SessionPresence::ProbeFailed => |_: &str| SessionPresence::ProbeFailed,
+            },
+        }
+    }
+
+    /// A spent budget whose probe fails the test if the budget check is ever
+    /// skipped.
+    pub(super) fn exhausted() -> Self {
+        Self {
+            remaining: std::time::Duration::ZERO,
+            probe: |_| panic!("an exhausted budget must not spawn a probe"),
+        }
+    }
 }
 
 /// What a caller could establish about the execution owner behind a channel.
