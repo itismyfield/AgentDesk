@@ -6466,6 +6466,7 @@ services::discord::turn_bridge::bridge_entry_persist::tests::a_reconcile_that_ch
 services::discord::turn_bridge::bridge_entry_persist::tests::a_rowless_entry_patch_keeps_its_pre_persist_detached_locals
 services::discord::turn_bridge::bridge_entry_persist::tests::adopting_a_self_duplicated_body_raises_a_correlated_invariant_violation
 services::discord::turn_bridge::bridge_entry_persist::tests::adopting_an_ordinary_body_raises_no_invariant_violation
+services::discord::turn_bridge::bridge_entry_persist::tests::an_empty_seed_is_not_an_adoption_and_records_nothing
 services::discord::turn_bridge::bridge_entry_persist::tests::an_enforced_rowless_turn_without_an_anchor_sends_no_placeholder
 services::discord::turn_bridge::bridge_entry_persist::tests::an_uninstalled_live_config_leaves_the_entry_rowless_cohort_empty
 services::discord::turn_bridge::bridge_entry_persist::tests::bridge_entry_failure_gate_precedes_emit_stream_and_finalize
@@ -6481,8 +6482,10 @@ services::discord::turn_bridge::bridge_entry_persist::tests::same_turn_owner_adv
 services::discord::turn_bridge::bridge_entry_persist::tests::saved_competing_bind_reconciliation_invalidates_candidate_edit_cache
 services::discord::turn_bridge::bridge_entry_persist::tests::saved_exit_reconcile_preserves_first_pin_across_registry_replacement
 services::discord::turn_bridge::bridge_entry_persist::tests::saved_reconciliation_preserves_existing_anchor_edit_cache
+services::discord::turn_bridge::bridge_entry_persist::tests::seeding_the_bridge_local_body_from_a_durable_row_is_recorded
 services::discord::turn_bridge::bridge_entry_persist::tests::stream_authority_loss_relinquishes_guards_before_visible_finalization
 services::discord::turn_bridge::bridge_entry_persist::tests::the_deployed_enforce_dial_governs_every_channel_and_observe_governs_none
+services::discord::turn_bridge::bridge_entry_persist::tests::the_first_reconcile_after_a_seed_is_structurally_silent
 services::discord::turn_bridge::bridge_entry_persist::tests::the_reconcile_entry_point_records_the_body_it_adopts
 services::discord::turn_bridge::bridge_entry_persist::tests::the_reconcile_record_survives_the_shipped_tracing_filter
 services::discord::turn_bridge::bridge_latency_spans::tests::empty_span_renders_all_dashes
@@ -6586,6 +6589,10 @@ services::discord::turn_bridge::completion_postlude::channel_writeback::tests::s
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_does_not_stash_feedback_reminder
 services::discord::turn_bridge::completion_postlude::channel_writeback::tests::scheduled_snapshot_turn_leaves_channel_session_untouched
 services::discord::turn_bridge::context::tests::intake_completion_waiter_discards_typed_payload_and_only_maps_recv_error
+services::discord::turn_bridge::context_window::tests::a_blank_streamed_body_adopting_the_terminal_done_result_is_recorded
+services::discord::turn_bridge::context_window::tests::a_declined_done_records_nothing
+services::discord::turn_bridge::context_window::tests::a_done_result_equal_to_the_body_in_hand_records_nothing
+services::discord::turn_bridge::context_window::tests::a_doubled_terminal_result_is_recorded_and_carries_the_self_duplicate_verdict
 services::discord::turn_bridge::context_window::tests::done_keeps_equal_streaming_response_when_no_tools_used
 services::discord::turn_bridge::context_window::tests::done_uses_terminal_result_when_streamed_response_is_prefix_missing_tail
 services::discord::turn_bridge::context_window::tests::done_uses_terminal_result_when_streamed_response_is_tail_only
@@ -6801,6 +6808,7 @@ services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::queued_
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::terminal_tool_result_fence_maps_handoff_loss_and_io_retry_fail_closed
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::the_restart_fence_asks_the_cohort_and_a_vanished_row_still_ends_the_arm
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::the_tool_arm_durable_adoption_emits_its_own_body_mutation_record
+services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::the_watcher_self_handoff_fence_records_the_durable_body_it_adopts
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::tool_arm_locals_follow_the_durable_row_after_a_guarded_save
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::tool_arms_derive_the_four_excluded_tool_line_locals_around_their_fences
 services::discord::turn_bridge::stream_loop::tool_arms::authority_tests::transient_terminal_tool_result_fence_requeues_the_exact_frame_at_front
@@ -6949,6 +6957,7 @@ services::discord::turn_bridge::terminal_outcome_delivery::delivery_epilogue_tes
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance::tests::completed_empty_response_explains_recovery_and_next_actions
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::guidance::tests::disconnected_empty_response_explains_recovery_and_next_actions
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::handler::body_mutation_tests::a_blank_recovery_neither_replaces_the_body_nor_records
+services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::handler::body_mutation_tests::a_recovery_that_reproduces_the_current_body_records_nothing
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::handler::body_mutation_tests::recovering_the_body_from_the_output_file_emits_a_body_mutation_record
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::handler::body_mutation_tests::the_stored_violation_carries_the_rows_dispatch_session_and_turn_keys
 services::discord::turn_bridge::terminal_outcome_delivery::empty_response_recovery::handler::tests::busy_claude_followup_timeout_preserves_session_and_skips_output_recovery

@@ -576,7 +576,9 @@ mod tests {
         assert!(logs.contains("before_len=0"), "got: {logs}");
         assert!(logs.contains("after_len=20"), "got: {logs}");
         // The row is in hand here, so unlike the streamed append this site is joinable.
-        assert!(logs.contains("dispatch_id=\"dispatch-5938-seed\"") || !logs.contains("[invariant]"));
+        assert!(
+            logs.contains("dispatch_id=\"dispatch-5938-seed\"") || !logs.contains("[invariant]")
+        );
     }
 
     /// The other three production `TurnBridgeContext` constructions pass

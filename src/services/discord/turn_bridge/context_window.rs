@@ -201,7 +201,10 @@ mod tests {
             // `any_tool_used && !has_post_tool_text` takes the replace arm, so the
             // decision really does return `Some` here — the silence comes from the
             // no-op skip, not from the resolver declining.
-            assert_eq!(resolve_done_response(body, body, true, false).as_deref(), Some(body));
+            assert_eq!(
+                resolve_done_response(body, body, true, false).as_deref(),
+                Some(body)
+            );
         });
         assert!(logs.is_empty(), "got: {logs}");
     }
