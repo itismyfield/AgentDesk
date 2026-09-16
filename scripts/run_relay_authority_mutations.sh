@@ -194,8 +194,13 @@ run_target() {
     set +e
     (
       cd "$REPO_ROOT"
+      # Incremental is on here although the repo default is off: every row is a
+      # two-anchor delta from the previous build, and the sccache constraint
+      # behind CARGO_INCREMENTAL=0 does not apply once RUSTC_WRAPPER is unset.
+      # It cannot fake a kill -- a binary missing the mutation passes the named
+      # test, which this script grades as SURVIVED.
       env -u RUSTC_WRAPPER -u AGENTDESK_ROOT_DIR \
-        CARGO_TERM_COLOR=never CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$TARGET_DIR" \
+        CARGO_TERM_COLOR=never CARGO_INCREMENTAL=1 CARGO_TARGET_DIR="$TARGET_DIR" \
         cargo test --offline --lib "$target" -- --exact --test-threads=1
     ) >"$log" 2>&1
     rc=$?
@@ -292,6 +297,11 @@ trap 'exit 143' TERM
 acquire_lock
 prepare_backups
 printf 'MUTATION_COUNT count=%d minimum=4\n' "$MUTATION_COUNT"
+# Sizing evidence for the serial row loop: one crate build already saturates the
+# runner, so rows stay sequential until this reports many more cores than rows.
+printf 'MUTATION_RUNNER cores=%s target_dir_avail_kb=%s\n' \
+  "$( (nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo unknown) )" \
+  "$( (df -Pk "$REPO_ROOT" 2>/dev/null | awk 'NR==2{print $4}') || echo unknown )"
 
 run_mutation \
   M10 "$TERMINAL_HANDOFF" \
