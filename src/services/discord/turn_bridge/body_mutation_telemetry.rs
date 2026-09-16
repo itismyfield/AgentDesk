@@ -19,60 +19,76 @@
 //! appearing under two different `site` values inside one turn pins the double
 //! write immediately — that identification is the whole point of the record.
 //!
-//! COVERAGE — the selection criterion, and what it deliberately leaves out.
+//! COVERAGE — WHAT IS RECORDED, AND AN EXPLICIT REFUSAL TO CLAIM COMPLETENESS.
 //!
-//! This module does NOT record every assignment to the bridge-local
-//! `full_response`. It records exactly three classes, stated here as a rule so
-//! a later reader can check a site against the rule instead of guessing:
+//! READ THE ABSENCE OF A RECORD AS "NO RECORD", NEVER AS "NO MUTATION."
 //!
-//! 1. CROSS-BOUNDARY ADOPTION — a site that copies bytes the bridge did not
-//!    itself produce INTO the bridge-local body. Exactly two origins exist: the
-//!    durable inflight row's `full_response` (the channel the watcher and the
-//!    bridge seed each other through) and the tmux output file (the watcher's
-//!    OWN source, which the empty-response recovery path re-reads directly).
-//!    Those are the only ways a byte the watcher wrote can enter this body, so
-//!    these are the sites the watcher-first / bridge-first verdict is read
-//!    from: `ReconcileFromInflightState`,
-//!    `ReconcileToolArmLocalsFromInflightState`, `RecoverBodyFromOutputFile`.
-//! 2. STREAM-LOOP ACCUMULATION — the two composers that build the body during
-//!    the turn, including the one that SHRINKS it: `AppendStreamedTextChunk`,
+//! That sentence is the whole contract, and it is written this way because the
+//! alternative has now failed twice. The first revision of this module asserted
+//! "these are ALL the places the bridge-local `full_response` body changes
+//! shape"; review produced a counterexample. The second replaced it with a
+//! three-class criterion plus a "named, so the boundary is a stated fact"
+//! enumeration and the claim that nothing outside it "can introduce a byte from
+//! the watcher's side"; review produced two more counterexamples — the terminal
+//! `Done` result on the TUI-direct path, which is decoded from the very output
+//! file the watcher tails, and the two `TurnBridgeContext.full_response` seeds
+//! that copy a durable row before the bridge task even starts. Both are now
+//! recorded. What is NOT repaired by recording them is the pattern: a prose
+//! completeness claim about a mutation surface this large is a claim the next
+//! reader will falsify. So this module no longer makes one, in any form.
+//!
+//! Concretely, for anyone reading a per-turn readout:
+//!   * A record means that site ran and these bytes moved. Trust it.
+//!   * NO record does NOT mean the body was untouched. An unexplained step
+//!     between one record's `after_len` and the next record's `before_len` is
+//!     evidence of an unrecorded mutation, and the right response is to go find
+//!     which site did it and add it here — not to conclude nothing happened.
+//!   * In particular, "no class-1 record this turn" is NOT evidence of
+//!     bridge-first. It is the absence of evidence either way.
+//!
+//! The classes below describe why each RECORDED site was chosen. They are a
+//! rationale for inclusion, not a partition of the surface.
+//!
+//! 1. CROSS-BOUNDARY ADOPTION — the site copies bytes the bridge did not itself
+//!    produce INTO the bridge-local body. These are what the watcher-first /
+//!    bridge-first question is read from, so this class gets every site found so
+//!    far: `ReconcileFromInflightState` and
+//!    `ReconcileToolArmLocalsFromInflightState` (durable inflight row, the
+//!    channel the watcher and the bridge seed each other through),
+//!    `RecoverBodyFromOutputFile` (the tmux output file, re-read directly by the
+//!    empty-response recovery path), `AdoptTerminalDoneResult` (the terminal
+//!    `Done` result, which on the TUI-direct path is decoded from that same
+//!    output file — see the variant's own doc), and `SeedFromTurnBridgeContext`
+//!    (the durable row copied into `TurnBridgeContext.full_response` before the
+//!    bridge task starts).
+//! 2. STREAM-LOOP ACCUMULATION — the composers that build the body during the
+//!    turn, including the one that SHRINKS it: `AppendStreamedTextChunk`,
 //!    `AppendToolBoundarySeparator`.
-//! 3. SHARED BLANKING — a site that empties the bridge-local body AND the
-//!    durable row body in the same breath, so the bytes leave the shared
-//!    channel rather than just the local copy: `ClearResponseDeliveryState`,
-//!    `SilenceRequeuedResponse`.
+//! 3. SHARED BLANKING — the site empties the bridge-local body AND the durable
+//!    row body together, so the bytes leave the shared channel rather than just
+//!    the local copy: `ClearResponseDeliveryState`, `SilenceRequeuedResponse`.
 //!
-//! WHY THOSE THREE: the readout is a per-turn stream of `before_len` /
-//! `after_len` pairs, and an analyst reads a gap between one record's
-//! `after_len` and the next record's `before_len` as loss. Classes 2 and 3
-//! keep the accumulation phase gap-free; class 1 is the only phase that can
-//! answer the question this module exists for.
+//! KNOWN UNRECORDED SITES, as of this writing and WITHOUT any claim that the
+//! list is exhaustive — it is a starting point for the next investigation, not a
+//! boundary: the two `ProviderErrorPresentation` guidance replacements in
+//! `stream_loop/content_arms.rs`; API_FRICTION marker stripping in
+//! `post_loop_finalize.rs` and in
+//! `terminal_outcome_delivery/empty_response_recovery/handler.rs`; the
+//! `CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE` constant in
+//! `post_loop_finalize.rs`; the `String::new()` suppressions in
+//! `terminal_outcome_delivery.rs`, `handler.rs` (three) and
+//! `terminal_outcome_delivery/recovery_retry.rs`; and
+//! `prompt_too_long_guidance::render_for_requester` in
+//! `terminal_outcome_delivery/cancel_prompt_replace.rs`. Each of those replaces
+//! the body during TERMINAL delivery, after the interleaving this module
+//! measures has already happened, which is why they were lower priority — NOT a
+//! proof that they cannot matter.
 //!
-//! NOT RECORDED — named, so the boundary is a stated fact and not a silence.
-//! The terminal-delivery replacements overwrite the bridge-local body with text
-//! the bridge itself authored or derived from the body already in hand, and
-//! none of them reads the durable row or the output file:
-//! `stream_loop/content_arms.rs` (the `resolve_done_response` result and the
-//! two `ProviderErrorPresentation` guidance strings), `post_loop_finalize.rs`
-//! (API_FRICTION marker stripping and the
-//! `CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE` constant),
-//! `terminal_outcome_delivery/empty_response_recovery/handler.rs` (its late
-//! API_FRICTION stripping and its three `String::new()` suppressions),
-//! `terminal_outcome_delivery.rs` and
-//! `terminal_outcome_delivery/recovery_retry.rs` (one `String::new()`
-//! suppression each), and `terminal_outcome_delivery/cancel_prompt_replace.rs`
-//! (`prompt_too_long_guidance::render_for_requester`). Because none of them can
-//! introduce a byte from the watcher's side, none can move the verdict; each
-//! CAN leave an unexplained length step in the TERMINAL phase of the readout,
-//! and that is the honest cost of drawing the line here. `content_arms.rs` also
-//! sits at its 635-line `scripts/audit_maintainability_config.toml` cap with
-//! zero headroom, so its three sites are unreachable for this PR regardless.
-//!
-//! The WATCHER's own accumulator is out of scope: it lives in `tmux_watcher.rs`
-//! and this module never sees it. The verdict does not need it — a watcher-first
-//! turn appears HERE as a class-1 record whose `delta_sha8` covers bytes this
-//! bridge never appended, which is exactly the join the record shape was built
-//! for.
+//! The WATCHER's own accumulator in `tmux_watcher.rs` is not instrumented here
+//! either. A watcher-first turn is EXPECTED to show up as a class-1 record whose
+//! `delta_sha8` covers bytes this bridge never appended; that is what the record
+//! shape was built for. Per the contract above, a turn without one has not been
+//! shown to be bridge-first.
 
 use crate::services::observability::{InvariantViolation, record_invariant_check};
 use sha2::{Digest, Sha256};
@@ -248,11 +264,10 @@ impl<'a> BodyMutationCorrelation<'a> {
 
 /// Which mutation site produced a record.
 ///
-/// These are NOT all the places the bridge-local `full_response` changes shape.
-/// They are the three classes the COVERAGE section at the top of this module
-/// defines — cross-boundary adoption, stream-loop accumulation, shared blanking
-/// — and that section names the terminal-delivery replacements this enum
-/// deliberately omits.
+/// NOT a partition of the mutation surface, and deliberately not presented as
+/// one — see the COVERAGE section at the top of this module. Adding a variant
+/// here is how an unrecorded site gets recorded; the absence of a variant says
+/// nothing about whether such a site exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord::turn_bridge) enum BodyMutationSite {
     /// `chunk_compose::append_streamed_text_chunk` — the streamed `Text` append
@@ -301,6 +316,62 @@ pub(in crate::services::discord::turn_bridge) enum BodyMutationSite {
     /// the re-read returns a span the bridge already delivered, which is a way
     /// to manufacture a doubled body on its own. It has to be visible.
     RecoverBodyFromOutputFile,
+    /// `context_window::resolve_done_response` — the terminal `Done` result
+    /// replacing the streamed body, driven from `stream_loop/content_arms.rs`.
+    ///
+    /// This looked like a bridge-authored replacement and is not. On the
+    /// TUI-direct path the `Done` frame is SYNTHESISED FROM THE WATCHER'S OWN
+    /// OUTPUT FILE: `tui_prompt_relay/claude_idle_bridge.rs` builds an
+    /// `IdleTerminalSource` whose `transcript_path` is the canonicalised
+    /// `output_path` it also hands to
+    /// `WatcherClaimIncarnation::capture_for_source`, so it is by construction
+    /// the file the tmux watcher tails; the terminal frame travels as
+    /// `StreamMessage::ClaudeTuiTerminalDone`, and
+    /// `inflight/save_store/identity_gate/runtime_stamp.rs` re-validates that
+    /// path against the row before converting it to `StreamMessage::Done {
+    /// result, .. }` and writing the SAME bytes to `fresh.full_response`. So
+    /// both halves of the #5938 double-write can be this one byte string.
+    ///
+    /// Two further reasons it cannot stay silent. `resolve_done_response`'s
+    /// first arm fires when the streamed body is blank, and
+    /// `idle_stream_message_is_content` documents a terminal `Done` as a
+    /// legitimate sole carrier of a turn body — so a whole turn can arrive
+    /// through here with no other record at all. And
+    /// `done_result_supersedes_streamed_partial` triggers on
+    /// `terminal.starts_with(streamed) || terminal.ends_with(streamed)` with
+    /// `terminal.len() > streamed.len()`, which is exactly the superset shape a
+    /// doubled body has; because `record_from_parts` evaluates
+    /// [`body_is_exact_self_duplicate`] only when a record is built, an
+    /// unrecorded adoption here meant the #5938 fingerprint never looked at the
+    /// body that was about to be delivered.
+    ///
+    /// Correlation is [`BodyMutationCorrelation::unavailable`] for the same
+    /// reason the streamed append site uses it: the only production caller sits
+    /// in `stream_loop/content_arms.rs`, which is at its 635-line
+    /// `scripts/audit_maintainability_config.toml` cap with zero headroom, so a
+    /// fifth argument would add a line there. The enclosing `discord_turn_bridge`
+    /// span still carries the keys on the tracing line.
+    AdoptTerminalDoneResult,
+    /// `bridge_entry_persist::seed_bridge_local_body` — the bridge-local body
+    /// being BORN from `TurnBridgeContext.full_response` at `turn_bridge/mod.rs`.
+    ///
+    /// Two of the five production `TurnBridgeContext` constructions seed it from
+    /// a durable inflight row —
+    /// `recovery_engine/restore_inflight.rs` (`state.full_response.clone()`,
+    /// restart recovery) and `tui_prompt_relay/claude_idle_bridge.rs`
+    /// (`claim.row.full_response.clone()`, TUI-direct idle continuation, which
+    /// its own guard shows is expected to be non-empty whenever
+    /// `start_offset >= claim.row.last_offset`). That is a durable-row adoption
+    /// by any reading, and it happens BEFORE the bridge task exists, so no
+    /// reconcile ever reports it: the shared adopter's `local == durable` no-op
+    /// skip guarantees the first `ReconcileFromInflightState` after such a seed
+    /// is silent. Recording the birth is what makes those bytes visible at all.
+    ///
+    /// Recorded from `before = ""` because that is literally true — there was no
+    /// bridge-local body a moment earlier — and skipped entirely for an empty
+    /// seed, which is not an adoption and is what the other three construction
+    /// sites pass.
+    SeedFromTurnBridgeContext,
 }
 
 impl BodyMutationSite {
@@ -319,6 +390,8 @@ impl BodyMutationSite {
             Self::RecoverBodyFromOutputFile => {
                 "empty_response_recovery::adopt_recovered_output_file_body"
             }
+            Self::AdoptTerminalDoneResult => "context_window::resolve_done_response",
+            Self::SeedFromTurnBridgeContext => "bridge_entry_persist::seed_bridge_local_body",
         }
     }
 
@@ -344,6 +417,12 @@ impl BodyMutationSite {
             }
             Self::RecoverBodyFromOutputFile => {
                 "src/services/discord/turn_bridge/terminal_outcome_delivery/empty_response_recovery/handler.rs:adopt_recovered_output_file_body"
+            }
+            Self::AdoptTerminalDoneResult => {
+                "src/services/discord/turn_bridge/context_window.rs:resolve_done_response"
+            }
+            Self::SeedFromTurnBridgeContext => {
+                "src/services/discord/turn_bridge/bridge_entry_persist.rs:seed_bridge_local_body"
             }
         }
     }

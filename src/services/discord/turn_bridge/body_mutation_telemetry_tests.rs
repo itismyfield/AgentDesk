@@ -824,6 +824,8 @@ fn record_shape_is_identical_at_every_site() {
         BodyMutationSite::ReconcileToolArmLocalsFromInflightState,
         BodyMutationSite::SilenceRequeuedResponse,
         BodyMutationSite::RecoverBodyFromOutputFile,
+        BodyMutationSite::AdoptTerminalDoneResult,
+        BodyMutationSite::SeedFromTurnBridgeContext,
     ];
     let labels: std::collections::BTreeSet<&str> = sites.iter().map(|site| site.as_str()).collect();
     assert_eq!(labels.len(), sites.len(), "site labels must be distinct");

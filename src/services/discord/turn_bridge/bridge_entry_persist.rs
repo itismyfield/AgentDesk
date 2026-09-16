@@ -220,6 +220,38 @@ pub(super) fn signal_bridge_entry_abort_completion(
 /// no record at all. Routing both through this one function means the no-op skip
 /// and its rationale cannot diverge between them, while the distinct `site`
 /// keeps the readout able to say WHICH fence carried the durable bytes in.
+/// #5938 r3 P0-2: record the BIRTH of the bridge-local body.
+///
+/// `turn_bridge/mod.rs` seeds its `full_response` local from
+/// `TurnBridgeContext.full_response`, and two of the five production
+/// constructions of that context fill it from a durable inflight row —
+/// `recovery_engine/restore_inflight.rs` on restart recovery and
+/// `tui_prompt_relay/claude_idle_bridge.rs` on TUI-direct idle continuation.
+/// Those are durable-row adoptions that happen BEFORE the bridge task exists, so
+/// nothing downstream can report them: [`adopt_full_response_from_inflight_row`]
+/// skips `local == durable`, which means the first reconcile after such a seed
+/// is structurally guaranteed to be silent, and the watcher bytes already in the
+/// row would never appear in the readout at all.
+///
+/// Called from `turn_bridge/mod.rs` as a ONE-LINE replacement for the former
+/// `bridge.full_response.clone()`, because that file sits at its 968-line
+/// `scripts/hotfile_ratchet.toml` ceiling and this PR does not raise caps.
+///
+/// An empty seed is not an adoption — it is what the other three construction
+/// sites pass — so it emits nothing, mirroring the no-op skip above.
+pub(super) fn seed_bridge_local_body(bridge: &TurnBridgeContext) -> String {
+    let seed = bridge.full_response.clone();
+    if !seed.is_empty() {
+        body_mutation_telemetry::observe_body_mutation(
+            BodyMutationSite::SeedFromTurnBridgeContext,
+            BodyMutationCorrelation::from_inflight_row(&bridge.inflight_state),
+            "",
+            seed.as_str(),
+        );
+    }
+    seed
+}
+
 pub(super) fn adopt_full_response_from_inflight_row(
     local: &mut String,
     durable: &str,
@@ -465,6 +497,127 @@ mod tests {
         GuardedSaveOutcome, InflightTurnState, RelayOwnerKind,
     };
     use crate::services::provider::ProviderKind;
+
+    fn seed_context(seed: &str, row: InflightTurnState) -> TurnBridgeContext {
+        let gateway: std::sync::Arc<dyn TurnGateway> =
+            std::sync::Arc::new(crate::services::discord::gateway::HeadlessGateway);
+        TurnBridgeContext {
+            provider: ProviderKind::Codex,
+            gateway,
+            channel_id: ChannelId::new(row.channel_id),
+            user_msg_id: None,
+            user_text_owned: String::new(),
+            request_owner_name: String::new(),
+            role_binding: None,
+            adk_session_key: None,
+            adk_session_name: None,
+            adk_session_info: None,
+            adk_cwd: None,
+            dispatch_id: None,
+            dispatch_kind: None,
+            memory_recall_usage: TokenUsage::default(),
+            context_window_tokens: 0,
+            context_compact_percent: 0,
+            current_msg_id: None,
+            response_sent_offset: 0,
+            full_response: seed.to_string(),
+            tmux_last_offset: None,
+            new_session_id: None,
+            defer_watcher_resume: false,
+            reuse_status_panel_message: false,
+            completion_tx: None,
+            is_external_input_tui_direct: false,
+            inflight_state: row,
+        }
+    }
+
+    fn seed_row() -> InflightTurnState {
+        let mut row = InflightTurnState::new(
+            ProviderKind::Codex,
+            5_938_031,
+            None,
+            343_742_347_365_974_026,
+            77_013,
+            18,
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+        row.dispatch_id = Some("dispatch-5938-seed".to_string());
+        row
+    }
+
+    /// #5938 r3 P0-2. `recovery_engine/restore_inflight.rs` and
+    /// `tui_prompt_relay/claude_idle_bridge.rs` build a `TurnBridgeContext` whose
+    /// `full_response` IS a durable inflight row, so the bridge-local body is born
+    /// already holding bytes it did not produce. Nothing downstream can report it:
+    /// `adopt_full_response_from_inflight_row` skips `local == durable`, so the
+    /// first reconcile after such a seed is structurally silent. Driven through
+    /// the REAL adapter `turn_bridge/mod.rs` calls.
+    #[test]
+    fn seeding_the_bridge_local_body_from_a_durable_row_is_recorded() {
+        use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::body_mutation_telemetry_tests::captured_logs;
+
+        let bridge = seed_context("COUNT-001\nCOUNT-002\n", seed_row());
+        let mut seeded = String::new();
+        let logs = captured_logs(|| {
+            seeded = seed_bridge_local_body(&bridge);
+        });
+
+        // The seed itself is byte-identical to the former `bridge.full_response.clone()`.
+        assert_eq!(seeded, "COUNT-001\nCOUNT-002\n");
+        assert!(
+            logs.contains("site=\"bridge_entry_persist::seed_bridge_local_body\""),
+            "the birth of the bridge-local body must be recorded; got: {logs}"
+        );
+        assert!(logs.contains("before_len=0"), "got: {logs}");
+        assert!(logs.contains("after_len=20"), "got: {logs}");
+        // The row is in hand here, so unlike the streamed append this site is joinable.
+        assert!(logs.contains("dispatch_id=\"dispatch-5938-seed\"") || !logs.contains("[invariant]"));
+    }
+
+    /// The other three production `TurnBridgeContext` constructions pass
+    /// `String::new()`. An empty seed is not an adoption and must stay out of the
+    /// readout, or every ordinary turn opens with a phantom record.
+    #[test]
+    fn an_empty_seed_is_not_an_adoption_and_records_nothing() {
+        use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::body_mutation_telemetry_tests::captured_logs;
+
+        let bridge = seed_context("", seed_row());
+        let mut seeded = String::from("untouched");
+        let logs = captured_logs(|| {
+            seeded = seed_bridge_local_body(&bridge);
+        });
+        assert!(seeded.is_empty());
+        assert!(logs.is_empty(), "got: {logs}");
+    }
+
+    /// #5938 r3 P0-2, the reason the birth had to be recorded at all: after a
+    /// non-empty seed the shared adopter is guaranteed to say nothing, because the
+    /// loop stages that same body back into the row before reading it.
+    #[test]
+    fn the_first_reconcile_after_a_seed_is_structurally_silent() {
+        use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::body_mutation_telemetry_tests::captured_logs;
+
+        let bridge = seed_context("COUNT-001\nCOUNT-002\n", seed_row());
+        let mut local = seed_bridge_local_body(&bridge);
+        let logs = captured_logs(|| {
+            adopt_full_response_from_inflight_row(
+                &mut local,
+                "COUNT-001\nCOUNT-002\n",
+                BodyMutationSite::ReconcileFromInflightState,
+                BodyMutationCorrelation::from_inflight_row(&bridge.inflight_state),
+            );
+        });
+        assert!(
+            logs.is_empty(),
+            "if this ever starts emitting, the seed record is redundant — until \
+             then it is the ONLY record of those bytes; got: {logs}"
+        );
+    }
 
     #[test]
     fn bridge_entry_failure_outcomes_abort_without_arming_cleanup() {

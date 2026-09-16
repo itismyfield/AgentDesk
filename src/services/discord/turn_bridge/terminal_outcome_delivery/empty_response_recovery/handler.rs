@@ -121,6 +121,15 @@ fn adopt_recovered_output_file_body(
         recovered.len(),
         channel_id
     );
+    // #5938 r3 P2-2: same no-op contract as the shared durable-row adopter
+    // (`bridge_entry_persist::adopt_full_response_from_inflight_row`). A recovery
+    // that hands back the body already in hand moved no bytes, and a phantom
+    // `before_len == after_len` record costs more in THIS class than in the
+    // blanking one, because class 1 is the channel the watcher-first verdict is
+    // read from.
+    if recovered == *full_response {
+        return false;
+    }
     observe_body_mutation(
         BodyMutationSite::RecoverBodyFromOutputFile,
         BodyMutationCorrelation::from_inflight_row(inflight_state),
@@ -586,6 +595,29 @@ mod body_mutation_tests {
         );
         assert!(logs.contains("before_len=10"), "got: {logs}");
         assert!(logs.contains("after_len=20"), "got: {logs}");
+    }
+
+    /// #5938 r3 P2-2: no-op parity with the shared durable-row adopter. A
+    /// recovery that reproduces the body already in hand moved no bytes, and a
+    /// phantom class-1 record is worse than a phantom class-3 one because class 1
+    /// is the channel the watcher-first verdict is read from.
+    #[test]
+    fn a_recovery_that_reproduces_the_current_body_records_nothing() {
+        let row = recovery_row();
+        let mut body = String::from("COUNT-001\nCOUNT-002\n");
+        let logs = captured_logs(|| {
+            assert!(!adopt_recovered_output_file_body(
+                &mut body,
+                "COUNT-001\nCOUNT-002\n".to_string(),
+                &row,
+                poise::serenity_prelude::ChannelId::new(5_938_013),
+            ));
+        });
+        assert_eq!(body, "COUNT-001\nCOUNT-002\n");
+        assert!(
+            !logs.contains("turn_bridge full_response body mutation"),
+            "got: {logs}"
+        );
     }
 
     /// The guard the extraction preserved: a blank recovery is not an adoption,

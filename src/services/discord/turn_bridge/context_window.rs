@@ -5,7 +5,38 @@
 /// - If streaming only accumulated pre-tool narration (tools used, no post-tool
 ///   text), replace with the authoritative `result` from the Done event.
 /// - If streaming produced nothing, use `result` directly.
+///
+/// #5938 r3 P0-1: every `Some` returned here replaces the bridge-local body
+/// wholesale, and `result` is NOT bridge-authored — on the TUI-direct path the
+/// `Done` frame is synthesised from the watcher's own output file. So the
+/// adoption is observed before it is handed back. See
+/// [`BodyMutationSite::AdoptTerminalDoneResult`] for the full path and for why
+/// this could not be left to the caller (`stream_loop/content_arms.rs` is at its
+/// line cap with zero headroom, so it can take no extra argument).
+///
+/// The decision itself is untouched: `decide_done_response` holds the original
+/// four arms byte for byte, this wrapper only records what that decision did.
+/// An adoption that returns the body already in hand is a no-op and is skipped,
+/// matching `bridge_entry_persist::adopt_full_response_from_inflight_row`.
 pub(super) fn resolve_done_response(
+    full_response: &str,
+    result: &str,
+    any_tool_used: bool,
+    has_post_tool_text: bool,
+) -> Option<String> {
+    let resolved = decide_done_response(full_response, result, any_tool_used, has_post_tool_text)?;
+    if resolved != full_response {
+        super::chunk_compose::body_mutation_telemetry::observe_body_mutation(
+            super::chunk_compose::body_mutation_telemetry::BodyMutationSite::AdoptTerminalDoneResult,
+            super::chunk_compose::body_mutation_telemetry::BodyMutationCorrelation::unavailable(),
+            full_response,
+            resolved.as_str(),
+        );
+    }
+    Some(resolved)
+}
+
+fn decide_done_response(
     full_response: &str,
     result: &str,
     any_tool_used: bool,
@@ -101,6 +132,79 @@ pub(super) fn apply_context_token_update(
 #[cfg(test)]
 mod tests {
     use super::resolve_done_response;
+    use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::body_mutation_telemetry_tests::captured_logs;
+
+    const SITE: &str = "site=\"context_window::resolve_done_response\"";
+
+    /// #5938 r3 P0-1, the verdict-inversion arm. When the streamed body is blank
+    /// the terminal `Done` result becomes the WHOLE turn body, and on the
+    /// TUI-direct path those bytes were decoded from the watcher's own output
+    /// file. Unrecorded, such a turn showed zero cross-boundary records and read
+    /// as bridge-first. Driven through the REAL function.
+    #[test]
+    fn a_blank_streamed_body_adopting_the_terminal_done_result_is_recorded() {
+        let logs = captured_logs(|| {
+            let resolved = resolve_done_response("", "COUNT-001\nCOUNT-002\n", false, false);
+            assert_eq!(resolved.as_deref(), Some("COUNT-001\nCOUNT-002\n"));
+        });
+        assert!(logs.contains(SITE), "got: {logs}");
+        assert!(logs.contains("before_len=0"), "got: {logs}");
+        assert!(logs.contains("after_len=20"), "got: {logs}");
+    }
+
+    /// #5938 r3 P0-1, the fingerprint-blindness arm.
+    /// `done_result_supersedes_streamed_partial` fires on
+    /// `terminal.starts_with(streamed)` with a longer terminal — which is exactly
+    /// the shape a DOUBLED body has. `record_from_parts` only evaluates
+    /// `body_is_exact_self_duplicate` when it builds a record, so while this site
+    /// was silent the #5938 predicate never saw the body it was about to deliver.
+    /// This pins both halves: the record exists AND it carries the verdict.
+    #[test]
+    fn a_doubled_terminal_result_is_recorded_and_carries_the_self_duplicate_verdict() {
+        let half = "알겠습니다. 바로 진행할게요.";
+        let doubled = half.repeat(2);
+        let logs = captured_logs(|| {
+            let resolved = resolve_done_response(half, &doubled, false, false);
+            assert_eq!(resolved.as_deref(), Some(doubled.as_str()));
+        });
+        assert!(logs.contains(SITE), "got: {logs}");
+        assert!(
+            logs.contains("self_duplicate=true"),
+            "the doubled body must reach the #5938 predicate here, because no \
+             later site will look at it; got: {logs}"
+        );
+        assert!(
+            logs.contains("[invariant]"),
+            "and it must raise the invariant, not just log the record; got: {logs}"
+        );
+    }
+
+    /// A `Done` the resolver declines moves no bytes, so it must stay out of the
+    /// readout.
+    #[test]
+    fn a_declined_done_records_nothing() {
+        let logs = captured_logs(|| {
+            assert!(resolve_done_response("streamed prose stays", "", false, false).is_none());
+            assert!(
+                resolve_done_response("streamed prose stays", "shorter", false, false).is_none()
+            );
+        });
+        assert!(logs.is_empty(), "got: {logs}");
+    }
+
+    /// No-op parity with `bridge_entry_persist::adopt_full_response_from_inflight_row`:
+    /// a result equal to the body already in hand is not an adoption.
+    #[test]
+    fn a_done_result_equal_to_the_body_in_hand_records_nothing() {
+        let logs = captured_logs(|| {
+            let body = "COUNT-001\nCOUNT-002\n";
+            // `any_tool_used && !has_post_tool_text` takes the replace arm, so the
+            // decision really does return `Some` here — the silence comes from the
+            // no-op skip, not from the resolver declining.
+            assert_eq!(resolve_done_response(body, body, true, false).as_deref(), Some(body));
+        });
+        assert!(logs.is_empty(), "got: {logs}");
+    }
 
     #[test]
     fn done_uses_terminal_result_when_streamed_response_is_tail_only() {
