@@ -254,6 +254,13 @@ banner "Intake-outbox done writer per-file call-site allowlist (#5071 T2)"
 "$PYTHON" -m unittest tests.test_intake_outbox_done_writer_call_sites
 "$PYTHON" -m unittest tests.test_rust_lex
 
+banner "Comment-only change checker self-tests"
+# scripts/check_comment_only_change.py decides whether a diff may skip human
+# review, so a false "comment-only" verdict ships unread code. These tests are
+# what stops that. The checker is an on-demand reviewer tool, not a tree gate:
+# nothing here runs it against this PR.
+"$PYTHON" -m unittest tests.test_comment_only_change
+
 banner "Hotfile LOC ratchet guard (#3565)"
 "$PYTHON" scripts/check_hotfile_ratchet.py
 "$PYTHON" -m unittest scripts.test_ratchet_admission
