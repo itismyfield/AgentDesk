@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 pub(super) use super::super::super::stream_tick::guarded_persist::VisibleMutationAuthority;
-use super::super::super::stream_tick::guarded_persist::{
-    stream_loop_suppression_cohort_admits, visible_mutation_authority_after_guarded_save,
-};
+use super::super::super::stream_tick::guarded_persist::visible_mutation_authority_after_guarded_save;
 use super::super::super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningRetargetAfterStateSave,
 };
@@ -205,15 +203,10 @@ pub(super) fn fence_restart_visible_mutation(
             context.has_post_tool_text,
         );
     }
-    // Each tool-arm fence is its own entry into the gate — these arms hold no
-    // per-tick locals `stream_tick` can lend them — so the cohort is asked here,
-    // once, on the way in.
-    let cohort_admits = stream_loop_suppression_cohort_admits(context.inflight_state.channel_id);
     visible_mutation_authority_after_guarded_save(
         outcome,
         context.inflight_state,
         intended_authority,
-        cohort_admits,
     )
 }
 
@@ -286,12 +279,10 @@ pub(super) async fn fence_terminal_tool_result_transition(
             context.has_post_tool_text,
         );
     }
-    let cohort_admits = stream_loop_suppression_cohort_admits(context.inflight_state.channel_id);
     let authority = visible_mutation_authority_after_guarded_save(
         outcome,
         context.inflight_state,
         intended_authority,
-        cohort_admits,
     );
     match terminal_tool_result_transition_permission(authority) {
         Ok(true) => TerminalToolResultFence::Prefenced(

@@ -268,6 +268,90 @@ tests net **+5,828**, generated net **+337**, tooling net **+6**이다.
 
 ---
 
+## §12-2 추가 — T6 D1 스트림 루프 구 판정·이중 경로 배선 철거 (2026-09-17, 착지)
+
+이 절은 base `origin/main d72504ca89` 위의 T6 슬라이스 **D1** 만 대사한다. 사용자가 S4 산문이
+요구한 선행조건 3개(100% 집행 / live acceptance / rollback 종료)를 승인했고, 다이얼이
+`relay_authority_mode: enforce` / `relay_authority_cohort_percent: 100` 이라는 사실은 커밋
+`730ccd418a` 본문에 기록돼 있다. **D1 은 S4 산문의 배선 절반만 집행한다 — 술어 본체·공용
+다이얼·cohort·관측 계약은 손대지 않는다.**
+
+**철거 후 의미:** `GuardedSaveOutcome::Missing` 이 코호트와 무관하게 항상
+`VisibleMutationAuthority::Suppressed` 로 매핑된다. `IdentityMismatch`(exact-episode veto)와
+`IoError`(retryable)는 움직이지 않는다. 100% enforce 다이얼 아래에서 이미 실행되던 경로이므로
+집행 의미 변화는 없고, 코호트가 `false` 로 되돌아갈 채널이 구조적으로 사라진다.
+
+경로는 `src/services/discord/` 기준이다.
+
+| 범위·현재 직접 호출 경로 | 철거한 레거시 경로 | 영구 보호·후속 처분 |
+|---|---|---|
+| S4 판정: `turn_bridge/stream_tick/guarded_persist.rs` 의 `visible_mutation_authority_after_guarded_save` | `cohort_admits: bool` 파라미터, `GuardedSaveOutcome::Missing if cohort_admits => Suppressed` 의 guard, 그리고 `Missing` 이 `AuthorityLost` 로 떨어지던 fall-through arm 을 철거했다. 이제 `Missing => Suppressed` 가 무조건이다. | `IdentityMismatch => AuthorityLost`(exact-episode veto)와 `IoError => Retry`(일시 저장 실패)는 그대로다. S2 관측점 `record_stream_loop_gate` 호출도 그대로다. |
+| S4 배선(tick): `turn_bridge/stream_tick.rs` | tick 진입 1회 코호트 읽기(`let cohort_admits = stream_loop_suppression_cohort_admits(channel_id.get())`)와 게이트 호출부 2곳의 인자, 그리고 import 이름을 철거했다. | 16개 `authorize_visible_mutation!` 사이트와 dirty flush 의 판정 경로 자체는 불변이다. |
+| S4 배선(tool-arm): `turn_bridge/stream_loop/tool_arms/authority.rs` | restart fence 와 terminal tool-result fence 의 코호트 문의 2곳(`let cohort_admits = …`)과 게이트 인자 2곳, use 블록의 술어 import 를 철거했다. | `stream_tool_outcome_after_restart_authority` 와 `terminal_tool_result_transition_permission` 의 매핑은 불변이다. `Missing` 이 `Suppressed` 가 되면서 restart arm 은 `AuthorityLost` 대신 `Continue` 로 귀결된다. |
+| **철거하지 않음** — 술어 본체 `guarded_persist.rs` 의 `stream_loop_suppression_cohort_admits` | 없음. 철거 집합 **밖**에 살아 있는 호출자가 있다: `turn_bridge/bridge_entry_persist.rs` 의 `bridge_entry_rowless_cohort_admits`(S7a 진입 게이트)가 위임 호출한다. | 본체 철거(D2)는 S7a 진입 게이트 철거가 선행이다. 테스트 `the_shipped_dial_admits_no_channel_to_the_stream_loop_enforcement_cohort` 는 보존했다 — 이름의 "stream_loop" 은 D1 이후 오칭이지만 개명은 술어의 새 소유자(S7a) 범위의 작업이다. |
+| **철거하지 않음** — 공용 rollout 다이얼 `relay_authority_mode`/`relay_authority_cohort_percent`, `relay_recovery/cohort.rs`, `relay_recovery/authority_observation.rs`, `relay_recovery/authority_retention.rs` | 없음. | 전부 S9 회수 경계다. D1 은 이 모듈들을 건드리지 않았고 `authority_observation` 은 doc 크로스레퍼런스 1줄만 갱신했다. |
+| **철거하지 않음** — `WatcherStateSnapshot.reachability_observation`, `axis_b_exact_episode_required` 등 `skipped_reason` 문자열 | 없음. | 이름이 observation/axis_b 라 관측처럼 보이나 전자는 `relay_recovery/destructive_warrant.rs` 가 소비하는 **증거 입력**이고 후자는 **집행 거부 사유**다. 둘 다 영구 보존이다. |
+
+**테스트 처분:** `guarded_persist_tests.rs` 의 어휘 pin
+`the_tick_reads_the_enforcement_cohort_once_and_both_gate_sites_use_that_read` 는 고정 대상
+소스가 사라져 전삭했다. 두 테스트는 의미가 반전돼 개명했다 —
+`recorded_stream_gate_old_mirrors_the_shipped_authority_mapping` →
+`recorded_stream_gate_new_mirrors_the_shipped_authority_mapping`(production 이 이제
+`stream_gate_new` 하나와만 거울이고, `stream_gate_old` 는 단조성 바닥으로만 남는다),
+`a_vanished_row_suppresses_inside_the_cohort_and_still_ends_lifecycle_outside_it` →
+`a_vanished_row_suppresses_without_ending_stream_lifecycle`. 뒤쪽은 CI 명명 계약 레인
+`t5-s4-missing-row-cohort-lifecycle` 의 선택자이므로 `scripts/relay_authority_contract_targets.json`·
+`scripts/check-ci-runner-hardening.sh`(job_sha256 재핀)·`.github/workflows/ci-pr.yml`·
+`tests/test_fast_check_ci_wiring.py` 를 같은 커밋에서 함께 갱신했다. 레인 `minimum` 은 1 그대로이며
+어떤 캡·베이스라인도 올리지 않았다. tool-arm 쪽
+`the_restart_fence_asks_the_cohort_and_a_vanished_row_still_ends_the_arm` 은
+`a_vanished_row_suppresses_the_restart_fence_without_ending_the_arm` 로 개명했다(레지스트리 밖).
+
+**슬라이스 독립성:** D1-P 와 D1-T 는 분리 불가다. 게이트 인자를 지우는 순간 그 인자를 넘기는
+테스트 호출지점이 컴파일되지 않으므로 한 커밋으로 착지해야 하고 되돌릴 때도 한 덩어리다.
+D1 은 다른 슬라이스를 선행으로 요구하지 않는다.
+
+**부수 효과 1건(중립):** 롤백 런북 `docs/runbooks/relay-authority-acceptance-rollback.md` 가
+기록한 "다이얼이 무음으로 `Legacy/0` 으로 복귀해 `AuthorityLost` 가 부활한다"는 위험은 D1 이후
+**스트림 게이트에 한해** 구조적으로 소멸한다(무조건 `Suppressed`). 진입 게이트(S7a) 쪽 같은
+위험은 그대로 남는다.
+
+**철거·예산 경계:** 이 갱신의 실제 T6 삭제는 `git diff --numstat origin/main -- src/` 기준
+**+59/−181 = 순증 −122줄**(production −24 / 테스트 −98)이다. census 예측은 −130(production −23 /
+테스트 −107)이었고 차이 −8 은 전부 census 가 `추정` 으로 표시한 테스트 재작성 두 건에서 나온다 —
+`recorded_stream_gate_*_mirrors_the_shipped_authority_mapping` 과 vanished-row 테스트를 예측보다
+덜 공격적으로 줄여 16셀 전수 커버리지와 unmoved 셀 단언을 그대로 남겼기 때문이다. 문서 갱신을
+포함한 리포 전체 순증은 **+183/−206 = −23줄**이다. 캡·베이스라인·레지스트리 숫자는 하나도 올리지
+않았다(CI 명명 레인 `minimum` 은 1 그대로, `#5321` 게이트 핀과 `job_sha256` 은 내용 변경에 따른
+재핀이며 완화가 아니다).
+
+### §12-2 마킹 계약 — 형식이 갈려 있어 마킹 grep 으로 census 를 못 한다
+
+§12-2 는 "대체한 레거시 경로에 deprecated 마킹을 남겨 철거를 마킹 grep 의 기계적 작업으로
+만든다"를 계약으로 둔다. 2026-09-17 base `d72504ca89` 실측 상태:
+
+- §12-2 가 지정한 `#[deprecated]` 형식은 `src/` 전체에 **0건**이다. `src/services/` 에서
+  `deprecated` 문자열을 포함한 파일은 `session_forwarding/trusted_target.rs` 와 `claude.rs`
+  **2개뿐**이고 **둘 다 릴레이 밖**이다.
+  재현: `rg -c '#\[deprecated' src/` · `rg -l -i 'deprecated' src/services/`.
+- 이 리포에서 실제 통용되는 철거 마킹은 `#[allow(dead_code)] // #NNNN: <사유>` 다.
+  `src/services/discord/` 에 **190건**(`cfg_attr` 형 포함), 그중 **79건**이 같은 줄에 `#NNNN`
+  이슈 참조를 단다.
+  재현: `rg -n 'allow\([^)]*\bdead_code\b' src/services/discord/ | wc -l`.
+- 별도 census 레인 실측: 호출자 0 후보 **40건 중 26건**이 이 주석을 달고 있다.
+
+**두 형식이 갈려 있어 §12-2 가 의도한 기계적 census 가 성립하지 않는다.** `#[deprecated]` 로
+grep 하면 0건이 나오지만 그 0건은 "철거할 것이 없다"는 뜻이 아니다. 죽었다는 사실은
+`#[allow(dead_code)] // #NNNN` 형태로 코드에 적혀 있고, 그 190건은 인벤토리로 승격돼 있지 않다.
+
+따라서 이 슬라이스의 좌표는 마킹 grep 이 아니라 **landed commit 역추적 + 심볼 전수 검색**으로
+얻었다 — 인벤토리가 지목한 landed commit(S4 `a5e8c64d65`/PR #5489, S5 `626d1b899e`/PR #5493,
+S6a `7d97f385ad`·`a9407c0ba4`·`f219523758`/PR #5495·#5496·#5497)을 직접 읽고 각 커밋이 추가한
+심볼을 현재 트리에서 `rg` 로 재확인해 생존/부재를 판정했다. 다음 철거 슬라이스도 같은 방법을
+쓰고, `#[allow(dead_code)] // #NNNN` 190건을 별도의 인벤토리 후보 풀로 읽어야 한다.
+
+---
+
 ## S1 — cohort infra (배포 no-op) · 브랜치 `feat/5464-t5-s1-cohort`
 
 **S1: 대체한 레거시 경로 없음(순수 추가).**
@@ -736,10 +820,16 @@ segmentation 은 48h 미만 다이얼 이탈에서 두 window 를 병합했고(r
 - **계속 살아 있는 경로:** 출하 기본값·관측 모드·rollout cohort 밖에서는 종전의 권위 상실과
   조기 종료가 그대로 동작한다. 부분 rollout과 rollback 동안의 호환 경로이며, 진입 시 내구 행
   부재 판정은 이 슬라이스가 대체하지 않았다.
-- **조건부 좁은 철거 후보:** 100% 집행, live acceptance, rollback 종료가 별도로 확인된 뒤에만
-  내구 행 소실을 권위 상실로 바꾸는 구 판정과 S4 전용 이중 경로 선택을 후보로 삼을 수 있다.
-  공용 rollout 다이얼·cohort와 관측·health 경로는 기존 S9 회수 계약을 따르며 이 후보에 포함되지
-  않는다.
+- **조건부 좁은 철거 후보 — 배선 절반 집행 완료 (T6 D1, 2026-09-17):** 원문은 "100% 집행,
+  live acceptance, rollback 종료가 별도로 확인된 뒤에만 내구 행 소실을 권위 상실로 바꾸는 구
+  판정과 S4 전용 이중 경로 선택을 후보로 삼을 수 있다. 공용 rollout 다이얼·cohort와 관측·health
+  경로는 기존 S9 회수 계약을 따르며 이 후보에 포함되지 않는다"였다. 세 선행조건이 승인된 뒤
+  **구 판정과 S4 전용 이중 경로 배선은 T6 D1 에서 철거됐다**(아래 "§12-2 추가 — T6 D1" 참조).
+  **술어 본체 `stream_loop_suppression_cohort_admits` 는 남았다** — 철거 집합 밖의 살아 있는
+  호출자 `turn_bridge/bridge_entry_persist.rs` 의 `bridge_entry_rowless_cohort_admits`(S7a 진입
+  게이트)가 위임 호출하며, 그 파일 독스가 "S4 and S7a enforce under ONE dial"로 공유를 명시한다.
+  본체 철거(D2)는 S7a 진입 게이트 철거가 선행돼야 하고, 공용 rollout 다이얼·cohort는 그대로
+  S9 회수 경계를 따른다. 순서는 **D1(완료) → S7a 진입 게이트 철거 → D2 → S9 다이얼 회수**다.
 - **영구 보존:** 다른 턴의 정확한 episode가 확인되거나 실제 전달 주체가 바뀐 경우의 권위 상실,
   일시 저장 실패 때의 가시 변경 억제와 재시도, 같은 위임 권위 아래 bridge 가시 변경만 억제하는
   동작은 남아야 한다. 내구 행 소실 뒤 정상 종료 처리에 도달한 낡은 bridge가 후임을 오염시키지
@@ -757,10 +847,23 @@ segmentation 은 48h 미만 다이얼 이탈에서 두 window 를 병합했고(r
   결정했다. S6a는 선택된 집행 채널의 자동 후보에 같은 정본 판정의 거부권을 결합했다. 따라서
   S5 증인은 S6a의 선행 비교 근거이지 병렬 권위가 아니며, S6a 밖의 출하 기본값·관측 모드·
   cohort 밖·증거 부재·수동 복구·비유닉스 구조 경로는 계속 살아 있다.
-- **조건부 좁은 철거 후보:** 100% 집행, live acceptance, rollback 종료가 모두 확인된 뒤에만
-  구조 판정과 새 인가의 차이를 rollout 증거용으로 병기하던 S5 전용 기록·누적·상세 진단과
-  소비자 옆의 독립 관측 배선을 S6a의 관측 회수 후보와 함께 검토할 수 있다. 공용 rollout
-  다이얼·cohort와 다른 슬라이스도 쓰는 관측·health 계약은 기존 S9 회수 경계를 따른다.
+- **조건부 좁은 철거 후보 — 이미 철거됨 (2026-09-17 정정):** 원문은 "100% 집행, live
+  acceptance, rollback 종료가 모두 확인된 뒤에만 구조 판정과 새 인가의 차이를 rollout 증거용으로
+  병기하던 S5 전용 기록·누적·상세 진단과 소비자 옆의 독립 관측 배선을 S6a의 관측 회수 후보와
+  함께 검토할 수 있다"였다. **이 후보는 커밋 `730ccd418a`(PR #5860, 2026-09-12,
+  "refactor(relay): retire axis-B recovery observation", 19파일 +357/−1195)에서 이미 전량
+  철거됐고 현재 트리 잔여는 0줄이다.** 그 커밋이 `AXIS_B_SCHEMA`·`AXIS_B_TRIAGE`·`AXIS_B_SINK`·
+  `AXIS_B_WRITER`·`AXIS_B_DROPPED_RECORDS`·`AXIS_B_WRITE_FAILURES`·`AxisBWrite`·
+  `AxisBObservationReport`·`AxisBStamp`·`AxisBRecord`·`axis_b_dial`·`axis_b_stamp`·`record_axis_b`·
+  `axis_b_sink`·`enqueue_axis_b_jsonl`·`axis_b_jsonl_path`·`with_axis_b_writer`·
+  `append_axis_b_jsonl`·`axis_b_observation_report` 19개 심볼과 소비자 옆 독립 관측 배선
+  (`observe_axis_b_candidate` 호출 5곳: 자동 소비자 4곳 + 수동 1곳)을 함께 제거했다.
+  재삽입은 `relay_recovery.rs` 의 ratchet 테스트 두 개가 0으로 고정한다 —
+  `destructive_consumers_cannot_read_reachability_for_routing` 가 `axis_b_observation_report`·
+  `AxisBObservationReport`·`AXIS_B_TRIAGE` 와 `observe_axis_b_candidate` 라우팅을 금지 목록으로
+  잡고, `automatic_warrant_wiring_is_pinned_at_the_four_direct_consumers` 가 호출 수를 고정한다.
+  **이 문단을 T6 잔여로 계상하면 안 된다.** 공용 rollout 다이얼·cohort와 다른 슬라이스도 쓰는
+  관측·health 계약은 기존 S9 회수 경계를 그대로 따른다.
 - **영구 보존:** 모든 자동 후보가 같은 정본 도달성 판정을 쓰고 후보와 인가가 일대일로
   결속된다는 보장, 별칭·재노출·포맷 부수경로로 다른 판정을 만들지 못하게 하는 정적 전수 잠금,
   정본 동등성 CI gate는 남아야 한다. 증거 부재 때 복구 가용성을 보존하고 관측 실패를 파괴 권위로
@@ -797,10 +900,18 @@ segmentation 은 48h 미만 다이얼 이탈에서 두 window 를 병합했고(r
   계속 결정한다. 비유닉스에서도 같은 이유로 종전 구조 기반 복구가 유지되며, 운영자가 대상을
   지정한 수동 복구는 자동 인가 밖에 남는다. 이들은 복구 가용성과 권한 분리를 위한 영구 경계이지
   일괄 철거할 레거시 우회가 아니다.
-- **조건부 좁은 철거 후보:** rollout 비교용 관측·진단은 live acceptance와 rollback 종료 뒤에만
-  회수 여부를 검토할 수 있다. 구 버전의 episode 신원이 fleet에서 소멸했음이 별도로 입증되는
-  경우에는 그 신원 부재 호환 기권도 좁은 후보가 될 수 있다. 현재 즉시 철거 가능한 S6a 권위
-  경로는 없다.
+- **조건부 좁은 철거 후보 — 관측·진단은 이미 철거됨 (2026-09-17 정정):** 원문은 "rollout
+  비교용 관측·진단은 live acceptance와 rollback 종료 뒤에만 회수 여부를 검토할 수 있다"였다.
+  **그 관측·진단은 S5 와 같은 경로였고 같은 커밋 `730ccd418a`(PR #5860, 2026-09-12)가 전량
+  철거했다. 현재 트리 잔여는 0줄이다.** `health.detail.axis_b_observation` 투영도 함께
+  제거됐고, `health/snapshot.rs:1399`·`:1438`·`:1531` 이 public·detail 양쪽에서 필드 부재를
+  고정한다. 문서 자신이 "현재 즉시 철거 가능한 S6a 권위 경로는 없다"고 적었으므로 관측·진단까지
+  사라진 지금 **S6a 잔여는 0 이며 T6 잔여로 계상하면 안 된다.**
+- **후보에서 제외 (선행조건 미충족):** "구 버전의 episode 신원이 fleet에서 소멸했음이 별도로
+  입증되는 경우 그 신원 부재 호환 기권"(`relay_recovery/destructive_warrant.rs` 의
+  `EpisodeEvidence::OperandAbsent => eligible: true`)은 좌표는 특정되지만 그 전제가 승인된 세
+  선행조건(100% 집행 / live acceptance / rollback 종료)에 포함되지 않는다. 아래 영구 보존의
+  "도달성 증거 부재 때의 기권"과 표면이 인접해 오판 위험이 높으므로 후보에서 제외한다.
 - **영구 보존:** 자동 후보와 인가의 일대일 결속, 명시적 episode 불일치 거부, registry·snapshot·
   도달성 증거 부재 때의 기권, 전송 상태가 불명확할 때 일반 파괴를 막는 동작, 내구 episode를
   예약한 비파괴 재부착의 복구 예외, 수동 복구 분리는 남아야 한다. PR #5496과 #5497은 이 의미를

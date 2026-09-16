@@ -29,14 +29,10 @@ fn queued_restart_foreign_authority_propagates_loss_while_self_delegation_contin
     let mut foreign = bridge.clone();
     foreign.set_watcher_owner_channel_id(foreign.channel_id + 1);
     foreign.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
-    // #5464 T5 S4: driven with the cohort ADMITTING, because the propagation this
-    // pins must survive enforcement — `IdentityMismatch` is an exact-episode veto
-    // and keeps ending the lifecycle inside the cohort (ERRATUM R3-E4-3).
     let foreign_authority = visible_mutation_authority_after_guarded_save(
         crate::services::discord::inflight::GuardedSaveOutcome::IdentityMismatch,
         &foreign,
         intended,
-        true,
     );
     assert_eq!(foreign_authority, VisibleMutationAuthority::AuthorityLost);
     assert_eq!(
@@ -49,7 +45,6 @@ fn queued_restart_foreign_authority_propagates_loss_while_self_delegation_contin
         crate::services::discord::inflight::GuardedSaveOutcome::Saved,
         &foreign,
         delegated,
-        true,
     );
     assert_eq!(self_delegated, VisibleMutationAuthority::Suppressed);
     assert_eq!(
@@ -59,17 +54,11 @@ fn queued_restart_foreign_authority_propagates_loss_while_self_delegation_contin
 }
 
 /// #5464 T5 S4 at the tool-arm entry, driven through production: with no durable
-/// row the real restart fence reports `Missing`, and under the SHIPPED dial that
-/// must still end the arm exactly as it does today.
-///
-/// The two fence functions ask the cohort themselves — they hold none of
-/// `stream_tick`'s per-tick locals — so the source assertion below pins that they
-/// still ASK. A literal at either call site would keep this file's behavioural
-/// assertions green while silently pinning the whole tool-arm surface to one side
-/// of the rollout, and the promotion evidence S2 collects would then describe a
-/// gate the arms are not running.
+/// row the real restart fence reports `Missing`, which suppresses this arm's
+/// visible mutation instead of ending the arm, so `post_loop_finalize` stays
+/// reachable.
 #[test]
-fn the_restart_fence_asks_the_cohort_and_a_vanished_row_still_ends_the_arm() {
+fn a_vanished_row_suppresses_the_restart_fence_without_ending_the_arm() {
     let temp = tempfile::TempDir::new().expect("runtime root");
     let _env_guard = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
 
@@ -94,8 +83,7 @@ fn the_restart_fence_asks_the_cohort_and_a_vanished_row_still_ends_the_arm() {
 
     // Nothing was ever saved for this channel, so the guarded save inside the
     // fence can only answer `Missing` — asserted, because `IdentityMismatch`
-    // maps to the same `AuthorityLost` and would let this pass for the wrong
-    // reason.
+    // would reach the fence as an exact-episode veto and still end the arm.
     assert!(
         crate::services::discord::inflight::load_inflight_state(
             &ProviderKind::Codex,
@@ -120,21 +108,12 @@ fn the_restart_fence_asks_the_cohort_and_a_vanished_row_still_ends_the_arm() {
     });
     assert_eq!(
         authority,
-        VisibleMutationAuthority::AuthorityLost,
-        "outside the enforcement cohort a vanished row must still end the arm",
+        VisibleMutationAuthority::Suppressed,
+        "a vanished row must suppress the arm's visible mutation, not end the arm",
     );
     assert_eq!(
         stream_tool_outcome_after_restart_authority(Some(authority)),
-        StreamToolArmOutcome::AuthorityLost,
-    );
-
-    let source = include_str!("authority.rs");
-    assert_eq!(
-        source
-            .matches("stream_loop_suppression_cohort_admits(context.inflight_state.channel_id)")
-            .count(),
-        2,
-        "both tool-arm fences must read the cohort instead of passing a literal",
+        StreamToolArmOutcome::Continue,
     );
 }
 
