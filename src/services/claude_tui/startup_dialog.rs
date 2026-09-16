@@ -254,25 +254,33 @@ mod tests {
 
     #[test]
     fn trust_dialog_for_home_workspace_is_auto_accepted() {
-        let pane = trust_dialog_pane_for("/Users/kunkun/.adk/release/workspaces/gamer");
+        let root = tempfile::tempdir().expect("absolute test root");
+        let home = root.path().join("operator");
+        let workspace = home.join(".adk/release/workspaces/gamer");
+        let pane = trust_dialog_pane_for(&workspace.to_string_lossy());
         let dialog = detect_claude_startup_dialog(&pane).expect("trust dialog must be detected");
         assert_eq!(
-            plan_startup_dialog_response_with_home(&dialog, Some(Path::new("/Users/kunkun"))),
+            plan_startup_dialog_response_with_home(&dialog, Some(&home)),
             StartupDialogPlan::DismissWithEnter
         );
     }
 
     #[test]
     fn trust_dialog_outside_home_is_rejected_component_wise() {
-        // `/Users/kunkun2` must not pass a `/Users/kunkun` home check; the
-        // policy compares path components, not string prefixes.
-        let pane = trust_dialog_pane_for("/Users/kunkun2/workspace");
+        // Both paths must be absolute on the host so rejection exercises the
+        // component boundary, not merely the absolute-path guard.
+        let root = tempfile::tempdir().expect("absolute test root");
+        let home = root.path().join("operator");
+        let workspace = root
+            .path()
+            .join("operator2/workspace")
+            .display()
+            .to_string();
+        let pane = trust_dialog_pane_for(&workspace);
         let dialog = detect_claude_startup_dialog(&pane).expect("trust dialog must be detected");
         assert_eq!(
-            plan_startup_dialog_response_with_home(&dialog, Some(Path::new("/Users/kunkun"))),
-            StartupDialogPlan::FailUntrustedWorkspace {
-                workspace: "/Users/kunkun2/workspace".to_string()
-            }
+            plan_startup_dialog_response_with_home(&dialog, Some(&home)),
+            StartupDialogPlan::FailUntrustedWorkspace { workspace }
         );
     }
 
