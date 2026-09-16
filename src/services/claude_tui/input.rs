@@ -1609,12 +1609,9 @@ fn wait_for_prompt_ready_polling(
         if prompt_marker_confirms_prompt_ready(readiness, &snapshot) {
             return Ok(());
         }
-        // Startup dialogs (resume-from-summary picker, workspace trust) park
-        // the pane on an option selector whose highlighted `❯ 1. ...` row
-        // reads as a composer draft, so neither the marker check above nor
-        // the transcript fallback below would ever pass. Handle them before
-        // the transcript fallback so an idle transcript cannot confirm
-        // readiness while a modal dialog is still swallowing input.
+        // Resume, trust, and rate-limit dialogs make the highlighted `❯ 1. ...`
+        // option look like a composer draft. Handle them before transcript
+        // readiness so an idle transcript cannot accept input through a modal.
         if let Some(dialog) =
             crate::services::claude_tui::startup_dialog::detect_claude_startup_dialog(
                 &snapshot.pane_tail,
