@@ -20,7 +20,9 @@ pub(crate) async fn inspect(
     let shared = runtime(registry, provider, channel).await?;
     let lease = identity(&shared, provider, channel).await?;
     if let Some(expected) = lease.as_ref() {
-        matching_inflight(provider, expected)?;
+        // A missing row is not a refusal (#5951 RG1); a present-but-protected
+        // or foreign row still is.
+        let _ = matching_inflight(provider, expected)?;
     }
     Ok(lease)
 }
@@ -70,8 +72,12 @@ mod tests {
         );
     }
 
+    /// #5951 S2 closing test 1 — a lease whose durable projection is gone is
+    /// still INSPECTABLE: the identity comes from the mailbox snapshot, which
+    /// exists whenever the lease does. Before S2 this returned `Err`, which is
+    /// what made a rowless channel unreachable for an operator.
     #[tokio::test]
-    async fn turn_lease_registry_inspect_rejects_missing_inflight() {
+    async fn turn_lease_registry_inspect_returns_rowless_lease_identity() {
         with_isolated_runtime_root(|| async {
             let registry = HealthRegistry::new();
             let shared = make_shared_data_for_tests_with_storage(None);
@@ -82,17 +88,25 @@ mod tests {
                 .restore_active_turn(token.clone(), UserId::new(7), MessageId::new(123))
                 .await;
             registry.register("codex".into(), shared.clone()).await;
-            let error = inspect(&registry, &ProviderKind::Codex, channel)
+            assert!(
+                inflight::load_inflight_state(&ProviderKind::Codex, channel.get()).is_none(),
+                "precondition: this episode has no durable projection"
+            );
+            let lease = inspect(&registry, &ProviderKind::Codex, channel)
                 .await
-                .unwrap_err();
-            assert!(error.contains("matching inflight identity is missing"));
+                .expect("a rowless lease is inspectable")
+                .expect("the mailbox snapshot is the identity source");
+            assert_eq!(lease.channel_id, channel.get());
+            assert_eq!(lease.user_message_id, 123);
+            assert_eq!(Some(lease.turn_nonce.as_str()), token.turn_nonce());
             assert!(
                 shared
                     .mailbox(channel)
                     .snapshot()
                     .await
                     .cancel_token
-                    .is_some()
+                    .is_some(),
+                "inspect never mutates the lease"
             );
             assert!(!token.is_completion_cleanup());
         })
