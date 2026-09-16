@@ -346,6 +346,15 @@ banner "PostgreSQL test-lane membership gate (#4979, enforced)"
 "$PYTHON" scripts/check_pg_test_lane_membership.py --baseline-ref "$TEST_LANE_BASELINE_REF"
 "$PYTHON" -m unittest tests.test_check_pg_test_lane_membership
 
+banner "New production file comment-ratio gate"
+# The 999-line blind spot: hotfile_ratchet only stops an ALREADY-huge file from
+# re-expanding, and both giant-file gates begin at 1,000 lines, so no gate
+# measured a brand-new file below that. #5953 added a 711-line file that was
+# 398 lines of comment and registered in neither ratchet. Added files only --
+# retroactive enforcement would red 200+ existing files at once.
+"$PYTHON" scripts/check_new_file_comment_ratio.py --base-ref "$TEST_LANE_BASELINE_REF"
+"$PYTHON" -m unittest tests.test_new_file_comment_ratio
+
 banner "Process-global Mutex<()> poison-recovery gate (#5185)"
 # The rule this enforces was documented in src/config.rs and recurred anyway:
 # one real failure reported itself as 11, was repaired at one mutex, and then a
