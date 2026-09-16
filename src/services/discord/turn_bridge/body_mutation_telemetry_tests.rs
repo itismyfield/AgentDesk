@@ -947,11 +947,20 @@ fn from_inflight_row_carries_every_key_the_row_holds() {
             &doubled,
         );
     });
-    assert!(logs.contains("dispatch_id=\"dispatch-5938-keys\""), "got: {logs}");
-    assert!(logs.contains("session_key=\"adk-session-keys\""), "got: {logs}");
+    assert!(
+        logs.contains("dispatch_id=\"dispatch-5938-keys\""),
+        "got: {logs}"
+    );
+    assert!(
+        logs.contains("session_key=\"adk-session-keys\""),
+        "got: {logs}"
+    );
     // `turn_id_for_state`'s spelling, so the stored row joins the rest of the
     // observability surface.
-    assert!(logs.contains("turn_id=\"discord:5938021:77012\""), "got: {logs}");
+    assert!(
+        logs.contains("turn_id=\"discord:5938021:77012\""),
+        "got: {logs}"
+    );
 }
 
 /// A row with no anchored user message produces NO turn_id rather than a
