@@ -5329,6 +5329,10 @@ services::discord::settings::write::yaml_write_back_secret_tests::typed_gate_rej
 services::discord::shared_state::restart_lifecycle_tests::check_deferred_restart_fresh_token_decrements_once_without_exit
 services::discord::shared_state::restart_lifecycle_tests::legacy_actor_store_matrix_preserves_unwritten_flags
 services::discord::shared_state::restart_lifecycle_tests::shutdown_reader_observes_live_writer_and_clone
+services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_command_injection_attempt
+services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_plain
+services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_unicode
+services::discord::sidecar_interaction::tests::test_escape_posix_shell_arg_with_quotes
 services::discord::single_message_panel::tests::carried_entry_notification_updates_latest_target_not_superseded_text
 services::discord::single_message_panel::tests::completion_footer_below_ttl_keeps_animating_registered_target
 services::discord::single_message_panel::tests::completion_footer_consecutive_edit_failures_evict_registered_target
