@@ -1,6 +1,7 @@
 pub mod agent_identity;
 pub mod agent_protocol;
 pub mod agent_quality;
+pub mod agent_recovery;
 pub mod agents;
 pub mod analytics;
 pub mod api_friction;

@@ -47,6 +47,9 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
         .map_err(anyhow::Error::msg)
         .context("Failed to init PostgreSQL")?;
     }
+    if let Some(pool) = pg_pool.as_ref() {
+        crate::services::agent_recovery::hydrate_from_pg(pool).await;
+    }
     crate::services::provider_hosting::install_provider_hosting_config(&config);
 
     let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool.clone())

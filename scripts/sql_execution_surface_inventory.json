@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "measured_at_sha": "76ce4159d307cec395c0dfcbf5f7938d45cc8d4c",
+  "measured_at_sha": "4d7d0190b1cf99f6279afe5100a39310b64f73f9",
   "records": [
     {
       "root": "migrations/postgres",
@@ -1075,6 +1075,33 @@
     },
     {
       "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0117_agent_recovery_channel_state.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:2b7a8de4652c79678f9e4c4ff1e71500523f815ab455b1e28b62c4eed7bac899"
+    },
+    {
+      "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0118_agent_recovery_fencing_generation.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:b005f69becc057c941bd5167a10d14dafd61292197f216599562df87c7304eec"
+    },
+    {
+      "root": "migrations/postgres",
+      "kind": "MIGRATION",
+      "path": "migrations/postgres/0119_agent_recovery_pending_intents.sql",
+      "api": "migration.file",
+      "symbol": "file",
+      "classification": "STATIC_FILE",
+      "fingerprint": "sha256:fc78c4bd3726d3d8885922958c371d64e7185ce58aaef3e4ece24c26d507f458"
+    },
+    {
+      "root": "migrations/postgres",
       "kind": "MIGRATION_METADATA",
       "path": "migrations/postgres/checksum-repair-allowlist.json",
       "api": "migration.non_sql_tracked",
@@ -1089,7 +1116,7 @@
       "api": "migration.non_sql_tracked",
       "symbol": "non_sql_tracked",
       "classification": "NON_SQL_TRACKED",
-      "fingerprint": "sha256:18f63df3c56e56b04dfab1a4acc0b392bc60fa338da4a079ceba581ed3b92042"
+      "fingerprint": "sha256:65c7b328062c195c617a4ba3df36d7aefbbe94e94cedf0bab4372d17b3846922"
     },
     {
       "root": "policies",
@@ -18883,6 +18910,123 @@
       "symbol": "query_scalar",
       "classification": "STATIC",
       "fingerprint": "sha256:7141cef951ad68279509b4c0847dc9f1e0f762cfd5cb06c0b38341b7e0adb287"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/checkpoint.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:064e7bbf326b94d35c928d4e683e4e8169f0d9959539cd3bd09beabe857ac0a8"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/checkpoint.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4bea47bc7dd8abcd92a30157d70deec62cf08d53a5f0a310773faf69ab7e5b77"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/checkpoint.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a536dfd26d18c90478fb17c8e720a62f1f7f989351ce59495cd948c7acbeac10"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/checkpoint.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:c496108ab01f05966542fd9b0c69f8e837235324f7f9e27fc6b66896f2f6420b"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/checkpoint.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:4dd16bf69d3a2a7845bc09c67c4a0610aaeb58022e6a04382fe98bc90afacb00"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/checkpoint.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:6d5298bddb17e93b5789e539d27eb2217c0f90b7315847458deaabb8f69ab688"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/checkpoint.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:7fdc0c096f572b725ddfbdf4b91f9fa30e11c1de34817ffb8e66b567d243bd4c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/checkpoint.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:9239a075484a2ceb51d74e08f940834a4129452940b5acb10e274e1e9bc04459"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/checkpoint.rs",
+      "api": "sqlx::query_as",
+      "symbol": "query_as",
+      "classification": "STATIC",
+      "fingerprint": "sha256:b91a0c0eafc8d867453b5fbe1812fd9f1c2b8fda44da1c018b31aeffc42fa097"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/durable/operations.rs",
+      "api": "sqlx::query_scalar",
+      "symbol": "query_scalar",
+      "classification": "STATIC",
+      "fingerprint": "sha256:ad90de340139a4e37eef1acdedc361e09717ca91496176b4d82cb4882e9c61f0"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/durable/postgres_tests.rs",
+      "api": "sqlx::query",
+      "symbol": "query",
+      "classification": "STATIC",
+      "fingerprint": "sha256:39678be627812fd12c842d436ac6fe40f99ede87a07b663786e61787ca50233c"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/durable/postgres_tests.rs",
+      "api": "sqlx::raw_sql",
+      "symbol": "raw_sql",
+      "classification": "STATIC",
+      "fingerprint": "sha256:8f785c3e9dd4d3317fb3beaa86bd677b523137efb84432480bcd5da6e2698991"
+    },
+    {
+      "root": "src",
+      "kind": "RUST",
+      "path": "src/services/agent_recovery/durable/postgres_tests.rs",
+      "api": "sqlx::raw_sql",
+      "symbol": "raw_sql",
+      "classification": "STATIC",
+      "fingerprint": "sha256:a27f11b69373baabb9c35c99a596e4e9cec6a6ee6e55c99e47a3535649141429"
     },
     {
       "root": "src",
