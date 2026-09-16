@@ -1,30 +1,17 @@
-//! Operand assembly for the composed relay verdict — #5942.
-//!
-//! Split out of `super` (`health/snapshot.rs`) by #5942 r4. That file is a
-//! registered giant (`scripts/giant_file_registry.toml`, `decision = "shrink"`,
-//! #5447, deadline 2027-02-28) and r3 grew its production LoC by 94, which the
-//! `giant_file_progress.py` no-regression gate rejects. Nothing here changed in
-//! the move: the four items below are the ones `super` already called, with the
-//! same bodies, and the `#[cfg(unix)]` gate they each carried is now on the
-//! `mod` declaration instead.
-//!
-//! # Where `super` publishes what these operands decide
+//! Operand assembly for the composed relay verdict — #5942. Split out of
+//! `super` (`health/snapshot.rs`, a registered giant per
+//! `scripts/giant_file_registry.toml`, #5447) with no behavior change: same
+//! bodies, `#[cfg(unix)]` moved to the `mod` declaration.
 //!
 //! The expiry these operands can produce surfaces on
 //! `DiscordHealthSnapshot::expired_relay_ledgers`, beside `degraded_reasons`
-//! rather than inside it, and `server::routes::health_api::public_health_json`
-//! re-projects that vector onto the unauthenticated `/api/health` body. Expiry
-//! must not be silent — the failure the field exists for is a set that GROWS —
-//! but it must also not be counted into the degraded axis, because counting it
-//! is the saturation #5942 reported.
+//! rather than inside it — it must not be silent, but must also not be
+//! counted into the degraded axis (that conflation is the saturation #5942
+//! reported).
 //!
-//! An empty vector is NOT the normal steady state. On the node that reported
-//! #5942 three routine channels are stamped once a day and expire about ten
-//! minutes after each run, so the vector is non-empty for roughly 23 of every
-//! 24 hours. A reader must therefore look at the entry COUNT and at
-//! `unobserved_for_secs` (an age past a day means the routine did not run at
-//! all), never at emptiness. There is no such reader in this repo yet — #5947
-//! tracks adding one or removing the field.
+//! An empty vector is NOT the normal steady state; a reader must look at the
+//! entry COUNT and `unobserved_for_secs`, never at emptiness. There is no such
+//! reader in this repo yet — #5947 tracks adding one or removing the field.
 
 use crate::services::discord::relay_health::{RelayActiveTurn, RelayHealthSnapshot};
 use crate::services::provider::ProviderKind;
@@ -80,49 +67,42 @@ pub(super) fn relay_verdict_probe_operands(
     }
 }
 
-/// The detail path's execution-owner witness (#5942 r2, P1-4).
+/// The detail path's execution-owner witness (#5942).
 ///
-/// **The two health paths do NOT share a probe, and this comment used to claim
-/// they did.** They ask different questions on purpose and r2 left it that way:
+/// The two health paths intentionally do NOT share a probe — they ask
+/// different questions:
 ///
-/// * the AGGREGATE path (`build_health_snapshot_with_options`) probes
-///   `tmux::session_presence` — "does the session exist" — because the bool it
-///   also derives (`tmux_present`) has consumers all over `super` and in stall
-///   recovery, and changing what THEY mean is not #5942's to do;
-/// * the DETAIL path probes `tmux::pane_liveness` — "does the session have a
-///   live pane" — which is what `tmux_session_alive` has always published.
+/// * AGGREGATE (`build_health_snapshot_with_options`) probes
+///   `tmux::session_presence` — "does the session exist" — because its
+///   derived `tmux_present` bool has consumers across `super` and stall
+///   recovery that #5942 does not change;
+/// * DETAIL probes `tmux::pane_liveness` — "does the session have a live
+///   pane" — matching what `tmux_session_alive` has always published.
 ///
-/// The one property that matters for the ledger TTL is held on BOTH: a probe
-/// that could not answer yields [`ExecutorWitness::Unwitnessed`] and therefore
-/// cannot expire anything. `PaneLiveness::ProbeError` arrives here as `None`,
-/// and `SessionPresence::ProbeFailed` becomes `Unwitnessed` in
-/// `witness_tmux_session_within`.
+/// Both share one property the ledger TTL relies on: a probe that could not
+/// answer yields [`ExecutorWitness::Unwitnessed`] and therefore cannot expire
+/// anything (`PaneLiveness::ProbeError` → `None`; `SessionPresence::ProbeFailed`
+/// → `Unwitnessed` in `witness_tmux_session_within`).
 ///
-/// They diverge in THREE places, each pinned by
+/// They diverge in three places, pinned by
 /// `the_two_health_paths_agree_inside_the_probe_and_diverge_on_the_wedge_the_budget_and_the_blank_name`:
 ///
-/// * the dead-pane wedge — a session that still exists with only dead panes.
-///   The aggregate reads `Present` (blocks expiry), the detail reads `Absent`
-///   (would expire);
-/// * the shared probe budget. Only the aggregate path is charged against it, so
-///   an exhausted budget withholds the aggregate witness while the detail one
-///   answers normally;
-/// * a BLANK session name (r4, P2-2). `tmux::session_presence` rejects it as
-///   `ProbeFailed` → `Unwitnessed`, while `tmux::pane_liveness` rejects it as
-///   `DeadOrAbsent` → `Some(false)` → `Absent` here. r3's doc claimed a third
-///   divergence would fail the test; the test enumerated only two, so it did
-///   not. It enumerates all three now.
+/// * dead-pane wedge (session exists, only dead panes) — aggregate reads
+///   `Present` (blocks expiry), detail reads `Absent` (would expire);
+/// * shared probe budget — only the aggregate path is charged against it, so
+///   an exhausted budget withholds only the aggregate witness;
+/// * blank session name — `tmux::session_presence` rejects it as
+///   `ProbeFailed` → `Unwitnessed`; `tmux::pane_liveness` rejects it as
+///   `DeadOrAbsent` → `Some(false)` → `Absent` here.
 ///
-/// Both err in the safe direction where it counts on the first two: the
-/// aggregate is the path that decides `/api/health`'s `ok`, and there it is the
-/// one that refuses to expire. The blank name is the exception and is harmless
-/// for a different reason — the detail path publishes no expiry, it only
-/// abstains from the warrant, so its stricter reading costs a warrant operand
-/// rather than a ledger.
+/// The first two err safe: the aggregate path decides `/api/health`'s `ok`
+/// and there it refuses to expire. The blank-name divergence is harmless for
+/// a different reason — the detail path publishes no expiry, it only
+/// abstains from the warrant.
 ///
-/// `(None, None)` is not a probe fault — `probe_tmux_session_alive` returns
-/// `None` without probing when there is no session name — so it is a positive
-/// absence, matching the aggregate path's rule for the same situation.
+/// `(None, None)` is a positive absence, not a probe fault:
+/// `probe_tmux_session_alive` returns `None` without probing when there is no
+/// session name, matching the aggregate path's rule for the same situation.
 pub(super) fn detail_executor_witness(
     tmux_session_alive: Option<bool>,
     tmux_session: Option<&str>,

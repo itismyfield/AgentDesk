@@ -1,48 +1,23 @@
 use super::*;
 
-/// Bounded upper limit for the strict-terminator re-scan when the default
-/// 64KB tail window does not contain a turn-state envelope but the transcript
-/// is larger than the window. Post-terminator housekeeping bursts (`/model`,
-/// `/compact`, attachment metadata, …) can exceed 64KB and push the real
-/// terminator out of the default window, which left the idle-queue stuck on
-/// `Busy` forever (#3030). We widen the window once, up to this ceiling, so a
-/// terminator that merely scrolled out of the small tail is still found —
-/// while keeping the read bounded so the 9+ hot call sites never read a whole
-/// multi-megabyte transcript on every probe.
+/// Upper bound for the strict-terminator re-scan's widened window, used when
+/// the default 64KB tail lacks a turn-state envelope. A post-terminator
+/// housekeeping burst (`/model`, `/compact`, attachments) can push the real
+/// terminator past 64KB and stick the idle-queue on `Busy` forever (#3030);
+/// this bounds the one-time widen so hot call sites never read a multi-MB file.
 const TURN_STATE_MAX_TAIL_BYTES: u64 = 1024 * 1024;
 
-/// Strict, relay-offset-independent "is the last turn fully over?" probe.
-///
-/// `jsonl_ready_for_input` calls this on the `offset_behind` path (the relay
-/// has not consumed the whole transcript). #2790 introduced it so a fully
-/// written terminator envelope reports Ready even though trailing bytes are
-/// still unconsumed — otherwise the idle-queue drain loops forever
-/// (`hosted TUI structured turn state is busy` every 2s).
-///
-/// #2790 only inspected the single latest line. Claude writes post-turn
-/// housekeeping envelopes *after* the terminator — `pr-link`, `ai-title`,
-/// `last-prompt`, `mode`, `attachment`, plus a `permission-mode` envelope
-/// emitted whenever the user opens an interactive `/model` / `/compact` view
-/// and returns to the prompt. With those trailing lines the latest line is
-/// no longer the terminator, so the probe wrongly reported Busy and the
-/// queued message was never drained — the recurring "no active turn yet the
-/// queue is stuck" bug (observed 9×; see the watcher test note in
-/// `tmux_watcher.rs`).
-///
-/// We now walk backward across those non-turn-state housekeeping lines to
-/// find the most recent *definitive* turn-state envelope:
-///   - a terminator (`result` / `system{turn_duration,stop_hook_summary,init}`
-///     / Codex `turn.completed`) proves the turn is over → idle.
-///   - a `user`/`assistant` envelope proves a turn is in flight → not idle.
-///   - a partial/unparseable trailing fragment cannot prove anything (a new
-///     turn may be mid-write), so we stop and report not-idle — preserving
-///     #2790's race guard against dispatching onto a just-restarted turn.
-///   - `permission-mode` (Unknown) and unrecognized housekeeping envelopes
-///     (None) are skipped; on this offset-behind readiness path the caller
-///     has no active turn, so a trailing `permission-mode` is `/model`
-///     metadata, not a turn spin-up. (The watcher's completion gate has its
-///     own `full_response`-non-empty guard, so this skip cannot tear down a
-///     spinning-up turn — see #2712.)
+/// Strict, relay-offset-independent "is the last turn fully over?" probe,
+/// used by `jsonl_ready_for_input` on the `offset_behind` path (relay has not
+/// consumed the whole transcript). Without this, a fully written terminator
+/// followed by trailing post-turn housekeeping (`pr-link`, `ai-title`, mode
+/// envelopes, …) reads as Busy forever (#2790, #3030) — see
+/// [`scan_strict_terminator`] for the walk-back algorithm that finds the real
+/// terminator beneath such trailing lines. On this path the caller has no
+/// active turn, so a skipped trailing `permission-mode` is `/model` metadata,
+/// never a turn spin-up; the watcher's completion gate has its own
+/// `full_response`-non-empty guard against tearing down a spinning-up turn
+/// (#2712).
 pub(crate) fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
     scan_strict_terminator_idle_with_strictness(
         provider,
@@ -51,36 +26,18 @@ pub(crate) fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path)
     )
 }
 
-/// #3016 S3 (Concern 1): the STRICTER turn-END-only sibling of
-/// [`jsonl_strict_terminator_idle`], used ONLY by the finalize `Done` decision
-/// (`TurnFinalizer::completion_signal_state`).
+/// The STRICTER turn-END-only sibling of [`jsonl_strict_terminator_idle`],
+/// used ONLY by the finalize `Done` decision
+/// (`TurnFinalizer::completion_signal_state`, #3016 S3 Concern 1).
 ///
-/// The lenient probe above accepts the whole "Idle-class" envelope family as
-/// proof the session is at rest — for Codex that includes `session_meta`,
-/// `thread.started`, `event_msg{task_complete}`, AND a *completed*
-/// `agent_message` (`item.completed`). That leniency is correct for the
-/// idle-queue *drain* (it asks "is the session ready to accept input?"), but it
-/// is WRONG as a turn-END terminator: a completed `agent_message` written
-/// immediately BEFORE a tool call is mid-turn — the turn is still LIVE — yet the
-/// lenient scan reads it as Idle. Finalizing on that signal over-finalizes a
-/// live turn.
-///
-/// This probe accepts as Idle ONLY the authoritative per-provider TURN
-/// terminator:
-///   - Codex: ONLY `type == "turn.completed"` (NOT `task_complete`, NOT a
-///     completed `agent_message`, NOT `session_meta`/`thread.started`).
-///   - Claude: ONLY the real turn terminator — `type == "result"` or the
-///     `system{turn_duration | stop_hook_summary}` turn-end envelope. NOT
-///     `system{init}` (a SESSION-start marker, never a turn-end), NOT any
-///     housekeeping/mode envelope.
-///
-/// Everything else (the lenient Idle-class markers, housekeeping, unknown
-/// metadata) is treated as "keep looking" so the reverse scan walks back to the
-/// real terminator beneath trailing housekeeping — while streaming/user
-/// envelopes and torn non-housekeeping fragments still report Busy. The
-/// torn-trailing skip and the housekeeping-walk-back are preserved verbatim; the
-/// ONLY behavioural change versus the lenient scan is which envelopes are
-/// allowed to *produce* an Idle verdict.
+/// Where the lenient probe treats the whole per-provider "Idle-class" family
+/// as at-rest — including a *completed* `agent_message`, which for Codex can
+/// be written mid-turn right before a tool call — this one accepts only the
+/// authoritative TURN-END terminator; see
+/// [`TerminatorStrictness::FinalizeAuthority`] and
+/// [`envelope_is_turn_end_terminator`] for exactly which envelopes qualify.
+/// Everything else is walked past rather than treated as Busy, same as the
+/// lenient scan; only which envelopes may *produce* an Idle verdict differs.
 pub(crate) fn jsonl_turn_end_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
     jsonl_completion_scan_idle(provider, path)
 }
@@ -104,7 +61,6 @@ fn scan_strict_terminator_idle_with_strictness(
     path: &Path,
     strictness: TerminatorStrictness,
 ) -> bool {
-    // First pass over the default 64KB tail window.
     let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
         // A read error cannot prove the turn has ended → conservative Busy.
         return false;
@@ -112,11 +68,9 @@ fn scan_strict_terminator_idle_with_strictness(
     match scan_strict_terminator(provider, &window.lines, strictness) {
         StrictTerminatorScan::Idle => return true,
         StrictTerminatorScan::Busy => return false,
-        // The window contained no definitive turn-state envelope. If it already
-        // covered the whole file there is nothing more to read → conservative
-        // Busy. Otherwise the real terminator may have scrolled out of the
-        // small tail window behind a post-terminator housekeeping burst
-        // (`/model`, `/compact`, attachments — #3030); widen once, bounded.
+        // No definitive envelope in this window. If it already covers the whole
+        // file, stay Busy; otherwise the terminator may have scrolled out behind
+        // a housekeeping burst (#3030) — widen once, bounded.
         StrictTerminatorScan::Inconclusive => {
             if window.window_covers_file {
                 return false;
@@ -129,9 +83,8 @@ fn scan_strict_terminator_idle_with_strictness(
     };
     match scan_strict_terminator(provider, &wide.lines, strictness) {
         StrictTerminatorScan::Idle => true,
-        // Even in the widened window we found no terminator (or the terminator
-        // is still older than the 1MB ceiling): stay conservatively Busy rather
-        // than assume idle on an ambiguous, unbounded transcript.
+        // Still no terminator within the 1MB ceiling: stay Busy rather than
+        // assume idle on an ambiguous, unbounded transcript.
         StrictTerminatorScan::Busy | StrictTerminatorScan::Inconclusive => false,
     }
 }
@@ -179,22 +132,15 @@ fn scan_strict_terminator(
         let json = match serde_json::from_str::<Value>(trimmed) {
             Ok(json) => json,
             Err(_) => {
-                // A single torn *trailing* write (the writer was mid-flush when
-                // we read) should not pin the session Busy forever. We skip at
-                // most ONE such line, and ONLY when we can *positively* identify
-                // it as recognized post-turn housekeeping (e.g. a partial
-                // `permission-mode` / `mode` envelope). Requirements:
-                //   - it is the very last non-empty line (the only place a torn
-                //     write can legitimately appear), and
-                //   - it looks truncated (does not end in `}`), and
-                //   - its recoverable top-level `type` is a *known* housekeeping
-                //     marker — NOT active (`user`/`assistant`/streaming), NOT a
-                //     terminator we would trust from a partial, and NOT an
-                //     unrecoverable/too-short fragment (e.g. `{"ty`, which could
-                //     be the start of a new `user` envelope).
-                // Anything we cannot positively prove is housekeeping keeps the
-                // session Busy — false-busy here is recoverable; false-idle
-                // injects input mid-turn (#3030).
+                // A single torn *trailing* write (writer mid-flush) should not
+                // pin the session Busy forever. Skip at most ONE such line,
+                // and only when it is: the very last non-empty line, looks
+                // truncated (no trailing `}`), and its recoverable top-level
+                // `type` is a *known* housekeeping marker (not active, not a
+                // trusted partial terminator, not an unrecoverable fragment
+                // like `{"ty`). Anything not positively proven housekeeping
+                // stays Busy — false-busy is recoverable, false-idle injects
+                // input mid-turn (#3030).
                 if allow_torn_trailing_skip
                     && rev_index == 0
                     && is_torn_trailing_fragment(trimmed)
@@ -218,15 +164,11 @@ fn scan_strict_terminator(
             Some(TuiTurnState::Idle) => match strictness {
                 // Lenient: any Idle-class envelope proves at-rest.
                 TerminatorStrictness::DrainReadiness => return StrictTerminatorScan::Idle,
-                // Turn-END-only (#3016 S3, Concern 1): an Idle-class envelope
-                // proves the TURN ended ONLY when it is the authoritative
-                // per-provider turn terminator. A non-terminator Idle-class
-                // marker (Codex `session_meta`/`thread.started`/`task_complete`/
-                // completed `agent_message`; Claude `system{init}`) is NOT a
-                // turn boundary — a completed `agent_message` right before a tool
-                // call is mid-turn — so walk PAST it to the real terminator
-                // beneath, exactly like trailing housekeeping. It can never
-                // *create* a Done verdict on its own.
+                // Turn-END-only (#3016 S3): an Idle-class envelope ends the
+                // turn only when it is the authoritative terminator — a
+                // non-terminator Idle-class marker (e.g. a completed
+                // `agent_message` right before a tool call) is walked PAST to
+                // the real terminator beneath, same as trailing housekeeping.
                 TerminatorStrictness::FinalizeAuthority => {
                     if envelope_is_turn_end_terminator(provider, &json) {
                         return StrictTerminatorScan::Idle;
@@ -237,12 +179,9 @@ fn scan_strict_terminator(
             Some(TuiTurnState::Streaming | TuiTurnState::UserSubmitted) => {
                 return StrictTerminatorScan::Busy;
             }
-            // Skip post-turn housekeeping (`permission-mode` → Unknown) and
-            // unrecognized metadata envelopes (None); keep looking for the
-            // real terminator. Unknown/None NEVER count as idle (#3030): a
-            // renamed housekeeping envelope must not be able to *create* an
-            // idle verdict — it can only be skipped over to reveal the real,
-            // structurally-recognized terminator beneath it.
+            // Skip housekeeping (`permission-mode` → Unknown) and unrecognized
+            // envelopes (None); never idle on their own (#3030) — only walked
+            // past to reveal the real terminator beneath.
             Some(TuiTurnState::Unknown) | None => continue,
         }
     }
@@ -257,22 +196,16 @@ fn provider_envelope_turn_state(provider: &ProviderKind, json: &Value) -> Option
     }
 }
 
-/// #3016 S3 (Concern 1): is this fully-parsed envelope the AUTHORITATIVE
-/// per-provider TURN-END terminator (the genuine turn boundary), as opposed to a
-/// merely "Idle-class" / at-rest marker that the lenient scan also trusts?
+/// Is this fully-parsed envelope the AUTHORITATIVE per-provider TURN-END
+/// terminator (#3016 S3), as opposed to a merely "Idle-class" at-rest marker
+/// the lenient scan also trusts? Intentionally the NARROW subset:
+///   - Codex: ONLY `turn.completed` — excludes `session_meta`/`thread.started`,
+///     `task_complete`, and a completed `agent_message` (can be mid-turn);
+///   - Claude: ONLY `result` and `system{turn_duration | stop_hook_summary}` —
+///     excludes `system{init}` (session-start, never a turn end).
 ///
-/// This is intentionally the NARROW subset of the Idle-class family:
-///   - Codex: ONLY `turn.completed`. `session_meta`/`thread.started` (session
-///     bring-up), `event_msg{task_complete}` (a task signal, not the turn
-///     record), and a completed `agent_message` (`item.completed`, which can be
-///     written mid-turn right before a tool call) are EXCLUDED.
-///   - Claude: ONLY `result` and the `system{turn_duration | stop_hook_summary}`
-///     turn-end envelopes. `system{init}` is a SESSION-start marker — never a
-///     turn end — and is EXCLUDED.
-///
-/// Callers guarantee `json` already classified as `TuiTurnState::Idle` via the
-/// per-provider classifier, so a `false` here means "Idle-class but not a turn
-/// boundary → keep scanning back".
+/// Callers guarantee `json` already classified `TuiTurnState::Idle`, so
+/// `false` means "Idle-class but not a boundary → keep scanning back".
 pub(super) fn envelope_is_turn_end_terminator(provider: &ProviderKind, json: &Value) -> bool {
     let Some(type_str) = json.get("type").and_then(Value::as_str) else {
         return false;
@@ -306,17 +239,14 @@ pub(super) fn is_torn_trailing_fragment(trimmed: &str) -> bool {
     bytes.first() == Some(&b'{') && bytes.last() != Some(&b'}')
 }
 
-/// Positive identification that a torn trailing partial is *recognized post-turn
-/// housekeeping* and therefore safe to skip over. This is the conservative
-/// inverse of an "is it active?" check: we skip ONLY when we can affirmatively
-/// classify the partial's top-level `type` as a known mode/permission marker.
-/// An unrecoverable type (too short, e.g. `{"ty`), an active envelope, or a
-/// partial terminator all return `false` → the caller stays Busy.
-///
-/// We reuse the same top-level field-fragment parser the standard observer uses
-/// so a partial `{"type":"permission-mode"...` is recognized before its line is
-/// fully flushed, without ever mistaking a partial `{"type":"user"...` for
-/// housekeeping.
+/// Positive identification that a torn trailing partial is recognized
+/// post-turn housekeeping and therefore safe to skip. The conservative
+/// inverse of an "is it active?" check: skip only when the partial's
+/// top-level `type` affirmatively classifies as a known mode/permission
+/// marker; an unrecoverable, active, or partial-terminator type all return
+/// `false`. Reuses the same top-level field-fragment parser the standard
+/// observer uses, so a partial `{"type":"permission-mode"...` is recognized
+/// before the line is fully flushed.
 fn partial_is_skippable_housekeeping(provider: &ProviderKind, trimmed: &str) -> bool {
     if !trimmed.trim_start().starts_with('{') {
         return false;
@@ -336,22 +266,14 @@ fn partial_is_skippable_housekeeping(provider: &ProviderKind, trimmed: &str) -> 
     }
 }
 
-/// Heuristic shape match for the family of `/model` / `/compact` interactive-
-/// view and mode-change housekeeping envelopes (`permission-mode`, `mode`, and
-/// future renames like `model-mode` / `permission_mode`). These are never
-/// turn-state signals.
-///
-/// Used ONLY by the strict offset-behind scan's torn-write skip
-/// (`partial_is_skippable_housekeeping`) to positively identify a truncated
-/// trailing line as safe-to-skip housekeeping. It is deliberately NOT wired into
-/// `claude_envelope_turn_state`: there, mapping the whole family to `Unknown`
-/// would stop the standard observer's walk-back across a completed turn's
-/// trailing `mode` housekeeping and wrongly report not-ready (see the note in
-/// `claude_envelope_turn_state`).
-///
-/// Deliberately narrow: matches only types that *are* a mode marker (`mode`),
-/// end in a `-mode`/`_mode` suffix, or carry a `permission` token. It must not
-/// match any envelope that could be a real turn-state signal.
+/// Heuristic shape match for `/model` / `/compact` mode-change housekeeping
+/// envelopes (`permission-mode`, `mode`, future `model-mode`/`permission_mode`
+/// renames) — never turn-state signals. Used ONLY by
+/// `partial_is_skippable_housekeeping`'s torn-write skip; deliberately NOT
+/// wired into `claude_envelope_turn_state`, where mapping the whole family to
+/// `Unknown` would break the standard observer's walk-back across a completed
+/// turn's trailing `mode` housekeeping (see the note there). Deliberately
+/// narrow — must not match any envelope that could be a real turn-state signal.
 pub(super) fn is_interactive_mode_housekeeping_type(type_str: &str) -> bool {
     type_str == "mode"
         || type_str.ends_with("-mode")
