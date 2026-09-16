@@ -84,30 +84,62 @@ fn exhaustion_switches_before_launch_and_unknown_usage_is_eligible() {
     let mut router = Router::default();
     let candidates = vec!["a".into(), "b".into(), "c".into()];
     assert_eq!(
-        router.select("codex", 1, &candidates, 100, |id| id != "a"),
-        "b"
+        router
+            .select("codex", 1, &candidates, 100, |id| id != "a")
+            .as_deref(),
+        Some("b")
     );
     // Healthy sticky account avoids crossing homes on each new request.
-    assert_eq!(router.select("codex", 1, &candidates, 101, |_| true), "b");
-    assert_eq!(router.select("claude", 1, &candidates, 101, |_| true), "a");
-    assert_eq!(router.select("codex", 2, &candidates, 101, |_| true), "a");
+    assert_eq!(
+        router
+            .select("codex", 1, &candidates, 101, |_| true)
+            .as_deref(),
+        Some("b")
+    );
+    assert_eq!(
+        router
+            .select("claude", 1, &candidates, 101, |_| true)
+            .as_deref(),
+        Some("a")
+    );
+    assert_eq!(
+        router
+            .select("codex", 2, &candidates, 101, |_| true)
+            .as_deref(),
+        Some("a")
+    );
 }
 
 #[test]
 fn retry_chain_is_bounded_even_after_cooldown_expires() {
     let mut router = Router::default();
     let candidates = vec!["a".into(), "b".into(), "c".into()];
-    assert_eq!(router.select("qwen", 1, &candidates, 100, |_| true), "a");
+    assert_eq!(
+        router
+            .select("qwen", 1, &candidates, 100, |_| true)
+            .as_deref(),
+        Some("a")
+    );
     assert_eq!(
         router.fail("qwen", 1, 42, 1, 100, |_| true),
         Some(("a".into(), "b".into()))
     );
-    assert_eq!(router.select("qwen", 1, &candidates, 102, |_| true), "b");
+    assert_eq!(
+        router
+            .select("qwen", 1, &candidates, 102, |_| true)
+            .as_deref(),
+        Some("b")
+    );
     assert_eq!(
         router.fail("qwen", 1, 42, 1, 102, |_| true),
         Some(("b".into(), "c".into()))
     );
-    assert_eq!(router.select("qwen", 1, &candidates, 104, |_| true), "c");
+    assert_eq!(
+        router
+            .select("qwen", 1, &candidates, 104, |_| true)
+            .as_deref(),
+        Some("c")
+    );
     assert_eq!(router.fail("qwen", 1, 42, 1, 104, |_| true), None);
     // A different user request can use the now recovered account.
     assert_eq!(
@@ -122,9 +154,24 @@ fn failed_account_is_cooled_down_across_channels_but_not_providers() {
     let candidates = vec!["a".into(), "b".into()];
     router.select("grok", 1, &candidates, 100, |_| true);
     router.fail("grok", 1, 42, 300, 100, |_| true);
-    assert_eq!(router.select("grok", 2, &candidates, 101, |_| true), "b");
-    assert_eq!(router.select("claude", 2, &candidates, 101, |_| true), "a");
-    assert_eq!(router.select("grok", 3, &candidates, 401, |_| true), "a");
+    assert_eq!(
+        router
+            .select("grok", 2, &candidates, 101, |_| true)
+            .as_deref(),
+        Some("b")
+    );
+    assert_eq!(
+        router
+            .select("claude", 2, &candidates, 101, |_| true)
+            .as_deref(),
+        Some("a")
+    );
+    assert_eq!(
+        router
+            .select("grok", 3, &candidates, 401, |_| true)
+            .as_deref(),
+        Some("a")
+    );
 }
 
 #[test]
@@ -134,8 +181,31 @@ fn exhausted_or_invalid_backups_stop_and_policy_removal_resets_selection() {
     router.select("opencode", 1, &candidates, 100, |_| true);
     assert_eq!(router.fail("opencode", 1, 42, 300, 100, |_| false), None);
     assert_eq!(
-        router.select("opencode", 1, &["b".into()], 101, |_| true),
-        "b"
+        router
+            .select("opencode", 1, &["b".into()], 101, |_| true)
+            .as_deref(),
+        Some("b")
     );
     assert_eq!(router.fail("opencode", 1, 42, 300, 101, |_| true), None);
+}
+
+#[test]
+fn no_eligible_account_never_falls_back_to_a_pressured_or_cooled_primary() {
+    let mut router = Router::default();
+    let candidates = vec!["a".into(), "b".into()];
+    assert_eq!(
+        router.select("codex", 71, &candidates, 100, |_| false),
+        None
+    );
+    assert_eq!(router.select("codex", 71, &[], 100, |_| true), None);
+    router.select("codex", 71, &candidates, 101, |_| true);
+    router.fail("codex", 71, 42, 300, 102, |_| true);
+    router.fail("codex", 71, 42, 300, 103, |_| true);
+    assert_eq!(router.select("codex", 71, &candidates, 104, |_| true), None);
+    assert_eq!(
+        router
+            .select("codex", 71, &candidates, 403, |_| true)
+            .as_deref(),
+        Some("b")
+    );
 }

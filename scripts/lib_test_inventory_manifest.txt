@@ -7880,6 +7880,7 @@ services::provider_auth_profile::fallback::tests::exhaustion_switches_before_lau
 services::provider_auth_profile::fallback::tests::explicit_fallback_then_priority_then_remainder_are_deduplicated
 services::provider_auth_profile::fallback::tests::failed_account_is_cooled_down_across_channels_but_not_providers
 services::provider_auth_profile::fallback::tests::invalid_or_cross_provider_policy_fails_closed
+services::provider_auth_profile::fallback::tests::no_eligible_account_never_falls_back_to_a_pressured_or_cooled_primary
 services::provider_auth_profile::fallback::tests::retry_chain_is_bounded_even_after_cooldown_expires
 services::provider_auth_profile::tests::agy_named_profile_does_not_require_home
 services::provider_auth_profile::tests::apply_overlay_sets_and_unsets

@@ -39,6 +39,7 @@ fn select(channel: u64) -> String {
         &["a".into(), "b".into(), "c".into()],
         |id| !profile_deferred(&ProviderKind::Codex, id, Some(AGENT)),
     )
+    .expect("an account meets the admission policy")
 }
 
 #[test]

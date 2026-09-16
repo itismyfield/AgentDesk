@@ -132,7 +132,7 @@ impl Router {
         candidates: &[String],
         now: i64,
         available: impl Fn(&str) -> bool,
-    ) -> String {
+    ) -> Option<String> {
         self.prune(now);
         let route = self
             .routes
@@ -154,16 +154,11 @@ impl Router {
         let selected = if candidates.contains(&route.selected) && eligible(&route.selected) {
             route.selected.clone()
         } else {
-            candidates
-                .iter()
-                .find(|id| eligible(id))
-                .cloned()
-                // No usable alternate: retain normal provider error handling.
-                .unwrap_or_else(|| candidates[0].clone())
+            candidates.iter().find(|id| eligible(id)).cloned()?
         };
         route.selected = selected.clone();
         route.touched_at = now;
-        selected
+        Some(selected)
     }
 
     fn fail(
@@ -217,7 +212,7 @@ pub(crate) fn select(
     channel: u64,
     candidates: &[String],
     available: impl Fn(&str) -> bool,
-) -> String {
+) -> Option<String> {
     let now = chrono::Utc::now().timestamp();
     let mut router = router().lock().unwrap_or_else(|p| p.into_inner());
     router.select(provider.as_str(), channel, candidates, now, available)

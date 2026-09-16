@@ -385,9 +385,21 @@ fn spawn_auth_overlay_for_context(
             .cloned()
             .unwrap_or_default();
         let candidates = policy.candidates(&provider, &primary_overlay.profile_id, &catalog);
-        let selected = fallback::select(&provider, channel, &candidates, |id| {
-            fallback_profile_available(&provider, id, agent_id, &catalog)
-        });
+        let selected = if policy.enabled
+            && crate::services::provider_auth_profile::extra_account_login_supported(&provider)
+        {
+            fallback::select(&provider, channel, &candidates, |id| {
+                fallback_profile_available(&provider, id, agent_id, &catalog)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "no eligible {} auth profile: accounts are pressured or cooling down",
+                    provider.as_str()
+                )
+            })?
+        } else {
+            primary_overlay.profile_id.clone()
+        };
         resolve(provider.clone(), Some(&selected), None, &catalog)
             .map_err(|error| error.to_string())?
     } else {
