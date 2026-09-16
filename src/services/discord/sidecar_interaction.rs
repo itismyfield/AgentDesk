@@ -196,12 +196,23 @@ async fn ephemeral_reply(
     Ok(())
 }
 
+/// Quote and escape an argument for POSIX shell execution (`'...'`).
+/// Any embedded single quotes are safely closed and re-opened as `'\''`.
+/// Inside single quotes in POSIX shell, no expansions (variable, command, arithmetic)
+/// can occur, preventing remote command injection while preserving all Unicode,
+/// spaces, and special characters.
+pub(crate) fn escape_posix_shell_arg(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Run `SidecarLauncher <action> "<device>"` on the chosen Mac.
 /// `mac-book` → local binary; `mac-mini` → over SSH (key/agent auth).
 /// Returns `(success, detail)` where detail is trimmed stdout/stderr.
 async fn run_sidecar_action(mac: &str, action: &str, device: &str) -> (bool, String) {
     let mut cmd = if mac == "mac-mini" {
-        let remote = format!("~/bin/SidecarLauncher {action} \"{device}\"");
+        let escaped_action = escape_posix_shell_arg(action);
+        let escaped_device = escape_posix_shell_arg(device);
+        let remote = format!("~/bin/SidecarLauncher {escaped_action} {escaped_device}");
         let mut c = tokio::process::Command::new("/usr/bin/ssh");
         c.args([
             "-o",
@@ -386,5 +397,38 @@ pub(super) async fn handle_sidecar_interaction(
             Ok(())
         }
         _ => ephemeral_reply(ctx, component, "알 수 없는 Sidecar 동작입니다.").await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_posix_shell_arg_plain() {
+        assert_eq!(escape_posix_shell_arg("iPad"), "'iPad'");
+        assert_eq!(escape_posix_shell_arg("iPad Pro"), "'iPad Pro'");
+    }
+
+    #[test]
+    fn test_escape_posix_shell_arg_with_quotes() {
+        assert_eq!(
+            escape_posix_shell_arg("Kunkun's iPad"),
+            "'Kunkun'\\''s iPad'"
+        );
+    }
+
+    #[test]
+    fn test_escape_posix_shell_arg_unicode() {
+        assert_eq!(escape_posix_shell_arg("홍길동의 iPad"), "'홍길동의 iPad'");
+    }
+
+    #[test]
+    fn test_escape_posix_shell_arg_command_injection_attempt() {
+        assert_eq!(
+            escape_posix_shell_arg("iPad\"; rm -rf / ; #"),
+            "'iPad\"; rm -rf / ; #'"
+        );
+        assert_eq!(escape_posix_shell_arg("`whoami`$(id)"), "'`whoami`$(id)'");
     }
 }
