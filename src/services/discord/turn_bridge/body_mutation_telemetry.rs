@@ -19,16 +19,60 @@
 //! appearing under two different `site` values inside one turn pins the double
 //! write immediately — that identification is the whole point of the record.
 //!
-//! COVERAGE (why four sites, not two): the readout is a per-turn stream of
-//! `before_len` / `after_len` pairs, and an analyst reads a gap between one
-//! record's `after_len` and the next record's `before_len` as loss. Every
-//! mutation of the bridge-local body must therefore appear, including the two
-//! that SHRINK it — `append_tool_boundary_separator` (trailing-whitespace
-//! truncate + `"\n\n"`, once per `StreamMessage::ToolUse`, whose result
-//! `stream_loop/tool_arms.rs` writes straight into the durable row) and
-//! `clear_response_delivery_state` (empty-sink rewind, which blanks the local
-//! body and the row body together). Omitting them produced exactly the
-//! `after_len=N` → `before_len=N-2` discontinuity this doc warns about.
+//! COVERAGE — the selection criterion, and what it deliberately leaves out.
+//!
+//! This module does NOT record every assignment to the bridge-local
+//! `full_response`. It records exactly three classes, stated here as a rule so
+//! a later reader can check a site against the rule instead of guessing:
+//!
+//! 1. CROSS-BOUNDARY ADOPTION — a site that copies bytes the bridge did not
+//!    itself produce INTO the bridge-local body. Exactly two origins exist: the
+//!    durable inflight row's `full_response` (the channel the watcher and the
+//!    bridge seed each other through) and the tmux output file (the watcher's
+//!    OWN source, which the empty-response recovery path re-reads directly).
+//!    Those are the only ways a byte the watcher wrote can enter this body, so
+//!    these are the sites the watcher-first / bridge-first verdict is read
+//!    from: `ReconcileFromInflightState`,
+//!    `ReconcileToolArmLocalsFromInflightState`, `RecoverBodyFromOutputFile`.
+//! 2. STREAM-LOOP ACCUMULATION — the two composers that build the body during
+//!    the turn, including the one that SHRINKS it: `AppendStreamedTextChunk`,
+//!    `AppendToolBoundarySeparator`.
+//! 3. SHARED BLANKING — a site that empties the bridge-local body AND the
+//!    durable row body in the same breath, so the bytes leave the shared
+//!    channel rather than just the local copy: `ClearResponseDeliveryState`,
+//!    `SilenceRequeuedResponse`.
+//!
+//! WHY THOSE THREE: the readout is a per-turn stream of `before_len` /
+//! `after_len` pairs, and an analyst reads a gap between one record's
+//! `after_len` and the next record's `before_len` as loss. Classes 2 and 3
+//! keep the accumulation phase gap-free; class 1 is the only phase that can
+//! answer the question this module exists for.
+//!
+//! NOT RECORDED — named, so the boundary is a stated fact and not a silence.
+//! The terminal-delivery replacements overwrite the bridge-local body with text
+//! the bridge itself authored or derived from the body already in hand, and
+//! none of them reads the durable row or the output file:
+//! `stream_loop/content_arms.rs` (the `resolve_done_response` result and the
+//! two `ProviderErrorPresentation` guidance strings), `post_loop_finalize.rs`
+//! (API_FRICTION marker stripping and the
+//! `CLAUDE_TUI_FOLLOWUP_REQUEUE_DELIVERY_NOTICE` constant),
+//! `terminal_outcome_delivery/empty_response_recovery/handler.rs` (its late
+//! API_FRICTION stripping and its three `String::new()` suppressions),
+//! `terminal_outcome_delivery.rs` and
+//! `terminal_outcome_delivery/recovery_retry.rs` (one `String::new()`
+//! suppression each), and `terminal_outcome_delivery/cancel_prompt_replace.rs`
+//! (`prompt_too_long_guidance::render_for_requester`). Because none of them can
+//! introduce a byte from the watcher's side, none can move the verdict; each
+//! CAN leave an unexplained length step in the TERMINAL phase of the readout,
+//! and that is the honest cost of drawing the line here. `content_arms.rs` also
+//! sits at its 635-line `scripts/audit_maintainability_config.toml` cap with
+//! zero headroom, so its three sites are unreachable for this PR regardless.
+//!
+//! The WATCHER's own accumulator is out of scope: it lives in `tmux_watcher.rs`
+//! and this module never sees it. The verdict does not need it — a watcher-first
+//! turn appears HERE as a class-1 record whose `delta_sha8` covers bytes this
+//! bridge never appended, which is exactly the join the record shape was built
+//! for.
 
 use crate::services::observability::{InvariantViolation, record_invariant_check};
 use sha2::{Digest, Sha256};
@@ -125,14 +169,36 @@ const SELF_DUPLICATION_SEPARATORS: [&str; 3] = ["", "\n", "\n\n"];
 /// produces a violation with no correlation key and no bucket movement. Sites
 /// that hold an `InflightTurnState` supply both; the streaming append site
 /// cannot (see [`BodyMutationCorrelation::unavailable`]).
+///
+/// #5938 r2 P2-2: the STORED `invariant_violation` event is a different artifact
+/// from the tracing line. The line inherits `dispatch_id` / `session_key` /
+/// `turn_id` from the enclosing `discord_turn_bridge` span; the stored event
+/// does not inherit anything and carries only what this struct hands it. The
+/// first revision passed `None` for all three, so a violation row could not be
+/// joined to the dispatch or the turn that produced it — exactly the join an
+/// #5938 investigation starts from. Every site that holds a row now fills them
+/// through [`BodyMutationCorrelation::from_inflight_row`]. `user_msg_id` rather
+/// than a formatted `turn_id` is carried so the struct stays `Copy`; `publish`
+/// renders it with the repo-wide `discord:<channel>:<user_msg>` spelling that
+/// `inflight::turn_id_for_state` already uses, including its `user_msg_id != 0`
+/// guard.
 #[derive(Debug, Clone, Copy, Default)]
 pub(in crate::services::discord::turn_bridge) struct BodyMutationCorrelation<'a> {
     pub(in crate::services::discord::turn_bridge) provider: Option<&'a str>,
     pub(in crate::services::discord::turn_bridge) channel_id: Option<u64>,
+    pub(in crate::services::discord::turn_bridge) dispatch_id: Option<&'a str>,
+    pub(in crate::services::discord::turn_bridge) session_key: Option<&'a str>,
+    pub(in crate::services::discord::turn_bridge) user_msg_id: Option<u64>,
 }
 
 impl<'a> BodyMutationCorrelation<'a> {
-    /// Both keys, from the durable row that every reconcile/rewind site holds.
+    /// TEST ONLY: the two `guard_fires` bucket keys and nothing else.
+    ///
+    /// Every production site holds a row and uses [`Self::from_inflight_row`],
+    /// so this exists purely so the tests can assert the difference between a
+    /// correlation that CAN move the bucket and [`Self::unavailable`], which
+    /// cannot, without standing up an `InflightTurnState` for each one.
+    #[cfg(test)]
     pub(in crate::services::discord::turn_bridge) const fn new(
         provider: &'a str,
         channel_id: u64,
@@ -140,6 +206,22 @@ impl<'a> BodyMutationCorrelation<'a> {
         Self {
             provider: Some(provider),
             channel_id: Some(channel_id),
+            dispatch_id: None,
+            session_key: None,
+            user_msg_id: None,
+        }
+    }
+
+    /// Every key the durable row can supply.
+    pub(in crate::services::discord::turn_bridge) fn from_inflight_row(
+        state: &'a crate::services::discord::inflight::InflightTurnState,
+    ) -> Self {
+        Self {
+            provider: Some(state.provider.as_str()),
+            channel_id: Some(state.channel_id),
+            dispatch_id: state.dispatch_id.as_deref(),
+            session_key: state.session_key.as_deref(),
+            user_msg_id: Some(state.user_msg_id),
         }
     }
 
@@ -157,12 +239,20 @@ impl<'a> BodyMutationCorrelation<'a> {
         Self {
             provider: None,
             channel_id: None,
+            dispatch_id: None,
+            session_key: None,
+            user_msg_id: None,
         }
     }
 }
 
-/// Which mutation site produced a record. These are ALL the places the
-/// bridge-local `full_response` body changes shape.
+/// Which mutation site produced a record.
+///
+/// These are NOT all the places the bridge-local `full_response` changes shape.
+/// They are the three classes the COVERAGE section at the top of this module
+/// defines — cross-boundary adoption, stream-loop accumulation, shared blanking
+/// — and that section names the terminal-delivery replacements this enum
+/// deliberately omits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord::turn_bridge) enum BodyMutationSite {
     /// `chunk_compose::append_streamed_text_chunk` — the streamed `Text` append
@@ -179,6 +269,38 @@ pub(in crate::services::discord::turn_bridge) enum BodyMutationSite {
     /// `retry_state::clear_response_delivery_state` — the empty-sink rewind that
     /// blanks the local body and the durable row body together.
     ClearResponseDeliveryState,
+    /// `stream_loop::tool_arms::authority::reconcile_tool_arm_locals_after_guarded_save`
+    /// — the TOOL-ARM mirror of [`Self::ReconcileFromInflightState`]: the same
+    /// whole-body adoption from the durable row, run from the two tool-arm
+    /// fences instead of from `stream_tick`.
+    ///
+    /// It is a separate variant rather than a reuse of the `stream_tick` one
+    /// because the two differ in exactly the way the verdict cares about. This
+    /// one runs only on `GuardedSaveOutcome::Saved`, and one of the two paths
+    /// that produce `Saved`
+    /// (`inflight/save_store/identity_gate/stream_loop_patch.rs`, the
+    /// `!baseline_authority.bridge_owns_relay()` branch its own comment calls
+    /// the "Exact watcher/standby self-handoff") first overwrites the row from
+    /// the ON-DISK copy. So this site is the bridge adopting a body the WATCHER
+    /// staged, and collapsing it into the `stream_tick` variant would hide which
+    /// of the two fences carried the watcher's bytes in.
+    ReconcileToolArmLocalsFromInflightState,
+    /// `terminal_outcome_delivery::queue_retry_silence::apply` — the requeue
+    /// silencer, which blanks the local body and the durable row body together
+    /// exactly as [`Self::ClearResponseDeliveryState`] does. Same class, same
+    /// reason: an unrecorded `N` → `0` on the shared channel is indistinguishable
+    /// from loss.
+    SilenceRequeuedResponse,
+    /// `terminal_outcome_delivery::empty_response_recovery::handler::adopt_recovered_output_file_body`
+    /// — the empty-response recovery path re-reading the tmux output file and
+    /// replacing the body with what it found.
+    ///
+    /// A THIRD origin, neither the bridge's own stream nor the durable row: the
+    /// bytes come from the file the WATCHER also reads, from
+    /// `inflight_state.last_offset` forward. If that offset has fallen behind,
+    /// the re-read returns a span the bridge already delivered, which is a way
+    /// to manufacture a doubled body on its own. It has to be visible.
+    RecoverBodyFromOutputFile,
 }
 
 impl BodyMutationSite {
@@ -190,6 +312,13 @@ impl BodyMutationSite {
                 "bridge_entry_persist::reconcile_runtime_locals_from_inflight_state"
             }
             Self::ClearResponseDeliveryState => "retry_state::clear_response_delivery_state",
+            Self::ReconcileToolArmLocalsFromInflightState => {
+                "tool_arms::authority::reconcile_tool_arm_locals_after_guarded_save"
+            }
+            Self::SilenceRequeuedResponse => "queue_retry_silence::apply",
+            Self::RecoverBodyFromOutputFile => {
+                "empty_response_recovery::adopt_recovered_output_file_body"
+            }
         }
     }
 
@@ -206,6 +335,15 @@ impl BodyMutationSite {
             }
             Self::ClearResponseDeliveryState => {
                 "src/services/discord/turn_bridge/retry_state.rs:clear_response_delivery_state"
+            }
+            Self::ReconcileToolArmLocalsFromInflightState => {
+                "src/services/discord/turn_bridge/stream_loop/tool_arms/authority.rs:reconcile_tool_arm_locals_after_guarded_save"
+            }
+            Self::SilenceRequeuedResponse => {
+                "src/services/discord/turn_bridge/terminal_outcome_delivery/queue_retry_silence.rs:apply"
+            }
+            Self::RecoverBodyFromOutputFile => {
+                "src/services/discord/turn_bridge/terminal_outcome_delivery/empty_response_recovery/handler.rs:adopt_recovered_output_file_body"
             }
         }
     }
@@ -308,6 +446,25 @@ fn is_blank(bytes: &[u8]) -> bool {
 /// the [`SELF_DUPLICATION_MIN_LEN`] floor for short repeats, [`is_blank`] for a
 /// body that is only whitespace, and [`has_shorter_repeating_period`] for a
 /// character run long enough to clear the floor.
+///
+/// KNOWN FALSE POSITIVES — measured, not hypothetical, and deliberately left in.
+/// The predicate asks whether the WHOLE body is `X + sep + X`, so a turn whose
+/// entire content happens to be two identical halves is flagged: one repeated
+/// code line (`    let x = compute_value(input);` × 2, 67 B), one repeated
+/// bullet (`- 로그를 확인한다` × 2, 49 B), one repeated table row
+/// (`| id | name | status |` × 2, 45 B), and a deliberately repeated emphasis
+/// paragraph joined by `"\n\n"` (118 B) all return true while being perfectly
+/// healthy. They stay because every filter that would exclude them — a
+/// line-count floor, a "halves must differ in punctuation" rule, a longer
+/// minimum — also excludes the short Korean acknowledgement that
+/// [`SELF_DUPLICATION_MIN_LEN`] was lowered to 16 to catch, and that class is
+/// this deployment's modal turn. The asymmetry is deliberate and the direction
+/// is chosen: this is OBSERVATION ONLY (no delivery gate anywhere in
+/// `record_invariant_check`), so a false positive costs one ERROR line plus one
+/// `guard_fires` tick, while a false negative costs the investigation the
+/// module exists for. `known_false_positive_shapes_are_pinned_not_filtered`
+/// holds the four shapes so the cost stays a documented number instead of a
+/// surprise in the readout.
 pub(in crate::services::discord::turn_bridge) fn body_is_exact_self_duplicate(body: &str) -> bool {
     let bytes = body.as_bytes();
     if bytes.len() < SELF_DUPLICATION_MIN_LEN {
@@ -390,6 +547,15 @@ pub(in crate::services::discord::turn_bridge) fn body_append_record(
 }
 
 fn publish(record: &BodyMutationRecord, correlation: BodyMutationCorrelation<'_>) {
+    // Same spelling and same `user_msg_id != 0` guard as
+    // `inflight::turn_id_for_state`, so a stored violation joins against the
+    // rows the rest of the observability surface already writes.
+    let turn_id = match (correlation.channel_id, correlation.user_msg_id) {
+        (Some(channel_id), Some(user_msg_id)) if user_msg_id != 0 => {
+            Some(format!("discord:{channel_id}:{user_msg_id}"))
+        }
+        _ => None,
+    };
     tracing::info!(
         target: BODY_MUTATION_TARGET,
         site = record.site.as_str(),
@@ -406,13 +572,14 @@ fn publish(record: &BodyMutationRecord, correlation: BodyMutationCorrelation<'_>
         InvariantViolation {
             provider: correlation.provider,
             channel_id: correlation.channel_id,
-            // The enclosing `discord_turn_bridge` span already carries
-            // dispatch_id / session_key / turn_id on every line these sites
-            // emit, and no site's signature can take them without reformatting a
-            // call site that sits at a line cap.
-            dispatch_id: None,
-            session_key: None,
-            turn_id: None,
+            // The tracing LINE inherits these from the enclosing
+            // `discord_turn_bridge` span; the STORED event inherits nothing, so
+            // it gets them from the row the site is holding. The streaming
+            // append site still has no row and still stores `None` (see
+            // `BodyMutationCorrelation::unavailable`).
+            dispatch_id: correlation.dispatch_id,
+            session_key: correlation.session_key,
+            turn_id: turn_id.as_deref(),
             invariant: BODY_NOT_SELF_DUPLICATED_INVARIANT,
             code_location: record.site.code_location(),
             message: "turn_bridge full_response is its own first half repeated twice (#5938)",
@@ -455,6 +622,11 @@ pub(in crate::services::discord::turn_bridge) fn observe_body_append(
     publish(&body_append_record(site, before_len, after), correlation);
 }
 
+// Visible across `turn_bridge` in test builds ONLY so the per-site tests can
+// live next to the production functions they drive (`tool_arms/authority_tests`,
+// `queue_retry_silence`, `empty_response_recovery/handler`) and still share one
+// tracing-capture harness, rather than each widening a production item's
+// visibility to reach this file.
 #[cfg(test)]
 #[path = "body_mutation_telemetry_tests.rs"]
-mod body_mutation_telemetry_tests;
+pub(in crate::services::discord::turn_bridge) mod body_mutation_telemetry_tests;

@@ -8,6 +8,9 @@ use super::super::super::stream_tick::{
     LongRunningPlaceholderActive, PendingLongRunningRetargetAfterStateSave,
 };
 use super::super::*;
+use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::{
+    BodyMutationCorrelation, BodyMutationSite,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord::turn_bridge::stream_loop) enum StreamToolArmOutcome {
@@ -62,7 +65,24 @@ pub(super) fn reconcile_tool_arm_locals_after_guarded_save(
     *current_msg_id = crate::services::discord::turn_bridge::current_message_anchor::detached_current_msg_id_from_durable(
         inflight_state.current_msg_id,
     );
-    full_response.clone_from(&inflight_state.full_response);
+    // #5938 r2 P0-1: this is the SAME durable-row adoption `stream_tick` performs
+    // (`bridge_entry_persist::reconcile_runtime_locals_from_inflight_state`), so
+    // it goes through the same recorded helper instead of a bare `clone_from`.
+    // It matters specifically here: the fence runs only on
+    // `GuardedSaveOutcome::Saved`, and one of the two branches that reach `Saved`
+    // (`inflight/save_store/identity_gate/stream_loop_patch.rs`, the
+    // `!baseline_authority.bridge_owns_relay()` branch its own comment calls the
+    // "Exact watcher/standby self-handoff") first overwrites the row from the
+    // ON-DISK copy. An unrecorded copy here was therefore the bridge adopting
+    // WATCHER bytes with nothing in the readout to say so — the exact blind spot
+    // that would let an analyst read the append records alone and conclude
+    // bridge-first.
+    crate::services::discord::turn_bridge::bridge_entry_persist::adopt_full_response_from_inflight_row(
+        full_response,
+        inflight_state.full_response.as_str(),
+        BodyMutationSite::ReconcileToolArmLocalsFromInflightState,
+        BodyMutationCorrelation::from_inflight_row(inflight_state),
+    );
     // A SUBSET of what `bridge_entry_persist::reconcile_runtime_locals_from_inflight_state`
     // (the `stream_tick` side) re-seeds — not an isomorphism. That function also
     // re-seeds `current_tool_line`, `prev_tool_status`, `last_tool_name` and

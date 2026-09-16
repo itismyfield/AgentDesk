@@ -294,7 +294,7 @@ pub(super) fn clear_response_delivery_state(
 
     observe_body_mutation(
         BodyMutationSite::ClearResponseDeliveryState,
-        BodyMutationCorrelation::new(inflight_state.provider.as_str(), inflight_state.channel_id),
+        BodyMutationCorrelation::from_inflight_row(inflight_state),
         full_response.as_str(),
         "",
     );

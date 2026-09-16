@@ -344,10 +344,7 @@ pub(super) async fn handle_stream_tool_message(
                 // #5938: the row this arm writes on the next line carries both
                 // correlation keys, so the boundary rewrite is recorded with a
                 // joinable key instead of an anonymous one.
-                let body_correlation = BodyMutationCorrelation::new(
-                    inflight_state.provider.as_str(),
-                    inflight_state.channel_id,
-                );
+                let body_correlation = BodyMutationCorrelation::from_inflight_row(&inflight_state);
                 chunk_compose::append_tool_boundary_separator(
                     &mut full_response,
                     body_correlation,

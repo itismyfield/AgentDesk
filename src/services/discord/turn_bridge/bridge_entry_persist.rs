@@ -211,20 +211,25 @@ pub(super) fn signal_bridge_entry_abort_completion(
 /// `push_str(durable)` on an equal `durable` is the identity, skipping the
 /// assignment with it changes no observable byte. Signal loss is zero: any
 /// adoption that actually changes the body still emits.
+///
+/// #5938 r2 P0-1: `site` is a parameter because this adoption has TWO production
+/// callers, not one. `reconcile_runtime_locals_from_inflight_state` below is the
+/// `stream_tick` side; `stream_loop::tool_arms::authority::
+/// reconcile_tool_arm_locals_after_guarded_save` is the tool-arm side, which ran
+/// the identical `full_response.clone_from(&inflight_state.full_response)` with
+/// no record at all. Routing both through this one function means the no-op skip
+/// and its rationale cannot diverge between them, while the distinct `site`
+/// keeps the readout able to say WHICH fence carried the durable bytes in.
 pub(super) fn adopt_full_response_from_inflight_row(
     local: &mut String,
     durable: &str,
+    site: BodyMutationSite,
     correlation: BodyMutationCorrelation<'_>,
 ) {
     if local.as_str() == durable {
         return;
     }
-    body_mutation_telemetry::observe_body_mutation(
-        BodyMutationSite::ReconcileFromInflightState,
-        correlation,
-        local.as_str(),
-        durable,
-    );
+    body_mutation_telemetry::observe_body_mutation(site, correlation, local.as_str(), durable);
     local.clear();
     local.push_str(durable);
 }
@@ -239,10 +244,8 @@ pub(super) fn reconcile_runtime_locals_from_inflight_state(
     adopt_full_response_from_inflight_row(
         state.full_response,
         state.inflight_state.full_response.as_str(),
-        BodyMutationCorrelation::new(
-            state.inflight_state.provider.as_str(),
-            state.inflight_state.channel_id,
-        ),
+        BodyMutationSite::ReconcileFromInflightState,
+        BodyMutationCorrelation::from_inflight_row(state.inflight_state),
     );
     *state.response_sent_offset = state.inflight_state.response_sent_offset;
     *state.bridge_confirmed_response_sent_offset = bridge_confirmed_response_sent_offset_seed(

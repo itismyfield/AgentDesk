@@ -601,3 +601,100 @@ async fn watcher_stamped_tool_flags_survive_the_fence_and_the_next_real_stream_t
         &tick_delivery_pin,
     ));
 }
+
+/// #5938 r2 P0-1. The tool-arm fences run the SAME durable-row body adoption
+/// `stream_tick` runs, and the branch that produces the `GuardedSaveOutcome::
+/// Saved` they require can be the watcher/standby self-handoff — so an
+/// unrecorded copy here is the bridge adopting WATCHER bytes with nothing in the
+/// readout to say so, and an analyst reading only the append records would
+/// conclude bridge-first. Driven through the REAL reconcile, so deleting the
+/// observation fails here.
+#[test]
+fn the_tool_arm_durable_adoption_emits_its_own_body_mutation_record() {
+    use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::body_mutation_telemetry_tests::captured_logs;
+
+    let mut durable = bridge_state(42_593_124);
+    durable.full_response = "COUNT-001\nCOUNT-002\n".to_string();
+    durable.response_sent_offset = durable.full_response.len();
+
+    let mut current_msg_id = MessageId::new(1_534_511_598_012_600_371);
+    let mut full_response = "COUNT-001\n".to_string();
+    let mut expected_current_message = (1_534_511_598_012_600_371_u64, 21_usize);
+    let mut response_sent_offset = "COUNT-001\n".len();
+    let mut bridge_confirmed_response_sent_offset = response_sent_offset;
+    let mut any_tool_used = false;
+    let mut has_post_tool_text = false;
+
+    let logs = captured_logs(|| {
+        reconcile_tool_arm_locals_after_guarded_save(
+            &durable,
+            &mut expected_current_message,
+            &mut current_msg_id,
+            &mut full_response,
+            &mut response_sent_offset,
+            &mut bridge_confirmed_response_sent_offset,
+            &mut any_tool_used,
+            &mut has_post_tool_text,
+        );
+    });
+
+    // The adoption itself is untouched by the observation.
+    assert_eq!(full_response, durable.full_response);
+
+    assert!(
+        logs.contains(
+            "site=\"tool_arms::authority::reconcile_tool_arm_locals_after_guarded_save\""
+        ),
+        "the tool-arm adoption must publish its OWN site, distinct from the \
+         stream_tick one, or the readout cannot say which fence carried the \
+         durable bytes in; got: {logs}"
+    );
+    assert!(logs.contains("before_len=10"), "got: {logs}");
+    assert!(logs.contains("after_len=20"), "got: {logs}");
+    // It must NOT borrow the stream_tick label.
+    assert!(
+        !logs.contains(
+            "site=\"bridge_entry_persist::reconcile_runtime_locals_from_inflight_state\""
+        ),
+        "got: {logs}"
+    );
+}
+
+/// The no-op skip travels with the shared helper: `stage_tick_state_for_guard!`
+/// pushes the loop body into the row and the fence reads it straight back, so
+/// the overwhelmingly common tool-arm adoption assigns a string to itself and
+/// must stay out of the readout.
+#[test]
+fn an_unchanged_tool_arm_adoption_records_nothing() {
+    use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::body_mutation_telemetry_tests::captured_logs;
+
+    let mut durable = bridge_state(42_593_125);
+    durable.full_response = "COUNT-001\nCOUNT-002\n".to_string();
+
+    let mut current_msg_id = MessageId::new(1_534_511_598_012_600_371);
+    let mut full_response = durable.full_response.clone();
+    let mut expected_current_message = (1_534_511_598_012_600_371_u64, 21_usize);
+    let mut response_sent_offset = 0usize;
+    let mut bridge_confirmed_response_sent_offset = 0usize;
+    let mut any_tool_used = false;
+    let mut has_post_tool_text = false;
+
+    let logs = captured_logs(|| {
+        reconcile_tool_arm_locals_after_guarded_save(
+            &durable,
+            &mut expected_current_message,
+            &mut current_msg_id,
+            &mut full_response,
+            &mut response_sent_offset,
+            &mut bridge_confirmed_response_sent_offset,
+            &mut any_tool_used,
+            &mut has_post_tool_text,
+        );
+    });
+
+    assert_eq!(full_response, durable.full_response);
+    assert!(
+        !logs.contains("turn_bridge full_response body mutation"),
+        "an adoption that changes nothing must emit nothing; got: {logs}"
+    );
+}

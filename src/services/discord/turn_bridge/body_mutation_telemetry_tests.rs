@@ -45,7 +45,12 @@ impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for CapturingWriter {
 }
 
 /// Run `body` with a thread-local tracing subscriber and return what it logged.
-fn captured_logs<F: FnOnce()>(body: F) -> String {
+///
+/// Shared with the per-site tests that live next to their production functions
+/// (`tool_arms/authority_tests`, `queue_retry_silence`,
+/// `empty_response_recovery/handler`), so all of them assert the same emitted
+/// artifact instead of re-deriving a capture harness each.
+pub(in crate::services::discord::turn_bridge) fn captured_logs<F: FnOnce()>(body: F) -> String {
     let writer = CapturingWriter::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(writer.clone())
@@ -245,7 +250,12 @@ fn append_site_emits_a_body_mutation_record() {
 fn assignment_site_emits_a_body_mutation_record() {
     let logs = captured_logs(|| {
         let mut local = String::from("COUNT-001\n");
-        adopt_full_response_from_inflight_row(&mut local, "COUNT-001\nCOUNT-002\n", correlation());
+        adopt_full_response_from_inflight_row(
+            &mut local,
+            "COUNT-001\nCOUNT-002\n",
+            BodyMutationSite::ReconcileFromInflightState,
+            correlation(),
+        );
         assert_eq!(local, "COUNT-001\nCOUNT-002\n");
     });
 
@@ -266,7 +276,12 @@ fn assignment_site_emits_a_body_mutation_record() {
 fn an_equal_adoption_is_not_a_mutation_and_is_not_recorded() {
     let logs = captured_logs(|| {
         let mut local = String::from("COUNT-001\nCOUNT-002\n");
-        adopt_full_response_from_inflight_row(&mut local, "COUNT-001\nCOUNT-002\n", correlation());
+        adopt_full_response_from_inflight_row(
+            &mut local,
+            "COUNT-001\nCOUNT-002\n",
+            BodyMutationSite::ReconcileFromInflightState,
+            correlation(),
+        );
         // Identity is preserved: the body the caller sees is unchanged.
         assert_eq!(local, "COUNT-001\nCOUNT-002\n");
     });
@@ -287,7 +302,12 @@ fn a_changed_adoption_is_still_recorded_after_the_no_op_skip() {
     ] {
         let logs = captured_logs(|| {
             let mut body = String::from(local);
-            adopt_full_response_from_inflight_row(&mut body, durable, correlation());
+            adopt_full_response_from_inflight_row(
+                &mut body,
+                durable,
+                BodyMutationSite::ReconcileFromInflightState,
+                correlation(),
+            );
             assert_eq!(body, durable);
         });
         assert!(
@@ -710,7 +730,12 @@ fn observation_leaves_the_body_byte_identical() {
     let durable = "COUNT-".to_string() + &"0123456789".repeat(6);
     let durable = durable.repeat(2);
     let mut local = String::from("COUNT-0123456789");
-    adopt_full_response_from_inflight_row(&mut local, &durable, correlation());
+    adopt_full_response_from_inflight_row(
+        &mut local,
+        &durable,
+        BodyMutationSite::ReconcileFromInflightState,
+        correlation(),
+    );
     assert_eq!(local, durable);
     assert!(body_is_exact_self_duplicate(&local));
 
@@ -796,6 +821,9 @@ fn record_shape_is_identical_at_every_site() {
         BodyMutationSite::AppendToolBoundarySeparator,
         BodyMutationSite::ReconcileFromInflightState,
         BodyMutationSite::ClearResponseDeliveryState,
+        BodyMutationSite::ReconcileToolArmLocalsFromInflightState,
+        BodyMutationSite::SilenceRequeuedResponse,
+        BodyMutationSite::RecoverBodyFromOutputFile,
     ];
     let labels: std::collections::BTreeSet<&str> = sites.iter().map(|site| site.as_str()).collect();
     assert_eq!(labels.len(), sites.len(), "site labels must be distinct");
@@ -821,4 +849,141 @@ fn a_shrinking_assignment_records_a_prefix_shorter_than_before_len() {
     assert_eq!(record.after_len, "shared-prefix-DURABLE".len());
     assert_eq!(record.prefix_len, "shared-prefix-".len());
     assert!(record.prefix_len < record.before_len);
+}
+
+// ---------------------------------------------------------------------------
+// Predicate cost that is accepted rather than hidden (#5938 r2 P2-1).
+// ---------------------------------------------------------------------------
+
+/// The self-duplication predicate asks whether the WHOLE body is `X + sep + X`,
+/// so a healthy turn that happens to be two identical halves is flagged. These
+/// four shapes were measured against the shipped predicate and all four return
+/// true. They are pinned — not filtered — because every filter that excludes
+/// them also excludes the short Korean acknowledgement the floor was lowered to
+/// 16 to catch, and the instrumentation is observation only: a false positive
+/// costs one ERROR line, a false negative costs the investigation.
+///
+/// If a later change makes one of these return false, that is a REAL narrowing
+/// of the predicate and this test is where the trade-off gets re-argued.
+#[test]
+fn known_false_positive_shapes_are_pinned_not_filtered() {
+    let repeated_code_line = ["    let x = compute_value(input);"; 2].join("\n");
+    let repeated_bullet = ["- 로그를 확인한다"; 2].join("\n");
+    let repeated_table_row = ["| id | name | status |"; 2].join("\n");
+    let repeated_emphasis = ["다시 한번 말합니다. 절대 배포하지 마세요."; 2].join("\n\n");
+
+    for (label, body, expected_len) in [
+        ("repeated code line", &repeated_code_line, 67usize),
+        ("repeated bullet", &repeated_bullet, 49),
+        ("repeated table row", &repeated_table_row, 45),
+        ("repeated emphasis paragraph", &repeated_emphasis, 118),
+    ] {
+        assert_eq!(
+            body.len(),
+            expected_len,
+            "{label}: fixture size changed, so the measured cost changed too"
+        );
+        assert!(
+            body_is_exact_self_duplicate(body),
+            "{label}: known false positive, documented on `body_is_exact_self_duplicate`"
+        );
+    }
+}
+
+/// The other half of the same trade-off, restated where the false positives are
+/// pinned: the noise classes the module names ARE excluded, so the predicate is
+/// not simply "any body with an even split".
+#[test]
+fn the_named_noise_classes_stay_excluded_beside_the_false_positives() {
+    assert!(!body_is_exact_self_duplicate(&"ㅋ".repeat(20)));
+    assert!(!body_is_exact_self_duplicate("byebye"));
+    assert!(!body_is_exact_self_duplicate("\n\n"));
+    assert!(!body_is_exact_self_duplicate("        "));
+}
+
+// ---------------------------------------------------------------------------
+// Stored-event correlation (#5938 r2 P2-2).
+// ---------------------------------------------------------------------------
+
+/// The tracing LINE inherits dispatch/session/turn from the enclosing span; the
+/// STORED `invariant_violation` event inherits nothing. A site holding a row
+/// must therefore hand all of them over explicitly, and `from_inflight_row` is
+/// what does it.
+#[test]
+fn from_inflight_row_carries_every_key_the_row_holds() {
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::provider::ProviderKind;
+
+    let mut row = InflightTurnState::new(
+        ProviderKind::Codex,
+        5_938_021,
+        None,
+        343_742_347_365_974_026,
+        77_012,
+        18,
+        String::new(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    row.dispatch_id = Some("dispatch-5938-keys".to_string());
+    row.session_key = Some("adk-session-keys".to_string());
+
+    let correlation = BodyMutationCorrelation::from_inflight_row(&row);
+    assert_eq!(correlation.provider, Some("codex"));
+    assert_eq!(correlation.channel_id, Some(5_938_021));
+    assert_eq!(correlation.dispatch_id, Some("dispatch-5938-keys"));
+    assert_eq!(correlation.session_key, Some("adk-session-keys"));
+    assert_eq!(correlation.user_msg_id, Some(77_012));
+
+    let doubled = "알겠습니다. 바로 진행할게요.".repeat(2);
+    let logs = captured_logs(|| {
+        observe_body_mutation(
+            BodyMutationSite::ReconcileFromInflightState,
+            BodyMutationCorrelation::from_inflight_row(&row),
+            "",
+            &doubled,
+        );
+    });
+    assert!(logs.contains("dispatch_id=\"dispatch-5938-keys\""), "got: {logs}");
+    assert!(logs.contains("session_key=\"adk-session-keys\""), "got: {logs}");
+    // `turn_id_for_state`'s spelling, so the stored row joins the rest of the
+    // observability surface.
+    assert!(logs.contains("turn_id=\"discord:5938021:77012\""), "got: {logs}");
+}
+
+/// A row with no anchored user message produces NO turn_id rather than a
+/// `discord:<channel>:0` that would join against nothing — the same guard
+/// `inflight::turn_id_for_state` applies.
+#[test]
+fn an_unanchored_row_emits_no_turn_id() {
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::provider::ProviderKind;
+
+    let row = InflightTurnState::new(
+        ProviderKind::Codex,
+        5_938_022,
+        None,
+        343_742_347_365_974_026,
+        0,
+        18,
+        String::new(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    let doubled = "알겠습니다. 바로 진행할게요.".repeat(2);
+    let logs = captured_logs(|| {
+        observe_body_mutation(
+            BodyMutationSite::ReconcileFromInflightState,
+            BodyMutationCorrelation::from_inflight_row(&row),
+            "",
+            &doubled,
+        );
+    });
+    assert!(logs.contains("turn_id=\"\""), "got: {logs}");
 }

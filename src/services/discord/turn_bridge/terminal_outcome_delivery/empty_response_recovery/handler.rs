@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use super::super::*;
 use super::guidance;
+use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::{
+    BodyMutationCorrelation, BodyMutationSite, observe_body_mutation,
+};
 
 pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) enum EmptyResponseRecoveryMessage
 {
@@ -87,6 +90,45 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) struct 
         &'a mut bool,
     pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) claude_tui_busy_requeue_pending:
         &'a mut bool,
+}
+
+/// #5938 r2 P1-1: adopt a body re-read from the tmux OUTPUT FILE.
+///
+/// A THIRD body origin, and the reason it is recorded: these bytes come neither
+/// from the bridge's own provider stream nor from the durable inflight row, but
+/// from the file the WATCHER also reads, starting at `inflight_state.last_offset`.
+/// If that offset has fallen behind what was already relayed, the re-read hands
+/// back a span the turn has already delivered — which is a way to manufacture a
+/// doubled body all on its own, on the exact axis #5938 is about. Extracted from
+/// the enclosing async recovery fn so the adoption is a synchronously testable
+/// production function rather than a fragment only reachable through a full
+/// terminal-delivery drive.
+///
+/// Returns whether the body was replaced. `recovered` is taken by value because
+/// the caller has no further use for it and the adoption moves it into place.
+fn adopt_recovered_output_file_body(
+    full_response: &mut String,
+    recovered: String,
+    inflight_state: &InflightTurnState,
+    channel_id: ChannelId,
+) -> bool {
+    if recovered.trim().is_empty() {
+        return false;
+    }
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    tracing::info!(
+        "  [{ts}] ↻ Recovered {} chars from output file for channel {}",
+        recovered.len(),
+        channel_id
+    );
+    observe_body_mutation(
+        BodyMutationSite::RecoverBodyFromOutputFile,
+        BodyMutationCorrelation::from_inflight_row(inflight_state),
+        full_response.as_str(),
+        recovered.as_str(),
+    );
+    *full_response = recovered;
+    true
 }
 
 fn preserve_busy_claude_followup(claude_tui_followup_busy_readiness_timeout: bool) -> bool {
@@ -176,15 +218,12 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                     path,
                     inflight_state.last_offset,
                 );
-                if !recovered.trim().is_empty() {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    tracing::info!(
-                        "  [{ts}] ↻ Recovered {} chars from output file for channel {}",
-                        recovered.len(),
-                        channel_id
-                    );
-                    full_response = recovered;
-                }
+                adopt_recovered_output_file_body(
+                    &mut full_response,
+                    recovered,
+                    inflight_state,
+                    channel_id,
+                );
             }
 
             // The stale-session witness remains authoritative even when an
@@ -495,5 +534,106 @@ mod tests {
     fn ordinary_empty_resume_still_uses_fresh_session_recovery() {
         assert!(!preserve_busy_claude_followup(false));
         assert!(!preserve_busy_claude_followup(false));
+    }
+}
+
+#[cfg(test)]
+mod body_mutation_tests {
+    use super::adopt_recovered_output_file_body;
+    use crate::services::discord::inflight::InflightTurnState;
+    use crate::services::discord::turn_bridge::chunk_compose::body_mutation_telemetry::body_mutation_telemetry_tests::captured_logs;
+    use crate::services::provider::ProviderKind;
+
+    fn recovery_row() -> InflightTurnState {
+        let mut row = InflightTurnState::new(
+            ProviderKind::Codex,
+            5_938_013,
+            None,
+            343_742_347_365_974_026,
+            77_011,
+            18,
+            String::new(),
+            None,
+            None,
+            Some("/tmp/AgentDesk-codex-5938.jsonl".to_string()),
+            None,
+            512,
+        );
+        row.dispatch_id = Some("dispatch-5938-r2".to_string());
+        row.session_key = Some("adk-session-5938".to_string());
+        row
+    }
+
+    /// #5938 r2 P1-1: the tmux output file is a third body origin — the same
+    /// source the watcher reads — so adopting from it has to leave a record.
+    #[test]
+    fn recovering_the_body_from_the_output_file_emits_a_body_mutation_record() {
+        let row = recovery_row();
+        let mut body = String::from("COUNT-001\n");
+        let logs = captured_logs(|| {
+            assert!(adopt_recovered_output_file_body(
+                &mut body,
+                "COUNT-001\nCOUNT-002\n".to_string(),
+                &row,
+                poise::serenity_prelude::ChannelId::new(5_938_013),
+            ));
+        });
+
+        assert_eq!(body, "COUNT-001\nCOUNT-002\n");
+        assert!(
+            logs.contains("site=\"empty_response_recovery::adopt_recovered_output_file_body\""),
+            "the output-file re-source must publish a body-mutation record; got: {logs}"
+        );
+        assert!(logs.contains("before_len=10"), "got: {logs}");
+        assert!(logs.contains("after_len=20"), "got: {logs}");
+    }
+
+    /// The guard the extraction preserved: a blank recovery is not an adoption,
+    /// changes nothing, and must not manufacture a record.
+    #[test]
+    fn a_blank_recovery_neither_replaces_the_body_nor_records() {
+        let row = recovery_row();
+        let mut body = String::from("COUNT-001\n");
+        let logs = captured_logs(|| {
+            assert!(!adopt_recovered_output_file_body(
+                &mut body,
+                "   \n\n".to_string(),
+                &row,
+                poise::serenity_prelude::ChannelId::new(5_938_013),
+            ));
+        });
+        assert_eq!(body, "COUNT-001\n");
+        assert!(logs.is_empty(), "got: {logs}");
+    }
+
+    /// #5938 r2 P2-2: the STORED violation inherits nothing from the span, so a
+    /// site holding a row must hand it every key it has. Driven through a body
+    /// that trips the self-duplication predicate, which is the only path that
+    /// reaches `record_invariant_check`'s violation arm.
+    #[test]
+    fn the_stored_violation_carries_the_rows_dispatch_session_and_turn_keys() {
+        let row = recovery_row();
+        let doubled = "알겠습니다. 바로 진행할게요.".repeat(2);
+        let mut body = String::new();
+        let logs = captured_logs(|| {
+            assert!(adopt_recovered_output_file_body(
+                &mut body,
+                doubled.clone(),
+                &row,
+                poise::serenity_prelude::ChannelId::new(5_938_013),
+            ));
+        });
+        assert!(
+            logs.contains("dispatch_id=\"dispatch-5938-r2\""),
+            "got: {logs}"
+        );
+        assert!(
+            logs.contains("session_key=\"adk-session-5938\""),
+            "got: {logs}"
+        );
+        assert!(
+            logs.contains("turn_id=\"discord:5938013:77011\""),
+            "got: {logs}"
+        );
     }
 }
