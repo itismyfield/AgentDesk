@@ -1,5 +1,13 @@
 //! #3608 청크 경계 빈 줄 정규화 composition primitives.
 
+// #5938 body-mutation telemetry. Declared here rather than in
+// `turn_bridge/mod.rs` because that file sits exactly at its 968-line
+// `scripts/hotfile_ratchet.toml` ceiling, so a `mod` line there would fail the
+// ratchet, and this PR must not raise a cap. The `#[path]` spelling mirrors the
+// `chunk_compose_tests.rs` declaration at the bottom of this file.
+#[path = "body_mutation_telemetry.rs"]
+pub(in crate::services::discord::turn_bridge) mod body_mutation_telemetry;
+
 /// #3608: true when the accumulated `full_response` currently ends *inside* an
 /// open ``` code fence. Mirrors the fence toggle used by `format_for_discord`
 /// (`trim_start().starts_with("```")`), so blank-line runs the model placed
@@ -24,7 +32,16 @@ pub(super) fn streamed_text_inside_open_code_fence(full_response: &str) -> bool 
 /// `\n` run is trimmed before appending so the boundary collapses to a single
 /// `\n\n`. Intentional larger gaps *within* a single chunk are preserved, and
 /// blank lines inside an open code fence are never touched.
+///
+/// #5938: every branch below is a `push_str`, so the accumulated body is only
+/// ever extended, never rewritten. The post-append observation records that
+/// mutation and CANNOT suppress it — a gate here would swallow legitimately
+/// repeated model text and manufacture a fresh #5941-class silent loss.
 pub(super) fn append_streamed_text_chunk(full_response: &mut String, content: &str) {
+    // Captured before the append: because the branches only push, this length
+    // IS the retained prefix, so the record needs no clone of the body on this
+    // per-streaming-tick hot path.
+    let before_len = full_response.len();
     if full_response.ends_with("\n\n") && !streamed_text_inside_open_code_fence(full_response) {
         full_response.push_str(content.trim_start_matches('\n'));
     } else if !streamed_text_inside_open_code_fence(full_response)
@@ -38,6 +55,11 @@ pub(super) fn append_streamed_text_chunk(full_response: &mut String, content: &s
     } else {
         full_response.push_str(content);
     }
+    body_mutation_telemetry::observe_body_append(
+        body_mutation_telemetry::BodyMutationSite::AppendStreamedTextChunk,
+        before_len,
+        full_response,
+    );
 }
 
 /// #3608: append the tool-use paragraph separator to `full_response`.

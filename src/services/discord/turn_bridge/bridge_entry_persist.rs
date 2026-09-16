@@ -1,5 +1,6 @@
 //! Bridge-entry inflight persistence plus local-state reconciliation (#4259 R4).
 
+use super::chunk_compose::body_mutation_telemetry::{self, BodyMutationSite};
 use super::context::BridgeCompletionSignal;
 use super::*;
 
@@ -181,13 +182,37 @@ pub(super) fn signal_bridge_entry_abort_completion(
     }
 }
 
+/// #5938 (observation only): adopt the durable inflight row's body into the
+/// bridge-local `full_response`.
+///
+/// This is the second of the two places the bridge-local body changes shape,
+/// and it is the one option "A" of the issue would have been blind to: when the
+/// watcher writes the already-doubled body to the row first, the bridge adopts
+/// 1198 bytes here in one assignment and never appends at all.
+///
+/// The record is taken BEFORE the assignment so `before`/`after` are the real
+/// pair, and the assignment that follows is byte-for-byte the one this site has
+/// always performed — `String::clone_from` is `clear` + `extend_from_slice` on
+/// the inner `Vec`, which is what these two lines do. Nothing is gated on the
+/// record; the adoption always happens.
+pub(super) fn adopt_full_response_from_inflight_row(local: &mut String, durable: &str) {
+    body_mutation_telemetry::observe_body_mutation(
+        BodyMutationSite::ReconcileFromInflightState,
+        local.as_str(),
+        durable,
+    );
+    local.clear();
+    local.push_str(durable);
+}
+
 pub(super) fn reconcile_runtime_locals_from_inflight_state(
     shared: &SharedData,
     state: &mut BridgeEntryRuntimeState<'_>,
 ) {
-    state
-        .full_response
-        .clone_from(&state.inflight_state.full_response);
+    adopt_full_response_from_inflight_row(
+        state.full_response,
+        state.inflight_state.full_response.as_str(),
+    );
     *state.response_sent_offset = state.inflight_state.response_sent_offset;
     *state.bridge_confirmed_response_sent_offset = bridge_confirmed_response_sent_offset_seed(
         state.inflight_state.effective_relay_owner_kind(),
