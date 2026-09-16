@@ -55,7 +55,9 @@ pub(super) fn run_bot_spawn_reachability_observation(
     let shared = shared_for_tmux.clone();
     let provider = provider_for_setup.clone();
     tokio::spawn(async move {
-        let cadence = std::time::Duration::from_secs(health::STALL_WATCHDOG_INTERVAL_SECS);
+        let cadence = std::time::Duration::from_secs(
+            health::reachability::observation::REACHABILITY_OBSERVATION_INTERVAL_SECS,
+        );
         loop {
             tokio::time::sleep(cadence).await;
 

@@ -31,28 +31,57 @@ fn rule(
     use WarrantRule::*;
     use health::reachability::verdict::ReachabilityVerdict::*;
 
+    // #5942 r2: `Expired` answers exactly what `Unknown` answers, and that is
+    // the point. The channels this variant is reachable for read
+    // `Unknown{transcript_unresolved}` before the TTL fires, so giving
+    // `Expired` a different rule would mean the warrant silently changed the
+    // moment a timer elapsed — a behaviour change #5942 never asked for in
+    // either direction.
+    //
+    // r1 answered `Deny` here on the argument that an expired ledger is less
+    // evidence than an unknown one. The r2 review was right that this is worse,
+    // not safer: an expired ledger is PERMANENTLY expired, so `Deny` was a
+    // permanent trap with no escape, and it removed the episode-gated
+    // `ClearStaleThreadProof`/`ClearOrphanPendingToken` cleanup that abandoned
+    // routine channels are exactly the population for.
+    //
+    // r3 (P2-1) corrects what r2 claimed for `RequireEpisode`. It is NOT a
+    // barrier for this population: `exact_episode_evidence` answers
+    // `OperandAbsent` when either nonce is missing, and the match below treats
+    // `Matched | OperandAbsent` alike, so an abandoned routine channel — which
+    // by construction has no live mailbox or inflight episode — passes the
+    // warrant. The rule only bites on `Mismatched`, i.e. two nonces that
+    // disagree. The decision stands anyway, for the reason above and not for
+    // the reason r2 gave: the point is that `Expired` grants no MORE than the
+    // `Unknown` the same channel carried one tick earlier. `Expired` changes
+    // one thing only — it withdraws a health vote — and the warrant surface is
+    // deliberately where it changes nothing.
     match (action, verdict) {
         (ClearStaleThreadProof, Reachable) => PassLedger,
         (ClearStaleThreadProof, Degraded { .. }) => RequireEpisode,
         (ClearStaleThreadProof, TransportUnknown { .. }) => Deny,
         (ClearStaleThreadProof, Unreachable { .. }) => RequireEpisode,
         (ClearStaleThreadProof, Unknown { .. }) => RequireEpisode,
+        (ClearStaleThreadProof, Expired { .. }) => RequireEpisode,
         (ClearOrphanPendingToken, Reachable) => PassLedger,
         (ClearOrphanPendingToken, Degraded { .. }) => RequireEpisode,
         (ClearOrphanPendingToken, TransportUnknown { .. }) => Deny,
         (ClearOrphanPendingToken, Unreachable { .. }) => RequireEpisode,
         (ClearOrphanPendingToken, Unknown { .. }) => RequireEpisode,
+        (ClearOrphanPendingToken, Expired { .. }) => RequireEpisode,
         (ReattachWatcher, Reachable) => PassLedger,
         (ReattachWatcher, Degraded { .. }) => RequireEpisode,
         (ReattachWatcher, TransportUnknown { .. }) if pinned_adoption => PassLedger,
         (ReattachWatcher, TransportUnknown { .. }) => Deny,
         (ReattachWatcher, Unreachable { .. }) => RequireEpisode,
         (ReattachWatcher, Unknown { .. }) => RequireEpisode,
+        (ReattachWatcher, Expired { .. }) => RequireEpisode,
         (DrainPendingQueue, Reachable) => PassLedger,
         (DrainPendingQueue, Degraded { .. }) => RequireEpisode,
         (DrainPendingQueue, TransportUnknown { .. }) => Deny,
         (DrainPendingQueue, Unreachable { .. }) => RequireEpisode,
         (DrainPendingQueue, Unknown { .. }) => RequireEpisode,
+        (DrainPendingQueue, Expired { .. }) => RequireEpisode,
         (ObserveOnly, _) => Deny,
     }
 }
@@ -164,7 +193,55 @@ mod tests {
                 uncovered_ranges: 1,
             },
             ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 1),
+            // #5942 r2 (P1-1): without this row the truth table below ran over
+            // five of six variants, and flipping the four `Expired` arms to
+            // `PassLedger` — turning an expiry into a destruction warrant —
+            // left the whole suite green. `match` exhaustiveness forced the
+            // arms to be WRITTEN; only the fixture pins what they SAY.
+            ReachabilityVerdict::Expired {
+                unobserved_for_secs: 1,
+            },
         ]
+    }
+
+    /// The fixture above is a hand-written list, and a hand-written list is
+    /// exactly what a new variant walks straight past. This index has no `_`
+    /// arm, so a seventh `ReachabilityVerdict` stops this module compiling
+    /// until someone names it — the same device
+    /// `reachability::verdict::tests::unknown_reason_index` uses, borrowed here
+    /// because this is the second place a missing row silently narrowed a
+    /// table.
+    fn verdict_index(verdict: &ReachabilityVerdict) -> usize {
+        match verdict {
+            ReachabilityVerdict::Reachable => 0,
+            ReachabilityVerdict::Degraded { .. } => 1,
+            ReachabilityVerdict::TransportUnknown { .. } => 2,
+            ReachabilityVerdict::Unreachable { .. } => 3,
+            ReachabilityVerdict::Unknown { .. } => 4,
+            ReachabilityVerdict::Expired { .. } => 5,
+        }
+    }
+
+    /// Every variant appears in `verdicts()` exactly once, proven the way
+    /// `every_unknown_reason_is_named_exactly_once` proves its table: the
+    /// indices the fixture yields must cover every slot without collision,
+    /// which they can only do if the fixture is a permutation of the arms
+    /// above.
+    #[test]
+    fn the_warrant_fixture_covers_every_verdict_variant_exactly_once() {
+        const VERDICT_COUNT: usize = 6;
+        let mut claimed = [false; VERDICT_COUNT];
+        for verdict in verdicts() {
+            let slot = &mut claimed[verdict_index(&verdict)];
+            assert!(
+                !*slot,
+                "{verdict:?} claims an index the fixture already used"
+            );
+            *slot = true;
+        }
+        for (index, claimed) in claimed.iter().enumerate() {
+            assert!(*claimed, "no fixture row claims verdict index {index}");
+        }
     }
 
     const ACTIONS: [RelayRecoveryActionKind; 4] = [
@@ -182,7 +259,16 @@ mod tests {
             WarrantRule::Deny,
             WarrantRule::RequireEpisode,
             WarrantRule::RequireEpisode,
+            // #5942 r2: `Expired` is warrant-neutral — the same rule the same
+            // channel had one tick earlier as `Unknown`.
+            WarrantRule::RequireEpisode,
         ];
+        assert_eq!(
+            verdicts().len(),
+            expected.len(),
+            "the fixture and the expectation must stay the same length, or this \
+             table silently checks a prefix"
+        );
         for action in ACTIONS {
             assert_eq!(
                 verdicts()

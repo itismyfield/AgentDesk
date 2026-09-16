@@ -14,7 +14,14 @@ use crate::services::discord::health::reachability::discovery::TranscriptFileId;
 use crate::services::discord::health::reachability::ledger::{
     LedgerIncarnation, LedgerObligation, ReachabilityLedger,
 };
-use crate::services::discord::health::session_enrichment::SessionEnrichment;
+use crate::services::discord::health::reachability::ledger_ttl::{
+    LEDGER_OBSERVATION_TTL_SECS, LEDGER_OBSERVATION_TTL_TICKS,
+    SHORTEST_PERIODIC_PRODUCER_PERIOD_SECS,
+};
+use crate::services::discord::health::reachability::observation::REACHABILITY_OBSERVATION_INTERVAL_SECS;
+use crate::services::discord::health::STALL_WATCHDOG_INTERVAL_SECS;
+use crate::services::discord::health::session_enrichment::{ExecutorWitness, SessionEnrichment};
+use crate::services::discord::health::snapshot::HealthStatus;
 use crate::services::discord::outbound::delivery_record::{
     ConfirmedDeliveryReceipt, DeliveredCommit, DeliveryRecord, ExactJsonlSourceIdentity,
 };
@@ -109,6 +116,8 @@ struct Case {
     divergence: RowCoordinateDivergence,
     ledger: Option<ReachabilityLedger>,
     ledger_present: bool,
+    ledger_observed_at_epoch_ms: Option<u64>,
+    executor: ExecutorWitness,
     receipts: ReceiptIndexRead,
     transcript: TranscriptLiveness,
     read_truncated: bool,
@@ -122,6 +131,10 @@ impl Default for Case {
             divergence: RowCoordinateDivergence::SameFile,
             ledger: Some(ledger_with(Vec::new(), proven_incarnation())),
             ledger_present: true,
+            // Observed on this very tick, with a live producer: the default
+            // case is a channel nothing has expired and nothing may.
+            ledger_observed_at_epoch_ms: Some(NOW_MS),
+            executor: ExecutorWitness::Present,
             receipts: ReceiptIndexRead::Absent,
             transcript: TranscriptLiveness::Resolved {
                 eof: 4_800,
@@ -136,18 +149,27 @@ impl Default for Case {
 
 impl Case {
     fn classify(&self) -> ReachabilityVerdict {
+        self.classify_at(NOW_MS)
+    }
+
+    /// `classify` against a caller-supplied wall clock, so a test that reads a
+    /// REAL file's timestamp can compare it against real `now` instead of the
+    /// synthetic [`NOW_MS`] the rest of the battery runs on.
+    fn classify_at(&self, now_epoch_ms: u64) -> ReachabilityVerdict {
         let provider = provider();
         classify_reachability(ReachabilityInputs {
             provider: &provider,
             divergence: self.divergence,
             ledger: self.ledger.as_ref(),
             ledger_present: self.ledger_present,
+            ledger_observed_at_epoch_ms: self.ledger_observed_at_epoch_ms,
+            executor: self.executor,
             receipts: &self.receipts,
             transcript: self.transcript,
             read_truncated: self.read_truncated,
             rowless_active_turn: self.rowless_active_turn,
             placeholder_present: self.placeholder_present,
-            now_epoch_ms: NOW_MS,
+            now_epoch_ms,
             process_started_at_epoch_ms: PROCESS_STARTED_MS,
         })
     }
@@ -425,7 +447,46 @@ fn in_band_ladder() -> Vec<ReachabilityVerdict> {
             oldest_unsatisfied_age_secs: 900,
             uncovered_ranges: 3,
         },
+        // #5942: the ladder is what the composition tests sweep, so a variant
+        // missing from it is a variant those tests never compose.
+        ReachabilityVerdict::Expired {
+            unobserved_for_secs: LEDGER_OBSERVATION_TTL_SECS + 1,
+        },
     ]
+}
+
+/// No `_` arm: a seventh `ReachabilityVerdict` stops this file compiling until
+/// someone decides whether the composition sweeps it.
+fn ladder_verdict_index(verdict: &ReachabilityVerdict) -> usize {
+    match verdict {
+        ReachabilityVerdict::Reachable => 0,
+        ReachabilityVerdict::Degraded { .. } => 1,
+        ReachabilityVerdict::TransportUnknown { .. } => 2,
+        ReachabilityVerdict::Unreachable { .. } => 3,
+        ReachabilityVerdict::Unknown { .. } => 4,
+        ReachabilityVerdict::Expired { .. } => 5,
+    }
+}
+
+/// `in_band_ladder()` is what every composition test sweeps, so a variant
+/// missing from it is a variant those tests never compose — which is precisely
+/// how #5942 r1's `Expired` reached the composition untested. r3 (P2-4) gives
+/// this fixture the same exhaustiveness guard the destructive-warrant table
+/// got, because "add your variant to the list" is a convention and a convention
+/// is not a gate.
+#[test]
+fn the_composition_ladder_covers_every_verdict_variant() {
+    const VERDICT_COUNT: usize = 6;
+    let mut seen = [false; VERDICT_COUNT];
+    for verdict in in_band_ladder() {
+        seen[ladder_verdict_index(&verdict)] = true;
+    }
+    for (index, seen) in seen.iter().enumerate() {
+        assert!(
+            *seen,
+            "no rung of in_band_ladder() covers verdict index {index}"
+        );
+    }
 }
 
 /// The `Unknown → Healthy` mutation lock. 4987 §4.1: an unobservable relay is
@@ -834,6 +895,7 @@ fn provider_absent_reason() -> &'static str {
         pane_idle_confirmed: false,
         rowless_active_turn: false,
         placeholder_present: false,
+        executor: ExecutorWitness::Unwitnessed,
         now_epoch_ms: NOW_MS,
         process_started_at_epoch_ms: PROCESS_STARTED_MS,
     });
@@ -938,5 +1000,494 @@ fn transcript_unresolved_no_longer_answers_for_five_branches() {
             .filter(|(_, reason)| *reason == "transcript_unresolved")
             .count(),
         1
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #5942: the ledger TTL
+//
+// A routine thread's producer lives for a few minutes and then exits. The
+// ledger it leaves behind has no tmux session to resolve its transcript
+// against, so every later tick reads `unknown{transcript_unresolved}`, which
+// `permits_health()` refuses — and with no expiry path the node is pinned
+// `ok=false` for as long as the file exists. These cases pin the expiry that
+// ends that, and — the larger half of the battery — the five separate
+// conditions that must hold before anything may expire at all.
+// ---------------------------------------------------------------------------
+
+/// The shape a dead routine thread leaves behind: a ledger owing nothing, with
+/// no producer left, last written well outside the TTL.
+fn abandoned_ledger_case() -> Case {
+    Case {
+        ledger: Some(ledger_with(Vec::new(), proven_incarnation())),
+        ledger_observed_at_epoch_ms: Some(NOW_MS - (LEDGER_OBSERVATION_TTL_SECS + 60) * 1_000),
+        executor: ExecutorWitness::Absent,
+        // The production shape: with the session gone the registry resolves no
+        // transcript, which is what makes the entry permanently unknown today.
+        transcript: TranscriptLiveness::Unresolved,
+        ..Case::default()
+    }
+}
+
+/// The verdict an unexpired version of the same channel produces. Named once so
+/// every guard below asserts "still THIS", not merely "not expired" — a guard
+/// that let the classifier fall through to some other wrong answer would
+/// otherwise pass.
+fn unexpired_verdict() -> ReachabilityVerdict {
+    ReachabilityVerdict::unknown(ReachabilityUnknownReason::TranscriptUnresolved, 0)
+}
+
+/// The fix: a ledger past its TTL with no producer and nothing owed leaves the
+/// health judgement — as an `Expired` that is still published, never as a
+/// `Reachable` and never as silence.
+#[test]
+fn an_abandoned_ledger_past_its_ttl_expires_out_of_the_health_judgment() {
+    let verdict = abandoned_ledger_case().classify();
+    assert!(
+        matches!(verdict, ReachabilityVerdict::Expired { .. }),
+        "an abandoned ledger past its TTL must expire, got {verdict:?}"
+    );
+    assert!(
+        !verdict.permits_health(),
+        "expiry must not be dressed up as health"
+    );
+    assert!(
+        verdict.abstains_from_health_polarity(),
+        "an expired ledger must withdraw from the polarity, not decide it"
+    );
+
+    let composed = compose_relay_verdict(verdict, ExternalRelayVerdict::Unknown);
+    let mut degraded_reasons = Vec::new();
+    let mut expired = Vec::new();
+    let mut status = HealthStatus::Healthy;
+    apply_relay_verdict_polarity(
+        true,
+        &composed,
+        "claude",
+        1_519_100_943_889_727_641,
+        &mut degraded_reasons,
+        &mut expired,
+        &mut status,
+    );
+    assert!(
+        degraded_reasons.is_empty(),
+        "#5942: an expired ledger must stop producing degraded reasons, got {degraded_reasons:?}"
+    );
+    assert_eq!(
+        status,
+        HealthStatus::Healthy,
+        "an expired ledger must not pin the node non-GREEN"
+    );
+    assert_eq!(
+        expired,
+        vec!["relay_verdict_expired_claude_1519100943889727641".to_string()],
+        "expiry must stay observable under its own name"
+    );
+}
+
+/// Over-expiry guard 1 — the TTL edge. At the bound and one second under it the
+/// ledger is still in the judgement; the first expiry is strictly past it.
+#[test]
+fn a_ledger_inside_its_ttl_is_not_expired() {
+    for age_secs in [
+        0,
+        1,
+        LEDGER_OBSERVATION_TTL_SECS - 1,
+        LEDGER_OBSERVATION_TTL_SECS,
+    ] {
+        let case = Case {
+            ledger_observed_at_epoch_ms: Some(NOW_MS - age_secs * 1_000),
+            ..abandoned_ledger_case()
+        };
+        assert_eq!(
+            case.classify(),
+            unexpired_verdict(),
+            "a ledger observed {age_secs}s ago is inside the TTL and must still be judged"
+        );
+    }
+
+    let just_past = Case {
+        ledger_observed_at_epoch_ms: Some(NOW_MS - (LEDGER_OBSERVATION_TTL_SECS + 1) * 1_000),
+        ..abandoned_ledger_case()
+    };
+    assert_eq!(
+        just_past.classify(),
+        ReachabilityVerdict::Expired {
+            unobserved_for_secs: LEDGER_OBSERVATION_TTL_SECS + 1,
+        },
+        "the first second past the bound expires, and reports its own age"
+    );
+}
+
+/// Over-expiry guard 2 — a live producer. A stale ledger beside a session that
+/// is still up is a DIFFERENT defect (the observation task is not committing),
+/// and expiring it would hide exactly that.
+#[test]
+fn a_live_executor_blocks_expiry_of_a_stale_ledger() {
+    let case = Case {
+        executor: ExecutorWitness::Present,
+        ..abandoned_ledger_case()
+    };
+    assert_eq!(
+        case.classify(),
+        unexpired_verdict(),
+        "a stale ledger with a live producer must stay in the judgement"
+    );
+}
+
+/// Over-expiry guard 3 — an unwitnessed producer. A spent probe budget or a
+/// probe that did not return is not evidence the session is gone, so it may not
+/// expire anything.
+#[test]
+fn an_unwitnessed_executor_blocks_expiry_of_a_stale_ledger() {
+    let case = Case {
+        executor: ExecutorWitness::Unwitnessed,
+        ..abandoned_ledger_case()
+    };
+    assert_eq!(
+        case.classify(),
+        unexpired_verdict(),
+        "an unwitnessed probe must never be read as an absent producer"
+    );
+}
+
+/// Over-expiry guard 4 — an outstanding obligation. This is the one that keeps
+/// the TTL from eating a real loss: bytes were owed when the producer died, and
+/// that is a delivery failure, not an abandoned ledger.
+#[test]
+fn an_outstanding_obligation_blocks_expiry_of_a_stale_ledger() {
+    let case = Case {
+        ledger: Some(ledger_with(
+            vec![obligation(1_000, 2_000, OBLIGATION_FAIL_BOUND_SECS + 30)],
+            proven_incarnation(),
+        )),
+        ..abandoned_ledger_case()
+    };
+    let verdict = case.classify();
+    assert!(
+        !matches!(verdict, ReachabilityVerdict::Expired { .. }),
+        "an unsatisfied obligation must survive the TTL, got {verdict:?}"
+    );
+    assert_eq!(verdict, unexpired_verdict());
+}
+
+/// Over-expiry guard 5 — a live turn. A placeholder outstanding in Discord, or
+/// a mailbox reporting an active turn, both say something is still going on for
+/// this channel whatever the tmux probe answered.
+#[test]
+fn a_live_placeholder_or_rowless_active_turn_blocks_expiry() {
+    let with_placeholder = Case {
+        placeholder_present: true,
+        ..abandoned_ledger_case()
+    };
+    assert_eq!(
+        with_placeholder.classify(),
+        unexpired_verdict(),
+        "an outstanding placeholder must not be expired away"
+    );
+
+    let with_active_turn = Case {
+        rowless_active_turn: true,
+        ..abandoned_ledger_case()
+    };
+    assert_eq!(
+        with_active_turn.classify(),
+        unexpired_verdict(),
+        "a mailbox-reported active turn must not be expired away"
+    );
+}
+
+/// Over-expiry guard 6 — an undated ledger. A clock that could not be read is
+/// not an old ledger, so `None` expires nothing.
+#[test]
+fn an_undated_ledger_is_never_expired() {
+    let case = Case {
+        ledger_observed_at_epoch_ms: None,
+        ..abandoned_ledger_case()
+    };
+    assert_eq!(
+        case.classify(),
+        unexpired_verdict(),
+        "an unreadable observation clock must not expire a ledger"
+    );
+}
+
+/// P2-3, the gate-position re-adjudication: expiry may never preempt a verdict
+/// the transcript ladder would have called `Reachable`.
+///
+/// The gate runs BEFORE the ladder, so this is a real hazard rather than a
+/// theoretical one, and r2 defended the position with the wrong argument — that
+/// a ledger with no producer "can never pass the ladder". It can: a transcript
+/// resolved with `alive: true` is 4987 §-1.4's positive evidence, and the
+/// reviewer demonstrated it composing to `Reachable` one tick before the gate
+/// expired it. The position is kept and the ARGUMENT replaced by a condition:
+/// conjunct 5 refuses to expire over positive alive evidence, which is the
+/// complete set of inputs that can produce `Reachable`, so the gate is now
+/// provably unable to preempt a GREEN answer.
+#[test]
+fn a_live_transcript_is_never_expired_even_with_no_executor_and_a_cold_ledger() {
+    let case = Case {
+        transcript: TranscriptLiveness::Resolved {
+            eof: 4_800,
+            alive: true,
+        },
+        ..abandoned_ledger_case()
+    };
+    assert_eq!(
+        case.classify(),
+        ReachabilityVerdict::Reachable,
+        "positive §-1.4 alive evidence outranks the TTL; expiring it would have hidden a \
+         channel that was answering"
+    );
+}
+
+/// The other half of conjunct 5, so the guard is a condition and not a blanket
+/// "any resolved transcript is safe".
+///
+/// `Resolved { alive: false }` still expires, and that is the correct trade:
+/// the ladder's answer for it is `unknown{incarnation_not_alive_witnessed}`,
+/// which `permits_health()` refuses exactly as `transcript_unresolved` does and
+/// which no later tick can retire on its own. Expiring it is the #5942 fix
+/// doing its job; refusing to would have made conjunct 5 a second, much wider
+/// rule than the one that was argued for.
+#[test]
+fn a_resolved_but_not_alive_transcript_still_expires_with_no_executor() {
+    let case = Case {
+        transcript: TranscriptLiveness::Resolved {
+            eof: 4_800,
+            alive: false,
+        },
+        ..abandoned_ledger_case()
+    };
+    assert!(
+        matches!(case.classify(), ReachabilityVerdict::Expired { .. }),
+        "a ledger with no producer and no alive witness must still expire, got {:?}",
+        case.classify()
+    );
+
+    // And the verdict it displaces is itself non-GREEN and permanent — the
+    // thing being retired is a stuck answer, not a finding.
+    let with_a_producer = Case {
+        executor: ExecutorWitness::Present,
+        ..case
+    };
+    let ladder_answer = with_a_producer.classify();
+    assert!(
+        !ladder_answer.permits_health(),
+        "if the ladder's own answer here were health, conjunct 5 would be too narrow; got \
+         {ladder_answer:?}"
+    );
+}
+
+/// Expiry must be READABLE, not merely quiet: the detail surface names the
+/// verdict, its reason, its age, and the fact that it abstained.
+#[test]
+fn the_expired_report_publishes_its_age_and_its_abstention() {
+    let composed = compose_relay_verdict(
+        abandoned_ledger_case().classify(),
+        ExternalRelayVerdict::Unknown,
+    );
+    let report = RelayVerdictReport::of(&composed, true);
+    assert_eq!(report.verdict, "expired");
+    assert_eq!(report.reason, Some("ledger_unobserved_past_ttl"));
+    assert_eq!(
+        report.unobserved_for_secs,
+        Some(LEDGER_OBSERVATION_TTL_SECS + 60)
+    );
+    assert!(report.health_polarity_abstained);
+    assert!(
+        report.governs_health_polarity,
+        "the §5.1 switch was live; abstention is this entry's own answer, not the switch's"
+    );
+    assert!(!report.manual_redelivery_banned);
+
+    // And the pair is not published on anything else.
+    let unexpired = compose_relay_verdict(unexpired_verdict(), ExternalRelayVerdict::Unknown);
+    let unexpired_report = RelayVerdictReport::of(&unexpired, true);
+    assert_eq!(unexpired_report.unobserved_for_secs, None);
+    assert!(!unexpired_report.health_polarity_abstained);
+}
+
+/// An abstention is Tier A's, and only while Tier A decides. An out-of-band
+/// watchdog that actually observed lost blocks on this channel outranks an
+/// expired ledger and degrades on its own evidence.
+#[test]
+fn the_external_tier_still_degrades_an_expired_ledger() {
+    let expired = abandoned_ledger_case().classify();
+    for external in [
+        ExternalRelayVerdict::Lagging { lost_blocks: 2 },
+        ExternalRelayVerdict::Unreachable { lost_blocks: 5 },
+    ] {
+        let composed = compose_relay_verdict(expired.clone(), external);
+        assert_eq!(composed.decided_by(), RelayVerdictTier::External);
+        assert!(!composed.permits_health());
+        assert!(
+            !composed.abstains_from_health_polarity(),
+            "a watchdog finding must not be swallowed by an expired ledger: {external:?}"
+        );
+
+        let mut degraded_reasons = Vec::new();
+        let mut expired_ledgers = Vec::new();
+        let mut status = HealthStatus::Healthy;
+        apply_relay_verdict_polarity(
+            true,
+            &composed,
+            "claude",
+            7,
+            &mut degraded_reasons,
+            &mut expired_ledgers,
+            &mut status,
+        );
+        assert_eq!(degraded_reasons.len(), 1, "{external:?} must still degrade");
+        assert!(expired_ledgers.is_empty());
+        assert_eq!(status, HealthStatus::Degraded);
+    }
+
+    // The control: the same expired verdict with a watchdog that claims no loss
+    // keeps Tier A and keeps abstaining, so the assertions above are testing the
+    // external rank and not the expiry.
+    let quiet = compose_relay_verdict(expired, ExternalRelayVerdict::NoLoss);
+    assert_eq!(quiet.decided_by(), RelayVerdictTier::InBand);
+    assert!(quiet.abstains_from_health_polarity());
+}
+
+/// The TTL is derived from the observation cadence and then CHECKED against the
+/// two independent quantities it has to sit between.
+///
+/// r1 wrote the lower bound as `TTL >= FAIL_BOUND` while defining
+/// `TTL = FAIL_BOUND`, so it could not fail — a tautology wearing an
+/// assertion's clothes. The TTL is now `ticks × cadence`, which is what
+/// actually stamps the file, so both comparisons below are between numbers that
+/// move for different reasons and either can go red:
+///
+/// * under [`OBLIGATION_FAIL_BOUND_SECS`] an obligation could be expired out
+///   from under the ladder still grading it;
+/// * at or above [`SHORTEST_PERIODIC_PRODUCER_PERIOD_SECS`] a routine re-stamps
+///   its ledger every cycle, renews the TTL forever, and never expires — #5942
+///   with extra steps.
+///
+/// What this still cannot check is whether
+/// `SHORTEST_PERIODIC_PRODUCER_PERIOD_SECS` matches the routines actually
+/// installed, because those are runtime rows behind `/api/routines`. The
+/// constant's own doc records that, and records why the failure is a return to
+/// today's behaviour rather than a new one.
+#[test]
+fn the_ledger_ttl_holds_against_the_delivery_bound_and_the_producer_period() {
+    // The derivation itself: ticks of the real observation cadence.
+    assert_eq!(
+        LEDGER_OBSERVATION_TTL_SECS,
+        LEDGER_OBSERVATION_TTL_TICKS * REACHABILITY_OBSERVATION_INTERVAL_SECS,
+        "the TTL must stay counted in observation ticks, not aliased to another bound"
+    );
+    assert!(
+        LEDGER_OBSERVATION_TTL_SECS >= OBLIGATION_FAIL_BOUND_SECS,
+        "a TTL under the fail bound ({OBLIGATION_FAIL_BOUND_SECS}s) can expire an obligation \
+         the ladder is still grading"
+    );
+    assert!(
+        LEDGER_OBSERVATION_TTL_SECS < SHORTEST_PERIODIC_PRODUCER_PERIOD_SECS,
+        "a TTL at or above the shortest producer period can be renewed forever and never fires"
+    );
+}
+
+/// The cadence the TTL counts is the OBSERVATION task's, and the observation
+/// task really reads that constant.
+///
+/// r2 derived the TTL from `STALL_WATCHDOG_INTERVAL_SECS`, which is the stall
+/// watchdog's number: retuning the watchdog would have silently moved a
+/// reachability TTL that has nothing to do with it. r3 gave the reachability
+/// tree its own [`REACHABILITY_OBSERVATION_INTERVAL_SECS`], which
+/// `runtime_bootstrap::spawns::run_bot_spawn_reachability_observation` now
+/// sleeps on.
+///
+/// The two are EQUAL today, and that is a coincidence worth pinning rather than
+/// collapsing: if someone retunes the watchdog, this assertion goes red and a
+/// human decides whether the observation cadence should follow, instead of the
+/// TTL moving on its own.
+#[test]
+fn the_ledger_ttl_is_counted_in_the_observation_tasks_own_cadence() {
+    assert_eq!(
+        REACHABILITY_OBSERVATION_INTERVAL_SECS, STALL_WATCHDOG_INTERVAL_SECS,
+        "the observation task is driven off the stall watchdog's tick today; if that changed, \
+         decide deliberately whether the reachability TTL follows"
+    );
+    assert_eq!(
+        LEDGER_OBSERVATION_TTL_SECS % REACHABILITY_OBSERVATION_INTERVAL_SECS,
+        0,
+        "a TTL that is not a whole number of observation ticks cannot be read as a tick count"
+    );
+}
+
+/// The TTL's clock is the ledger file's MODIFICATION time — not its access
+/// time, not its inode-change time, and not a constant.
+///
+/// r2's version only checked that a just-written file reads back "within 60
+/// seconds of now", which every one of those three clocks satisfies: swapping
+/// `.modified()` for `.accessed()` kept it green. That mutant is not academic.
+/// On Linux `relatime` — the default on the deployment host's filesystems —
+/// each health tick's `read_ledger_at` would touch atime forward, so an
+/// atime-based TTL would be renewed by the very act of reading it and NOTHING
+/// would ever expire; #5942 would ship as a no-op that passes its own tests.
+///
+/// So the file here is given a modification time far in the past and an access
+/// time of NOW, which separates the three clocks: `.modified()` returns the
+/// backdated value, while `.accessed()` and the inode-change time both land on
+/// now. Then the value is fed to the classifier against a real wall clock, so
+/// the file's clock and the verdict are connected by the test rather than by
+/// assumption.
+#[test]
+fn the_ttl_clock_is_the_ledger_files_modification_time_not_its_access_time() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("ledger.json");
+    std::fs::write(&path, "{}").expect("write");
+
+    let now = std::time::SystemTime::now();
+    let now_ms = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_millis() as u64;
+    let backdated_secs = LEDGER_OBSERVATION_TTL_SECS + 300;
+    let backdated = now - std::time::Duration::from_secs(backdated_secs);
+    let times = std::fs::FileTimes::new()
+        .set_accessed(now)
+        .set_modified(backdated);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .expect("open for set_times")
+        .set_times(times)
+        .expect("set_times");
+
+    let observed = ledger_committed_at_epoch_ms(&path).expect("a written file has a commit time");
+    let age_secs = (now_ms.saturating_sub(observed)) / 1_000;
+    assert!(
+        age_secs > LEDGER_OBSERVATION_TTL_SECS,
+        "the commit time must be the backdated mtime ({backdated_secs}s old), but it read as \
+         {age_secs}s old — an atime- or ctime-based clock would read ~0 here, and under Linux \
+         relatime every health tick would renew it"
+    );
+    assert!(
+        age_secs < backdated_secs + 120,
+        "the commit time must be THIS file's mtime, got an age of {age_secs}s against the \
+         {backdated_secs}s that was set"
+    );
+
+    // And the classifier really runs on that number: same file, real clock.
+    let case = Case {
+        ledger_observed_at_epoch_ms: Some(observed),
+        ..abandoned_ledger_case()
+    };
+    assert!(
+        matches!(
+            case.classify_at(now_ms),
+            ReachabilityVerdict::Expired { .. }
+        ),
+        "a ledger whose FILE says it has not been stamped in {backdated_secs}s must expire"
+    );
+
+    assert_eq!(
+        ledger_committed_at_epoch_ms(&dir.path().join("absent.json")),
+        None,
+        "a ledger with no file has no commit time, and an unknown clock expires nothing"
     );
 }

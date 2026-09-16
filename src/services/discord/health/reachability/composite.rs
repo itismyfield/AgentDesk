@@ -53,6 +53,7 @@ use crate::services::discord::outbound::receipt_index::{
 };
 use crate::services::provider::ProviderKind;
 
+use super::super::session_enrichment::ExecutorWitness;
 use super::divergence::{CoordinateObservation, RowCoordinateDivergence, divergence};
 use super::external_verdict::{
     ExternalRelayVerdict, classify_external_verdict_at, external_verdict_path,
@@ -60,6 +61,7 @@ use super::external_verdict::{
 use super::ledger::{
     LedgerObligation, ReachabilityLedger, ledger_file_exists, ledger_path, read_ledger_at,
 };
+use super::ledger_ttl::{EXPIRED_REASON, expired_without_a_producer, ledger_committed_at_epoch_ms};
 use super::verdict::{
     NotAliveObligationState, ReachabilityUnknownReason, ReachabilityVerdict,
     TransportUnknownEvidence,
@@ -122,7 +124,11 @@ pub(in crate::services::discord) struct RelayVerdict {
 /// produce" — inventing one would put a false precision into the product.
 fn in_band_rank(verdict: &ReachabilityVerdict) -> u8 {
     match verdict {
-        ReachabilityVerdict::Reachable => 0,
+        // `Expired` shares rank 0 with `Reachable` because it makes no claim of
+        // loss for the external tier to outrank — not because it claims health.
+        // It does not: `permits_health` is false for it, and a watchdog that DID
+        // see loss still displaces it and degrades on its own evidence (#5942).
+        ReachabilityVerdict::Reachable | ReachabilityVerdict::Expired { .. } => 0,
         ReachabilityVerdict::Degraded { .. } => 1,
         ReachabilityVerdict::TransportUnknown { .. } | ReachabilityVerdict::Unknown { .. } => 2,
         ReachabilityVerdict::Unreachable { .. } => 3,
@@ -194,6 +200,18 @@ impl RelayVerdict {
         matches!(self.decided_by, RelayVerdictTier::InBand) && self.in_band.permits_health()
     }
 
+    /// Whether this composed verdict withdraws from the health polarity rather
+    /// than deciding it (#5942).
+    ///
+    /// True only when Tier A itself expired AND the external tier did not
+    /// displace it. That second conjunct keeps the abstention from swallowing a
+    /// real finding: a watchdog that observed lost blocks outranks an expired
+    /// in-band ledger and degrades on its own evidence.
+    pub(in crate::services::discord) fn abstains_from_health_polarity(&self) -> bool {
+        matches!(self.decided_by, RelayVerdictTier::InBand)
+            && self.in_band.abstains_from_health_polarity()
+    }
+
     /// Whether an alarm for this composed verdict must carry §-1.3b's explicit
     /// "do not redeliver by hand" notice.
     ///
@@ -233,6 +251,7 @@ impl RelayVerdict {
                 ReachabilityVerdict::TransportUnknown { .. } => "transport_unknown",
                 ReachabilityVerdict::Unknown { .. } => "unknown",
                 ReachabilityVerdict::Unreachable { .. } => "unreachable",
+                ReachabilityVerdict::Expired { .. } => "expired",
             },
             RelayVerdictTier::External => match self.external {
                 ExternalRelayVerdict::Unknown => "unknown",
@@ -259,6 +278,18 @@ pub(in crate::services::discord) struct RelayVerdictReport {
     pub reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_lost_blocks: Option<u32>,
+    /// #5942: how long an `expired` entry's ledger went without an observation
+    /// commit. On that verdict only, so the expiry is read off the surface with
+    /// its age rather than inferred from a channel that quietly stopped
+    /// appearing in the degraded reasons.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unobserved_for_secs: Option<u64>,
+    /// #5942: this entry withdrew from the health polarity instead of deciding
+    /// it. Separate from `governs_health_polarity`, which reports the §5.1
+    /// SWITCH: an expired entry under `Composite` carries both as true, which
+    /// is the pair an operator needs — the switch was live and it still did not
+    /// count.
+    pub health_polarity_abstained: bool,
     /// Whether this value was allowed to change the health polarity of the
     /// entry it sits on. False under `RelayVerdictSource::Structural`, where
     /// the same object is published purely as a shadow.
@@ -273,8 +304,15 @@ impl RelayVerdictReport {
         verdict: &RelayVerdict,
         governs_health_polarity: bool,
     ) -> Self {
+        let mut unobserved_for_secs = None;
         let (oldest_unsatisfied_age_secs, uncovered_ranges, reason) = match verdict.in_band() {
             ReachabilityVerdict::Reachable => (None, None, None),
+            ReachabilityVerdict::Expired {
+                unobserved_for_secs: unobserved,
+            } => {
+                unobserved_for_secs = Some(*unobserved);
+                (None, None, Some(EXPIRED_REASON))
+            }
             ReachabilityVerdict::Degraded {
                 oldest_unsatisfied_age_secs,
                 uncovered_ranges,
@@ -312,6 +350,8 @@ impl RelayVerdictReport {
             uncovered_ranges,
             reason,
             external_lost_blocks,
+            unobserved_for_secs,
+            health_polarity_abstained: verdict.abstains_from_health_polarity(),
             governs_health_polarity,
             manual_redelivery_banned: verdict.requires_manual_redelivery_ban_notice(),
         }
@@ -382,6 +422,13 @@ pub(in crate::services::discord) struct ReachabilityInputs<'a> {
     /// parse", which 4987 §-1.4 counterexample 7 requires.
     pub ledger: Option<&'a ReachabilityLedger>,
     pub ledger_present: bool,
+    /// #5942: when the ledger file was last committed, or `None` when that
+    /// could not be established. `None` never expires a ledger — an undated
+    /// ledger is not an old one.
+    pub ledger_observed_at_epoch_ms: Option<u64>,
+    /// #5942: what the caller could establish about the execution owner behind
+    /// this channel. Only [`ExecutorWitness::Absent`] can expire a ledger.
+    pub executor: ExecutorWitness,
     /// T4-B3's receipt projection read.
     pub receipts: &'a ReceiptIndexRead,
     pub transcript: TranscriptLiveness,
@@ -409,7 +456,7 @@ struct CoverageSweep {
     oldest_first_observed_at_epoch_ms: Option<u64>,
 }
 
-fn age_secs(now_epoch_ms: u64, first_observed_at_epoch_ms: u64) -> u64 {
+pub(super) fn age_secs(now_epoch_ms: u64, first_observed_at_epoch_ms: u64) -> u64 {
     now_epoch_ms.saturating_sub(first_observed_at_epoch_ms) / 1_000
 }
 
@@ -511,12 +558,32 @@ pub(in crate::services::discord) fn classify_reachability(
         // coordinate; no coordinate was ever framed.
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::NeverObserved, 0);
     };
-    let TranscriptLiveness::Resolved { eof, alive } = inputs.transcript else {
-        return ReachabilityVerdict::unknown(ReachabilityUnknownReason::TranscriptUnresolved, 0);
-    };
+    // #5942 r3: every FAULT arm runs before the timer. A diverged coordinate, an
+    // unparseable store and a truncated read are things that went WRONG, and a
+    // thing that went wrong must not be retired by a clock. `read_truncated`
+    // moved above the gate for that reason; it is hardcoded `false` at the
+    // production call site today, so this makes an ordering claim true rather
+    // than changing behaviour.
     if inputs.read_truncated {
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::ReadTruncated, 0);
     }
+    // Now ask whether anybody is left to make this ledger say anything.
+    //
+    // The gate sits above the transcript arm because that arm is what a ledger
+    // with no producer can never pass, so such a channel re-answers
+    // `TranscriptUnresolved` every tick forever. r3 (P2-3) re-adjudicated the
+    // position rather than assuming it: the gate must not preempt a verdict the
+    // ladder would have called `Reachable`, and the only input that can produce
+    // one is 4987 §-1.4's positive incarnation-alive evidence — which
+    // `expired_without_a_producer` now refuses to expire over.
+    if let Some(unobserved_for_secs) = expired_without_a_producer(&inputs, ledger) {
+        return ReachabilityVerdict::Expired {
+            unobserved_for_secs,
+        };
+    }
+    let TranscriptLiveness::Resolved { eof, alive } = inputs.transcript else {
+        return ReachabilityVerdict::unknown(ReachabilityUnknownReason::TranscriptUnresolved, 0);
+    };
     if inputs.rowless_active_turn {
         return ReachabilityVerdict::unknown(ReachabilityUnknownReason::RowlessActiveTurn, 0);
     }
@@ -666,6 +733,11 @@ pub(in crate::services::discord) struct RelayVerdictProbe<'a> {
     pub rowless_active_turn: bool,
     /// A placeholder message is outstanding for this channel.
     pub placeholder_present: bool,
+    /// #5942: what the caller could establish about this channel's execution
+    /// owner. The caller owns this probe because establishing it costs a tmux
+    /// round trip against a shared budget, which this file does not hold and
+    /// must not spend.
+    pub executor: ExecutorWitness,
     pub now_epoch_ms: u64,
     pub process_started_at_epoch_ms: u64,
 }
@@ -705,6 +777,9 @@ pub(in crate::services::discord) fn observe_relay_verdict(
     let ledger_path = ledger_path(provider, probe.channel_id);
     let ledger = ledger_path.as_deref().and_then(read_ledger_at);
     let ledger_present = ledger_path.as_deref().is_some_and(ledger_file_exists);
+    let ledger_observed_at_epoch_ms = ledger_path
+        .as_deref()
+        .and_then(ledger_committed_at_epoch_ms);
 
     let receipts = delivery_record_path(provider, probe.channel_id)
         .as_deref()
@@ -725,6 +800,8 @@ pub(in crate::services::discord) fn observe_relay_verdict(
         divergence: divergence_outcome,
         ledger: ledger.as_ref(),
         ledger_present,
+        ledger_observed_at_epoch_ms,
+        executor: probe.executor,
         receipts: &receipts,
         transcript,
         // The bounded read happens inside the observation task, which records
@@ -805,15 +882,28 @@ pub(in crate::services::discord) fn apply_relay_verdict_polarity(
     provider: &str,
     channel_id: u64,
     degraded_reasons: &mut Vec<String>,
+    expired_relay_ledgers: &mut Vec<String>,
     status: &mut super::super::snapshot::HealthStatus,
 ) {
-    if composite_governs_polarity && !relay_verdict.permits_health() {
-        degraded_reasons.push(format!(
-            "relay_verdict_{}_{provider}_{channel_id}",
-            relay_verdict.label(),
-        ));
-        *status = status.worsen(super::super::snapshot::HealthStatus::Degraded);
+    if !composite_governs_polarity || relay_verdict.permits_health() {
+        return;
     }
+    let entry = format!(
+        "relay_verdict_{}_{provider}_{channel_id}",
+        relay_verdict.label(),
+    );
+    // #5942: an expired entry is recorded, not counted. Its OWN vector, not
+    // `degraded_reasons`, so the aggregate keeps publishing the channel — a
+    // growing set is how "it is spreading" stays visible — without pinning the
+    // node non-GREEN forever. Writing it into `degraded_reasons` and skipping
+    // the `worsen` is worse: every consumer that reads a non-empty
+    // `degraded_reasons` as "degraded" would see the same saturation renamed.
+    if relay_verdict.abstains_from_health_polarity() {
+        expired_relay_ledgers.push(entry);
+        return;
+    }
+    degraded_reasons.push(entry);
+    *status = status.worsen(super::super::snapshot::HealthStatus::Degraded);
 }
 
 #[cfg(test)]

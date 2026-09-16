@@ -71,6 +71,22 @@ pub(in crate::services::discord) enum ReachabilityVerdict {
         reason: ReachabilityUnknownReason,
         since_secs: u64,
     },
+    /// The ledger outlived every producer that could ever resolve it (#5942):
+    /// no observation committed it for longer than the TTL, its execution owner
+    /// is positively witnessed absent, and it holds nothing outstanding.
+    ///
+    /// This is **not** a health claim. It is the third answer the polarity gate
+    /// was missing: `Reachable` asserts the relay is answerable, `Unknown`
+    /// asserts it is unanswerable *right now*, and `Expired` records that there
+    /// is no longer anybody left to answer — so the entry withdraws from the
+    /// judgement instead of pinning it non-GREEN forever.
+    /// [`ReachabilityVerdict::permits_health`] stays false for it, exactly as it
+    /// is for `Unknown`; what changes is only whether the polarity gate counts
+    /// it, which [`ReachabilityVerdict::abstains_from_health_polarity`] answers.
+    Expired {
+        /// How long the ledger has gone without an observation commit.
+        unobserved_for_secs: u64,
+    },
 }
 
 /// Why a `TransportUnknown` believes a transport occurred (4987 §-1.3b).
@@ -154,7 +170,10 @@ impl ReachabilityVerdict {
             Self::Degraded { .. }
             | Self::TransportUnknown { .. }
             | Self::Unreachable { .. }
-            | Self::Unknown { .. } => false,
+            | Self::Unknown { .. }
+            // #5942: expiry withdraws an entry from the judgement; it never
+            // promotes it. An expired ledger proves nothing was delivered.
+            | Self::Expired { .. } => false,
         }
     }
 
@@ -172,7 +191,8 @@ impl ReachabilityVerdict {
             | Self::Degraded { .. }
             | Self::TransportUnknown { .. }
             | Self::Unreachable { .. }
-            | Self::Unknown { .. } => false,
+            | Self::Unknown { .. }
+            | Self::Expired { .. } => false,
         }
     }
 
@@ -190,7 +210,8 @@ impl ReachabilityVerdict {
             | Self::Degraded { .. }
             | Self::TransportUnknown { .. }
             | Self::Unreachable { .. }
-            | Self::Unknown { .. } => false,
+            | Self::Unknown { .. }
+            | Self::Expired { .. } => false,
         }
     }
 
@@ -200,6 +221,32 @@ impl ReachabilityVerdict {
     /// because the crash window looks like a loss and is not one.
     pub(in crate::services::discord) fn requires_manual_redelivery_ban_notice(&self) -> bool {
         matches!(self, Self::TransportUnknown { .. })
+    }
+
+    /// Whether this verdict withdraws from the health polarity instead of
+    /// deciding it (#5942).
+    ///
+    /// `Expired` only. This is deliberately a THIRD answer rather than a
+    /// loosening of [`ReachabilityVerdict::permits_health`]: 4987 §4.1's
+    /// `Unknown ⇒ not GREEN` rule is untouched, and no variant that could still
+    /// be observed gains a way out of it. What an expired entry loses is its
+    /// vote, not its non-GREEN status — it is still published, with its age, so
+    /// an operator sees a ledger that outlived its producer rather than
+    /// silence.
+    ///
+    /// Spelled as an exhaustive match for the reason
+    /// [`ReachabilityVerdict::authorizes_redelivery`] is: a new variant must
+    /// claim an answer here before it compiles, so nothing joins the abstaining
+    /// set by omission.
+    pub(in crate::services::discord) fn abstains_from_health_polarity(&self) -> bool {
+        match self {
+            Self::Expired { .. } => true,
+            Self::Reachable
+            | Self::Degraded { .. }
+            | Self::TransportUnknown { .. }
+            | Self::Unreachable { .. }
+            | Self::Unknown { .. } => false,
+        }
     }
 
     /// The `Unknown` reason, when this is an `Unknown`.
@@ -290,7 +337,46 @@ mod tests {
                 ),
                 since_secs: 5,
             },
+            ReachabilityVerdict::Expired {
+                unobserved_for_secs: 3_600,
+            },
         ]
+    }
+
+    /// The fixture above is a hand-written list, and a hand-written list is
+    /// what a new variant walks straight past — #5942 r1 added `Expired` to the
+    /// enum and the truth table in `relay_recovery::destructive_warrant` kept
+    /// grading five rows out of six until r2 noticed. No `_` arm, so a seventh
+    /// variant stops this module compiling until someone names it.
+    fn verdict_index(verdict: &ReachabilityVerdict) -> usize {
+        match verdict {
+            ReachabilityVerdict::Reachable => 0,
+            ReachabilityVerdict::Degraded { .. } => 1,
+            ReachabilityVerdict::TransportUnknown { .. } => 2,
+            ReachabilityVerdict::Unreachable { .. } => 3,
+            ReachabilityVerdict::Unknown { .. } => 4,
+            ReachabilityVerdict::Expired { .. } => 5,
+        }
+    }
+
+    /// Every variant is REPRESENTED in `every_verdict()`, so the polarity tables
+    /// below are exhaustive by construction. "At least once" rather than
+    /// "exactly once" because the fixture deliberately carries several
+    /// `TransportUnknown` evidences and every `Unknown` reason; the property
+    /// that matters is that no variant is missing.
+    #[test]
+    fn the_polarity_fixture_covers_every_verdict_variant() {
+        const VERDICT_COUNT: usize = 6;
+        let mut seen = [false; VERDICT_COUNT];
+        for verdict in every_verdict() {
+            seen[verdict_index(&verdict)] = true;
+        }
+        for (index, seen) in seen.iter().enumerate() {
+            assert!(
+                *seen,
+                "no row of every_verdict() covers verdict index {index}"
+            );
+        }
     }
 
     #[test]
@@ -362,6 +448,32 @@ mod tests {
                 expected,
                 "wrong ban-notice polarity for {verdict:?}"
             );
+        }
+    }
+
+    /// #5942: expiry is the ONLY verdict that withdraws from the polarity.
+    ///
+    /// The table is asserted in both directions for the reason
+    /// `only_reachable_permits_green_health` is: the failure mode this predicate
+    /// invites is a second variant quietly joining the abstaining set, which
+    /// would silence a real non-GREEN channel. `permits_health` is re-asserted
+    /// beside it so the two can never be confused — an expired verdict abstains
+    /// AND is still not health.
+    #[test]
+    fn only_expired_abstains_from_health_polarity() {
+        for verdict in every_verdict() {
+            let expected = matches!(verdict, ReachabilityVerdict::Expired { .. });
+            assert_eq!(
+                verdict.abstains_from_health_polarity(),
+                expected,
+                "wrong abstention polarity for {verdict:?}"
+            );
+            if expected {
+                assert!(
+                    !verdict.permits_health(),
+                    "abstaining is not permission: {verdict:?}"
+                );
+            }
         }
     }
 

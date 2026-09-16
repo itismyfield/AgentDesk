@@ -16,6 +16,21 @@ use super::obligation::scan_canonical;
 use super::tail::{TAIL_READ_CAP_BYTES, TailCursor, TailOutcome, read_incremental};
 use super::verdict::ReachabilityUnknownReason;
 
+/// How often the reachability observation task commits a ledger (#5942 r3).
+///
+/// This tree's OWN cadence, not the stall watchdog's. `spawns.rs` sleeps this
+/// long between sweeps of `tmux_watchers`, and the ledger TTL is counted in
+/// multiples of it, so the two cannot drift apart by accident.
+///
+/// It happens to equal `health::STALL_WATCHDOG_INTERVAL_SECS` today and the
+/// task used to read that constant directly. That coupling was invisible and
+/// one-directional: retuning the stall watchdog to 45 s would have moved the
+/// ledger TTL from 600 s to 900 s with nothing to say so. The shared value is
+/// now a deliberate equality that
+/// `the_ledger_ttl_is_counted_in_the_observation_tasks_own_cadence` asserts
+/// rather than an alias that hides the dependency.
+pub(in crate::services::discord) const REACHABILITY_OBSERVATION_INTERVAL_SECS: u64 = 30;
+
 /// What one tick managed to persist. This is observation state, not a verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::services::discord) enum ReachabilityObservationState {
