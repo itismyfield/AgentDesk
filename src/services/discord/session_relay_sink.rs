@@ -42,7 +42,7 @@ mod orphan_reclaim;
 mod relay_format;
 mod task_notification_context;
 mod terminal_handoff;
-mod turn_parser;
+pub(in crate::services::discord) mod turn_parser;
 use self::idle_jsonl::IdlePending::{Deferred, RetainedForRetry, SentUnconfirmed};
 use self::idle_jsonl::{
     IdleCursor, IdleJsonlSessionInitRearm, IdleJsonlSuppression, IdlePending, IdleRelayRangeAction,
