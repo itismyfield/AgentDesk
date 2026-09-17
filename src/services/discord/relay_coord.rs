@@ -23,17 +23,15 @@ pub(in crate::services) struct TmuxRelayCoord {
     pub(in crate::services::discord) cancel_handoffs:
         super::tmux::tmux_watcher::cancel_handoff::Store,
     /// End offset (exclusive) of the last relay this process has confirmed
-    /// delivery for. 0 = no confirmed delivery yet this process lifetime.
+    /// delivery for; 0 = none yet this process lifetime (#3017).
     ///
-    /// #3017: this is the single output-offset authority for the relay-dedup
-    /// paths (read via `SharedData::committed_relay_offset`, advanced by the
-    /// watcher's `advance_watcher_confirmed_end`). For an inflight-less wake /
-    /// idle-background / monitor-auto-turn turn, the secondary relay actors
-    /// (idle-JSONL relay, session-bound sink) CONSULT this watermark so a
-    /// byte-range the watcher already committed is relayed exactly once
-    /// regardless of which actor observes it first (the E-13 dedup invariant).
-    /// For a normal Discord-origin turn (inflight present) the watcher remains
-    /// sole relay owner; only no-inflight wake/idle paths gate on this watermark.
+    /// The single output-offset authority for relay-dedup: read via
+    /// `SharedData::committed_relay_offset`, advanced by
+    /// `advance_watcher_confirmed_end`. For inflight-less turns
+    /// (wake/idle-background/monitor-auto), secondary relay actors consult
+    /// this watermark so an already-committed byte-range relays exactly once
+    /// regardless of observer order (E-13). For a normal Discord-origin turn
+    /// the watcher remains sole relay owner.
     pub(in crate::services::discord) confirmed_end_offset: Arc<std::sync::atomic::AtomicU64>,
     pub(in crate::services::discord) reset_state:
         std::sync::Mutex<relay_health::FrontierResetState>,
@@ -45,32 +43,26 @@ pub(in crate::services) struct TmuxRelayCoord {
     /// Number of watcher reattach/reconnect spawns observed for this channel
     /// in the current dcserver process. Exposed through watcher-state (#964).
     pub(in crate::services::discord) reconnect_count: Arc<std::sync::atomic::AtomicU64>,
-    /// `.generation` marker file mtime (nanos since epoch) snapshotted the
-    /// last time `confirmed_end_offset` was advanced. 0 = never observed.
+    /// `.generation` marker file mtime (ns since epoch) snapshotted the last
+    /// time `confirmed_end_offset` was advanced; 0 = never observed.
     ///
-    /// `reset_stale_relay_watermark_if_output_regressed` (#1270) uses this
-    /// to distinguish two output-regression scenarios that look identical
-    /// at the byte level:
-    ///   - Mid-flight rotation (`truncate_jsonl_head_safe` rename — same
-    ///     wrapper, same `.generation` mtime): pin watermark to current
-    ///     EOF so we don't re-relay surviving content (PR #1256 intent).
-    ///   - Cancel→respawn (`cleanup_session_temp_files` deletes
-    ///     `.generation`, claude.rs writes a fresh one — new wrapper, new
-    ///     mtime): reset watermark to 0 so the genuinely-new response is
-    ///     relayed.
-    ///
-    /// `.generation` is the stable wrapper-identity signal because it's
-    /// written once per spawn and never touched by the live wrapper, so its
-    /// mtime survives jsonl rotation but flips on a fresh spawn.
+    /// `reset_stale_relay_watermark_if_output_regressed` (#1270) uses this to
+    /// tell apart two output-regression scenarios identical at the byte
+    /// level: mid-flight rotation (same `.generation` mtime — pin watermark
+    /// to current EOF) vs. cancel→respawn (`.generation` deleted and
+    /// recreated — new mtime, reset watermark to 0). `.generation` works as
+    /// the wrapper-identity signal because it is written once per spawn and
+    /// never touched by the live wrapper: its mtime survives jsonl rotation
+    /// but flips on a fresh spawn.
     pub(in crate::services::discord) confirmed_end_generation_mtime_ns:
         Arc<std::sync::atomic::AtomicI64>,
-    /// #3041 P1-1: the LIVE per-channel delivery lease. Added ALONGSIDE
-    /// `relay_slot` (which is NOT removed yet — its guard migration is a later
-    /// step). The watcher acquires this before delivering the terminal response
-    /// and commits it after; the commit is what advances `confirmed_end_offset`
+    /// The live per-channel delivery lease (#3041 P1-1), added alongside
+    /// `relay_slot` (not yet removed — guard migration is a later step). The
+    /// watcher acquires this before delivering the terminal response and
+    /// commits it after; the commit advances `confirmed_end_offset`
     /// (replacing the watcher's inline advance). Shared via `Arc` across all
-    /// watcher instances for the channel so a replacement watcher observes a
-    /// live holder's lease and skips the duplicate send (the §5.2 B2 invariant).
+    /// watcher instances so a replacement watcher observes a live holder's
+    /// lease and skips the duplicate send (§5.2 B2).
     pub(in crate::services::discord) delivery_lease: Arc<DeliveryLeaseCell>,
 }
 
