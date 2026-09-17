@@ -1,23 +1,13 @@
 use super::*;
 
-/// Upper bound for the strict-terminator re-scan's widened window, used when
-/// the default 64KB tail lacks a turn-state envelope. A post-terminator
-/// housekeeping burst (`/model`, `/compact`, attachments) can push the real
-/// terminator past 64KB and stick the idle-queue on `Busy` forever (#3030);
-/// this bounds the one-time widen so hot call sites never read a multi-MB file.
+/// Widened re-scan ceiling for when the default 64KB tail lacks a terminator
+/// (#3030); bounds the one-time widen so hot call sites never read a multi-MB file.
 const TURN_STATE_MAX_TAIL_BYTES: u64 = 1024 * 1024;
 
-/// Strict, relay-offset-independent "is the last turn fully over?" probe,
-/// used by `jsonl_ready_for_input` on the `offset_behind` path (relay has not
-/// consumed the whole transcript). Without this, a fully written terminator
-/// followed by trailing post-turn housekeeping (`pr-link`, `ai-title`, mode
-/// envelopes, …) reads as Busy forever (#2790, #3030) — see
-/// [`scan_strict_terminator`] for the walk-back algorithm that finds the real
-/// terminator beneath such trailing lines. On this path the caller has no
-/// active turn, so a skipped trailing `permission-mode` is `/model` metadata,
-/// never a turn spin-up; the watcher's completion gate has its own
-/// `full_response`-non-empty guard against tearing down a spinning-up turn
-/// (#2712).
+/// Strict, relay-offset-independent "is the last turn fully over?" probe used
+/// by `jsonl_ready_for_input`'s `offset_behind` path — without it, a written
+/// terminator followed by trailing housekeeping reads as Busy forever
+/// (#2790, #3030); see [`scan_strict_terminator`] for the walk-back.
 pub(crate) fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
     scan_strict_terminator_idle_with_strictness(
         provider,
@@ -26,24 +16,16 @@ pub(crate) fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path)
     )
 }
 
-/// The STRICTER turn-END-only sibling of [`jsonl_strict_terminator_idle`],
-/// used ONLY by the finalize `Done` decision
-/// (`TurnFinalizer::completion_signal_state`, #3016 S3 Concern 1).
-///
-/// Where the lenient probe treats the whole per-provider "Idle-class" family
-/// as at-rest — including a *completed* `agent_message`, which for Codex can
-/// be written mid-turn right before a tool call — this one accepts only the
-/// authoritative TURN-END terminator; see
-/// [`TerminatorStrictness::FinalizeAuthority`] and
-/// [`envelope_is_turn_end_terminator`] for exactly which envelopes qualify.
-/// Everything else is walked past rather than treated as Busy, same as the
-/// lenient scan; only which envelopes may *produce* an Idle verdict differs.
+/// Stricter turn-END-only sibling of [`jsonl_strict_terminator_idle`], used
+/// only by the finalize `Done` decision (#3016 S3). Unlike the lenient probe,
+/// this accepts only the authoritative TURN-END terminator (see
+/// [`envelope_is_turn_end_terminator`]) — a completed `agent_message` (Codex
+/// can write one mid-turn) is walked past, not treated as Busy.
 pub(crate) fn jsonl_turn_end_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
     jsonl_completion_scan_idle(provider, path)
 }
 
-/// Shared completion-signal scan entry point for the finalizer/gate authority:
-/// only authoritative per-provider turn terminators prove completion.
+/// Finalizer/gate authority entry point: only authoritative terminators prove completion.
 pub(crate) fn jsonl_completion_scan_idle(provider: &ProviderKind, path: &Path) -> bool {
     scan_strict_terminator_idle_with_strictness(
         provider,
@@ -52,10 +34,8 @@ pub(crate) fn jsonl_completion_scan_idle(provider: &ProviderKind, path: &Path) -
     )
 }
 
-/// Shared windowed reverse-scan driver for both the lenient
-/// ([`jsonl_strict_terminator_idle`]) and the turn-END-only
-/// ([`jsonl_turn_end_terminator_idle`]) probes. Only the `strictness` argument
-/// differs — the windowing, widen-once, and torn-write handling are identical.
+/// Shared windowed reverse-scan driver for the lenient and turn-END-only
+/// probes; only the `strictness` argument differs.
 fn scan_strict_terminator_idle_with_strictness(
     provider: &ProviderKind,
     path: &Path,
@@ -68,9 +48,7 @@ fn scan_strict_terminator_idle_with_strictness(
     match scan_strict_terminator(provider, &window.lines, strictness) {
         StrictTerminatorScan::Idle => return true,
         StrictTerminatorScan::Busy => return false,
-        // No definitive envelope in this window. If it already covers the whole
-        // file, stay Busy; otherwise the terminator may have scrolled out behind
-        // a housekeeping burst (#3030) — widen once, bounded.
+        // Inconclusive over the whole file stays Busy; otherwise widen once (#3030).
         StrictTerminatorScan::Inconclusive => {
             if window.window_covers_file {
                 return false;
@@ -83,8 +61,7 @@ fn scan_strict_terminator_idle_with_strictness(
     };
     match scan_strict_terminator(provider, &wide.lines, strictness) {
         StrictTerminatorScan::Idle => true,
-        // Still no terminator within the 1MB ceiling: stay Busy rather than
-        // assume idle on an ambiguous, unbounded transcript.
+        // Still no terminator at the 1MB ceiling: stay Busy, not idle-by-default.
         StrictTerminatorScan::Busy | StrictTerminatorScan::Inconclusive => false,
     }
 }
@@ -92,13 +69,9 @@ fn scan_strict_terminator_idle_with_strictness(
 /// How permissive the reverse scan is about what counts as an Idle verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminatorStrictness {
-    /// The whole provider "Idle-class" family proves at-rest (the idle-queue
-    /// drain's readiness question). Used by [`jsonl_strict_terminator_idle`].
+    /// Whole "Idle-class" family proves at-rest. Used by [`jsonl_strict_terminator_idle`].
     DrainReadiness,
-    /// ONLY the authoritative per-provider TURN terminator proves the turn
-    /// ENDED. Every other envelope (including the lenient Idle-class markers) is
-    /// walked past. Used by [`jsonl_turn_end_terminator_idle`] for the finalize
-    /// `Done` decision (#3016 S3, Concern 1).
+    /// Only the authoritative TURN terminator counts. Used by [`jsonl_turn_end_terminator_idle`].
     FinalizeAuthority,
 }
 
@@ -106,18 +79,14 @@ enum TerminatorStrictness {
 enum StrictTerminatorScan {
     /// A definitive terminator proves the turn is over → Ready.
     Idle,
-    /// A definitive in-flight signal (streaming/user, an active-looking partial,
-    /// or a non-torn unparseable line) proves the turn is not over → Busy.
+    /// A definitive in-flight signal proves the turn is not over → Busy.
     Busy,
-    /// The window held only housekeeping/unknown envelopes and ran out without a
-    /// verdict. The caller decides whether to widen the window or stay Busy.
+    /// Only housekeeping/unknown envelopes; caller decides whether to widen or stay Busy.
     Inconclusive,
 }
 
-/// Reverse-scan the tail window for the most recent *definitive* turn-state
-/// envelope. Conservatism rule (#3030): never report `Idle` while there is any
-/// plausible evidence of an in-flight turn — false-idle (input injected
-/// mid-turn) is strictly worse than false-busy.
+/// Reverse-scan for the most recent definitive turn-state envelope. Never
+/// reports `Idle` on plausible in-flight evidence — false-idle is worse (#3030).
 fn scan_strict_terminator(
     provider: &ProviderKind,
     lines: &[String],
@@ -132,15 +101,10 @@ fn scan_strict_terminator(
         let json = match serde_json::from_str::<Value>(trimmed) {
             Ok(json) => json,
             Err(_) => {
-                // A single torn *trailing* write (writer mid-flush) should not
-                // pin the session Busy forever. Skip at most ONE such line,
-                // and only when it is: the very last non-empty line, looks
-                // truncated (no trailing `}`), and its recoverable top-level
-                // `type` is a *known* housekeeping marker (not active, not a
-                // trusted partial terminator, not an unrecoverable fragment
-                // like `{"ty`). Anything not positively proven housekeeping
-                // stays Busy — false-busy is recoverable, false-idle injects
-                // input mid-turn (#3030).
+                // A torn trailing write shouldn't pin Busy forever: skip at most
+                // ONE such line, only when it's the last non-empty line, looks
+                // truncated, and its `type` is a *known* housekeeping marker —
+                // not positively proven housekeeping stays Busy (#3030).
                 if allow_torn_trailing_skip
                     && rev_index == 0
                     && is_torn_trailing_fragment(trimmed)
@@ -149,26 +113,18 @@ fn scan_strict_terminator(
                     allow_torn_trailing_skip = false;
                     continue;
                 }
-                // An active-looking partial, an unidentifiable partial, an
-                // interior partial, or a second unparseable line — none of these
-                // can prove the turn has ended.
+                // Any other partial or a second unparseable line can't prove the turn ended.
                 return StrictTerminatorScan::Busy;
             }
         };
-        // Any complete line consumes the one-shot torn-trailing budget: a torn
-        // write can only ever be the trailing line, so once we have seen a
-        // complete line, a later (older) unparseable line is genuine corruption.
+        // A complete line consumes the budget: a later unparseable line is genuine corruption.
         allow_torn_trailing_skip = false;
         let classified = provider_envelope_turn_state(provider, &json);
         match classified {
             Some(TuiTurnState::Idle) => match strictness {
                 // Lenient: any Idle-class envelope proves at-rest.
                 TerminatorStrictness::DrainReadiness => return StrictTerminatorScan::Idle,
-                // Turn-END-only (#3016 S3): an Idle-class envelope ends the
-                // turn only when it is the authoritative terminator — a
-                // non-terminator Idle-class marker (e.g. a completed
-                // `agent_message` right before a tool call) is walked PAST to
-                // the real terminator beneath, same as trailing housekeeping.
+                // Turn-END-only (#3016 S3): a non-terminator Idle marker is walked past.
                 TerminatorStrictness::FinalizeAuthority => {
                     if envelope_is_turn_end_terminator(provider, &json) {
                         return StrictTerminatorScan::Idle;
@@ -179,9 +135,7 @@ fn scan_strict_terminator(
             Some(TuiTurnState::Streaming | TuiTurnState::UserSubmitted) => {
                 return StrictTerminatorScan::Busy;
             }
-            // Skip housekeeping (`permission-mode` → Unknown) and unrecognized
-            // envelopes (None); never idle on their own (#3030) — only walked
-            // past to reveal the real terminator beneath.
+            // Housekeeping/unrecognized envelopes are walked past, never idle alone (#3030).
             Some(TuiTurnState::Unknown) | None => continue,
         }
     }
@@ -196,16 +150,11 @@ fn provider_envelope_turn_state(provider: &ProviderKind, json: &Value) -> Option
     }
 }
 
-/// Is this fully-parsed envelope the AUTHORITATIVE per-provider TURN-END
-/// terminator (#3016 S3), as opposed to a merely "Idle-class" at-rest marker
-/// the lenient scan also trusts? Intentionally the NARROW subset:
-///   - Codex: ONLY `turn.completed` — excludes `session_meta`/`thread.started`,
-///     `task_complete`, and a completed `agent_message` (can be mid-turn);
-///   - Claude: ONLY `result` and `system{turn_duration | stop_hook_summary}` —
-///     excludes `system{init}` (session-start, never a turn end).
-///
-/// Callers guarantee `json` already classified `TuiTurnState::Idle`, so
-/// `false` means "Idle-class but not a boundary → keep scanning back".
+/// Is this envelope the AUTHORITATIVE per-provider TURN-END terminator
+/// (#3016 S3)? Narrower than the "Idle-class" the lenient scan trusts: Codex
+/// ONLY `turn.completed` (excludes a mid-turn `agent_message`); Claude ONLY
+/// `result` and `system{turn_duration | stop_hook_summary}`. `false` means
+/// "Idle-class but not a boundary → keep scanning back".
 pub(super) fn envelope_is_turn_end_terminator(provider: &ProviderKind, json: &Value) -> bool {
     let Some(type_str) = json.get("type").and_then(Value::as_str) else {
         return false;
@@ -214,11 +163,7 @@ pub(super) fn envelope_is_turn_end_terminator(provider: &ProviderKind, json: &Va
         ProviderKind::Codex => type_str == "turn.completed",
         ProviderKind::Claude => match type_str {
             "result" => true,
-            // #3221: the `[Request interrupted by user]` marker is a genuine
-            // turn boundary (the turn was aborted), so the turn-END-only scan
-            // used by the finalize `Done` decision must treat it as a
-            // terminator too — keeping the strict scan consistent with the
-            // standard observer's Idle classification of the same envelope.
+            // #3221: an interrupt marker is a genuine turn boundary too.
             "user" => claude_user_envelope_is_interrupt_marker(json),
             "system" => matches!(
                 json.get("subtype").and_then(Value::as_str),
@@ -230,50 +175,33 @@ pub(super) fn envelope_is_turn_end_terminator(provider: &ProviderKind, json: &Va
     }
 }
 
-/// A truncated trailing JSON fragment looks like the writer was interrupted
-/// mid-flush: it starts as an object but the final non-whitespace byte is not a
-/// closing `}`. A complete JSON object always ends in `}`, so this is a cheap,
-/// conservative "was this a torn write?" check.
+/// Cheap "was this a torn write?" check: starts as an object but doesn't end in `}`.
 pub(super) fn is_torn_trailing_fragment(trimmed: &str) -> bool {
     let bytes = trimmed.as_bytes();
     bytes.first() == Some(&b'{') && bytes.last() != Some(&b'}')
 }
 
-/// Positive identification that a torn trailing partial is recognized
-/// post-turn housekeeping and therefore safe to skip. The conservative
-/// inverse of an "is it active?" check: skip only when the partial's
-/// top-level `type` affirmatively classifies as a known mode/permission
-/// marker; an unrecoverable, active, or partial-terminator type all return
-/// `false`. Reuses the same top-level field-fragment parser the standard
-/// observer uses, so a partial `{"type":"permission-mode"...` is recognized
-/// before the line is fully flushed.
+/// A torn trailing partial is safe to skip only when its top-level `type`
+/// affirmatively classifies as a known mode/permission marker; reuses the
+/// standard observer's field-fragment parser to recognize it pre-flush.
 fn partial_is_skippable_housekeeping(provider: &ProviderKind, trimmed: &str) -> bool {
     if !trimmed.trim_start().starts_with('{') {
         return false;
     }
     let Some(type_value) = top_level_string_field_fragment(trimmed, "type") else {
-        // Could not even recover the top-level `type` — could be the start of a
-        // new active envelope. Do not skip.
+        // Unrecoverable `type` could be the start of a new active envelope: do not skip.
         return false;
     };
     match provider {
-        // Claude: only the structurally-recognized mode/permission housekeeping
-        // family is skippable. `user`/`assistant`/`result`/`system` are not.
         ProviderKind::Claude => is_interactive_mode_housekeeping_type(&type_value),
-        // Codex has no equivalent post-turn housekeeping envelope family that is
-        // safe to skip on a torn trailing line; stay conservative and never skip.
+        // Codex has no equivalent skippable family; stay conservative.
         _ => false,
     }
 }
 
-/// Heuristic shape match for `/model` / `/compact` mode-change housekeeping
-/// envelopes (`permission-mode`, `mode`, future `model-mode`/`permission_mode`
-/// renames) — never turn-state signals. Used ONLY by
-/// `partial_is_skippable_housekeeping`'s torn-write skip; deliberately NOT
-/// wired into `claude_envelope_turn_state`, where mapping the whole family to
-/// `Unknown` would break the standard observer's walk-back across a completed
-/// turn's trailing `mode` housekeeping (see the note there). Deliberately
-/// narrow — must not match any envelope that could be a real turn-state signal.
+/// Heuristic shape match for `/model` / `/compact` housekeeping, never a
+/// turn-state signal. Used only by the torn-write skip above; deliberately
+/// narrow so it never matches a real turn-state envelope.
 pub(super) fn is_interactive_mode_housekeeping_type(type_str: &str) -> bool {
     type_str == "mode"
         || type_str.ends_with("-mode")
