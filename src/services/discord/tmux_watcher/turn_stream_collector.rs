@@ -7,6 +7,9 @@ use crate::services::discord::task_notification_delivery::merge_context;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
+#[path = "turn_stream_collector/chunk_forward.rs"]
+mod chunk_forward;
+use chunk_forward::{forward_turn_chunk_to_supervisor_relay, forwarded_chunk};
 #[path = "turn_stream_collector/state.rs"]
 mod state;
 pub(super) use state::*;
@@ -364,11 +367,6 @@ pub(super) async fn collect_turn_stream_until_terminal(
         Some(initial_buffer_start_offset),
         Some(turn_terminal_start_offset),
     );
-    let initial_forward_text = watcher_forward_text_after_pre_turn_skip(
-        &decoded_data.text,
-        initial_buffer_len.saturating_sub(decoded_data.text.len()),
-        initial_outcome.pre_turn_bytes_skipped,
-    );
     // #3041 P1-3 (Part a, B1): DEFERRED forward of the outer-read chunk. We now
     // know — from `initial_outcome.found_result` — whether THIS chunk is the
     // RESULT-bearing (terminal) one. If so, forward it as a TERMINAL frame
@@ -380,14 +378,13 @@ pub(super) async fn collect_turn_stream_until_terminal(
     // fence, no streaming-latency change beyond the synchronous parse reorder).
     // The ACK target is captured from THIS forward, so the watcher's wait now
     // correlates to the terminal frame's sequence (more precise).
-    //
-    // #5948 (I17): same span derivation as the streaming path below — `all_data`
-    // ends at `initial_buffer_start_offset + initial_buffer_len`, and the
-    // pre-turn skip only trims a prefix, so the forwarded bytes end there too.
-    let initial_forward_span = (!initial_forward_text.is_empty()).then(|| {
-        let end = initial_buffer_start_offset.saturating_add(initial_buffer_len as u64);
-        (end.saturating_sub(initial_forward_text.len() as u64), end)
-    });
+    let initial_chunk_forward = forwarded_chunk(
+        &decoded_data.text,
+        initial_buffer_len,
+        initial_buffer_start_offset,
+        initial_outcome.pre_turn_bytes_skipped,
+        initial_source_authority,
+    );
     let (
         mut session_bound_relay_turn_fully_mirrored,
         mut session_bound_relay_turn_first_forwarded_sequence,
@@ -404,30 +401,15 @@ pub(super) async fn collect_turn_stream_until_terminal(
             turn_identity_for_panel.as_ref(),
             &tmux_session_name,
         );
-        let data_mirrored_to_session_relay = match initial_terminal_fence {
-            // #3041 P1-3 (codex P1-3 issue 1): a single physical chunk may carry
-            // turn A's result PLUS turn B's first bytes. `all_data` after the parse
-            // holds turn B's leftover; split the decoded chunk at that boundary so
-            // the TERMINAL frame carries only turn A's bytes and turn B's tail rides
-            // a separate non-terminal frame (no black-hole, no shared-ACK reuse).
-            Some(fence) => forward_terminal_chunk_with_trailing_to_supervisor_relay(
-                &tmux_session_name,
-                initial_forward_text,
-                all_data.len(),
-                &producer_registry,
-                &mut cached_relay_producer,
-                fence,
-                source_authority_with_span(initial_source_authority, initial_forward_span),
-            ),
-            None => forward_chunk_to_supervisor_relay_for_turn(
-                &tmux_session_name,
-                initial_forward_text,
-                &producer_registry,
-                &mut cached_relay_producer,
-                turn_identity_for_panel.as_ref(),
-                source_authority_with_span(initial_source_authority, initial_forward_span),
-            ),
-        };
+        let data_mirrored_to_session_relay = forward_turn_chunk_to_supervisor_relay(
+            &tmux_session_name,
+            &initial_chunk_forward,
+            all_data.len(),
+            &producer_registry,
+            &mut cached_relay_producer,
+            turn_identity_for_panel.as_ref(),
+            initial_terminal_fence,
+        );
         let supervisor_turn_state = apply_initial_supervisor_relay_forward(
             &mut all_data_fully_mirrored_to_session_relay,
             &mut all_data_session_bound_relay_ack,
@@ -689,17 +671,19 @@ pub(super) async fn collect_turn_stream_until_terminal(
                         Some(chunk_buffer_start_offset),
                         Some(turn_terminal_start_offset),
                     );
-                    let chunk_forward_text = watcher_forward_text_after_pre_turn_skip(
-                        &decoded_chunk.text,
-                        chunk_buffer_len.saturating_sub(decoded_chunk.text.len()),
-                        outcome.pre_turn_bytes_skipped,
-                    );
                     // #3041 P1-3 (Part a, B1): deferred forward of THIS streaming
                     // chunk. `outcome.found_result` now tells us whether this is
                     // the RESULT-bearing chunk; if so it rides a TERMINAL frame
                     // carrying the commit fence (consumed_end + pinned identity).
                     // E5 (#2412): every decoded chunk is still pushed into the
                     // relay MPSC; only the terminality of the frame changed.
+                    let chunk_forward = forwarded_chunk(
+                        &decoded_chunk.text,
+                        chunk_buffer_len,
+                        chunk_buffer_start_offset,
+                        outcome.pre_turn_bytes_skipped,
+                        authority,
+                    );
                     let streaming_terminal_fence = watcher_terminal_commit_fence(
                         outcome.found_result,
                         chunk_buffer_start_offset,
@@ -707,42 +691,15 @@ pub(super) async fn collect_turn_stream_until_terminal(
                         turn_identity_for_panel.as_ref(),
                         &tmux_session_name,
                     );
-                    // #5948 (I17): name the absolute JSONL byte range these
-                    // forwarded bytes came from. `all_data` ends at
-                    // `chunk_buffer_start_offset + chunk_buffer_len`, and
-                    // `chunk_forward_text` is a SUFFIX of the decoded chunk (the
-                    // pre-turn skip only trims a prefix), so the forwarded bytes
-                    // end there too. A rewind re-reads from
-                    // `turn_data_start_offset` and hands the sink these same
-                    // offsets under a fresh relay `sequence`; the offsets are what
-                    // let the sink tell that replay from genuinely new output.
-                    let chunk_forward_span = (!chunk_forward_text.is_empty()).then(|| {
-                        let end = chunk_buffer_start_offset.saturating_add(chunk_buffer_len as u64);
-                        (end.saturating_sub(chunk_forward_text.len() as u64), end)
-                    });
-                    let chunk_forwarded_to_session_relay = match streaming_terminal_fence {
-                        // #3041 P1-3 (codex P1-3 issue 1): split a result+next-turn
-                        // physical chunk at the leftover boundary so turn A's
-                        // terminal frame carries only A's bytes and turn B's tail
-                        // rides a separate non-terminal frame (no black-hole).
-                        Some(fence) => forward_terminal_chunk_with_trailing_to_supervisor_relay(
-                            &tmux_session_name,
-                            chunk_forward_text,
-                            all_data.len(),
-                            &producer_registry,
-                            &mut cached_relay_producer,
-                            fence,
-                            source_authority_with_span(authority, chunk_forward_span),
-                        ),
-                        None => forward_chunk_to_supervisor_relay_for_turn(
-                            &tmux_session_name,
-                            chunk_forward_text,
-                            &producer_registry,
-                            &mut cached_relay_producer,
-                            turn_identity_for_panel.as_ref(),
-                            source_authority_with_span(authority, chunk_forward_span),
-                        ),
-                    };
+                    let chunk_forwarded_to_session_relay = forward_turn_chunk_to_supervisor_relay(
+                        &tmux_session_name,
+                        &chunk_forward,
+                        all_data.len(),
+                        &producer_registry,
+                        &mut cached_relay_producer,
+                        turn_identity_for_panel.as_ref(),
+                        streaming_terminal_fence,
+                    );
                     apply_streaming_supervisor_relay_forward(
                         &mut all_data_fully_mirrored_to_session_relay,
                         &mut all_data_session_bound_relay_ack,

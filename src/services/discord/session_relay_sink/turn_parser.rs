@@ -363,3 +363,6 @@ pub(in crate::services::discord) struct SessionRelayDelivery {
     pub(super) relay_generation_mtime_ns: Option<i64>,
     pub(super) relay_source_stamp: Option<SourceStamp>,
 }
+
+#[cfg(test)]
+mod resend_dedupe_tests;

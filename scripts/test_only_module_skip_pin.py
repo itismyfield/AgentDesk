@@ -99,6 +99,7 @@ PINNED_BASENAME_TEST_FILES = frozenset(
         "src/services/discord/runtime_bootstrap/spawns_tests.rs",
         "src/services/discord/session_relay_sink/delivery_orchestration_tests.rs",
         "src/services/discord/session_relay_sink/tests.rs",
+        "src/services/discord/session_relay_sink/turn_parser/resend_dedupe_tests.rs",
         "src/services/discord/status_panel_orphan_store_tests.rs",
         "src/services/discord/task_notification_delivery/tests.rs",
         "src/services/discord/task_supervisor/watcher_completion_tests.rs",
@@ -183,6 +184,7 @@ PINNED_RESOLVER_TEST_ONLY_FILES = frozenset(
         "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4361.rs",
         "src/services/discord/inflight/stall_recovery_tests/flake_isolation_4422.rs",
         "src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs",
+        "src/services/discord/session_relay_sink/tests/stream_frame_fixtures.rs",
         "src/services/discord/tui_prompt_relay/local_model_queue_wake_e2e.rs",
         "src/services/provider/read_fault.rs",
     }

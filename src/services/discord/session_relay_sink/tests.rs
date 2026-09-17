@@ -5,6 +5,10 @@ use crate::services::cluster::session_matcher::{MatchedChannel, expected_rollout
 use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
 use crate::services::tui_prompt_dedupe::{ExternalInputRelayLease, ExternalInputRelayOwner};
 
+mod stream_frame_fixtures;
+pub(super) use stream_frame_fixtures::terminal_frame_offset;
+use stream_frame_fixtures::{frame, ranged_frame, terminal_frame};
+
 pub(super) fn matched(channel_id: &str) -> MatchedChannel {
     let session = ProviderKind::Claude.build_tmux_session_name(channel_id);
     MatchedChannel {
@@ -24,83 +28,6 @@ pub(super) fn matched_codex(channel_id: &str) -> MatchedChannel {
         provider: ProviderKind::Codex,
         expected_session_name: session.clone(),
         expected_rollout_path: expected_rollout_path_for(&session),
-    }
-}
-
-fn frame(binding: &MatchedChannel, payload: &str, sequence: u64) -> StreamFrame {
-    StreamFrame {
-        session_name: binding.expected_session_name.clone(),
-        binding: binding.clone(),
-        payload: payload.to_string(),
-        sequence,
-        terminal_consumed_end: None,
-        turn_user_msg_id: 0,
-        turn_started_at: String::new(),
-        turn_start_offset: None,
-        relay_range: None,
-        relay_generation_mtime_ns: None,
-        relay_source_stamp: None,
-        source_span: None,
-    }
-}
-
-fn ranged_frame(
-    binding: &MatchedChannel,
-    payload: &str,
-    sequence: u64,
-    range_start: u64,
-    range_end: u64,
-) -> StreamFrame {
-    let mut frame = frame(binding, payload, sequence);
-    frame.relay_range = Some((range_start, range_end));
-    frame.relay_generation_mtime_ns = Some(dr::current_generation_mtime_ns(
-        &binding.expected_session_name,
-    ));
-    frame
-}
-
-fn terminal_frame(
-    binding: &MatchedChannel,
-    payload: &str,
-    sequence: u64,
-    consumed_end: u64,
-    turn_user_msg_id: u64,
-    turn_started_at: &str,
-) -> StreamFrame {
-    terminal_frame_offset(
-        binding,
-        payload,
-        sequence,
-        consumed_end,
-        turn_user_msg_id,
-        turn_started_at,
-        Some(0),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn terminal_frame_offset(
-    binding: &MatchedChannel,
-    payload: &str,
-    sequence: u64,
-    consumed_end: u64,
-    turn_user_msg_id: u64,
-    turn_started_at: &str,
-    turn_start_offset: Option<u64>,
-) -> StreamFrame {
-    StreamFrame {
-        session_name: binding.expected_session_name.clone(),
-        binding: binding.clone(),
-        payload: payload.to_string(),
-        sequence,
-        terminal_consumed_end: Some(consumed_end),
-        turn_user_msg_id,
-        turn_started_at: turn_started_at.to_string(),
-        turn_start_offset,
-        relay_range: None,
-        relay_generation_mtime_ns: None,
-        relay_source_stamp: None,
-        source_span: None,
     }
 }
 

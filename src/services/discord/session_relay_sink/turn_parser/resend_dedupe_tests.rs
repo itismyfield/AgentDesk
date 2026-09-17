@@ -4,8 +4,8 @@
 //! receiver-side sequence test can ever see it. Identity comes from the
 //! absolute source byte range instead.
 
-use super::tests::{matched, matched_codex};
-use super::turn_parser::SessionRelayParser;
+use super::super::tests::{matched, matched_codex};
+use super::SessionRelayParser;
 use crate::services::cluster::session_matcher::MatchedChannel;
 use crate::services::cluster::stream_relay::StreamFrame;
 

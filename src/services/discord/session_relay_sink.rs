@@ -1477,5 +1477,3 @@ fn delivery_lease_key_for_frame(
 mod delivery_orchestration_tests;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod turn_parser_resend_tests;
