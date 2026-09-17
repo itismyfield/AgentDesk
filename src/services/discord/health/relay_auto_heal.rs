@@ -1447,8 +1447,13 @@ mod tests {
             resume_offset.clone(),
             turn_delivered.clone(),
         );
-        let snapshot =
-            backlog_snapshot(channel_id, tmux_session, output_path, 22_299_791, 22_434_708);
+        let snapshot = backlog_snapshot(
+            channel_id,
+            tmux_session,
+            output_path,
+            22_299_791,
+            22_434_708,
+        );
         shared.publish_watcher_read_offset(channel_id, 22_434_708);
 
         assert!(
@@ -1491,8 +1496,13 @@ mod tests {
             resume_offset.clone(),
             turn_delivered.clone(),
         );
-        let mut snapshot =
-            backlog_snapshot(channel_id, tmux_session, output_path, 22_299_791, 22_434_708);
+        let mut snapshot = backlog_snapshot(
+            channel_id,
+            tmux_session,
+            output_path,
+            22_299_791,
+            22_434_708,
+        );
         snapshot.watcher_owner_channel_id = None;
         shared.publish_watcher_read_offset(channel_id, 22_434_708);
 
@@ -1601,9 +1611,11 @@ mod tests {
                 }
             }
         }
-        assert!(refused_rewinds > 0 && admitted_rewinds > 0,
+        assert!(
+            refused_rewinds > 0 && admitted_rewinds > 0,
             "the sweep must contain both kinds of rewind, or it proves nothing about the split \
-             ({refused_rewinds} refused, {admitted_rewinds} admitted)");
+             ({refused_rewinds} refused, {admitted_rewinds} admitted)"
+        );
     }
 
     /// #5943 checkbox 3. The duplicate-relay guard is still armed on the far
@@ -1641,8 +1653,13 @@ mod tests {
             turn_delivered.clone(),
         );
         let read_position = 22_434_708;
-        let snapshot =
-            backlog_snapshot(channel_id, tmux_session, output_path, 22_299_791, read_position);
+        let snapshot = backlog_snapshot(
+            channel_id,
+            tmux_session,
+            output_path,
+            22_299_791,
+            read_position,
+        );
         shared.publish_watcher_read_offset(channel_id, read_position);
 
         assert!(nudge_watcher_handle_for_backlog(
@@ -1663,7 +1680,10 @@ mod tests {
             "a pending frontier must not be re-enqueued; that is a re-post by another route"
         );
 
-        let enqueued = resume_offset.lock().unwrap().expect("redrive enqueued a resume point");
+        let enqueued = resume_offset
+            .lock()
+            .unwrap()
+            .expect("redrive enqueued a resume point");
         assert!(
             turn_delivered.load(Ordering::Acquire),
             "the redrive must hand the consumer a live delivery marker to arm the floor with"
