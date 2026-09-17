@@ -2131,10 +2131,9 @@ pub(crate) async fn run_stall_watchdog_pass(
         .await;
         continue;
     }
-    // #3410 cross-tick retry: channels whose force-clean respawn failed dropped
-    // out of the watcher-derived candidate loop (no watcher = not a candidate),
-    // so re-attempt each still-tracked absent channel — never give up after one.
-    watcher_respawn::retry_pending_watcher_respawns(registry, provider, &runtimes, now_unix_secs)
+    // A cancelled watcher and a failed respawn both leave the channel out of the
+    // watcher-derived candidate loop above, so neither is reachable from it.
+    watcher_respawn::sweep_and_retry_absences(registry, provider, &runtimes, &seen, now_unix_secs)
         .await;
     cleaned + relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &runtimes).await
 }
