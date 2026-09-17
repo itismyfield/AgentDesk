@@ -4,8 +4,8 @@
 
 use super::*;
 
-/// #5941 invariant I17 (`docs/relay-state-contract.md`): a terminal frame carrying a body must
-/// end with a delivery owner or a durable record.
+/// #5941 invariant I17 (`docs/relay-state-contract.md`): a terminal frame that REACHES the
+/// #5175 denial seam carrying a body must end with a delivery owner or a durable record.
 pub(super) const TERMINAL_FRAME_OWNER_OR_RECORD_INVARIANT: &str =
     "terminal_frame_has_a_delivery_owner_or_a_record";
 
@@ -18,7 +18,7 @@ pub(super) struct OrphanTerminalFrameFacts<'a> {
     pub(super) watcher_direct_fallback_requested: bool,
     pub(super) watcher_direct_fallback_authorized: bool,
     pub(super) session_bound_relay_owns_terminal_delivery: bool,
-    pub(super) direct_terminal_response_refused_duplicate: bool,
+    pub(super) duplicate_guard_refused_body: bool,
     /// The unsent tail, `full_response[response_sent_offset..]`.
     pub(super) current_response: &'a str,
     pub(super) response_sent_offset: usize,
@@ -43,28 +43,28 @@ pub(super) struct OrphanTerminalFrameFacts<'a> {
 impl OrphanTerminalFrameFacts<'_> {
     /// Did this frame end with no delivery owner AND a body worth preserving?
     ///
-    /// `denial.is_some()` is implied today by the two fallback flags, kept because a
-    /// hard-terminal veto can deny authority without them. Empty bodies are excluded: 18 of
-    /// the 33 denials in the 2026-09-16 incident carried one. The last two conjuncts ask the
-    /// SINK side, which the six above never do — a watcher that refused to send is no evidence
-    /// the sink did not send. `RingUnknown` is the ONLY excluded ack arm, because it is the
-    /// only one carrying POSITIVE evidence of delivery: its sole producer is the sink's own
+    /// The first FOUR conjuncts cannot fail here: 1-3 restate this module's own outer guard,
+    /// and 4 reads the same ack as 2 (`owns` needs `session_bound_ack_confirms_transport`,
+    /// `requested` its negation). They are defensive; the five below decide.
+    /// `duplicate_guard_refused_body` is the #4081/#4714 verdict RAW: the routed
+    /// `direct_terminal_response_refused_duplicate` ANDs in the authorization conjunct 3 has
+    /// already excluded, so reading THAT would pin its conjunct true. Empty bodies are
+    /// excluded: 18 of the 33 denials in the 2026-09-16 incident carried one. The last two ask
+    /// the SINK side, which the rest never do — a watcher that refused to send is no evidence
+    /// the sink did not send. `RingUnknown` is the ONLY excluded ack arm, because it alone
+    /// carries POSITIVE evidence of delivery: its sole producer is the sink's own
     /// `SentButUncommitted` report (`session_relay_sink/terminal_handoff.rs` →
     /// `stream_relay.rs::deliver_frame`), i.e. the POST landed and only its commit PROOF was
-    /// lost. `TimedOut` is the opposite shape —
-    /// `session_bound_ack.rs::wait_for_session_bound_relay_delivery_ack` returns it by falling
-    /// through its deadline after the ack ring stayed SILENT, and no later path settles it —
-    /// so it is an ABSENCE of evidence, which `terminal_relay_plan.rs` reads as "the sink MAY
-    /// have posted". A maybe is what the record exists for: the other six arms stay
-    /// recordable. The range conjunct is `> 0`: a turn served out of the #1216 leftover buffer
-    /// has a `data_start_offset` at the CARRIED buffer's turn start, which can sit at or above
-    /// this consumed range.
+    /// lost. `TimedOut` is the opposite shape — `wait_for_session_bound_relay_delivery_ack`
+    /// falls through its deadline after the ack ring stayed SILENT and no later path settles
+    /// it: an ABSENCE of evidence, read as "the sink MAY have posted". A maybe is what the
+    /// record exists for. The range conjunct is `> 0` for the #1216 leftover-buffer turn.
     pub(super) fn record_required(&self) -> bool {
         self.denial.is_some()
             && self.watcher_direct_fallback_requested
             && !self.watcher_direct_fallback_authorized
             && !self.session_bound_relay_owns_terminal_delivery
-            && !self.direct_terminal_response_refused_duplicate
+            && !self.duplicate_guard_refused_body
             && !self.current_response.is_empty()
             && self.terminal_event_consumed_offset > 0
             && !matches!(

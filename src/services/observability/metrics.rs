@@ -89,9 +89,11 @@ pub struct AtomicCounters {
     /// sink did not acknowledge delivery AND the soft terminal failed the
     /// watcher's turn-authority contract, so neither actor posted the body. Any
     /// non-zero value is a silently dropped answer plus a frozen delivery
-    /// frontier (redrive then re-publishes the previous answer). The failing
-    /// conjunct is emitted alongside as a `relay_terminal_authority_denied_*`
-    /// root-cause counter.
+    /// frontier (redrive then re-publishes the previous answer). This is the
+    /// ADMITTED subset: it rises only once a body is actually owed a dead-letter
+    /// row. The failing conjunct is named by `relay_terminal_denial_cause`, which
+    /// is UNGATED (#5941) and so counts EVERY denial — including the ones that
+    /// lost nothing — so the two are not comparable per-event.
     pub relay_terminal_authority_denied: AtomicU64,
     /// #4794: observed prompt-notification emissions that hit an authoritative
     /// tmux-owner registry miss and were still pending when bounded three-state

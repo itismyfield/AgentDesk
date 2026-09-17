@@ -544,17 +544,24 @@ still spoken for, so this one steps past them rather than colliding.
 Numbered I17 for the same reason I16 is not I13: `docs/design/4987-relay-reachability.md`
 §8.2 still reserves I13/I15 for the reachability obligations, and #5943 took I16.
 
-- Definition: a terminal frame carrying an undelivered body must end with a
-  delivery owner (the session-bound sink, or an authorized soft-terminal
-  watcher) or with a durable `relay_dead_letter` row preserving that body — not
-  with neither.
+- Definition — SCOPED to the #5175 denial seam, not to the relay as a whole. A
+  terminal frame that REACHES the producer below carrying an undelivered body
+  must end with a delivery owner (the session-bound sink, or an authorized
+  soft-terminal watcher) or with a durable `relay_dead_letter` row preserving
+  that body — not with neither. Frames that never reach it are outside the
+  invariant: the seam runs only where the watcher REQUESTED a direct fallback and
+  was DENIED authority, so a frame nobody tried to relay, a frame relayed under
+  authority, and any loss on a path that does not run `terminal_relay_plan` are
+  all unobserved here and none of them can violate it.
 - Producer: `tmux_watcher::orphan_terminal_frame::observe_orphan_terminal_frame`,
   called from `terminal_relay_plan` at the #5175 denial seam, where the sink has
   already declined delivery and soft-terminal authority has been denied. The
   record is admitted by `OrphanTerminalFrameFacts::record_required`: a denial, a
   requested but unauthorized watcher fallback, no session-bound terminal
-  ownership, no duplicate refusal, a NON-EMPTY unsent body (18 of the 33 denials
-  in the 2026-09-16 incident carried none), a non-zero consumed JSONL range, and
+  ownership, no #4081/#4714 duplicate refusal — read RAW, since the routed flag
+  ANDs in the authorization this seam has already denied — a NON-EMPTY unsent
+  body (18 of the 33 denials in the 2026-09-16 incident carried none), a
+  non-zero consumed JSONL range, and
   — the SINK side of the question, which the watcher's own refusal is no
   evidence about — neither a landed-but-unproven POST (`RingUnknown`, the sink's
   `SentButUncommitted`) nor a range at or below the resend-dedup committed
@@ -573,9 +580,13 @@ Numbered I17 for the same reason I16 is not I13: `docs/design/4987-relay-reachab
   lost three assistant answers while every health surface read `healthy`.
 - Strength of the guarantee — do not read it as more than it says. The write is
   AT-LEAST-ONCE and NOT idempotent: a process death between the spawn and the
-  INSERT loses the row with every surface still reporting intact, and a restart
-  that re-observes the frame files a SECOND row (pinned by the double-observe
-  test). `D` below is a lower bound that may also contain duplicates.
+  INSERT loses the row with every surface still reporting intact, and the write
+  carries no dedup key, so re-observing the SAME frame files another row. Read
+  that as the ordinary case, not the crash case: the watcher polls, and a frame
+  that stays terminal and unowned is re-observed on every tick until the offset
+  moves, so one loss routinely yields several rows; a restart merely adds to the
+  same pile (both pinned by the double-observe test). `D` below is a lower bound
+  that may also contain duplicates.
 - Boundary: this invariant does NOT claim the body was delivered, and it does
   not advance the delivery frontier — only that the loss is attributable and the
   content recoverable. The upstream fix (the bridge conceding relay authority

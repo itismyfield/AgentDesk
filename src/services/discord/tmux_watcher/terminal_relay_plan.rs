@@ -605,7 +605,14 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                 watcher_direct_fallback_requested,
                 watcher_direct_fallback_authorized,
                 session_bound_relay_owns_terminal_delivery,
-                direct_terminal_response_refused_duplicate,
+                // #5978: the RAW verdict. The routed `..._refused_duplicate` ANDs in
+                // `watcher_direct_fallback_after_session_bound_ack` — the authorization THIS
+                // seam has already denied — so feeding it here pins the record conjunct true
+                // and dead-letters bodies the #4081/#4714 guard just found on the channel.
+                // Same text either way: an unauthorized fallback keeps
+                // `session_bound_fallback_uses_full_body` false, so the decision read
+                // `current_response` itself.
+                duplicate_guard_refused_body: direct_terminal_response_decision.refused_duplicate(),
                 current_response,
                 response_sent_offset,
                 full_response_len: full_response.len(),

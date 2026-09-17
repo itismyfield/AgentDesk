@@ -541,7 +541,7 @@ fn orphan_facts() -> OrphanTerminalFrameFacts<'static> {
         watcher_direct_fallback_requested: true,
         watcher_direct_fallback_authorized: false,
         session_bound_relay_owns_terminal_delivery: false,
-        direct_terminal_response_refused_duplicate: false,
+        duplicate_guard_refused_body: false,
         current_response: LOST_BODY,
         response_sent_offset: SENT_PREFIX,
         full_response_len: SENT_PREFIX + LOST_BODY.len(),
@@ -669,13 +669,19 @@ fn a_body_the_sink_already_put_on_screen_requires_no_record_5941() {
 fn a_frame_someone_else_delivered_requires_no_record_5941() {
     // Each of these means the body was NOT lost: the sink committed it, the
     // duplicate guard saw it in the channel, or the watcher was authorized.
+    //
+    // #5978 P1-1: the duplicate case pairs with `watcher_direct_fallback_authorized:
+    // false`, reachable only since the seam reads the RAW #4081/#4714 verdict — the
+    // routed flag ANDs in that same authorization, so this case used to assert over a
+    // state the wiring could not build. `..._is_not_admitted_to_the_record_5941` drives
+    // the pairing through production; this one pins the predicate.
     for facts in [
         OrphanTerminalFrameFacts {
             session_bound_relay_owns_terminal_delivery: true,
             ..orphan_facts()
         },
         OrphanTerminalFrameFacts {
-            direct_terminal_response_refused_duplicate: true,
+            duplicate_guard_refused_body: true,
             ..orphan_facts()
         },
         OrphanTerminalFrameFacts {
@@ -837,12 +843,20 @@ fn the_production_call_site_hands_the_seam_the_lost_body_5941() {
         "watcher_resend_committed,",
         "placeholder_msg_id,",
         "request_owner_user_id: inflight_before_relay",
+        "duplicate_guard_refused_body: direct_terminal_response_decision",
     ] {
         assert!(
             call_site.contains(operand),
             "the seam must be fed `{operand}` from the frame being lost: {call_site}"
         );
     }
+
+    // #5978 P1-1: the routed flag ANDs in the authorization this seam has already denied,
+    // which makes the duplicate conjunct unfalsifiable while every test above stays green.
+    assert!(
+        !call_site.contains("direct_terminal_response_refused_duplicate"),
+        "the duplicate conjunct must read the RAW guard verdict, not the routed flag: {call_site}"
+    );
 
     // The WARN and the counter MOVED with the seam — not duplicated, not
     // dropped. Operators grep `#5175:`.
@@ -975,6 +989,9 @@ fn a_dropped_body_with_no_durable_record_violates_i17_5941() {
 /// sharing `LOST_CHANNEL` with the sibling I17 test would race under `--test-threads`.
 const PLAN_DRIVEN_CHANNEL: u64 = 1_479_671_298_497_183_836;
 
+/// Likewise for the #5978 duplicate-guard half of the pairing.
+const DUPLICATE_GUARD_CHANNEL: u64 = 1_479_671_298_497_183_837;
+
 /// Losses ADMITTED for `channel` — the aggregate counter the seam raises only
 /// after `record_required` passes, i.e. exactly when a DLQ row is owed.
 fn admitted_losses(channel: u64) -> u64 {
@@ -985,26 +1002,25 @@ fn admitted_losses(channel: u64) -> u64 {
         .sum()
 }
 
-#[tokio::test]
-async fn the_plan_itself_admits_the_lost_body_to_the_record_5941() {
-    // The only #5941 test that enters through PRODUCTION. The others hand-build
-    // `OrphanTerminalFrameFacts`, and the wiring test greps the call site's
-    // ARGUMENT LIST — so `let current_response = "";` planted on the line ABOVE
-    // the call falsifies `record_required` forever, writes zero dead-letter rows
-    // and leaves every one of them green. The gap was the ENTRY POINT, not the
-    // strength of any assertion, so this one drives `run_terminal_relay_plan`
-    // itself over the incident shape: a soft stop-hook terminal carrying an
-    // assistant body, no inflight row (soft-terminal authority is denied) and no
-    // cached relay producer (the sink never owns the frame).
+/// Drives `run_terminal_relay_plan` over the #5941 incident shape and returns how
+/// many losses the seam ADMITTED. `already_on_channel` plants the #4081/#4714
+/// delivered-content fingerprint for `LOST_BODY` first, and is the ONLY input that
+/// differs between the two callers below — so the delta between them isolates the
+/// duplicate-guard conjunct from every other one.
+async fn admitted_losses_over_one_plan_pass(channel_id: u64, already_on_channel: bool) -> u64 {
     let root = tempfile::tempdir().expect("isolated runtime root");
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let shared = crate::services::discord::make_shared_data_for_tests();
-    let channel = serenity::ChannelId::new(PLAN_DRIVEN_CHANNEL);
-    let before = admitted_losses(PLAN_DRIVEN_CHANNEL);
-
+    let channel = serenity::ChannelId::new(channel_id);
     let http = std::sync::Arc::new(serenity::Http::new("fixture-no-network"));
     let provider = ProviderKind::Claude;
     let session = SESSION.to_string();
+    if already_on_channel {
+        crate::services::discord::outbound::delivery_record::record_delivered_content_fingerprint(
+            &provider, channel, &session, LOST_BODY,
+        );
+    }
+    let before = admitted_losses(channel_id);
     let output_path = root.path().join("out.jsonl").display().to_string();
     let all_data = String::new();
     let full_response = format!("{}{LOST_BODY}", "x".repeat(SENT_PREFIX));
@@ -1036,7 +1052,9 @@ async fn the_plan_itself_admits_the_lost_body_to_the_record_5941() {
         terminal_kind: Some(WatcherTerminalKind::SoftStopHookSummary),
         task_notification_kind: None,
         assistant_text_seen: true,
-        fresh_assistant_text_seen: true,
+        // `should_direct_send` never asks for FRESHNESS, so a leftover buffer is
+        // still relayed — that is how the duplicate guard comes to matter here.
+        fresh_assistant_text_seen: false,
         tool_state: &tool_state,
         placeholder_msg_id: None,
         status_panel_msg_id: None,
@@ -1059,9 +1077,39 @@ async fn the_plan_itself_admits_the_lost_body_to_the_record_5941() {
         matches!(outcome, TerminalRelayPlanOutcome::Proceed(_)),
         "the plan must reach its terminal decision rather than bailing before the seam"
     );
+    admitted_losses(channel_id) - before
+}
+
+#[tokio::test]
+async fn the_plan_itself_admits_the_lost_body_to_the_record_5941() {
+    // The only #5941 tests that enter through PRODUCTION. The others hand-build
+    // `OrphanTerminalFrameFacts`, and the wiring test greps the call site's
+    // ARGUMENT LIST — so `let current_response = "";` planted on the line ABOVE
+    // the call falsifies `record_required` forever, writes zero dead-letter rows
+    // and leaves every one of them green. The gap was the ENTRY POINT, not the
+    // strength of any assertion, so this one drives `run_terminal_relay_plan`
+    // itself over the incident shape: a soft stop-hook terminal carrying an
+    // assistant body, no inflight row (soft-terminal authority is denied) and no
+    // cached relay producer (the sink never owns the frame).
     assert_eq!(
-        admitted_losses(PLAN_DRIVEN_CHANNEL) - before,
+        admitted_losses_over_one_plan_pass(PLAN_DRIVEN_CHANNEL, false).await,
         1,
         "a frame the plan itself left with no delivery owner must be admitted to the record exactly once"
+    );
+}
+
+#[tokio::test]
+async fn a_body_the_duplicate_guard_already_saw_is_not_admitted_to_the_record_5941() {
+    // #5978 P1-1, the other half of the pairing, and the reason the conjunct is no
+    // longer dead. Reachable shape, from the #5464 sample where 150 of 753 denials
+    // were `NoInflightRow`: a redrive leaves no inflight row, the watcher re-reads the
+    // leftover buffer and still requests a direct send, and the body is byte-identical
+    // to one already on the channel, so #4081/#4714 refuses it. NOTHING WAS LOST, so no
+    // row is owed and the threshold-1 aggregate behind that gate must not move — while
+    // the seam read the routed flag it did move.
+    assert_eq!(
+        admitted_losses_over_one_plan_pass(DUPLICATE_GUARD_CHANNEL, true).await,
+        0,
+        "a body the duplicate guard found already on the channel is not a loss and must not page"
     );
 }

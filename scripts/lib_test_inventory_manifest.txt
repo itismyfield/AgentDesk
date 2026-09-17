@@ -5805,6 +5805,7 @@ services::discord::tmux::tmux_watcher::terminal_readiness::tests::terminal_relay
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::terminal_relay_does_not_adopt_synthetic_status_panel_message_id
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::watcher_direct_terminal_idle_commit_keeps_later_token_update_idle
 services::discord::tmux::tmux_watcher::terminal_readiness::tests::watcher_direct_terminal_idle_commit_requires_delivery_without_inflight
+services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::a_body_the_duplicate_guard_already_saw_is_not_admitted_to_the_record_5941
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::a_body_the_sink_already_put_on_screen_requires_no_record_5941
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::a_dropped_body_with_no_durable_record_violates_i17_5941
 services::discord::tmux::tmux_watcher::terminal_relay_plan::soft_terminal_direct_send_authority_tests::a_frame_someone_else_delivered_requires_no_record_5941
