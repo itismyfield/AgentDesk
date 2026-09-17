@@ -73,7 +73,7 @@ fn patch_bridge_entry_state_if_identity_unchanged_in_root_impl(
         || before.channel_id != after.channel_id
         || !expected.matches_state(after)
     {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
     let path = inflight_state_path(root, &provider, before.channel_id);
     if let Some(parent) = path.parent()
@@ -95,11 +95,11 @@ fn patch_bridge_entry_state_if_identity_unchanged_in_root_impl(
         Err(outcome) => return outcome,
     };
     if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::Unnameable;
     }
     if on_disk.restart_mode.is_some() || on_disk.rebind_origin || !expected.matches_state(&on_disk)
     {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
 
     let bridge_placeholder_clear_applied = before.long_running_placeholder_active
@@ -199,7 +199,7 @@ fn patch_bridge_entry_state_if_identity_unchanged_in_root_impl(
             }
             GuardedSaveOutcome::Saved
         }
-        Ok(None) => GuardedSaveOutcome::IdentityMismatch,
+        Ok(None) => GuardedSaveOutcome::AuthorityPinned,
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),

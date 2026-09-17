@@ -97,11 +97,12 @@ pub(in crate::services::discord::turn_bridge) fn visible_mutation_authority_afte
         }
         GuardedSaveOutcome::Saved if authority_unchanged => VisibleMutationAuthority::Suppressed,
         // A vanished durable row withholds this tick's mutation and leaves the
-        // turn alive; `IdentityMismatch` is an exact-episode veto and ends it.
-        GuardedSaveOutcome::Missing => VisibleMutationAuthority::Suppressed,
-        GuardedSaveOutcome::Saved | GuardedSaveOutcome::IdentityMismatch => {
-            VisibleMutationAuthority::AuthorityLost
-        }
+        // turn alive; the mismatch family is an exact-episode veto and ends it.
+        GuardedSaveOutcome::RowAbsent => VisibleMutationAuthority::Suppressed,
+        GuardedSaveOutcome::Saved
+        | GuardedSaveOutcome::AuthorityPinned
+        | GuardedSaveOutcome::Unnameable
+        | GuardedSaveOutcome::SuccessorOwned => VisibleMutationAuthority::AuthorityLost,
         GuardedSaveOutcome::IoError => VisibleMutationAuthority::Retry,
     };
     // #5464 T5 S2: the one observation point that covers all sixteen
@@ -219,7 +220,7 @@ fn persist_stream_tick_state_with_authority_mode(
         *detached_current_msg_id =
             detached_current_msg_id_from_durable(inflight_state.current_msg_id);
     } else if operation.mode == StreamTickSaveMode::StrictVisibleMutationFence
-        && outcome == GuardedSaveOutcome::IdentityMismatch
+        && outcome.is_identity_mismatch_legacy()
         && expected.matches_state(inflight_state)
         && ((
             inflight_state.current_msg_id,
@@ -238,10 +239,7 @@ fn persist_stream_tick_state_with_authority_mode(
         *detached_current_msg_id =
             detached_current_msg_id_from_durable(inflight_state.current_msg_id);
     }
-    if matches!(
-        outcome,
-        GuardedSaveOutcome::Missing | GuardedSaveOutcome::IdentityMismatch
-    ) {
+    if outcome == GuardedSaveOutcome::RowAbsent || outcome.is_identity_mismatch_legacy() {
         tracing::warn!(
             channel_id = operation.channel_id.get(),
             caller = operation.caller,

@@ -56,8 +56,10 @@ pub(in crate::services::discord) fn warn_for_bridge_terminal_mirror_outcome(
     ctx: BridgeEvidenceLossContext<'_>,
 ) {
     match outcome {
-        GuardedSaveOutcome::Saved | GuardedSaveOutcome::Missing => {}
-        GuardedSaveOutcome::IdentityMismatch => {
+        GuardedSaveOutcome::Saved | GuardedSaveOutcome::RowAbsent => {}
+        GuardedSaveOutcome::AuthorityPinned
+        | GuardedSaveOutcome::Unnameable
+        | GuardedSaveOutcome::SuccessorOwned => {
             tracing::warn!(
                 provider = %ctx.provider.as_str(),
                 channel_id = ctx.channel_id.get(),
@@ -146,7 +148,7 @@ mod tests {
     fn identity_mismatch_bridge_outcome_emits_lost_evidence_warn() {
         let logs = capture_warn(|| {
             warn_for_bridge_terminal_mirror_outcome(
-                GuardedSaveOutcome::IdentityMismatch,
+                GuardedSaveOutcome::SuccessorOwned,
                 BridgeEvidenceLossContext {
                     provider: &ProviderKind::Claude,
                     channel_id: ChannelId::new(5025),

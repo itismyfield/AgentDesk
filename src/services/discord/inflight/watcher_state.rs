@@ -34,20 +34,56 @@ pub(in crate::services::discord) struct WatcherStreamProgressPatch {
 }
 
 /// #3558: outcome of [`persist_watcher_stream_progress_locked_in_root`].
+///
+/// #5951 S1: `Skipped` collapsed FOUR unrelated refusals into one value, and
+/// the doc on that variant named only two of them — exactly the drift this
+/// split removes. Behaviour is unchanged: every value below that replaces
+/// `Skipped` answers [`WatcherProgressOutcome::is_skipped_legacy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum WatcherProgressOutcome {
     /// The watcher-owned fields were patched and persisted.
     Saved,
-    /// Either no row exists, or the in-lock reload no longer matches the
-    /// expected identity / tmux session (a fresh turn replaced it, or a
-    /// restart/rebind marker is now pinned). The write was skipped.
-    Skipped,
+    /// No durable row exists at all. The write was skipped; nothing is
+    /// resurrected. Formerly one of the four `Skipped` causes.
+    RowAbsent,
+    /// A planned-restart or rebind-origin marker is pinned on the row, so a
+    /// different lifecycle owns it and the streaming caller must not touch it.
+    AuthorityPinned,
+    /// The caller's coordinates do not address this row: the durable
+    /// `tmux_session_name` names a different session, or the caller's parsed
+    /// body has not caught up with its own `response_sent_offset` yet.
+    CoordinateMismatch,
+    /// A fresh turn replaced the row — the caller pinned a per-turn identity
+    /// and the in-lock reload no longer matches it.
+    SuccessorOwned,
     /// Filesystem or lock acquisition failure.
     IoError,
     /// #5191: the caller pinned an exact identity and the in-lock reload shows
     /// that row is already terminal-delivery-committed. Rejected before any
     /// field mutation, so the committed row stays byte-identical on disk.
     TerminalAlreadyCommitted,
+}
+
+impl WatcherProgressOutcome {
+    /// Every value the pre-#5951 `Skipped` stood for, in one place, so a
+    /// consumer that only ever asked "was the write skipped?" keeps its
+    /// verdict unchanged across the split.
+    ///
+    /// `#[cfg(test)]` because the audit found NO production consumer of the old
+    /// `Skipped` value: prod only ever compares against `Saved` (`tmux.rs`) or
+    /// `TerminalAlreadyCommitted` (`streaming_status_tick.rs`). Keeping it out
+    /// of the production surface is the truthful state; the slice that first
+    /// needs the legacy class in prod un-gates it.
+    #[cfg(test)]
+    pub(in crate::services::discord) const fn is_skipped_legacy(self) -> bool {
+        matches!(
+            self,
+            Self::RowAbsent
+                | Self::AuthorityPinned
+                | Self::CoordinateMismatch
+                | Self::SuccessorOwned
+        )
+    }
 }
 
 /// #3558: single-lock read-modify-write for the tmux streaming-progress
@@ -118,15 +154,15 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
         return WatcherProgressOutcome::IoError;
     };
     let Some(mut state) = load_inflight_state_unlocked(&path) else {
-        return WatcherProgressOutcome::Skipped;
+        return WatcherProgressOutcome::RowAbsent;
     };
     // A pinned restart/rebind marker means a different lifecycle owns the row;
     // the streaming caller must not touch it (mirrors the refresh-path guard).
     if state.restart_mode.is_some() || state.rebind_origin {
-        return WatcherProgressOutcome::Skipped;
+        return WatcherProgressOutcome::AuthorityPinned;
     }
     if state.tmux_session_name.as_deref() != Some(require_tmux_session_name) {
-        return WatcherProgressOutcome::Skipped;
+        return WatcherProgressOutcome::CoordinateMismatch;
     }
     // #3558: when the caller has captured a per-turn identity, reject a write
     // onto a fresh row B (different user_msg_id / started_at / turn_start_offset)
@@ -136,7 +172,7 @@ pub(super) fn persist_watcher_stream_progress_locked_in_root(
     if let Some(identity) = require_identity
         && !identity.matches_state(&state)
     {
-        return WatcherProgressOutcome::Skipped;
+        return WatcherProgressOutcome::SuccessorOwned;
     }
     // #5191: the pinned owner's row is already terminal-delivery-committed, so a
     // later streaming frame must not rewrite its body/offset/current_msg_id. A
@@ -389,5 +425,143 @@ pub(super) fn persist_watcher_relay_watermark_locked_in_root(
     ) {
         Ok(()) => WatcherRelayWatermarkOutcome::Saved,
         Err(_) => WatcherRelayWatermarkOutcome::IoError,
+    }
+}
+
+#[cfg(test)]
+mod watcher_progress_outcome_tests {
+    use super::*;
+    use crate::services::discord::inflight::InflightTurnState;
+
+    const TMUX: &str = "AgentDesk-codex-5951-watcher";
+
+    fn turn(channel_id: u64, user_msg_id: u64) -> InflightTurnState {
+        let mut state = InflightTurnState::new(
+            ProviderKind::Codex,
+            channel_id,
+            Some("adk-5951-s1".to_string()),
+            343_742_347_365_974_026,
+            user_msg_id,
+            18,
+            "user prompt".to_string(),
+            Some("session".to_string()),
+            Some(TMUX.to_string()),
+            Some(format!("/tmp/{TMUX}-{channel_id}.jsonl")),
+            None,
+            512,
+        );
+        state.turn_start_offset = Some(4_096);
+        state.turn_nonce = Some(format!("nonce-{user_msg_id}"));
+        state
+    }
+
+    fn patch() -> WatcherStreamProgressPatch {
+        WatcherStreamProgressPatch {
+            current_msg_id: Some(900_100),
+            full_response: "watcher body".to_string(),
+            response_sent_offset: 0,
+            current_tool_line: None,
+            prev_tool_status: None,
+            task_notification_kind: None,
+            any_tool_used: false,
+            has_post_tool_text: false,
+            streaming_rollover_frozen_msg_ids: Vec::new(),
+        }
+    }
+
+    /// Drive the shipped watcher RMW against a seeded row and assert the
+    /// refusal left it byte-identical.
+    fn refused(
+        channel_id: u64,
+        durable: impl FnOnce(&mut InflightTurnState),
+        require_tmux_session_name: &str,
+    ) -> WatcherProgressOutcome {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let mut seed = turn(channel_id, 77_010);
+        durable(&mut seed);
+        crate::services::discord::inflight::save_store::save_inflight_state_in_root(
+            temp.path(),
+            &seed,
+        )
+        .expect("seed durable row");
+        let path = inflight_state_path(temp.path(), &ProviderKind::Codex, channel_id);
+        let before = fs::read(&path).expect("durable row");
+        let identity = InflightTurnIdentity::from_state(&turn(channel_id, 77_010));
+        let outcome = persist_watcher_stream_progress_locked_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            channel_id,
+            Some(&identity),
+            require_tmux_session_name,
+            patch(),
+        );
+        assert_eq!(
+            fs::read(&path).expect("durable row"),
+            before,
+            "a refused watcher progress write must leave the durable row byte-identical"
+        );
+        outcome
+    }
+
+    /// #5951 S1: `Skipped` was four causes wearing one name — and its own doc
+    /// named only two of them. Each cause is driven through the shipped
+    /// `persist_watcher_stream_progress_locked_in_root` and pinned to its own
+    /// variant. The fifth `CoordinateMismatch` producer (the `tmux.rs` wrapper
+    /// refusing a body that trails its own offset) is covered at that entry
+    /// point by `progress_short_body_and_ioerror_stay_nonterminal`.
+    #[test]
+    fn watcher_progress_outcome_truth_table_separates_all_four_skipped_causes() {
+        let temp = tempfile::TempDir::new().expect("runtime root");
+        let identity = InflightTurnIdentity::from_state(&turn(5_951_100, 77_010));
+        let row_absent = persist_watcher_stream_progress_locked_in_root(
+            temp.path(),
+            &ProviderKind::Codex,
+            5_951_100,
+            Some(&identity),
+            TMUX,
+            patch(),
+        );
+
+        let restart_marker = refused(
+            5_951_101,
+            |durable| {
+                durable
+                    .set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
+            },
+            TMUX,
+        );
+        let rebind_origin = refused(5_951_102, |durable| durable.rebind_origin = true, TMUX);
+        let other_session = refused(5_951_103, |_durable| {}, "AgentDesk-codex-5951-other-pane");
+        let successor = refused(5_951_104, |durable| durable.user_msg_id = 77_011, TMUX);
+
+        assert_eq!(row_absent, WatcherProgressOutcome::RowAbsent);
+        assert_eq!(restart_marker, WatcherProgressOutcome::AuthorityPinned);
+        assert_eq!(rebind_origin, WatcherProgressOutcome::AuthorityPinned);
+        assert_eq!(other_session, WatcherProgressOutcome::CoordinateMismatch);
+        assert_eq!(successor, WatcherProgressOutcome::SuccessorOwned);
+
+        for (name, cause) in [
+            ("no row", row_absent),
+            ("restart marker", restart_marker),
+            ("rebind origin", rebind_origin),
+            ("other tmux session", other_session),
+            ("successor turn", successor),
+        ] {
+            assert!(
+                cause.is_skipped_legacy(),
+                "{name} was a `Skipped` before #5951 S1 and must stay one"
+            );
+        }
+        assert_ne!(
+            restart_marker, row_absent,
+            "a pinned restart marker is not an absent row"
+        );
+        assert_ne!(
+            successor, other_session,
+            "a different pane is not a later turn on this pane"
+        );
+        assert!(!WatcherProgressOutcome::Saved.is_skipped_legacy());
+        assert!(!WatcherProgressOutcome::IoError.is_skipped_legacy());
+        assert!(!WatcherProgressOutcome::TerminalAlreadyCommitted.is_skipped_legacy());
     }
 }

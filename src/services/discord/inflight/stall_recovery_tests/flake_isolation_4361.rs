@@ -194,7 +194,7 @@ fn carried_birth_reclaim_rejects_started_at_skew_4361() {
 }
 
 /// Skip → the on-disk row became a planned-restart marker. The guarded save
-/// must not clobber it (`IdentityMismatch`); restart recovery owns it.
+/// must not clobber it (`AuthorityPinned`); restart recovery owns it.
 #[test]
 fn skip_save_does_not_clobber_planned_restart_marker() {
     // #4361: process generation and the runtime root are ambient process state.
@@ -219,7 +219,7 @@ fn skip_save_does_not_clobber_planned_restart_marker() {
         preserved.turn_start_offset,
     );
 
-    assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+    assert!(outcome.is_identity_mismatch_legacy());
     let rows = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
     assert_eq!(rows.len(), 1);
     assert!(

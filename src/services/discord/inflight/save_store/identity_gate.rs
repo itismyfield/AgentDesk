@@ -27,6 +27,8 @@ pub(in crate::services::discord) use completion_preserve::save_inflight_state_if
 pub(in crate::services::discord::inflight) use completion_preserve::save_inflight_state_if_matches_identity_in_root;
 use guarded_read::read_inflight_state_for_guarded_write;
 pub(in crate::services::discord) use heartbeat::touch_inflight_state_if_matches_identity;
+#[cfg(test)]
+pub(in crate::services::discord::inflight) use heartbeat::touch_inflight_state_if_matches_identity_in_root;
 pub(in crate::services::discord) use runtime_stamp::stamp_runtime_handoff_if_matches_identity;
 pub(in crate::services::discord) use stamp_merge::GuardedStampTarget;
 use stamp_merge::{merge_forward_response_progress, merge_runtime_stamp_progress};
@@ -145,7 +147,7 @@ fn save_inflight_state_identity_gated_in_root<T: GuardedStampTarget>(
             durable_turn_start_offset = ?on_disk.turn_start_offset,
             "inflight identity-refresh save skipped because offsetless id-0 snapshot cannot safely match a durable row"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::Unnameable;
     }
     if !allow_output_restamp && on_disk.output_path != state.output_path {
         tracing::info!(
@@ -160,7 +162,7 @@ fn save_inflight_state_identity_gated_in_root<T: GuardedStampTarget>(
             durable_rebind_origin = on_disk.rebind_origin,
             "inflight identity-refresh save skipped because durable row output path changed"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
     if on_disk.restart_mode.is_some()
         || on_disk.rebind_origin
@@ -177,7 +179,7 @@ fn save_inflight_state_identity_gated_in_root<T: GuardedStampTarget>(
             durable_rebind_origin = on_disk.rebind_origin,
             "inflight identity-refresh save skipped because durable row authority changed"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
     if on_disk.save_generation != state.save_generation {
         tracing::info!(
@@ -188,7 +190,7 @@ fn save_inflight_state_identity_gated_in_root<T: GuardedStampTarget>(
             durable_save_generation = on_disk.save_generation,
             "inflight identity-refresh save skipped because a same-turn writer advanced the durable row"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
 
     let mut updated = state.clone();
@@ -207,7 +209,7 @@ fn save_inflight_state_identity_gated_in_root<T: GuardedStampTarget>(
             durable_identity = ?durable,
             "inflight identity-refresh save skipped because validation rejected the refreshed write"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
     match crate::services::discord::inflight::store::persist_under_lock_with_snapshot(
         root,
@@ -219,7 +221,7 @@ fn save_inflight_state_identity_gated_in_root<T: GuardedStampTarget>(
             target.adopt_persisted(persisted);
             GuardedSaveOutcome::Saved
         }
-        Ok(None) => GuardedSaveOutcome::IdentityMismatch,
+        Ok(None) => GuardedSaveOutcome::AuthorityPinned,
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -257,7 +259,7 @@ pub(in crate::services::discord::inflight) fn patch_restart_full_response_if_ide
         return GuardedSaveOutcome::IoError;
     };
     if state.restart_mode.is_none() {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
     let path = inflight_state_path(root, &provider, state.channel_id);
     if let Some(parent) = path.parent()
@@ -289,7 +291,7 @@ pub(in crate::services::discord::inflight) fn patch_restart_full_response_if_ide
             durable_identity = ?durable,
             "restart-preserved full_response patch skipped because offsetless id-0 snapshot cannot safely match a durable row"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::Unnameable;
     }
     if !expected.matches_state(&on_disk)
         || on_disk.restart_mode.is_none()
@@ -313,7 +315,7 @@ pub(in crate::services::discord::inflight) fn patch_restart_full_response_if_ide
             durable_output_path = ?on_disk.output_path.as_deref(),
             "restart-preserved full_response patch skipped because durable row is not the same restart-preserved turn"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
 
     let response_sent_offset = on_disk.response_sent_offset;
@@ -328,7 +330,7 @@ pub(in crate::services::discord::inflight) fn patch_restart_full_response_if_ide
             full_response_len = state.full_response.len(),
             "restart-preserved full_response patch skipped because the existing response offset would become invalid"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
     if response_sent_offset > 0
         && on_disk.full_response.as_bytes().get(..response_sent_offset)
@@ -343,7 +345,7 @@ pub(in crate::services::discord::inflight) fn patch_restart_full_response_if_ide
             cleaned_full_response_len = state.full_response.len(),
             "already-relayed prefix diverges after API_FRICTION cleaning; keeping raw text to preserve resume-offset semantics"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
 
     on_disk.full_response = state.full_response.clone();
@@ -365,23 +367,6 @@ pub(in crate::services::discord::inflight) fn patch_restart_full_response_if_ide
             GuardedSaveOutcome::IoError
         }
     }
-}
-
-/// Outcome of [`save_inflight_state_if_matches_identity`] — the #3041 P1-2 R3
-/// identity-guarded re-save used on a delivery-lease `Skip` epilogue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::services::discord) enum GuardedSaveOutcome {
-    /// On-disk row still matched the turn identity; the row was rewritten.
-    Saved,
-    /// No inflight row existed (the lease HOLDER already cleared it on its
-    /// success path). We do NOT resurrect it — the turn is already delivered.
-    Missing,
-    /// A row existed but its identity did NOT match (a newer turn replaced it,
-    /// or a planned-restart / rebind-origin marker now owns the row). We do
-    /// NOT clobber it.
-    IdentityMismatch,
-    /// Filesystem, malformed durable JSON, or serialization error.
-    IoError,
 }
 
 fn identity_matches_with_offset_guard(
@@ -530,7 +515,7 @@ fn bind_recovery_anchor_if_matches_snapshot(
     let data = match fs::read_to_string(&path) {
         Ok(data) => data,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return GuardedSaveOutcome::Missing;
+            return GuardedSaveOutcome::RowAbsent;
         }
         Err(error) => {
             tracing::warn!(
@@ -543,7 +528,7 @@ fn bind_recovery_anchor_if_matches_snapshot(
         }
     };
     let Ok(mut on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     };
     if captured.is_some_and(|state| {
         !crate::services::discord::inflight::InflightEpisodePin::from_state(state)
@@ -556,12 +541,12 @@ fn bind_recovery_anchor_if_matches_snapshot(
         || expected_relay_authority
             .is_some_and(|authority| StreamRelayAuthority::from_state(&on_disk) != authority)
     {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
     if on_disk.current_msg_id != expected_current_msg_id
         || expected_current_msg_len.is_some_and(|len| on_disk.current_msg_len != len)
     {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
     on_disk.current_msg_id = anchor_msg_id;
     on_disk.current_msg_len = anchor_text_len;
@@ -625,14 +610,14 @@ pub(in crate::services::discord::inflight) fn persist_leak_recovery_response_off
         return GuardedSaveOutcome::IoError;
     };
     let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
-        return GuardedSaveOutcome::Missing;
+        return GuardedSaveOutcome::RowAbsent;
     };
     let expected = InflightTurnIdentity::from_state(delivered);
     if !expected.matches_state(&on_disk) || on_disk.current_msg_id != delivered.current_msg_id {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
     if on_disk.response_sent_offset >= delivered_offset {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
     if transfer_end(
         &delivered.full_response,
@@ -641,7 +626,7 @@ pub(in crate::services::discord::inflight) fn persist_leak_recovery_response_off
     )
     .is_none()
     {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
 
     on_disk.response_sent_offset = delivered_offset;
@@ -700,10 +685,10 @@ pub(in crate::services::discord::inflight) fn persist_recovery_output_path_if_ma
         return GuardedSaveOutcome::IoError;
     };
     let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
-        return GuardedSaveOutcome::Missing;
+        return GuardedSaveOutcome::RowAbsent;
     };
     if !expected.matches_state(&on_disk) {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
 
     on_disk.output_path = Some(output_path);
@@ -733,9 +718,11 @@ pub(in crate::services::discord::inflight) fn persist_recovery_output_path_if_ma
 ///
 ///   - `Saved`            — the marker is now set (or was already set → still
 ///                          `Saved`, idempotent).
-///   - `Missing`          — no row exists; it was cleared concurrently. We do NOT
+///   - `RowAbsent`        — no row exists; it was cleared concurrently. We do NOT
 ///                          resurrect it (there is no live turn to protect).
-///   - `IdentityMismatch` — a newer turn (or a rebind-origin placeholder) owns the
+///   - `Unnameable`       — the snapshot is an offsetless id-0 that names no row.
+///   - `AuthorityPinned` /
+///     `SuccessorOwned`   — a rebind-origin placeholder or a newer turn owns the
 ///                          row. We do NOT clobber it.
 ///   - `IoError`          — filesystem / serialization failure.
 ///
@@ -776,7 +763,7 @@ pub(in crate::services::discord::inflight) fn mark_readopted_from_inflight_if_id
         return GuardedSaveOutcome::IoError;
     };
     let Some(mut on_disk) = load_inflight_state_unlocked(&path) else {
-        return GuardedSaveOutcome::Missing;
+        return GuardedSaveOutcome::RowAbsent;
     };
     // #4370 R3-5: match the broad `save_inflight_state_identity_gated_in_root`
     // id-0 fail-closed gate. `InflightTurnIdentity` cannot disambiguate colliding
@@ -795,10 +782,10 @@ pub(in crate::services::discord::inflight) fn mark_readopted_from_inflight_if_id
             durable_identity = ?InflightTurnIdentity::from_state(&on_disk),
             "readopted-from-inflight marker skipped because offsetless id-0 snapshot cannot safely match a durable row (#4370 R3-5 fail-closed)"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::Unnameable;
     }
     if on_disk.rebind_origin || !expected.matches_state(&on_disk) {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
     match persist_readopted_under_lock(
         root,
@@ -898,19 +885,19 @@ pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_re
         return Err(GuardedSaveOutcome::IoError);
     };
     let Ok(data) = fs::read_to_string(&path) else {
-        return Err(GuardedSaveOutcome::Missing);
+        return Err(GuardedSaveOutcome::RowAbsent);
     };
     let Ok(on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
-        return Err(GuardedSaveOutcome::IdentityMismatch);
+        return Err(GuardedSaveOutcome::AuthorityPinned);
     };
     if expected_episode.is_some_and(|pin| !pin.matches_state(&on_disk)) {
-        return Err(GuardedSaveOutcome::IdentityMismatch);
+        return Err(GuardedSaveOutcome::SuccessorOwned);
     }
     if on_disk.rebind_origin {
-        return Err(GuardedSaveOutcome::IdentityMismatch);
+        return Err(GuardedSaveOutcome::AuthorityPinned);
     }
     if on_disk.restart_mode != state.restart_mode {
-        return Err(GuardedSaveOutcome::IdentityMismatch);
+        return Err(GuardedSaveOutcome::AuthorityPinned);
     }
     // #4400 (b) r2: zero-id `expected` authorizes this save ONLY for the
     // adoptable #3107 self-heal orphan carrying a birth `turn_start_offset`
@@ -921,17 +908,17 @@ pub(in crate::services::discord::inflight) fn lock_and_save_existing_inflight_re
             && !(on_disk.is_adoptable_orphaned_synthetic_watcher_row()
                 && on_disk.turn_start_offset.is_some()))
     {
-        return Err(GuardedSaveOutcome::IdentityMismatch);
+        return Err(GuardedSaveOutcome::from_durable_authority(&on_disk));
     }
     if let Some(expected_offset) = expected_turn_start_offset {
         if on_disk.turn_start_offset != Some(expected_offset) {
-            return Err(GuardedSaveOutcome::IdentityMismatch);
+            return Err(GuardedSaveOutcome::SuccessorOwned);
         }
     }
     if expected_last_offset_for_rebase
         .is_some_and(|expected_last| on_disk.last_offset != expected_last)
     {
-        return Err(GuardedSaveOutcome::IdentityMismatch);
+        return Err(GuardedSaveOutcome::AuthorityPinned);
     }
 
     let mut updated = on_disk;
@@ -984,14 +971,14 @@ mod tests {
         use GuardedSaveOutcome as G;
         for (source, target, end, offset, msg_delta, turn_delta, outcome, saved_end) in [
             ("abcdef", "abcTAIL", 3, 1, 0, 0, G::Saved, 3),
-            ("abcdef", "XYZdef", 3, 1, 0, 0, G::IdentityMismatch, 1),
-            ("abcdef", "abcTAIL", 3, 1, 1, 0, G::IdentityMismatch, 1),
-            ("abcdef", "abcTAIL", 3, 1, 0, 1, G::IdentityMismatch, 1),
-            ("abcdef", "abcTAIL", 3, 3, 0, 0, G::IdentityMismatch, 3),
-            ("abcdef", "abcTAIL", 3, 4, 0, 0, G::IdentityMismatch, 4),
-            ("한글", "한글", 1, 0, 0, 0, G::IdentityMismatch, 0),
-            ("ab", "abcdef", 3, 1, 0, 0, G::IdentityMismatch, 1),
-            ("abcdef", "ab", 3, 1, 0, 0, G::IdentityMismatch, 1),
+            ("abcdef", "XYZdef", 3, 1, 0, 0, G::AuthorityPinned, 1),
+            ("abcdef", "abcTAIL", 3, 1, 1, 0, G::SuccessorOwned, 1),
+            ("abcdef", "abcTAIL", 3, 1, 0, 1, G::SuccessorOwned, 1),
+            ("abcdef", "abcTAIL", 3, 3, 0, 0, G::AuthorityPinned, 3),
+            ("abcdef", "abcTAIL", 3, 4, 0, 0, G::AuthorityPinned, 4),
+            ("한글", "한글", 1, 0, 0, 0, G::AuthorityPinned, 0),
+            ("ab", "abcdef", 3, 1, 0, 0, G::AuthorityPinned, 1),
+            ("abcdef", "ab", 3, 1, 0, 0, G::AuthorityPinned, 1),
         ] {
             let root = tempfile::tempdir().unwrap();
             let mut delivered = drain_restart_seed(5752, "prefix-transfer");
@@ -1129,13 +1116,13 @@ mod tests {
         let mut newer = persisted.clone();
         newer.user_msg_id = 99_999;
         save_inflight_state_in_root(temp.path(), &newer).expect("seed newer turn");
-        assert_eq!(
+        assert!(
             claude_e_stamp::stamp_claude_e_process_if_matches_identity_in_root(
                 temp.path(),
                 &handoff,
                 &expected,
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         let still_newer: InflightTurnState =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("read newer row"))
@@ -1146,8 +1133,8 @@ mod tests {
     // #4370 F1: the `readopted_from_inflight` marker is a narrow adoption patch.
     // It lands on a DrainRestart row (where the broad identity-refresh save
     // refuses `restart_mode` rows) and consumes the handoff marker; it never
-    // resurrects a concurrently-cleared row (`Missing`);
-    // and it refuses to clobber a different turn's row (`IdentityMismatch`).
+    // resurrects a concurrently-cleared row (`RowAbsent`);
+    // and it refuses to clobber a different turn's row (`SuccessorOwned`).
     #[test]
     fn readopted_marker_lands_on_restart_preserved_row_and_never_resurrects() {
         // #3293: pin the runtime root to a tempdir before any state construction
@@ -1163,7 +1150,7 @@ mod tests {
         );
         let provider = ProviderKind::Codex;
 
-        // (1) Missing: no durable row → the marker patch does NOT resurrect it.
+        // (1) RowAbsent: no durable row → the marker patch does NOT resurrect it.
         let mut state = drain_restart_seed(44_370, "AgentDesk-codex-4370-drain");
         let expected = InflightTurnIdentity::from_state(&state);
         assert_eq!(
@@ -1173,7 +1160,7 @@ mod tests {
                 state.channel_id,
                 &expected,
             ),
-            GuardedSaveOutcome::Missing,
+            GuardedSaveOutcome::RowAbsent,
             "an absent row must not be resurrected by the marker patch",
         );
 
@@ -1183,14 +1170,14 @@ mod tests {
         state.set_restart_mode(InflightRestartMode::DrainRestart);
         save_inflight_state_in_root(temp.path(), &state).expect("seed restart-preserved row");
         let expected = InflightTurnIdentity::from_state(&state);
-        assert_eq!(
+        assert!(
             save_inflight_state_if_identity_unchanged_in_root(
                 temp.path(),
                 &state,
                 "test::readopted_marker_broad_refresh_refuses",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
-            "the broad identity-refresh save must keep refusing restart_mode rows",
+            )
+            .is_identity_mismatch_legacy(),
+            "the broad identity-refresh save must keep refusing restart_mode rows"
         );
         assert_eq!(
             mark_readopted_from_inflight_if_identity_unchanged_in_root(
@@ -1228,18 +1215,18 @@ mod tests {
             GuardedSaveOutcome::Saved,
         );
 
-        // (4) IdentityMismatch: a different turn identity must not be clobbered.
+        // (4) SuccessorOwned: a different turn identity must not be clobbered.
         let mut other = state.clone();
         other.user_msg_id = 99_999;
         let mismatched = InflightTurnIdentity::from_state(&other);
-        assert_eq!(
+        assert!(
             mark_readopted_from_inflight_if_identity_unchanged_in_root(
                 temp.path(),
                 &provider,
                 state.channel_id,
                 &mismatched,
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
 
         // (5) #4370 R3-5: an offsetless id-0 snapshot is refused fail-closed even
@@ -1247,7 +1234,7 @@ mod tests {
         // cannot uniquely name a `user_msg_id == 0 && turn_start_offset == None`
         // row, the marker patch must never authorize mutating it (mirrors the
         // broad `save_inflight_state_identity_gated_in_root` id-0 gate). Asserting
-        // `IdentityMismatch` (not `Missing`) proves BOTH that the row persisted AND
+        // the mismatch family (not `RowAbsent`) proves BOTH that the row persisted AND
         // that the id-0 guard — not a matches_state miss — produced the refusal.
         let mut id0 = InflightTurnState::new(
             ProviderKind::Codex,
@@ -1270,15 +1257,15 @@ mod tests {
         assert!(id0.turn_start_offset.is_none());
         save_inflight_state_in_root(temp.path(), &id0).expect("seed offsetless id-0 row");
         let id0_expected = InflightTurnIdentity::from_state(&id0);
-        assert_eq!(
+        assert!(
             mark_readopted_from_inflight_if_identity_unchanged_in_root(
                 temp.path(),
                 &ProviderKind::Codex,
                 id0.channel_id,
                 &id0_expected,
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
-            "an offsetless id-0 snapshot must be refused fail-closed even against a byte-identical durable row (#4370 R3-5)",
+            )
+            .is_identity_mismatch_legacy(),
+            "an offsetless id-0 snapshot must be refused fail-closed even against a byte-identical durable row (#4370 R3-5)"
         );
     }
 
@@ -1345,15 +1332,15 @@ mod tests {
         different_turn.user_msg_id += 1;
         different_turn.turn_start_offset = Some(2_048);
         let different_expected = InflightTurnIdentity::from_state(&different_turn);
-        assert_eq!(
+        assert!(
             save_inflight_state_if_identity_matches_allow_output_restamp_in_root(
                 root.path(),
                 &different_turn,
                 &different_expected,
                 "test::output_restamp_different_turn_rejected",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
-            "a different user-message identity must not clobber the durable turn",
+            )
+            .is_identity_mismatch_legacy(),
+            "a different user-message identity must not clobber the durable turn"
         );
         let preserved: InflightTurnState =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("read sealed row"))
@@ -1381,15 +1368,15 @@ mod tests {
         stale_zero_id_restamp.turn_start_offset = Some(4_001);
         stale_zero_id_restamp.last_offset = 4_001;
         stale_zero_id_restamp.output_path = Some("/tmp/stale-zero-id.jsonl".to_string());
-        assert_eq!(
+        assert!(
             save_inflight_state_if_identity_matches_allow_output_restamp_in_root(
                 root.path(),
                 &stale_zero_id_restamp,
                 &older_expected,
                 "test::output_restamp_zero_id_collision_rejected",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
-            "same-timestamp zero-id turns are disambiguated by their loaded birth offsets",
+            )
+            .is_identity_mismatch_legacy(),
+            "same-timestamp zero-id turns are disambiguated by their loaded birth offsets"
         );
         let zero_id_path =
             inflight_state_path(root.path(), &ProviderKind::Codex, newer_zero_id.channel_id);
@@ -1429,7 +1416,7 @@ mod tests {
     }
 
     /// #4400 (b) review r2: the rebind adoption save must accept the adoptable
-    /// zero-id orphan (pre-fix it was refused as `IdentityMismatch`, turning
+    /// zero-id orphan (pre-fix it was refused as an identity mismatch, turning
     /// the classifier's 409 self-deadlock into a 500 self-deadlock — the fix
     /// was invalid on the real path), while every OTHER zero-id shape keeps
     /// the unconditional refusal. Each contrast row is a mutation kill: widen
@@ -1485,15 +1472,15 @@ mod tests {
         tui_direct.request_owner_user_id = 1;
         save_inflight_state_in_root(temp.path(), &tui_direct).expect("seed TUI-direct row");
         let tui_expected = InflightTurnIdentity::from_state(&tui_direct);
-        assert_eq!(
+        assert!(
             save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
                 temp.path(),
                 &tui_direct,
                 &tui_expected,
                 tui_direct.turn_start_offset,
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
-            "a live TUI-direct synthetic row (owner 1) must keep the zero-id refusal (I2)",
+            )
+            .is_identity_mismatch_legacy(),
+            "a live TUI-direct synthetic row (owner 1) must keep the zero-id refusal (I2)"
         );
 
         // (3) Bridge-owned/default zero-id row: not the self-heal shape.
@@ -1501,15 +1488,15 @@ mod tests {
         bridge_owned.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::None);
         save_inflight_state_in_root(temp.path(), &bridge_owned).expect("seed bridge-owned row");
         let bridge_expected = InflightTurnIdentity::from_state(&bridge_owned);
-        assert_eq!(
+        assert!(
             save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
                 temp.path(),
                 &bridge_owned,
                 &bridge_expected,
                 bridge_owned.turn_start_offset,
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
-            "a bridge-owned zero-id row must keep the refusal",
+            )
+            .is_identity_mismatch_legacy(),
+            "a bridge-owned zero-id row must keep the refusal"
         );
 
         // (4) Offsetless zero-id orphan: fail closed (mirrors the id-0
@@ -1518,15 +1505,15 @@ mod tests {
         offsetless.turn_start_offset = None;
         save_inflight_state_in_root(temp.path(), &offsetless).expect("seed offsetless row");
         let offsetless_expected = InflightTurnIdentity::from_state(&offsetless);
-        assert_eq!(
+        assert!(
             save_existing_inflight_rebind_adoption_if_matches_identity_in_root(
                 temp.path(),
                 &offsetless,
                 &offsetless_expected,
                 None,
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
-            "an offsetless zero-id row cannot be uniquely named and must be refused fail-closed",
+            )
+            .is_identity_mismatch_legacy(),
+            "an offsetless zero-id row cannot be uniquely named and must be refused fail-closed"
         );
     }
 
@@ -1555,13 +1542,13 @@ mod tests {
 
         let mut stale = baseline.clone();
         stale.full_response = "stale bridge response".to_string();
-        assert_eq!(
+        assert!(
             save_inflight_state_if_identity_unchanged_in_root(
                 root.path(),
                 &stale,
                 "test::generation_cas",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         let preserved: InflightTurnState =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("read preserved row"))

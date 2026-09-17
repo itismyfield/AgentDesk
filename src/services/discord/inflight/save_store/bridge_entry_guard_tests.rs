@@ -131,14 +131,14 @@ fn bridge_entry_guarded_save_preserves_newer_owner_bytes_on_identity_mismatch() 
 
     stale_owner.current_msg_id = 42;
     stale_owner.full_response = "stale owner overwrite".to_string();
-    assert_eq!(
+    assert!(
         patch_bridge_entry_state_if_identity_unchanged_in_root(
             temp.path(),
             &before,
             &mut stale_owner,
             BRIDGE_ENTRY_CALLER,
-        ),
-        GuardedSaveOutcome::IdentityMismatch
+        )
+        .is_identity_mismatch_legacy()
     );
     assert_eq!(
         fs::read(&path).expect("read row after declined stale save"),
@@ -164,7 +164,7 @@ fn bridge_entry_guarded_save_does_not_resurrect_a_deleted_row() {
             &mut stale_owner,
             BRIDGE_ENTRY_CALLER,
         ),
-        GuardedSaveOutcome::Missing
+        GuardedSaveOutcome::RowAbsent
     );
     assert!(
         !path.exists(),

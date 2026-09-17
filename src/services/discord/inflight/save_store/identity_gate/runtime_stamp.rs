@@ -112,9 +112,9 @@ fn admit_codex_terminal_range_in_root(
     let (result, session, rollout) = frame;
     let (tmux, nonce) = authority;
     let (start, end) = range;
-    let session = nonempty(session).ok_or(GuardedSaveOutcome::IdentityMismatch)?;
-    let tmux = nonempty(Some(tmux)).ok_or(GuardedSaveOutcome::IdentityMismatch)?;
-    let nonce = nonempty(Some(nonce)).ok_or(GuardedSaveOutcome::IdentityMismatch)?;
+    let session = nonempty(session).ok_or(GuardedSaveOutcome::Unnameable)?;
+    let tmux = nonempty(Some(tmux)).ok_or(GuardedSaveOutcome::Unnameable)?;
+    let nonce = nonempty(Some(nonce)).ok_or(GuardedSaveOutcome::Unnameable)?;
     if !can_chain_locally
         || local.provider_kind() != Some(ProviderKind::Codex)
         || local.runtime_kind != Some(RuntimeHandoffKind::CodexTui)
@@ -123,7 +123,7 @@ fn admit_codex_terminal_range_in_root(
         || result.trim().is_empty()
         || end <= start
     {
-        return Err(GuardedSaveOutcome::IdentityMismatch);
+        return Err(GuardedSaveOutcome::AuthorityPinned);
     }
     let path = inflight_state_path(root, &ProviderKind::Codex, local.channel_id);
     let _lock = lock_inflight_state_path(&path).map_err(|_| GuardedSaveOutcome::IoError)?;
@@ -146,12 +146,12 @@ fn admit_codex_terminal_range_in_root(
         || fresh.terminal_delivery_committed
         || !StreamRelayAuthority::from_state(&fresh).bridge_owns_relay()
     {
-        return Err(GuardedSaveOutcome::IdentityMismatch);
+        return Err(GuardedSaveOutcome::from_durable_authority(&fresh));
     }
     let (canonical, file_len) =
-        canonical_regular_file(rollout).ok_or(GuardedSaveOutcome::IdentityMismatch)?;
+        canonical_regular_file(rollout).ok_or(GuardedSaveOutcome::AuthorityPinned)?;
     if file_len < end || !marker_matches(tmux, &canonical, session, start) {
-        return Err(GuardedSaveOutcome::IdentityMismatch);
+        return Err(GuardedSaveOutcome::AuthorityPinned);
     }
     // A dead prelaunch session deliberately persists no wrapper path. At the
     // first raw range (`start == 0`), allow that representation only after the
@@ -171,7 +171,7 @@ fn admit_codex_terminal_range_in_root(
         && binding_matches(tmux, &canonical, session, [start, end]);
     let generation = tmux_generation_file_mtime_ns(tmux);
     if (!cold && !warm) || generation == 0 {
-        return Err(GuardedSaveOutcome::IdentityMismatch);
+        return Err(GuardedSaveOutcome::AuthorityPinned);
     }
     persist_terminal_range(
         root,
@@ -207,7 +207,7 @@ fn persist_terminal_range(
         "inflight::runtime_stamp::admit_terminal_range",
     )
     .map_err(|_| GuardedSaveOutcome::IoError)?
-    .ok_or(GuardedSaveOutcome::IdentityMismatch)?;
+    .ok_or(GuardedSaveOutcome::AuthorityPinned)?;
     baseline.clone_from(&persisted);
     local.output_path.clone_from(&persisted.output_path);
     local.session_id.clone_from(&persisted.session_id);
@@ -557,7 +557,7 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
             durable_identity = ?durable,
             "runtime-handoff stamp skipped because offsetless id-0 snapshot cannot safely match a durable row"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::Unnameable;
     }
     if on_disk.restart_mode.is_some() || on_disk.rebind_origin || !expected.matches_state(&on_disk)
     {
@@ -571,7 +571,7 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
             durable_rebind_origin = on_disk.rebind_origin,
             "runtime-handoff stamp skipped because durable row authority changed"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
     if expected.tmux_session_name.is_some()
         && requested.tmux_session_name != expected.tmux_session_name
@@ -584,7 +584,7 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
             requested_tmux_session_name = ?requested.tmux_session_name,
             "runtime-handoff stamp skipped because an established runtime session changed"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
 
     if !merge_runtime_stamp_progress(&mut on_disk, &requested) {
@@ -594,7 +594,7 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
             caller,
             "runtime-handoff stamp rejected because local and durable responses diverged"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
 
     let requested_runtime = (
@@ -640,10 +640,10 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
             && durable_runtime != baseline_runtime
             && durable_runtime != requested_runtime
         {
-            return GuardedSaveOutcome::IdentityMismatch;
+            return GuardedSaveOutcome::AuthorityPinned;
         }
         if owner_changed && durable_owner != baseline_owner && durable_owner != requested_owner {
-            return GuardedSaveOutcome::IdentityMismatch;
+            return GuardedSaveOutcome::AuthorityPinned;
         }
         (runtime_changed, owner_changed)
     } else {
@@ -676,7 +676,7 @@ pub(in crate::services::discord::inflight) fn stamp_runtime_handoff_if_matches_i
             state.adopt_persisted(persisted);
             GuardedSaveOutcome::Saved
         }
-        Ok(None) => GuardedSaveOutcome::IdentityMismatch,
+        Ok(None) => GuardedSaveOutcome::AuthorityPinned,
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -937,14 +937,14 @@ mod tests {
         let mut changed_session = persisted.clone();
         changed_session.tmux_session_name = Some("AgentDesk-codex-different".to_string());
         changed_session.output_path = Some("/runtime/should-not-land.jsonl".to_string());
-        assert_eq!(
+        assert!(
             stamp_runtime_handoff_if_matches_identity_in_root(
                 root.path(),
                 &changed_session,
                 &persisted_expected,
                 "test::changed_session_rejected",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         let preserved = load(root.path(), &provider, channel_id);
         assert_eq!(
@@ -975,21 +975,21 @@ mod tests {
                 &expected,
                 "test::missing_row",
             ),
-            GuardedSaveOutcome::Missing,
+            GuardedSaveOutcome::RowAbsent,
         );
 
         let mut newer = seed.clone();
         newer.user_msg_id = 99_999;
         newer.output_path = Some("/runtime/newer-turn.jsonl".to_string());
         save_inflight_state_in_root(root.path(), &newer).expect("seed re-owned row");
-        assert_eq!(
+        assert!(
             stamp_runtime_handoff_if_matches_identity_in_root(
                 root.path(),
                 &stamp,
                 &expected,
                 "test::concurrent_reowner",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         let preserved = load(root.path(), &provider, channel_id);
         assert_eq!(preserved.user_msg_id, 99_999);
@@ -1021,15 +1021,15 @@ mod tests {
             stamp.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
             stamp.tmux_session_name = Some("AgentDesk-codex-r2".to_string());
 
-            assert_eq!(
+            assert!(
                 stamp_runtime_handoff_if_matches_identity_in_root(
                     root.path(),
                     &stamp,
                     &expected,
                     "test::reserved_authority",
-                ),
-                GuardedSaveOutcome::IdentityMismatch,
-                "{mutate} authority must fail closed",
+                )
+                .is_identity_mismatch_legacy(),
+                "{mutate} authority must fail closed"
             );
             let preserved = load(root.path(), &provider, channel_id);
             assert_eq!(preserved.runtime_kind, seed.runtime_kind);
@@ -1198,15 +1198,15 @@ mod tests {
         local.runtime_kind = Some(RuntimeHandoffKind::CodexTui);
         let local_before = serde_json::to_value(&local).expect("serialize local frame");
 
-        assert_eq!(
+        assert!(
             stamp_runtime_handoff_if_matches_identity_in_root(
                 root.path(),
                 (&baseline, &mut local),
                 &expected,
                 "test::divergent_runtime_response",
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
-            "semantic body divergence must not enter the transient-I/O retry loop",
+            )
+            .is_identity_mismatch_legacy(),
+            "semantic body divergence must not enter the transient-I/O retry loop"
         );
         assert_eq!(serde_json::to_value(&local).unwrap(), local_before);
         assert_eq!(
@@ -1327,7 +1327,7 @@ impl InflightTurnState {
         } else {
             result
         };
-        let mismatch = GuardedSaveOutcome::IdentityMismatch;
+        let mismatch = GuardedSaveOutcome::SuccessorOwned;
         let captured = actor.upgrade().ok_or(mismatch)?;
         if !std::sync::Arc::ptr_eq(&captured, bridge_actor)
             || bridge_actor.turn_nonce() != Some(turn_nonce.as_str())

@@ -18,7 +18,7 @@ pub(in crate::services::discord) fn touch_inflight_state_if_matches_identity(
     touch_inflight_state_if_matches_identity_in_root(&root, provider, channel_id, expected, caller)
 }
 
-fn touch_inflight_state_if_matches_identity_in_root(
+pub(in crate::services::discord::inflight) fn touch_inflight_state_if_matches_identity_in_root(
     root: &Path,
     provider: &ProviderKind,
     channel_id: u64,
@@ -30,7 +30,7 @@ fn touch_inflight_state_if_matches_identity_in_root(
         return GuardedSaveOutcome::IoError;
     };
     let Some(on_disk) = load_inflight_state_unlocked(&path) else {
-        return GuardedSaveOutcome::Missing;
+        return GuardedSaveOutcome::RowAbsent;
     };
     if expected.user_msg_id == 0 && expected.turn_start_offset.is_none() {
         tracing::info!(
@@ -40,7 +40,7 @@ fn touch_inflight_state_if_matches_identity_in_root(
             snapshot_identity = ?expected,
             "inflight heartbeat skipped because offsetless id-0 identity cannot safely own a durable row"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::Unnameable;
     }
     if on_disk.restart_mode.is_some() || on_disk.rebind_origin || !expected.matches_state(&on_disk)
     {
@@ -54,7 +54,7 @@ fn touch_inflight_state_if_matches_identity_in_root(
             durable_rebind_origin = on_disk.rebind_origin,
             "inflight heartbeat skipped because durable row authority changed"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
 
     match persist_under_lock(

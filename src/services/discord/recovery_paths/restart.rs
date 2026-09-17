@@ -331,7 +331,7 @@ fn anchor_probe_should_repost(probe: super::super::placeholder_sweeper::Placehol
 /// the row", and the caller's `None` arm clears the row UNCONDITIONALLY. That
 /// clear (a) dropped a committed answer whose pre-send bump hit a transient
 /// `IoError` (the deferral the bump-gate intends is lost) and (b) could DELETE a
-/// row now owned by a NEWER turn on an `IdentityMismatch`. This enum makes the
+/// row now owned by a NEWER turn on an identity mismatch. This enum makes the
 /// three contracts explicit so the caller never clears a row it must preserve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum AnchorRepostOutcome {
@@ -344,11 +344,11 @@ pub(in crate::services::discord) enum AnchorRepostOutcome {
     /// [`dispose_recovery_relay_outcome`].
     Relayed(RecoveryRelayOutcome),
     /// The pre-send `anchor_repost_attempts` bump did NOT durably persist
-    /// (`IoError` / `Missing` / `IdentityMismatch`), so the send was REFUSED (the
+    /// (`IoError` / `RowAbsent` / identity mismatch), so the send was REFUSED (the
     /// at-most-`budget` bound cannot be guaranteed without a durable attempt
     /// record). The on-disk row was left UNTOUCHED — the caller MUST preserve it
     /// (do NOT clear): a transient `IoError` is re-posted by a later boot whose
-    /// bump succeeds, and a `Missing` / stranger (`IdentityMismatch`, a newer
+    /// bump succeeds, and a `RowAbsent` / stranger (`SuccessorOwned`, a newer
     /// turn now owns the row) row must never be cleared by this path.
     RefusedPreserveRow,
 }
@@ -367,8 +367,10 @@ fn anchor_repost_pre_send_refusal(
         // No durable attempt record → refuse and preserve the row (see the
         // `RefusedPreserveRow` doc for the per-variant rationale).
         inflight::GuardedSaveOutcome::IoError
-        | inflight::GuardedSaveOutcome::Missing
-        | inflight::GuardedSaveOutcome::IdentityMismatch => {
+        | inflight::GuardedSaveOutcome::RowAbsent
+        | inflight::GuardedSaveOutcome::AuthorityPinned
+        | inflight::GuardedSaveOutcome::Unnameable
+        | inflight::GuardedSaveOutcome::SuccessorOwned => {
             Some(AnchorRepostOutcome::RefusedPreserveRow)
         }
     }
@@ -523,7 +525,7 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     //     `attempts == 0` row and would send again → UNBOUNDED duplicate relay.
     //     Refusing is strictly safer; if the fault is transient a later boot's
     //     bump succeeds and the answer is re-posted then (deferred, not dropped).
-    //   * `Missing` / `IdentityMismatch` — the row this answer belonged to is
+    //   * `RowAbsent` / identity mismatch — the row this answer belonged to is
     //     gone or now owned by a newer turn; re-posting a stale recovered answer
     //     is wrong anyway. Refuse.
     // No durable attempt record ⇒ no send. Only a `Saved` bump proceeds.
@@ -533,8 +535,8 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
     // force-clears the committed row, which would (a) drop a committed answer
     // whose bump hit a transient `IoError` — defeating the deferral, the answer
     // would be retried-then-reposted on a later boot — and (b) DELETE a row now
-    // owned by a NEWER turn on `IdentityMismatch`. `RefusedPreserveRow` tells the
-    // caller to preserve the row and move on. (`Missing` ⇒ the row is already
+    // owned by a NEWER turn on `SuccessorOwned`. `RefusedPreserveRow` tells the
+    // caller to preserve the row and move on. (`RowAbsent` ⇒ the row is already
     // gone, so preserving is a safe no-op.)
     let repost_identity = inflight::InflightTurnIdentity::from_state(state);
     let bump_outcome = inflight::anchor_repost::bump_anchor_repost_attempts_if_matches_identity(
@@ -635,7 +637,7 @@ pub(in crate::services::discord) async fn try_recover_anchor_repost(
 ///   durably persist, so the send was REFUSED and the on-disk row deliberately
 ///   PRESERVED for a later boot ([`AnchorRepostOutcome::RefusedPreserveRow`] —
 ///   clearing it here would drop an `IoError`-deferred answer or delete a newer
-///   turn's row on `IdentityMismatch`).
+///   turn's row on `SuccessorOwned`).
 /// * `false` → no repost was needed/possible
 ///   ([`AnchorRepostOutcome::NotReposted`]) → the caller runs its legacy
 ///   committed-delivery finish + clear.
@@ -1017,7 +1019,7 @@ mod tests {
     /// committed row on `NotReposted`; routing a non-`Saved` bump there would
     /// (a) DROP a committed answer whose bump hit a transient `IoError` (the
     /// deferral is lost — the answer is re-posted by a later boot) and (b) DELETE
-    /// a row now owned by a NEWER turn on `IdentityMismatch`. This pins that
+    /// a row now owned by a NEWER turn on `SuccessorOwned`. This pins that
     /// EVERY non-`Saved` bump yields the PRESERVE disposition (distinct from the
     /// clear disposition), and that ONLY `Saved` proceeds to the send.
     #[test]
@@ -1033,8 +1035,10 @@ mod tests {
         // never `NotReposted` (which the caller clears on).
         for failure in [
             GuardedSaveOutcome::IoError,
-            GuardedSaveOutcome::Missing,
-            GuardedSaveOutcome::IdentityMismatch,
+            GuardedSaveOutcome::RowAbsent,
+            GuardedSaveOutcome::AuthorityPinned,
+            GuardedSaveOutcome::Unnameable,
+            GuardedSaveOutcome::SuccessorOwned,
         ] {
             assert_eq!(
                 anchor_repost_pre_send_refusal(failure),

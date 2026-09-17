@@ -128,17 +128,20 @@ pub(in crate::services::discord) const fn entry_gate_old(
     }
 }
 
-/// AC2-R entry gate (S7a's `BridgeEntryDisposition`). `Missing` is the structural
+/// AC2-R entry gate (S7a's `BridgeEntryDisposition`). `RowAbsent` is the structural
 /// signal AC1 forbids ending delivery authority on, so the turn continues rowless;
-/// `IdentityMismatch` says another turn owns the row, which is an exact-episode
+/// an identity mismatch says another turn owns the row, which is an exact-episode
 /// veto and still ends this one, and `IoError` stays fail-closed.
 pub(in crate::services::discord) const fn entry_gate_new(
     outcome: GuardedSaveOutcome,
 ) -> LifecycleVerdict {
     match outcome {
         GuardedSaveOutcome::Saved => LifecycleVerdict::Continue,
-        GuardedSaveOutcome::Missing => LifecycleVerdict::ContinueRowless,
-        GuardedSaveOutcome::IdentityMismatch | GuardedSaveOutcome::IoError => LifecycleVerdict::End,
+        GuardedSaveOutcome::RowAbsent => LifecycleVerdict::ContinueRowless,
+        GuardedSaveOutcome::AuthorityPinned
+        | GuardedSaveOutcome::Unnameable
+        | GuardedSaveOutcome::SuccessorOwned
+        | GuardedSaveOutcome::IoError => LifecycleVerdict::End,
     }
 }
 
@@ -157,13 +160,15 @@ pub(in crate::services::discord) const fn stream_gate_old(
         }
         GuardedSaveOutcome::Saved if authority_unchanged => LifecycleVerdict::Suppress,
         GuardedSaveOutcome::Saved
-        | GuardedSaveOutcome::Missing
-        | GuardedSaveOutcome::IdentityMismatch => LifecycleVerdict::End,
+        | GuardedSaveOutcome::RowAbsent
+        | GuardedSaveOutcome::AuthorityPinned
+        | GuardedSaveOutcome::Unnameable
+        | GuardedSaveOutcome::SuccessorOwned => LifecycleVerdict::End,
         GuardedSaveOutcome::IoError => LifecycleVerdict::Retry,
     }
 }
 
-/// AC2-R stream-tick gate (S4's `Missing → Suppressed`). One cell moves — a
+/// AC2-R stream-tick gate (S4's `RowAbsent → Suppressed`). One cell moves — a
 /// vanished durable row suppresses this tick's visible mutation instead of ending
 /// the turn, so `post_loop_finalize` stays reachable and the finished answer is not
 /// orphaned inside a deleted row. Every other cell is `stream_gate_old` verbatim,
@@ -174,7 +179,7 @@ pub(in crate::services::discord) const fn stream_gate_new(
     bridge_owns_relay: bool,
 ) -> LifecycleVerdict {
     match outcome {
-        GuardedSaveOutcome::Missing => LifecycleVerdict::Suppress,
+        GuardedSaveOutcome::RowAbsent => LifecycleVerdict::Suppress,
         other => stream_gate_old(other, authority_unchanged, bridge_owns_relay),
     }
 }
@@ -213,7 +218,7 @@ pub(crate) const fn lease_range_shape(
 }
 
 /// Entry gate. The store outcome is kept because the verdict pair alone cannot
-/// separate the two ways a turn ends — `IdentityMismatch` (a real takeover) and
+/// separate the two ways a turn ends — an identity mismatch (a real takeover) and
 /// `IoError` (transient) both map to `(End, End)` and only one is a defect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 struct EntryGateObservation {
@@ -237,7 +242,7 @@ struct StreamGateTally {
 }
 
 /// Loop exit: this turn's terminal range shape. It does NOT carry
-/// `rowless_continuation`: a `Missing`-at-entry turn is ended by the shipped gate
+/// `rowless_continuation`: a `RowAbsent`-at-entry turn is ended by the shipped gate
 /// before the bridge loop starts, so that field was permanently `false` here and an
 /// always-false field is a false-green vector. `rowless_no_range_share` is S7a's to
 /// measure once enforcement makes the population reachable (ERRATUM R3-E4/E4-6).
@@ -541,8 +546,10 @@ fn record_completion_scope_at(
 const fn guarded_save_label(outcome: GuardedSaveOutcome) -> &'static str {
     match outcome {
         GuardedSaveOutcome::Saved => "saved",
-        GuardedSaveOutcome::Missing => "missing",
-        GuardedSaveOutcome::IdentityMismatch => "identity_mismatch",
+        GuardedSaveOutcome::RowAbsent => "missing",
+        GuardedSaveOutcome::AuthorityPinned
+        | GuardedSaveOutcome::Unnameable
+        | GuardedSaveOutcome::SuccessorOwned => "identity_mismatch",
         GuardedSaveOutcome::IoError => "io_error",
     }
 }
@@ -765,10 +772,12 @@ mod tests {
     use super::*;
     use crate::services::provider::ProviderKind;
 
-    const OUTCOMES: [GuardedSaveOutcome; 4] = [
+    const OUTCOMES: [GuardedSaveOutcome; 6] = [
         GuardedSaveOutcome::Saved,
-        GuardedSaveOutcome::Missing,
-        GuardedSaveOutcome::IdentityMismatch,
+        GuardedSaveOutcome::RowAbsent,
+        GuardedSaveOutcome::AuthorityPinned,
+        GuardedSaveOutcome::Unnameable,
+        GuardedSaveOutcome::SuccessorOwned,
         GuardedSaveOutcome::IoError,
     ];
     /// The dial an operator has to move to before any of this runs.
@@ -905,20 +914,22 @@ mod tests {
     fn only_the_missing_row_cell_differs_between_old_and_new() {
         assert_eq!(
             (
-                entry_gate_old(GuardedSaveOutcome::Missing),
-                entry_gate_new(GuardedSaveOutcome::Missing)
+                entry_gate_old(GuardedSaveOutcome::RowAbsent),
+                entry_gate_new(GuardedSaveOutcome::RowAbsent)
             ),
             (LifecycleVerdict::End, LifecycleVerdict::ContinueRowless),
         );
         assert_eq!(
             (
-                stream_gate_old(GuardedSaveOutcome::Missing, true, true),
-                stream_gate_new(GuardedSaveOutcome::Missing, true, true)
+                stream_gate_old(GuardedSaveOutcome::RowAbsent, true, true),
+                stream_gate_new(GuardedSaveOutcome::RowAbsent, true, true)
             ),
             (LifecycleVerdict::End, LifecycleVerdict::Suppress),
         );
         for unchanged in [
-            GuardedSaveOutcome::IdentityMismatch,
+            GuardedSaveOutcome::AuthorityPinned,
+            GuardedSaveOutcome::Unnameable,
+            GuardedSaveOutcome::SuccessorOwned,
             GuardedSaveOutcome::IoError,
         ] {
             assert_eq!(entry_gate_old(unchanged), entry_gate_new(unchanged));
@@ -927,11 +938,21 @@ mod tests {
                 stream_gate_new(unchanged, true, true),
             );
         }
-        assert_eq!(
-            entry_gate_new(GuardedSaveOutcome::IdentityMismatch),
-            LifecycleVerdict::End,
-            "an exact-episode veto is not a structural signal and still ends the turn",
-        );
+        // #5951 S1: every variant the pre-split `IdentityMismatch` stood for
+        // keeps the identical verdict here — that is the behaviour-preservation
+        // contract of the decomposition.
+        for veto in [
+            GuardedSaveOutcome::AuthorityPinned,
+            GuardedSaveOutcome::Unnameable,
+            GuardedSaveOutcome::SuccessorOwned,
+        ] {
+            assert!(veto.is_identity_mismatch_legacy());
+            assert_eq!(
+                entry_gate_new(veto),
+                LifecycleVerdict::End,
+                "an exact-episode veto is not a structural signal and still ends the turn",
+            );
+        }
     }
 
     #[test]
@@ -981,8 +1002,8 @@ mod tests {
         let channel = 4_259_211;
         let state = state(channel, 77_010);
 
-        open_turn(OBSERVING, &shared, &state, GuardedSaveOutcome::Missing);
-        record_stream_loop_gate(&state, GuardedSaveOutcome::Missing, true, true);
+        open_turn(OBSERVING, &shared, &state, GuardedSaveOutcome::RowAbsent);
+        record_stream_loop_gate(&state, GuardedSaveOutcome::RowAbsent, true, true);
         record_stream_loop_gate(&state, GuardedSaveOutcome::Saved, true, true);
         record_loop_exit(&state, Some(4_096));
 
@@ -1077,7 +1098,7 @@ mod tests {
         let successor = state(channel, 77_021);
 
         open_turn(OBSERVING, &shared, &stranded, GuardedSaveOutcome::Saved);
-        record_stream_loop_gate(&stranded, GuardedSaveOutcome::IdentityMismatch, true, true);
+        record_stream_loop_gate(&stranded, GuardedSaveOutcome::SuccessorOwned, true, true);
         assert!(
             events_for(temp.path(), channel).is_empty(),
             "an in-flight turn must not be written tick by tick",
@@ -1138,20 +1159,10 @@ mod tests {
         assert_ne!(old_turn, new_turn);
 
         open_turn(OBSERVING, &shared, &predecessor, GuardedSaveOutcome::Saved);
-        record_stream_loop_gate(
-            &predecessor,
-            GuardedSaveOutcome::IdentityMismatch,
-            true,
-            true,
-        );
+        record_stream_loop_gate(&predecessor, GuardedSaveOutcome::SuccessorOwned, true, true);
         open_turn(OBSERVING, &shared, &successor, GuardedSaveOutcome::Saved);
         // Everything after this line is the predecessor arriving late.
-        record_stream_loop_gate(
-            &predecessor,
-            GuardedSaveOutcome::IdentityMismatch,
-            true,
-            true,
-        );
+        record_stream_loop_gate(&predecessor, GuardedSaveOutcome::SuccessorOwned, true, true);
         record_loop_exit(&predecessor, Some(16_384));
         // Two ticks, so the successor's own tally is a value the predecessor's
         // single late tick cannot coincidentally produce: under the two-field
@@ -1303,7 +1314,7 @@ mod tests {
         let unobserved = state(4_259_214, 77_031);
 
         open_turn(OBSERVING, &shared, &observed, GuardedSaveOutcome::Saved);
-        record_stream_loop_gate(&unobserved, GuardedSaveOutcome::Missing, true, true);
+        record_stream_loop_gate(&unobserved, GuardedSaveOutcome::RowAbsent, true, true);
         record_loop_exit(&unobserved, Some(4_096));
         record_loop_exit(&observed, None);
 
@@ -1329,7 +1340,7 @@ mod tests {
 
         for index in 0..(TRIAGE_RING_DEPTH as u64 + 4) {
             let turn = state(channel, 77_100 + index);
-            open_turn(OBSERVING, &shared, &turn, GuardedSaveOutcome::Missing);
+            open_turn(OBSERVING, &shared, &turn, GuardedSaveOutcome::RowAbsent);
             record_loop_exit(&turn, Some(4_096));
         }
 

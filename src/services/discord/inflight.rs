@@ -1360,7 +1360,7 @@ mod stall_recovery_tests {
                 streaming_rollover_frozen_msg_ids: Vec::new(),
             },
         );
-        assert_eq!(outcome, WatcherProgressOutcome::Skipped);
+        assert_eq!(outcome, WatcherProgressOutcome::SuccessorOwned);
 
         let persisted = loaded_row(temp.path(), channel_id);
         assert_eq!(
@@ -2799,7 +2799,7 @@ mod stall_recovery_tests {
     /// #3041 P1-3 (Part a, B1): the identity-guarded save must NOT let a stale write
     /// clobber a NEWER turn that has taken over the inflight row (e.g. a fast
     /// follow-up turn on the same channel between the watcher's compute and its
-    /// write). A mismatched identity yields `IdentityMismatch` and the newer turn's
+    /// write). A mismatched identity yields `SuccessorOwned` and the newer turn's
     /// row is preserved. (The frame-carried B1 commit fence removed the racy
     /// delegated-terminal-end inflight persist; this keeps the generic guard covered
     /// via a still-live field.)
@@ -2826,7 +2826,7 @@ mod stall_recovery_tests {
             &original_identity,
             original.turn_start_offset,
         );
-        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert!(outcome.is_identity_mismatch_legacy());
 
         let rows = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
         assert_eq!(rows.len(), 1);
@@ -3868,7 +3868,7 @@ mod stall_recovery_tests {
 
         assert_eq!(
             outcome,
-            GuardedSaveOutcome::Missing,
+            GuardedSaveOutcome::RowAbsent,
             "holder-cleared inflight must NOT be resurrected by the bridge skip epilogue"
         );
         assert!(
@@ -3915,7 +3915,7 @@ mod stall_recovery_tests {
 
     /// Skip → a NEWER turn (different `user_msg_id`) already wrote its inflight
     /// before the preserving bridge's epilogue ran. The guarded save must NOT
-    /// clobber the fresh turn (`IdentityMismatch`).
+    /// clobber the fresh turn (`SuccessorOwned`).
     #[test]
     fn skip_save_does_not_clobber_newer_turn() {
         let temp = TempDir::new().unwrap();
@@ -3939,9 +3939,8 @@ mod stall_recovery_tests {
             preserved.turn_start_offset,
         );
 
-        assert_eq!(
-            outcome,
-            GuardedSaveOutcome::IdentityMismatch,
+        assert!(
+            outcome.is_identity_mismatch_legacy(),
             "a preserved older turn must NOT overwrite a newer turn's inflight"
         );
         let rows = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
@@ -3954,7 +3953,7 @@ mod stall_recovery_tests {
 
     /// Skip → the on-disk row's `turn_start_offset` no longer matches (a newer
     /// turn reusing the same `user_msg_id`/session at a different offset). The
-    /// guarded save must refuse (`IdentityMismatch`).
+    /// guarded save must refuse (an identity mismatch).
     #[test]
     fn skip_save_checks_turn_start_offset() {
         let temp = TempDir::new().unwrap();
@@ -3976,7 +3975,7 @@ mod stall_recovery_tests {
             Some(0),
         );
 
-        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert!(outcome.is_identity_mismatch_legacy());
     }
 
     #[test]
@@ -4185,7 +4184,7 @@ mod stall_recovery_tests {
                 on_disk.last_offset,
             );
 
-        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert!(outcome.is_identity_mismatch_legacy());
         let rows = load_inflight_states_from_root(temp.path(), &ProviderKind::Codex);
         assert_eq!(rows.len(), 1);
         assert_eq!(
@@ -4309,7 +4308,7 @@ mod stall_recovery_tests {
             on_disk.turn_start_offset,
         );
 
-        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert!(outcome.is_identity_mismatch_legacy());
         let rows = load_inflight_states_from_root(temp.path(), &ProviderKind::Claude);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].rebind_origin);

@@ -51,7 +51,7 @@ pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_
             durable_identity = ?InflightTurnIdentity::from_state(&on_disk),
             "ClaudeE process-evidence stamp skipped because durable row authority changed"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::from_durable_authority(&on_disk);
     }
 
     let requested_process_runtime = (
@@ -92,7 +92,7 @@ pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_
                 channel_id = requested.channel_id,
                 "ClaudeE process-evidence stamp skipped because the durable process/runtime group changed"
             );
-            return GuardedSaveOutcome::IdentityMismatch;
+            return GuardedSaveOutcome::AuthorityPinned;
         }
         process_runtime_changed
     } else {
@@ -105,7 +105,7 @@ pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_
             channel_id = requested.channel_id,
             "ClaudeE process-evidence stamp rejected because local and durable responses diverged"
         );
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
     if apply_process_runtime {
         on_disk.runtime_kind = Some(RuntimeHandoffKind::ClaudeEAdapter);
@@ -127,7 +127,7 @@ pub(in crate::services::discord::inflight) fn stamp_claude_e_process_if_matches_
             state.adopt_persisted(persisted);
             GuardedSaveOutcome::Saved
         }
-        Ok(None) => GuardedSaveOutcome::IdentityMismatch,
+        Ok(None) => GuardedSaveOutcome::AuthorityPinned,
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
@@ -297,14 +297,14 @@ mod tests {
                 "{case} P2 must adopt the exact persisted snapshot",
             );
 
-            assert_eq!(
+            assert!(
                 stamp_claude_e_process_if_matches_identity_in_root(
                     root.path(),
                     (&baseline, &mut stale_p1),
                     &expected,
-                ),
-                GuardedSaveOutcome::IdentityMismatch,
-                "stale {case} P1 must lose the group CAS",
+                )
+                .is_identity_mismatch_legacy(),
+                "stale {case} P1 must lose the group CAS"
             );
             let preserved_p2 = load(root.path(), channel_id);
             assert_eq!(
@@ -362,14 +362,14 @@ mod tests {
         local.full_response = "resolved terminal branch".to_string();
         let local_before = serde_json::to_value(&local).expect("serialize process frame");
 
-        assert_eq!(
+        assert!(
             stamp_claude_e_process_if_matches_identity_in_root(
                 root.path(),
                 (&baseline, &mut local),
                 &expected,
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
-            "semantic body divergence must not retain a permanently failing process frame",
+            )
+            .is_identity_mismatch_legacy(),
+            "semantic body divergence must not retain a permanently failing process frame"
         );
         assert_eq!(serde_json::to_value(&local).unwrap(), local_before);
         assert_eq!(

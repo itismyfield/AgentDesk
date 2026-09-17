@@ -75,8 +75,10 @@ fn recorded_stream_gate_new_mirrors_the_shipped_authority_mapping() {
 
     for outcome in [
         GuardedSaveOutcome::Saved,
-        GuardedSaveOutcome::Missing,
-        GuardedSaveOutcome::IdentityMismatch,
+        GuardedSaveOutcome::RowAbsent,
+        GuardedSaveOutcome::AuthorityPinned,
+        GuardedSaveOutcome::Unnameable,
+        GuardedSaveOutcome::SuccessorOwned,
         GuardedSaveOutcome::IoError,
     ] {
         for (state, intended, authority_unchanged, bridge_owns_relay) in [
@@ -143,9 +145,9 @@ fn the_shipped_dial_admits_no_channel_to_the_stream_loop_enforcement_cohort() {
     }
 }
 
-/// The one cell S4 moves, at the seam that decides it — and the two cells that
-/// must NOT move with it. `IdentityMismatch` is an exact-episode veto rather than
-/// a structural signal (design r3 ERRATUM R3-E4-3), so it keeps its termination
+/// The one cell S4 moves, at the seam that decides it — and the cells that must
+/// NOT move with it. The mismatch family is an exact-episode veto rather than a
+/// structural signal (design r3 ERRATUM R3-E4-3), so it keeps its termination
 /// right; `IoError` stays retryable.
 #[test]
 fn a_vanished_row_suppresses_without_ending_stream_lifecycle() {
@@ -154,7 +156,7 @@ fn a_vanished_row_suppresses_without_ending_stream_lifecycle() {
     assert!(intended.bridge_owns_relay());
 
     let suppressed = visible_mutation_authority_after_guarded_save(
-        GuardedSaveOutcome::Missing,
+        GuardedSaveOutcome::RowAbsent,
         &bridge,
         intended,
     );
@@ -168,7 +170,15 @@ fn a_vanished_row_suppresses_without_ending_stream_lifecycle() {
 
     for (unmoved, expected) in [
         (
-            GuardedSaveOutcome::IdentityMismatch,
+            GuardedSaveOutcome::AuthorityPinned,
+            VisibleMutationAuthority::AuthorityLost,
+        ),
+        (
+            GuardedSaveOutcome::Unnameable,
+            VisibleMutationAuthority::AuthorityLost,
+        ),
+        (
+            GuardedSaveOutcome::SuccessorOwned,
             VisibleMutationAuthority::AuthorityLost,
         ),
         (GuardedSaveOutcome::IoError, VisibleMutationAuthority::Retry),
@@ -392,10 +402,9 @@ fn changed_durable_relay_authority_still_ends_bridge_authority() {
             "turn_bridge::stream_tick::authority_preflight",
         );
 
-        assert_eq!(
-            outcome,
-            GuardedSaveOutcome::IdentityMismatch,
-            "a changed durable relay owner must still be rejected by the fence",
+        assert!(
+            outcome.is_identity_mismatch_legacy(),
+            "a changed durable relay owner must still be rejected by the fence"
         );
         let persisted =
             load_inflight_state(&ProviderKind::Codex, channel.get()).expect("persisted row");
@@ -472,7 +481,7 @@ fn reowned_flush_skips_without_clobbering_or_retrying_dirty() {
             "turn_bridge::stream_tick::dirty_flush_test",
         );
 
-        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert!(outcome.is_identity_mismatch_legacy());
         assert!(!dirty_after_guarded_save(outcome));
         let persisted =
             load_inflight_state(&ProviderKind::Codex, channel.get()).expect("persisted row");
@@ -577,12 +586,14 @@ fn dirty_and_side_effect_transitions_follow_guarded_outcome() {
     use GuardedSaveOutcome::*;
     assert!(!dirty_after_guarded_save(Saved));
     assert!(dirty_after_guarded_save(IoError));
-    assert!(!dirty_after_guarded_save(Missing));
-    assert!(!dirty_after_guarded_save(IdentityMismatch));
+    // #5951 S1: every refusal the pre-split enum collapsed into `Missing` /
+    // `IdentityMismatch` keeps the identical dirty + `Saved`-match verdict.
+    for refusal in [RowAbsent, AuthorityPinned, Unnameable, SuccessorOwned] {
+        assert!(!dirty_after_guarded_save(refusal));
+        assert!(!matches!(refusal, GuardedSaveOutcome::Saved));
+    }
     assert!(matches!(Saved, GuardedSaveOutcome::Saved));
     assert!(!matches!(IoError, GuardedSaveOutcome::Saved));
-    assert!(!matches!(Missing, GuardedSaveOutcome::Saved));
-    assert!(!matches!(IdentityMismatch, GuardedSaveOutcome::Saved));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -745,7 +756,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
     let mut stale_current = MessageId::new(4);
     let mut stale_pending = Some(stale_current);
     let mut stale_created = Some(stale_current);
-    assert_eq!(
+    assert!(
         persist_stream_tick_state_with_candidate_cleanup(
             StreamTickCandidateSaveContext {
                 gateway: &gateway,
@@ -762,8 +773,8 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
             },
             "turn_bridge::stream_tick::candidate_reowned_test",
         )
-        .await,
-        GuardedSaveOutcome::IdentityMismatch
+        .await
+        .is_identity_mismatch_legacy()
     );
     assert_eq!(stale_pending, None);
     assert_eq!(stale_created, None);
@@ -804,7 +815,7 @@ async fn candidate_cleanup_covers_saved_competing_reowned_and_missing_rows() {
             "turn_bridge::stream_tick::candidate_missing_test",
         )
         .await,
-        GuardedSaveOutcome::Missing
+        GuardedSaveOutcome::RowAbsent
     );
     assert_eq!(missing_pending, None);
     assert_eq!(missing_created, None);
@@ -873,7 +884,7 @@ async fn strict_fence_loses_authority_before_visible_mutation() {
         .expect("test mutation");
     }
 
-    assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+    assert!(outcome.is_identity_mismatch_legacy());
     assert_eq!(authority, VisibleMutationAuthority::AuthorityLost);
     assert!(gateway.edits.lock().expect("edits lock").is_empty());
     assert_eq!(
@@ -1236,9 +1247,9 @@ fn heartbeat_touches_same_owner_but_skips_successor() {
 
         let successor = owner_state(channel.get(), 99_999);
         save_inflight_state(&successor).expect("seed successor row");
-        assert_eq!(
-            persist_stream_tick_heartbeat(&ProviderKind::Codex, channel, &expected),
-            GuardedSaveOutcome::IdentityMismatch
+        assert!(
+            persist_stream_tick_heartbeat(&ProviderKind::Codex, channel, &expected)
+                .is_identity_mismatch_legacy()
         );
         let persisted =
             load_inflight_state(&ProviderKind::Codex, channel.get()).expect("persisted row");

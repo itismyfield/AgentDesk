@@ -383,7 +383,7 @@ pub(super) async fn run_bridge_stream_tick(
             .await;
             state_dirty = dirty_after_guarded_save(guarded_outcome);
             if guarded_outcome == GuardedSaveOutcome::Saved
-                || (guarded_outcome == GuardedSaveOutcome::IdentityMismatch
+                || (guarded_outcome.is_identity_mismatch_legacy()
                     && stream_tick_expected.matches_state(inflight_state))
             {
                 reconcile_tick_runtime_from_inflight!(current_msg_id_before_fence);
@@ -1055,9 +1055,9 @@ pub(super) async fn run_bridge_stream_tick(
                     channel_id
                 );
             }
-            GuardedSaveOutcome::Missing | GuardedSaveOutcome::IdentityMismatch => {
-                // Ownership was lost. Discard deferred placeholder actions so a
-                // stale tick cannot edit or retarget the successor turn's card.
+            _ => {
+                // Ownership was lost — every non-`Saved`, non-`IoError` refusal.
+                // Discard deferred actions so a stale tick cannot retarget the card.
                 pending_long_running_open_after_state_save = None;
                 pending_long_running_retarget_after_state_save = None;
             }

@@ -59,26 +59,26 @@ where
     };
     // Row already cleared (delivered / force-cleared) → never resurrect.
     let Ok(data) = fs::read_to_string(&path) else {
-        return GuardedSaveOutcome::Missing;
+        return GuardedSaveOutcome::RowAbsent;
     };
     let Ok(mut on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
         // Malformed row: do not clobber — the loader eviction path GCs it.
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     };
     // Strong identity: user_msg_id + started_at + tmux_session_name (+ offset for
     // TUI-direct disambiguation) must all match the turn whose repost just ran.
     if !expected.matches_state(&on_disk) {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::SuccessorOwned;
     }
     if let Some(expected_offset) = expected_turn_start_offset {
         if on_disk.turn_start_offset != Some(expected_offset) {
-            return GuardedSaveOutcome::IdentityMismatch;
+            return GuardedSaveOutcome::SuccessorOwned;
         }
     } else if expected.user_msg_id == 0 && on_disk.turn_start_offset.is_some() {
         // TUI-direct turns (`user_msg_id == 0`) collide on `started_at`'s
         // 1-second resolution; without an offset to compare we cannot prove
         // this is the same turn, so refuse rather than mark a stranger's row.
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::Unnameable;
     }
     mutate(&mut on_disk);
     on_disk.ensure_finalizer_turn_id();
@@ -359,15 +359,15 @@ mod tests {
         older.user_msg_id = 777;
         let identity = InflightTurnIdentity::from_state(&older);
 
-        assert_eq!(
+        assert!(
             mark_anchor_reposted_if_matches_identity_in_root(
                 temp.path(),
                 &ProviderKind::Codex,
                 older.channel_id,
                 &identity,
                 older.turn_start_offset,
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         let row = read_row(temp.path(), older.channel_id).expect("row persists");
         assert_eq!(row.user_msg_id, 999, "newer turn's row must be untouched");
@@ -419,7 +419,7 @@ mod tests {
                 &identity,
                 state.turn_start_offset,
             ),
-            GuardedSaveOutcome::Missing,
+            GuardedSaveOutcome::RowAbsent,
         );
         assert_eq!(
             bump_anchor_repost_attempts_if_matches_identity_in_root(
@@ -429,7 +429,7 @@ mod tests {
                 &identity,
                 state.turn_start_offset,
             ),
-            GuardedSaveOutcome::Missing,
+            GuardedSaveOutcome::RowAbsent,
         );
         assert!(
             read_row(temp.path(), state.channel_id).is_none(),
@@ -447,7 +447,7 @@ mod tests {
     /// again forever → UNBOUNDED duplicate relay — the exact window the PR claims
     /// to hard-bound. This pins all three failure modes: the send is refused, and
     /// the row is left correctly for a later boot (IoError → deferred re-post) or
-    /// untouched (Missing / IdentityMismatch → the gone/replaced turn never reposts).
+    /// untouched (RowAbsent / mismatch → the gone/replaced turn never reposts).
     #[test]
     fn non_saved_pre_send_bump_blocks_the_send() {
         // Mirror the exact restart.rs send gate: post iff the bump is `Saved`.
@@ -496,7 +496,7 @@ mod tests {
             "an IoError-blocked send leaves the row, so a later boot can still re-post (deferred)"
         );
 
-        // (b) Missing — the row was cleared / never existed. The send MUST be
+        // (b) RowAbsent — the row was cleared / never existed. The send MUST be
         // refused AND the mutator MUST NOT resurrect the row.
         let temp = TempDir::new().unwrap();
         let gone = make_state(391_808);
@@ -508,7 +508,7 @@ mod tests {
             &gone_identity,
             gone.turn_start_offset,
         );
-        assert_eq!(missing, GuardedSaveOutcome::Missing);
+        assert_eq!(missing, GuardedSaveOutcome::RowAbsent);
         assert!(
             !send_permitted(missing),
             "a Missing row MUST refuse the send-new (the turn is gone)"
@@ -518,7 +518,7 @@ mod tests {
             "a blocked (Missing) send must not resurrect the row"
         );
 
-        // (c) IdentityMismatch — the row is now owned by a NEWER turn. The send
+        // (c) SuccessorOwned — the row is now owned by a NEWER turn. The send
         // MUST be refused and the stranger row left untouched (the stale answer
         // never reposts nor consumes the live turn's budget).
         let temp = TempDir::new().unwrap();
@@ -535,10 +535,10 @@ mod tests {
             &older_identity,
             older.turn_start_offset,
         );
-        assert_eq!(mismatch, GuardedSaveOutcome::IdentityMismatch);
+        assert!(mismatch.is_identity_mismatch_legacy());
         assert!(
             !send_permitted(mismatch),
-            "a stranger-owned (IdentityMismatch) row MUST refuse the send-new"
+            "a stranger-owned (SuccessorOwned) row MUST refuse the send-new"
         );
         let stranger = read_row(temp.path(), older.channel_id).expect("newer row persists");
         assert_eq!(stranger.user_msg_id, 999, "newer turn's row untouched");

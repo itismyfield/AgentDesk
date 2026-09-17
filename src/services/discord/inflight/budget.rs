@@ -64,27 +64,27 @@ pub(in crate::services::discord) fn bump_recovery_relay_attempts_if_matches_iden
     };
     // Row already cleared (delivered / force-cleared) → never resurrect.
     let Ok(data) = fs::read_to_string(&path) else {
-        return GuardedSaveOutcome::Missing;
+        return GuardedSaveOutcome::RowAbsent;
     };
     let Ok(mut on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
         // Malformed row: do not clobber — the loader eviction path GCs it.
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     };
     // Strong identity: user_msg_id + started_at + tmux_session_name must all
     // match the turn whose relay just failed. Restart/rebind markers are NOT
     // grounds for refusal here — they are preserved verbatim below.
     if !expected.matches_state(&on_disk) {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::SuccessorOwned;
     }
     if let Some(expected_offset) = expected_turn_start_offset {
         if on_disk.turn_start_offset != Some(expected_offset) {
-            return GuardedSaveOutcome::IdentityMismatch;
+            return GuardedSaveOutcome::SuccessorOwned;
         }
     } else if expected.user_msg_id == 0 && on_disk.turn_start_offset.is_some() {
         // TUI-direct turns (`user_msg_id == 0`) collide on `started_at`'s
         // 1-second resolution; without an offset to compare we cannot prove
         // this is the same turn, so refuse rather than count a stranger's row.
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::Unnameable;
     }
     on_disk.recovery_relay_attempts = on_disk.recovery_relay_attempts.saturating_add(1);
     on_disk.ensure_finalizer_turn_id();
@@ -170,14 +170,14 @@ mod tests {
         // mechanism that kept the budget counter at 0 on the carrier row.
         let mut counted = state.clone();
         counted.recovery_relay_attempts = 1;
-        assert_eq!(
+        assert!(
             save_inflight_state_if_matches_identity_in_root(
                 temp.path(),
                 &counted,
                 &identity,
                 state.turn_start_offset,
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy(),
             "generic guarded save must still refuse restart-marked rows (its #3041 contract)"
         );
 
@@ -270,15 +270,15 @@ mod tests {
         let mut expected = InflightTurnIdentity::from_state(&state);
         expected.turn_start_offset = None;
 
-        assert_eq!(
+        assert!(
             bump_recovery_relay_attempts_if_matches_identity_in_root(
                 temp.path(),
                 &ProviderKind::Codex,
                 state.channel_id,
                 &expected,
                 None,
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         let row = read_row(temp.path(), state.channel_id).expect("row must remain");
         assert_eq!(
@@ -300,15 +300,15 @@ mod tests {
         older.user_msg_id = 777;
         let identity = InflightTurnIdentity::from_state(&older);
 
-        assert_eq!(
+        assert!(
             bump_recovery_relay_attempts_if_matches_identity_in_root(
                 temp.path(),
                 &ProviderKind::Codex,
                 older.channel_id,
                 &identity,
                 older.turn_start_offset,
-            ),
-            GuardedSaveOutcome::IdentityMismatch,
+            )
+            .is_identity_mismatch_legacy()
         );
         let row = read_row(temp.path(), older.channel_id).expect("row must remain");
         assert_eq!(row.user_msg_id, 999, "newer turn's row must be untouched");
@@ -330,7 +330,7 @@ mod tests {
                 &identity,
                 state.turn_start_offset,
             ),
-            GuardedSaveOutcome::Missing,
+            GuardedSaveOutcome::RowAbsent,
         );
         assert!(
             read_row(temp.path(), state.channel_id).is_none(),

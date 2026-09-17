@@ -118,7 +118,7 @@ mod tests {
             0,
             false,
         );
-        assert_eq!(p1_outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert!(p1_outcome.is_identity_mismatch_legacy());
         assert!(!p1_dirty);
         let preserved_p2 =
             load_inflight_state(&ProviderKind::Claude, p2.channel_id).expect("load preserved P2");
@@ -161,7 +161,7 @@ mod tests {
                 preexisting_dirty,
             );
 
-            assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+            assert!(outcome.is_identity_mismatch_legacy());
             assert_eq!(dirty, preexisting_dirty);
             assert_eq!(
                 local.runtime_kind,

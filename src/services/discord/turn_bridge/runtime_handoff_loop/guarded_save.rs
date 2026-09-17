@@ -54,7 +54,7 @@ fn injected_atomic_stamp_failure() -> bool {
 /// claude.rs/codex.rs/qwen.rs follow-up arms), which differs from the intake
 /// seed (codex r1 on the strict variant).
 ///
-/// A declined save (`Missing` / `IdentityMismatch`) is surfaced with the
+/// A declined save (`RowAbsent` or any identity-mismatch variant) is surfaced
 /// #4218 `channel_id` log key (the gate also logs the skip internally) and the
 /// outcome is returned so the `TmuxReady` arm can keep its dirty marking
 /// consistent with row ownership (see
@@ -77,10 +77,7 @@ pub(super) fn guarded_runtime_handoff_save(
     if outcome == GuardedSaveOutcome::IoError {
         inflight_state.clone_from(persisted_baseline);
     }
-    if matches!(
-        outcome,
-        GuardedSaveOutcome::Missing | GuardedSaveOutcome::IdentityMismatch
-    ) {
+    if outcome == GuardedSaveOutcome::RowAbsent || outcome.is_identity_mismatch_legacy() {
         tracing::warn!(
             channel_id = channel_id.get(),
             caller,
@@ -94,7 +91,7 @@ pub(super) fn guarded_runtime_handoff_save(
 /// Identity-guarded atomic stamp for runtime handoffs that may first-populate
 /// `tmux_session_name`. The store validates the pre-mutation durable identity
 /// and authority under the sidecar lock, then patches only runtime/session/
-/// output/owner evidence. `Missing` never creates a row: every bridge entry
+/// output/owner evidence. `RowAbsent` never creates a row: every bridge entry
 /// path seeds or adopts the durable row before a runtime handoff can arrive.
 pub(super) fn guarded_runtime_atomic_stamp(
     persisted_baseline: &InflightTurnState,
@@ -119,10 +116,7 @@ pub(super) fn guarded_runtime_atomic_stamp(
     if outcome == GuardedSaveOutcome::IoError {
         inflight_state.clone_from(persisted_baseline);
     }
-    if matches!(
-        outcome,
-        GuardedSaveOutcome::Missing | GuardedSaveOutcome::IdentityMismatch
-    ) {
+    if outcome == GuardedSaveOutcome::RowAbsent || outcome.is_identity_mismatch_legacy() {
         tracing::warn!(
             channel_id = channel_id.get(),
             caller,
@@ -145,7 +139,7 @@ pub(super) fn guarded_runtime_atomic_stamp(
 /// - `IoError` → preserve the pre-existing dirty bit. The handoff request is
 ///   requeued by the runtime loop; a generic stream flush must never retry its
 ///   identity-mutated local projection.
-/// - `Missing` / `IdentityMismatch` → this turn no longer owns the row; do NOT
+/// - `RowAbsent` / any identity mismatch → this turn no longer owns the row; do
 ///   newly mark the arm's mutations dirty (a pre-existing dirty flag from
 ///   earlier loop work is preserved — clearing it could drop an unrelated
 ///   pending flush).
@@ -157,9 +151,12 @@ pub(super) fn tmux_ready_state_dirty_after_guarded_save(
 ) -> bool {
     use crate::services::discord::inflight::GuardedSaveOutcome;
     match outcome {
-        Some(GuardedSaveOutcome::Missing | GuardedSaveOutcome::IdentityMismatch) => {
-            previous_state_dirty
-        }
+        Some(
+            GuardedSaveOutcome::RowAbsent
+            | GuardedSaveOutcome::AuthorityPinned
+            | GuardedSaveOutcome::Unnameable
+            | GuardedSaveOutcome::SuccessorOwned,
+        ) => previous_state_dirty,
         Some(GuardedSaveOutcome::Saved) | None => true,
         Some(GuardedSaveOutcome::IoError) => previous_state_dirty,
     }
@@ -274,7 +271,7 @@ mod tests {
 
     // #4259 PR-2a: the whole point of the guard — a CONCURRENT turn that
     // re-owned the channel between this turn's snapshot and its handoff write
-    // must NOT be clobbered; the save skips with `IdentityMismatch`, leaves no
+    // must NOT be clobbered; the save skips with `SuccessorOwned`, leaves no
     // write, and the arm must not queue the stale snapshot for the blind dirty
     // flush either.
     #[test]
@@ -306,7 +303,7 @@ mod tests {
             channel,
             "turn_bridge::runtime_handoff_loop::tmux_ready_watcher_handoff",
         );
-        assert_eq!(outcome, GuardedSaveOutcome::IdentityMismatch);
+        assert!(outcome.is_identity_mismatch_legacy());
 
         let persisted =
             load_inflight_state(&ProviderKind::Codex, channel.get()).expect("persisted row");
@@ -325,13 +322,19 @@ mod tests {
         );
     }
 
-    // #4259 R8: outcome → dirty policy table. Missing/mismatch/IoError never
+    // #4259 R8: outcome → dirty policy table. RowAbsent/mismatch/IoError never
     // NEWLY mark dirty (but preserve an earlier mark); the runtime frame itself
     // is the IoError retry, not a generic flush of identity-mutated local state.
     #[test]
     fn tmux_ready_dirty_marking_follows_guarded_save_outcome() {
         use GuardedSaveOutcome::*;
-        for lost in [Missing, IdentityMismatch, IoError] {
+        for lost in [
+            RowAbsent,
+            AuthorityPinned,
+            Unnameable,
+            SuccessorOwned,
+            IoError,
+        ] {
             assert!(!tmux_ready_state_dirty_after_guarded_save(
                 false,
                 Some(lost)

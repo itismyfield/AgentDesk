@@ -23,6 +23,84 @@ impl InflightDeliveryRewindReason {
     }
 }
 
+/// Outcome of the identity-guarded durable inflight writes in `save_store`.
+///
+/// #5951 S1: the historical `IdentityMismatch` collapsed at least six distinct
+/// refusals into one value, so no caller could tell "nobody owns this row" from
+/// "a planned restart owns it" from "a successor episode owns it". The refusal
+/// is now decomposed along the only axis callers actually need: may I restore
+/// the projection, and may I treat my own turn as over? Behaviour is unchanged
+/// — [`GuardedSaveOutcome::is_identity_mismatch_legacy`] reproduces the old
+/// single value for every consumer that predates the split.
+///
+/// Lives here rather than in `save_store/identity_gate.rs` so the guard file,
+/// which sits 23 production lines below the giant-file threshold, does not have
+/// to carry the enum it no longer needs to own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::services::discord) enum GuardedSaveOutcome {
+    /// On-disk row still matched the turn identity; the row was rewritten.
+    Saved,
+    /// No inflight row existed (`NotFound` only — see `guarded_read.rs`). The
+    /// lease HOLDER may already have cleared it on its success path. This is
+    /// the ONLY refusal a projection repair may ever be gated on (#5951 §1.2
+    /// mechanism R); today nothing repairs, so it still resurrects nothing.
+    /// Formerly `Missing`.
+    RowAbsent,
+    /// A durable or structural authority forbids the write and the row must be
+    /// left byte-identical: a planned-restart / rebind-origin marker owns it,
+    /// the durable `output_path` moved, a concurrent same-turn writer won the
+    /// compare-and-set, the caller's own preconditions do not hold, or
+    /// validation refused the refreshed state. Never repairable, and never a
+    /// licence to finalize — the caller's turn may still be live.
+    AuthorityPinned,
+    /// The identity in play cannot be named at all: an offsetless
+    /// `user_msg_id == 0` snapshot (or an empty session / tmux / nonce frame)
+    /// can never uniquely match a durable row, so the write fails closed. This
+    /// is the opposite of a successor turn — it is *no* turn.
+    Unnameable,
+    /// A different episode demonstrably owns the row: the pinned identity no
+    /// longer matches it, its birth offset differs, or a terminal-delivery-
+    /// committed row carries another `turn_nonce`. Not repairable, but the
+    /// caller's own turn really is over.
+    SuccessorOwned,
+    /// Filesystem, malformed durable JSON, or serialization error.
+    IoError,
+}
+
+impl GuardedSaveOutcome {
+    /// Every value the pre-#5951 `IdentityMismatch` stood for, in one place.
+    ///
+    /// S1 is a behaviour-preserving split, so a consumer that only ever asked
+    /// "was this an identity mismatch?" calls this and keeps its verdict
+    /// unchanged. Consumers that `match` exhaustively spell the three variants
+    /// out instead, which is what makes a future seventh variant a compile
+    /// error at every decision point rather than a silent default.
+    pub(in crate::services::discord) const fn is_identity_mismatch_legacy(self) -> bool {
+        matches!(
+            self,
+            Self::AuthorityPinned | Self::Unnameable | Self::SuccessorOwned
+        )
+    }
+
+    /// Classify a refusal whose guard mixes pinned authority with succession.
+    ///
+    /// Many guards share one disjunction —
+    /// `restart_mode.is_some() || rebind_origin || !expected.matches_state(..)`
+    /// — which cannot name a single cause in the condition itself. This reads
+    /// the row that actually refused: a pinned restart / rebind marker is
+    /// [`Self::AuthorityPinned`]; anything else that reached the refusal is a
+    /// successor episode holding the row.
+    pub(in crate::services::discord) fn from_durable_authority(
+        on_disk: &InflightTurnState,
+    ) -> Self {
+        if on_disk.restart_mode.is_some() || on_disk.rebind_origin {
+            Self::AuthorityPinned
+        } else {
+            Self::SuccessorOwned
+        }
+    }
+}
+
 pub(super) fn inflight_provider_dir(root: &Path, provider: &ProviderKind) -> PathBuf {
     root.join(provider.as_str())
 }

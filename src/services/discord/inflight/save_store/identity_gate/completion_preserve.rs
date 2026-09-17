@@ -10,9 +10,9 @@ use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
 /// way `clear_inflight_state_if_matches` (#2427 D-wire) does: under the lock,
 /// write only when the row is STILL present AND its `(user_msg_id, started_at,
 /// tmux_session_name)` identity (+ `turn_start_offset` when known) matches. Gone
-/// (`Missing`) or replaced by a newer turn / restart-rebind marker
-/// (`IdentityMismatch`) → no-op; holder FAILED + didn't clear → still present &
-/// matching → refresh (`Saved`). Same advisory lock + atomic_write primitives as the
+/// (`RowAbsent`), replaced by a newer turn (`SuccessorOwned`) or by a restart /
+/// rebind marker (`AuthorityPinned`) → no-op; holder FAILED + didn't clear →
+/// still present & matching → refresh (`Saved`). Same lock + atomic_write as the
 /// rest of the module (Windows-safe).
 pub(in crate::services::discord) fn save_inflight_state_if_matches_identity<
     T: GuardedStampTarget,
@@ -60,27 +60,31 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_matches_ide
     };
     // Holder already cleared the row on its success path → do NOT resurrect.
     let Ok(data) = fs::read_to_string(&path) else {
-        return GuardedSaveOutcome::Missing;
+        return GuardedSaveOutcome::RowAbsent;
     };
     let Ok(on_disk) = serde_json::from_str::<InflightTurnState>(&data) else {
         // Malformed row: treat like a mismatch and do not clobber — the loader
         // eviction path GCs malformed payloads on the next read.
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     };
     // A newer turn (different identity) or a planned-restart / rebind-origin
     // marker now owns the row — never overwrite it with this preserved turn.
     if on_disk.restart_mode.is_some() || on_disk.rebind_origin {
-        return GuardedSaveOutcome::IdentityMismatch;
+        return GuardedSaveOutcome::AuthorityPinned;
     }
-    if expected.user_msg_id == 0
-        || !expected.matches_state(&on_disk)
-        || on_disk.turn_nonce != state.turn_nonce
-    {
-        return GuardedSaveOutcome::IdentityMismatch;
+    // #5951 S1: an id-0 snapshot is unnameable (it can never uniquely match a
+    // durable row), while a live identity / nonce divergence is a successor
+    // episode. Both refused before the split; they are separated here so the
+    // repair gate can never confuse "no turn" with "another turn".
+    if expected.user_msg_id == 0 {
+        return GuardedSaveOutcome::Unnameable;
+    }
+    if !expected.matches_state(&on_disk) || on_disk.turn_nonce != state.turn_nonce {
+        return GuardedSaveOutcome::SuccessorOwned;
     }
     if let Some(expected_offset) = expected_turn_start_offset {
         if on_disk.turn_start_offset != Some(expected_offset) {
-            return GuardedSaveOutcome::IdentityMismatch;
+            return GuardedSaveOutcome::SuccessorOwned;
         }
     }
     // Completion preservation is a durable-first merge, never a stale row
@@ -129,7 +133,7 @@ pub(in crate::services::discord::inflight) fn save_inflight_state_if_matches_ide
             target.adopt_persisted(persisted);
             GuardedSaveOutcome::Saved
         }
-        Ok(None) => GuardedSaveOutcome::IdentityMismatch,
+        Ok(None) => GuardedSaveOutcome::AuthorityPinned,
         Err(error) => {
             tracing::warn!(
                 provider = %provider.as_str(),
