@@ -296,6 +296,13 @@ pub(super) fn carry_session_bound_ack_for_turn(
 pub(super) struct SupervisorFrameSourceAuthority {
     generation_mtime_ns: i64,
     source_stamp: Option<crate::services::cluster::stream_relay::SourceStamp>,
+    /// #5948 (I17): absolute JSONL byte range the forwarded payload was read from,
+    /// when the caller knows it. It rides the source authority instead of a
+    /// separate parameter on every forward helper because it answers the same
+    /// question the authority already answers — where these bytes came from — one
+    /// coordinate finer. A caller that cannot name a range leaves it `None`; the
+    /// sink treats a named range as authoritative, so it is never invented here.
+    source_span: Option<(u64, u64)>,
 }
 
 impl From<i64> for SupervisorFrameSourceAuthority {
@@ -303,6 +310,7 @@ impl From<i64> for SupervisorFrameSourceAuthority {
         Self {
             generation_mtime_ns,
             source_stamp: None,
+            source_span: None,
         }
     }
 }
@@ -312,7 +320,20 @@ impl From<super::loop_poll_prologue::WatcherSourceAuthority> for SupervisorFrame
         Self {
             generation_mtime_ns: authority.generation_mtime_ns,
             source_stamp: authority.source_stamp,
+            source_span: None,
         }
+    }
+}
+
+/// #5948 (I17): attach the absolute source byte range a forward carries to the
+/// authority that already describes the forward's provenance.
+pub(super) fn source_authority_with_span(
+    source_authority: impl Into<SupervisorFrameSourceAuthority>,
+    source_span: Option<(u64, u64)>,
+) -> SupervisorFrameSourceAuthority {
+    SupervisorFrameSourceAuthority {
+        source_span,
+        ..source_authority.into()
     }
 }
 
@@ -414,13 +435,20 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
 ) -> SupervisorRelayForward {
     let (terminal_part, tail_part) =
         split_decoded_chunk_at_terminal_boundary(decoded, leftover_len);
+    // #5948 (I17): the split is a byte split of one contiguous source range, so
+    // the span splits with it — the terminal frame owns `[start, boundary)` and
+    // the tail owns `[boundary, end)`. Handing both frames the WHOLE span would
+    // make the sink treat the tail's genuinely-new bytes as already folded.
+    let authority: SupervisorFrameSourceAuthority = source_authority.into();
+    let (terminal_span, tail_span) =
+        split_source_span_at_terminal_boundary(authority.source_span, terminal_part.len());
     let terminal_forward = forward_terminal_chunk_to_supervisor_relay(
         tmux_session_name,
         terminal_part,
         registry,
         cached_producer,
         terminal,
-        source_authority,
+        source_authority_with_span(authority, terminal_span),
     );
     if tail_part.is_empty() {
         return terminal_forward;
@@ -451,7 +479,7 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
         tail_part,
         registry,
         cached_producer,
-        source_authority,
+        source_authority_with_span(authority, tail_span),
     );
     let mirrored = terminal_forward.mirrored && tail_forward.mirrored;
     let ack_target = terminal_forward.ack_target;
@@ -475,6 +503,24 @@ pub(super) fn forward_terminal_chunk_with_trailing_to_supervisor_relay(
         trailing_turn_follows: true,
         trailing_first_forwarded_sequence,
     }
+}
+
+/// #5948 (I17): split one contiguous source byte range at the same boundary
+/// `split_decoded_chunk_at_terminal_boundary` splits the payload at, so each
+/// forwarded frame names exactly the bytes it carries. `None` in ⇒ `None` out on
+/// both sides: a caller that cannot name a range must not have one invented for
+/// it, because the sink treats a named range as authoritative.
+pub(super) fn split_source_span_at_terminal_boundary(
+    span: Option<(u64, u64)>,
+    terminal_len: usize,
+) -> (Option<(u64, u64)>, Option<(u64, u64)>) {
+    let Some((start, end)) = span else {
+        return (None, None);
+    };
+    let boundary = start.saturating_add(terminal_len as u64).min(end);
+    let terminal = (boundary > start).then_some((start, boundary));
+    let tail = (end > boundary).then_some((boundary, end));
+    (terminal, tail)
 }
 
 /// #3041 P1-3 (codex P1-3 issue 1 — multi-turn-chunk black-hole close): split the
@@ -545,18 +591,21 @@ pub(super) fn forward_chunk_to_supervisor_relay_inner(
     // turn now being ACK-waited). A non-terminal frame has no fence → no ack
     // target is produced (the `outcome.sequence.map` below yields `None`).
     let ack_turn_start_offset = terminal.as_ref().and_then(|fence| fence.turn_start_offset);
+    let source_span = source_authority.and_then(|authority| authority.source_span);
     let outcome = match terminal {
         Some(fence) => producer.try_send_terminal_frame_with_source(
             payload,
             fence,
             source_authority.map_or(0, |authority| authority.generation_mtime_ns),
             source_authority.and_then(|authority| authority.source_stamp),
+            source_span,
         ),
         None => producer.try_send_frame_with_source(
             payload,
             frame_identity,
             source_authority.map_or(0, |authority| authority.generation_mtime_ns),
             source_authority.and_then(|authority| authority.source_stamp),
+            source_span,
         ),
     };
     if !outcome.is_alive() {

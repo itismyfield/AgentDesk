@@ -139,6 +139,19 @@ pub struct StreamFrame {
     /// replaced wrapper must never commit against the replacement transcript.
     pub relay_generation_mtime_ns: Option<i64>,
     pub relay_source_stamp: Option<SourceStamp>,
+    /// #5948 (I17): absolute JSONL byte range this frame's `payload` was read
+    /// from, when the producer knows it. ADVISORY — it is a resend-identity
+    /// coordinate only, never a commit coordinate: `relay_range` alone still
+    /// drives the idle/catch-up commit, so setting this on a streaming frame
+    /// cannot divert the sink onto the idle advance path.
+    ///
+    /// The sink parser needs it because a watcher rewind
+    /// (`tmux_watcher.rs` terminal-delivery rewind, `loop_poll_prologue.rs`
+    /// redrive resume) re-reads the same bytes and the relay stamps them with a
+    /// FRESH `sequence`, so no receiver-side sequence test can tell a resend
+    /// from new output. Byte offsets can: replayed bytes carry offsets the
+    /// parser already folded, genuinely repeated prose never does.
+    pub source_span: Option<(u64, u64)>,
 }
 
 /// Per-session counters. Exposed via the supervisor for diagnostics.
@@ -437,6 +450,9 @@ impl RelayProducer {
         .is_alive()
     }
 
+    /// Frames built here never name a source range: the byte-range identity a
+    /// rewind resend needs (#5948 / I17) is only known to the watcher paths that
+    /// go through [`RelayProducer::try_send_frame_with_source`].
     fn enqueue(
         &self,
         payload: String,
@@ -453,6 +469,7 @@ impl RelayProducer {
             range,
             generation: relay_generation_mtime_ns,
             stamp: relay_source_stamp,
+            span: None,
         })
     }
 
@@ -659,6 +676,8 @@ pub struct RelayFrameRequest {
     pub range: Option<(u64, u64)>,
     pub generation: Option<i64>,
     pub stamp: Option<SourceStamp>,
+    /// #5948 (I17): see [`StreamFrame::source_span`].
+    pub span: Option<(u64, u64)>,
 }
 
 fn try_send_frame_inner(
@@ -676,6 +695,7 @@ fn try_send_frame_inner(
         range: relay_range,
         generation: relay_generation_mtime_ns,
         stamp: relay_source_stamp,
+        span: source_span,
     } = request;
     if shutdown.load(Ordering::Acquire) {
         return RelaySendOutcome::closed();
@@ -704,6 +724,7 @@ fn try_send_frame_inner(
         relay_range,
         relay_generation_mtime_ns,
         relay_source_stamp,
+        source_span,
     };
     metrics.frames_received.fetch_add(1, Ordering::AcqRel);
     match queue.push_drop_oldest(frame) {
@@ -769,6 +790,7 @@ impl StreamRelayHandle {
                 range: None,
                 generation: None,
                 stamp: None,
+                span: None,
             },
         )
     }
@@ -1149,7 +1171,7 @@ mod tests {
         };
         assert!(
             producer
-                .try_send_frame_with_source("observe".into(), None, 0, Some(stamp))
+                .try_send_frame_with_source("observe".into(), None, 0, Some(stamp), None)
                 .is_alive()
         );
         flush_pending().await;

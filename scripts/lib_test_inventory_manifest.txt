@@ -5178,6 +5178,16 @@ services::discord::session_relay_sink::tests::terminal_delivery_route_skips_brid
 services::discord::session_relay_sink::tests::terminal_lease_coordinate_prefers_fence_then_idle_range_then_degenerate
 services::discord::session_relay_sink::tests::watcher_preemption_blocks_inflightless_sink_post_4277
 services::discord::session_relay_sink::tests::watcher_preemption_blocks_task_context_route_promotion_before_card_post_4277
+services::discord::session_relay_sink::turn_parser_resend_tests::a_gap_or_a_disagreeing_span_folds_the_payload_whole
+services::discord::session_relay_sink::turn_parser_resend_tests::a_generation_change_clears_the_resend_watermark
+services::discord::session_relay_sink::turn_parser_resend_tests::a_suppressed_resend_increments_the_relay_resend_suppressed_counter
+services::discord::session_relay_sink::turn_parser_resend_tests::an_early_resend_never_pulls_the_watermark_back_down
+services::discord::session_relay_sink::turn_parser_resend_tests::frames_without_a_source_span_are_folded_whole
+services::discord::session_relay_sink::turn_parser_resend_tests::intentionally_repeated_prose_in_a_later_source_range_is_never_swallowed
+services::discord::session_relay_sink::turn_parser_resend_tests::native_codex_terminal_path_dedupes_the_open_turn_and_keeps_the_retry
+services::discord::session_relay_sink::turn_parser_resend_tests::redrive_resume_replays_an_open_turn_and_folds_only_the_fresh_tail
+services::discord::session_relay_sink::turn_parser_resend_tests::rewind_resend_of_an_already_folded_range_does_not_double_the_open_turn
+services::discord::session_relay_sink::turn_parser_resend_tests::terminal_delivery_rewind_after_handoff_still_delivers_the_retry
 services::discord::session_runtime::channel_routing::tests::actual_thread_classification_includes_news_threads
 services::discord::session_runtime::resume_launch_binding_tests::absent_resume_binding_keeps_existing_launch_selection
 services::discord::session_runtime::resume_launch_binding_tests::rebound_session_binding_reaches_claude_resume_launch_args
@@ -5784,6 +5794,7 @@ services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_gu
 services::discord::tmux::tmux_watcher::streaming_status_tick::provider_output_guard::tests::invariant_4371_watcher_rollover_never_selects_raw_control_data
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::forward_chunk_surfaces_backpressure_evicted_victim_identity
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::per_turn_fully_mirrored_degrades_when_evicted_victim_matches
+services::discord::tmux::tmux_watcher::supervisor_relay::tests::source_span_splits_at_the_same_boundary_as_the_payload
 services::discord::tmux::tmux_watcher::supervisor_relay::tests::terminal_event_consumed_offset_excludes_buffered_tail
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::caller_arc_wiring
 services::discord::tmux::tmux_watcher::terminal_commit_epilogue::continuation_marker_tests::current_zero_id_row_can_complete
@@ -7776,6 +7787,7 @@ services::observability::emit::tests::relay_root_cause_metric_wrappers_record_pe
 services::observability::emit::tests::warn_severity_invariant_still_emits_event_without_error_level
 services::observability::metrics::tests::identity_conflict_snapshot_preserves_closed_categories
 services::observability::metrics::tests::permanent_relay_loss_is_additive_and_exposed
+services::observability::metrics::tests::resend_suppression_reaches_the_snapshot_row
 services::observability::queries::alert_authority_tests::rollup_is_aggregation_only_and_rule_engine_is_sole_alerter_pg
 services::observability::recovery_audit::tests::build_recovery_audit_record_redacts_and_hashes_full_body
 services::observability::recovery_audit::tests::recovery_audit_pg_tests::recovery_audit_round_trips_and_fetches_by_turn
@@ -7789,6 +7801,7 @@ services::observability::relay_signal_alert::tests::effective_threshold_prefers_
 services::observability::relay_signal_alert::tests::signal_statuses_match_emit_path_names
 services::observability::relay_signal_alert::tests::signal_table_covers_documented_relay_loss_vectors
 services::observability::relay_signal_alert::tests::signal_table_excludes_benign_watcher_owned_non_attempt
+services::observability::relay_signal_alert::tests::signal_table_monitors_rewind_resend_suppression
 services::observability::turn_lifecycle::tests::normalize_label_collapses_future_ad_hoc_surface_variants
 services::observability::turn_lifecycle::tests::turn_event_metadata_is_compile_time_constant_backed
 services::observability::turn_lifecycle::tests::turn_event_notification_policy_and_copy_match_lifecycle_contract

@@ -138,6 +138,16 @@ pub(super) const RELAY_SIGNAL_DEFINITIONS: &[RelaySignal] = &[
         label: "릴레이 owner 불명",
     },
     RelaySignal {
+        key: "relay_resend_suppressed",
+        event_type: "relay_root_cause_counter",
+        statuses: &["relay_resend_suppressed"],
+        // #5948: a rewind resend is a normal, recoverable event — the sink now
+        // absorbs it — so the threshold sits above the handful a busy hour
+        // produces and trips only when the upstream rewind paths are churning.
+        default_threshold: 20,
+        label: "재전송 소스 범위 억제(되감기 이중 누적 차단)",
+    },
+    RelaySignal {
         key: "offset_invariant_violation",
         event_type: "invariant_violation",
         statuses: &["last_offset_monotonic", "response_sent_offset_monotonic"],

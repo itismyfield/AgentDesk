@@ -380,6 +380,14 @@ pub(super) async fn collect_turn_stream_until_terminal(
     // fence, no streaming-latency change beyond the synchronous parse reorder).
     // The ACK target is captured from THIS forward, so the watcher's wait now
     // correlates to the terminal frame's sequence (more precise).
+    //
+    // #5948 (I17): same span derivation as the streaming path below — `all_data`
+    // ends at `initial_buffer_start_offset + initial_buffer_len`, and the
+    // pre-turn skip only trims a prefix, so the forwarded bytes end there too.
+    let initial_forward_span = (!initial_forward_text.is_empty()).then(|| {
+        let end = initial_buffer_start_offset.saturating_add(initial_buffer_len as u64);
+        (end.saturating_sub(initial_forward_text.len() as u64), end)
+    });
     let (
         mut session_bound_relay_turn_fully_mirrored,
         mut session_bound_relay_turn_first_forwarded_sequence,
@@ -409,7 +417,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                 &producer_registry,
                 &mut cached_relay_producer,
                 fence,
-                initial_source_authority,
+                source_authority_with_span(initial_source_authority, initial_forward_span),
             ),
             None => forward_chunk_to_supervisor_relay_for_turn(
                 &tmux_session_name,
@@ -417,7 +425,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                 &producer_registry,
                 &mut cached_relay_producer,
                 turn_identity_for_panel.as_ref(),
-                initial_source_authority,
+                source_authority_with_span(initial_source_authority, initial_forward_span),
             ),
         };
         let supervisor_turn_state = apply_initial_supervisor_relay_forward(
@@ -699,6 +707,19 @@ pub(super) async fn collect_turn_stream_until_terminal(
                         turn_identity_for_panel.as_ref(),
                         &tmux_session_name,
                     );
+                    // #5948 (I17): name the absolute JSONL byte range these
+                    // forwarded bytes came from. `all_data` ends at
+                    // `chunk_buffer_start_offset + chunk_buffer_len`, and
+                    // `chunk_forward_text` is a SUFFIX of the decoded chunk (the
+                    // pre-turn skip only trims a prefix), so the forwarded bytes
+                    // end there too. A rewind re-reads from
+                    // `turn_data_start_offset` and hands the sink these same
+                    // offsets under a fresh relay `sequence`; the offsets are what
+                    // let the sink tell that replay from genuinely new output.
+                    let chunk_forward_span = (!chunk_forward_text.is_empty()).then(|| {
+                        let end = chunk_buffer_start_offset.saturating_add(chunk_buffer_len as u64);
+                        (end.saturating_sub(chunk_forward_text.len() as u64), end)
+                    });
                     let chunk_forwarded_to_session_relay = match streaming_terminal_fence {
                         // #3041 P1-3 (codex P1-3 issue 1): split a result+next-turn
                         // physical chunk at the leftover boundary so turn A's
@@ -711,7 +732,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             &producer_registry,
                             &mut cached_relay_producer,
                             fence,
-                            authority,
+                            source_authority_with_span(authority, chunk_forward_span),
                         ),
                         None => forward_chunk_to_supervisor_relay_for_turn(
                             &tmux_session_name,
@@ -719,7 +740,7 @@ pub(super) async fn collect_turn_stream_until_terminal(
                             &producer_registry,
                             &mut cached_relay_producer,
                             turn_identity_for_panel.as_ref(),
-                            authority,
+                            source_authority_with_span(authority, chunk_forward_span),
                         ),
                     };
                     apply_streaming_supervisor_relay_forward(

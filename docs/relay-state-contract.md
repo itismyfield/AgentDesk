@@ -539,6 +539,75 @@ still spoken for, so this one steps past them rather than colliding.
   end-to-end `loop_poll_prologue` resume-consumption test; like I12 this path
   emits tracing logs rather than `record_invariant_check` rows).
 
+## I17. A rewind resend is identified by source bytes, never by sequence (#5948)
+
+Numbered I17 because I13/I14/I15 stay reserved for the reachability obligations
+(see I16's note) and I16 is taken.
+
+- Definition: when a watcher rewind re-sends JSONL bytes the session-bound sink
+  parser already folded into the turn it is still accumulating, the parser folds
+  only the part of the payload it has not seen, and it decides that from the
+  frame's absolute source byte range — `StreamFrame::source_span` — not from
+  `StreamFrame::sequence` and not from payload equality.
+- Why not `sequence`: the relay mints a frame's sequence at the SEND, fresh, per
+  frame (`stream_relay::try_send_frame_inner`). A rewind resend is a new send, so
+  it carries a strictly LARGER sequence than the original. `sequence` describes
+  relay order, never source identity; a receiver-side `sequence <= last_sequence`
+  test can therefore never fire on the case this invariant is about.
+- Why not payload equality: a turn that prints the same sentence twice is
+  byte-identical to a one-line replay. Suppressing on content would delete real
+  output, which is the #5941-class silent loss this contract exists to prevent.
+  Byte offsets separate the two exactly, because genuinely repeated prose always
+  occupies a strictly LATER source range than the prose it repeats.
+- Producer: `tmux_watcher::turn_stream_collector` names the absolute range of the
+  bytes it forwards on both the initial and the streaming path, and
+  `supervisor_relay` carries it to the frame. A result+next-turn chunk is split at
+  the terminal boundary, so the span splits with it — the terminal frame owns
+  `[start, boundary)` and the tail frame owns `[boundary, end)`. A producer that
+  cannot name a range sends `None`. The range is read off the collector's
+  EXISTING buffer bookkeeping (`all_data_start_offset` +
+  `advance_buffer_start_offset`) — the same coordinate it already hands
+  `process_watcher_lines_for_turn` for pre-turn skipping and terminal-evidence
+  offsets — so this invariant inherits exactly that coordinate's accuracy and
+  introduces no new offset authority.
+- Consumer: `session_relay_sink::turn_parser::SessionRelayParser::fold_frame_payload`
+  keeps one `turn_source_end` watermark. `None` span means fold the whole payload —
+  the sink refuses to guess, so an un-instrumented producer degrades to today's
+  behaviour rather than to loss. A span is honoured ONLY when it names exactly as
+  many bytes as its payload carries; that equality is what makes the overlap a
+  byte PREFIX of the payload, and a span that disagrees folds whole rather than
+  slice a body on a coordinate the sink cannot trust.
+- Scope, stated because it is easy to over-read: the watermark is TURN-scoped.
+  `reset_turn` clears it, so suppression only ever applies inside one UNDELIVERED
+  turn — which is the actual rewind damage, a single delivery whose prose is
+  doubled. A resend that arrives after the turn was handed off reproduces the same
+  body rather than a doubled one, and that resend IS the retry the watcher's
+  terminal-delivery rewind exists to drive ("must retry the SAME range next
+  loop"); suppressing it would convert a failed POST into permanent silent loss.
+  Cross-delivery duplicates remain the send point's job. A generation change also
+  clears the watermark, because a rotated transcript restarts the offsets.
+- Advisory, not a commit coordinate: `source_span` never participates in the
+  commit decision. `relay_range` alone still steers
+  `advance_after_confirmed_post` onto the idle-range path, which is precisely why
+  this is a new field instead of a reuse of `relay_range` — reusing it would have
+  silently rerouted streaming frames onto the idle commit.
+- The native-Codex terminal path clears the span: `ingest_verified_native_terminal`
+  SYNTHESISES its payload rather than reading it from the transcript, so the
+  incoming frame's range does not describe those bytes. Seeding the watermark from
+  a synthetic body would make the next genuine frame in that range look like a
+  replay and drop a real answer.
+- Violation surface: fold the same range twice and one delivery carries the same
+  prose twice; suppress across the turn handoff and a failed POST becomes silent
+  loss.
+- Tracing events: `record_relay_resend_suppressed` emits a WARN plus the
+  `relay_resend_suppressed` relay root-cause counter, so every suppression lands
+  in the restart-safe `observability_events` stream and in the hourly #3561
+  operator alert table (`RELAY_SIGNAL_DEFINITIONS`). A suppression is never
+  silent.
+- Invariant key: `rewind_resend_identified_by_source_bytes` (enforced by the
+  `session_relay_sink::turn_parser_resend_tests` set; like I12/I16 this path emits
+  tracing + counters rather than `record_invariant_check` rows).
+
 ## How to add a new invariant
 
 1. Document it here with the same structure (definition, producer,
