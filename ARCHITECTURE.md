@@ -1057,6 +1057,8 @@ src/
 │   │   │   │   ├── existing_panel_update.rs
 │   │   │   │   ├── native_collector_tests.rs
 │   │   │   │   └── types.rs
+│   │   │   ├── supervisor_relay/
+│   │   │   │   └── supervisor_frame_source.rs
 │   │   │   ├── terminal_commit_epilogue/
 │   │   │   │   └── continuation_marker_tests.rs
 │   │   │   ├── turn_identity/
@@ -1094,7 +1096,6 @@ src/
 │   │   │   ├── stall_exit.rs
 │   │   │   ├── streaming_session_banner.rs
 │   │   │   ├── streaming_status_tick.rs
-│   │   │   ├── supervisor_frame_source.rs
 │   │   │   ├── supervisor_relay.rs
 │   │   │   ├── supervisor_relay_tests.rs
 │   │   │   ├── task_response_authority.rs
