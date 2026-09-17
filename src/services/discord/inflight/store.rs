@@ -1,10 +1,8 @@
-//! Inflight sidecar filesystem + advisory-lock seam (#3479 extraction).
+//! Inflight sidecar filesystem + advisory-lock seam (#3479).
 //!
-//! The low-level path layout (`inflight_provider_dir` / `inflight_state_path`)
-//! and the cross-platform [`InflightStateFileLock`] guard
-//! (`lock_inflight_state_path`) used by every read/modify/write helper in the
-//! parent module. Behaviour-preserving move out of `inflight.rs`; the parent
-//! re-exports the cross-module items so existing call sites resolve unchanged.
+//! Path layout (`inflight_provider_dir` / `inflight_state_path`) and the
+//! cross-platform [`InflightStateFileLock`] guard used by every
+//! read/modify/write helper in the parent module.
 
 use super::*;
 
@@ -23,28 +21,19 @@ impl InflightDeliveryRewindReason {
     }
 }
 
-/// Outcome of the identity-guarded durable inflight writes in `save_store`.
-///
-/// #5951 S1: the historical `IdentityMismatch` collapsed at least six distinct
-/// refusals into one value, so no caller could tell "nobody owns this row" from
-/// "a planned restart owns it" from "a successor episode owns it". The refusal
-/// is now decomposed along the only axis callers actually need: may I restore
-/// the projection, and may I treat my own turn as over? Behaviour is unchanged
-/// — [`GuardedSaveOutcome::is_identity_mismatch_legacy`] reproduces the old
-/// single value for every consumer that predates the split.
-///
-/// Lives here rather than in `save_store/identity_gate.rs` so the guard file,
-/// which sits 23 production lines below the giant-file threshold, does not have
-/// to carry the enum it no longer needs to own.
+/// Outcome of the identity-guarded durable inflight writes in `save_store`
+/// (#5951 S1). Decomposed along the two axes callers need: may I restore the
+/// projection, and may I treat my own turn as over?
+/// [`GuardedSaveOutcome::is_identity_mismatch_legacy`] reproduces the old
+/// collapsed value for consumers that predate the split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::services::discord) enum GuardedSaveOutcome {
     /// On-disk row still matched the turn identity; the row was rewritten.
     Saved,
     /// No inflight row existed (`NotFound` only — see `guarded_read.rs`). The
-    /// lease HOLDER may already have cleared it on its success path. This is
-    /// the ONLY refusal a projection repair may ever be gated on (#5951 §1.2
-    /// mechanism R); today nothing repairs, so it still resurrects nothing.
-    /// Formerly `Missing`.
+    /// lease holder may already have cleared it on its success path. The only
+    /// refusal a projection repair may ever gate on (#5951 §1.2 mechanism R);
+    /// today nothing repairs, so it still resurrects nothing.
     RowAbsent,
     /// A durable or structural authority forbids the write and the row must be
     /// left byte-identical: a planned-restart / rebind-origin marker owns it,
@@ -69,12 +58,9 @@ pub(in crate::services::discord) enum GuardedSaveOutcome {
 
 impl GuardedSaveOutcome {
     /// Every value the pre-#5951 `IdentityMismatch` stood for, in one place.
-    ///
-    /// S1 is a behaviour-preserving split, so a consumer that only ever asked
-    /// "was this an identity mismatch?" calls this and keeps its verdict
-    /// unchanged. Consumers that `match` exhaustively spell the three variants
-    /// out instead, which is what makes a future seventh variant a compile
-    /// error at every decision point rather than a silent default.
+    /// A consumer that only asks "was this an identity mismatch?" calls this;
+    /// one that matches exhaustively spells out the three variants instead,
+    /// so a future seventh variant is a compile error at every decision point.
     pub(in crate::services::discord) const fn is_identity_mismatch_legacy(self) -> bool {
         matches!(
             self,
@@ -83,13 +69,9 @@ impl GuardedSaveOutcome {
     }
 
     /// Classify a refusal whose guard mixes pinned authority with succession.
-    ///
-    /// Many guards share one disjunction —
-    /// `restart_mode.is_some() || rebind_origin || !expected.matches_state(..)`
-    /// — which cannot name a single cause in the condition itself. This reads
-    /// the row that actually refused: a pinned restart / rebind marker is
-    /// [`Self::AuthorityPinned`]; anything else that reached the refusal is a
-    /// successor episode holding the row.
+    /// Reads the row that actually refused: a pinned restart/rebind marker is
+    /// [`Self::AuthorityPinned`]; anything else is a successor episode holding
+    /// the row.
     pub(in crate::services::discord) fn from_durable_authority(
         on_disk: &InflightTurnState,
     ) -> Self {
@@ -143,15 +125,12 @@ pub(in crate::services::discord) fn second_handle_try_lock(
 }
 
 /// Acquires the canonical `<channel>.json.lock` sidecar as a blocking exclusive
-/// advisory file lock. Every cooperating AgentDesk process opens this stable
-/// pathname through [`lock_inflight_state_path`]; the JSON row itself remains
-/// unlocked. The sidecar is never unlinked, even when no JSON row exists, so an
-/// open handle can never become a detached old inode while a new canonical inode
-/// admits another writer. Handle close (including process exit) releases the
-/// lock; network-filesystem behavior and non-cooperating writers are outside the
-/// contract. `second_handle_try_lock` pins contention between two independent
-/// opens in one process; native Windows CI compiles that same witness, but it is
-/// not a separate-process integration test.
+/// advisory file lock; the JSON row itself remains unlocked. The sidecar is
+/// never unlinked, even when no JSON row exists, so an open handle can never
+/// become a detached old inode while a new canonical inode admits another
+/// writer. Handle close (including process exit) releases the lock;
+/// network-filesystem behavior and non-cooperating writers are outside the
+/// contract.
 pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileLock, String> {
     let lock_path = inflight_state_lock_path(path);
     if let Some(parent) = lock_path.parent() {
@@ -167,18 +146,8 @@ pub(crate) fn lock_inflight_state_path(path: &Path) -> Result<InflightStateFileL
     Ok(InflightStateFileLock { file })
 }
 
-// ---------------------------------------------------------------------------
-// #3835: shared lock-held persist tail + save-side validation gate.
-//
-// Moved verbatim from the `inflight` parent so the CAS save/clear children and
-// the sibling child modules (`watcher_state`, `ownership_ops`,
-// `orphan_relay_reclaim`, `finalizer_identity`) consume one primitive layer.
-// The parent re-imports these at their original inflight-private visibility, so
-// `super::persist_under_lock` / `super::validate_inflight_state_for_save` (and the
-// CAS children's unqualified calls via `use super::*`) resolve unchanged.
-// `persist_under_lock_inner` stays module-private here (internal to the two
-// persist wrappers). Behaviour-preserving: no function body is altered.
-// ---------------------------------------------------------------------------
+// #3835: shared lock-held persist tail + save-side validation gate, consumed
+// by the CAS save/clear children and sibling modules via `use super::*`.
 
 pub(super) fn validate_inflight_state_for_save(
     root: &Path,
@@ -230,46 +199,31 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
         return true;
     };
 
-    // #3154 — OBSERVE-ONLY on the bridge/watcher save path. A legit fresh-turn
-    // reset (different user_msg_id or turn_start_offset) resets
-    // response_sent_offset to 0 on purpose (see InflightTurnState::new), so the
-    // check is gated by SAME turn identity; only a backward move within the same
-    // turn is a violation. We do not skip the write here (that would drop a
-    // legit fresh turn); this mirrors the last_offset_monotonic precedent below.
+    // OBSERVE-ONLY (#3154): a fresh-turn reset (different user_msg_id or
+    // turn_start_offset) resets response_sent_offset to 0 on purpose (see
+    // InflightTurnState::new), so only a backward move within the SAME turn
+    // identity is a violation; the write itself is never skipped here.
     let same_turn_identity = existing.user_msg_id == state.user_msg_id
         && existing.turn_start_offset == state.turn_start_offset;
     let monotonic_offset =
         !same_turn_identity || state.response_sent_offset >= existing.response_sent_offset;
-    // I6 (last_offset_monotonic) — OBSERVE-ONLY on the bridge/watcher save
-    // path. A legit fresh-turn reset (different user_msg_id or
-    // turn_start_offset) lowers last_offset on purpose, so the check is gated
-    // by SAME turn identity; only a backward move within the same turn is a
-    // violation. We do not skip the write here (that would drop a legit fresh
-    // turn); the enforcing variant lives in the standby/refresh path.
+    // I6 last_offset_monotonic: OBSERVE-ONLY here too — a fresh-turn reset
+    // lowers last_offset on purpose, so only a same-turn backward move is a
+    // violation; the enforcing variant lives in the standby/refresh path.
     let last_offset_monotonic = !same_turn_identity || state.last_offset >= existing.last_offset;
 
-    // #3552: the severity selection is computed before the records below. The
-    // enforce-skip and rewind-classifier branches select WARN; otherwise a
-    // backward-write violation selects ERROR. The enforce branch itself (skip +
-    // return false) is unchanged.
-    // #3933: a legitimate Gemini/Qwen `RetryBoundary` reset rewinds the SAME
-    // turn's frontier to the start — `full_response` cleared and
-    // `response_sent_offset` back to 0 — to re-stream the answer
-    // (turn_bridge/retry_state.rs::clear_response_delivery_state). That backward
-    // move is NOT a stale-snapshot regression, so the enforce guard must permit
-    // it (the release runs AGENTDESK_DELIVERY_RECORD_AUTHORITY=1; blocking it
-    // drops the re-streamed body). A genuine backward regression carries a
-    // non-empty body, so it never matches this rewind signature and stays
-    // blocked. The signal is derived here from the incoming state — no call-site
-    // change — so the guard stays self-contained.
+    // #3552: enforce-skip or a legitimate rewind selects WARN below; anything
+    // else selects ERROR. #3933: a legitimate RetryBoundary reset (see
+    // turn_bridge/retry_state.rs::clear_response_delivery_state) clears
+    // full_response and resets response_sent_offset to 0 to re-stream the
+    // answer; a genuine regression always carries a non-empty body, so it
+    // never matches this signature.
     let is_legitimate_full_reset =
         same_turn_identity && state.full_response.is_empty() && state.response_sent_offset == 0;
-    // #4110: terminal-error reset and dead-watcher reclaim intentionally lower a
-    // same-turn delivery frontier while keeping a non-empty response body. Those
-    // are not generic saves: the bridge first performs an identity-checked,
-    // lock-held RMW save carrying this reason marker. Only that path may carve
-    // out the non-empty backward move; ordinary stale snapshots still have no
-    // marker and remain blocked by authority.
+    // #4110: terminal-error reset / dead-watcher reclaim intentionally lower a
+    // same-turn frontier while keeping a non-empty body, via an
+    // identity-checked RMW save carrying this reason marker; ordinary stale
+    // snapshots carry no marker and stay blocked.
     let is_legitimate_reasoned_delivery_rewind = delivery_rewind_reason.is_some()
         && same_turn_identity
         && !state.full_response.is_empty()
@@ -285,11 +239,9 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
         last_offset_monotonic,
         is_legitimate_delivery_rewind,
     );
-    // #3933: select WARN for either mechanical branch: the enforce guard skips
-    // the backward write, or the rewind classifier permits it. This is a
-    // severity-label change ONLY — the enforce guard, the debug tripwire (which
-    // still keys off `enforce_skips_backward_write`), and the on-disk schema are
-    // all unchanged.
+    // #3933: WARN when the enforce guard skips the write OR the rewind
+    // classifier permits it; this only changes the severity label, not the
+    // enforce guard or debug tripwire below.
     let warn_downgrade_selected = enforce_skips_backward_write || is_legitimate_delivery_rewind;
     let offset_monotonic_severity = offset_monotonic_invariant_severity(warn_downgrade_selected);
 
@@ -305,45 +257,21 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
             "same_turn_identity": same_turn_identity,
             "path": path.display().to_string(),
             "delivery_rewind_reason": delivery_rewind_reason.map(InflightDeliveryRewindReason::as_str),
-            // #5500: severity alone collapses the WARN reasons into one label.
-            // Record which branch applied so a stored event can be triaged after
-            // the fact. Both values are already computed above — nothing new is
-            // derived here.
-            //
-            // `full_reset_signature_matched` is the local `is_legitimate_full_reset`
-            // classifier, named on the wire for what it actually is: a SHAPE test
-            // on the incoming state (`same_turn_identity` AND `full_response`
-            // empty AND `response_sent_offset == 0`). It is evidence that the
-            // rewind matched the #3933 re-stream signature and was therefore
-            // permitted — NOT a proof that the rewind was legitimate. The step
-            // from "matched" to "legitimate" rests on the #3933 assumption stated
-            // above (a genuine backward regression carries a non-empty body),
-            // which nothing here verifies: the guard has only the incoming state
-            // to decide from. Recording the raw classifier keeps that assumption
-            // auditable instead of baking its conclusion into the event. It is
-            // worth a key because the dominant stored shape (`next == 0`, null
-            // rewind reason) turns on exactly this test, and the empty-body half
-            // cannot otherwise be reconstructed from the event.
-            //
-            // Together with `severity` the pair is exhaustive HERE: WARN with
-            // `enforce_skips_backward_write` → the write was skipped; WARN with
-            // `full_reset_signature_matched` → the guard did not skip it, so the
-            // backward write proceeds (the two are mutually exclusive —
-            // `authority_blocks_backward_inflight_write` returns false whenever
-            // the signature matched); WARN with neither → the #4110 reasoned
-            // rewind, named by `delivery_rewind_reason`. Absence of a key means
-            // UNKNOWN (written before this change), never "false".
+            // #5500: lets a stored event be triaged after the fact.
+            // `full_reset_signature_matched` is a SHAPE test (same_turn_identity
+            // + empty full_response + offset 0), not proof of legitimacy. Pair
+            // is exhaustive for WARN: enforce_skips_backward_write → skipped;
+            // only full_reset_signature_matched → proceeded (mutually
+            // exclusive); neither → #4110 reasoned rewind. Missing key = older
+            // event, never "false".
             "full_reset_signature_matched": is_legitimate_full_reset,
             "enforce_skips_backward_write": enforce_skips_backward_write,
         }),
         offset_monotonic_severity,
     );
-    // #3933: when the enforce guard is about to SKIP this backward write it never
-    // persists, so the debug tripwire has nothing to catch — asserting there would
-    // panic on a write we already discard. Relax the tripwire for that skipped
-    // case only; a backward move that actually PERSISTS (enforce OFF, or a
-    // permitted legitimate reset in release) still trips it, preserving the
-    // tripwire's purpose and every existing observe-only test verbatim.
+    // #3933: a write the enforce guard is about to SKIP never persists, so the
+    // debug tripwire has nothing to catch there; relax it only for that case —
+    // a backward move that actually PERSISTS still trips it.
     debug_assert!(
         monotonic_offset || enforce_skips_backward_write || is_legitimate_reasoned_delivery_rewind,
         "inflight response_sent_offset must not move backwards for the same turn identity"
@@ -360,22 +288,11 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
             "next": state.last_offset,
             "same_turn_identity": same_turn_identity,
             "path": path.display().to_string(),
-            // #5500: the same two discriminators as the response_sent_offset
-            // record above, because `offset_monotonic_severity` is one decision
-            // shared by both invariants — these fields explain THIS event's
-            // severity, they do not describe this event's own offsets.
-            //
-            // Read `full_reset_signature_matched` carefully here: the signature is
-            // a shape test on `full_response` and `response_sent_offset` and says
-            // NOTHING about `last_offset`. It appears on this record because
-            // #3933 lets it downgrade both invariants at once, not because a
-            // full-response reset justifies a backward `last_offset`. Nothing in
-            // this function verifies that it does.
-            //
-            // On this record the pair is exhaustive for WARN: the #4110 reasoned
-            // rewind is structurally impossible whenever this event fires (it
-            // requires `last_offset_monotonic`, which is false here), so a WARN
-            // is always explained by exactly one of these two keys.
+            // #5500: same discriminators as above (one severity decision for
+            // both invariants) — explain THIS event's severity, not its
+            // offsets. #3933's signature says nothing about last_offset; the
+            // #4110 rewind can't fire here (needs last_offset_monotonic, false
+            // here), so WARN is always exactly one of these keys.
             "full_reset_signature_matched": is_legitimate_full_reset,
             "enforce_skips_backward_write": enforce_skips_backward_write,
         }),
@@ -403,10 +320,9 @@ pub(super) fn validate_inflight_state_for_save_with_delivery_rewind_reason(
         }),
     );
 
-    // #3416 (#3089 B3): observe→ENFORCE under the durable-authority flag (no-op
-    // when OFF); see dr::authority_blocks_backward_inflight_write. The violation
-    // itself was already recorded by the monotonic record_inflight_invariant
-    // above (downgraded to WARN for this skipped-write case — see #3552).
+    // #3416/#3089 B3: observe→ENFORCE under the durable-authority flag (no-op
+    // when OFF); see dr::authority_blocks_backward_inflight_write. The
+    // violation was already recorded above (WARN, per #3552).
     if enforce_skips_backward_write {
         tracing::warn!(
             "#3416 enforce: skipped backward inflight write at {}",
@@ -496,10 +412,10 @@ pub(super) fn persist_readopted_under_lock(
 }
 
 /// Like [`persist_under_lock`] but preserves the row's existing `updated_at`
-/// instead of bumping it to now. Used by the #3982 orphan downgrade: the owner
-/// correction of a confirmed-dead orphan is not new lifecycle activity, so its
-/// quiescence clock must not be reset, or the triggering TUI-direct turn's fresh
-/// re-read would see a "fresh" row and keep aborting.
+/// instead of bumping it to now (#3982 orphan downgrade): an owner correction
+/// of a confirmed-dead orphan is not new lifecycle activity, so the
+/// quiescence clock must not reset, or a fresh TUI-direct re-read would abort
+/// on a "fresh" row.
 pub(super) fn persist_under_lock_preserving_updated_at(
     root: &Path,
     path: &Path,
@@ -512,33 +428,19 @@ pub(super) fn persist_under_lock_preserving_updated_at(
 #[cfg(test)]
 mod relay_state_contract_refs {
     //! #4268 — relay-state contract symbol anchors for the `inflight`
-    //! state/store (compiler-checked existence).
+    //! state/store: compiler-checked existence, not comments.
     //!
-    //! Every statement below is a real reference that fails to COMPILE if its
-    //! symbol is renamed, moved, or removed, so `cargo check --workspace
-    //! --all-targets` (a required CI gate) is the source of truth for whether
-    //! each contract symbol still exists.
-    //! `scripts/check_contract_symbol_refs.py` parses the anchor SET from these
-    //! reference expressions — never from comments — and checks it equals the
-    //! `sym:` anchors in `docs/relay-state-contract.md`.
+    //! Every reference below fails to COMPILE if its symbol is renamed, moved,
+    //! or removed. `scripts/check_contract_symbol_refs.py` derives the anchor
+    //! SET from these reference expressions and checks it against the `sym:`
+    //! anchors in `docs/relay-state-contract.md` — no comment can name a
+    //! symbol the code doesn't reference.
     //!
-    //! There are deliberately no `// sym:` labels: the anchor name is derived
-    //! from the reference the compiler checks (`use` path / field expression), so
-    //! commenting out or `use super::*;`-replacing a reference removes its anchor
-    //! and the set comparison fails — no comment can name a symbol the code does
-    //! not actually reference. The block cfg gate and the attributes inside are
-    //! byte-exact whitelists in the checker (no cfg parser): the gate must be
-    //! `#[cfg(test)]` or `#[cfg(all(test, unix))]` (the latter for a `#[cfg(unix)]`
-    //! symbol — see the watchdog block), and the only attribute allowed inside is
-    //! `#[test]`. This blocks a feature/non-ubuntu block gate AND an item-level
-    //! cfg on a reference, either of which would drop a symbol from the required
-    //! compile and silently disable the proof.
-    //!
-    //! Hosted here (not in `inflight.rs`) because several referenced items are
-    //! `pub(super)` within the `inflight` subtree and are only nameable from
-    //! inside it, while `inflight.rs` is a frozen test-residue file whose ceiling
-    //! must not grow (#4269). This whole module is `#[cfg(test)]`, so it is test
-    //! LoC and adds no production surface.
+    //! The checker whitelists this block's cfg gate and attributes byte-exact:
+    //! gate must be `#[cfg(test)]` or `#[cfg(all(test, unix))]`, only `#[test]`
+    //! is allowed inside. Hosted here rather than in the frozen `inflight.rs`
+    //! (#4269) because several referenced items are `pub(super)` and only
+    //! nameable from inside this subtree.
     #[test]
     fn contract_symbols_exist() {
         let _ = |s: &super::super::model::InflightTurnState| {

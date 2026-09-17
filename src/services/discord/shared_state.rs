@@ -1,19 +1,7 @@
-//! #3038 S1/S2/S3/S4/S5 — extracted field clusters of [`SharedData`].
-//!
-//! This module hosts named sub-structs that group cohesive `SharedData` fields
-//! together with the inherent `impl SharedData` methods that exclusively own
-//! those fields. The split follows the `CoreState` precedent (a field group +
-//! dedicated accessors) and the #3294/#3295 behaviour-preserving decomposition
-//! standard: field declarations, doc comments, visibility annotations, and
-//! method bodies move *verbatim*; the only edits are the mechanical field-path
-//! re-wiring forced by the new nesting (`self.<field>` →
-//! `self.<group>.<field>`) and module-path adjustments (`queued_placeholders_store::`
-//! → `super::queued_placeholders_store::`).
-//!
-//! Inherent `impl` blocks are valid from any module in the defining crate, so
-//! moving the methods here keeps `SharedData`'s public surface and every call
-//! site unchanged while removing ~200 production LoC from the `discord/mod.rs`
-//! giant.
+//! #3038 — named sub-structs that group cohesive `SharedData` fields together
+//! with the inherent `impl SharedData` methods that exclusively own those
+//! fields, keeping `SharedData`'s public surface and every call site
+//! unchanged.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -28,15 +16,10 @@ use super::{
     placeholder_controller, placeholder_live_events,
 };
 
-/// #3038 cluster F — live-placeholder/status-panel state.
-///
-/// Groups the five contiguous fields that together own the user-visible live
-/// placeholder card surface: cleanup tombstones, serialized placeholder edits,
-/// the recent live-event/status-panel feed, and the two feature gates that
-/// decide whether those events render into placeholder cards or separate
-/// status panels. Field declarations, docs, and types moved verbatim from
-/// `discord/mod.rs`; the members keep their original
-/// `pub(in crate::services::discord)` visibility.
+/// #3038 cluster F — live-placeholder/status-panel state: cleanup
+/// tombstones, serialized placeholder edits, the recent live-event/
+/// status-panel feed, and the feature gates deciding whether those events
+/// render into placeholder cards or separate status panels.
 pub(in crate::services::discord) struct PlaceholderState {
     /// Last known placeholder cleanup outcome keyed by provider/channel/message.
     /// This local tombstone lets watcher finalization reason about cleanup
@@ -44,10 +27,8 @@ pub(in crate::services::discord) struct PlaceholderState {
     pub(in crate::services::discord) placeholder_cleanup:
         Arc<placeholder_cleanup::PlaceholderCleanupRegistry>,
     /// Lifecycle FSM + edit coalescer for live-turn placeholder cards (#1255).
-    /// Both the `tmux_handed_off` async-dispatch path and the new Monitor /
-    /// `Bash run_in_background` live-turn path go through this controller so
-    /// that concurrent edits to the same placeholder message_id serialize
-    /// instead of racing.
+    /// Serializes concurrent edits to the same placeholder message_id across
+    /// both the async-dispatch and live-turn call paths.
     pub(in crate::services::discord) placeholder_controller:
         Arc<placeholder_controller::PlaceholderController>,
     /// Per-channel recent tool/system events rendered in Active placeholder
@@ -56,20 +37,14 @@ pub(in crate::services::discord) struct PlaceholderState {
         Arc<placeholder_live_events::PlaceholderLiveEvents>,
     pub(in crate::services::discord) placeholder_live_events_enabled: bool,
     pub(in crate::services::discord) status_panel_v2_enabled: bool,
-    /// #3805 P2: two-message panel rollout gate copied from
-    /// `placeholder.two_message_panel_enabled` at boot. Default OFF. PR-B wires
-    /// the SINK read: when ON the bridge creates the status panel as a NEW
-    /// message BELOW the answer (answer-first layout) via
-    /// `turn_bridge::two_message_panel`; when OFF the single-message path is
-    /// byte-identical. Later stages extend the same gate to re-anchor/recovery.
+    /// Two-message panel rollout gate (default OFF, #3805). When ON, the
+    /// status panel renders as a separate message below the answer instead
+    /// of the single-message layout.
     pub(in crate::services::discord) two_message_panel_enabled: bool,
 }
 
-/// #3038 cluster G — runtime Discord HTTP cache.
-///
-/// Groups the gateway serenity context and bot-token fallback used by
-/// non-gateway Discord REST paths. Field declarations, docs, and types moved
-/// verbatim from `discord/mod.rs`; direct readers all stay inside `discord`.
+/// #3038 cluster G — runtime Discord HTTP cache: gateway serenity context and
+/// bot-token fallback used by non-gateway Discord REST paths.
 pub(in crate::services::discord) struct RuntimeHttpCache {
     /// Cached serenity context for deferred queue drain (set once during ready event).
     pub(in crate::services::discord) cached_serenity_ctx: tokio::sync::OnceCell<serenity::Context>,
@@ -77,36 +52,25 @@ pub(in crate::services::discord) struct RuntimeHttpCache {
     pub(in crate::services::discord) cached_bot_token: tokio::sync::OnceCell<String>,
 }
 
-/// #3479 cluster — policy runtime capability.
-///
-/// Groups the shared policy engine used by direct-dispatch finalization. The
-/// field, doc, and type moved verbatim from `discord/mod.rs`; direct readers
-/// all stay inside `discord` (`recovery_engine` +
-/// `turn_bridge::completion_guard`) and reach it via `shared.policy.engine`.
+/// #3479 — shared policy engine used by direct-dispatch finalization
+/// (`recovery_engine`, `turn_bridge::completion_guard`), reached via
+/// `shared.policy.engine`.
 pub(in crate::services::discord) struct PolicyRuntime {
-    /// Shared policy engine for direct dispatch finalization.
     pub(in crate::services::discord) engine: Option<crate::engine::PolicyEngine>,
 }
 
 impl SharedData {
-    /// Phase 5.2 of intake-node-routing (issue #2009): return an `Arc<Http>`
-    /// that the response path (tmux watcher, placeholder updates, message
-    /// edits) can use to call Discord. On the leader the gateway-attached
-    /// runtime caches `cached_serenity_ctx`, and `ctx.http` is preferred so
-    /// the Http instance shares the same application_id and connection
-    /// pool the gateway already owns. On cluster-standby nodes the
-    /// OnceCell is empty (no gateway runtime ever ran), so we fall back to
-    /// a freshly constructed `serenity::http::Http` built from the bot
-    /// token cached in `cached_bot_token`. Returns `None` only when both
-    /// caches are empty — that means the runtime never reached the
-    /// "token known" milestone in `run_bot()`, which today only happens
-    /// before `bot_settings` finishes loading.
+    /// Returns an `Arc<Http>` for posting to Discord outside the gateway
+    /// event loop (tmux watcher, placeholder updates, message edits).
     ///
-    /// Callers should treat `None` as a hard failure: they cannot post
-    /// to Discord without an Http instance. The current call sites
-    /// either propagate the failure (skip the work + warn) or have
-    /// their own panic-on-None invariant tied to `cached_bot_token`
-    /// being populated at `run_bot()` startup.
+    /// Prefers `ctx.http` from the cached gateway context so it shares the
+    /// gateway's application_id and connection pool; on cluster-standby nodes
+    /// (no gateway ever ran) falls back to a fresh `Http` built from the
+    /// cached bot token. Returns `None` only if neither cache is populated —
+    /// i.e. before `bot_settings` finishes loading during `run_bot()`.
+    ///
+    /// Callers must treat `None` as a hard failure: they cannot post to
+    /// Discord without an `Http` instance.
     pub(in crate::services::discord) fn serenity_http_or_token_fallback(
         &self,
     ) -> Option<Arc<serenity::http::Http>> {
@@ -120,68 +84,46 @@ impl SharedData {
     }
 }
 
-/// #3038 cluster C — the queued-placeholder handoff state.
-///
-/// Groups the three fields that together implement the `📬 메시지 대기 중`
-/// queued-card lifecycle: the in-memory mapping, the queue-exit clear sidecar
-/// mirror, and the per-channel persistence mutexes that serialize ownership-
-/// coupled mutations. See the per-field docs below for the round-5 P2 lock-span
-/// invariant they jointly enforce.
+/// #3038 cluster C — queued-placeholder handoff state: the `📬 메시지 대기 중`
+/// card mapping, its queue-exit clear sidecar mirror, and the per-channel
+/// persistence mutexes serializing ownership-coupled mutations (see field
+/// docs for the lock-span invariant).
 pub(in crate::services::discord) struct QueuedPlaceholderState {
-    /// #1332: per-channel mapping from a mailbox-queued user message id to the
-    /// Discord placeholder message id displaying the `📬 메시지 대기 중` card.
-    /// Populated when `mailbox_try_start_turn` reports the new message lost the
-    /// race; consumed by the dispatch path when the queued turn is dequeued so
-    /// the existing Queued card transitions to `Active` instead of leaking a
-    /// duplicate placeholder.
+    /// Per-channel mapping from a mailbox-queued user message id to the
+    /// Discord placeholder message id showing the `📬 메시지 대기 중` card.
+    /// Populated on start-turn race loss; consumed on dequeue so the card
+    /// transitions to `Active` instead of leaking a duplicate.
     pub(in crate::services::discord) queued_placeholders:
         dashmap::DashMap<(ChannelId, MessageId), MessageId>,
-    /// #1362: queue-exit placeholder cards that were removed from
-    /// `queued_placeholders` while `cached_serenity_ctx` was not ready. Kept in
-    /// memory and mirrored to a sidecar so ready-time drain can delete the
-    /// visible stale `📬` cards after the Discord HTTP client exists.
+    /// Queue-exit placeholder cards removed from `queued_placeholders` while
+    /// `cached_serenity_ctx` was not ready. Mirrored to a sidecar so ready-time
+    /// drain can delete the stale `📬` cards once the HTTP client exists.
     pub(in crate::services::discord) queue_exit_placeholder_clears:
         dashmap::DashMap<(ChannelId, MessageId), MessageId>,
-    /// #1332 round-4 codex review P2 + round-5 P2: per-channel mutex guarding
-    /// `queued_placeholders` snapshot writes AND any Discord PATCH that
-    /// asserts queued ownership. When two updates for the same channel race
-    /// (e.g., two messages lose the start-turn race simultaneously, or an
-    /// insert races a queue-exit drain), each caller must serialize its
-    /// `(snapshot DashMap → atomic_write file)` block so an older snapshot
-    /// cannot finish last and overwrite a newer mapping. Round-5 extends the
-    /// lock to span the ownership recheck + Discord edit + persistence
-    /// rollback in the race-loss render path so the same Discord message can
-    /// never be written by both the queued-placeholder render and the
+    /// Per-channel mutex guarding `queued_placeholders` snapshot writes and
+    /// any Discord PATCH asserting queued ownership, so a stale snapshot can
+    /// never overwrite a newer mapping and the same Discord message is never
+    /// written by both the queued-placeholder render and the
     /// dispatch/queue-exit cleanup paths.
     ///
-    /// Invariant (round-5 P2): any Discord PATCH that asserts queued
-    /// ownership MUST hold this lock across both the ownership recheck AND
-    /// the PATCH (and across the persistence write that follows). The map
-    /// fast-path stays on the lock-free `DashMap` above; only ownership-
-    /// coupled mutations are serialized per channel. The lock is async
-    /// (`tokio::sync::Mutex`) so it can be held across `.await` points
-    /// without blocking the runtime worker.
+    /// Invariant: hold this lock across the ownership recheck, the PATCH,
+    /// and the persistence write that follows. Only ownership-coupled
+    /// mutations are serialized — the map fast-path stays lock-free. Async
+    /// so it can be held across `.await` points.
     pub(in crate::services::discord) queued_placeholders_persist_locks:
         dashmap::DashMap<ChannelId, Arc<tokio::sync::Mutex<()>>>,
 }
 
 /// #3038 cluster C — inherent methods that exclusively own
-/// [`QueuedPlaceholderState`]. Moved verbatim from `discord/mod.rs`; the only
-/// edits are the mechanical `self.<field>` → `self.queued.<field>` re-wiring
-/// and the `queued_placeholders_store::` → `super::queued_placeholders_store::`
-/// path adjustment. Signatures, visibility, `.await` points, and lock
-/// acquisition/release order are unchanged.
+/// [`QueuedPlaceholderState`].
 impl SharedData {
-    /// #1332 round-4 codex review P2 + round-5 P2: fetch (or create) the
-    /// per-channel persistence mutex. The mutex itself is stored as
+    /// Fetch (or create) the per-channel persistence mutex. Stored as
     /// `Arc<tokio::sync::Mutex<()>>` so callers can clone it out of the
     /// `DashMap` and release the shard lock before acquiring the channel
-    /// mutex — eliminating any chance of a deadlock between DashMap shard
-    /// locks and the persistence mutex. Round-5 switched from
-    /// `std::sync::Mutex` to `tokio::sync::Mutex` so the lock can be held
-    /// across `.await` points (specifically the `ensure_queued` Discord
-    /// PATCH in the race-loss render path) without blocking a runtime
-    /// worker.
+    /// mutex, avoiding a deadlock between DashMap shard locks and the
+    /// persistence mutex. `tokio::sync::Mutex` so the lock can be held across
+    /// `.await` points (e.g. the `ensure_queued` Discord PATCH in the
+    /// race-loss render path).
     pub(in crate::services::discord) fn queued_placeholders_persist_lock(
         &self,
         channel_id: ChannelId,
@@ -193,11 +135,9 @@ impl SharedData {
             .clone()
     }
 
-    /// #1332 round-5 codex review P2: insert variant that assumes the
-    /// caller already holds the per-channel persistence mutex. Used by the
-    /// race-loss render path so the lock can span ownership recheck +
-    /// `ensure_queued` PATCH + persistence write (and an optional rollback)
-    /// without re-acquiring the lock between steps.
+    /// Insert variant that assumes the caller already holds the per-channel
+    /// persistence mutex, so the race-loss render path can span the ownership
+    /// recheck, PATCH, and persistence write under one lock acquisition.
     pub(in crate::services::discord) fn insert_queued_placeholder_locked(
         &self,
         channel_id: ChannelId,
@@ -215,12 +155,9 @@ impl SharedData {
         );
     }
 
-    /// #1332 round-3 codex review P2 + round-4 P2 + round-5 P2: write-through
-    /// remove for the `queued_placeholders` mapping. Returns the placeholder
-    /// message id that was removed (if any) so callers can drive the same
-    /// downstream flow as the raw `DashMap::remove`. Mutation + snapshot run
-    /// under the per-channel persistence mutex; see
-    /// `insert_queued_placeholder` for the deadlock-avoidance rationale.
+    /// Write-through remove for the `queued_placeholders` mapping. Returns
+    /// the removed placeholder message id, if any, under the per-channel
+    /// persistence mutex.
     pub(super) async fn remove_queued_placeholder(
         &self,
         channel_id: ChannelId,
@@ -231,10 +168,8 @@ impl SharedData {
         self.remove_queued_placeholder_locked(channel_id, user_msg_id)
     }
 
-    /// #1332 round-5 codex review P2: remove variant that assumes the caller
-    /// already holds the per-channel persistence mutex. Used by the
-    /// race-loss render path's rollback branch so the entire ownership-
-    /// coupled critical section runs under one async lock acquisition.
+    /// Remove variant that assumes the caller already holds the per-channel
+    /// persistence mutex, for the race-loss render path's rollback branch.
     pub(in crate::services::discord) fn remove_queued_placeholder_locked(
         &self,
         channel_id: ChannelId,
@@ -254,14 +189,12 @@ impl SharedData {
         removed
     }
 
-    /// #1332 round-3 codex review P1: atomic ownership recheck for the
-    /// race-loss render path. After enqueueing the intervention, the active
-    /// turn might finish concurrently and the dispatch path can already have
-    /// consumed our `(channel_id, user_msg_id)` mapping — at which point the
-    /// placeholder we POSTed has been promoted to the live response card.
-    /// Returns `true` only when the mapping still points at our exact
-    /// `placeholder_msg_id`; callers MUST exit gracefully (without editing or
-    /// deleting Discord state) if this returns `false`.
+    /// Atomic ownership recheck for the race-loss render path: the active
+    /// turn may finish concurrently and consume our mapping before we get
+    /// here, promoting our placeholder to the live response card. Returns
+    /// `true` only when the mapping still points at our exact
+    /// `placeholder_msg_id`; callers MUST exit without touching Discord
+    /// state if this returns `false`.
     pub(super) fn queued_placeholder_still_owned(
         &self,
         channel_id: ChannelId,
@@ -275,12 +208,6 @@ impl SharedData {
             .unwrap_or(false)
     }
 
-    // #3038 S1: this method was module-private in `discord/mod.rs`; the verbatim
-    // move to this sibling module requires widening its visibility to
-    // `pub(in crate::services::discord)` so the same mod.rs callers
-    // (`apply_queue_exit_feedback`) still resolve it. This is a compile-time-only
-    // re-annotation that keeps the effective reachability identical (the method
-    // was already reachable from every `discord` module via inherent dispatch).
     pub(in crate::services::discord) async fn add_pending_queue_exit_placeholder_clears(
         &self,
         channel_id: ChannelId,
@@ -304,12 +231,10 @@ impl SharedData {
         );
     }
 
-    /// #2044 F13: enqueue a single deferred placeholder-clear when an
-    /// inline `delete_message` from a non-queue-exit path (e.g.
-    /// `render_visible_queued_ack`) fails. Mirrors the persistence
-    /// behaviour of `add_pending_queue_exit_placeholder_clears` so the
-    /// retry survives a restart and is drained by the same
-    /// `drain_pending_queue_exit_placeholder_clears` worker.
+    /// Enqueues a single deferred placeholder-clear when an inline
+    /// `delete_message` from a non-queue-exit path (e.g.
+    /// `render_visible_queued_ack`) fails, so the retry survives a restart
+    /// and is drained by `drain_pending_queue_exit_placeholder_clears`.
     pub(in crate::services::discord) async fn add_pending_queue_exit_placeholder_clear_one(
         &self,
         channel_id: ChannelId,
@@ -329,8 +254,6 @@ impl SharedData {
         );
     }
 
-    // #3038 S1: widened from module-private to `pub(in crate::services::discord)`
-    // for the cross-module verbatim move (see `add_pending_queue_exit_placeholder_clears`).
     pub(in crate::services::discord) async fn remove_pending_queue_exit_placeholder_clears(
         &self,
         channel_id: ChannelId,
@@ -361,8 +284,6 @@ impl SharedData {
         );
     }
 
-    // #3038 S1: widened from module-private to `pub(in crate::services::discord)`
-    // for the cross-module verbatim move (see `add_pending_queue_exit_placeholder_clears`).
     pub(in crate::services::discord) fn pending_queue_exit_placeholder_clears(
         &self,
     ) -> Vec<(ChannelId, MessageId, MessageId)> {
@@ -377,20 +298,12 @@ impl SharedData {
     }
 }
 
-/// #3038 cluster D — session-scoped override / reset-pending state.
-///
-/// Groups the eight fields that together implement per-channel runtime
-/// overrides (model override, native fast mode, Codex goals) and the
-/// session-reset bookkeeping they drive: the per-cause `*_session_reset_pending`
-/// sets, the aggregated `session_reset_pending` set kept in sync by
-/// `commands::config::sync_session_reset_pending`, and the staged `/model`
-/// picker selections. Field declarations, docs, and types moved verbatim from
-/// `discord/mod.rs`; the members' original `pub(super)` annotations (declared
-/// in `discord/mod.rs`, i.e. visible up to `crate::services`) are re-spelled
-/// per-field as the semantically identical `pub(in crate::services)` because
-/// `pub(super)` written *here* would shrink the scope to
-/// `crate::services::discord` — a compile-time-only re-annotation with zero
-/// runtime effect.
+/// #3038 cluster D — session-scoped override / reset-pending state:
+/// per-channel model override, native fast mode, and Codex goals, plus the
+/// session-reset bookkeeping they drive (the per-cause
+/// `*_session_reset_pending` sets, the aggregated `session_reset_pending` set
+/// kept in sync by `commands::config::sync_session_reset_pending`, and the
+/// staged `/model` picker selections).
 pub(in crate::services) struct SessionOverrideState {
     /// Per-channel model override, independent of session lifecycle.
     /// Takes priority over role-map model. Cleared via the `/model` picker default option.
@@ -418,43 +331,30 @@ pub(in crate::services) struct SessionOverrideState {
         dashmap::DashMap<MessageId, ModelPickerPendingState>,
 }
 
-/// #3479 Item 3 — dispatch intake/routing state.
-///
-/// Groups the three cohesive per-dispatch routing maps that together decide
-/// whether an incoming bot message starts a new turn, is deduped, or is routed
-/// into an existing dispatch thread / counter-model channel. Field declarations,
-/// docs, and types moved verbatim from `discord/mod.rs`; the members keep their
-/// original `pub(super)` (== `pub(in crate::services)`) visibility, and call
-/// sites use `shared.dispatch.<original field name>`.
+/// #3479 — per-dispatch routing maps deciding whether an incoming bot message
+/// starts a new turn, is deduped, or is routed into an existing dispatch
+/// thread / counter-model channel.
 pub(in crate::services) struct DispatchRoutingState {
     /// Intake-level dedup cache: prevents the same message from starting two turns
     /// when duplicate bot dispatches arrive nearly simultaneously.
     /// Key: dedup key (dispatch_id or channel+author+text hash).
     /// Value: (first-seen Instant, was_thread_context).
     pub(in crate::services) intake_dedup: dashmap::DashMap<String, (std::time::Instant, bool)>,
-    /// Maps parent channel → active dispatch thread channel.
-    /// When a dispatch creates a thread, the parent is recorded here so that
-    /// subsequent bot messages to the parent are queued instead of starting
-    /// a parallel turn.  Cleared when the dispatch thread turn completes.
+    /// Maps parent channel → active dispatch thread channel, so subsequent
+    /// bot messages to the parent are queued instead of starting a parallel
+    /// turn. Cleared when the dispatch thread turn completes.
     pub(in crate::services) thread_parents: dashmap::DashMap<ChannelId, ChannelId>,
-    /// Per-thread role/model override for cross-channel dispatch reuse.
-    /// When a review dispatch reuses an implementation thread, this maps
+    /// Per-thread role/model override for cross-channel dispatch reuse: maps
     /// thread_channel_id → alt_channel_id so role_binding and model_for_turn
     /// resolve from the counter-model channel instead of the thread's parent.
     /// Cleared when the turn completes.
     pub(in crate::services) role_overrides: dashmap::DashMap<ChannelId, ChannelId>,
 }
 
-// #3038 cluster D — free-function helpers that exclusively own
-// [`SessionOverrideState`]. Moved verbatim from `commands/config.rs` (which
-// re-exports them so every `super::config::*` importer and unqualified call
-// site is unchanged). The only edits are the per-item visibility
-// re-annotations documented inline; bodies, signatures, and the
-// `shared.overrides.<field>` access paths are byte-identical to the
-// pre-move state of this slice. The settings-coupled writers
-// (`update_channel_fast_mode` / `update_channel_codex_goals` /
-// `update_channel_model_override`) intentionally stay in config.rs: they mix
-// this cluster with `settings` persistence (`save_bot_settings`).
+// Free-function helpers over `SessionOverrideState`. The settings-coupled
+// writers (`update_channel_fast_mode` / `update_channel_codex_goals` /
+// `update_channel_model_override`) intentionally stay in config.rs since they
+// mix this cluster with `settings` persistence (`save_bot_settings`).
 
 pub(in crate::services::discord) fn fast_mode_reset_pending_key(
     channel_id: serenity::ChannelId,
@@ -487,11 +387,6 @@ fn fast_mode_reset_entry_matches_channel(entry: &str, channel_id: serenity::Chan
         .unwrap_or(false)
 }
 
-// #3038 S2: this helper was module-private in `commands/config.rs`; the
-// verbatim move requires widening it to `pub(in crate::services::discord)`
-// because one caller (`update_channel_fast_mode`, a settings-coupled writer)
-// stays behind in config.rs and resolves it through the re-export there.
-// Compile-time-only re-annotation; effective reachability is unchanged.
 pub(in crate::services::discord) fn fast_mode_reset_entry_matches_provider(
     entry: &str,
     channel_id: serenity::ChannelId,
@@ -612,37 +507,23 @@ pub(in crate::services::discord) fn clear_codex_goals_reset_pending_for_channel(
         .is_some()
 }
 
-/// #3038 cluster E — restart-lifecycle state.
+/// #3038 cluster E — restart-lifecycle state: per-channel recovery/reconcile
+/// bookkeeping for the current boot, restart/shutdown drain flags, and the
+/// process-global active/finalizing/shutdown counters.
 ///
-/// Groups the thirteen fields that together implement the
-/// boot-to-shutdown lifecycle of one provider runtime: the per-channel
-/// recovery markers and reconcile bookkeeping for the current boot, the
-/// restart/shutdown drain flags and restart generation, and the
-/// process-global active / finalizing / shutdown counters. Field
-/// declarations, docs, and types moved verbatim from `discord/mod.rs`;
-/// the members' original `pub(super)` annotations (declared in
-/// `discord/mod.rs`, i.e. visible up to `crate::services`) are re-spelled
-/// per-field as the semantically identical `pub(in crate::services)`
-/// because `pub(super)` written *here* would shrink the scope to
-/// `crate::services::discord` — a compile-time-only re-annotation with
-/// zero runtime effect.
-///
-/// INVARIANT (#3038 S3, HANDOFF design): `global_active`,
-/// `global_finalizing`, and `shutdown_remaining` are *injected* `Arc`
-/// handles shared across every provider's `SharedData` (see
-/// `RunBotContext` / `run_bot_build_shared_data`). They MUST stay
-/// `Arc`-typed — flattening any of them into a plain atomic would
-/// silently fork the process-global counter per provider and break the
-/// deferred-restart / shutdown barrier arithmetic.
+/// INVARIANT: `global_active`, `global_finalizing`, and `shutdown_remaining`
+/// are *injected* `Arc` handles shared across every provider's `SharedData`
+/// (see `RunBotContext`). They MUST stay `Arc`-typed — flattening any into a
+/// plain atomic would silently fork the process-global counter per provider
+/// and break the deferred-restart / shutdown barrier arithmetic.
 pub(in crate::services) struct RestartLifecycle {
-    /// Per-channel in-flight turn recovery marker (restart resume in progress)
-    /// Value is the Instant when recovery started, used for stale-recovery timeout.
+    /// Per-channel restart-resume marker: Instant when recovery started, for
+    /// stale-recovery timeout.
     pub(in crate::services) recovering_channels: dashmap::DashMap<ChannelId, std::time::Instant>,
     /// Global shutdown flag — when set, watchers exit quietly via cancel path
     pub(in crate::services) shutting_down: Arc<std::sync::atomic::AtomicBool>,
-    /// Provider-local intake tick activity. The deferred-restart poller fences
-    /// admissions, waits for this handle to drain, then acknowledges its marker
-    /// and consumes this provider's process-global shutdown-barrier slot.
+    /// Provider-local intake tick activity; the deferred-restart poller uses
+    /// it to fence admissions before consuming this provider's shutdown slot.
     pub(in crate::services) intake_worker_lifecycle:
         crate::services::cluster::intake_worker::IntakeWorkerLifecycle,
     /// Number of turns currently in finalization phase (response sending + cleanup).
@@ -659,9 +540,8 @@ pub(in crate::services) struct RestartLifecycle {
     pub(in crate::services) reconcile_done: Arc<std::sync::atomic::AtomicBool>,
     /// Number of queued deferred idle-queue kickoffs waiting to run.
     pub(in crate::services) deferred_hook_backlog: std::sync::atomic::AtomicUsize,
-    /// Per-channel live deferred idle-queue kickoff guard. A channel may have at
-    /// most one fast/slow deferred drain task active; the task removes its entry
-    /// when its backlog guard drops.
+    /// Per-channel deferred idle-queue kickoff guard: one drain task active
+    /// per channel, removed when its backlog guard drops.
     pub(in crate::services) deferred_hook_channels:
         dashmap::DashMap<ChannelId, Arc<tokio::sync::Notify>>,
     /// When this provider started reconcile/recovery for the current boot.
@@ -685,20 +565,15 @@ pub(in crate::services) struct RestartLifecycle {
     pub(in crate::services) shutdown_slot_consumed: std::sync::atomic::AtomicBool,
 }
 
-/// #5485 S2a — read-only transport for the process-global shutdown flag.
+/// #5485 — read-only view of the process-global shutdown flag for workers
+/// that only *observe* shutdown (intake poll loop, voice
+/// sensitivity/progress/rejoin workers), so they cannot flip the flag for the
+/// whole process.
 ///
-/// Workers that merely *observe* shutdown (the intake poll loop, the voice
-/// sensitivity/progress/rejoin workers) used to be handed a raw
-/// `Arc<AtomicBool>` clone of [`RestartLifecycle::shutting_down`], which is a
-/// full write capability: the handle a poll loop reads with was the same
-/// handle that could flip the flag for the whole process.
-///
-/// `ShutdownReader` is that identical allocation with the write half removed.
 /// [`ShutdownReader::load`] and `Clone` are the entire surface — no `Deref`,
-/// `AsRef`, `From<Arc<_>>`, `store`, `swap`, or inner-handle accessor, and
-/// cloning yields another reader rather than the wrapped `Arc`. Behaviour is
-/// unchanged: readers see the very same allocation the writers store into and
-/// every migrated call site keeps its original memory ordering verbatim.
+/// `AsRef`, `From<Arc<_>>`, `store`, or `swap`. Readers see the same
+/// allocation the writer stores into; cloning yields another reader, not the
+/// wrapped `Arc`.
 #[derive(Clone)]
 pub(in crate::services) struct ShutdownReader(Arc<std::sync::atomic::AtomicBool>);
 
@@ -711,74 +586,64 @@ impl ShutdownReader {
 }
 
 impl RestartLifecycle {
-    /// Hand out a read-only view of the process-global shutdown flag. This is
-    /// the ONLY constructor of [`ShutdownReader`]: the wrapped handle is a
-    /// private tuple field of this module, so nothing outside can wrap an
-    /// arbitrary `Arc` into observer capability or unwrap this one into a writer.
+    /// Hand out a read-only view of the shutdown flag. The only constructor
+    /// of [`ShutdownReader`]: its wrapped handle is a private tuple field, so
+    /// nothing outside can forge observer capability or unwrap it into a
+    /// writer.
     pub(in crate::services) fn shutdown_reader(&self) -> ShutdownReader {
         ShutdownReader(self.shutting_down.clone())
     }
 
-    /// #5485 S2a — deferred-restart poller, admission-fence publish
-    /// (`runtime_bootstrap::deferred_restart::begin_deferred_restart`).
+    /// Deferred-restart poller admission-fence publish (`begin_deferred_restart`).
     pub(in crate::services::discord) fn legacy_deferred_begin(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
     }
 
-    /// #5485 S2a — deferred-restart poller, health-visible acknowledgement
-    /// (`runtime_bootstrap::deferred_restart::prepare_deferred_restart`).
+    /// Deferred-restart poller health-visible ack (`prepare_deferred_restart`).
     pub(in crate::services::discord) fn legacy_deferred_ack(&self) {
         self.restart_pending.store(true, Ordering::SeqCst);
     }
 
-    /// #5485 S2a — deferred-restart rollback (`deferred_restart`), clearing in
-    /// the original order: shutdown flag first, acknowledgement second.
+    /// Deferred-restart rollback: clears in the original order, shutdown flag
+    /// first, acknowledgement second.
     pub(in crate::services::discord) fn legacy_deferred_rollback(&self) {
         self.shutting_down.store(false, Ordering::SeqCst);
         self.restart_pending.store(false, Ordering::SeqCst);
     }
 
-    /// #5485 S2a — standby promotion fence, applied to every provider runtime
-    /// (`runtime_bootstrap::gateway_lease_recovery`).
+    /// Standby promotion fence, applied to every provider runtime.
     pub(in crate::services::discord) fn legacy_promotion_fence(&self) {
         self.restart_pending.store(true, Ordering::SeqCst);
     }
 
-    /// #5485 S2a — standby promotion unfence
-    /// (`runtime_bootstrap::gateway_lease_recovery::unfence_runtimes`).
+    /// Standby promotion unfence (`gateway_lease_recovery::unfence_runtimes`).
     pub(in crate::services::discord) fn legacy_promotion_unfence(&self) {
         self.restart_pending.store(false, Ordering::SeqCst);
     }
 
-    /// #5485 S2a — gateway lease loss self-fence (`gateway_lease`): shut down
-    /// and leave the restart request behind so launchd brings the process back.
+    /// Gateway lease loss self-fence: shuts down and leaves the restart
+    /// request behind so launchd brings the process back.
     pub(in crate::services::discord) fn legacy_lease_lost(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         self.restart_pending.store(true, Ordering::SeqCst);
     }
 
-    /// #5485 S2a — SIGTERM handler (`runtime_bootstrap::shutdown`).
+    /// SIGTERM handler.
     pub(in crate::services::discord) fn legacy_sigterm(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
-        // Block dequeue and put router into drain mode so no new
-        // queue/checkpoint mutations occur during shutdown.
+        // Drain mode: no new queue/checkpoint mutations during shutdown.
         self.restart_pending.store(true, Ordering::SeqCst);
     }
 }
 
 #[cfg(test)]
 pub(in crate::services::discord) mod restart_lifecycle_tests {
-    //! #3038 S3 — post-extraction regression pin for the
-    //! `check_deferred_restart` fresh-token branch. This branch needs
-    //! `restart_pending == true` while `shutdown_counted == false`, a state
-    //! only the (unseedable in-process) SIGTERM handler produces without
-    //! writing fields directly, so the pre-move characterization suite
-    //! (`runtime_bootstrap::restart_lifecycle_characterization_tests`) could
-    //! not cover it through the function surface alone. Post-move tests may
-    //! seed the group fields freely; together with the unmodified
-    //! characterization tests this completes the check_deferred_restart
-    //! decision matrix (the final-provider `exit(0)` arm stays untestable —
-    //! `shutdown_remaining` is kept above 1 here).
+    //! Regression pin for the `check_deferred_restart` fresh-token branch: it
+    //! needs `restart_pending == true` while `shutdown_counted == false`, a
+    //! state only the SIGTERM handler produces without direct field writes,
+    //! so it can't be driven through the public function surface alone (the
+    //! final-provider `exit(0)` arm stays untestable — `shutdown_remaining`
+    //! is kept above 1 here).
 
     use std::sync::atomic::Ordering;
 
