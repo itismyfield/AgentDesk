@@ -6297,6 +6297,8 @@ services::discord::tui_prompt_relay::synthetic_start::tests::real_owner_without_
 services::discord::tui_prompt_relay::synthetic_start::tests::stale_synthetic_owner_finalized_row_reclaims_for_new_turn
 services::discord::tui_prompt_relay::synthetic_start::tests::stale_synthetic_owner_live_inflight_still_skips_reclaim
 services::discord::tui_prompt_relay::synthetic_start::tests::stale_synthetic_owner_replaced_requires_same_tmux_session
+services::discord::tui_prompt_relay::synthetic_start::tests::stamped_source_witness_refuses_a_delegated_relay_row
+services::discord::tui_prompt_relay::synthetic_start::tests::stamped_source_witness_refuses_a_foreign_allocation_on_the_same_channel
 services::discord::tui_prompt_relay::synthetic_start::tests::stream_tick_stamp_carries_the_allocation_witness
 services::discord::tui_prompt_relay::synthetic_start::tests::synthetic_finish_routes_release_through_finalizer
 services::discord::tui_prompt_relay::synthetic_start::tests::synthetic_finish_session_key_mismatch_preserves_newer_turn

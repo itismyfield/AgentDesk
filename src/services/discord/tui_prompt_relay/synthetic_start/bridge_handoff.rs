@@ -249,10 +249,17 @@ pub(in crate::services::discord) fn preserve_admitted_source(
 /// Exact equality against `before` proves the row is still the one the witness
 /// describes, and `is_same_episode_as` proves the write did not install a
 /// successor allocation; a missing witness or a dead one is left untouched.
+/// `is_same_episode_as` deliberately ignores relay ownership, so the same
+/// delegation gate `record` applies at insert is re-applied here: a tick that
+/// hands the relay to a watcher or a concurrent owner must not carry a witness
+/// onto a row `record` would have refused to witness at all.
 pub(in crate::services::discord) fn preserve_stamped_source(
     before: &InflightEpisodePin,
     stamped: &InflightTurnState,
 ) {
+    if stamped.effective_relay_owner_kind() != RelayOwnerKind::None {
+        return;
+    }
     let advanced = InflightEpisodePin::from_state(stamped);
     if !before.is_same_episode_as(&advanced) {
         return;

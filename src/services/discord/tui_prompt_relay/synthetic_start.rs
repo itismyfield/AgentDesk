@@ -462,16 +462,123 @@ mod tests {
             "the witness follows its own episode across the stream-tick stamp"
         );
 
-        // The same carry cannot hand a successor allocation A's proof.
-        let mut successor = local.clone();
-        successor.turn_nonce = Some("5981-successor-nonce".into());
-        bridge_handoff::preserve_stamped_source(
-            &InflightEpisodePin::from_state(&local),
-            &successor,
+        // The same carry cannot hand a successor allocation A's proof. A
+        // restart re-admits through `CancelToken::from_persisted_turn_nonce`,
+        // so the nonce is the one birth axis a successor shares; each of the
+        // rest has to refuse the carry on its own.
+        let current = InflightEpisodePin::from_state(&local);
+        let successors: [(&str, fn(&mut InflightTurnState)); 5] = [
+            ("turn_nonce", |row| {
+                row.turn_nonce = Some("5981-successor-nonce".into());
+            }),
+            ("born_generation", |row| row.born_generation += 1),
+            ("started_at", |row| {
+                row.started_at = "1970-01-01 00:00:01".into();
+            }),
+            ("user_msg_id", |row| row.user_msg_id += 1),
+            ("request_owner_user_id", |row| row.request_owner_user_id += 1),
+        ];
+        for (axis, mutate) in successors {
+            let mut successor = local.clone();
+            mutate(&mut successor);
+            bridge_handoff::preserve_stamped_source(&current, &successor);
+            assert!(
+                bridge_handoff::retained_actor(&successor).is_err(),
+                "a successor differing only in {axis} adopted the live witness"
+            );
+            assert!(
+                Arc::ptr_eq(
+                    &bridge_handoff::retained_actor(&local).unwrap().unwrap(),
+                    &actor
+                ),
+                "a successor differing only in {axis} displaced the live witness"
+            );
+        }
+    }
+
+    /// #5981 follow-up — `CLAIMS` is keyed by `(provider, channel_id)` alone, so
+    /// a witness can outlive the allocation that installed it and still be the
+    /// only entry a later allocation on that channel finds. Repainting it onto
+    /// the newcomer's row would leave the first allocation's actor attached,
+    /// and `retained_actor` would then hand that actor to the newcomer.
+    #[test]
+    fn stamped_source_witness_refuses_a_foreign_allocation_on_the_same_channel() {
+        use inflight::InflightEpisodePin;
+        let channel = ChannelId::new(5_984_101);
+        let mut first =
+            synthetic_state(channel, MessageId::new(5_984_102), "witness-5984-a", false);
+        first.relay_ownership_only = false;
+        first.current_msg_id = 5_984_103;
+        first.external_turn_id = Some("external-witness-5984-a".into());
+        let first_actor = Arc::new(CancelToken::new());
+        first.turn_nonce = first_actor.turn_nonce().map(str::to_owned);
+        assert!(bridge_handoff::record(&first, Some(&first_actor), None));
+
+        // The second allocation never lands a witness of its own: `record`
+        // refuses a row whose external turn id is not published yet.
+        let mut second =
+            synthetic_state(channel, MessageId::new(5_984_202), "witness-5984-b", false);
+        second.relay_ownership_only = false;
+        second.current_msg_id = 5_984_203;
+        second.born_generation = first.born_generation + 1;
+        let second_actor = Arc::new(CancelToken::new());
+        second.turn_nonce = second_actor.turn_nonce().map(str::to_owned);
+        assert!(!bridge_handoff::record(&second, Some(&second_actor), None));
+
+        let before = InflightEpisodePin::from_state(&second);
+        let mut stamped = second.clone();
+        stamped.session_id = Some("native-session-5984-b".into());
+        assert!(
+            before.is_same_episode_as(&InflightEpisodePin::from_state(&stamped)),
+            "the second allocation's own tick must reach the witness filter"
         );
-        assert!(bridge_handoff::retained_actor(&successor).is_err());
+        bridge_handoff::preserve_stamped_source(&before, &stamped);
+        assert!(
+            bridge_handoff::retained_actor(&stamped).is_err(),
+            "the second allocation adopted the first one's surviving actor"
+        );
         assert!(Arc::ptr_eq(
-            &bridge_handoff::retained_actor(&local).unwrap().unwrap(),
+            &bridge_handoff::retained_actor(&first).unwrap().unwrap(),
+            &first_actor
+        ));
+    }
+
+    /// #5981 follow-up — `is_same_episode_as` deliberately leaves relay
+    /// ownership out, so a tick that hands the relay to a watcher still reads
+    /// as the same episode. `record` declines to witness a delegated row at
+    /// all; the stamped carry has to decline it too, or a witness rides across
+    /// the handoff onto a row that never earned one.
+    #[test]
+    fn stamped_source_witness_refuses_a_delegated_relay_row() {
+        use inflight::InflightEpisodePin;
+        let channel = ChannelId::new(5_984_301);
+        let mut row = synthetic_state(channel, MessageId::new(5_984_302), "witness-5984-c", false);
+        row.relay_ownership_only = false;
+        row.current_msg_id = 5_984_303;
+        row.external_turn_id = Some("external-witness-5984-c".into());
+        let actor = Arc::new(CancelToken::new());
+        row.turn_nonce = actor.turn_nonce().map(str::to_owned);
+        assert!(bridge_handoff::record(&row, Some(&actor), None));
+        let before = InflightEpisodePin::from_state(&row);
+
+        let mut delegated = row.clone();
+        delegated.session_id = Some("native-session-5984-c".into());
+        delegated.watcher_owns_live_relay = true;
+        assert_eq!(
+            delegated.effective_relay_owner_kind(),
+            RelayOwnerKind::Watcher
+        );
+        assert!(
+            before.is_same_episode_as(&InflightEpisodePin::from_state(&delegated)),
+            "the handoff tick must reach the witness filter"
+        );
+        bridge_handoff::preserve_stamped_source(&before, &delegated);
+        assert!(
+            bridge_handoff::retained_actor(&delegated).is_err(),
+            "the witness followed the relay handoff onto a delegated row"
+        );
+        assert!(Arc::ptr_eq(
+            &bridge_handoff::retained_actor(&row).unwrap().unwrap(),
             &actor
         ));
     }
