@@ -325,18 +325,45 @@ fn terminal_ordering_fixture(
                     )).await.unwrap_or_else(|_| panic!("{race:?} dormant recovery exceeds its bound"));
                 if !recovered {
                     let current = crate::services::discord::mailbox_snapshot(&shared, channel).await;
+                    // Claude-schema extraction: a Codex transcript always reads back
+                    // empty here, so `body_bytes`/`body_matches` only mean something
+                    // for `ProviderKind::Claude`. The provider is printed first so
+                    // the next reader is not misled by a structural zero.
                     let extracted = crate::services::discord::recovery_engine::extract_response_from_output_pub(
                         &output.to_string_lossy(), retained.turn_start_offset.unwrap());
-                    panic!("{race:?} dormant recovery did not settle the original exact source: \
+                    // #5965: `capture_dormant` also refuses on PROCESS-GLOBAL gates
+                    // keyed by the tmux session name and by (provider, channel). A
+                    // stale entry in any of them is indistinguishable from a genuine
+                    // source mismatch in the fields above, so name the gate instead
+                    // of leaving the next sweep failure to guess which one fired.
+                    let idle_tail_registered = CLAUDE_IDLE_RESPONSE_TAILS
+                        .lock().unwrap_or_else(|error| error.into_inner()).contains(tmux);
+                    let live_producer = crate::services::cluster::relay_producer_registry
+                        ::global_relay_producer_registry().get_live_producer(tmux).is_some();
+                    let watcher_can_own = synthetic_start::tui_direct_watcher_can_own_output(
+                        &shared.tmux_watchers, tmux, Some(output.as_path()));
+                    let live_lease = crate::services::tui_prompt_dedupe::external_input_relay_lease(
+                        provider.as_str(), tmux, channel.get()).map(|lease| lease.turn_id);
+                    // The very first gate is a `try_lock_owned` on the process-global
+                    // per-(provider, channel) serial lock. It is the only refusal that
+                    // leaves every field above intact, so report it explicitly rather
+                    // than letting a contended lock read as a source mismatch.
+                    let channel_serial_free = crate::services::discord::tui_direct_pending_start
+                        ::channel_lock(provider.as_str(), channel.get()).try_lock().is_ok();
+                    panic!("{race:?}/{provider:?} dormant recovery did not settle the original exact source: \
                         same_actor={}, cancelled={}, relay_in_flight={}, range={:?}..{}, file_end={}, \
-                        body_bytes={}/{}, body_matches={}, generation={:?}/{}, row_path={:?}, caller_path={:?}",
+                        body_bytes={}/{}, body_matches={}, generation={:?}/{}, row_path={:?}, caller_path={:?}, \
+                        channel_serial_free={channel_serial_free}, \
+                        idle_tail_registered={idle_tail_registered}, live_producer={live_producer}, \
+                        watcher_can_own={watcher_can_own}, live_lease={live_lease:?}, \
+                        streamed_before_terminal={streamed_before_terminal}, gateway traffic: {}",
                         current.cancel_token.as_ref().is_some_and(|actor| Arc::ptr_eq(actor, &original_actor)),
                         original_actor.cancelled.load(std::sync::atomic::Ordering::Acquire),
                         shared.relay_emission_in_flight(channel), retained.turn_start_offset, retained.last_offset,
                         std::fs::metadata(&output).unwrap().len(), retained.full_response.len(), extracted.len(),
                         retained.full_response == extracted, retained.tui_terminal_generation_mtime_ns,
                         crate::services::discord::turn_bridge::tmux_generation_file_mtime_ns(tmux),
-                        retained.output_path, output);
+                        retained.output_path, output, gateway.traffic_dump());
                 }
             }
             let replacement = if replace_after_delivery {
